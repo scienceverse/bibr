@@ -76,7 +76,7 @@ The headings in the paper. The abstract and start of the intro often don't have 
 
 - section_id (integer)
 - header (string)
-- level (integer)
+- parent_section_id (integer)
 - section_type (factor) 
   - abstract
   - intro
@@ -88,7 +88,6 @@ The headings in the paper. The abstract and start of the intro often don't have 
   - figure
   - table
   - supplemental
-
 
 ## Xrefs
 
