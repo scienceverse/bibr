@@ -14,7 +14,7 @@ A paper should consist of these tables:
 
 - info 
 - authors 
-- sentences 
+- text 
 - sections 
 - xrefs 
 - bib 
@@ -61,12 +61,12 @@ metacheck::credit_roles("abbr")
 - affiliation (string)
 - corresponding (T/F)
 
-## Sentences
+## Text
 
 Each sentence in the paper, excluding title, headings, and references. Include figure and table captions, and footnotes. Use markdown for formatting.
 
 - text (string)
-- sentence_id (integer)
+- text_id (integer)
 - paragraph_id (integer)
 - section_id (integer)
 
@@ -94,12 +94,12 @@ The headings in the paper. The abstract and start of the intro often don't have 
 
 Cross references. This links items in the bibliography, footnotes, tables, and figures to sentences that reference them.
 
-Footnotes are kept in the sentences table, so their xref_id is the sentence_id of that footnote. 
+Footnotes are kept in the text table, so their xref_id is the text_id of that footnote. 
 
 - xref_id (integer) 
 - xref_type (factor) bib, tbl, fig, foot
 - contents (string) 
-- sentence_id (integer)
+- text_id (integer)
 
 ## Bib
 
@@ -118,19 +118,19 @@ All external links in the document text, figure captions, and table captions (ex
 
 - url (string)
 - link_text (string)
-- sentence_id (integer)
+- text_id (integer)
 
 ## Tables
 
-Each table is given a unique section_id in the sections table and a unique tbl_id to reference it in the xrefs table. The title is in sections:header and the caption is in sentences.
+Each table is given a unique section_id in the sections table and a unique tbl_id to reference it in the xrefs table. The title is in sections:header and the caption is in text.
 
 - tbl_id (integer)
 - section_id (integer)
-- html (string)
+- tbl_html (string)
 
 ## Figures
 
-Each figure is given a unique section_id in the sections table and a unique fig_id to reference it in the xrefs table. The title is in sections:header and the caption is in sentences.
+Each figure is given a unique section_id in the sections table and a unique fig_id to reference it in the xrefs table. The title is in sections:header and the caption is in text.
 
 Including images is a future task.
 
