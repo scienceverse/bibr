@@ -32,16 +32,18 @@ def test_uv_fallback_launches_pinned_paddle_vllm_command(monkeypatch):
     _server, popen = _mk_server(vllm_installed=False, model="PaddlePaddle/PaddleOCR-VL-1.6")
 
     cmd = popen.call_args.args[0]
-    assert cmd[:7] == [
+    assert cmd[:9] == [
         "uv",
         "tool",
         "run",
         "--from",
-        "vllm==0.25.1",
+        "vllm==0.27.0",
+        "--with",
+        "openai>=2.54.0,<3",
         "vllm",
         "serve",
     ]
-    assert cmd[7] == "PaddlePaddle/PaddleOCR-VL-1.6"
+    assert cmd[9] == "PaddlePaddle/PaddleOCR-VL-1.6"
     assert "--model" not in cmd
 
 
@@ -194,14 +196,16 @@ def test_uv_bootstrap_pins_a_supported_interpreter_on_python_314(monkeypatch):
     _server, popen = _mk_server(vllm_installed=False, model="PaddlePaddle/PaddleOCR-VL-1.6")
 
     cmd = popen.call_args.args[0]
-    assert cmd[:9] == [
+    assert cmd[:11] == [
         "uv",
         "tool",
         "run",
         "--python",
         "3.13",
         "--from",
-        "vllm==0.25.1",
+        "vllm==0.27.0",
+        "--with",
+        "openai>=2.54.0,<3",
         "vllm",
         "serve",
     ]

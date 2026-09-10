@@ -15,6 +15,13 @@ FOOTNOTES_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relations
 ENDNOTES_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/endnotes"
 _W_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
+# Elements that end the run of text they sit in without carrying text of their
+# own. A note is flattened to one string, so without these a tab- or
+# break-separated bibliography endnote fuses into "Smith, J.2020Title".
+_NOTE_SEPARATORS: frozenset[str] = frozenset(
+    f"{{{_W_NAMESPACE}}}{name}" for name in ("br", "tab", "cr", "p")
+)
+
 
 def _load_notes(doc, *, part_attr: str, reltype: str, tag: str) -> dict[str, str]:
     """Return ``{note_id: text}`` for one notes part."""
@@ -51,8 +58,20 @@ def _load_notes(doc, *, part_attr: str, reltype: str, tag: str) -> dict[str, str
         note_id = note.get(f"{{{_W_NAMESPACE}}}id")
         if note_id is None:
             continue
-        texts = [t.text for t in note.iter(f"{{{_W_NAMESPACE}}}t") if t.text]
-        out[note_id] = "".join(texts).strip()
+        parts: list[str] = []
+        for node in note.iter():
+            tag = node.tag
+            if not isinstance(tag, str):  # comments / PIs
+                continue
+            if tag == f"{{{_W_NAMESPACE}}}t":
+                if node.text:
+                    parts.append(node.text)
+            elif tag in _NOTE_SEPARATORS and parts and not parts[-1][-1].isspace():
+                # Word splits runs mid-word for formatting, so only explicit
+                # separators may contribute whitespace; adjacent <w:t> still
+                # concatenates untouched.
+                parts.append(" ")
+        out[note_id] = "".join(parts).strip()
     return out
 
 

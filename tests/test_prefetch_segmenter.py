@@ -15,6 +15,7 @@ import pytest
     ],
 )
 def test_prefetch_uses_runtime_hub_resolution(monkeypatch, model, hub_prefix):
+    from bibr.segmenter_base import resolve_wtpsplit_model
     from scripts.prefetch_segmenter import prefetch_segmenter
 
     captured = {}
@@ -24,17 +25,26 @@ def test_prefetch_uses_runtime_hub_resolution(monkeypatch, model, hub_prefix):
         captured["kwargs"] = kwargs
 
     monkeypatch.setattr("wtpsplit_lite.SaT", fake_sat)
-
+    monkeypatch.setattr(
+        "scripts.prefetch_segmenter.materialize_hub_snapshot",
+        lambda repo_id, revision: (f"/pinned/{repo_id}@{revision}", None),
+    )
     prefetch_segmenter(model, cache_dir=None)
-
-    assert captured["name"] == model
-    assert captured["kwargs"]["hub_prefix"] == hub_prefix
     assert captured["kwargs"]["ort_providers"] == ["CPUExecutionProvider"]
-    if "/" in model:
-        assert captured["kwargs"]["tokenizer_name_or_path"] == model
-    else:
-        assert "tokenizer_name_or_path" not in captured["kwargs"]
     assert "from_pretrained_kwargs" not in captured["kwargs"]
+    revision = resolve_wtpsplit_model(model).revision
+    if revision is not None:
+        # The default short name is pinned: SaT gets the audited snapshot directory.
+        assert captured["name"] == f"/pinned/segment-any-text/{model}@{revision}"
+        assert captured["kwargs"]["hub_prefix"] is None
+        assert "tokenizer_name_or_path" not in captured["kwargs"]
+    else:
+        assert captured["name"] == model
+        assert captured["kwargs"]["hub_prefix"] == hub_prefix
+        if "/" in model:
+            assert captured["kwargs"]["tokenizer_name_or_path"] == model
+        else:
+            assert "tokenizer_name_or_path" not in captured["kwargs"]
 
 
 def test_prefetch_preserves_existing_local_bundle(monkeypatch, tmp_path):
@@ -84,7 +94,7 @@ def test_prefetch_passes_explicit_cache_directory(monkeypatch, tmp_path):
         captured["name"] = name
         captured["kwargs"] = kwargs
 
-    def fake_hf_hub_download(repo_id, filename, *, cache_dir):
+    def fake_hf_hub_download(repo_id, filename, *, cache_dir, revision=None):  # noqa: ARG001
         downloads.append((repo_id, filename, cache_dir))
         if filename == "tokenizer.json" and repo_id == "segment-any-text/sat-6l-sm":
             response = httpx.Response(

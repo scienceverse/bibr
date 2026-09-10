@@ -891,6 +891,22 @@ def test_level0_unknown_section_is_body():
     assert 1 not in body_ids  # level-0 TITLE still excluded
 
 
+class TestSuperscriptCitationDetection:
+    """A closing brace is neither ``\\w`` nor ``$``, so the two lookbehinds
+    guarding SUPERSCRIPT_CITE_RE let a braced LaTeX base through and the
+    exponent was detected as a bib citation."""
+
+    def test_braced_latex_base_is_not_a_citation(self):
+        from bibr.structure.citation_linker import SUPERSCRIPT_CITE_RE
+
+        assert not SUPERSCRIPT_CITE_RE.search(r"measured $\mathrm{cm}^{2}$ in area")
+
+    def test_word_carried_superscript_is_still_a_citation(self):
+        from bibr.structure.citation_linker import SUPERSCRIPT_CITE_RE
+
+        assert SUPERSCRIPT_CITE_RE.search("as reported. ^{12} in trials")
+
+
 class TestStripCitationSuperscripts:
     def test_single(self):
         sents = [_sent(0, "effective^{9} in many cases.")]
@@ -923,6 +939,24 @@ class TestStripCitationSuperscripts:
         sents = [_sent(0, "partial $^{2}$ was reported.")]
         strip_citation_superscripts(sents, [])
         assert sents[0].text == "partial $^{2}$ was reported."
+
+    def test_preserves_braced_latex_base(self):
+        """Math was recognised only when the single preceding character was
+        alphabetic and the one before it was not, so a LaTeX-braced base fell
+        through to "citation" — the unit was deleted from the sentence."""
+        sents = [_sent(0, r"Each plot measured $\mathrm{cm}^{2}$ in area.")]
+        strip_citation_superscripts(sents, [])
+        assert sents[0].text == r"Each plot measured $\mathrm{cm}^{2}$ in area."
+
+    def test_preserves_multi_letter_greek_base(self):
+        sents = [_sent(0, "The effect was large \u03b7p^{2} = .14.")]
+        strip_citation_superscripts(sents, [])
+        assert sents[0].text == "The effect was large \u03b7p^{2} = .14."
+
+    def test_still_strips_a_word_carrying_a_marker_inside_a_math_free_sentence(self):
+        sents = [_sent(0, "This was effective^{9} in trials.")]
+        strip_citation_superscripts(sents, [])
+        assert sents[0].text == "This was effective in trials."
 
     def test_skips_reference_section(self):
         sections = _sections_with_refs()

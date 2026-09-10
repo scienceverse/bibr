@@ -61,6 +61,32 @@ def _local_region_limit(settings: GlobalSettings, backend: str) -> int:
     return max(1, min(ocr.concurrent_regions_per_file, ocr.max_concurrent_regions))
 
 
+def _backend_region_count(file_states) -> int:
+    """Regions that will actually invoke the OCR backend.
+
+    Regions pre-filled by NativeTextStage (``_native_text_used``) and the
+    ``abandon``/``skip`` task types bypass OCR, and a file that already carries
+    ``ocr_regions`` (a cache hit) contributes nothing. Zero means no engine is
+    needed for these files at all.
+    """
+    total = 0
+    for fs in file_states:
+        if fs.ocr_regions is not None or not fs.layout_results:
+            continue
+        for page_regions in fs.layout_results:
+            for region in page_regions:
+                if region.get("task_type", "text") in ("abandon", "skip"):
+                    continue
+                if region.get("_native_text_used"):
+                    continue
+                total += 1
+    return total
+
+
+async def _no_engine_recognize(_image, _prompt: str) -> str:
+    raise RuntimeError("OCR backend invoked although no region needed it; no engine was started")
+
+
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
     if settings is not None:
         return settings
@@ -107,37 +133,42 @@ def _bbox_containment(inner: list, outer: list) -> float:
 def _deduplicate_formula_text_regions(
     pages: list[list[dict]], settings: GlobalSettings | None = None
 ) -> list[list[dict]]:
-    """Suppress only near-contained inline duplicates, retaining their raw proposals.
+    """Remove formula regions that are contained within text regions.
 
-    Display equations and partial overlaps are independent evidence. An inline
-    proposal with ambiguous prose ownership is also left intact.
+    When the layout detector returns both an ``inline_formula`` region and a
+    ``text`` region covering the same area, both get OCR'd independently,
+    producing duplicate content (formula wrapped in ``$$`` plus the same
+    content inline in the text block).  This function drops the formula
+    region when >=50% of its area is contained within a text region.
     """
-    threshold = max(0.98, _effective_settings(settings).layout.containment_threshold)
-    for regions in pages:
-        prose = [
+    _FORMULA_LABELS = {"formula", "display_formula", "inline_formula"}
+    _TEXT_LABELS = {"text", "content"}
+    containment_threshold = _effective_settings(settings).layout.containment_threshold
+
+    for page_regions in pages:
+        text_regions = [
             r
-            for r in regions
-            if r and r.get("native_label") in {"text", "content"} and r.get("bbox_2d")
+            for r in page_regions
+            if r and r.get("native_label") in _TEXT_LABELS and r.get("bbox_2d")
         ]
-        kept = []
-        for region in regions:
-            label = region.get("native_label") or region.get("label")
-            if label not in {"inline_formula", "formula"} or not region.get("bbox_2d"):
-                kept.append(region)
+        if not text_regions:
+            continue
+
+        to_remove = set()
+        for i, region in enumerate(page_regions):
+            if not region or region.get("label") not in _FORMULA_LABELS:
                 continue
-            owners = [
-                r for r in prose if _bbox_containment(region["bbox_2d"], r["bbox_2d"]) >= threshold
-            ]
-            if len(owners) == 1:
-                owners[0].setdefault("_formula_proposals", []).append(dict(region))
-                ids = region.get("_source_region_ids", [])
-                if ids:
-                    owners[0]["_source_region_ids"] = list(
-                        dict.fromkeys([*owners[0].get("_source_region_ids", []), *ids])
-                    )
-            else:
-                kept.append(region)
-        regions[:] = kept
+            bbox = region.get("bbox_2d")
+            if not bbox:
+                continue
+            for text_r in text_regions:
+                if _bbox_containment(bbox, text_r["bbox_2d"]) > containment_threshold:
+                    to_remove.add(i)
+                    break
+
+        if to_remove:
+            page_regions[:] = [r for i, r in enumerate(page_regions) if i not in to_remove]
+
     return pages
 
 
@@ -374,30 +405,18 @@ def ocr_page_regions(
     ``include_figures`` overrides ``Settings.FIGURE_IMAGES`` for this request
     when not None.
     """
-
-    async def run():
-        owned_crops = []
-        try:
-            return await _ocr_page_regions_impl(
-                page_img,
-                regions,
-                page_idx,
-                filename,
-                ocr_fn,
-                ocr_sem,
-                include_figures=include_figures,
-                settings=settings,
-                profile=profile,
-                warning_sink=warning_sink,
-                owned_crops=owned_crops,
-            )
-        finally:
-            # Errors retain tracebacks (and their locals) for reporting. Close
-            # crop buffers explicitly so those tracebacks cannot pin pixels.
-            for crop in owned_crops:
-                crop.close()
-
-    return run()
+    return _ocr_page_regions_impl(
+        page_img,
+        regions,
+        page_idx,
+        filename,
+        ocr_fn,
+        ocr_sem,
+        include_figures=include_figures,
+        settings=settings,
+        profile=profile,
+        warning_sink=warning_sink,
+    )
 
 
 async def _ocr_page_regions_impl(
@@ -412,7 +431,6 @@ async def _ocr_page_regions_impl(
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
     warning_sink: Callable[[str], None] | None = None,
-    owned_crops: list,
 ) -> list[dict]:
     """Implementation of ocr_page_regions; see public wrapper for documentation.
 
@@ -438,7 +456,7 @@ async def _ocr_page_regions_impl(
     for i, region in enumerate(regions):
         task_type = region.get("task_type", "text")
 
-        if task_type == "abandon" or region.get("_native_formula_parent"):
+        if task_type == "abandon":
             continue
 
         slot_idx = len(region_list)
@@ -455,8 +473,6 @@ async def _ocr_page_regions_impl(
                     fig_crop = crop_image_region(page_img, fig_bbox)
                 except Exception:
                     fig_crop = page_img
-                if fig_crop is not page_img:
-                    owned_crops.append(fig_crop)
                 image_b64 = base64.b64encode(pil_to_bytes(fig_crop)).decode()
             region_list.append(
                 OcrRegionResult.from_layout_region(
@@ -481,53 +497,36 @@ async def _ocr_page_regions_impl(
             )
             continue
 
-        if region.get("_native_spans"):
-            from bibr.ocr.native_repair import recognize_native_spans
-
-            assembled = await recognize_native_spans(
-                page_img,
-                region,
-                page_idx,
-                filename,
-                ocr_fn,
-                ocr_sem,
-                settings=effective,
-                profile=profile,
-                warning_sink=warning_sink,
-                owned_crops=owned_crops,
-            )
-            region_list.append(
-                OcrRegionResult.from_layout_region(
-                    region, slot_idx=slot_idx, content=assembled
-                ).to_dict()
-            )
-            continue
-
         # Reserve the slot (filled after OCR)
         region_list.append(None)
 
         bbox = region.get("bbox_2d", [0, 0, 1000, 1000])
-
-        try:
-            from bibr.ocr.image_processing import crop_image_region
-
-            cropped = crop_image_region(page_img, bbox)
-        except Exception as e:
-            logger.warning("crop_image_region failed, using PIL fallback: %s", e)
-            w, h = page_img.size
-            x1 = int(bbox[0] * w / 1000)
-            y1 = int(bbox[1] * h / 1000)
-            x2 = int(bbox[2] * w / 1000)
-            y2 = int(bbox[3] * h / 1000)
-            cropped = page_img.crop((x1, y1, x2, y2))
-        if cropped is not page_img:
-            owned_crops.append(cropped)
-
         ocr_task: OcrTask = task_type if task_type in {"text", "table", "formula"} else "text"
-        ocr_tasks.append((i, region, cropped, ocr_task, profile.prompt_for(ocr_task)))
+        ocr_tasks.append((i, region, bbox, ocr_task, profile.prompt_for(ocr_task)))
 
     # Send OCR requests concurrently (throttled by semaphore)
     if ocr_tasks:
+
+        def _crop(bbox):
+            """Crop one region. ``Image.crop`` is an eager copy, so this is
+            deferred until the region semaphore has been acquired: cropping
+            every region of every page up front held all of them alongside
+            ``fs.page_images``, which still holds every page image."""
+            try:
+                from bibr.ocr.image_processing import crop_image_region
+
+                return crop_image_region(page_img, bbox)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("crop_image_region failed, using PIL fallback: %s", e)
+                w, h = page_img.size
+                return page_img.crop(
+                    (
+                        int(bbox[0] * w / 1000),
+                        int(bbox[1] * h / 1000),
+                        int(bbox[2] * w / 1000),
+                        int(bbox[3] * h / 1000),
+                    )
+                )
 
         async def _ocr_with_corruption_retry(cropped, prompt):
             # Control-char-riddled output (the vllm-mlx --mllm NUL failure
@@ -551,13 +550,13 @@ async def _ocr_page_regions_impl(
                 return result
             return retried if ocr_corruption_count(retried) < corruption else result
 
-        async def _run_ocr(cropped, prompt):
+        async def _run_ocr(bbox, prompt):
             if ocr_sem is not None:
                 async with ocr_sem:
-                    return await _ocr_with_corruption_retry(cropped, prompt)
-            return await _ocr_with_corruption_retry(cropped, prompt)
+                    return await _ocr_with_corruption_retry(_crop(bbox), prompt)
+            return await _ocr_with_corruption_retry(_crop(bbox), prompt)
 
-        ocr_coros = [_run_ocr(cropped, prompt) for _, _, cropped, _, prompt in ocr_tasks]
+        ocr_coros = [_run_ocr(bbox, prompt) for _, _, bbox, _, prompt in ocr_tasks]
         ocr_results = await asyncio.gather(*ocr_coros, return_exceptions=True)
 
         # Fill pre-allocated slots in their original positions
@@ -574,12 +573,17 @@ async def _ocr_page_regions_impl(
                 # converted to blank content — propagate to fail the page.
                 raise result
             if isinstance(result, BaseException):
-                logger.warning(
-                    "[page %d, region %d] OCR failed: %s",
-                    page_idx,
-                    orig_idx,
-                    result,
+                # The region ships blank. Without an export-visible warning
+                # three failed regions in a 40-page paper look like missing
+                # paragraphs behind a clean receipt.
+                warning = (
+                    "OCR failed for a region; its text is missing "
+                    f"(page {page_idx + 1}, region {orig_idx}, task {task_type}): "
+                    f"{type(result).__name__}: {result}"
                 )
+                logger.warning(warning)
+                if warning_sink is not None:
+                    warning_sink(warning)
             else:
                 provider_finish_reason = getattr(result, "finish_reason", None)
                 finish_reason = provider_finish_reason
@@ -706,11 +710,6 @@ class OcrStage:
         runtime_identity = getattr(rm, "ocr_runtime_identity", None)
         runtime_client = getattr(rm, "ocr", None)
         runtime_loaded = bool(getattr(runtime_client, "loaded", False))
-        if automatic_backend and ctx.signals.ocr_page_window and not runtime_loaded:
-            # Aggressive mode releases the client between page windows. Its
-            # replacement must select a fresh profile and cache identity.
-            identity = None
-            ctx.scratch.pop("ocr_runtime_identity", None)
         if (
             automatic_backend
             and isinstance(runtime_identity, OcrRuntimeIdentity)
@@ -745,6 +744,14 @@ class OcrStage:
                     exc=prior_init_error,
                 )
             return
+        if (
+            automatic_needs_resolution
+            and identity is None
+            and _backend_region_count(ctx.alive()) == 0
+        ):
+            # Native text covers every region of this window, so nothing will
+            # call the backend: no concrete runtime — and no engine — is needed.
+            automatic_needs_resolution = False
         if automatic_needs_resolution and identity is None:
             # An automatic chain has no exact cache identity until startup
             # chooses a concrete candidate. This trades a cold-cache startup
@@ -772,7 +779,7 @@ class OcrStage:
         if identity is None:
             identity = resolve_ocr_runtime_identity(cfg, settings)
             ctx.scratch["ocr_runtime_identity"] = identity
-        cache_on = ocr_cache.is_enabled(settings) and not ctx.signals.ocr_page_window
+        cache_on = ocr_cache.is_enabled(settings)
         alive = ctx.alive()
         if cache_on:
             for fs in alive:
@@ -797,44 +804,37 @@ class OcrStage:
         # is fresh per ``process_chunk``, so a later chunk (or serve request)
         # still retries — unlike a ResourceManager-lifetime cache that would
         # poison a long-lived server after one transient failure.
-        try:
-            if not automatic_needs_resolution:
-                await rm.await_ocr()  # always async, regardless of whether preload ran
-            if not automatic_needs_resolution and hasattr(rm.ocr, "wait_for_server"):
-                await rm.ocr.wait_for_server()
-        except Exception as e:  # noqa: BLE001
-            ctx.signals.ocr_init_error = e
-            for fs in ctx.alive():
-                fs.set_error(
-                    f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
-                )
-            logger.warning("OCR backend init failed", exc_info=True)
-            return
-
         # Count only regions that will actually invoke the OCR backend.
         # Regions pre-filled by NativeTextStage (``_native_text_used``) and
         # ``abandon``/``skip`` task types bypass OCR, so excluding them here
         # makes the progress bar reflect real work — otherwise users see
         # ``0/127`` even when the document was fully extracted via native text.
-        total_regions = 0
-        for fs in ctx.alive():
-            if fs.ocr_regions is not None:
-                continue
-            if fs.layout_results:
-                for page_regions in fs.layout_results:
-                    for region in page_regions:
-                        tt = region.get("task_type", "text")
-                        if tt in ("abandon", "skip"):
-                            continue
-                        if region.get("_native_text_used") or region.get("_native_formula_parent"):
-                            continue
-                        spans = region.get("_native_spans")
-                        total_regions += (
-                            sum(s["status"] == "pending" for s in spans) if spans else 1
-                        )
+        # It also decides whether an engine is started at all: a window whose
+        # regions were all filled natively never pays for OCR startup.
+        total_regions = _backend_region_count(pending)
+        engine_needed = total_regions > 0
+        if engine_needed:
+            try:
+                if not automatic_needs_resolution:
+                    await rm.await_ocr()  # always async, regardless of whether preload ran
+                if not automatic_needs_resolution and hasattr(rm.ocr, "wait_for_server"):
+                    await rm.ocr.wait_for_server()
+            except Exception as e:  # noqa: BLE001
+                ctx.signals.ocr_init_error = e
+                for fs in ctx.alive():
+                    fs.set_error(
+                        f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
+                    )
+                logger.warning("OCR backend init failed", exc_info=True)
+                return
+        else:
+            logger.info(
+                "OCR engine not started: native text covers every region of %d file(s)",
+                len(pending),
+            )
         ctx.progress.ocr_start(total_regions)
 
-        raw_ocr_fn = rm.ocr.recognize
+        raw_ocr_fn = rm.ocr.recognize if engine_needed else _no_engine_recognize
         profile = resolve_ocr_profile(
             explicit=identity.profile,
             backend=identity.backend,
@@ -861,9 +861,10 @@ class OcrStage:
                 # to a concrete candidate whose concurrency ceiling differs.
                 ocr_sem = asyncio.Semaphore(_local_region_limit(settings, identity.backend))
                 await self._run_local(ctx, ocr_fn, ocr_sem)
-            if not ctx.signals.ocr_page_window:
-                self._check_ocr_success(ctx)
-            if cache_on:
+            self._check_ocr_success(ctx)
+            # A native-only window under the automatic chain ran with a static
+            # identity that no later probe looks up; storing it would be waste.
+            if cache_on and (engine_needed or not automatic_backend):
                 for fs in pending:
                     if fs.error is None and fs.ocr_regions is not None:
                         ocr_cache.store(fs, cfg, identity, fs.ocr_regions, settings)
@@ -932,11 +933,6 @@ class OcrStage:
                     # still show a high "success" rate. Exclude them so the
                     # denominator/numerator cover only regions OCR processed.
                     if region.native_text_used:
-                        continue
-                    if region.native_spans:
-                        repairs = [s for s in region.native_spans if s["status"] != "native"]
-                        ocr_needed += len(repairs)
-                        ocr_filled += sum(s["status"] == "recognized_unverified" for s in repairs)
                         continue
                     ocr_needed += 1
                     if region.content.strip():
@@ -1026,7 +1022,7 @@ class OcrStage:
                 return
 
             # Only fail the file if ALL pages failed.
-            if errors and len(errors) == len(page_results) and not ctx.signals.ocr_page_window:
+            if errors and len(errors) == len(page_results):
                 fs.set_error(
                     f"OCR failed for all pages: {errors[0]}",
                     code="ocr_failed",
@@ -1036,8 +1032,13 @@ class OcrStage:
                 return
 
             first_idx = fs.page_indices[0] if fs.page_indices else 0
+            # Pure synchronous regex/text work over every region of the file.
+            # ``bibr serve`` runs one async worker, so leaving it on the loop
+            # made it head-of-line blocking for every co-resident request —
+            # and the repeated-content detector's tail is measured in seconds.
             fs.ocr_regions = _to_typed_regions(
-                _postprocess_ocr_regions(
+                await asyncio.to_thread(
+                    _postprocess_ocr_regions,
                     [[] for _ in range(first_idx)] + clean_pages,
                     ctx.settings,
                 )

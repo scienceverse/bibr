@@ -180,6 +180,97 @@ def test_epub_spine_metadata_and_references_delegate_to_html_parser():
     assert contents.native_ref_strings == ["Smith, J. (2020). ePub ref."]
 
 
+def _make_epub_with_entity_metadata() -> bytes:
+    """An EPUB 2-style OPF carrying a DOCTYPE and named character entities."""
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    opf_xml = b"""<?xml version="1.0"?>
+<!DOCTYPE package SYSTEM "http://www.idpf.org/dtds/2007/opf.dtd">
+<package xmlns="http://www.idpf.org/2007/opf"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         version="2.0">
+  <metadata>
+    <dc:title>The &alpha;-Helix at 37&deg;C</dc:title>
+    <dc:creator>Jos&eacute; M&uuml;ller</dc:creator>
+    <dc:publisher>Verlag M&uuml;nchen</dc:publisher>
+  </metadata>
+  <manifest>
+    <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"""
+    chapter1 = b"""<html xmlns="http://www.w3.org/1999/xhtml">
+  <body><section><h1>Chapter One</h1><p>Chapter one text.</p></section></body>
+</html>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+        zf.writestr("OEBPS/chapter1.xhtml", chapter1)
+    return buf.getvalue()
+
+
+def test_epub_opf_metadata_resolves_named_entities():
+    """The OPF is parsed with entity expansion off, so named entities would
+    otherwise ship as literal "&alpha;" markup in the title and author names."""
+    meta = EpubParser(_make_epub_with_entity_metadata()).parse().preparsed_metadata
+
+    assert meta.title == "The α-Helix at 37°C"
+    assert [a.family for a in meta.authors] == ["Müller"]
+    assert meta.publisher == "Verlag München"
+
+
+def _make_epub_utf8(title: str, creator: str, body: str) -> bytes:
+    """An ePub whose OPF and chapter carry literal UTF-8, no entities."""
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    opf_xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf"
+         xmlns:dc="http://purl.org/dc/elements/1.1/"
+         version="3.0">
+  <metadata><dc:title>{title}</dc:title><dc:creator>{creator}</dc:creator></metadata>
+  <manifest>
+    <item id="c1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>""".encode()
+    chapter1 = f"""<html xmlns="http://www.w3.org/1999/xhtml">
+  <body><section><h1>Kapitel</h1><p>{body}</p></section></body>
+</html>""".encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+        zf.writestr("OEBPS/chapter1.xhtml", chapter1)
+    return buf.getvalue()
+
+
+def test_epub_non_ascii_survives_the_synthesized_html():
+    """The spine is re-emitted as one HTML document for HtmlParser. Without a
+    charset declaration html5lib decodes those UTF-8 bytes as windows-1252 and
+    mojibakes every non-ASCII character in the metadata and the body."""
+    epub = _make_epub_utf8(
+        "Der α-Helix Effekt", "José Müller", "Die Temperatur betrug 37°C bei München."
+    )
+    parser = EpubParser(epub)
+    meta = parser.parse().preparsed_metadata
+
+    assert meta.title == "Der α-Helix Effekt"
+    assert [(a.given, a.family) for a in meta.authors] == [("José", "Müller")]
+    body = " ".join(t[0] for t in parser._deferred_texts)
+    assert "37°C bei München" in body
+
+
 def test_html_parser_rejects_oversized_input(monkeypatch):
     """Bound html5lib's pure-Python parse cost: HTML above the cap is refused
     rather than parsed (audit L9)."""

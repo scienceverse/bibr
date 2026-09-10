@@ -677,15 +677,33 @@ class TestErrorPropagation:
 
 
 class TestCrossrefEnrichGate:
-    """Verify CROSSREF_ENRICH=False skips enrichment entirely."""
+    """The CROSSREF_ENRICH gate is opt-in and resolved per run through
+    ``RunConfig.enrichment_enabled`` (an explicit switch beats the setting)."""
 
-    async def test_enrich_skipped_when_disabled(self, monkeypatch):
-        """When CROSSREF_ENRICH is False, the pipeline gate prevents enrichment."""
-        from bibr.config import Settings
+    def test_enrich_is_off_by_default(self):
+        from bibr.config import CrossrefOptions
 
-        monkeypatch.setattr(Settings.crossref, "enrich", False)
+        assert CrossrefOptions.model_fields["enrich"].default is False
 
-        assert Settings.crossref.enrich is False
+    def test_run_config_follows_setting_when_unset(self):
+        from bibr.config import GlobalSettings
+        from bibr.pipeline.context import RunConfig
+
+        settings = GlobalSettings()
+        settings.crossref.enrich = False
+        assert RunConfig().enrichment_enabled(settings) is False
+        settings.crossref.enrich = True
+        assert RunConfig().enrichment_enabled(settings) is True
+
+    def test_run_config_explicit_switch_overrides_setting(self):
+        from bibr.config import GlobalSettings
+        from bibr.pipeline.context import RunConfig
+
+        settings = GlobalSettings()
+        settings.crossref.enrich = False
+        assert RunConfig(crossref=True).enrichment_enabled(settings) is True
+        settings.crossref.enrich = True
+        assert RunConfig(crossref=False).enrichment_enabled(settings) is False
 
     async def test_enrich_runs_when_enabled(self, monkeypatch):
         """When CROSSREF_ENRICH is True, enrichment proceeds normally."""
@@ -1447,3 +1465,188 @@ class TestBulkDoiPrefetch:
 
         assert MatchSource.CROSSREF in ref.match
         mock_client.works.assert_awaited_once()
+
+
+# ══════════════════════════════════════════════════════════════════════
+# EnrichmentPrefetch: the up-front network work, reusable by enrich_references
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _resolver_double(candidates=None):
+    resolver = mock.AsyncMock()
+    resolver.healthy = mock.AsyncMock(return_value=True)
+    resolver.search_many = mock.AsyncMock(
+        return_value=[candidates if candidates is not None else []]
+    )
+    resolver.lookup_doi = mock.AsyncMock(return_value=None)
+    resolver.close = mock.AsyncMock()
+    return resolver
+
+
+class TestEnrichmentPrefetch:
+    async def test_supplied_prefetch_skips_the_second_probe_and_search(self):
+        from bibr.enrich.references import enrich_references, prefetch_enrichment
+
+        ref = _make_ref(title="A Great Paper on Testing Methods", doi=None)
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        resolver = _resolver_double(
+            [{"title": "A Great Paper on Testing Methods", "doi": "10.1/x", "source": "openalex"}]
+        )
+
+        prefetch = await prefetch_enrichment(
+            [ref], crossref_client=crossref, resolver_client=resolver
+        )
+        assert resolver.healthy.await_count == 1
+        assert resolver.search_many.await_count == 1
+        assert prefetch.resolver_healthy is True
+        assert prefetch.resolver_prefetch[id(ref)][0]["doi"] == "10.1/x"
+        assert prefetch.seconds >= 0.0
+        assert ref.match == {}  # the prefetch never mutates references
+
+        report = await enrich_references([ref], prefetch=prefetch)
+
+        assert resolver.healthy.await_count == 1
+        assert resolver.search_many.await_count == 1
+        assert MatchSource.OPENALEX in ref.match
+        assert report.matched == 1 and report.failed == 0
+        crossref.works.assert_not_called()
+
+    async def test_without_prefetch_the_inline_path_is_unchanged(self):
+        from bibr.enrich.references import enrich_references
+
+        ref = _make_ref(title="A Great Paper on Testing Methods", doi=None)
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        resolver = _resolver_double(
+            [{"title": "A Great Paper on Testing Methods", "doi": "10.1/x", "source": "openalex"}]
+        )
+
+        await enrich_references([ref], crossref_client=crossref, resolver_client=resolver)
+
+        assert resolver.healthy.await_count == 1
+        assert resolver.search_many.await_count == 1
+        assert MatchSource.OPENALEX in ref.match
+        # A caller-supplied resolver is never closed by enrichment.
+        resolver.close.assert_not_awaited()
+
+    async def test_bulk_doi_prefetch_runs_once_in_the_prefetch(self):
+        from bibr.enrich.references import enrich_references, prefetch_enrichment
+
+        ref = _make_ref(doi="10.1000/test")
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        crossref.works = mock.AsyncMock(return_value={"message": _make_crossref_item()})
+
+        prefetch = await prefetch_enrichment([ref], crossref_client=crossref)
+        crossref.prefetch_works_by_doi.assert_awaited_once_with(["10.1000/test"])
+
+        await enrich_references([ref], prefetch=prefetch)
+
+        crossref.prefetch_works_by_doi.assert_awaited_once()
+        assert MatchSource.CROSSREF in ref.match
+
+    async def test_owned_resolver_is_closed_by_the_consumer(self):
+        from bibr.config import GlobalSettings
+        from bibr.enrich.references import enrich_references, prefetch_enrichment
+
+        settings = GlobalSettings()
+        settings.resolver.url = "http://resolver"
+        settings.resolver.enrich = True
+        resolver = _resolver_double([])
+        ref = _make_ref(title="A Great Paper on Testing Methods", doi=None)
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        crossref.search = mock.AsyncMock(return_value={"message": {"items": []}})
+
+        with mock.patch("bibr.clients.resolver.ResolverClient", return_value=resolver):
+            prefetch = await prefetch_enrichment([ref], settings=settings, crossref_client=crossref)
+            assert prefetch.owns_resolver is True
+            resolver.close.assert_not_awaited()
+            await enrich_references([ref], settings=settings, prefetch=prefetch)
+
+        resolver.close.assert_awaited_once()
+        await prefetch.aclose()  # idempotent
+        resolver.close.assert_awaited_once()
+
+    async def test_owned_resolver_is_closed_when_the_prefetch_is_cancelled(self):
+        from bibr.config import GlobalSettings
+        from bibr.enrich.references import prefetch_enrichment
+
+        settings = GlobalSettings()
+        settings.resolver.url = "http://resolver"
+        settings.resolver.enrich = True
+        resolver = _resolver_double([])
+        started = asyncio.Event()
+
+        async def blocking_probe():
+            started.set()
+            await asyncio.sleep(10)
+
+        resolver.healthy = mock.AsyncMock(side_effect=blocking_probe)
+        crossref = _mock_crossref()
+
+        with mock.patch("bibr.clients.resolver.ResolverClient", return_value=resolver):
+            task = asyncio.create_task(
+                prefetch_enrichment([_make_ref()], settings=settings, crossref_client=crossref)
+            )
+            await started.wait()
+            task.cancel()
+            await asyncio.wait([task])
+
+        assert task.cancelled()
+        resolver.close.assert_awaited_once()
+
+    async def test_unhealthy_resolver_is_dropped_and_closed_in_the_prefetch(self):
+        from bibr.config import GlobalSettings
+        from bibr.enrich.references import enrich_references, prefetch_enrichment
+
+        settings = GlobalSettings()
+        settings.resolver.url = "http://resolver"
+        settings.resolver.enrich = True
+        resolver = _resolver_double([])
+        resolver.healthy = mock.AsyncMock(return_value=False)
+        ref = _make_ref(doi="10.1000/test")
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        crossref.works = mock.AsyncMock(return_value={"message": _make_crossref_item()})
+
+        with mock.patch("bibr.clients.resolver.ResolverClient", return_value=resolver):
+            prefetch = await prefetch_enrichment([ref], settings=settings, crossref_client=crossref)
+
+        assert prefetch.resolver_healthy is False
+        assert prefetch.resolver_client is None
+        resolver.close.assert_awaited_once()
+        resolver.search_many.assert_not_awaited()
+
+        await enrich_references([ref], settings=settings, prefetch=prefetch)
+        assert MatchSource.CROSSREF in ref.match
+
+    async def test_prefetch_search_failure_is_replayed_as_terminal_failures(self):
+        from bibr.enrich.references import enrich_references, prefetch_enrichment
+
+        ref = _make_ref(title="A Great Paper on Testing Methods", doi=None)
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        crossref.search = mock.AsyncMock(return_value={"message": {"items": []}})
+        resolver = _resolver_double([])
+        resolver.search_many = mock.AsyncMock(side_effect=RuntimeError("search down"))
+
+        prefetch = await prefetch_enrichment(
+            [ref], crossref_client=crossref, resolver_client=resolver
+        )
+        assert isinstance(prefetch.resolver_prefetch_error, RuntimeError)
+
+        report = await enrich_references([ref], prefetch=prefetch)
+
+        assert report.failed == 1
+        assert any("resolver prefetch failed" in d for d in report.details)
+
+    async def test_empty_reference_list_short_circuits(self):
+        from bibr.enrich.references import prefetch_enrichment
+
+        crossref = _mock_crossref()
+        crossref.prefetch_works_by_doi = mock.AsyncMock()
+        prefetch = await prefetch_enrichment([], crossref_client=crossref)
+        assert prefetch.resolver_client is None
+        crossref.prefetch_works_by_doi.assert_not_awaited()

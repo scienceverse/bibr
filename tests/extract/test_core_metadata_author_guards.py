@@ -291,17 +291,6 @@ def test_marker_stripper_leaves_all_caps_and_ordinary_names_intact():
     assert _strip_attached_markers("Kian Jafari1") == "Kian Jafari"
 
 
-def test_grounding_accepts_lowercase_affiliation_marker_lists():
-    from bibr.extract.core_metadata import grounded_authors_in_context
-
-    authors = [_author(1, "Kaisin", "Yee"), _author(2, "Hiang Khoon", "Tan")]
-    grounded, rejected = grounded_authors_in_context(
-        authors, "Kaisin Yeea,b,c and Hiang Khoon Tana,b,d,e,∗"
-    )
-    assert grounded == authors
-    assert rejected == []
-
-
 def test_observability_grounding_strips_glued_affiliation_digits():
     from bibr.extract.core_metadata import assess_author_grounding, build_byline_group
 
@@ -556,3 +545,14 @@ class TestBrokenDiacriticGrounding:
     def test_apostrophes_and_hyphens_survive_the_fold(self):
         assert self._tokens("O'Brien") == self._tokens("O’Brien") == ("o'brien",)
         assert self._tokens("Anne-Marie Smith-Jones") == ("anne-marie", "smith-jones")
+
+
+def test_grounding_accepts_lowercase_affiliation_marker_lists():
+    from bibr.extract.core_metadata import grounded_authors_in_context
+
+    authors = [_author(1, "Kaisin", "Yee"), _author(2, "Hiang Khoon", "Tan")]
+    grounded, rejected = grounded_authors_in_context(
+        authors, "Kaisin Yeea,b,c and Hiang Khoon Tana,b,d,e,∗"
+    )
+    assert grounded == authors
+    assert rejected == []

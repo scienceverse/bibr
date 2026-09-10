@@ -35,6 +35,7 @@ from bibr.paper_contents import (
     PaperXref,
 )
 from bibr.structure.xref_utils import detect_xrefs
+from tests.export.conftest import extraction_block as _extraction_block
 
 # ── helpers ────────────────────────────────────────────────────────────
 
@@ -115,10 +116,11 @@ def test_citation_linking_receipt_exports_losslessly_and_round_trips_schema():
         unique_linked_bib_fraction=0.3,
     )
     paper = _minimal_paper(contents=_minimal_contents(citation_receipt=receipt))
+    paper.extraction = _extraction_block()
 
     out = export_paper_to_json(paper, validate=False)
 
-    assert out["citation_linking"] == {
+    assert out["extraction"]["diagnostics"]["citation_linking"] == {
         "style_scores": {"numeric": 1.0, "author-year": 0.0},
         "candidates": [
             {
@@ -137,14 +139,17 @@ def test_citation_linking_receipt_exports_losslessly_and_round_trips_schema():
         "resolved_candidate_fraction": 1.0,
         "unique_linked_bib_fraction": 0.3,
     }
-    assert PaperExport.model_validate(out).citation_linking is not None
+    assert PaperExport.model_validate(out).extraction.diagnostics.citation_linking is not None
 
 
 def test_citation_linking_receipt_is_omitted_when_unavailable_with_or_without_validation():
     paper = _minimal_paper()
+    paper.extraction = _extraction_block()
 
-    assert "citation_linking" not in export_paper_to_json(paper, validate=False)
-    assert "citation_linking" not in export_paper_to_json(paper, validate=True)
+    for validate in (False, True):
+        out = export_paper_to_json(paper, validate=validate)
+        assert "citation_linking" not in out
+        assert "citation_linking" not in out["extraction"]["diagnostics"]
 
 
 def test_export_sanitizes_lone_surrogates_for_utf8_json_response():
@@ -167,7 +172,7 @@ def test_export_sanitizes_lone_surrogates_for_utf8_json_response():
     out = export_paper_to_json(paper)
 
     json.dumps(out, ensure_ascii=False).encode("utf-8")
-    assert out["info"]["title"] == "Title with �"
+    assert out["metadata"]["title"] == "Title with �"
     assert out["text"][0]["text"] == "Bad OCR scalar � in body."
 
 
@@ -224,9 +229,9 @@ class TestConsolidatedExportValidates:
 
 
 class TestEnrichmentExport:
-    """The export must surface enrichment completeness as structured data so a
-    consumer can tell a partial (timed-out) enrichment from a complete one
-    instead of grepping processing_warnings."""
+    """``extraction.enrichment`` must surface enrichment completeness as
+    structured data so a consumer can tell a partial (timed-out) enrichment
+    from a complete one instead of grepping warnings."""
 
     @staticmethod
     def _ref(bib_id: int, matched: bool) -> PaperReference:
@@ -250,8 +255,14 @@ class TestEnrichmentExport:
             references=[self._ref(1, True), self._ref(2, True), self._ref(3, False)],
         )
         meta.enrichment_complete = False
-        out = export_paper_to_json(_minimal_paper(metadata=meta))
-        assert out["enrichment"] == {"complete": False, "refs_enriched": 2, "refs_total": 3}
+        paper = _minimal_paper(metadata=meta)
+        paper.extraction = _extraction_block()
+        out = export_paper_to_json(paper)
+        assert out["extraction"]["enrichment"] == {
+            "complete": False,
+            "refs_enriched": 2,
+            "refs_total": 3,
+        }
 
     def test_complete_enrichment(self):
         meta = PaperMetadata(
@@ -260,28 +271,34 @@ class TestEnrichmentExport:
             references=[self._ref(1, True), self._ref(2, True)],
         )
         meta.enrichment_complete = True
-        out = export_paper_to_json(_minimal_paper(metadata=meta))
-        assert out["enrichment"]["complete"] is True
-        assert out["enrichment"]["refs_enriched"] == 2
-        assert out["enrichment"]["refs_total"] == 2
+        paper = _minimal_paper(metadata=meta)
+        paper.extraction = _extraction_block()
+        enrichment = export_paper_to_json(paper)["extraction"]["enrichment"]
+        assert enrichment["complete"] is True
+        assert enrichment["refs_enriched"] == 2
+        assert enrichment["refs_total"] == 2
 
-    def test_enrichment_null_when_it_never_ran(self):
-        # enrichment_complete left at its default (None) → field is null
+    def test_enrichment_omitted_when_it_never_ran(self):
+        # enrichment_complete left at its default (None) → the subsystem did not
+        # run, so the key is absent rather than a zeroed row.
         meta = PaperMetadata(doi="10.1/x", title="T", references=[self._ref(1, False)])
-        out = export_paper_to_json(_minimal_paper(metadata=meta))
-        assert out["enrichment"] is None
+        paper = _minimal_paper(metadata=meta)
+        paper.extraction = _extraction_block()
+        out = export_paper_to_json(paper)
+        assert "enrichment" not in out["extraction"]
+        assert "enrichment" not in out
 
 
 # ── structured affiliations ────────────────────────────────────────────
 
 
 class TestAffiliationsExport:
-    """Top-level ``affiliations`` mirrors ``funding``: a 1-based list carrying
+    """Top-level ``affiliation`` mirrors ``funding``: a 1-based list carrying
     our verbatim ``text`` plus the LLM's best-effort structured components."""
 
     def test_empty_by_default(self):
         out = export_paper_to_json(_minimal_paper())
-        assert out["affiliations"] == []
+        assert out["affiliation"] == []
 
     def test_roundtrips_with_ids_and_null_components(self):
         from bibr.models import Affiliation
@@ -302,7 +319,7 @@ class TestAffiliationsExport:
             ],
         )
         out = export_paper_to_json(_minimal_paper(metadata=meta))
-        assert out["affiliations"] == [
+        assert out["affiliation"] == [
             {
                 "affiliation_id": 1,
                 "text": "Dept of Psychology, Univ X, London, UK",
@@ -912,6 +929,50 @@ class TestExportMatchSerialization:
         assert services == {"crossref", "openalex"}
 
 
+class TestNerOnlyBibFields:
+    """The five the decoder used to drop reach ``bib[]`` in schema 10.8."""
+
+    def test_they_reach_the_export(self):
+        ref = PaperReference(
+            bib_id=1,
+            title="Bert: pre-training of deep bidirectional transformers",
+            first_page=None,
+            volume=None,
+            authors="Devlin J, Chang M-W",
+            year=2018,
+            container=None,
+            arxiv="1810.04805",
+            pmid="28919116",
+            series="Lecture Notes in Computer Science",
+            access_date="Accessed 12 March 2020",
+            note="in Russian",
+        )
+        meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
+        bib = export_paper_to_json(_minimal_paper(metadata=meta))["bib"][0]
+        assert bib["arxiv"] == "1810.04805"
+        assert bib["pmid"] == "28919116"
+        assert bib["series"] == "Lecture Notes in Computer Science"
+        assert bib["access_date"] == "Accessed 12 March 2020"
+        assert bib["note"] == "in Russian"
+
+    def test_they_are_null_when_the_parser_tags_none_of_them(self):
+        # The shipped v4.5 checkpoint never emits one -- its corpus had no
+        # examples -- so existing output keeps its shape with explicit nulls.
+        ref = PaperReference(
+            bib_id=1,
+            title="A study of X",
+            first_page=None,
+            volume=None,
+            authors="Smith, J.",
+            year=None,
+            container=None,
+        )
+        meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
+        bib = export_paper_to_json(_minimal_paper(metadata=meta))["bib"][0]
+        for field in ("arxiv", "pmid", "series", "access_date", "note"):
+            assert bib[field] is None
+
+
 class TestBibIsolatedFromMatches:
     """`bib[]` mirrors the printed reference verbatim. External matches
     (Crossref, OpenAlex) are never copied into `bib[]`, regardless of score —
@@ -1041,7 +1102,7 @@ class TestBibIsolatedFromMatches:
 
 class TestExportXrefSerialization:
     def test_xref_type_routing(self):
-        """Each xref exports xref_id and xref_type directly."""
+        """Each xref exports target_id and xref_type directly."""
         xrefs = [
             PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=1),
             PaperXref(xref_id=2, xref_type="table", contents="Table 2", text_id=1),
@@ -1053,19 +1114,19 @@ class TestExportXrefSerialization:
         result = export_paper_to_json(paper)
 
         bib_xref = result["xref"][0]
-        assert bib_xref["xref_id"] == 1
+        assert bib_xref["target_id"] == 1
         assert bib_xref["xref_type"] == "bib"
 
         tbl_xref = result["xref"][1]
-        assert tbl_xref["xref_id"] == 2
+        assert tbl_xref["target_id"] == 2
         assert tbl_xref["xref_type"] == "table"
 
         fig_xref = result["xref"][2]
-        assert fig_xref["xref_id"] == 3
+        assert fig_xref["target_id"] == 3
         assert fig_xref["xref_type"] == "figure"
 
         foot_xref = result["xref"][3]
-        assert foot_xref["xref_id"] == 4
+        assert foot_xref["target_id"] == 4
         assert foot_xref["xref_type"] == "foot"
 
 
@@ -1155,20 +1216,20 @@ class TestExportTopLevel:
         result = export_paper_to_json(paper)
         assert result["paper_id"] == "10.1234/test"
 
-    def test_info_block(self):
+    def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        info = result["info"]
-        assert info["title"] == "Test Paper"
-        assert info["doi"] == "10.1234/test"
-        assert info["file_hash"] == "abc123"
-        assert info["input_format"] == "pdf"
-        assert info["schema_version"] == "10.7"
-        # The producing package version lives alongside the schema version:
-        # schema_version says what shape the file has, bibr_version who made it.
-        import bibr
-
-        assert info["bibr_version"] == bibr.__version__
+        assert result["schema_version"] == "11.0"
+        assert result["metadata"]["title"] == "Test Paper"
+        assert result["metadata"]["doi"] == "10.1234/test"
+        # v11 split the input artifact's identity out of the paper's metadata.
+        assert result["source"] == {
+            "file_name": "test.pdf",
+            "file_hash": "abc123",
+            "input_format": "pdf",
+        }
+        assert "file_hash" not in result["metadata"]
+        assert "bibr_version" not in result["metadata"]
 
     def test_input_format_lowercased(self):
         # The pipeline stores enum member names ("PDF", "DOCX", "XML"); the
@@ -1185,7 +1246,7 @@ class TestExportTopLevel:
             )
         )
         result = export_paper_to_json(paper)
-        assert result["info"]["input_format"] == "pdf"
+        assert result["source"]["input_format"] == "pdf"
 
     def test_author_orcid_canonicalized(self):
         meta = PaperMetadata(
@@ -1251,7 +1312,7 @@ class TestExportAbstract:
             abstract_sentences=["Section text that must NOT be re-derived at export."],
         )
         result = export_paper_to_json(paper)
-        assert result["info"]["abstract"] == "The clean LLM abstract."
+        assert result["metadata"]["abstract"] == "The clean LLM abstract."
 
     def test_no_export_side_section_fallback(self):
         """Export does NOT rebuild the abstract from section text — that policy
@@ -1262,12 +1323,12 @@ class TestExportAbstract:
             abstract_sentences=["Sentence one.", "Sentence two."],
         )
         result = export_paper_to_json(paper)
-        assert result["info"]["abstract"] is None
+        assert result["metadata"]["abstract"] is None
 
     def test_blank_abstract_exports_null(self):
         paper = self._abstract_paper(metadata_abstract="   ", abstract_sentences=[])
         result = export_paper_to_json(paper)
-        assert result["info"]["abstract"] is None
+        assert result["metadata"]["abstract"] is None
 
 
 # ── Schema validation ─────────────────────────────────────────────────
@@ -1359,21 +1420,14 @@ class TestSchemaValidation:
         data = export_paper_to_json(_minimal_paper())
         assert validate_export(data) == []
 
-    def test_additive_validation_fields_default_for_older_v106_payload(self):
-        """Payloads produced before the additive fields still validate as v10.6."""
+    def test_optional_validation_and_diagnostics_fields_default_when_absent(self):
+        """A payload missing the optional flags still validates, with defaults."""
         from bibr.export.json_export import PaperExport
 
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
-        paper.extraction = {
-            "bibr_version": "0.3.0",
-            "ref_seg_strategy": "geom",
-            "ref_parse_strategy": "ner",
-            "ref_seg_fallback_used": False,
-            "crossref_enrich": False,
-            "consolidate": "off",
-        }
+        paper.extraction = _extraction_block()
         data = export_paper_to_json(paper)
-        data["extraction"].pop("references_complete")
+        data["extraction"]["diagnostics"].pop("references_complete")
         data["validation"].pop("blocking")
         data["validation"].pop("promotable")
         for issue in data["validation"]["issues"]:
@@ -1383,7 +1437,7 @@ class TestSchemaValidation:
 
         validated = PaperExport.model_validate(data)
 
-        assert validated.extraction.references_complete is True
+        assert validated.extraction.diagnostics.references_complete is True
         assert validated.validation.blocking == 0
         assert validated.validation.promotable is True
         assert validated.validation.issues[0].origin_stage == "export"
@@ -1430,11 +1484,13 @@ class TestSchemaIsContract:
         assert errors == [], f"Validation errors: {errors}"
 
     def test_regions_payload_is_declared(self):
-        """include_regions output (_regions) validates against the schema."""
+        """include_regions output (extraction.regions) validates against the schema."""
         from bibr.export.json_export import validate_export
 
-        data = export_paper_to_json(_minimal_paper())
-        data["_regions"] = [
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block()
+        data = export_paper_to_json(paper)
+        data["extraction"]["regions"] = [
             {
                 "page": 1,
                 "index": 0,
@@ -1508,7 +1564,7 @@ class TestTypedBibMatchExport:
             service_id="10.1/cr",
             score=0.95,
             title="A Paper",
-            authors=[{"given": "J.", "family": "Smith"}],
+            author=[{"given": "J.", "family": "Smith"}],
             year=2020,
         )
         assert m.service_id == "10.1/cr"
@@ -1592,37 +1648,42 @@ class TestExportInPressYearHandling:
         assert result["bib"][0]["is_in_press"] is True
 
 
-class TestOcrConfigExportRejectsExtraKeys:
+class TestEngineExportsRejectExtraKeys:
     def test_extra_key_raises(self):
+        import pytest
         from pydantic import ValidationError
 
-        from bibr.export.json_export import OcrConfigExport
+        from bibr.export.json_export import LlmEngineExport, OcrEngineExport
 
-        try:
-            OcrConfigExport(ocr_backend="x", surprise="y")  # type: ignore[call-arg]
-        except ValidationError:
-            return
-        raise AssertionError("OcrConfigExport must reject unknown keys")
+        with pytest.raises(ValidationError):
+            OcrEngineExport(backend="x", surprise="y")  # type: ignore[call-arg]
+        with pytest.raises(ValidationError):
+            LlmEngineExport(provider="x", surprise="y")  # type: ignore[call-arg]
 
 
-# ── processing_warnings ────────────────────────────────────────────────
+# ── extraction.warnings ────────────────────────────────────────────────
 
 
 class TestProcessingWarnings:
     def test_default_empty_list(self):
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         result = export_paper_to_json(paper)
-        assert result["processing_warnings"] == []
-        assert "processing_warnings" not in result["info"]
+        assert result["extraction"]["warnings"] == []
+        # v11 moved warnings under ``extraction``; the root key is gone and
+        # ``info`` stays scalar-only.
+        assert "processing_warnings" not in result
+        assert "processing_warnings" not in result["metadata"]
 
-    def test_warnings_surfaced_at_top_level(self):
+    def test_warnings_surfaced_under_extraction(self):
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         paper.processing_warnings = [
             "OCR failed for page index 3: timeout",
             "Crossref enrichment timed out",
         ]
         result = export_paper_to_json(paper)
-        assert result["processing_warnings"] == [
+        assert result["extraction"]["warnings"] == [
             "OCR failed for page index 3: timeout",
             "Crossref enrichment timed out",
         ]
@@ -1631,6 +1692,7 @@ class TestProcessingWarnings:
         from bibr.export.json_export import validate_export
 
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         paper.processing_warnings = ["test warning"]
         result = export_paper_to_json(paper)
         assert validate_export(result) == []
@@ -1641,7 +1703,9 @@ class TestProcessingWarnings:
 
 class TestValidationGateWiring:
     def test_clean_paper_has_empty_validation_block(self):
-        result = export_paper_to_json(_minimal_paper())
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block()
+        result = export_paper_to_json(paper)
         assert result["validation"] == {
             "errors": 0,
             "warnings": 0,
@@ -1649,7 +1713,7 @@ class TestValidationGateWiring:
             "promotable": True,
             "issues": [],
         }
-        assert result["processing_warnings"] == []
+        assert result["extraction"]["warnings"] == []
 
     def test_reference_failure_exports_blocking_issue_and_incomplete_extraction(self):
         metadata = PaperMetadata(
@@ -1658,21 +1722,14 @@ class TestValidationGateWiring:
             references_incomplete=True,
         )
         paper = _minimal_paper(metadata=metadata)
-        paper.extraction = {
-            "bibr_version": "9.9.9-test",
-            "ref_seg_strategy": "geom",
-            "ref_parse_strategy": "ner",
-            "ref_seg_fallback_used": False,
-            "crossref_enrich": False,
-            "consolidate": "off",
-        }
+        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
 
         result = export_paper_to_json(paper)
 
-        assert result["info"]["title"] == "Durable Core"
-        assert result["info"]["doi"] == "10.1234/core"
+        assert result["metadata"]["title"] == "Durable Core"
+        assert result["metadata"]["doi"] == "10.1234/core"
         assert result["bib"] == []
-        assert result["extraction"]["references_complete"] is False
+        assert result["extraction"]["diagnostics"]["references_complete"] is False
         assert result["validation"]["errors"] == 1
         assert result["validation"]["blocking"] == 1
         assert result["validation"]["promotable"] is False
@@ -1796,74 +1853,73 @@ class TestValidationGateWiring:
         assert suspect[0]["origin_stage"] == "extract"
         assert suspect[0]["count"] == 1
         assert len(suspect[0]["evidence_ids"]) <= 20
-        assert result["info"]["abstract"] == abstract
+        assert result["metadata"]["abstract"] == abstract
 
-    def test_defect_surfaces_string_and_block(self):
+    def test_defect_surfaces_only_in_the_structured_block(self):
+        """v11 stopped mirroring gate findings into prose warnings: the finding
+        carries structure (code, severity, evidence) a string throws away, and
+        two shapes of one finding made every consumer reconcile them."""
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
+        paper.extraction = _extraction_block()
+        paper.processing_warnings = ["ocr retried page 3"]
+
         result = export_paper_to_json(paper)
-        # (a) one machine-greppable string per issue in processing_warnings
-        assert any(
-            w.startswith("VALIDATION:warning:VAL_TITLE_GENERIC:")
-            for w in result["processing_warnings"]
-        ), result["processing_warnings"]
-        # (b) a structured top-level block
+
         block = result["validation"]
         assert block["warnings"] >= 1
         codes = {i["code"] for i in block["issues"]}
         assert "VAL_TITLE_GENERIC" in codes
+        assert result["extraction"]["warnings"] == ["ocr retried page 3"]
 
     def test_validate_false_skips_gate(self):
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
+        paper.extraction = _extraction_block()
         result = export_paper_to_json(paper, validate=False)
         assert "validation" not in result
-        assert result["processing_warnings"] == []
+        assert result["extraction"]["warnings"] == []
 
     def test_gate_exception_does_not_break_export(self, monkeypatch):
         def _boom(_payload):
             raise RuntimeError("gate exploded")
 
         monkeypatch.setattr("bibr.export.validation.validate_export", _boom)
-        result = export_paper_to_json(_minimal_paper())
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block()
+        result = export_paper_to_json(paper)
         # export still produced a dict, with the failure surfaced as VAL_INTERNAL
         assert result["validation"]["warnings"] >= 1
-        assert any("VAL_INTERNAL" in w for w in result["processing_warnings"]), result[
-            "processing_warnings"
-        ]
+        assert "VAL_INTERNAL" in {i["code"] for i in result["validation"]["issues"]}
+        assert result["extraction"]["warnings"] == []
 
 
-# ── info is scalar-only (consumed by R via as.data.frame) ──────────────
+# ── metadata is scalar-only (consumed by R via as.data.frame) ──────────
 
 
-class TestInfoIsScalarOnly:
-    """R consumers (metacheck::read_bibr) call ``as.data.frame(info)``, which
-    errors when info fields are nested objects or non-scalar lists. Keep
-    pipeline metadata (ocr_config, processing_warnings) at the top level."""
+class TestMetadataIsScalarOnly:
+    """R consumers (metacheck's .read_bibr) call ``as.data.frame(metadata)``,
+    which errors when its fields are nested objects or non-scalar lists.
+    Pipeline telemetry (engines, warnings) lives under ``extraction`` instead."""
 
-    def test_ocr_config_not_in_info(self):
+    def test_engines_are_under_extraction_not_metadata(self):
         paper = _minimal_paper()
-        paper.ocr_config = {
-            "ocr_backend": "glm-http",
-            "ocr_model": None,
-            "llm_provider": "google",
-            "llm_model": "gemini",
-            "no_llm": False,
-        }
+        paper.extraction = _extraction_block(
+            ocr={"backend": "glm-http", "model": None, "profile": "glm"},
+            llm={"provider": "google", "model": "gemini", "backend": "cloud"},
+        )
         result = export_paper_to_json(paper)
-        assert "ocr_config" not in result["info"]
-        assert result["ocr_config"]["ocr_backend"] == "glm-http"
+        assert "ocr_config" not in result["metadata"]
+        assert "ocr_config" not in result
+        assert result["extraction"]["ocr"]["backend"] == "glm-http"
+        assert result["extraction"]["llm"]["provider"] == "google"
 
-    def test_all_info_values_are_scalar_or_flat_list_of_strings(self):
+    def test_all_metadata_values_are_scalar_or_flat_list_of_strings(self):
         paper = _minimal_paper()
+        paper.extraction = _extraction_block(
+            ocr={"backend": "glm-http", "model": None, "profile": "glm"},
+        )
         paper.processing_warnings = ["w1", "w2"]
-        paper.ocr_config = {
-            "ocr_backend": "glm-http",
-            "ocr_model": None,
-            "llm_provider": "google",
-            "llm_model": "gemini",
-            "no_llm": False,
-        }
-        info = export_paper_to_json(paper)["info"]
-        for k, v in info.items():
+        metadata = export_paper_to_json(paper)["metadata"]
+        for k, v in metadata.items():
             if k == "keywords":
                 assert isinstance(v, list)
                 assert all(isinstance(s, str) for s in v)
@@ -1898,8 +1954,10 @@ class TestIncludeRegionsToggle:
                 estimated_line_height=12.0,
             )
         ]
+        paper.extraction = _extraction_block()
         result = export_paper_to_json(paper)
         assert "_regions" not in result
+        assert "regions" not in result["extraction"]
 
     def test_regions_included_when_opted_in(self):
         from bibr.paper_contents import RegionSummary
@@ -1922,9 +1980,10 @@ class TestIncludeRegionsToggle:
                 estimated_line_height=12.0,
             )
         ]
+        paper.extraction = _extraction_block()
         result = export_paper_to_json(paper, include_regions=True)
-        assert "_regions" in result
-        assert result["_regions"][0]["content"] == "hello"
+        assert "_regions" not in result
+        assert result["extraction"]["regions"][0]["content"] == "hello"
 
     def test_raw_ocr_content_is_only_in_opted_in_regions(self):
         from bibr.paper_contents import RegionSummary
@@ -1942,12 +2001,13 @@ class TestIncludeRegionsToggle:
             )
         ]
 
+        paper.extraction = _extraction_block()
         normal = export_paper_to_json(paper)
         opted_in = export_paper_to_json(paper, include_regions=True)
 
-        assert "_regions" not in normal
-        assert opted_in["_regions"][0]["content"] == "canonical diagnostic"
-        assert opted_in["_regions"][0]["raw_ocr_content"] == raw_content
+        assert "regions" not in normal["extraction"]
+        assert opted_in["extraction"]["regions"][0]["content"] == "canonical diagnostic"
+        assert opted_in["extraction"]["regions"][0]["raw_ocr_content"] == raw_content
 
 
 # ── v4 training region metadata on text blocks ─────────────────────────
@@ -2086,29 +2146,44 @@ class TestV4RegionMetadataOnTextBlocks:
 
 
 class TestExtractionProvenance:
-    """The top-level ``extraction`` block records bibr version, the resolved
-    reference strategies, seg-fallback, enrichment flags, and stage timings."""
+    """The top-level ``extraction`` block records the producing engines, bibr
+    version, the resolved reference strategies, seg-fallback, enrichment flags,
+    LLM usage, and stage timings."""
 
-    def _ctx(self, *, crossref=True, consolidate=None, timings=None):
+    def _ctx(self, *, crossref=None, consolidate=None, timings=None, no_llm=False, settings=None):
         import types
 
         from bibr.config import snapshot_settings
+        from bibr.ocr.profiles import OcrRuntimeIdentity
+        from bibr.pipeline.context import RunConfig
 
+        scratch = {
+            "ocr_runtime_identity": OcrRuntimeIdentity(
+                backend="glm-http",
+                model="glm-ocr",
+                profile="glm",
+                normalizer_version="glm-canonical-v1",
+            )
+        }
+        if timings is not None:
+            scratch["stage_timings"] = timings
         return types.SimpleNamespace(
-            config=types.SimpleNamespace(crossref=crossref, consolidate=consolidate),
-            settings=snapshot_settings(),
-            scratch={"stage_timings": timings} if timings is not None else {},
+            config=RunConfig(crossref=crossref, consolidate=consolidate, no_llm=no_llm),
+            settings=settings if settings is not None else snapshot_settings(),
+            scratch=scratch,
         )
 
-    def test_schema_version_and_bibr_version_coexist(self):
-        # v10.3 renamed info.bibr_version -> schema_version; v10.5 restored
-        # bibr_version alongside it, now carrying the *package* version.
-        import bibr
-
-        result = export_paper_to_json(_minimal_paper())
-        assert result["info"]["schema_version"] == "10.7"
-        assert result["info"]["bibr_version"] == bibr.__version__
-        assert result["info"]["bibr_version"] != result["info"]["schema_version"]
+    def test_schema_version_is_at_the_root_and_package_version_under_extraction(self):
+        # v11 put the schema version at the root (its presence is the reader's
+        # dispatch signal) and left the producing *package* version as the sole
+        # ``extraction.bibr_version``.
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
+        result = export_paper_to_json(paper)
+        assert result["schema_version"] == "11.0"
+        assert result["extraction"]["bibr_version"] == "9.9.9-test"
+        assert "schema_version" not in result["metadata"]
+        assert "bibr_version" not in result["metadata"]
 
     def test_extraction_none_when_unset_and_validates(self):
         from bibr.export.json_export import validate_export
@@ -2121,21 +2196,146 @@ class TestExtractionProvenance:
         from bibr.export.json_export import validate_export
 
         paper = _minimal_paper()
-        paper.extraction = {
-            "bibr_version": "9.9.9-test",
-            "ref_seg_strategy": "llm",
-            "ref_parse_strategy": "ner",
-            "ref_seg_fallback_used": True,
-            "crossref_enrich": False,
-            "consolidate": "off",
-            "timings": {"extract": 1.0},
-            "total_seconds": 1.0,
-        }
+        paper.extraction = _extraction_block(
+            bibr_version="9.9.9-test",
+            settings={
+                "ref_seg": "llm",
+                "ref_parse": "ner",
+                "crossref_enrich": False,
+                "consolidate": "off",
+            },
+            diagnostics={"ref_seg_fallback_used": True},
+            timings={"stages": {"extract": 1.0}, "total_seconds": 1.0},
+        )
         result = export_paper_to_json(paper)
         assert result["extraction"]["bibr_version"] == "9.9.9-test"
-        assert result["extraction"]["ref_parse_strategy"] == "ner"
-        assert result["extraction"]["ref_seg_fallback_used"] is True
+        assert result["extraction"]["settings"]["ref_parse"] == "ner"
+        assert result["extraction"]["diagnostics"]["ref_seg_fallback_used"] is True
+        assert result["extraction"]["timings"]["total_seconds"] == 1.0
         assert validate_export(result) == []
+
+    def test_completed_at_is_utc_iso8601_to_the_second(self):
+        import datetime as dt
+        import re
+
+        from bibr.pipeline.stages.export import _build_extraction
+
+        ext = _build_extraction(self._ctx(), _minimal_paper())
+
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", ext["completed_at"])
+        parsed = dt.datetime.fromisoformat(ext["completed_at"].replace("Z", "+00:00"))
+        assert parsed.tzinfo == dt.UTC
+
+    def test_build_extraction_carries_text_quality_into_diagnostics(self):
+        # v11 home of the parse-quality score: it is telemetry, not metadata.
+        from bibr.pipeline.stages.export import _build_extraction
+
+        paper = _minimal_paper()
+        paper.text_quality = 0.42
+        assert _build_extraction(self._ctx(), paper)["diagnostics"]["text_quality"] == 0.42
+        assert _build_extraction(self._ctx(), _minimal_paper())["diagnostics"]["text_quality"] is (
+            None
+        )
+
+    def test_build_extraction_reports_both_engines(self):
+        from bibr.pipeline.stages.export import _build_extraction
+
+        ctx = self._ctx()
+        ext = _build_extraction(ctx, _minimal_paper())
+
+        assert ext["ocr"] == {"backend": "glm-http", "model": "glm-ocr", "profile": "glm"}
+        assert ext["llm"]["provider"] == ctx.settings.llm.provider
+        assert ext["llm"]["model"] == ctx.settings.llm.model
+
+    def test_build_extraction_ocr_is_null_on_the_native_parse_path(self):
+        """DOCX/XML/HTML/EPUB are parsed natively and never reach an OCR engine,
+        so the block must not report the *configured* backend as if it had
+        produced this output. ``resolve_ocr_runtime_identity`` cannot know this
+        — it is pure config resolution — so the input format is the signal."""
+        from bibr.pipeline.stages.export import _build_extraction
+
+        native = (
+            ("docx", ".docx"),
+            ("xml", ".xml"),
+            ("html", ".html"),
+            ("htm", ".htm"),
+            ("epub", ".epub"),
+        )
+        for file_type, extension in native:
+            paper = _minimal_paper(
+                input_file=InputFile(
+                    path=Path(f"/tmp/paper{extension}"),
+                    file_hash="abc123",
+                    input_format=InputFormat(
+                        file_extension=extension,
+                        detected_mime_type="application/octet-stream",
+                        # The pipeline stores the enum member name upper-cased.
+                        file_type=file_type.upper(),
+                    ),
+                )
+            )
+
+            ext = _build_extraction(self._ctx(), paper)
+
+            assert ext["ocr"] is None, file_type
+            # ``null``, not omitted — the run happened, without that engine.
+            paper.extraction = ext
+            assert export_paper_to_json(paper)["extraction"]["ocr"] is None
+
+    def test_build_extraction_reports_ocr_for_a_pdf(self):
+        from bibr.pipeline.stages.export import _build_extraction
+
+        ext = _build_extraction(self._ctx(), _minimal_paper())
+        assert ext["ocr"]["backend"] == "glm-http"
+
+    def test_build_extraction_llm_is_null_when_the_run_had_none(self):
+        """``null`` (not omitted): the run happened, deliberately without an LLM."""
+        from bibr.pipeline.stages.export import _build_extraction
+
+        ext = _build_extraction(self._ctx(no_llm=True), _minimal_paper())
+
+        assert ext["llm"] is None
+        assert ext["ocr"] is not None
+
+    def test_build_extraction_aggregates_usage_from_the_label_triples(self):
+        from bibr.pipeline.stages.export import _build_extraction
+
+        paper = _minimal_paper()
+        paper.llm_usage_labels = {
+            ("extract_authors", "google", "gemini-x"): {
+                "calls": 2,
+                "input_tokens": 100,
+                "cached_input_tokens": 10,
+                "output_tokens": 20,
+                "total_tokens": 120,
+            },
+            ("parse_refs", "openai", "gpt-x"): {
+                "calls": 1,
+                "input_tokens": 50,
+                "cached_input_tokens": 0,
+                "output_tokens": 5,
+                "total_tokens": 55,
+            },
+        }
+
+        usage = _build_extraction(self._ctx(), paper)["usage"]
+
+        assert usage["totals"] == {
+            "calls": 3,
+            "input_tokens": 150,
+            "cached_input_tokens": 10,
+            "output_tokens": 25,
+            "total_tokens": 175,
+        }
+        assert [(row["label"], row["provider"], row["model"]) for row in usage["breakdown"]] == [
+            ("extract_authors", "google", "gemini-x"),
+            ("parse_refs", "openai", "gpt-x"),
+        ]
+
+    def test_build_extraction_usage_is_none_when_no_llm_ran(self):
+        from bibr.pipeline.stages.export import _build_extraction
+
+        assert _build_extraction(self._ctx(), _minimal_paper())["usage"] is None
 
     def test_build_extraction_defaults(self):
         import bibr
@@ -2146,14 +2346,14 @@ class TestExtractionProvenance:
         ext = _build_extraction(ctx, _minimal_paper())
 
         assert ext["bibr_version"] == bibr.__version__
-        assert ext["ref_seg_strategy"] == "llm"
-        assert ext["ref_parse_strategy"] == "llm"
-        assert ext["references_complete"] is True
-        assert ext["ref_seg_fallback_used"] is False
-        assert ext["crossref_enrich"] is bool(Settings.crossref.enrich)
-        assert ext["consolidate"] == Settings.crossref.consolidate
-        assert ext["timings"]["extract"] == 1.234
-        assert ext["total_seconds"] == round(0.10 + 1.2345, 3)
+        assert ext["settings"]["ref_seg"] == "llm"
+        assert ext["settings"]["ref_parse"] == "llm"
+        assert ext["diagnostics"]["references_complete"] is True
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is False
+        assert ext["settings"]["crossref_enrich"] is bool(Settings.crossref.enrich)
+        assert ext["settings"]["consolidate"] == Settings.crossref.consolidate
+        assert ext["timings"]["stages"]["extract"] == 1.234
+        assert ext["timings"]["total_seconds"] == round(0.10 + 1.2345, 3)
 
     def test_build_extraction_includes_exact_build_sha(self):
         from bibr.pipeline.stages.export import _build_extraction
@@ -2172,7 +2372,7 @@ class TestExtractionProvenance:
         paper = _minimal_paper()
         paper.processing_warnings = [f"{SEG_FALLBACK_WARNING_PREFIX}: produced 0 spans"]
         ext = _build_extraction(self._ctx(), paper)
-        assert ext["ref_seg_fallback_used"] is True
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
 
     def test_build_extraction_detects_geom_cascade(self):
         # A geom->LLM cascade is a fall-back from the configured (geom) segmenter
@@ -2185,7 +2385,7 @@ class TestExtractionProvenance:
             f"{GEOM_CASCADE_WARNING_PREFIX}: geom low-confidence (0.947 < 0.95) or empty"
         ]
         ext = _build_extraction(self._ctx(), paper)
-        assert ext["ref_seg_fallback_used"] is True
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
 
     def test_build_extraction_merge_split_is_not_fallback(self):
         # Merge-split is a correction on top of the segmenter, not a fall-back.
@@ -2195,22 +2395,60 @@ class TestExtractionProvenance:
         paper = _minimal_paper()
         paper.processing_warnings = [f"{MERGE_SPLIT_WARNING_PREFIX}: +1 segment(s)"]
         ext = _build_extraction(self._ctx(), paper)
-        assert ext["ref_seg_fallback_used"] is False
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is False
 
     def test_build_extraction_effective_consolidate_and_crossref_off(self):
         from bibr.pipeline.stages.export import _build_extraction
 
         ctx = self._ctx(crossref=False, consolidate="replace")
         ext = _build_extraction(ctx, _minimal_paper())
-        assert ext["crossref_enrich"] is False
-        assert ext["consolidate"] == "replace"
+        assert ext["settings"]["crossref_enrich"] is False
+        assert ext["settings"]["consolidate"] == "replace"
 
-    def test_build_extraction_no_timings(self):
+    def test_build_extraction_crossref_enrich_reflects_effective_per_run_value(self):
+        """``extraction.crossref_enrich`` is the resolved tri-state, not the raw setting."""
+        from bibr.config import GlobalSettings
         from bibr.pipeline.stages.export import _build_extraction
 
-        ext = _build_extraction(self._ctx(), _minimal_paper())
+        off = GlobalSettings()
+        off.crossref.enrich = False
+        on = GlobalSettings()
+        on.crossref.enrich = True
+
+        # None follows the setting either way.
+        assert _build_extraction(self._ctx(settings=off), _minimal_paper())["settings"][
+            "crossref_enrich"
+        ] is (False)
+        assert _build_extraction(self._ctx(settings=on), _minimal_paper())["settings"][
+            "crossref_enrich"
+        ] is (True)
+        # A per-run override wins over the setting.
+        forced_on = _build_extraction(self._ctx(crossref=True, settings=off), _minimal_paper())
+        assert forced_on["settings"]["crossref_enrich"] is True
+        forced_off = _build_extraction(self._ctx(crossref=False, settings=on), _minimal_paper())
+        assert forced_off["settings"]["crossref_enrich"] is False
+
+    def test_build_extraction_total_excludes_overlapped_prefetch_timing(self):
+        """The enrichment prefetch overlaps the extract stage: reported, never summed."""
+        from bibr.pipeline.stages.export import _build_extraction
+
+        ctx = self._ctx(timings={"extract": 2.0, "enrich_prefetch": 1.5, "enrich": 0.5})
+        ext = _build_extraction(ctx, _minimal_paper())
+
+        assert ext["timings"]["stages"]["enrich_prefetch"] == 1.5
+        assert ext["timings"]["total_seconds"] == 2.5
+
+    def test_build_extraction_no_timings(self):
+        """Absent, not a zeroed row: ``{"stages": null, "total_seconds": null}``
+        is exactly the shape the absence rule exists to prevent."""
+        from bibr.pipeline.stages.export import _build_extraction
+
+        paper = _minimal_paper()
+        ext = _build_extraction(self._ctx(), paper)
         assert ext["timings"] is None
-        assert ext["total_seconds"] is None
+
+        paper.extraction = ext
+        assert "timings" not in export_paper_to_json(paper)["extraction"]
 
     def test_build_extraction_prefers_per_file_timings(self):
         # In a multi-file chunk the chunk wall clock must not be attributed to
@@ -2222,8 +2460,8 @@ class TestExtractionProvenance:
         ctx = self._ctx(timings={"ocr": 100.0, "extract": 50.0})  # chunk totals
         fs = types.SimpleNamespace(stage_times={"ocr": 2.0, "extract": 1.0009})
         ext = _build_extraction(ctx, _minimal_paper(), fs)
-        assert ext["timings"] == {"ocr": 2.0, "extract": 1.001}
-        assert ext["total_seconds"] == round(2.0 + 1.0009, 3)
+        assert ext["timings"]["stages"] == {"ocr": 2.0, "extract": 1.001}
+        assert ext["timings"]["total_seconds"] == round(2.0 + 1.0009, 3)
 
     def test_build_extraction_falls_back_to_chunk_timings(self):
         # A caller without per-file times (or an empty dict) keeps the old
@@ -2235,8 +2473,32 @@ class TestExtractionProvenance:
         ctx = self._ctx(timings={"ocr": 4.0})
         fs = types.SimpleNamespace(stage_times={})
         ext = _build_extraction(ctx, _minimal_paper(), fs)
-        assert ext["timings"] == {"ocr": 4.0}
-        assert ext["total_seconds"] == 4.0
+        assert ext["timings"]["stages"] == {"ocr": 4.0}
+        assert ext["timings"]["total_seconds"] == 4.0
+
+
+class TestQualificationProvenanceIsAlwaysPresent:
+    """An external qualification runner reads
+    ``prediction["qualification_provenance"]`` by SUBSCRIPT, so this key is
+    carved out of the v11 absence rule: null when no LLM ran, never omitted.
+    Omitting it would KeyError the runner mid-sweep on any --no-llm arm."""
+
+    def test_null_not_omitted_when_no_llm_ran(self):
+        paper = _minimal_paper()
+        assert paper.qualification_provenance is None
+
+        result = export_paper_to_json(paper)
+
+        assert "qualification_provenance" in result
+        assert result["qualification_provenance"] is None
+
+    def test_populated_when_an_llm_ran(self):
+        paper = _minimal_paper()
+        paper.qualification_provenance = {"model_id": "nuextract3", "fallback_outcome": "recovered"}
+
+        result = export_paper_to_json(paper)
+
+        assert result["qualification_provenance"]["model_id"] == "nuextract3"
 
 
 # ── paper self-identity: scalar fields + info_match ────────────────────
@@ -2244,7 +2506,7 @@ class TestExtractionProvenance:
 
 class TestPaperSelfIdentityExport:
     """The paper's OWN bibliographic identity: scalar fields round-trip into
-    ``info`` and the enrichment match flattens into top-level ``info_match``."""
+    ``metadata`` and the enrichment match flattens into ``metadata_match``."""
 
     def test_biblio_scalars_round_trip(self):
         meta = PaperMetadata(
@@ -2260,27 +2522,27 @@ class TestPaperSelfIdentityExport:
             published="2020-01-01",
             license="CC BY 4.0",
         )
-        info = export_paper_to_json(_minimal_paper(metadata=meta))["info"]
-        assert info["journal"] == "Psychological Science"
-        assert info["volume"] == "31"
-        assert info["issue"] == "1"
-        assert info["first_page"] == "65"
-        assert info["last_page"] == "74"
-        assert info["issn"] == "0956-7976"
-        assert info["publisher"] == "SAGE Publications"
-        assert info["published"] == "2020-01-01"
-        assert info["license"] == "CC BY 4.0"
+        exported = export_paper_to_json(_minimal_paper(metadata=meta))["metadata"]
+        assert exported["journal"] == "Psychological Science"
+        assert exported["volume"] == "31"
+        assert exported["issue"] == "1"
+        assert exported["first_page"] == "65"
+        assert exported["last_page"] == "74"
+        assert exported["issn"] == "0956-7976"
+        assert exported["publisher"] == "SAGE Publications"
+        assert exported["published"] == "2020-01-01"
+        assert exported["license"] == "CC BY 4.0"
 
     def test_absent_biblio_is_null(self):
         meta = PaperMetadata(doi="10.1234/test", title="Test Paper")
-        info = export_paper_to_json(_minimal_paper(metadata=meta))["info"]
-        assert info["journal"] is None
-        assert info["volume"] is None
-        assert info["publisher"] is None
-        assert info["published"] is None
-        assert info["license"] is None
+        exported = export_paper_to_json(_minimal_paper(metadata=meta))["metadata"]
+        assert exported["journal"] is None
+        assert exported["volume"] is None
+        assert exported["publisher"] is None
+        assert exported["published"] is None
+        assert exported["license"] is None
 
-    def test_info_match_serializes_like_bib_match(self):
+    def test_metadata_match_serializes_like_bib_match(self):
         meta = PaperMetadata(
             doi="10.1234/test",
             title="Test Paper",
@@ -2301,9 +2563,9 @@ class TestPaperSelfIdentityExport:
             },
         )
         out = export_paper_to_json(_minimal_paper(metadata=meta))
-        info_match = out["info_match"]
-        assert len(info_match) == 1
-        entry = info_match[0]
+        metadata_match = out["metadata_match"]
+        assert len(metadata_match) == 1
+        entry = metadata_match[0]
         assert "bib_id" not in entry
         assert entry["service"] == "crossref"
         assert entry["service_id"] == "10.1234/test"
@@ -2311,12 +2573,12 @@ class TestPaperSelfIdentityExport:
         assert entry["container"] == "Psychological Science"
         assert entry["volume"] == "31"
         assert entry["first_page"] == "65"
-        assert entry["authors"] == [{"given": "A", "family": "B"}]
+        assert entry["author"] == [{"given": "A", "family": "B"}]
 
-    def test_no_match_empty_info_match(self):
+    def test_no_match_empty_metadata_match(self):
         meta = PaperMetadata(doi="10.1234/test", title="Test Paper")
         out = export_paper_to_json(_minimal_paper(metadata=meta))
-        assert out["info_match"] == []
+        assert out["metadata_match"] == []
 
 
 # ── xref tier export ──────────────────────────────────────────────────
@@ -2325,8 +2587,8 @@ class TestPaperSelfIdentityExport:
 def test_xref_export_carries_tier():
     from bibr.export.json_export import XrefExport
 
-    x = XrefExport(xref_id=1, xref_type="bib", contents="[1]", text_id=3, tier="numeric")
+    x = XrefExport(target_id=1, xref_type="bib", contents="[1]", text_id=3, tier="numeric")
     assert x.tier == "numeric"
     # non-bib xrefs default to null
-    fig = XrefExport(xref_id=1, xref_type="figure", contents="Figure 1", text_id=3)
+    fig = XrefExport(target_id=1, xref_type="figure", contents="Figure 1", text_id=3)
     assert fig.tier is None

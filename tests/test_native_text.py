@@ -608,3 +608,115 @@ def test_fill_partial_mutation_can_be_cleaned_up():
     assert pages_regions[0][0]["content"] == ""
     assert pages_regions[0][1].get("_native_text_used") is None
     assert pages_regions[0][1]["content"] == ""
+
+
+# --- Page /Rotate (audit [16]) ----------------------------------------------
+
+
+def _rotated_pdf(rotate: int) -> bytes:
+    """A 600x800 page with ALPHA near the top-left and OMEGA near the
+    bottom-right in *unrotated* user space, carrying ``/Rotate rotate``."""
+    content = b"BT /F1 24 Tf 50 750 Td (ALPHA) Tj ET\nBT /F1 24 Tf 460 50 Td (OMEGA) Tj ET\n"
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        (
+            b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 600 800]/Rotate "
+            + str(rotate).encode()
+            + b"/Resources<</Font<</F1 5 0 R>>>>/Contents 4 0 R>>"
+        ),
+        b"<</Length " + str(len(content)).encode() + b">>stream\n" + content + b"endstream",
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for index, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += str(index).encode() + b" 0 obj\n" + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += b"xref\n0 " + str(len(objects) + 1).encode() + b"\n0000000000 65535 f \n"
+    for offset in offsets:
+        out += f"{offset:010d} 00000 n \n".encode()
+    out += (
+        b"trailer<</Size "
+        + str(len(objects) + 1).encode()
+        + b"/Root 1 0 R>>\nstartxref\n"
+        + str(xref_at).encode()
+        + b"\n%%EOF\n"
+    )
+    return bytes(out)
+
+
+_ROTATION_QUADRANTS = {
+    # (rotation) -> (quadrant holding ALPHA, quadrant holding OMEGA) in the
+    # rendered image the layout detector indexes. Verified against
+    # page.render(): rotation moves the ink, and the text layer does not move
+    # with it.
+    0: ("top-left", "bottom-right"),
+    90: ("top-right", "bottom-left"),
+    180: ("bottom-right", "top-left"),
+    270: ("bottom-left", "top-right"),
+}
+
+_QUADRANT_BBOX = {
+    "top-left": [0, 0, 300, 300],
+    "top-right": [700, 0, 1000, 300],
+    "bottom-left": [0, 700, 300, 1000],
+    "bottom-right": [700, 700, 1000, 1000],
+}
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+def test_native_text_follows_page_rotation(rotation):
+    """``page.render()`` applies ``/Rotate``, so on a 90/270 page the image is
+    transposed while the CropBox and char boxes stay unrotated. Mapping the
+    layout bbox through the CropBox alone returned '' for every text region."""
+    pdf_bytes = _rotated_pdf(rotation)
+    alpha_quadrant, omega_quadrant = _ROTATION_QUADRANTS[rotation]
+
+    alpha = get_native_text_in_bbox(
+        pdf_bytes, page_idx=0, bbox_normalized=_QUADRANT_BBOX[alpha_quadrant]
+    )
+    omega = get_native_text_in_bbox(
+        pdf_bytes, page_idx=0, bbox_normalized=_QUADRANT_BBOX[omega_quadrant]
+    )
+
+    assert "ALPHA" in alpha
+    assert "OMEGA" not in alpha
+    assert "OMEGA" in omega
+    assert "ALPHA" not in omega
+
+
+# --- CropBox origin (audit [33]) --------------------------------------------
+
+
+def test_bbox_pdf_pts_shares_the_frame_page_dimensions_describe():
+    """``page.get_size()`` reports the CropBox extent while ``_bbox_pdf_pts``
+    included the CropBox origin, so ``0 <= x1 <= x2 <= page_w`` was false on
+    any page whose CropBox does not start at (0, 0) — and
+    ``front_role_features.from_pdf_bbox`` divides by exactly those dimensions.
+    """
+    import pypdfium2
+
+    from bibr.ocr.native_text import (
+        _attach_bbox_pdf_pts,
+        _attach_page_dimensions,
+        _page_crop_box,
+        _page_rotation,
+    )
+
+    fixture = Path(__file__).parent / "fixtures" / "cropbox_offset_sample.pdf"
+    doc = pypdfium2.PdfDocument(fixture.read_bytes())
+    try:
+        page = doc[0]
+        regions = [{"label": "text", "bbox_2d": [0, 0, 1000, 1000]}]
+        _attach_page_dimensions(page, regions)
+        _attach_bbox_pdf_pts(_page_crop_box(page), regions, _page_rotation(page))
+        page.close()
+    finally:
+        doc.close()
+
+    region = regions[0]
+    x1, y1, x2, y2 = region["_bbox_pdf_pts"]
+    assert 0 <= x1 <= x2 <= region["_page_w"] + 0.01
+    assert 0 <= y1 <= y2 <= region["_page_h"] + 0.01

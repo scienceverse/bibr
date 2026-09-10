@@ -125,11 +125,11 @@ def resolve_llm_backend(raw: str) -> str:
             return "vllm-mlx"
         if sys.platform == "win32":
             return "llama-cpp"
-        from bibr.local.llm_models import detect_hardware
+        from bibr.local.llm_models import cuda_llm_backend_for, detect_hardware
 
         platform_key, memory_gb = detect_hardware()
-        if platform_key == "cuda" and memory_gb is not None and memory_gb <= 8:
-            return "llama-cpp"
+        if platform_key == "cuda":
+            return cuda_llm_backend_for(memory_gb)
         return "vllm"
 
     if raw not in _VALID_LLM_BACKENDS:
@@ -215,7 +215,7 @@ class LocalPipeline(Pipeline):
         ocr_model: str | None = None,
         ocr_profile: str | None = None,
         device: str | None = None,
-        crossref: bool = True,
+        crossref: bool | None = None,
         equations: bool = True,
         start_page: int | None = None,
         end_page: int | None = None,
@@ -275,6 +275,8 @@ class LocalPipeline(Pipeline):
         # --no-llm implies no Crossref and no equation extraction, and no
         # managed local LLM server (which would never be called — forcing
         # "cloud" makes LlmServerStage a no-op regardless of LLM_BACKEND).
+        # ``crossref`` is tri-state: None follows CROSSREF_ENRICH (off by
+        # default), True/False force it for this pipeline.
         if no_llm:
             crossref = False
             equations = False
@@ -323,7 +325,7 @@ class LocalPipeline(Pipeline):
         ).lower() == "off"
 
         enrichers = []
-        if crossref and settings_snapshot.crossref.enrich and not refs_off:
+        if config.enrichment_enabled(settings_snapshot) and not refs_off:
             enrichers.append(CrossrefEnricher(settings=settings_snapshot))
 
         # Cloud LLM has no OCR→LLM VRAM handoff, so each OCR window's back

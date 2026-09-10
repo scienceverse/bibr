@@ -21,38 +21,75 @@ logger = logging.getLogger(__name__)
 # collect only mops up cycles.
 _GC_MIN_INTERVAL_SECONDS = 30.0
 
+# Per-file timings that overlap another stage's wall clock and therefore must
+# not be added into ``extraction.timings.total_seconds``.
+_OVERLAPPED_TIMINGS = frozenset({"enrich_prefetch"})
 
-def _build_ocr_config(ctx: PipelineContext) -> dict:
+
+# Input formats parsed natively, without ever reaching an OCR engine: DocxHandling
+# Stage (bibr/pipeline/stages/docx.py) and HtmlHandlingStage (.html/.htm/.epub)
+# populate ``contents`` directly, and the OCR stage skips every file that already
+# has it. ``extraction.ocr`` must be ``null`` for these: reporting the
+# *configured* backend would fabricate an engine for a file it never saw.
+# Mirrors SupportedFileType (bibr/input/supported_files.py) minus PDF; both
+# ``file_type`` spellings for .htm are listed since the two producers disagree.
+_NATIVE_PARSE_FORMATS = frozenset({"docx", "xml", "html", "htm", "epub"})
+
+
+def _build_engines(ctx: PipelineContext, paper=None) -> tuple[dict | None, dict | None]:
+    """Resolve the OCR and core-LLM engine identities for ``extraction``.
+
+    ``None`` is meaningful for both: no OCR engine ran (the DOCX/XML native
+    paths), or the run deliberately had no LLM (``--no-llm``).
+
+    ``resolve_ocr_runtime_identity`` is pure config resolution — it answers
+    "which backend *would* run", not "which one did" — so the native-parse
+    formats are excluded here from *paper*'s declared input format. Callers
+    without a paper (identity-probe tests) get the resolved configuration.
+    """
+    from bibr.export.json_export import normalized_input_format
     from bibr.ocr.profiles import resolve_ocr_runtime_identity
 
-    scratch = getattr(ctx, "scratch", None) or {}
-    identity = scratch.get("ocr_runtime_identity")
-    if identity is None:
-        identity = resolve_ocr_runtime_identity(ctx.config, ctx.settings)
+    ocr = None
+    if normalized_input_format(getattr(paper, "input_file", None)) not in _NATIVE_PARSE_FORMATS:
+        scratch = getattr(ctx, "scratch", None) or {}
+        identity = scratch.get("ocr_runtime_identity")
+        if identity is None:
+            identity = resolve_ocr_runtime_identity(ctx.config, ctx.settings)
+        if identity is not None and identity.backend:
+            ocr = {
+                "backend": identity.backend,
+                "model": identity.model,
+                "profile": identity.profile,
+            }
 
-    return {
-        "ocr_backend": identity.backend,
-        "ocr_model": identity.model,
-        "ocr_profile": identity.profile,
-        "llm_provider": ctx.settings.llm.provider,
-        "llm_model": ctx.settings.llm.model,
-        "no_llm": ctx.config.no_llm,
-    }
+    llm = None
+    if not ctx.config.no_llm:
+        llm = {
+            "provider": ctx.settings.llm.provider,
+            "model": ctx.settings.llm.model,
+            "backend": getattr(ctx.settings.llm, "backend", None),
+        }
+    return ocr, llm
 
 
 def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
-    """Extraction provenance for the v10.3 ``extraction`` export block.
+    """Extraction provenance for the v11 ``extraction`` block.
 
-    Records the bibr package version, the resolved reference seg/parse
-    strategies, whether the CRF seg-fallback fired, the *effective*
-    Crossref-enrich/consolidate modes, and per-stage wall-clock timings.
+    Records the producing engines, the bibr package version, the resolved
+    reference seg/parse strategies, whether the CRF seg-fallback fired, the
+    *effective* Crossref-enrich/consolidate modes, per-stage wall-clock
+    timings, LLM token usage, and the non-fatal processing warnings.
 
     Timings come from the file's own ``fs.stage_times`` — in a multi-file
     chunk the chunk wall clock must not be attributed to every paper. The
     chunk-level ``ctx.scratch["stage_timings"]`` is only a fallback for
     callers without per-file times.
     """
+    import datetime as _dt
+
     import bibr
+    from bibr.export.usage import build_usage_export
     from bibr.extract.extractor import (
         GEOM_CASCADE_WARNING_PREFIX,
         SEG_FALLBACK_WARNING_PREFIX,
@@ -74,35 +111,65 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     raw_timings = (getattr(fs, "stage_times", None) or {}) or (
         (getattr(ctx, "scratch", None) or {}).get("stage_timings") or {}
     )
-    timings = {k: round(float(v), 3) for k, v in raw_timings.items()} or None
-    total_seconds = round(sum(raw_timings.values()), 3) if raw_timings else None
+    # Absent, not a zeroed row: an untimed run did not record timings at all.
+    timings = (
+        {
+            "stages": {k: round(float(v), 3) for k, v in raw_timings.items()},
+            "total_seconds": round(
+                sum(v for k, v in raw_timings.items() if k not in _OVERLAPPED_TIMINGS), 3
+            ),
+        }
+        if raw_timings
+        else None
+    )
+    ocr, llm = _build_engines(ctx, paper)
 
     extraction = {
         "bibr_version": bibr.__version__,
         "build_sha": ctx.settings.BIBR_BUILD_SHA,
-        "ref_seg_strategy": seg_strategy,
-        "ref_parse_strategy": parse_strategy,
-        "references_complete": not bool(
-            getattr(getattr(paper, "metadata", None), "references_incomplete", False)
-        ),
-        "ref_seg_fallback_used": fallback_used,
-        "crossref_enrich": bool(ctx.config.crossref and ctx.settings.crossref.enrich),
-        "consolidate": ctx.config.consolidate or ctx.settings.crossref.consolidate,
+        "completed_at": _dt.datetime.now(_dt.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "ocr": ocr,
+        "llm": llm,
+        "settings": {
+            "ref_seg": seg_strategy,
+            "ref_parse": parse_strategy,
+            "crossref_enrich": ctx.config.enrichment_enabled(ctx.settings),
+            "consolidate": ctx.config.consolidate or ctx.settings.crossref.consolidate,
+        },
         "timings": timings,
-        "total_seconds": total_seconds,
+        "usage": build_usage_export(paper.llm_usage_labels or None),
+        "diagnostics": {
+            "text_quality": paper.text_quality,
+            "references_complete": not bool(
+                getattr(getattr(paper, "metadata", None), "references_incomplete", False)
+            ),
+            "ref_seg_fallback_used": fallback_used,
+        },
+        "warnings": list(paper.processing_warnings or []),
+        # Opt-in (LLM_CAPTURE_TRACE); a sibling of "regions", not nested under
+        # diagnostics. Empty list -> None so the key is omitted entirely when
+        # nothing was captured (absence rule).
+        "trace": list(paper.llm_trace or []) or None,
     }
+
+    identity_block = {}
     expected_identity = getattr(paper, "expected_identity", None)
     if is_dataclass(expected_identity):
-        extraction["expected_identity"] = asdict(expected_identity)
+        identity_block["expected"] = asdict(expected_identity)
     doi_selection = getattr(paper, "doi_selection", None)
     if is_dataclass(doi_selection):
-        extraction["identity_receipt"] = {
+        identity_block["receipt"] = {
             "selected": asdict(doi_selection.selected)
             if doi_selection.selected is not None
             else None,
             "candidates": [asdict(candidate) for candidate in doi_selection.candidates],
             "issue_codes": [issue.code for issue in doi_selection.issues],
         }
+    if identity_block:
+        extraction["identity"] = identity_block
     return extraction
 
 
@@ -113,12 +180,14 @@ async def build_result_payload(ctx: PipelineContext, fs) -> dict:
 
     if fs.paper is None:
         raise RuntimeError("Paper not built before export stage")
-    fs.paper.ocr_config = _build_ocr_config(ctx)
-    fs.paper.extraction = _build_extraction(ctx, fs.paper, fs)
+    # Merge stage warnings BEFORE building the block: ``extraction.warnings``
+    # snapshots ``paper.processing_warnings``, so appending afterwards would
+    # drop them.
     if fs.warnings:
         fs.paper.processing_warnings = list(
             dict.fromkeys([*fs.paper.processing_warnings, *fs.warnings])
         )
+    fs.paper.extraction = _build_extraction(ctx, fs.paper, fs)
     return await asyncio.to_thread(
         fs.paper.export_to_json,
         include_regions=ctx.config.include_regions,
@@ -133,17 +202,14 @@ async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> None:
     if mode == "off":
         return
     from bibr.enrich.consolidate import consolidate_bibs
+    from bibr.export.json_export import append_payload_warning
 
     await asyncio.to_thread(consolidate_bibs, payload, mode=mode)
-    crossref_on = ctx.config.crossref and ctx.settings.crossref.enrich
+    crossref_on = ctx.config.enrichment_enabled(ctx.settings)
     if not crossref_on and not payload.get("bib_match"):
-        payload["processing_warnings"] = list(
-            dict.fromkeys(
-                [
-                    *payload.get("processing_warnings", []),
-                    "consolidate enabled but Crossref enrichment is off — no matches to merge",
-                ]
-            )
+        append_payload_warning(
+            payload,
+            "consolidate enabled but Crossref enrichment is off — no matches to merge",
         )
 
 

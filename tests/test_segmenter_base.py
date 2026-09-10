@@ -67,6 +67,11 @@ def _build_segmenter(monkeypatch, *, model_name: str, threshold: float | None = 
         return model
 
     monkeypatch.setattr("wtpsplit_lite.SaT", fake_sat)
+    # A pinned Hub model is materialised through the HF cache; never touch it here.
+    monkeypatch.setattr(
+        "bibr.segmenter_base.materialize_hub_snapshot",
+        lambda repo_id, revision: (f"/pinned/{repo_id}@{revision}", None),
+    )
     monkeypatch.setattr(
         "bibr.utils.onnx_providers.get_ort_providers",
         lambda **kwargs: ["CPUExecutionProvider"],
@@ -159,6 +164,16 @@ def test_resolver_distinguishes_short_and_full_hf_ids(value, hub_prefix):
     assert resolved.model_name == value
     assert resolved.hub_prefix == hub_prefix
     assert not resolved.is_local
+
+
+def test_default_hub_model_loads_its_pinned_snapshot(monkeypatch):
+    """The default short name resolves to the audited commit's snapshot directory —
+    wtpsplit-lite's own config loader cannot take a revision."""
+    _segmenter, _model, init = _build_segmenter(monkeypatch, model_name="sat-6l-sm")
+    revision = resolve_wtpsplit_model("sat-6l-sm").revision
+    assert init["name"] == f"/pinned/segment-any-text/sat-6l-sm@{revision}"
+    assert init["kwargs"]["hub_prefix"] is None
+    assert "from_pretrained_kwargs" not in init["kwargs"]
 
 
 def test_resolver_preserves_existing_local_directory(tmp_path):

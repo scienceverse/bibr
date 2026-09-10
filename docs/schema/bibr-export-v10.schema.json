@@ -1,0 +1,3446 @@
+{
+  "$defs": {
+    "AffiliationExport": {
+      "additionalProperties": false,
+      "description": "Structured affiliation parsed from the author byline. ``text`` is our own\nverbatim byline string; the parsed components are best-effort (LLM).",
+      "properties": {
+        "affiliation_id": {
+          "title": "Affiliation Id",
+          "type": "integer"
+        },
+        "author_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Author Ids",
+          "type": "array"
+        },
+        "city": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "City"
+        },
+        "country": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Country"
+        },
+        "department": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department"
+        },
+        "institution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Institution"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "affiliation_id",
+        "text"
+      ],
+      "title": "AffiliationExport",
+      "type": "object"
+    },
+    "AuthorExport": {
+      "additionalProperties": false,
+      "properties": {
+        "affiliation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affiliation"
+        },
+        "author_id": {
+          "title": "Author Id",
+          "type": "integer"
+        },
+        "corresponding": {
+          "title": "Corresponding",
+          "type": "boolean"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "given": {
+          "title": "Given",
+          "type": "string"
+        },
+        "orcid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orcid"
+        },
+        "role": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role",
+          "type": "array"
+        },
+        "suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suffix"
+        }
+      },
+      "required": [
+        "author_id",
+        "given",
+        "family",
+        "corresponding"
+      ],
+      "title": "AuthorExport",
+      "type": "object"
+    },
+    "BibAuthorExport": {
+      "additionalProperties": false,
+      "description": "Structured author for bib_match entries (from external services).",
+      "properties": {
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Family"
+        },
+        "given": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Given"
+        }
+      },
+      "required": [
+        "given",
+        "family"
+      ],
+      "title": "BibAuthorExport",
+      "type": "object"
+    },
+    "BibExport": {
+      "additionalProperties": false,
+      "properties": {
+        "access_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Date"
+        },
+        "arxiv": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arxiv"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "authors": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authors"
+        },
+        "bib_id": {
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "consolidated_fields": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Consolidated Fields"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editor"
+        },
+        "editors": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editors"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "is_in_press": {
+          "default": false,
+          "title": "Is In Press",
+          "type": "boolean"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "pmid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pmid"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "series": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Series"
+        },
+        "text_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        },
+        "year_suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year Suffix"
+        }
+      },
+      "required": [
+        "bib_id"
+      ],
+      "title": "BibExport",
+      "type": "object"
+    },
+    "BibMatchExport": {
+      "additionalProperties": false,
+      "description": "Flat enrichment match from an external service.",
+      "properties": {
+        "authors": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BibAuthorExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authors"
+        },
+        "bib_id": {
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editors": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BibAuthorExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editors"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "service_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        }
+      },
+      "required": [
+        "bib_id",
+        "service"
+      ],
+      "title": "BibMatchExport",
+      "type": "object"
+    },
+    "CaptionAssignmentExport": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguous": {
+          "default": false,
+          "title": "Ambiguous",
+          "type": "boolean"
+        },
+        "caption_id": {
+          "title": "Caption Id",
+          "type": "string"
+        },
+        "object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Object Id"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "caption_id",
+        "object_id",
+        "score",
+        "reasons"
+      ],
+      "title": "CaptionAssignmentExport",
+      "type": "object"
+    },
+    "CaptionAssignmentReceiptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/CaptionAssignmentExport"
+          },
+          "title": "Assignments",
+          "type": "array"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CaptionCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates",
+        "assignments"
+      ],
+      "title": "CaptionAssignmentReceiptExport",
+      "type": "object"
+    },
+    "CaptionCandidateExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Bbox"
+        },
+        "caption_id": {
+          "title": "Caption Id",
+          "type": "string"
+        },
+        "object_type": {
+          "title": "Object Type",
+          "type": "string"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "source_index": {
+          "title": "Source Index",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "caption_id",
+        "text",
+        "object_type",
+        "page_number",
+        "bbox",
+        "source_index"
+      ],
+      "title": "CaptionCandidateExport",
+      "type": "object"
+    },
+    "CitationCandidateExport": {
+      "additionalProperties": false,
+      "description": "Lossless JSON representation of one citation detector candidate.",
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "bib_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Bib Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "title": "Confidence",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "raw": {
+          "title": "Raw",
+          "type": "string"
+        },
+        "rejection_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rejection Reasons",
+          "type": "array"
+        },
+        "start": {
+          "title": "Start",
+          "type": "integer"
+        },
+        "style": {
+          "title": "Style",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text_id",
+        "start",
+        "end",
+        "raw",
+        "style",
+        "bib_ids",
+        "evidence",
+        "confidence",
+        "accepted",
+        "rejection_reasons"
+      ],
+      "title": "CitationCandidateExport",
+      "type": "object"
+    },
+    "CitationLinkingExport": {
+      "additionalProperties": false,
+      "description": "Evidence-bearing diagnostic receipt for inline citation linking.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CitationCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "resolved_candidate_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Resolved Candidate Fraction"
+        },
+        "style_scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Style Scores",
+          "type": "object"
+        },
+        "unique_linked_bib_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unique Linked Bib Fraction"
+        }
+      },
+      "required": [
+        "style_scores",
+        "candidates",
+        "resolved_candidate_fraction",
+        "unique_linked_bib_fraction"
+      ],
+      "title": "CitationLinkingExport",
+      "type": "object"
+    },
+    "DoiCandidateExport": {
+      "additionalProperties": false,
+      "properties": {
+        "marker_kind": {
+          "title": "Marker Kind",
+          "type": "string"
+        },
+        "normalized": {
+          "title": "Normalized",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page"
+        },
+        "raw": {
+          "title": "Raw",
+          "type": "string"
+        },
+        "region_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Region Index"
+        },
+        "region_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Region Type"
+        },
+        "rejection_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rejection Reason"
+        },
+        "repeated_header_footer_count": {
+          "title": "Repeated Header Footer Count",
+          "type": "integer"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Id"
+        },
+        "section_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Type"
+        },
+        "selection_tier": {
+          "title": "Selection Tier",
+          "type": "integer"
+        },
+        "semantic_context": {
+          "title": "Semantic Context",
+          "type": "string"
+        },
+        "source_kind": {
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "text_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Text Id"
+        }
+      },
+      "required": [
+        "raw",
+        "normalized",
+        "source_kind",
+        "page",
+        "section_id",
+        "section_type",
+        "region_index",
+        "region_type",
+        "text_id",
+        "marker_kind",
+        "repeated_header_footer_count",
+        "semantic_context",
+        "selection_tier"
+      ],
+      "title": "DoiCandidateExport",
+      "type": "object"
+    },
+    "EnrichmentExport": {
+      "additionalProperties": false,
+      "description": "Reference-enrichment completeness \u2014 lets a consumer distinguish a\npartial (timed-out) Crossref enrichment from a complete one without\ngrepping ``processing_warnings``. ``null`` when enrichment never ran.",
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "refs_enriched": {
+          "title": "Refs Enriched",
+          "type": "integer"
+        },
+        "refs_total": {
+          "title": "Refs Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "refs_enriched",
+        "refs_total"
+      ],
+      "title": "EnrichmentExport",
+      "type": "object"
+    },
+    "EqExport": {
+      "additionalProperties": false,
+      "properties": {
+        "comp": {
+          "title": "Comp",
+          "type": "string"
+        },
+        "df": {
+          "title": "Df",
+          "type": "string"
+        },
+        "grp_id": {
+          "title": "Grp Id",
+          "type": "integer"
+        },
+        "lhs": {
+          "title": "Lhs",
+          "type": "string"
+        },
+        "rhs": {
+          "title": "Rhs",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text_id",
+        "grp_id",
+        "lhs",
+        "df",
+        "comp",
+        "rhs"
+      ],
+      "title": "EqExport",
+      "type": "object"
+    },
+    "ExpectedIdentityExport": {
+      "additionalProperties": false,
+      "properties": {
+        "doi_required": {
+          "default": false,
+          "title": "Doi Required",
+          "type": "boolean"
+        },
+        "expected_doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Doi"
+        },
+        "expected_doi_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Doi Sha256"
+        },
+        "expected_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Title"
+        },
+        "queue_record_id": {
+          "title": "Queue Record Id",
+          "type": "string"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Sha256"
+        },
+        "target_block_hint": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Block Hint"
+        }
+      },
+      "required": [
+        "queue_record_id"
+      ],
+      "title": "ExpectedIdentityExport",
+      "type": "object"
+    },
+    "ExtractionExport": {
+      "additionalProperties": false,
+      "description": "Extraction provenance \u2014 how this output was produced.\n\nBuilt by ``ExportStage._build_extraction`` from the pipeline context; the\nexport function passes it through verbatim. ``null`` when a Paper is\nexported outside the pipeline.",
+      "properties": {
+        "bibr_version": {
+          "title": "Bibr Version",
+          "type": "string"
+        },
+        "build_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Sha"
+        },
+        "consolidate": {
+          "title": "Consolidate",
+          "type": "string"
+        },
+        "crossref_enrich": {
+          "title": "Crossref Enrich",
+          "type": "boolean"
+        },
+        "expected_identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectedIdentityExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "identity_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityReceiptExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ref_parse_strategy": {
+          "title": "Ref Parse Strategy",
+          "type": "string"
+        },
+        "ref_seg_fallback_used": {
+          "title": "Ref Seg Fallback Used",
+          "type": "boolean"
+        },
+        "ref_seg_strategy": {
+          "title": "Ref Seg Strategy",
+          "type": "string"
+        },
+        "references_complete": {
+          "default": true,
+          "title": "References Complete",
+          "type": "boolean"
+        },
+        "timings": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Timings"
+        },
+        "total_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Seconds"
+        }
+      },
+      "required": [
+        "bibr_version",
+        "ref_seg_strategy",
+        "ref_parse_strategy",
+        "ref_seg_fallback_used",
+        "crossref_enrich",
+        "consolidate"
+      ],
+      "title": "ExtractionExport",
+      "type": "object"
+    },
+    "FigureExport": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "figure_id": {
+          "title": "Figure Id",
+          "type": "integer"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FigurePartExport"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        }
+      },
+      "required": [
+        "figure_id",
+        "page_number"
+      ],
+      "title": "FigureExport",
+      "type": "object"
+    },
+    "FigurePartExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "part_index": {
+          "title": "Part Index",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProvenanceExport"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "part_index"
+      ],
+      "title": "FigurePartExport",
+      "type": "object"
+    },
+    "FundingExport": {
+      "additionalProperties": false,
+      "description": "Structured funding entry parsed from the funding statement.",
+      "properties": {
+        "award_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Award Ids",
+          "type": "array"
+        },
+        "funder": {
+          "title": "Funder",
+          "type": "string"
+        }
+      },
+      "required": [
+        "funder"
+      ],
+      "title": "FundingExport",
+      "type": "object"
+    },
+    "IdentityReceiptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/DoiCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "issue_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issue Codes",
+          "type": "array"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoiCandidateExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "IdentityReceiptExport",
+      "type": "object"
+    },
+    "InfoExport": {
+      "additionalProperties": false,
+      "properties": {
+        "abstract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Abstract"
+        },
+        "bibr_version": {
+          "title": "Bibr Version",
+          "type": "string"
+        },
+        "coi_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coi Statement"
+        },
+        "data_availability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Availability"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Doi"
+        },
+        "ethics_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ethics Statement"
+        },
+        "file_hash": {
+          "title": "File Hash",
+          "type": "string"
+        },
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "funding_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Funding Statement"
+        },
+        "input_format": {
+          "title": "Input Format",
+          "type": "string"
+        },
+        "issn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issn"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "journal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Journal"
+        },
+        "keywords": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "License"
+        },
+        "oecd_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd Confidence"
+        },
+        "oecd_l1": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd L1"
+        },
+        "oecd_l2": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd L2"
+        },
+        "paper_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Type"
+        },
+        "paper_type_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Type Confidence"
+        },
+        "published": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Published"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "schema_version": {
+          "enum": [
+            "10.6",
+            "10.7",
+            "10.8",
+            "10.9"
+          ],
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "text_quality": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Quality"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        }
+      },
+      "required": [
+        "title",
+        "keywords",
+        "doi",
+        "file_hash",
+        "input_format",
+        "file_name",
+        "schema_version",
+        "bibr_version"
+      ],
+      "title": "InfoExport",
+      "type": "object"
+    },
+    "InfoMatchExport": {
+      "additionalProperties": false,
+      "description": "Flat enrichment match for the paper's OWN bibliographic identity.\n\nMirrors :class:`BibMatchExport` (same external-service shape) but keyed to\nthe paper rather than a reference, so it carries no ``bib_id``.",
+      "properties": {
+        "authors": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BibAuthorExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authors"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editors": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/BibAuthorExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editors"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "service_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        }
+      },
+      "required": [
+        "service"
+      ],
+      "title": "InfoMatchExport",
+      "type": "object"
+    },
+    "OcrConfigExport": {
+      "additionalProperties": false,
+      "properties": {
+        "llm_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Llm Model"
+        },
+        "llm_provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Llm Provider"
+        },
+        "no_llm": {
+          "default": false,
+          "title": "No Llm",
+          "type": "boolean"
+        },
+        "ocr_backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Backend"
+        },
+        "ocr_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Model"
+        },
+        "ocr_profile": {
+          "anyOf": [
+            {
+              "enum": [
+                "paddle",
+                "glm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ocr Profile"
+        }
+      },
+      "title": "OcrConfigExport",
+      "type": "object"
+    },
+    "PersonNameExport": {
+      "additionalProperties": false,
+      "description": "One structured person name derived from a verbatim reference string.\n\nNaming rule (CSL-borrowed): ``bib[].authors``/``editors`` stay the verbatim\nprinted strings; ``bib[].author``/``editor`` carry this best-effort split.\n``literal`` holds corporate or unsplittable names whole (the JATS\n``string-name`` analog); when it is set, ``family``/``given`` are absent.\nEvery emitted value is a substring of the verbatim input.",
+      "properties": {
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family"
+        },
+        "given": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Given"
+        },
+        "literal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Literal"
+        },
+        "suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suffix"
+        }
+      },
+      "title": "PersonNameExport",
+      "type": "object"
+    },
+    "ProvenanceExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "page": {
+          "title": "Page",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "title": "ProvenanceExport",
+      "type": "object"
+    },
+    "ReferenceSegmentationAttemptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "credible_starts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Credible Starts"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected": {
+          "title": "Selected",
+          "type": "boolean"
+        },
+        "spans": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Spans",
+          "type": "array"
+        },
+        "strategy": {
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy",
+        "spans",
+        "credible_starts",
+        "selected",
+        "reason_flags"
+      ],
+      "title": "ReferenceSegmentationAttemptExport",
+      "type": "object"
+    },
+    "ReferenceYieldExport": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/ReferenceSegmentationAttemptExport"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "credible_source_starts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Credible Source Starts"
+        },
+        "duplicate_rate": {
+          "title": "Duplicate Rate",
+          "type": "number"
+        },
+        "parsed_count": {
+          "title": "Parsed Count",
+          "type": "integer"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected_spans": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Selected Spans",
+          "type": "array"
+        },
+        "source_character_coverage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Character Coverage"
+        },
+        "valid_count": {
+          "title": "Valid Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credible_source_starts",
+        "attempts",
+        "selected_spans",
+        "source_character_coverage",
+        "parsed_count",
+        "valid_count",
+        "duplicate_rate",
+        "reason_flags"
+      ],
+      "title": "ReferenceYieldExport",
+      "type": "object"
+    },
+    "RegionExport": {
+      "additionalProperties": false,
+      "description": "Per-region layout debug payload (``include_regions=True``).",
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Bbox"
+        },
+        "bbox_height": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox Height"
+        },
+        "bbox_width": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox Width"
+        },
+        "char_density": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Density"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "estimated_line_height": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Line Height"
+        },
+        "font_bold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Bold"
+        },
+        "font_size": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "font_weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Weight"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Label"
+        },
+        "page": {
+          "title": "Page",
+          "type": "integer"
+        },
+        "raw_ocr_content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Ocr Content"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        }
+      },
+      "required": [
+        "page",
+        "index",
+        "label",
+        "bbox"
+      ],
+      "title": "RegionExport",
+      "type": "object"
+    },
+    "SectionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "classification_score": {
+          "title": "Classification Score",
+          "type": "number"
+        },
+        "classification_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Classification Source"
+        },
+        "header": {
+          "title": "Header",
+          "type": "string"
+        },
+        "level": {
+          "title": "Level",
+          "type": "integer"
+        },
+        "parent_section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent Section Id"
+        },
+        "section_id": {
+          "title": "Section Id",
+          "type": "integer"
+        },
+        "section_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Type"
+        }
+      },
+      "required": [
+        "section_id",
+        "header",
+        "level",
+        "parent_section_id",
+        "section_type",
+        "classification_score"
+      ],
+      "title": "SectionExport",
+      "type": "object"
+    },
+    "TableExport": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "contents": {
+          "items": {},
+          "title": "Contents",
+          "type": "array"
+        },
+        "html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Html"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TablePartExport"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "table_id": {
+          "title": "Table Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "table_id",
+        "contents",
+        "page_number"
+      ],
+      "title": "TableExport",
+      "type": "object"
+    },
+    "TablePartExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "contents": {
+          "items": {},
+          "title": "Contents",
+          "type": "array"
+        },
+        "html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Html"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "part_index": {
+          "title": "Part Index",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProvenanceExport"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "part_index",
+        "contents"
+      ],
+      "title": "TablePartExport",
+      "type": "object"
+    },
+    "TextExport": {
+      "additionalProperties": false,
+      "properties": {
+        "_bbox_2d": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox 2D"
+        },
+        "_font_bold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Bold"
+        },
+        "_font_size": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "_is_italic": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Italic"
+        },
+        "_page_h": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page H"
+        },
+        "_page_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page W"
+        },
+        "_region_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region Type"
+        },
+        "formatted": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formatted"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "paragraph_id": {
+          "title": "Paragraph Id",
+          "type": "integer"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Id"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text",
+        "text_id",
+        "paragraph_id",
+        "section_id",
+        "page_number"
+      ],
+      "title": "TextExport",
+      "type": "object"
+    },
+    "UrlExport": {
+      "additionalProperties": false,
+      "properties": {
+        "href": {
+          "title": "Href",
+          "type": "string"
+        },
+        "link_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Link Text"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "href",
+        "link_text",
+        "text_id"
+      ],
+      "title": "UrlExport",
+      "type": "object"
+    },
+    "ValidationExport": {
+      "additionalProperties": false,
+      "description": "Promotion disposition derived from typed validation issues.",
+      "properties": {
+        "blocking": {
+          "default": 0,
+          "title": "Blocking",
+          "type": "integer"
+        },
+        "errors": {
+          "title": "Errors",
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/ValidationIssueExport"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "promotable": {
+          "default": true,
+          "title": "Promotable",
+          "type": "boolean"
+        },
+        "warnings": {
+          "title": "Warnings",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "errors",
+        "warnings",
+        "issues"
+      ],
+      "title": "ValidationExport",
+      "type": "object"
+    },
+    "ValidationIssueExport": {
+      "additionalProperties": false,
+      "description": "JSON-safe representation of a shared pipeline validation issue.",
+      "properties": {
+        "blocking": {
+          "default": false,
+          "title": "Blocking",
+          "type": "boolean"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "origin_stage": {
+          "default": "export",
+          "title": "Origin Stage",
+          "type": "string"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "count"
+      ],
+      "title": "ValidationIssueExport",
+      "type": "object"
+    },
+    "XrefExport": {
+      "additionalProperties": false,
+      "properties": {
+        "contents": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Contents"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "enum": [
+                "numeric",
+                "paren-numeric",
+                "flattened-superscript",
+                "author-year",
+                "llm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tier"
+        },
+        "xref_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Xref Id"
+        },
+        "xref_type": {
+          "enum": [
+            "bib",
+            "table",
+            "figure",
+            "foot",
+            "supplementary",
+            "equation",
+            "section"
+          ],
+          "title": "Xref Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "xref_id",
+        "xref_type",
+        "contents",
+        "text_id"
+      ],
+      "title": "XrefExport",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Pydantic model for the bibr v10.x JSON export schema (reads v10.6 onwards).",
+  "properties": {
+    "_regions": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/RegionExport"
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Opt-in per-region layout debug payload (bbox, font, section linkage, raw content); omitted unless include_regions=True.",
+      "title": "Regions"
+    },
+    "affiliations": {
+      "default": [],
+      "description": "Structured author affiliations parsed from the byline: verbatim text plus best-effort institution/department/city/country and linked author IDs.",
+      "items": {
+        "$ref": "#/$defs/AffiliationExport"
+      },
+      "title": "Affiliations",
+      "type": "array"
+    },
+    "author": {
+      "description": "Extracted authors, with name, affiliation, email, corresponding-author flag, ORCID, and contribution roles.",
+      "items": {
+        "$ref": "#/$defs/AuthorExport"
+      },
+      "title": "Author",
+      "type": "array"
+    },
+    "bib": {
+      "description": "Parsed bibliography entries, verbatim from the printed reference list \u2014 never backfilled from external enrichment.",
+      "items": {
+        "$ref": "#/$defs/BibExport"
+      },
+      "title": "Bib",
+      "type": "array"
+    },
+    "bib_match": {
+      "default": [],
+      "description": "Flattened enrichment matches (e.g. Crossref) for bibliography entries, one row per external-service hit.",
+      "items": {
+        "$ref": "#/$defs/BibMatchExport"
+      },
+      "title": "Bib Match",
+      "type": "array"
+    },
+    "caption_assignment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CaptionAssignmentReceiptExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Document-wide caption candidates and deterministic ownership decisions."
+    },
+    "citation_linking": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/CitationLinkingExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Citation detector scores plus every accepted/rejected source span; omitted when citation linking did not run."
+    },
+    "enrichment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnrichmentExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Reference-enrichment completeness \u2014 how many references were enriched vs total; null when enrichment never ran."
+    },
+    "eq": {
+      "description": "Parsed statistical/mathematical expressions split into left-hand side, degrees of freedom, comparator, and right-hand side.",
+      "items": {
+        "$ref": "#/$defs/EqExport"
+      },
+      "title": "Eq",
+      "type": "array"
+    },
+    "extraction": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExtractionExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Extraction provenance: producing bibr version, resolved reference seg/parse strategies, Crossref enrich/consolidate settings, and per-stage timings; null when exported outside the pipeline."
+    },
+    "figure": {
+      "description": "Extracted figures with caption, page number, and (optionally) base64-encoded image data.",
+      "items": {
+        "$ref": "#/$defs/FigureExport"
+      },
+      "title": "Figure",
+      "type": "array"
+    },
+    "funding": {
+      "default": [],
+      "description": "Structured funder names and award IDs parsed from the funding statement.",
+      "items": {
+        "$ref": "#/$defs/FundingExport"
+      },
+      "title": "Funding",
+      "type": "array"
+    },
+    "info": {
+      "$ref": "#/$defs/InfoExport",
+      "description": "Scalar paper-level metadata: title, abstract, keywords, DOI, file identity, schema/package versions, paper-type and OECD classification, the paper's own journal/venue identity, and research-integrity statement text."
+    },
+    "info_match": {
+      "default": [],
+      "description": "Enrichment matches for the paper's own bibliographic identity (self-DOI lookup), shaped like bib_match minus bib_id.",
+      "items": {
+        "$ref": "#/$defs/InfoMatchExport"
+      },
+      "title": "Info Match",
+      "type": "array"
+    },
+    "llm_usage": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Per-model LLM token usage counts for this extraction; null when no LLM ran or usage tracking is disabled.",
+      "title": "Llm Usage"
+    },
+    "llm_usage_by_label": {
+      "anyOf": [
+        {
+          "additionalProperties": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object"
+          },
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Per-call-site-label LLM token usage counts for this extraction (e.g. 'extract_authors'); null when no LLM ran or usage tracking is disabled.",
+      "title": "Llm Usage By Label"
+    },
+    "ocr_config": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OcrConfigExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "OCR/LLM backend and model configuration used to produce this extraction; null when unavailable."
+    },
+    "paper_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Paper identifier: user-supplied --paper-id, else the DOI, else the source file name.",
+      "title": "Paper Id"
+    },
+    "processing_warnings": {
+      "default": [],
+      "description": "Non-fatal warnings emitted during processing, including output-validation-gate findings.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Processing Warnings",
+      "type": "array"
+    },
+    "qualification_provenance": {
+      "anyOf": [
+        {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Deployment-qualification provenance: identity SHAs, per-task protocol hashes, native-validity + fallback outcome, and request counts; null when no LLM ran or usage tracking is disabled.",
+      "title": "Qualification Provenance"
+    },
+    "reference_yield": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ReferenceYieldExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Reference segmentation attempts, selected spans, and parse-yield receipt."
+    },
+    "section": {
+      "description": "Document section headers with hierarchy (level, parent) and IMRaD classification.",
+      "items": {
+        "$ref": "#/$defs/SectionExport"
+      },
+      "title": "Section",
+      "type": "array"
+    },
+    "table": {
+      "description": "Extracted tables with HTML markup, structured cell contents, caption, and page number.",
+      "items": {
+        "$ref": "#/$defs/TableExport"
+      },
+      "title": "Table",
+      "type": "array"
+    },
+    "text": {
+      "description": "Full body text as an ordered array of sentence-level spans, each linked to its paragraph, section, and page.",
+      "items": {
+        "$ref": "#/$defs/TextExport"
+      },
+      "title": "Text",
+      "type": "array"
+    },
+    "url": {
+      "description": "Hyperlinks found in the body text, with their link text and source sentence.",
+      "items": {
+        "$ref": "#/$defs/UrlExport"
+      },
+      "title": "Url",
+      "type": "array"
+    },
+    "validation": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ValidationExport"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Output validation gate result: counts of errors/warnings and the structured issue list; absent when the gate was skipped."
+    },
+    "xref": {
+      "description": "In-text citation/cross-reference markers linking a sentence to a bibliography entry, table, figure, footnote, equation, or section.",
+      "items": {
+        "$ref": "#/$defs/XrefExport"
+      },
+      "title": "Xref",
+      "type": "array"
+    }
+  },
+  "required": [
+    "paper_id",
+    "info",
+    "author",
+    "text",
+    "section",
+    "url",
+    "bib",
+    "xref",
+    "figure",
+    "table",
+    "eq",
+    "bib_match",
+    "info_match",
+    "funding",
+    "affiliations",
+    "ocr_config",
+    "enrichment",
+    "processing_warnings",
+    "llm_usage",
+    "llm_usage_by_label",
+    "qualification_provenance",
+    "extraction"
+  ],
+  "title": "PaperExport",
+  "type": "object"
+}

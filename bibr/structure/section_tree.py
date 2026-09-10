@@ -16,7 +16,6 @@ plain dict, never stored on sections, never serialized.
 import re
 from dataclasses import dataclass, field
 
-from bibr.ocr.ref_patterns import _REF_HEADER_RE
 from bibr.paper_contents import CanonicalSection, PaperSection
 from bibr.utils.text import normalize_text
 
@@ -350,25 +349,14 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
 
     zone_start = int(n * 0.6)
     references_idx: int | None = None
-    seen_body = False
     for i, s in enumerate(sections):
-        seen_body = seen_body or s.section_type in IMRAD_ANCHORS
-        # A publisher's CITATION panel can be classified as REFERENCES before
-        # the article starts. It provides no evidence of back matter.
-        if s.section_type == CanonicalSection.REFERENCES and (
-            seen_body or _REF_HEADER_RE.fullmatch(s.header.strip())
-        ):
+        if s.section_type == CanonicalSection.REFERENCES:
             references_idx = i
             break
 
-    # Detected titles can be level 1. Preserve their authority even when they
-    # begin with "A" and follow a misclassified publisher citation panel.
-    infos = [
-        _appendix_head_info(s.header)
-        if s.level > 0 and s.section_type != CanonicalSection.TITLE
-        else (None, None)
-        for s in sections
-    ]
+    # Level-0 sections (title/root) never participate; treat them as gaps that
+    # break an appendix block.
+    infos = [_appendix_head_info(s.header) if s.level > 0 else (None, None) for s in sections]
 
     def in_zone(i: int) -> bool:
         return i >= zone_start or (references_idx is not None and i > references_idx)

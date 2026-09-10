@@ -33,6 +33,26 @@ def _parse_pdf(ocr_regions, outline=None, *, settings=None, first_page_index=0):
     return parser, contents
 
 
+async def _predict_front_roles(rm, ocr_regions, *, first_page_index: int):
+    """Run the optional front-role classifier off the event loop; never raise."""
+    from bibr.extract.front_role import FrontRolePredictions
+
+    ensure = getattr(rm, "ensure_front_role", None)
+    if ensure is None:
+        return None
+    try:
+        classifier = ensure()
+        if classifier is None:
+            return None
+        predictions = await asyncio.to_thread(
+            classifier.predict_pages, ocr_regions, first_page_index=first_page_index
+        )
+    except Exception:  # noqa: BLE001 - an optional prior must never fail parsing
+        logger.warning("Front-role classification failed; continuing without it", exc_info=True)
+        return None
+    return predictions if isinstance(predictions, FrontRolePredictions) else None
+
+
 class ParseSegmentStage:
     name = "parse"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -72,9 +92,17 @@ class ParseSegmentStage:
                 # Hand captured reference-line geometry to the extract stage.
                 if contents is not None:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
-                    from bibr.ocr.pdf_inspection import inspection_to_dict
 
-                    contents.native_source = inspection_to_dict(getattr(fs, "pdf_inspection", None))
+                # Score every OCR region's front-matter role while the raw
+                # regions are still resident (they are freed after this
+                # stage). Evidence only: front_matter.py decides what to do
+                # with it, and a missing model leaves the heuristics alone.
+                if contents is not None and native_parser is None and fs.ocr_regions:
+                    predictions = await _predict_front_roles(
+                        rm, fs.ocr_regions, first_page_index=ctx.config.start_page or 0
+                    )
+                    if predictions is not None:
+                        contents.front_role_predictions = predictions
 
                 assembler = parser.assembler
                 if len(assembler):

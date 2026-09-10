@@ -78,7 +78,8 @@ async def test_decoder_abort_recovers_without_server_grammar(monkeypatch, recove
         assert "response_format" not in requests[1]
         assert requests[1]["max_tokens"] == 128
         assert requests[1]["chat_template_kwargs"] == {"enable_thinking": False}
-        client._acquire_rate_limit.assert_awaited_once()
+        # One slot for the initial request and one for its recovery.
+        assert client._acquire_rate_limit.await_count == 2
 
 
 @pytest.mark.parametrize(

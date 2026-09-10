@@ -46,6 +46,17 @@ async def test_label_paper_type_reuses_paper_type_label_prompt():
 
 
 async def test_label_paper_type_acquires_limiter():
-    client = _make_client()
+    """The slot is taken inside ``_invoke_structured``, below its cache check,
+    so drive the real funnel with a stub backend rather than stubbing the
+    funnel itself — otherwise the acquisition under test is mocked away."""
+
+    class _Backend:
+        async def create(self, **kwargs):  # noqa: ARG002
+            return PaperTypeLabel(paper_type="meta-analysis", confidence=0.82), None
+
+    client = LLMClient(settings=snapshot_settings(), backend=_Backend())
+    client._limiter = mock.AsyncMock()
+
     await client.label_paper_type("T", "A")
-    client.limiter.acquire.assert_awaited_once()
+
+    client._limiter.acquire.assert_awaited_once()

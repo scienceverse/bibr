@@ -38,7 +38,7 @@ class _CountingPipeline:
         self.max_inflight = max(self.max_inflight, self.inflight)
         await asyncio.sleep(0.05)
         self.inflight -= 1
-        return {"paper_id": paper_id, "info": {"file_name": filename}}
+        return {"paper_id": paper_id, "source": {"file_name": filename}}
 
 
 def _api(tmp_path) -> tuple[BibrPipelineAPI, _CountingPipeline, _MemoryCache]:
@@ -91,8 +91,8 @@ async def test_cache_hit_rebinds_filename_to_current_request(tmp_path):
     second = _inputs()
     second["filename"] = "paper.pdf"
 
-    assert (await api.predict(first))["paper_json"]["info"]["file_name"] == "alice-secret.pdf"
-    assert (await api.predict(second))["paper_json"]["info"]["file_name"] == "paper.pdf"
+    assert (await api.predict(first))["paper_json"]["source"]["file_name"] == "alice-secret.pdf"
+    assert (await api.predict(second))["paper_json"]["source"]["file_name"] == "paper.pdf"
     assert pipeline.calls == 1
 
 

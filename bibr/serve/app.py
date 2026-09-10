@@ -3,12 +3,11 @@
 Builds a single ``litserve.LitServer`` hosting the full bibr pipeline. The
 server exposes:
   - ``POST /papers/extract``           — multipart upload, returns the bibr JSON schema
-  - ``POST /papers/enrich``            — backfill enrichment from saved extraction JSON
   - ``POST /papers/jobs``              — submit an async extraction job (202)
   - ``GET  /papers/jobs/{id}``         — poll job status
   - ``GET  /papers/jobs/{id}/result``  — fetch the paper_json once succeeded
   - ``GET  /health``                   — LitServe's built-in liveness check
-  - ``GET  /ready``                    — custom readiness probe (OCR + Redis)
+  - ``GET  /ready``                    — custom readiness probe (OCR + Redis + job store)
 
 Every response carries ``x-request-id`` (echoed from the request when a sane
 one is supplied, else generated) and ``x-bibr-duration-ms``; one structured
@@ -84,39 +83,12 @@ def readiness_payload(
     }
 
 
-# Dedicated logger for per-request / per-extraction usage metering (D2). One
-# JSON line per record; formatting is done at the call site with json.dumps.
-metering_logger = logging.getLogger("bibr.serve.metering")
-
-
-def _configure_metering_logging(settings) -> None:
-    """Ensure metering records are emitted, and (idempotently) attach a file sink.
-
-    Sets the metering logger to INFO so records aren't dropped at source, and —
-    when ``METER_LOG_PATH`` is set — attaches a single size-capped JSONL
-    ``RotatingFileHandler``. Rotation is what bounds disk use: the metering
-    middleware runs outside the auth gate (it deliberately logs 401s), so
-    unauthenticated request spam would otherwise grow the log without bound and
-    exhaust disk (audit M5). Idempotent across repeated ``build_server`` calls
-    (tests) so handlers don't accumulate.
-    """
-    from logging.handlers import RotatingFileHandler
-
-    metering_logger.setLevel(logging.INFO)
-    log_path = settings.metering.log_path
-    if not log_path:
-        return
-    for handler in metering_logger.handlers:
-        if getattr(handler, "_bibr_metering_sink", None) == log_path:
-            return
-    file_handler = RotatingFileHandler(
-        log_path,
-        maxBytes=settings.metering.log_max_bytes,
-        backupCount=settings.metering.log_backup_count,
-    )
-    file_handler.setFormatter(logging.Formatter("%(message)s"))
-    file_handler._bibr_metering_sink = log_path  # type: ignore[attr-defined]
-    metering_logger.addHandler(file_handler)
+# Metering records (one JSON line each) go through ``bibr.serve.logsetup``; the
+# names stay importable from here for the middleware below and for tests.
+from bibr.serve.logsetup import (  # noqa: E402
+    configure_metering_logging as _configure_metering_logging,
+)
+from bibr.serve.logsetup import metering_logger  # noqa: E402
 
 
 def _safe_cors_credentials(origins: list[str], allow_credentials: bool) -> bool:
@@ -178,17 +150,7 @@ def _build_server(upload_stores):
     from fastapi.middleware.cors import CORSMiddleware
 
     from bibr.config import Settings, validate_production_settings
-
-    # LitServe 0.2.17 gates its own MCP connector on the official `mcp` package
-    # being importable (litserve.server._MCP_AVAILABLE) but builds that
-    # connector from the third-party `fastmcp` package: litserve/mcp.py binds
-    # `MCPServer` only when fastmcp is installed, so with bibr's `mcp` extra
-    # alone `server.run()` dies with `NameError: name 'MCPServer' is not
-    # defined` before uvicorn starts. bibr mounts its own endpoint
-    # (bibr.serve.mcp) and never wants LitServe's, so switch the detection off
-    # for this process regardless of what is installed. Must happen before the
-    # LitServer is constructed and before run(): both read the module flag.
-    litserve_server._MCP_AVAILABLE = False
+    from bibr.serve.admission import base64_envelope
     from bibr.serve.auth import PUBLIC_PATHS, check_bearer
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
     from bibr.serve.ingress import (
@@ -199,10 +161,34 @@ def _build_server(upload_stores):
         register_extract_route,
         resolve_litserve_dispatch,
     )
+    from bibr.serve.paths import MCP_MOUNT_PATH
+
+    # LitServe 0.2.17 gates its own MCP connector on the official `mcp` package
+    # being importable (litserve.server._MCP_AVAILABLE) but builds that connector
+    # from the third-party `fastmcp` package: litserve/mcp.py binds `MCPServer`
+    # only when fastmcp is installed, so with bibr's `mcp` extra alone
+    # `server.run()` dies with `NameError: name 'MCPServer' is not defined`
+    # before uvicorn starts. bibr mounts its own endpoint (bibr.serve.mcp) and
+    # never wants LitServe's, so switch the detection off for this process
+    # regardless of what is installed. Must happen before the LitServer is
+    # constructed and before run(): both read the module flag.
+    litserve_server._MCP_AVAILABLE = False
 
     # Fail fast on misconfigured production deployments (missing Redis
     # password / API key, wildcard CORS) before any model loads.
     validate_production_settings(Settings)
+
+    # The outer body cap is the file limit plus multipart headroom — except that the
+    # MCP endpoint carries its file base64-encoded inside a JSON-RPC body, so with
+    # MCP enabled the cap must fit a max_file_size file in that form (4/3 inflation)
+    # or chew_paper would refuse files well under the advertised limit.
+    max_payload_size = Settings.pipeline.max_file_size + Settings.pipeline.multipart_overhead_bytes
+    if Settings.mcp.enabled:
+        max_payload_size = max(
+            max_payload_size,
+            base64_envelope(Settings.pipeline.max_file_size)
+            + Settings.pipeline.multipart_overhead_bytes,
+        )
 
     upload_store = UploadStore.create(
         max_size=Settings.pipeline.max_file_size,
@@ -229,9 +215,7 @@ def _build_server(upload_stores):
         # intra-op threads already use every core from one process. Scale with
         # PIPELINE_MAX_INFLIGHT_REQUESTS and the batch-timeout knobs instead.
         workers_per_device=1,
-        max_payload_size=(
-            Settings.pipeline.max_file_size + Settings.pipeline.multipart_overhead_bytes
-        ),
+        max_payload_size=max_payload_size,
         timeout=Settings.pipeline.timeout,
         restart_workers=Settings.pipeline.restart_workers,
     )
@@ -244,9 +228,6 @@ def _build_server(upload_stores):
     server.app.state.upload_store = upload_store
     server.app.state.inference_tracker = inference_tracker
     register_extract_route(server.app, upload_store, inference_tracker)
-    from bibr.serve.enrichment import register_enrichment_route
-
-    export_enricher = register_enrichment_route(server.app, Settings)
 
     # Gate every other route too (/info, /openapi.json, /docs, …) — LitServe
     # and FastAPI metadata endpoints leak deployment details. Middleware so
@@ -260,7 +241,17 @@ def _build_server(upload_stores):
     # before Starlette parses multipart bodies or LitServe buffers file bytes.
     from bibr.serve.admission import add_upload_admission
 
-    upload_admission = add_upload_admission(server.app, Settings.pipeline.max_active_uploads)
+    admission_gate = add_upload_admission(
+        server.app,
+        Settings.pipeline.max_active_uploads,
+        # A large /mcp body holds a slot while it is received; the chew tools take
+        # their own slot for the extraction (bibr.serve.mcp).
+        body_gated_paths=(MCP_MOUNT_PATH, MCP_MOUNT_PATH + "/") if Settings.mcp.enabled else (),
+        body_threshold=Settings.pipeline.upload_spool_memory_bytes,
+        max_body=max_payload_size,
+        max_file_size=Settings.pipeline.max_file_size,
+    )
+    server.app.state.upload_admission_gate = admission_gate
 
     @server.app.middleware("http")
     async def _auth_gate(request, call_next):  # pyright: ignore[reportUnusedFunction]
@@ -312,13 +303,16 @@ def _build_server(upload_stores):
         )
         return response
 
-    # Async job API (D1). In-process store lives on the single API-server
-    # process pinned in main(); routes are auth-gated by the middleware above
-    # (not in PUBLIC_PATHS).
+    # Async job API (D1). JOBS_STORE picks the in-process store (lives on the
+    # single API-server process pinned in main()) or the Redis store shared
+    # between replicas; build_job_store fails fast on a Redis store without a
+    # URL or the redis package. Routes are auth-gated by the middleware above
+    # (not in PUBLIC_PATHS). The dispatcher closes in the router's shutdown
+    # handlers first; the store closes after it, once no runner can write.
     if Settings.jobs.enabled:
-        from bibr.serve.jobs import JobStore, register_job_routes
+        from bibr.serve.jobs import build_job_store, register_job_routes
 
-        job_store = JobStore()
+        job_store = build_job_store(Settings)
         server.app.state.job_store = job_store
         register_job_routes(
             server.app,
@@ -326,6 +320,7 @@ def _build_server(upload_stores):
             upload_store=upload_store,
             tracker=inference_tracker,
         )
+        server.app.router.add_event_handler("shutdown", job_store.close)
 
     # MCP endpoint (opt-in): streamable-HTTP Model Context Protocol tools at
     # /mcp, riding the same upload store and inference dispatch as
@@ -349,7 +344,7 @@ def _build_server(upload_stores):
             Settings,
             upload_store=upload_store,
             tracker=inference_tracker,
-            admission_gate=upload_admission,
+            admission_gate=admission_gate,
         )
 
     # CORS added last so it wraps the auth gate — 401s from it still get
@@ -367,14 +362,10 @@ def _build_server(upload_stores):
 
     # Scrub credential-shaped substrings from server logs, including SDK
     # tracebacks logged with exc_info that can embed ?key=… URLs (audit L12).
-    from bibr.utils.redact import install_secret_scrubbing
+    # main() installs the serve sink and keeps LitServe's rebuilt handler covered.
+    from bibr.serve.logsetup import scrub_library_handlers
 
-    log_targets: list = list(logging.getLogger().handlers)
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "litserve"):
-        log_targets.extend(logging.getLogger(name).handlers)
-    log_targets.extend(metering_logger.handlers)
-    if log_targets:
-        install_secret_scrubbing(*log_targets)
+    scrub_library_handlers()
 
     _register_readiness_route(server, Settings)
 
@@ -382,10 +373,7 @@ def _build_server(upload_stores):
         try:
             await inference_tracker.close()
         finally:
-            try:
-                await upload_store.close()
-            finally:
-                await export_enricher.close()
+            await upload_store.close()
 
     _compose_lifespan_cleanup(server.app, _close_ingress_resources)
     return server
@@ -396,7 +384,8 @@ def _register_readiness_route(server, Settings) -> None:
 
     Layout/segmenter readiness is covered by LitServe's own worker lifecycle
     (requests simply queue until workers are ready), so this only probes
-    external dependencies: the SGLang OCR server and Redis (when enabled).
+    external dependencies: the SGLang OCR server, Redis (when the cache is
+    enabled), and the shared job store (when ``JOBS_STORE=redis``).
     """
     import asyncio
     import json
@@ -482,6 +471,20 @@ def _register_readiness_route(server, Settings) -> None:
                 checks["redis"] = "error"
                 check_results.append(False)
 
+        # The shared job store is a hard dependency of the job routes when it is
+        # configured: a replica that cannot reach it answers 503 on every job call,
+        # so it must not receive traffic. The memory store needs no probe.
+        job_store = getattr(server.app.state, "job_store", None)
+        if Settings.jobs.enabled and Settings.jobs.store == "redis" and job_store is not None:
+            try:
+                await asyncio.wait_for(job_store.ping(), timeout=3.0)
+                checks["jobs_store"] = "ok"
+                check_results.append(True)
+            except Exception:
+                logger.warning("Readiness job-store check failed", exc_info=True)
+                checks["jobs_store"] = "error"
+                check_results.append(False)
+
         all_ok = all(check_results)
         status = "ready" if all_ok else "not_ready"
         return Response(
@@ -508,6 +511,13 @@ def main():
 
     from bibr.config import Settings
     from bibr.serve.auth import validate_bind_auth
+    from bibr.serve.logsetup import configure_serve_logging, install_litserve_logging_hook
+
+    # The CLI's own logging setup never runs for `serve`; install the serve sink
+    # first so every warning below (and every bibr.* record) is formatted and
+    # scrubbed rather than falling through logging.lastResort.
+    configure_serve_logging(Settings)
+    install_litserve_logging_hook()
 
     validate_bind_auth(args.host, Settings.auth.api_key)
 
@@ -517,9 +527,13 @@ def main():
     # Upload-root ownership, dispatch tracking, admission, readiness state, and
     # optional jobs are process-local. LitServe otherwise defaults this count to
     # the inference-worker count, making API processes race over shared cleanup.
+    # log_config=None keeps uvicorn from installing its own handlers, so its
+    # records propagate to the serve sink (formatted, scrubbed) instead.
     server.run(
         host=args.host,
         port=args.port,
         generate_client_file=False,
         num_api_servers=1,
+        log_level=Settings.SERVE_LOG_LEVEL,
+        log_config=None,
     )

@@ -244,7 +244,8 @@ def test_resolve_pages_invalid_raises(pages):
 
 def test_resolve_flag_defaults():
     config = _resolve("paper.pdf", "--ocr", "glm-llama", "--memory", "balanced")
-    assert config.crossref is True
+    # Tri-state: neither --crossref nor --no-crossref → None (CROSSREF_ENRICH decides).
+    assert config.crossref is None
     assert config.equations is True
     assert config.no_llm is False
     assert config.figure_images is None
@@ -268,6 +269,24 @@ def test_resolve_flag_inversions():
     assert config.crossref is False
     assert config.equations is False
     assert config.no_llm is True
+
+
+def test_resolve_crossref_flag_forces_on():
+    config = _resolve("paper.pdf", "--ocr", "glm-llama", "--memory", "balanced", "--crossref")
+    assert config.crossref is True
+
+
+def test_crossref_flags_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        _chew_args("paper.pdf", "--crossref", "--no-crossref")
+
+
+def test_mcp_parser_accepts_crossref_flag():
+    args = _build_parser().parse_args(["mcp", "--crossref"])
+    assert args.crossref is True
+    assert args.no_crossref is False
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(["mcp", "--crossref", "--no-crossref"])
 
 
 def test_resolve_figure_images_flag():
@@ -302,7 +321,21 @@ def _config(**overrides):
     return ResolvedRunConfig(**base)
 
 
-def test_active_stages_pdf_default():
+def test_active_stages_pdf_default(monkeypatch):
+    # The default (crossref=None) follows CROSSREF_ENRICH, which is off unless
+    # the deployment opted in — so a plain run has no enrich stage.
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.crossref, "enrich", False)
+    assert _config().active_stages([Path("paper.pdf")]) == [
+        "validate",
+        "layout",
+        "ocr",
+        "parse",
+        "extract",
+        "export",
+    ]
+    monkeypatch.setattr(Settings.crossref, "enrich", True)
     assert _config().active_stages([Path("paper.pdf")]) == [
         "validate",
         "layout",
@@ -314,35 +347,19 @@ def test_active_stages_pdf_default():
     ]
 
 
-@pytest.mark.parametrize(
-    ("suffix", "stage"),
-    [(".docx", "docx"), (".xml", "jats"), (".html", "html"), (".htm", "html"), (".epub", "html")],
-)
-def test_active_stages_native_inputs_skip_pdf_work(suffix, stage):
-    assert _config().active_stages([Path("paper" + suffix)]) == [
-        "validate",
-        stage,
-        "parse",
-        "extract",
-        "enrich",
-        "export",
-    ]
+def test_active_stages_docx_reads_native_format():
+    stages = _config(crossref=True).active_stages([Path("paper.docx")])
+    assert stages == ["validate", "docx", "parse", "extract", "enrich", "export"]
+    assert "enrich" in stages
 
 
-def test_active_stages_mixed_inputs_follow_native_then_pdf_order():
-    files = [Path("paper.pdf"), Path("paper.docx"), Path("paper.xml"), Path("paper.epub")]
-    assert _config().active_stages(files) == [
-        "validate",
-        "docx",
-        "jats",
-        "html",
-        "layout",
-        "ocr",
-        "parse",
-        "extract",
-        "enrich",
-        "export",
-    ]
+def test_active_stages_crossref_flag_overrides_setting(monkeypatch):
+    from bibr.config import Settings
+
+    monkeypatch.setattr(Settings.crossref, "enrich", False)
+    assert "enrich" in _config(crossref=True).active_stages([Path("paper.pdf")])
+    monkeypatch.setattr(Settings.crossref, "enrich", True)
+    assert "enrich" not in _config(crossref=False).active_stages([Path("paper.pdf")])
 
 
 def test_active_stages_no_crossref_drops_enrich():
@@ -350,7 +367,7 @@ def test_active_stages_no_crossref_drops_enrich():
 
 
 def test_active_stages_no_llm_drops_enrich():
-    assert "enrich" not in _config(no_llm=True).active_stages([Path("paper.pdf")])
+    assert "enrich" not in _config(no_llm=True, crossref=True).active_stages([Path("paper.pdf")])
 
 
 def test_active_stages_via_resolve_no_crossref():
@@ -436,7 +453,7 @@ def test_resolve_refs_default_none():
 
 
 def test_active_stages_refs_off_drops_enrich():
-    assert "enrich" not in _config(refs="off").active_stages([Path("paper.pdf")])
+    assert "enrich" not in _config(refs="off", crossref=True).active_stages([Path("paper.pdf")])
 
 
 def test_help_examples_mention_refs_off():

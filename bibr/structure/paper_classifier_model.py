@@ -1,22 +1,19 @@
-"""HF Hub loader + inference for the trained multitask paper classifier.
+"""HF Hub loader + inference for the trained multitask paper classifier (torch).
 
 Mirrors ``section_classifier_model.py``: snapshot_download → safetensors +
 tokenizer + label_maps.json + inference_config.json, then a synchronous
 ``classify_batch`` that predicts OECD L1, OECD L2, and paper_type (each with a
 per-head softmax confidence) from title+abstract pairs.
 
-The input text is built byte-identically to bibr-training's ``title_abstract_v1``
-template (``build_input_text`` in
-``bibr-training/src/bibr_training/paper_classifier/dataset.py``): the cleaned,
-whitespace-collapsed title and abstract joined by ``" [SEP] "``, dropping either
-part when empty.
+The torch-free pieces (the ``title_abstract_v1`` template, the prediction
+dataclass, the runtime loader) live in
+:mod:`bibr.structure.paper_classifier_common` and are re-exported here; the
+ONNX Runtime twin is :mod:`bibr.structure.paper_classifier_onnx`.
 """
 
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass
 from pathlib import Path
 
 from bibr.utils.ml_extra import ml_import_error
@@ -31,49 +28,31 @@ except ImportError as e:  # pragma: no cover
 from huggingface_hub import snapshot_download
 
 from bibr.structure._paper_classifier_arch import ENCODER, PaperClassifierMultitaskModel
+from bibr.structure.paper_classifier_common import (
+    _MAX_INFERENCE_BATCH,
+    _TEXT_SEPARATOR,
+    _WS_RE,
+    PaperClassificationPrediction,
+    _build_input_text,
+    _clean_str,
+)
 from bibr.utils.hf_cache import (
     disable_hf_cache_symlinks_on_windows,
     is_windows_symlink_privilege_error,
 )
 from bibr.utils.tokenizer_safety import safe_tokenize
 
-# Byte-identical to bibr-training's dataset.TEXT_SEPARATOR (line 18).
-_TEXT_SEPARATOR = " [SEP] "
-# Byte-identical to bibr-training's dataset._clean_str whitespace normalization.
-_WS_RE = re.compile(r"\s+")
-
-# Cap per forward pass — same MPS-correctness rationale as the section model.
-_MAX_INFERENCE_BATCH = 64
-
-
-@dataclass
-class PaperClassificationPrediction:
-    """One paper's multitask prediction with per-head softmax confidences."""
-
-    oecd_l1: str
-    oecd_l1_score: float
-    oecd_l2: str
-    oecd_l2_score: float
-    paper_type: str
-    paper_type_score: float
-
-
-def _clean_str(value: str | None) -> str:
-    """Whitespace-collapse + strip, matching bibr-training's _clean_str."""
-    if value is None:
-        return ""
-    return _WS_RE.sub(" ", str(value)).strip()
-
-
-def _build_input_text(title: str | None, abstract: str | None) -> str:
-    """Build the title_abstract_v1 input text, byte-identical to training.
-
-    ``" [SEP] ".join(non-empty cleaned parts)`` — dropping the separator when
-    either title or abstract is empty (see build_input_text in
-    bibr-training/src/bibr_training/paper_classifier/dataset.py).
-    """
-    parts = [p for p in (_clean_str(title), _clean_str(abstract)) if p]
-    return _TEXT_SEPARATOR.join(parts)
+__all__ = [
+    "PaperClassificationPrediction",
+    "PaperClassifierModel",
+    "_MAX_INFERENCE_BATCH",
+    "_TEXT_SEPARATOR",
+    "_WS_RE",
+    "_build_input_text",
+    "_clean_str",
+    "_download_snapshot",
+    "_pick_device",
+]
 
 
 def _pick_device() -> str:
@@ -86,6 +65,9 @@ def _pick_device() -> str:
 
 
 def _download_snapshot(repo_id: str, revision: str) -> Path:
+    local = Path(repo_id).expanduser()
+    if local.is_dir():
+        return local
     disable_hf_cache_symlinks_on_windows()
     try:
         return Path(snapshot_download(repo_id, revision=revision))
@@ -98,6 +80,8 @@ def _download_snapshot(repo_id: str, revision: str) -> Path:
 
 class PaperClassifierModel:
     """Wraps the trained multitask (L1/L2/paper_type) classifier for inference."""
+
+    runtime = "torch"
 
     def __init__(self, model_dir: Path, device: str | None = None) -> None:
         self.device = device or _pick_device()

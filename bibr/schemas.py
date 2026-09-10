@@ -212,7 +212,23 @@ class LLMResponse(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _unwrap_schema_name_envelope(cls, data: object) -> object:
-        return _strip_schema_name_envelope(data, cls.__name__)
+        data = _strip_schema_name_envelope(data, cls.__name__)
+        # A schema is valid JSON, but it is not an extraction. Defaulted fields
+        # and ignored extras otherwise accept it (even using the schema name
+        # as the paper title). Also reject values nested inside "properties";
+        # guessing how to unwrap those would hide a provider contract failure.
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("properties"), dict)
+            and "properties" not in cls.model_fields
+            and (
+                data.get("type") == "object"
+                or "$schema" in data
+                or bool(cls.model_fields.keys() & data["properties"].keys())
+            )
+        ):
+            raise ValueError("Schema echo: expected extracted field values, not a JSON Schema")
+        return data
 
 
 class AbstractResponse(LLMResponse):
@@ -238,6 +254,7 @@ class AuthorLLM(PaperAuthor):
     """A printed author with their affiliation, contact details and ORCID."""
 
     nuextract_policy: ClassVar[NuExtractSchemaPolicy] = NuExtractSchemaPolicy(
+        exclude=frozenset({"author_id"}),
         semantics={
             "given": "string",
             "family": "string",
@@ -247,11 +264,11 @@ class AuthorLLM(PaperAuthor):
         },
     )
 
-    # Exclude downstream fields from every generation schema, not just NuExtract.
+    # Exclude downstream roles from every generation schema, not just NuExtract.
     # A permissive role array can trap local guided decoders in whitespace loops.
-    # Keep the fields on the model for downstream assembly and cached responses.
-    # LLM doesn't emit author_id; assigned post-extraction by enumeration.
-    author_id: SkipJsonSchema[int | None] = None
+    # Keep the runtime field for downstream assembly and cached responses.
+    # Preserve the existing optional author_id schema; assign IDs post-extraction.
+    author_id: int | None = None
     # role is filled by downstream affiliation/email harvesting, not the LLM.
     role: SkipJsonSchema[list[str]] = Field(default_factory=list)
 
@@ -460,44 +477,6 @@ class TitleKeywordsLLM(AbstractResponse):
         return _coerce_biblio_none_strings(data)
 
 
-class CompactTitleKeywordsLLM(TitleKeywordsLLM):
-    # Preserve the evaluated wire schema identity and all validation behavior.
-    # This opt-in schema removes duplicated publication instructions only.
-    __doc__ = TitleKeywordsLLM.__doc__
-    model_config = {"title": "TitleKeywordsLLM"}
-
-    @model_validator(mode="wrap")
-    @classmethod
-    def _record_abstract_absence(cls, data, handler):
-        # The wire title remains TitleKeywordsLLM. Unwrap that alias before
-        # inherited sanitation/absence tracking, while still accepting the
-        # Python class name used by some native backends.
-        return super()._record_abstract_absence(
-            _strip_schema_name_envelope(data, "TitleKeywordsLLM"), handler
-        )
-
-    # Detailed source/normalization rules live in the task prompt. Keep field
-    # descriptions concise so Instructor does not resend those examples twice.
-    journal: str | None = Field(default=None, description="This paper's printed journal/venue")
-    volume: str | None = Field(default=None, description="Printed volume; null if absent")
-    issue: str | None = Field(default=None, description="Printed issue; null if absent")
-    first_page: str | None = Field(default=None, description="Start of the printed page range")
-    last_page: str | None = Field(default=None, description="End of the printed page range")
-    issn: str | None = Field(default=None, description="Printed journal ISSN")
-    publisher: str | None = Field(
-        default=None, description="Publishing house verbatim, including suffixes; never infer"
-    )
-    published: str | None = Field(
-        default=None,
-        description="Printed publication/online date: YYYY-MM-DD when full, otherwise YYYY; "
-        "not Received/Accepted/Revised",
-    )
-    license: str | None = Field(
-        default=None,
-        description="Explicit license, short form with printed version; Open Access alone is null",
-    )
-
-
 class AuthorsLLM(LLMResponse):
     """Authors extracted by LLM with affiliations, emails, and ORCID."""
 
@@ -670,6 +649,20 @@ class CoreMetadataLLM(AbstractResponse):
         return _coerce_biblio_none_strings(data)
 
 
+# Fields the NER parser fills and the LLM is never shown. They are removed from
+# the JSON schema itself (see ``__get_pydantic_json_schema__`` below), which is
+# what both LLM paths read -- Instructor from the model, NuExtract from
+# ``model_json_schema()`` -- so ``nuextract_policy.exclude`` stays what it says
+# it is: the downstream-only fields. Widening the
+# reference response schema is not free: the NuExtract template is qualified
+# against a fixed shape, and the LFM2.5 student was distilled on prompts that
+# embed this exact schema, so an extra property desynchronises the student from
+# the runtime it will be served in. Asking the LLM for these is a separate,
+# measurable change -- it needs its own qualification run, not a side effect of
+# giving the parser's output somewhere to land.
+_NER_ONLY_REFERENCE_FIELDS = frozenset({"arxiv", "pmid", "series", "access_date", "note"})
+
+
 class PaperReferenceLLM(PaperReference):
     """LLM-extracted reference. Subclasses :class:`PaperReference` so the
     field set is declared once. ``bib_id`` (positional, post-extraction) and
@@ -721,6 +714,24 @@ class PaperReferenceLLM(PaperReference):
     # DOI verbatim. A PrivateAttr so it stays out of the Instructor/NuExtract
     # schema and out of ``model_dump()``; the LLM never sees it.
     _index_trusted: bool = PrivateAttr(default=True)
+
+    @classmethod
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        """Hide the NER-only fields from every LLM-facing schema.
+
+        Instructor derives its response schema from this model, and pydantic
+        builds nested models through the schema graph rather than by calling
+        ``model_json_schema`` -- so this hook, not an override, is what keeps
+        ``PaperReferenceList`` unchanged too.
+        """
+        schema = handler.resolve_ref_schema(handler(core_schema))
+        for name in _NER_ONLY_REFERENCE_FIELDS:
+            schema.get("properties", {}).pop(name, None)
+        if "required" in schema:
+            schema["required"] = [
+                name for name in schema["required"] if name not in _NER_ONLY_REFERENCE_FIELDS
+            ]
+        return schema
 
     @property
     def index_trusted(self) -> bool:

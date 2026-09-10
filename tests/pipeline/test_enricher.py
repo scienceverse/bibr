@@ -202,3 +202,121 @@ def test_crossref_enricher_never_swallows_process_interrupts(exc):
 
     with pytest.raises(type(exc)):
         asyncio.run(enrich())
+
+
+# --- enrichment prefetch consumption ------------------------------------------------
+
+
+def _fs_with_handle(handle, n: int = 2) -> FileState:
+    fs = _make_fs_with_refs(n)
+    fs.paper.enrichment_prefetch = handle
+    return fs
+
+
+async def _handle(coro_fn):
+    from bibr.pipeline.enrich_prefetch import start_enrichment_prefetch
+
+    with patch("bibr.enrich.references.prefetch_enrichment", coro_fn):
+        handle = start_enrichment_prefetch([MagicMock()], settings=CrossrefEnricher()._settings)
+    assert handle is not None
+    return handle
+
+
+def _pending():
+    current = asyncio.current_task()
+    return [t for t in asyncio.all_tasks() if t is not current and not t.done()]
+
+
+@pytest.mark.asyncio
+async def test_enricher_consumes_a_completed_prefetch():
+    async def done(references, *, settings=None, **_):  # noqa: ARG001
+        return "PREFETCH"
+
+    handle = await _handle(done)
+    await asyncio.wait([handle.task])
+    fs = _fs_with_handle(handle)
+    fake = AsyncMock()
+    enricher = CrossrefEnricher()
+    with patch("bibr.enrich.references.enrich_references", fake):
+        await enricher.enrich(fs)
+
+    fake.assert_awaited_once_with(
+        fs.paper.metadata.references, settings=enricher._settings, prefetch="PREFETCH"
+    )
+    assert fs.paper.enrichment_prefetch is None
+    assert fs.stage_times["enrich_prefetch"] >= 0.0
+    assert fs.warnings == []
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
+async def test_enricher_waits_for_a_still_running_prefetch():
+    async def slow(references, *, settings=None, **_):  # noqa: ARG001
+        await asyncio.sleep(0.05)
+        return "LATE"
+
+    handle = await _handle(slow)
+    fs = _fs_with_handle(handle)
+    fake = AsyncMock()
+    with patch("bibr.enrich.references.enrich_references", fake):
+        await CrossrefEnricher().enrich(fs)
+
+    assert fake.await_args.kwargs["prefetch"] == "LATE"
+    assert fs.stage_times["enrich_prefetch"] >= 0.05
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
+async def test_enricher_falls_back_inline_when_the_prefetch_failed(caplog):
+    async def boom(references, *, settings=None, **_):  # noqa: ARG001
+        raise RuntimeError("resolver exploded")
+
+    handle = await _handle(boom)
+    fs = _fs_with_handle(handle)
+    fake = AsyncMock()
+    enricher = CrossrefEnricher()
+    with caplog.at_level("DEBUG", logger="bibr.pipeline.enricher"):
+        with patch("bibr.enrich.references.enrich_references", fake):
+            outcome = await enricher.enrich(fs)
+
+    # No ``prefetch`` kwarg: enrich_references redoes the round-trips itself.
+    fake.assert_awaited_once_with(fs.paper.metadata.references, settings=enricher._settings)
+    assert outcome.warnings == ()
+    assert fs.warnings == []
+    assert any("prefetch unavailable" in r.message for r in caplog.records)
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
+async def test_enricher_timeout_cancels_the_prefetch_it_was_waiting_on():
+    async def never(references, *, settings=None, **_):  # noqa: ARG001
+        await asyncio.sleep(10)
+
+    handle = await _handle(never)
+    fs = _fs_with_handle(handle)
+    with patch("bibr.enrich.references.enrich_references", AsyncMock()):
+        outcome = await CrossrefEnricher(timeout=0.02).enrich(fs)
+
+    assert "timed out" in outcome.detail
+    await asyncio.wait([handle.task])
+    assert handle.task.cancelled()
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
+async def test_enricher_discards_the_prefetch_when_there_is_no_work():
+    async def slow(references, *, settings=None, **_):  # noqa: ARG001
+        await asyncio.sleep(10)
+
+    handle = await _handle(slow)
+    fs = FileState(path=Path("p.pdf"))
+    fs.paper = MagicMock(metadata=MagicMock(references=[], doi=""))
+    fs.paper.enrichment_prefetch = handle
+
+    from bibr.pipeline.enricher import EnrichmentStatus
+
+    outcome = await CrossrefEnricher().enrich(fs)
+
+    assert outcome.status is EnrichmentStatus.NO_WORK
+    assert handle.task.cancelled()
+    assert _pending() == []

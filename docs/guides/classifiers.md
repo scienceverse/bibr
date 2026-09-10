@@ -84,6 +84,54 @@ type is allowed to repeat, and section order is not forced into IMRaD order.
 
 When the PP-DocLayoutV3 layout model tags a region with a semantic label (abstract, reference, footnote), `PDFParser._handle_section_hint` uses that label to create or reuse an implicit section for it directly — independent of, and prior to, header-based classification. This doesn't override an existing classification score; it's how sections without a text heading (e.g. a layout-detected reference block) get a section in the first place.
 
+## Front-role classifier
+
+**Module:** `bibr/extract/front_role.py` (bundle loading, scoring), `bibr/extract/front_role_features.py` (the feature contract shared with the trainer), consumed by `bibr/extract/front_matter.py` and `bibr/extract/ref_locator.py`
+
+An optional gradient-boosted model scores every OCR text region with a distribution over
+eleven roles: `title`, `byline`, `affiliation`, `abstract`, `keywords`, `doi_line`,
+`masthead`, `heading`, `ref_header`, `body`, `other`. Its features are the region's
+geometry in a page-relative frame, its font relative to the largest type on the page, and
+script-independent text shape (initial density, separator counts, affiliation and
+correspondence cues). It is trained from publisher JATS projected onto
+cached OCR regions, so its labels are verbatim ground truth rather than an LLM's opinion.
+
+The scores are **evidence, not decisions**. Front-matter ownership (`resolve_front_matter`)
+keeps its lexical heuristics and adds the model's roles on top:
+
+- a region the model calls a byline (probability at or above
+  `ML_FRONT_ROLE_MIN_CONFIDENCE`, default `0.5`) is admitted as a byline even when the
+  English byline shape or the 45-word cap rejects it (consortium bylines, separator-rich
+  house styles, non-Latin scripts), including page-1 rows the section classifier mistyped;
+- a model title seeds a record for scripts the uppercase test cannot read;
+- affiliation and abstract roles are added the same way;
+- a confident masthead (`ML_FRONT_ROLE_MASTHEAD_CONFIDENCE`, default `0.8`) cannot root a
+  record unless layout labelled the region `doc_title`;
+- a row the heuristics seeded as a title but the model confidently types as something else
+  (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) keeps the title role and loses
+  only the right to root a *second* record. `Correspondence`, `A R T I C L E I N F O`,
+  `CITATION` and `Key Features` all score `heading` at 1.00 and all sit above an abstract,
+  which is anatomy enough to develop a record — so admitting a correct byline above them
+  used to cut the real title away from its own abstract. Layout's `doc_title` and a match
+  against the reference parser's detected title both outrank the veto, and `1.0` disables
+  it.
+
+`RefLocator` accepts a heading the model scores as `ref_header` as the reference-section
+header, which covers the non-English headings (`Literaturverzeichnis`, `Bibliografía`,
+`Список литературы`, `参考文献`) the English regex misses.
+
+`ML_FRONT_ROLE_MODEL_ID` defaults to `scienceverse/bibr-front-role-v1`, pinned to a commit
+by `ML_FRONT_ROLE_REVISION` so a hub push cannot change front-matter output. Set the id to
+null to fall back to the lexical heuristics alone, or `ML_FRONT_ROLE_ENABLED=false` to keep
+a configured bundle unloaded. The bundle is a joblib **pickle**, read through the
+gadget-restricted loader — only point the setting at a checkpoint you control. scikit-learn
+and joblib are core dependencies, so the model runs on a torch-free install.
+Loading is soft: an unavailable bundle logs one warning and the pipeline runs on the
+heuristics alone. Resolutions influenced by the model carry the `front_role_model` reason
+flag, and every candidate records the roles the model contributed (`model_roles`) with its
+top scores (`model_scores`). Native DOCX/JATS/HTML inputs have no OCR regions and are never
+scored.
+
 ## Paper type classifier
 
 **Module:** `bibr/structure/paper_classifier.py` (taxonomy constants), `bibr/extract/core_metadata.py` (LLM classification, via `CoreMetadataExtractor`; `bibr/extract/extractor.py` delegates to it)
@@ -180,7 +228,7 @@ Parenthetical `(Smith, 2020)` and narrative `Smith (2020)` citation patterns are
 Remaining ambiguous or unresolved citation candidates are sent to the LLM for resolution against the reference list.
 
 Resolved citations are stored as `PaperXref` objects with `xref_type="bib"`.
-The exported `citation_linking` receipt records candidate spans, evidence,
+The exported `extraction.diagnostics.citation_linking` receipt records candidate spans, evidence,
 accepted/rejected decisions, and coverage; this makes unresolved citations
 visible alongside the successful `xref` rows. Rejected numeric candidates
 do not automatically become LLM requests.

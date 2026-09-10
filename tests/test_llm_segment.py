@@ -222,15 +222,18 @@ async def test_segment_references_rate_limits_each_window():
     expected_windows = _window_ref_text(ref_text, settings.llm.ref_seg_window_chars)
     assert len(expected_windows) > 1
 
-    def fake_invoke(response_model, messages, system_prompt, **kwargs):
-        block = _window_payload(prompt_text(messages[0]["content"]))
+    # The slot is taken inside ``_invoke_structured``, below its cache check, so
+    # stub one level lower to leave that acquisition in place while still
+    # faking the provider.
+    def fake_invoke(**kwargs):
+        block = _window_payload(prompt_text(kwargs["messages"][0]["content"]))
         anchors = [
             line[: line.index("]") + 1] for line in block.splitlines() if line.startswith("[")
         ]
         return RefAnchors(anchors=anchors)
 
     with mock.patch.object(
-        client, "_invoke_structured", new=mock.AsyncMock(side_effect=fake_invoke)
+        client, "_invoke_with_protocol_fallback", new=mock.AsyncMock(side_effect=fake_invoke)
     ):
         anchors = await client.segment_references(ref_text, file_hash="h")
 

@@ -66,6 +66,13 @@ _TEXT_KEYS = frozenset(
 # it is deliberately absent from the numeric key sets above.
 PROD_FEATURE_KEYS = _GEOM_KEYS | _TEXT_KEYS | {"region_label"}
 
+# Layout labels that never carry front-matter text. They still take part in
+# ``region_features`` (neighbour deltas, page counts) but are neither trained
+# on nor scored. Shared with bibr-training's labeler so both sides agree.
+NON_TEXT_LABELS = frozenset(
+    {"image", "chart", "table", "seal", "formula", "display_formula", "inline_formula"}
+)
+
 _EMAIL = re.compile(r"[^\s@]+@[^\s@]+\.[A-Za-z]{2,}")
 _YEAR = re.compile(r"\b(?:19|20)\d\d\b")
 _DOI = re.compile(r"\b10\.\d{4,9}/", re.IGNORECASE)

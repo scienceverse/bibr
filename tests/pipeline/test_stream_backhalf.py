@@ -23,12 +23,6 @@ from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.render_ocr import StreamingRenderOcrStage
 from bibr.pipeline.state import FileState
 
-
-@pytest.fixture(autouse=True)
-def fake_page_count(monkeypatch):
-    monkeypatch.setattr("bibr.ocr.utils.get_pdf_page_count", lambda _: 1)
-
-
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -391,29 +385,17 @@ class TestStreamingOverlap:
         hold = asyncio.Event()
         files = [_mk(f"{i}.pdf") for i in range(3)]
         stage = _stage(events, parse=_FakeParse(events, hold=hold))
-        all_spawned = asyncio.Event()
-        started = 0
-        original_run = stage._run_backhalf
-
-        async def signal_backhalf(*args):
-            nonlocal started
-            started += 1
-            if started == 3:
-                all_spawned.set()
-            await original_run(*args)
-
-        stage._run_backhalf = signal_backhalf
 
         task = asyncio.create_task(stage.run(_ctx(files, _cfg())))
-        # Page inspection runs in executor threads; a fixed count of loop
-        # turns cannot establish that all three windows have arrived.
-        try:
-            await asyncio.wait_for(all_spawned.wait(), timeout=30)
-            parses = [e for e in events if e.startswith("parse:")]
-            assert len(parses) == 2, f"expected 2 concurrent back-half windows, saw {parses}"
-        finally:
-            hold.set()
-            await asyncio.wait_for(task, timeout=30)
+        # Let the loop drain: OCR for all three windows is instant, so every
+        # back-half task is spawned; only two can enter parse.
+        for _ in range(50):
+            await asyncio.sleep(0)
+        parses = [e for e in events if e.startswith("parse:")]
+        assert len(parses) == 2, f"expected 2 concurrent back-half windows, saw {parses}"
+
+        hold.set()
+        await asyncio.wait_for(task, timeout=30)
         parses = [e for e in events if e.startswith("parse:")]
         assert len(parses) == 3
         assert all(fs.result_json is not None for fs in files)

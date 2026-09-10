@@ -63,10 +63,6 @@ class OcrRegionResult:
     # against the exact alternate source after parsing or a cache round trip.
     native_text_candidate: str | None = None
     native_text_rejection_reason: str | None = None
-    source_region_id: str | None = None
-    source_region_ids: list[str] | None = None
-    native_spans: list[dict[str, Any]] | None = None
-    formula_proposals: list[dict[str, Any]] | None = None
 
     @classmethod
     def from_layout_region(
@@ -105,11 +101,6 @@ class OcrRegionResult:
             finish_reason=finish_reason,
             native_text_candidate=layout.get("_native_text_candidate"),
             native_text_rejection_reason=layout.get("_native_text_rejection_reason"),
-            source_region_id=layout.get("_source_region_id"),
-            source_region_ids=layout.get("_source_region_ids")
-            or ([layout["_source_region_id"]] if layout.get("_source_region_id") else None),
-            native_spans=layout.get("_native_spans"),
-            formula_proposals=layout.get("_formula_proposals"),
         )
 
     @classmethod
@@ -140,10 +131,6 @@ class OcrRegionResult:
             finish_reason=d.get("_ocr_finish_reason"),
             native_text_candidate=d.get("_native_text_candidate"),
             native_text_rejection_reason=d.get("_native_text_rejection_reason"),
-            source_region_id=d.get("_source_region_id"),
-            source_region_ids=d.get("_source_region_ids"),
-            native_spans=d.get("_native_spans"),
-            formula_proposals=d.get("_formula_proposals"),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -181,12 +168,4 @@ class OcrRegionResult:
             out["_native_text_candidate"] = self.native_text_candidate
         if self.native_text_rejection_reason is not None:
             out["_native_text_rejection_reason"] = self.native_text_rejection_reason
-        for key, value in (
-            ("_source_region_id", self.source_region_id),
-            ("_source_region_ids", self.source_region_ids),
-            ("_native_spans", self.native_spans),
-            ("_formula_proposals", self.formula_proposals),
-        ):
-            if value is not None:
-                out[key] = value
         return out

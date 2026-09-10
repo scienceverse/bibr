@@ -149,6 +149,7 @@ def test_pick_device_cpu_without_cuda():
 def test_download_snapshot_disables_hf_symlinks_on_windows(monkeypatch, tmp_path):
     import huggingface_hub.constants as hf_constants
 
+    from bibr.structure import section_classifier_common as common
     from bibr.structure import section_classifier_model as mod
 
     calls = []
@@ -168,7 +169,7 @@ def test_download_snapshot_disables_hf_symlinks_on_windows(monkeypatch, tmp_path
         )
         return str(tmp_path)
 
-    monkeypatch.setattr(mod, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(common, "snapshot_download", fake_snapshot_download)
 
     assert mod._download_snapshot("fake/repo", "main") == tmp_path
     assert calls == [
@@ -184,6 +185,7 @@ def test_download_snapshot_disables_hf_symlinks_on_windows(monkeypatch, tmp_path
 def test_download_snapshot_retries_windows_symlink_privilege_error(monkeypatch, tmp_path):
     import huggingface_hub.constants as hf_constants
 
+    from bibr.structure import section_classifier_common as common
     from bibr.structure import section_classifier_model as mod
 
     calls = []
@@ -200,7 +202,7 @@ def test_download_snapshot_retries_windows_symlink_privilege_error(monkeypatch, 
             raise error
         return str(tmp_path)
 
-    monkeypatch.setattr(mod, "snapshot_download", fake_snapshot_download)
+    monkeypatch.setattr(common, "snapshot_download", fake_snapshot_download)
 
     assert mod._download_snapshot("fake/repo", "main") == tmp_path
     assert calls == [

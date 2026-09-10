@@ -237,6 +237,18 @@ def main():
                 # already provide a clear message for.
                 _print_error(str(e))
                 sys.exit(1)
+        elif args.command == "batch":
+            from bibr.local.cli.batch import _run_batch
+
+            try:
+                sys.exit(_run_batch(args))
+            except BibrError as e:
+                _print_error(str(e))
+                sys.exit(1)
+            except ValueError as e:
+                # ``Chewer`` preflight: missing LLM credentials surface as ValueError.
+                _print_error(str(e))
+                sys.exit(1)
         elif args.command == "doctor":
             _run_doctor()
         elif args.command == "inspect":

@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
@@ -61,6 +62,21 @@ _ENV_FILE = ".env"
 #: empty disables dotenv loading; otherwise an ``os.pathsep``-separated list of
 #: paths, merged in the same last-wins order.
 ENV_FILE_OVERRIDE_VAR = "BIBR_ENV_FILE"
+# Set to 1/true to make every settings model ignore ``.env`` files (the
+# process environment still applies). For harnesses and CI: a run that pins its
+# variables in the environment must not inherit the twenty-first one from a
+# developer's ``.env`` in the checkout or from ``~/.bibr/.env``.
+DOTENV_DISABLE_VAR = "BIBR_DISABLE_DOTENV"
+
+
+def dotenv_disabled() -> bool:
+    """True when ``BIBR_DISABLE_DOTENV`` asks bibr to ignore every ``.env`` file."""
+    return os.environ.get(DOTENV_DISABLE_VAR, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def dotenv_files_present() -> list[Path]:
+    """The ``.env`` files bibr would read right now, in load order."""
+    return [path.resolve() for path in _default_env_files() if path.is_file()]
 
 
 def _default_env_files() -> tuple[Path, ...]:
@@ -125,12 +141,46 @@ class _NoInterpolationDotEnvSource(DotEnvSettingsSource):
 # Field-name markers that identify a secret (API key / password / token).
 # Shared by the repr/model_dump redaction (audit M3) and the cache-fingerprint
 # scrub so the two can't drift.
+#
+# End-anchored, mirroring ``config_introspect._SECRET_RE``. An unanchored
+# substring match classified every ``*_max_tokens`` field as a secret, which
+# excluded eleven LLM budget knobs from ``compute_behavior_fingerprint`` — so
+# changing LLM_MAX_TOKENS or REF_PARSE_MAX_TOKENS left the serve cache
+# namespace byte-identical and results produced under the old budget were
+# silently re-served.
 _SECRET_NAME_MARKERS = ("api_key", "password", "token", "secret", "api_email")
 
 
 def _is_secret_name(name: str) -> bool:
-    lowered = str(name).lower()
-    return any(marker in lowered for marker in _SECRET_NAME_MARKERS)
+    return str(name).lower().endswith(_SECRET_NAME_MARKERS)
+
+
+def _split_csv_env(value, *, lower: bool = False):
+    """Accept a comma-separated env string or a list; normalize to tokens.
+
+    A bare ``list[str]`` field is JSON-decoded by pydantic-settings, so the
+    comma-separated form the field descriptions and ``docs/guides/mcp.md``
+    prescribe raised ``SettingsError`` on the first attribute access of
+    ``Settings`` anywhere — taking ``bibr serve`` down with an unhandled
+    traceback. Pair with ``Annotated[list[str], NoDecode]``.
+    """
+    items = value
+    if isinstance(items, str):
+        text = items.strip()
+        if text.startswith("["):
+            # The JSON form is what pydantic-settings decodes natively and what
+            # existing deployments already set — keep accepting it alongside
+            # the comma-separated form the field descriptions prescribe.
+            try:
+                items = json.loads(text)
+            except ValueError:
+                items = text.split(",")
+        else:
+            items = text.split(",")
+    if isinstance(items, (list, tuple)):
+        cleaned = [str(item).strip() for item in items]
+        return [item.lower() if lower else item for item in cleaned if item]
+    return value
 
 
 class _BibrSettings(BaseSettings):
@@ -164,9 +214,10 @@ class _BibrSettings(BaseSettings):
     def __init__(self, **kwargs):
         # Resolve the CWD-then-home fallback chain fresh at instantiation time
         # unless the caller passed an explicit ``_env_file`` override (tests,
-        # tooling) — that override must always win.
+        # tooling) — that override must always win. ``BIBR_DISABLE_DOTENV``
+        # empties the chain instead, for every section model alike.
         if "_env_file" not in kwargs:
-            kwargs["_env_file"] = _default_env_files()
+            kwargs["_env_file"] = None if dotenv_disabled() else _default_env_files()
         super().__init__(**kwargs)
 
     @classmethod
@@ -299,11 +350,6 @@ class LlmOptions(_BibrSettings):
         ge=0,
         description="Max completion tokens for citation resolution; 0 disables the task cap.",
     )
-    citation_shortlist: bool = Field(
-        True,
-        description="Shortlist references for reliably parsed author-year citation fallbacks. "
-        "Uncertain retrieval keeps the full bibliography; unresolved results expand once.",
-    )
     max_input_chars: int = Field(300_000, description="Max input characters sent to the LLM.")
     # Reference-segmentation OUTPUT bound: the anchor-emit call produces ~1 short
     # anchor per reference, so a long bibliography in one window emits too many
@@ -328,25 +374,7 @@ class LlmOptions(_BibrSettings):
         description="Send task-specific context slices to the core-metadata LLM calls: "
         "page-1 + ORCID/correspondence rows to the authors call and front matter through "
         "the end of the abstract to the classification call, instead of the full "
-        "front-matter blob. Title/keywords context pruning is separately opt-in.",
-    )
-    title_context: bool = Field(
-        False,
-        description="Experimental: omit identified author rows from the title/abstract request "
-        "when title/abstract boundaries are clear. Requires LLM_PER_TASK_CONTEXT=true; "
-        "ignored for merged core metadata. Off pending broader quality qualification.",
-    )
-    compact_metadata_prompt: bool = Field(
-        False,
-        description="Experimental compact title/abstract/publication prompt and field descriptions. "
-        "Reduces input tokens; off pending qualification of publication-field recall. "
-        "Does not alter the merged metadata contract.",
-    )
-    equation_batch_input_tokens: int = Field(
-        1500,
-        ge=1,
-        description="Approximate equation-fallback payload tokens per batch (UTF-8 bytes / 3). "
-        "Whole sentences stay intact; at most 10 sentences per batch. Excludes prompt/schema.",
+        "front-matter blob. The title/keywords call always receives the full blob.",
     )
     # Experimental: one merged LLM call for title/abstract/keywords + authors
     # + classification instead of three — saves resending the front-matter
@@ -364,6 +392,16 @@ class LlmOptions(_BibrSettings):
     )
     timeout_seconds: int = Field(30, description="Per-request LLM timeout in seconds.")
     track_usage: bool = Field(True, description="Track LLM token usage.")
+    capture_trace: bool = Field(
+        False,
+        description="Opt-in: capture each LLM call's rendered prompt and raw response into "
+        "extraction.trace (see LlmTraceExport). Off by default — a default-config export has "
+        "no trace key. Prompts/completions are scrubbed of credential-shaped tokens before "
+        "capture; callers choose storage and retention for trace-bearing exports. Captures Instructor "
+        "backend calls only — the NuExtract-native structured backend is not yet instrumented, "
+        "so enabling this on a nuextract-native deployment (a common local/self-hosted setup) "
+        "silently produces no trace rows; a warning is logged in that case.",
+    )
     thinking_budget: int = Field(
         0, description="Thinking budget for extended-thinking models (0 = disabled)."
     )
@@ -376,13 +414,12 @@ class LlmOptions(_BibrSettings):
         'local server ("local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"). '
         "Written by `bibr setup`.",
     )
-    local_model: str = Field(
-        "numind/NuExtract3-mlx-8bits",
-        description="Local LLM model id (for ollama/local providers). Default matches the "
-        "`bibr setup` recommendation (NuExtract 3, MLX/Apple-Silicon variant; 8bit runs ~2x "
-        "faster than nvfp4 under MLX, which lacks fast nvfp4 kernels). CUDA users should run "
-        "`bibr setup` or set LLM_LOCAL_MODEL explicitly — an mlx build won't load under "
-        "vLLM/CUDA.",
+    local_model: str | None = Field(
+        None,
+        description="Model id served by the managed local LLM backends. Unset picks the "
+        "NuExtract 3 variant the selected backend can load: bf16 for vLLM, GGUF Q4_K_M for "
+        "llama.cpp, the 8-bit MLX build for Apple Silicon (8bit runs ~2x faster than nvfp4 "
+        "under MLX, which lacks fast nvfp4 kernels). `bibr setup` writes it explicitly.",
     )
     local_mem_fraction: float = Field(
         0.85, description="GPU memory fraction reserved for the managed local LLM server (0.0-1.0)."
@@ -588,12 +625,6 @@ class OcrOptions(_BibrSettings):
     native_text_enabled: bool = Field(
         True, description="Native text extraction — skip OCR for text-layer PDFs."
     )
-    native_repair_enabled: bool = Field(
-        False, description="Experimental selective native line and inline-formula repair."
-    )
-    native_captions_enabled: bool = Field(
-        False, description="Accept unambiguous native caption lines when native repair is enabled."
-    )
     native_text_min_chars: int = Field(
         20, description="Minimum character count for a native-text extraction to be accepted."
     )
@@ -774,6 +805,26 @@ class LayoutOptions(_BibrSettings):
 
     model_config = _section("LAYOUT_")
 
+    model_revision: str = Field(
+        "97d101e6db2642e162a1d05392d1b0231c91033e",
+        description="HF Hub revision (commit SHA or branch) of PaddlePaddle/PP-DocLayoutV3_safetensors "
+        "to load. Pinned so a hub push cannot change layout output; 'main' tracks the repo head.",
+    )
+    # ONNX artifact for the layout model. The torch weights live in a
+    # third-party repo, so the exported graph is hosted in a bibr-owned repo
+    # (or a local bundle directory containing onnx/model.onnx). Resolved under
+    # ML_RUNTIME (bibr/utils/ml_runtime.py); a missing repo/revision falls back
+    # to torch in "auto" mode.
+    onnx_model_id: str | None = Field(
+        "scienceverse/bibr-layout-onnx",
+        description="HF Hub repo id (or local bundle directory) holding the ONNX export of the "
+        "layout model under onnx/. Null disables the ONNX runtime for layout.",
+    )
+    onnx_revision: str = Field(
+        "2bcb16a65f5128fd9e61ac6c503204721cf01ce0",
+        description="HF Hub revision (commit SHA or branch) of LAYOUT_ONNX_MODEL_ID to load. "
+        "Pinned to the export whose regions match the torch model exactly; 'main' tracks the head.",
+    )
     dpi: int = Field(200, gt=0, description="Page rasterization DPI for layout detection.")
     max_render_pixels: int = Field(
         25_000_000,
@@ -873,7 +924,17 @@ class CrossrefOptions(_BibrSettings):
         description="Crossref rate limit in requests per minute "
         "(raise to 600 if you set an email or have an API key).",
     )
-    enrich: bool = Field(True, description="Enable Crossref reference enrichment.")
+    # Off by default: enrichment is a network fan-out against Crossref (and the
+    # optional resolver) that adds seconds per paper and needs a polite-pool
+    # email to run at volume. Per-run switches override this setting either
+    # way: ``bibr chew --crossref`` / ``--no-crossref``, ``chew(crossref=...)``,
+    # and the serve API's ``crossref`` form field.
+    enrich: bool = Field(
+        False,
+        description="Enable Crossref/resolver reference enrichment (off by default). "
+        "Per-run overrides: `bibr chew --crossref`/`--no-crossref`, `chew(crossref=...)`, "
+        "or the serve API's `crossref` form field.",
+    )
     # Every DOI-bearing reference otherwise costs its own /works/{doi} request
     # against a rate limiter shared by the whole process (and, with Redis, the
     # whole fleet). One /works?filter=doi:... request answers up to
@@ -1087,6 +1148,25 @@ class CacheOptions(_BibrSettings):
         description="Directory for the OCR disk cache. Null = $XDG_CACHE_HOME/bibr/ocr "
         "(else ~/.cache/bibr/ocr).",
     )
+    # Opt-in disk cache for structured LLM responses, keyed on model + schema +
+    # system + user text. A hit costs no tokens and no rate-limit slot. This is
+    # also the prefill target for the offline Message Batches path: a batch
+    # answers requests at half price and writes them here for a later run to
+    # find. Off by default — like the OCR cache, it never silently changes
+    # results unless opted in. Env: CACHE_LLM.
+    llm: bool = Field(
+        False,
+        description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
+        "system prompt and user text. Also the prefill target for offline batch runs. Off by "
+        "default.",
+    )
+    # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm
+    # (else ~/.cache/bibr/llm). Env: CACHE_LLM_DIR.
+    llm_dir: str | None = Field(
+        None,
+        description="Directory for the LLM response cache. Null = $XDG_CACHE_HOME/bibr/llm "
+        "(else ~/.cache/bibr/llm).",
+    )
 
 
 class CircuitBreakerOptions(_BibrSettings):
@@ -1129,14 +1209,23 @@ class CorsOptions(_BibrSettings):
 
     model_config = _section("CORS_")
 
-    origins: list[str] = Field(
+    origins: Annotated[list[str], NoDecode] = Field(
         [], description="Comma-separated list of allowed CORS origins for production."
     )
     allow_credentials: bool = Field(
         False, description="Allow credentials (cookies/auth headers) in CORS requests."
     )
-    allow_methods: list[str] = Field(["*"], description="Allowed HTTP methods for CORS requests.")
-    allow_headers: list[str] = Field(["*"], description="Allowed HTTP headers for CORS requests.")
+    allow_methods: Annotated[list[str], NoDecode] = Field(
+        ["*"], description="Allowed HTTP methods for CORS requests."
+    )
+    allow_headers: Annotated[list[str], NoDecode] = Field(
+        ["*"], description="Allowed HTTP headers for CORS requests."
+    )
+
+    @field_validator("origins", "allow_methods", "allow_headers", mode="before")
+    @classmethod
+    def _split_lists(cls, v):
+        return _split_csv_env(v)
 
 
 class RedisOptions(_BibrSettings):
@@ -1177,6 +1266,19 @@ class MlOptions(_BibrSettings):
 
     model_config = _section("ML_")
 
+    # Which inference runtime serves bibr's own local models (layout detector,
+    # section/paper classifiers, NER parser). "auto" prefers a model's ONNX
+    # bundle (core install, onnxruntime) and falls back to the torch classes
+    # when the bundle is absent and torch is importable; "onnx"/"torch" force
+    # one and fail with a ConfigurationError naming the fix otherwise. See
+    # bibr/utils/ml_runtime.py.
+    runtime: Literal["auto", "onnx", "torch"] = Field(
+        "auto",
+        description="Inference runtime for the local models: 'auto' (ONNX bundle when published "
+        "or configured, else torch when installed), 'onnx' (require the ONNX bundle), or 'torch' "
+        "(require the torch extra).",
+    )
+
     # Trained section classifier (MiniLM two-head, document-context input
     # template). When ``section_classifier_model_id`` is None, classification
     # falls back to the LLM path. Env: ``ML_SECTION_CLASSIFIER_MODEL_ID``,
@@ -1187,7 +1289,10 @@ class MlOptions(_BibrSettings):
         "classification path.",
     )
     section_classifier_revision: str = Field(
-        "main", description="HF Hub revision (commit SHA or branch) for the section classifier."
+        "ee1a83db01ce947e3a5eb87dfde7221328f4b207",
+        description="HF Hub revision (commit SHA or branch) for the section classifier. Pinned "
+        "to the audited commit (plus the additive ONNX bundle) so a hub push cannot change "
+        "output; 'main' tracks the repo head.",
     )
     # Type-head softmax probability below which a trained-model prediction
     # collapses to UNKNOWN. With 16 classes the uniform baseline is ~0.06, so
@@ -1230,7 +1335,10 @@ class MlOptions(_BibrSettings):
         "published SPECTER2 multitask classifier (OECD L1/L2 + paper_type).",
     )
     paper_classifier_revision: str = Field(
-        "main", description="HF Hub revision (commit SHA or branch) for the paper classifier."
+        "6046171b3198a255acb1f07f81a586a32f399ac4",
+        description="HF Hub revision (commit SHA or branch) for the paper classifier. Pinned to "
+        "the audited commit (plus the additive ONNX bundle) so a hub push cannot change "
+        "output; 'main' tracks the repo head.",
     )
     # paper_type-head softmax probability below which a trained-model
     # prediction is escalated to the LLM fallback (see
@@ -1263,6 +1371,61 @@ class MlOptions(_BibrSettings):
     paper_classifier_device: str | None = Field(
         None,
         description="Device the paper classifier runs on. Null = auto (CUDA -> CPU).",
+    )
+
+    # First-page region-role classifier (bibr/extract/front_role.py): a GBM
+    # bundle over the front_role_features contract, trained separately
+    # from publisher JATS projected onto OCR regions. Its role scores are
+    # evidence for front-matter ownership (title/byline/affiliation/abstract
+    # admission, masthead suppression) and for non-English reference headers.
+    # Null disables it; front matter then rests on the lexical heuristics alone.
+    # Loaded via bibr.ner.checkpoint.resolve_checkpoint (bare repo id gets
+    # ":front_role.joblib" appended). scikit-learn and joblib are core deps, so
+    # this runs on a torch-free install like every other default-path model.
+    front_role_model_id: str | None = Field(
+        "scienceverse/bibr-front-role-v1",
+        description="HF Hub repo id (or local path) of the first-page region-role classifier "
+        "bundle. Null disables the model and rests front matter on the lexical heuristics "
+        "alone. TRUST BOUNDARY: deserialized with joblib via the gadget-restricted loader; "
+        "only point it at a checkpoint you control.",
+    )
+    front_role_revision: str = Field(
+        "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b",
+        description="Pinned revision for the front-role classifier bundle. Pinned so a hub push "
+        "cannot change front-matter output; 'main' tracks the repo head.",
+    )
+    front_role_enabled: bool = Field(
+        True,
+        description="Consult the front-role classifier when a model id is configured. False "
+        "keeps the model unloaded even when ML_FRONT_ROLE_MODEL_ID is set.",
+    )
+    # Minimum role probability before a model role counts as evidence in
+    # front-matter resolution. 0.5 = the argmax must also be a majority.
+    front_role_min_confidence: float = Field(
+        0.5,
+        ge=0.0,
+        le=1.0,
+        description="Minimum front-role probability for a model role to count as evidence.",
+    )
+    # A masthead this confident denies the row the right to root a record
+    # (journal name / running head / volume line typed as a title by layout).
+    front_role_masthead_confidence: float = Field(
+        0.8,
+        ge=0.0,
+        le=1.0,
+        description="Front-role masthead probability above which a row cannot be a title seed.",
+    )
+    # A row the heuristics seeded as a title but the classifier confidently
+    # types as something else ("Correspondence", "A R T I C L E I N F O",
+    # "CITATION", "Key Features" all score heading 1.00) keeps its title role
+    # and loses only the right to *root a second record*. See
+    # bibr/extract/front_matter.py::_record_title_indices.
+    front_role_record_root_confidence: float = Field(
+        0.9,
+        ge=0.0,
+        le=1.0,
+        description="Front-role probability of a non-title role above which a title seed cannot "
+        "root a second front-matter record. 1.0 disables the veto.",
     )
     classifiers_required: bool = Field(
         False,
@@ -1444,13 +1607,6 @@ class PipelineOptions(_BibrSettings):
         description="Hard maximum pages processed per file. Requests beyond this range are capped "
         "to prevent compact many-page PDFs from exhausting render memory.",
     )
-    page_window_size: int = Field(
-        8,
-        ge=1,
-        description="Maximum PDF pages rendered per file before layout/native text/OCR completes "
-        "and their images are released. Applies to local and serve pipelines; concurrent files "
-        "and requests each have their own window. Does not limit document length.",
-    )
     max_concurrent_post_parse: int = Field(
         4, description="Max concurrent post-parse tasks per request."
     )
@@ -1507,18 +1663,46 @@ class PipelineOptions(_BibrSettings):
 
 
 class JobsOptions(_BibrSettings):
-    """Async job API (serve). Env: ``JOBS_ENABLED``, ``JOBS_TTL_SECONDS``, ``JOBS_MAX_ACTIVE``.
+    """Async job API (serve). Env: ``JOBS_ENABLED``, ``JOBS_TTL_SECONDS``, ``JOBS_MAX_ACTIVE``,
+    ``JOBS_MAX_RUNNING``, ``JOBS_MAX_RETAINED``, ``JOBS_MAX_RETAINED_BYTES``, ``JOBS_STORE``,
+    ``JOBS_REDIS_URL``, ``JOBS_KEY_PREFIX``, ``JOBS_REPLICA_ID``.
 
-    Jobs are held in an in-process store on the single HTTP API-server process.
-    ``serve.app.main`` always pins ``num_api_servers=1`` because upload ownership,
-    dispatch tracking, and readiness state are also process-local. Nothing here affects
-    extraction output (see
+    By default jobs are held in an in-process store on the single HTTP API-server
+    process (``serve.app.main`` always pins ``num_api_servers=1`` because upload
+    ownership, dispatch tracking, and readiness state are process-local).
+    ``JOBS_STORE=redis`` moves job status, results, and the active-job cap into Redis
+    so several ``bibr serve`` replicas behind one load balancer answer status/result
+    polls for each other's jobs; uploads and execution stay on the replica that
+    accepted the upload. Nothing here affects extraction output (see
     ``_FINGERPRINT_EXCLUDED_SECTIONS``).
     """
 
     model_config = _section("JOBS_")
 
     enabled: bool = Field(True, description="Enable the async job API (serve).")
+    store: Literal["memory", "redis"] = Field(
+        "memory",
+        description="Where job status and results live: 'memory' (one replica; lost on "
+        "restart) or 'redis' (shared by every replica pointed at the same Redis, so the "
+        "active-job cap is global and any replica can answer status/result polls). "
+        "Uploads and execution always stay on the replica that received the upload.",
+    )
+    redis_url: str | None = Field(
+        None,
+        description="Redis URL for JOBS_STORE=redis. Falls back to REDIS_URL (the cache's "
+        "Redis) when unset; startup fails if neither is set.",
+    )
+    key_prefix: str = Field(
+        "bibr:jobs",
+        description="Key prefix for the Redis job store. Every replica sharing one job "
+        "namespace must use the same prefix; change it to isolate deployments that share "
+        "a Redis.",
+    )
+    replica_id: str | None = Field(
+        None,
+        description="Identifier of this bibr serve replica, recorded on each job it "
+        "executes and reported as `replica` in job status. Defaults to `<hostname>:<pid>`.",
+    )
     ttl_seconds: int = Field(3600, description="TTL in seconds for completed job records.")
     max_active: int = Field(32, description="Max admitted queued plus running jobs.")
     max_running: int = Field(
@@ -1529,7 +1713,17 @@ class JobsOptions(_BibrSettings):
     max_retained: int = Field(
         128,
         ge=0,
-        description="Max completed job results retained in memory; oldest results are evicted.",
+        description="Max completed job results retained (in the process, or in Redis across "
+        "every replica); oldest results are evicted.",
+    )
+    max_retained_bytes: int = Field(
+        256 * 1024 * 1024,
+        ge=0,
+        description="Byte budget for retained job results (their encoded JSON bodies; the "
+        "Redis store charges the same encoded size while holding the body compressed). "
+        "Oldest results are evicted until the rest fit; the newest result is always kept so "
+        "that an export larger than the budget can still be fetched once. 0 disables the "
+        "budget (count-only retention).",
     )
 
 
@@ -1585,17 +1779,31 @@ class McpOptions(_BibrSettings):
         description="Chewed papers retained in memory per MCP client session; the oldest "
         "is evicted beyond this.",
     )
+    session_idle_timeout_seconds: float = Field(
+        1800.0,
+        ge=0,
+        description="Seconds an MCP client session may sit idle before the server closes it "
+        "and drops its papers. A client that disconnects without DELETE would otherwise pin "
+        "its session — and up to max_papers_per_session full exports — for the process "
+        "lifetime. 0 disables the timeout.",
+    )
     chew_url_enabled: bool = Field(
         True,
         description="Expose the chew_url tool on the serve MCP endpoint: a server-side, "
         "SSRF-guarded download of a public https:// URL routed into extraction. Disable "
         "to keep the endpoint free of outbound fetches.",
     )
-    url_allowed_hosts: list[str] = Field(
+    url_allowed_hosts: Annotated[list[str], NoDecode] = Field(
         [],
         description="Restrict chew_url downloads to these hosts (subdomains included, "
         "e.g. 'arxiv.org' admits 'export.arxiv.org'). Empty = any public host.",
     )
+
+    @field_validator("url_allowed_hosts", mode="before")
+    @classmethod
+    def _split_hosts(cls, v):
+        # Hostnames are case-insensitive; the SSRF guard compares lowercased.
+        return _split_csv_env(v, lower=True)
 
 
 class GlobalSettings(_BibrSettings):
@@ -1627,7 +1835,28 @@ class GlobalSettings(_BibrSettings):
         pattern=r"^[0-9a-f]{40}$",
         description="Exact lowercase Git commit deployed by the serving environment.",
     )
+    SERVE_LOG_LEVEL: str = Field(
+        "info",
+        description="Log level for bibr serve's own loggers (bibr.*), also handed to uvicorn "
+        "and LitServe: debug, info, warning or error. Metering records (METER_ENABLED) are "
+        "emitted regardless of this level.",
+    )
+
+    @field_validator("SERVE_LOG_LEVEL", mode="before")
+    @classmethod
+    def _normalize_serve_log_level(cls, value):
+        level = str(value).strip().lower()
+        if level not in ("debug", "info", "warning", "error"):
+            raise ValueError("SERVE_LOG_LEVEL must be one of debug, info, warning, error")
+        return level
+
     WTPSPLIT_MODEL: str = Field("sat-6l-sm", description="WtP-split sentence segmentation model.")
+    WTPSPLIT_MODEL_REVISION: str | None = Field(
+        None,
+        description="HF Hub revision for a Hub-hosted wtpsplit model. Unset pins the default "
+        "sat-6l-sm to its audited commit and loads other Hub models from main; local bundles "
+        "carry their own manifest revision.",
+    )
     WTPSPLIT_THRESHOLD: float | None = Field(
         None,
         ge=0.0,
@@ -1814,7 +2043,7 @@ class GlobalSettings(_BibrSettings):
         "track the latest revision instead.",
     )
     NER_PARSER_REVISION: str = Field(
-        "4b0e9bf22ea225eedad08ac908514121aa8c4e58",
+        "ff50a83e7f5b73dcf6f8f973a1a6e3847ec429e6",
         description='Pinned commit revision for the NER parser checkpoint. Set to "main" to track '
         "the latest revision instead.",
     )
@@ -2118,8 +2347,15 @@ def _configuration_error(exc: ValidationError) -> ConfigurationError:
         # Top-level fields are already the bare env-var name; sub-model fields
         # are prefix + FIELD_NAME.
         env_var = field if not prefix else f"{prefix}{field.upper()}"
-        value = err.get("input")
         expected = (err.get("ctx") or {}).get("expected")
+        if not loc:
+            # A model-level validator reports ``loc == ()`` and ``input`` == the
+            # whole merged source mapping — every env/dotenv value matching a
+            # field on this model, API keys included. The settings models' own
+            # redaction cannot help: what pydantic hands back is a plain dict.
+            problems.append(f"{env_var} is invalid — {err.get('msg')}")
+            continue
+        value = "***" if _is_secret_name(field) else err.get("input")
         if expected:
             allowed = ", ".join(re.findall(r"'([^']*)'", expected)) or expected
             problems.append(f"{env_var}={value} is invalid — allowed values: {allowed}")

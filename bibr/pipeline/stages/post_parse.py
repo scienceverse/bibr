@@ -9,6 +9,7 @@ import os
 import re
 import time
 import unicodedata
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
@@ -354,6 +355,7 @@ def _attach_front_matter_resolution(
     expected_identity: ExpectedIdentity | None = None,
     *,
     metadata_llm_active: bool = False,
+    settings: GlobalSettings | None = None,
 ):
     """Build record ownership before normalization mutates section boundaries."""
 
@@ -374,9 +376,20 @@ def _attach_front_matter_resolution(
         contents,
         expected_identity=expected_identity,
         target_required=target_required,
+        settings=settings,
     )
     contents.front_matter_resolution = resolution
     return issues
+
+
+def _notify_references(listener: Callable[[list], None] | None, references: list) -> None:
+    """Hand parsed references to the optional listener; its failure never propagates."""
+    if listener is None or not references:
+        return
+    try:
+        listener(references)
+    except Exception:  # noqa: BLE001 — a listener must never break extraction
+        logger.warning("on_references_ready callback failed", exc_info=True)
 
 
 async def _resolve_preparsed_references(
@@ -388,6 +401,7 @@ async def _resolve_preparsed_references(
     ref_parse_strategy: str | None,
     *,
     settings: GlobalSettings,
+    on_references_ready: Callable[[list], None] | None = None,
 ):
     """Fill references onto a natively-preparsed (JATS) ``PaperMetadata``.
 
@@ -414,6 +428,7 @@ async def _resolve_preparsed_references(
 
     if contents.native_references is not None:
         paper_metadata.references = contents.native_references
+        _notify_references(on_references_ready, paper_metadata.references)
         return paper_metadata
 
     from bibr.extract.extractor import MetadataExtractor
@@ -445,6 +460,7 @@ async def _resolve_preparsed_references(
     if ref_df is not None and not ref_df.empty:
         try:
             paper_metadata.references = await extractor._extract_references(ref_df)
+            _notify_references(on_references_ready, paper_metadata.references)
         except asyncio.CancelledError:
             raise
         except ProcessingError:
@@ -473,6 +489,7 @@ async def _extract_metadata_and_equations(
     classifier_resources: ClassifierResources | None = None,
     front_matter_resolution: FrontMatterResolution | None = None,
     validation_issue_sink: list[ValidationIssue] | None = None,
+    on_references_ready: Callable[[list], None] | None = None,
 ):
     """Phase 1: metadata + equation extraction in parallel.
 
@@ -521,6 +538,7 @@ async def _extract_metadata_and_equations(
             ref_seg_strategy,
             ref_parse_strategy,
             settings=effective_settings,
+            on_references_ready=on_references_ready,
         )
     else:
         extractor = MetadataExtractor(
@@ -533,20 +551,32 @@ async def _extract_metadata_and_equations(
             classifier_resources=classifier_resources,
             front_matter_resolution=front_matter_resolution,
         )
-        meta_coro = extractor.extract_all_metadata()
+        # Pass the listener only when one is set so extractor doubles that take no
+        # kwargs (and every non-prefetching path) see the unchanged call.
+        extract_kwargs = {"on_references_ready": on_references_ready} if on_references_ready else {}
+        meta_coro = extractor.extract_all_metadata(**extract_kwargs)
 
     eq_coro = None
+    regex_equations: list = []
     if extract_equations and effective_settings.EQUATION_EXTRACTION:
         from bibr.extract.equation_extractor import EquationExtractor
 
         eq_extractor = EquationExtractor()
+        # The regex pass is synchronous and always completes; only the LLM
+        # fan-out can exceed the budget. Running it inside the wait_for meant a
+        # timeout destroyed equations that had already been extracted, and the
+        # export shipped "eq": [] with nothing in the log. Threaded because
+        # this runs on the shared serve event loop.
+        regex_equations = await asyncio.to_thread(
+            eq_extractor.extract_from_sentences, contents.sentences, contents.sections
+        )
         eq_coro = asyncio.wait_for(
             eq_extractor.extract_with_llm_fallback(
                 contents.sentences,
                 contents.sections,
                 llm_client,
                 min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
-                batch_input_tokens=effective_settings.llm.equation_batch_input_tokens,
+                regex_equations=regex_equations,
             ),
             timeout=float(effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS),
         )
@@ -564,9 +594,23 @@ async def _extract_metadata_and_equations(
     if isinstance(results[0], BaseException):
         raise results[0]
     if isinstance(results[1], BaseException):
-        if not isinstance(results[1], (TimeoutError, asyncio.TimeoutError)):
+        timed_out = isinstance(results[1], (TimeoutError, asyncio.TimeoutError))
+        if timed_out:
+            logger.warning(
+                "Equation LLM fallback timed out after %ss; keeping %d regex equation(s)",
+                effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS,
+                len(regex_equations),
+            )
+            contents.processing_warnings.append(
+                "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex-only equation extraction"
+            )
+        else:
             logger.warning("Equation extraction failed: %s", results[1])
-        contents.equations = []
+            contents.processing_warnings.append(
+                "EQUATION_LLM_FALLBACK_FAILED: kept regex-only equation extraction"
+            )
+        # The regex pass ran to completion before the fan-out started — ship it.
+        contents.equations = regex_equations
     else:
         contents.equations = results[1]
     if validation_issue_sink is not None and extractor is not None:
@@ -629,11 +673,11 @@ def _finalize_abstract_and_keywords(
       them. Without LLM the keywords section often spills into the intro, so
       only the first sentence is used and anything that doesn't look like a
       keyword list (long or sentence-like entries) is rejected.
-    - abstract suspicion: the OCR layout model can mislabel opening body text
-      as an ABSTRACT region. When bounded selection evidence is available,
-      report suspicious content through a nonblocking validation warning.
-      Length, paper type and keywords alone do not authorize deleting an
-      abstract; the extracted string is retained.
+    - commentary guard (residual #1): the OCR layout model mislabels a
+      commentary's opening body as an ABSTRACT region; both the LLM string and
+      the section fallback can carry that body text. Suppress it here — using
+      the FINAL keywords, so a genuine commentary with a keywords block is
+      preserved.
 
     This lives in post-parse, not the export layer: ``json_export`` serializes
     metadata verbatim and must not re-derive it.
@@ -1308,6 +1352,28 @@ async def _link_citations(
             validation_issue_sink.append(issue)
 
 
+def _usage_totals_by_label(
+    labels: dict[tuple[str, str, str], dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    """Sum ``(label, provider, model)``-keyed usage buckets down to label-only.
+
+    ``LLMClient.usage_labels_pop_file`` partitions by the full triple (a label
+    can run under more than one provider/model within a file) so the per-triple
+    counts never blend a stale provider stamp with a new engine's token counts.
+    The export carries those triples verbatim (``extraction.usage.breakdown``),
+    but two consumers are label-keyed by contract and must not gain an engine
+    dimension: ``SafeLlmDiagnostics`` (which requires unique labels) and
+    ``qualification_provenance`` (read by an external deployment gate). Both are
+    fed from here.
+    """
+    collapsed: dict[str, dict[str, int]] = {}
+    for (label, _provider, _model), counts in labels.items():
+        bucket = collapsed.setdefault(label, {})
+        for name, value in counts.items():
+            bucket[name] = bucket.get(name, 0) + value
+    return collapsed
+
+
 def _build_paper(contents, paper_metadata, file_name: str, file_hash: str, paper_id: str | None):
     """Assemble the final ``Paper`` object from extracted parts."""
     from bibr.input.file import InputFile, InputFormat
@@ -1404,10 +1470,19 @@ async def post_parse(
     settings: GlobalSettings | None = None,
     classifier_resources: ClassifierResources | None = None,
     expected_identity: ExpectedIdentity | None = None,
+    enrichment_prefetch: bool = False,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
     Shared between LitServe and local pipelines.
+
+    When ``enrichment_prefetch`` is set (the run will enrich references), the
+    enrich stage's up-front network work starts as a task the moment the
+    references are parsed — while citation linking and structured-integrity
+    LLM calls are still in flight — and rides the returned ``Paper`` as
+    ``paper.enrichment_prefetch`` for ``CrossrefEnricher`` to consume. It is
+    cancelled if post-parse fails after it started. Nothing is started for
+    ``no_llm``, ``refs=off`` or an empty reference list.
 
     When ``no_llm=True``, all LLM-driven steps are skipped: section
     classification falls back to alias-table lookup only, implicit section
@@ -1442,10 +1517,23 @@ async def post_parse(
     )
 
     file_usage: dict[str, dict[str, int]] = {}
-    file_usage_by_label: dict[str, dict[str, int]] = {}
+    file_usage_labels: dict[tuple[str, str, str], dict[str, int]] = {}
     file_protocol_hashes: dict[str, dict[str, str]] = {}
+    file_llm_trace: list[dict] = []
     front_matter_issues = ()
     metadata_issues: list[ValidationIssue] = []
+
+    prefetch_handle = None
+    on_references_ready = None
+    if enrichment_prefetch and not no_llm and parse_strategy != "off":
+        from bibr.pipeline.enrich_prefetch import start_enrichment_prefetch
+
+        def on_references_ready(references: list) -> None:
+            nonlocal prefetch_handle
+            if prefetch_handle is None:
+                prefetch_handle = start_enrichment_prefetch(references, settings=effective_settings)
+
+    extraction_completed = False
     # The client is shared across concurrently-processed files; the contextvar
     # scopes usage attribution to this file's task tree (no snapshot diffing).
     # The key is unique per invocation (not the bare content hash) so
@@ -1468,6 +1556,7 @@ async def post_parse(
                 contents,
                 expected_identity,
                 metadata_llm_active=not no_llm,
+                settings=effective_settings,
             )
             await _normalize_section_structure(
                 contents,
@@ -1490,6 +1579,7 @@ async def post_parse(
                 classifier_resources=classifier_resources,
                 front_matter_resolution=contents.front_matter_resolution,
                 validation_issue_sink=metadata_issues,
+                on_references_ready=on_references_ready,
             )
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
@@ -1547,7 +1637,12 @@ async def post_parse(
             )
             from bibr.extract.research_integrity import extract_structured_integrity
 
-            integrity_resolution = resolve_integrity_statements(
+            # Synchronous regex sweep over every sentence — median 28-37 ms,
+            # max 66 ms on 479 real PMC exports. Threaded for the same reason
+            # as the citation tiers: serve runs one async worker, so this on
+            # the loop delays every co-resident request.
+            integrity_resolution = await asyncio.to_thread(
+                resolve_integrity_statements,
                 contents,
                 mode=effective_settings.pipeline.integrity_statement_mode,
                 author_names=tuple(
@@ -1596,7 +1691,7 @@ async def post_parse(
             # Late text cleaning now precedes integrity rendering. Candidate
             # acceptance and provenance were frozen above; only their selected
             # text IDs are rendered from the cleaned sentence objects here.
-            contents.finalize_text()
+            await asyncio.to_thread(contents.finalize_text)
             apply_integrity_resolution(contents, paper_metadata, integrity_resolution)
             metadata_issues.extend(integrity_resolution.issues)
 
@@ -1608,11 +1703,17 @@ async def post_parse(
                     file_hash,
                     integrity_resolution=integrity_resolution,
                 )
+            extraction_completed = True
 
         except ProcessingError as exc:
             terminal_processing_error = exc
             raise
         finally:
+            # Post-parse failed (or was cancelled) after the reference task
+            # kicked off the enrichment prefetch: nothing will consume it, so
+            # cancel rather than let it run to completion on its own.
+            if not extraction_completed and prefetch_handle is not None:
+                prefetch_handle.cancel()
             # Capture-and-evict in the finally so the bucket is removed even
             # when a phase raises — shared (serve/local) clients are never
             # closed per file, so a leaked bucket would accumulate forever.
@@ -1631,7 +1732,7 @@ async def post_parse(
             ):
                 popped_labels = llm_client.usage_labels_pop_file(usage_key)
                 if getattr(llm_client, "_track_usage", False):
-                    file_usage_by_label = popped_labels
+                    file_usage_labels = popped_labels
             if (
                 usage_key is not None
                 and llm_client is not None
@@ -1641,13 +1742,21 @@ async def post_parse(
                 if getattr(llm_client, "_track_usage", False):
                     file_protocol_hashes = popped_hashes
             if (
+                usage_key is not None
+                and llm_client is not None
+                and hasattr(llm_client, "traces_pop_file")
+            ):
+                popped_trace = llm_client.traces_pop_file(usage_key)
+                if getattr(llm_client, "_track_usage", False):
+                    file_llm_trace = popped_trace
+            if (
                 terminal_processing_error is not None
                 and terminal_processing_error.safe_diagnostics is not None
             ):
                 terminal_processing_error.safe_diagnostics = (
                     terminal_processing_error.safe_diagnostics.with_file_usage(
                         file_usage,
-                        file_usage_by_label,
+                        _usage_totals_by_label(file_usage_labels),
                     )
                 )
             # Clean up LLM client resources (rate limiter / Redis connections)
@@ -1669,15 +1778,18 @@ async def post_parse(
     build_section_tree(contents.sections)
 
     paper = _build_paper(contents, paper_metadata, file_name, file_hash, paper_id)
+    paper.enrichment_prefetch = prefetch_handle
     paper.validation_issues.extend(front_matter_issues)
     paper.validation_issues.extend(metadata_issues)
-    paper.llm_usage = file_usage
-    paper.llm_usage_by_label = file_usage_by_label
+    paper.llm_usage_labels = file_usage_labels
+    paper.llm_trace = file_llm_trace
     if llm_client is not None and getattr(llm_client, "_track_usage", False):
         paper.qualification_provenance = _build_qualification_provenance(
             llm_client,
             effective_settings,
-            usage_by_label=file_usage_by_label,
+            # Label-keyed by contract — the external gate's shape must not gain
+            # an engine dimension.
+            usage_by_label=_usage_totals_by_label(file_usage_labels),
             protocol_hashes=file_protocol_hashes,
         )
 
@@ -1719,6 +1831,10 @@ class PostParseStage:
         t0 = time.monotonic()
         alive = ctx.alive()
         sem = asyncio.Semaphore(ctx.settings.pipeline.max_concurrent_post_parse)
+        # Start enrichment's network prefetch under the LLM tail only when this
+        # run will actually enrich (post_parse itself skips it for refs=off /
+        # no_llm / no references).
+        enrichment_prefetch = bool(ctx.config.enrichment_enabled(ctx.settings))
 
         async def _gated(fs):
             async with sem:
@@ -1739,6 +1855,7 @@ class PostParseStage:
                     settings=ctx.settings,
                     classifier_resources=ctx.resources.classifiers,
                     expected_identity=fs.expected_identity,
+                    enrichment_prefetch=enrichment_prefetch,
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

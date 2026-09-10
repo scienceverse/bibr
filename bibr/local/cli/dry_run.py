@@ -116,7 +116,10 @@ def _dry_run_device_label(config: ResolvedRunConfig) -> str:
 
         return detect_torch_device()
     except ImportError:
-        return "cpu (torch not installed)"
+        # Core install: the local models run on ONNX Runtime.
+        from bibr.utils.onnx_providers import get_ort_providers, selected_device
+
+        return f"{selected_device(get_ort_providers(model_name='dry-run'))} (onnxruntime)"
 
 
 def _dry_run_llm_label(config: ResolvedRunConfig) -> str:
@@ -144,33 +147,42 @@ def _dry_run_memory_mode_label(args, config: ResolvedRunConfig) -> str:
 
 
 def _dry_run_enrichment_lines(config: ResolvedRunConfig, parse_strategy: str) -> list[str]:
-    """Crossref on/off, resolver state, and consolidate mode.
+    """Crossref on/off (with the reason), resolver state, and consolidate mode.
 
+    Mirrors ``ResolvedRunConfig.enrichment_enabled`` / ``RunConfig.enrichment_enabled``:
     ``no_llm`` forces ``crossref=False`` inside ``LocalPipeline.__init__``
-    (never mind ``--no-crossref``'s own value) — checked first so the
-    displayed reason matches what actually turned it off.
+    (never mind ``--crossref``'s own value) — checked first so the displayed
+    reason matches what actually turned it off; then the explicit flag, then
+    ``refs=off`` (nothing to enrich), then the ``CROSSREF_ENRICH`` setting,
+    which is off unless the deployment opted in.
     """
     from bibr.config import Settings
 
     lines = []
+    setting_explicit = "enrich" in Settings.crossref.model_fields_set
     crossref_on = (
         not config.no_llm
-        and config.crossref
-        and Settings.crossref.enrich
         and parse_strategy != "off"
+        and (config.crossref if config.crossref is not None else bool(Settings.crossref.enrich))
     )
     if not crossref_on:
         if config.no_llm:
             reason = "--no-llm"
-        elif not config.crossref:
+        elif config.crossref is False:
             reason = "--no-crossref"
-        elif not Settings.crossref.enrich:
+        elif parse_strategy == "off":
+            reason = "refs=off"
+        elif setting_explicit:
             reason = "CROSSREF_ENRICH=false"
         else:
-            reason = "refs=off"
+            reason = "off by default; enable with --crossref or CROSSREF_ENRICH=true"
         lines.append(f"Crossref: disabled ({reason})")
         return lines
-    lines.append("Crossref: enabled")
+    lines.append(
+        "Crossref: enabled (--crossref)"
+        if config.crossref is True
+        else "Crossref: enabled (CROSSREF_ENRICH=true)"
+    )
     if Settings.resolver.url and Settings.resolver.enrich:
         lines.append(f"  resolver: {Settings.resolver.url}")
     else:
@@ -381,7 +393,10 @@ def _print_dry_run_plan(
     extras = [line.strip().replace(": ", " ", 1) for line in enrich_lines[1:]]
     if extras:
         crossref_value += f" {ui.SEP} " + f" {ui.SEP} ".join(extras)
-    out.print(ui.kv("crossref", crossref_value))
+    # soft_wrap: the reason text ("off by default; enable with ...") plus a
+    # resolver URL can exceed a narrow terminal, and Rich would otherwise
+    # hard-wrap it mid-token.
+    out.print(ui.kv("crossref", crossref_value), soft_wrap=True)
     out.print(ui.kv("memory", _dry_run_memory_mode_label(args, config)))
 
     ui.section(out, "Models")

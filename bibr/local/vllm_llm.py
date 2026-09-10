@@ -46,7 +46,9 @@ class VllmLlmServer:
         settings=None,
     ):
         self._settings = settings if settings is not None else snapshot_settings()
-        self._model = model or self._settings.llm.local_model
+        from bibr.local.llm_models import default_local_model
+
+        self._model = model or self._settings.llm.local_model or default_local_model("vllm")
         self._port = port if port is not None else self._settings.llm.vllm_port
         if mem_fraction is None:
             mem_fraction = self._settings.llm.local_mem_fraction
@@ -98,13 +100,22 @@ class VllmLlmServer:
         # New session so shutdown() can kill the whole process group — vLLM
         # spawns worker children that would otherwise survive the launcher and
         # hold VRAM.
-        self._process = subprocess.Popen(  # noqa: S603
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=self._stderr_fh,
-            start_new_session=True,
-        )
-        self._wait_until_healthy()
+        # start_new_session means the server never sees the terminal's SIGINT,
+        # and the readiness wait can block for minutes on a first-run weight
+        # download while the wizard invites the user to press Ctrl-C — so
+        # BaseException, not Exception, or the server keeps its VRAM after
+        # bibr exits. Mirrors VllmOcrServer.
+        try:
+            self._process = subprocess.Popen(  # noqa: S603
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=self._stderr_fh,
+                start_new_session=True,
+            )
+            self._wait_until_healthy()
+        except BaseException:
+            self.shutdown()
+            raise
 
     @staticmethod
     def _resolve_launch_cmd(model: str) -> list[str]:
@@ -126,15 +137,30 @@ class VllmLlmServer:
             ]
 
         if shutil.which("uv") is not None:
-            logger.info(
-                "vllm not importable in-process; launching from an isolated 'uv tool' "
-                "environment. The first run downloads/installs vLLM into uv's cache "
-                "(this can take a while)."
+            logger.warning(
+                "vLLM is not installed in this environment; launching the local LLM through "
+                "an isolated `uv tool run --from vllm==0.27.0` environment instead. The first "
+                "run downloads several GB and can take minutes before the model loads. "
+                "Install it once with `uv sync --extra vllm` to skip this bootstrap."
             )
+            cmd = ["uv", "tool", "run"]
+            if sys.version_info >= (3, 14):
+                # vllm==0.27.0 ships no 3.14 wheels (the `vllm` extra is also
+                # marked python_version < 3.14), so ask uv for a managed 3.13.
+                cmd += ["--python", "3.13"]
             # `vllm serve` takes the model as a positional argument (not --model).
             # Match the audited `vllm` extra exactly. This fallback executes a
             # downloaded tool, so a floating lower bound is inappropriate.
-            return ["uv", "tool", "run", "--from", "vllm==0.25.1", "vllm", "serve", model]
+            return [
+                *cmd,
+                "--from",
+                "vllm==0.27.0",
+                "--with",
+                "openai>=2.54.0,<3",
+                "vllm",
+                "serve",
+                model,
+            ]
 
         from bibr.exceptions import UpstreamServiceError
 

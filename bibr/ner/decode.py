@@ -21,8 +21,12 @@ _PAGE_SPAN_RE = re.compile(
     r"^([A-Za-z]{0,2}\d{1,6}[A-Za-z]?)\s*[-–—]{1,2}\s*([A-Za-z]{0,2}\d{1,6}[A-Za-z]?)$"
 )
 
-# BIO field name -> PaperReference field name. Fields with no target (ARXIV,
-# PMID, SERIES, ACCESS_DATE, NOTE, ...) are intentionally absent and dropped.
+# BIO field name -> PaperReference field name. Every field type in the tag
+# scheme has a target: the five that used to be dropped here (ARXIV, PMID,
+# SERIES, ACCESS_DATE, NOTE) were trained -- PMID reaches 0.947 F1 on the
+# JATS-supervised corpus -- and then thrown away at decode. YEAR is the one
+# exception, handled below because it is the only field converted to an int.
+# ``test_every_tagged_field_reaches_paper_reference`` guards the invariant.
 _FIELD_TO_PAPER_REF: dict[str, str] = {
     "TITLE": "title",
     "AUTHOR": "authors",
@@ -37,6 +41,11 @@ _FIELD_TO_PAPER_REF: dict[str, str] = {
     "URL": "url",
     "EDITION": "edition",
     "EDITOR": "editors",
+    "ARXIV": "arxiv",
+    "PMID": "pmid",
+    "SERIES": "series",
+    "ACCESS_DATE": "access_date",
+    "NOTE": "note",
 }
 
 

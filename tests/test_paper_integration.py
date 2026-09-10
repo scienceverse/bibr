@@ -113,17 +113,17 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     # Check paper_id
     assert result["paper_id"] == "10.1234/test"
 
-    # Check info
-    info = result["info"]
-    assert info["title"] == "Test Paper"
-    assert info["doi"] == "10.1234/test"
-    assert info["file_hash"] == "hash123"
-    assert info["file_name"] == "test.pdf"
-    assert info["schema_version"] == "10.7"
-    assert info["paper_type"] is None
-    assert info["paper_type_confidence"] is None
-    assert info["oecd_l1"] is None
-    assert info["oecd_confidence"] is None
+    # Check metadata / source / root version
+    assert result["schema_version"] == "11.0"
+    metadata = result["metadata"]
+    assert metadata["title"] == "Test Paper"
+    assert metadata["doi"] == "10.1234/test"
+    assert result["source"]["file_hash"] == "hash123"
+    assert result["source"]["file_name"] == "test.pdf"
+    assert metadata["paper_type"] is None
+    assert metadata["paper_type_confidence"] is None
+    assert metadata["oecd_l1"] is None
+    assert metadata["oecd_confidence"] is None
 
     # Check text — footnote text is now in the text table
     text_list = result["text"]
@@ -156,7 +156,7 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     xref_list = result["xref"]
     assert len(xref_list) == 1
     assert xref_list[0]["xref_type"] == "foot"
-    assert xref_list[0]["xref_id"] == 2
+    assert xref_list[0]["target_id"] == 2
     assert xref_list[0]["text_id"] == 1
 
     # No footnote column in v8.0
@@ -403,8 +403,7 @@ def test_paper_export_bib_with_populated_references(mock_contents):
     assert cr["bib_type"] == "journal_article"
 
     # Verify version
-    info = result["info"]
-    assert info["schema_version"] == "10.7"
+    assert result["schema_version"] == "11.0"
 
 
 def test_paper_export_bib_without_matches(mock_contents):
@@ -544,12 +543,12 @@ def test_paper_export_xref_split_fks():
     # bib xref
     bib_xref = xref_list[0]
     assert bib_xref["xref_type"] == "bib"
-    assert bib_xref["xref_id"] == 1
+    assert bib_xref["target_id"] == 1
 
     # table xref
     tbl_xref = xref_list[1]
     assert tbl_xref["xref_type"] == "table"
-    assert tbl_xref["xref_id"] == 2
+    assert tbl_xref["target_id"] == 2
 
 
 def test_paper_export_orcid_canonicalization():

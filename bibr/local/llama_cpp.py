@@ -838,10 +838,11 @@ class LlamaCppLlmServer:
 
     def __init__(self, settings=None) -> None:
         from bibr.config import snapshot_settings
+        from bibr.local.llm_models import default_local_model
 
         self._settings = settings if settings is not None else snapshot_settings()
         self._server = LlamaCppServer(
-            model=self._settings.llm.local_model,
+            model=self._settings.llm.local_model or default_local_model("llama-cpp"),
             port=self._settings.llm.llama_cpp_port,
             context_size=self._settings.llm.llama_cpp_context_size,
             startup_timeout=self._settings.llm.llama_cpp_startup_timeout,

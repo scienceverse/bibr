@@ -43,6 +43,15 @@ os.environ["ML_PAPER_CLASSIFIER_MODEL_ID"] = ""
 # Keep section-classifier tests offline for the same reason. Tests for the
 # trained path opt in explicitly; config-default tests clear this override.
 os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = ""
+# Production default is the published front-role bundle; disabled here so
+# front-matter tests don't pull the HF snapshot. Tests for the model path build
+# their own FrontRolePredictions or point at a local bundle.
+os.environ["ML_FRONT_ROLE_MODEL_ID"] = ""
+# Production default is "auto" (probe the Hub for a model's ONNX bundle, else
+# torch). Pinned to "torch" here so constructing a detector/classifier in a
+# test never makes a network round-trip; ONNX-runtime tests set ML_RUNTIME (or
+# a settings override) explicitly and point at local bundles.
+os.environ["ML_RUNTIME"] = "torch"
 # Never inherit a developer's local resolver service from ``.env``. Tests that
 # exercise resolver routing pass an explicit client and opt into authoritative
 # mode with monkeypatch; all other tests should remain offline and hermetic.

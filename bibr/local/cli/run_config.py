@@ -24,7 +24,9 @@ class ResolvedRunConfig:
     ocr_model: str | None = None
     ocr_profile: str | None = None
     device: str | None = None
-    crossref: bool = True
+    crossref: bool | None = None
+    """Tri-state enrichment switch: ``True`` (``--crossref``), ``False``
+    (``--no-crossref``), ``None`` follows ``CROSSREF_ENRICH`` (off by default)."""
     equations: bool = True
     no_llm: bool = False
     figure_images: bool | None = None
@@ -38,13 +40,28 @@ class ResolvedRunConfig:
     refs: str | None = None
     ocr_summary_model: str | None = None
 
-    def active_stages(self, files: Iterable[Path]) -> list[str]:
-        """Progress stages for the input formats present in this run."""
+    def enrichment_enabled(self) -> bool:
+        """Whether this run enriches references (mirrors ``RunConfig.enrichment_enabled``).
+
+        ``--no-llm`` forces enrichment off, an explicit ``--crossref`` /
+        ``--no-crossref`` wins next, and otherwise the ``CROSSREF_ENRICH``
+        setting decides. ``refs=off`` leaves nothing to enrich — Crossref
+        works on references — so it also reads as off.
+        """
+        if self.no_llm or self.refs == "off":
+            return False
+        if self.crossref is not None:
+            return self.crossref
+        from bibr.config import Settings
+
+        return bool(Settings.crossref.enrich)
+
+    def active_stages(self, files: Iterable[Path] | None = None) -> list[str]:
+        """Progress stages for known input formats, or every format before discovery."""
         from bibr.pipeline.progress import STAGES, stages_for_files
 
-        stages = stages_for_files(STAGES, files)
-        # refs=off leaves nothing to enrich — Crossref works on references.
-        if not self.crossref or self.no_llm or self.refs == "off":
+        stages = list(STAGES) if files is None else stages_for_files(STAGES, files)
+        if not self.enrichment_enabled():
             stages.remove("enrich")
         return stages
 
@@ -113,7 +130,7 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         ocr_model=args.ocr_model,
         ocr_profile=explicit_profile or configured_profile,
         device=args.device,
-        crossref=not args.no_crossref,
+        crossref=_resolve_crossref_flag(args),
         equations=not args.no_equations,
         no_llm=args.no_llm,
         figure_images=args.figure_images or None,
@@ -127,6 +144,15 @@ def resolve_run_config(args) -> ResolvedRunConfig:
         refs=getattr(args, "refs", None) or None,
         ocr_summary_model=summary_candidate.model,
     )
+
+
+def _resolve_crossref_flag(args) -> bool | None:
+    """``--crossref`` → True, ``--no-crossref`` → False, neither → None (setting decides)."""
+    if getattr(args, "crossref", False):
+        return True
+    if getattr(args, "no_crossref", False):
+        return False
+    return None
 
 
 def _apply_runtime_settings(args) -> None:
@@ -352,11 +378,16 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
 
 
 def _managed_llm_model(backend: str, settings) -> str:
-    if backend == "rapid-mlx":
-        return settings.llm.rapid_mlx_model
+    """The model a managed backend will serve — mirrors each server's own resolution."""
     if backend == "llmster":
         return settings.llm.llmster_model or settings.llm.llmster_model_id
-    return settings.llm.local_model
+    if settings.llm.local_model:
+        return settings.llm.local_model
+    if backend == "rapid-mlx":
+        return settings.llm.rapid_mlx_model
+    from bibr.local.llm_models import default_local_model
+
+    return default_local_model(backend)
 
 
 def _managed_llm_weight_repo(backend: str, settings) -> str | None:

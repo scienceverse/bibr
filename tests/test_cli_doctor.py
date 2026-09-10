@@ -117,6 +117,27 @@ def test_check_llm_local_backend_vllm_ok_with_uv():
     assert "org/model" in rec.calls[0][1]
 
 
+def test_check_llm_local_backend_vllm_uv_runner_is_honest_about_python_314(monkeypatch):
+    """No vllm package on 3.14: the extra installs nothing, so say what will happen."""
+    import importlib.util
+    import shutil
+    import sys
+
+    from bibr.local.cli import _check_llm_local_backend
+
+    rec = _Recorder()
+    monkeypatch.setattr(sys, "version_info", (3, 14, 0, "final", 0))
+    with (
+        mock.patch.object(importlib.util, "find_spec", return_value=None),
+        mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+    ):
+        _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
+    assert rec.calls[0][0] == "ok"
+    assert "several GB" in rec.calls[0][1]
+    assert "Python 3.13" in rec.calls[0][1]
+    assert "installs nothing" in rec.calls[0][1]
+
+
 def test_check_llm_local_backend_vllm_missing_launcher():
     """No vllm package and no uv → red fail with an install hint (no API key)."""
     import importlib.util
@@ -554,16 +575,55 @@ def test_check_ref_strategies_geom_without_sklearn_fails(monkeypatch):
     _check_ref_strategies(rec.ok, rec.fail)
     assert rec.calls[0][0] == "fail"
     assert "cascade to LLM" in rec.calls[0][1]
-    assert "uv sync --extra ml" in rec.calls[0][2]
+    assert "Reinstall bibr" in rec.calls[0][2]
 
 
-def test_check_ref_strategies_ner_without_torch_fails(monkeypatch):
-    """ner parsing without the ml extra must fail with an install hint."""
+def test_check_ref_strategies_ner_without_torch_is_ok_on_onnx(monkeypatch):
+    """A core install parses references on ONNX Runtime — not a failure."""
     import importlib.util
 
     import bibr.config
 
     monkeypatch.setattr(bibr.config.Settings, "REF_SEG_STRATEGY", None)
+    monkeypatch.setattr(bibr.config.Settings, "REF_PARSE_STRATEGY", "ner")
+    # conftest pins ML_RUNTIME=torch so nothing reaches the Hub; this is the
+    # default-install case.
+    monkeypatch.setattr(bibr.config.Settings.ml, "runtime", "auto")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    from bibr.local.cli import _check_ref_strategies
+
+    rec = _Recorder()
+    _check_ref_strategies(rec.ok, rec.fail)
+    assert rec.calls[0][0] == "ok"
+    assert "ONNX Runtime" in rec.calls[0][1]
+
+
+def test_check_ref_strategies_ner_fails_when_torch_runtime_is_forced(monkeypatch):
+    """ML_RUNTIME=torch with no torch is a real misconfiguration."""
+    import importlib.util
+
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings, "REF_SEG_STRATEGY", None)
+    monkeypatch.setattr(bibr.config.Settings, "REF_PARSE_STRATEGY", "ner")
+    monkeypatch.setattr(bibr.config.Settings.ml, "runtime", "torch")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+    from bibr.local.cli import _check_ref_strategies
+
+    rec = _Recorder()
+    _check_ref_strategies(rec.ok, rec.fail)
+    assert rec.calls[0][0] == "fail"
+    assert "ML_RUNTIME=torch" in rec.calls[0][1]
+    assert "uv sync --extra torch" in rec.calls[0][2]
+
+
+def test_check_ref_strategies_crf_segmenter_without_torch_fails(monkeypatch):
+    """The CRF segmenter has no ONNX export, so it still needs the extra."""
+    import importlib.util
+
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings, "REF_SEG_STRATEGY", "crf")
     monkeypatch.setattr(bibr.config.Settings, "REF_PARSE_STRATEGY", "ner")
     monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
     from bibr.local.cli import _check_ref_strategies
@@ -571,7 +631,7 @@ def test_check_ref_strategies_ner_without_torch_fails(monkeypatch):
     rec = _Recorder()
     _check_ref_strategies(rec.ok, rec.fail)
     assert rec.calls[0][0] == "fail"
-    assert "uv sync --extra ml" in rec.calls[0][2]
+    assert "torch-only" in rec.calls[0][1]
 
 
 def test_check_ref_strategies_off_reports_disabled(monkeypatch):

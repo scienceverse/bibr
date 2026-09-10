@@ -925,3 +925,29 @@ def test_bare_table_label_exemption_does_not_cross_multiple_heading_boundaries()
     )
 
     assert contents.tables[0].caption is None
+
+
+def test_confirmed_table_caption_deduplicated_away_does_not_raise():
+    """The confirmed owner id is recorded at parse time.
+
+    De-duplication elects a canonical purely by text length and source index,
+    with no awareness of which cluster member holds the confirmed bare-table
+    label, so the recorded id can be absent from the post-dedup candidates.
+    Indexing the lookup with it raised KeyError, which ParseSegmentStage
+    reported as parse_failed — dropping the whole paper.
+    """
+    import pandas as pd
+
+    from bibr.paper_contents import PaperTable
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(json_result=[])
+    table = PaperTable(table_id=1, df=pd.DataFrame({"a": [1]}), tbl_html="<table/>", section_id=1)
+    parser.tables = [table]
+    parser._table_source_indices[id(table)] = 0
+    parser._confirmed_table_caption_owners["caption:2"] = id(table)
+
+    # "caption:2" lost the canonical vote, so it is not among the actives.
+    parser._group_continuation_tables([])
+
+    assert table.caption is None

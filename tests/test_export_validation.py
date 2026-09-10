@@ -23,7 +23,7 @@ def _base() -> dict:
     """A minimal, well-formed export dict that trips no check."""
     return {
         "paper_id": "p1",
-        "info": {"title": "A Study of Real Things", "abstract": "An abstract."},
+        "metadata": {"title": "A Study of Real Things", "abstract": "An abstract."},
         "author": [{"given": "Ann", "family": "Lee"}],
         "text": [
             {
@@ -47,7 +47,7 @@ def _base() -> dict:
         "table": [],
         "eq": [],
         "funding": [],
-        "affiliations": [],
+        "affiliation": [],
     }
 
 
@@ -100,7 +100,7 @@ def test_raw_ocr_region_diagnostics_do_not_affect_canonical_validation():
 
 def test_private_use_in_canonical_identity_fields_is_nonblocking_warning():
     payload = _base()
-    payload["info"].update(
+    payload["metadata"].update(
         {
             "doi": "10.1000/927",
             "journal": "Journal of History",
@@ -141,7 +141,7 @@ def test_private_use_diagnostics_body_refs_expected_identity_and_enrichment_are_
 
 def test_clean_non_ascii_identity_unicode_is_allowed():
     payload = _base()
-    payload["info"].update(
+    payload["metadata"].update(
         {
             "title": "Bühler’s α-study — 1927",
             "journal": "Zeitschrift für Pädagogik",
@@ -162,15 +162,24 @@ def test_non_dict_input_is_safe():
 # ── ERROR-severity checks ──────────────────────────────────────────────
 
 
-def test_placeholder_in_info():
+def test_placeholder_in_metadata():
     p = _base()
-    p["info"]["abstract"] = "verbatim-string"
+    p["metadata"]["abstract"] = "verbatim-string"
     assert "VAL_PLACEHOLDER" in _codes(validate_export(p))
 
 
 def test_placeholder_in_author():
     p = _base()
     p["author"][0]["family"] = "STRING"  # case-insensitive
+    assert "VAL_PLACEHOLDER" in _codes(validate_export(p))
+
+
+def test_placeholder_in_affiliation():
+    """Regression: ``_check_placeholder`` reads the root ``affiliation`` key
+    (singular, v11) — it silently stopped checking anything the moment the
+    key was renamed from ``affiliations`` until the reader was updated."""
+    p = _base()
+    p["affiliation"] = [{"affiliation_id": 1, "text": "verbatim-string"}]
     assert "VAL_PLACEHOLDER" in _codes(validate_export(p))
 
 
@@ -233,7 +242,7 @@ def test_bbox_space_within_bounds_ok():
 
 def test_dangling_xref_target():
     p = _base()
-    p["xref"] = [{"xref_id": 999, "xref_type": "bib", "contents": "[9]", "text_id": 1}]
+    p["xref"] = [{"target_id": 999, "xref_type": "bib", "contents": "[9]", "text_id": 1}]
     assert "VAL_DANGLING_REF" in _codes(validate_export(p))
 
 
@@ -278,13 +287,13 @@ def test_url_wellformed_ok():
 
 def test_title_generic():
     p = _base()
-    p["info"]["title"] = "PhD Dissertation"
+    p["metadata"]["title"] = "PhD Dissertation"
     assert "VAL_TITLE_GENERIC" in _codes(validate_export(p))
 
 
 def test_title_empty():
     p = _base()
-    p["info"]["title"] = ""
+    p["metadata"]["title"] = ""
     assert "VAL_TITLE_GENERIC" in _codes(validate_export(p))
 
 
@@ -302,7 +311,7 @@ def test_abstract_missing():
         {"text_id": 1, "section_id": 1, "text": "one"},
         {"text_id": 2, "section_id": 1, "text": "two"},
     ]
-    p["info"]["abstract"] = None
+    p["metadata"]["abstract"] = None
     assert "VAL_ABSTRACT_MISSING" in _codes(validate_export(p))
 
 
@@ -317,7 +326,7 @@ def test_abstract_suspect_when_ungrounded_against_abstract_section():
         }
     )
     p["text"].append({"text_id": 2, "section_id": 2, "text": "Grounded source abstract."})
-    p["info"]["abstract"] = "Invented abstract."
+    p["metadata"]["abstract"] = "Invented abstract."
 
     issue = next(i for i in validate_export(p) if i.code == "VAL_ABSTRACT_SUSPECT")
     assert issue.blocking is False
@@ -338,7 +347,7 @@ def test_abstract_suspect_when_value_crosses_into_body_section():
         {"text_id": 1, "section_id": 2, "text": "Grounded source abstract."},
         {"text_id": 2, "section_id": 1, "text": "Body sentence outside the abstract."},
     ]
-    p["info"]["abstract"] = "Grounded source abstract. Body sentence outside the abstract."
+    p["metadata"]["abstract"] = "Grounded source abstract. Body sentence outside the abstract."
 
     issue = next(i for i in validate_export(p) if i.code == "VAL_ABSTRACT_SUSPECT")
     assert "cross_boundary" in issue.message
@@ -353,14 +362,14 @@ def test_abstract_suspect_when_value_crosses_into_body_section():
 )
 def test_abstract_length_and_share_are_nonblocking_warnings(abstract, body, reason):
     p = _base()
-    p["info"]["abstract"] = abstract
+    p["metadata"]["abstract"] = abstract
     p["text"] = [{"text_id": 1, "section_id": 1, "text": body}]
 
     issue = next(i for i in validate_export(p) if i.code == "VAL_ABSTRACT_SUSPECT")
 
     assert issue.blocking is False
     assert reason in issue.message
-    assert p["info"]["abstract"] == abstract
+    assert p["metadata"]["abstract"] == abstract
 
 
 def test_abstract_thresholds_are_strict_and_references_are_excluded():
@@ -373,34 +382,34 @@ def test_abstract_thresholds_are_strict_and_references_are_excluded():
             "parent_section_id": None,
         }
     )
-    p["info"]["abstract"] = "A" * 20
+    p["metadata"]["abstract"] = "A" * 20
     p["text"] = [
         {"text_id": 1, "section_id": 1, "text": "B" * 100},
         {"text_id": 2, "section_id": 2, "text": "R" * 1000},
     ]
     assert "VAL_ABSTRACT_SUSPECT" not in _codes(validate_export(p))
 
-    p["info"]["abstract"] = "A" * 21
+    p["metadata"]["abstract"] = "A" * 21
     issues = [issue for issue in validate_export(p) if issue.code == "VAL_ABSTRACT_SUSPECT"]
     assert len(issues) == 1
     assert "non_reference_share_gt_20pct" in issues[0].message
 
-    p["info"]["abstract"] = "A" * 2500
+    p["metadata"]["abstract"] = "A" * 2500
     p["text"][0]["text"] = "B" * 20000
     assert "VAL_ABSTRACT_SUSPECT" not in _codes(validate_export(p))
 
-    p["info"]["abstract"] = "A" * 2501
+    p["metadata"]["abstract"] = "A" * 2501
     issue = next(i for i in validate_export(p) if i.code == "VAL_ABSTRACT_SUSPECT")
     assert "length_gt_2500" in issue.message
 
 
 def test_abstract_share_zero_denominator_does_not_warn_or_mutate():
     p = _base()
-    p["info"]["abstract"] = "No source denominator."
+    p["metadata"]["abstract"] = "No source denominator."
     p["text"] = []
 
     assert "VAL_ABSTRACT_SUSPECT" not in _codes(validate_export(p))
-    assert p["info"]["abstract"] == "No source denominator."
+    assert p["metadata"]["abstract"] == "No source denominator."
 
 
 def test_abstract_suspect_emits_once_with_bounded_source_ids():
@@ -417,7 +426,7 @@ def test_abstract_suspect_emits_once_with_bounded_source_ids():
         {"text_id": index, "section_id": 2, "text": f"Source sentence {index}."}
         for index in range(1, 31)
     ]
-    p["info"]["abstract"] = "A" * 2501
+    p["metadata"]["abstract"] = "A" * 2501
 
     issues = [issue for issue in validate_export(p) if issue.code == "VAL_ABSTRACT_SUSPECT"]
 
@@ -427,7 +436,7 @@ def test_abstract_suspect_emits_once_with_bounded_source_ids():
 
 def test_abstract_suspect_is_replay_fallback_when_payload_already_has_issue():
     p = _base()
-    p["info"]["abstract"] = "A" * 2501
+    p["metadata"]["abstract"] = "A" * 2501
     p["validation"] = {
         "errors": 0,
         "warnings": 1,
@@ -505,7 +514,7 @@ def test_panel_caption():
 def test_xref_zero():
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 12)]
-    p["xref"] = [{"xref_id": 1, "xref_type": "figure", "contents": "Figure 1", "text_id": 1}]
+    p["xref"] = [{"target_id": 1, "xref_type": "figure", "contents": "Figure 1", "text_id": 1}]
     p["figure"] = [{"figure_id": 1, "caption": "Real", "page_number": 1}]
     assert "VAL_XREF_ZERO" in _codes(validate_export(p))
 
@@ -513,7 +522,7 @@ def test_xref_zero():
 def test_xref_zero_ok_when_bib_target_present():
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 12)]
-    p["xref"] = [{"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1}]
+    p["xref"] = [{"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1}]
     assert "VAL_XREF_ZERO" not in _codes(validate_export(p))
 
 
@@ -521,10 +530,10 @@ def test_xref_low_coverage_counts_unique_valid_bib_targets_only():
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 11)]
     p["xref"] = [
-        {"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
-        {"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 2},
-        {"xref_id": 99, "xref_type": "bib", "contents": "[99]", "text_id": 3},
-        {"xref_id": 2, "xref_type": "figure", "contents": "Figure 2", "text_id": 4},
+        {"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
+        {"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 2},
+        {"target_id": 99, "xref_type": "bib", "contents": "[99]", "text_id": 3},
+        {"target_id": 2, "xref_type": "figure", "contents": "Figure 2", "text_id": 4},
     ]
 
     issues = validate_export(p)
@@ -542,7 +551,7 @@ def test_xref_low_coverage_uses_bibliography_row_count_denominator():
         {"bib_id": 9, "text_id": None}
     ]
     p["xref"] = [
-        {"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
+        {"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
     ]
 
     issues = validate_export(p)
@@ -557,7 +566,7 @@ def test_xref_low_coverage_threshold_is_strictly_below_twenty_percent():
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 11)]
     p["xref"] = [
-        {"xref_id": i, "xref_type": "bib", "contents": f"[{i}]", "text_id": i} for i in (1, 2)
+        {"target_id": i, "xref_type": "bib", "contents": f"[{i}]", "text_id": i} for i in (1, 2)
     ]
 
     assert "VAL_XREF_LOW_COVERAGE" not in _codes(validate_export(p))
@@ -576,7 +585,7 @@ def test_post_parse_xref_low_coverage_issue_suppresses_export_replay_duplicate()
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 11)]
     p["xref"] = [
-        {"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
+        {"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
     ]
     source_issue = ValidationIssue(
         "VAL_XREF_LOW_COVERAGE",
@@ -602,7 +611,7 @@ def test_xref_low_coverage_export_replay_remains_available_without_source_issue(
     p = _base()
     p["bib"] = [{"bib_id": i, "text_id": None} for i in range(1, 11)]
     p["xref"] = [
-        {"xref_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
+        {"target_id": 1, "xref_type": "bib", "contents": "[1]", "text_id": 1},
     ]
 
     out = _apply_output_validation(p)
@@ -649,7 +658,7 @@ def test_statement_orphan():
     p["text"] = [
         {"text_id": 1, "section_id": 1, "text": "The authors declare no conflict of interest."}
     ]
-    p["info"]["coi_statement"] = None
+    p["metadata"]["coi_statement"] = None
     assert "VAL_STATEMENT_ORPHAN" in _codes(validate_export(p))
 
 
@@ -658,7 +667,7 @@ def test_statement_present_ok():
     p["text"] = [
         {"text_id": 1, "section_id": 1, "text": "The authors declare no conflict of interest."}
     ]
-    p["info"]["coi_statement"] = "The authors declare no conflict of interest."
+    p["metadata"]["coi_statement"] = "The authors declare no conflict of interest."
     assert "VAL_STATEMENT_ORPHAN" not in _codes(validate_export(p))
 
 

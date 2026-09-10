@@ -74,13 +74,18 @@ def _tracked_client(effects):
     return client
 
 
+def _lkey(client, label):
+    """The (label, provider, model) triple a client's label buckets are keyed by."""
+    return (label, client._settings.llm.provider, client._settings.llm.model)
+
+
 def test_record_usage_attributes_label_per_file():
     client = LLMClient.__new__(LLMClient)  # skip provider init
     client._usage = {}
     client._usage_by_file = {}
     client._labels_by_file = {}
     client._track_usage = True
-    client._settings = SimpleNamespace(llm=SimpleNamespace(model="m"))
+    client._settings = SimpleNamespace(llm=SimpleNamespace(provider="p", model="m"))
 
     with usage_file_context("hashA#1"):
         tok = _usage_label.set("extract_authors")
@@ -96,14 +101,14 @@ def test_record_usage_attributes_label_per_file():
             _usage_label.reset(tok)
 
     labels = client.usage_labels_pop_file("hashA#1")
-    assert labels["extract_authors"] == {
+    assert labels[("extract_authors", "p", "m")] == {
         "input_tokens": 150,
         "output_tokens": 15,
         "total_tokens": 165,
         "cached_input_tokens": 0,
         "calls": 2,
     }
-    assert labels["extract_title_keywords"]["calls"] == 1
+    assert labels[("extract_title_keywords", "p", "m")]["calls"] == 1
     assert client.usage_labels_pop_file("hashA#1") == {}  # popped
 
 
@@ -113,10 +118,10 @@ def test_record_usage_without_label_uses_unlabeled_bucket():
     client._usage_by_file = {}
     client._labels_by_file = {}
     client._track_usage = True
-    client._settings = SimpleNamespace(llm=SimpleNamespace(model="m"))
+    client._settings = SimpleNamespace(llm=SimpleNamespace(provider="p", model="m"))
     with usage_file_context("hashB#1"):
         client._record_usage(_fake_completion())
-    assert client.usage_labels_pop_file("hashB#1")["unlabeled"]["calls"] == 1
+    assert client.usage_labels_pop_file("hashB#1")[("unlabeled", "p", "m")]["calls"] == 1
 
 
 async def test_label_bucket_records_success_waits_and_provider_time():
@@ -126,7 +131,7 @@ async def test_label_bucket_records_success_waits_and_provider_time():
     with usage_file_context("timed#1"):
         await client.extract_title_keywords("text")
 
-    metrics = client.usage_labels_pop_file("timed#1")["extract_title_keywords"]
+    metrics = client.usage_labels_pop_file("timed#1")[_lkey(client, "extract_title_keywords")]
     assert metrics["calls"] == 1
     assert metrics["logical_calls"] == 1
     assert metrics["attempts"] == 1
@@ -146,7 +151,7 @@ async def test_label_bucket_records_outer_retry(monkeypatch):
     with usage_file_context("retry#1"):
         await client.extract_title_keywords("text")
 
-    metrics = client.usage_labels_pop_file("retry#1")["extract_title_keywords"]
+    metrics = client.usage_labels_pop_file("retry#1")[_lkey(client, "extract_title_keywords")]
     assert metrics["logical_calls"] == 1
     assert metrics["attempts"] == 2
     assert metrics["retries"] == 1
@@ -160,7 +165,7 @@ async def test_label_bucket_records_terminal_failure_without_completion():
         with pytest.raises(UpstreamServiceError):
             await client.extract_title_keywords("text")
 
-    metrics = client.usage_labels_pop_file("failed#1")["extract_title_keywords"]
+    metrics = client.usage_labels_pop_file("failed#1")[_lkey(client, "extract_title_keywords")]
     assert metrics["calls"] == 0
     assert metrics["logical_calls"] == 1
     assert metrics["attempts"] == 1
@@ -180,7 +185,7 @@ async def test_invoke_structured_acquires_limiter_under_explicit_label():
         )
 
     client._limiter.acquire.assert_awaited_once()
-    metrics = client.usage_labels_pop_file("external#1")["section_classifier"]
+    metrics = client.usage_labels_pop_file("external#1")[_lkey(client, "section_classifier")]
     assert metrics["logical_calls"] == 1
     assert metrics["rate_limit_wait_ms"] >= 0
 
@@ -214,7 +219,9 @@ async def test_cancelled_semaphore_wait_records_zero_attempt_and_restores_label(
         gate.release()
         _usage_label.reset(outer_token)
 
-    metrics = client.usage_labels_pop_file("cancelled-wait#1")["extract_title_keywords"]
+    metrics = client.usage_labels_pop_file("cancelled-wait#1")[
+        _lkey(client, "extract_title_keywords")
+    ]
     assert metrics["logical_calls"] == 1
     assert metrics["attempts"] == 0
     assert metrics["native_attempts"] == 0
@@ -245,7 +252,9 @@ async def test_cancelled_retry_backoff_does_not_count_unstarted_retry(monkeypatc
         with pytest.raises(asyncio.CancelledError):
             await task
 
-    metrics = client.usage_labels_pop_file("cancelled-backoff#1")["extract_title_keywords"]
+    metrics = client.usage_labels_pop_file("cancelled-backoff#1")[
+        _lkey(client, "extract_title_keywords")
+    ]
     assert metrics["logical_calls"] == 1
     assert metrics["attempts"] == 1
     assert metrics["native_attempts"] + metrics["instructor_attempts"] == 1
@@ -279,14 +288,16 @@ async def test_concurrent_explicit_labels_are_isolated_within_file_context():
     assert {first.title, second.title} == {"first", "second"}
     assert set(backend.labels) == {"first", "second"}
     metrics = client.usage_labels_pop_file("concurrent#1")
-    assert metrics["first"]["calls"] == 1
-    assert metrics["first"]["output_tokens"] == 10
-    assert metrics["first"]["logical_calls"] == 1
-    assert metrics["first"]["attempts"] == 1
-    assert metrics["second"]["calls"] == 1
-    assert metrics["second"]["output_tokens"] == 20
-    assert metrics["second"]["logical_calls"] == 1
-    assert metrics["second"]["attempts"] == 1
+    first_metrics = metrics[_lkey(client, "first")]
+    second_metrics = metrics[_lkey(client, "second")]
+    assert first_metrics["calls"] == 1
+    assert first_metrics["output_tokens"] == 10
+    assert first_metrics["logical_calls"] == 1
+    assert first_metrics["attempts"] == 1
+    assert second_metrics["calls"] == 1
+    assert second_metrics["output_tokens"] == 20
+    assert second_metrics["logical_calls"] == 1
+    assert second_metrics["attempts"] == 1
 
 
 async def test_concurrent_file_protocol_counters_do_not_leak():
@@ -318,8 +329,8 @@ async def test_concurrent_file_protocol_counters_do_not_leak():
         run_one("file-b#1", "extract_authors", "truncated"),
     )
 
-    first = client.usage_labels_pop_file("file-a#1")["extract_title_keywords"]
-    second = client.usage_labels_pop_file("file-b#1")["extract_authors"]
+    first = client.usage_labels_pop_file("file-a#1")[_lkey(client, "extract_title_keywords")]
+    second = client.usage_labels_pop_file("file-b#1")[_lkey(client, "extract_authors")]
     assert first["attempts"] == first["native_attempts"] + first["instructor_attempts"] == 2
     assert second["attempts"] == second["native_attempts"] + second["instructor_attempts"] == 2
     assert first["native_invalid_non_json"] == 1
@@ -328,18 +339,13 @@ async def test_concurrent_file_protocol_counters_do_not_leak():
     assert second["native_invalid_truncated"] == 1
 
 
-def test_export_includes_llm_usage_by_label():
+def test_export_breaks_usage_down_by_label_provider_and_model():
+    from bibr.export.usage import build_usage_export
+    from tests.export.conftest import extraction_block as _extraction_block
+
     paper = _minimal_paper(
-        llm_usage={
-            "m": {
-                "input_tokens": 1,
-                "output_tokens": 1,
-                "total_tokens": 2,
-                "cached_input_tokens": 0,
-            }
-        },
-        llm_usage_by_label={
-            "extract_authors": {
+        llm_usage_labels={
+            ("extract_authors", "google", "m"): {
                 "input_tokens": 1,
                 "output_tokens": 1,
                 "total_tokens": 2,
@@ -348,12 +354,22 @@ def test_export_includes_llm_usage_by_label():
             }
         },
     )
+    paper.extraction = _extraction_block(usage=build_usage_export(paper.llm_usage_labels))
     data = export_paper_to_json(paper)
-    assert data["llm_usage_by_label"]["extract_authors"]["calls"] == 1
-    assert data["info"]["schema_version"] == "10.7"
+    row = data["extraction"]["usage"]["breakdown"][0]
+    assert (row["label"], row["provider"], row["model"], row["calls"]) == (
+        "extract_authors",
+        "google",
+        "m",
+        1,
+    )
+    assert data["schema_version"] == "11.0"
 
 
-def test_export_emits_null_llm_usage_by_label_when_empty():
+def test_export_omits_usage_when_no_labels_were_tracked():
+    from tests.export.conftest import extraction_block as _extraction_block
+
     paper = _minimal_paper()
+    paper.extraction = _extraction_block()
     data = export_paper_to_json(paper)
-    assert data["llm_usage_by_label"] is None
+    assert "usage" not in data["extraction"]

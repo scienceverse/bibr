@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from bibr.input.html_native import HtmlParser
     from bibr.input.jats_native import JatsParser
     from bibr.input.pdf_outline import OutlineItem
-    from bibr.ocr.pdf_inspection import PdfInspection, PdfInspectionAccumulator
+    from bibr.ocr.pdf_inspection import PdfInspection
     from bibr.ocr.types import OcrRegionResult
     from bibr.paper import Paper
     from bibr.paper_contents import PaperContents
@@ -61,7 +61,6 @@ class FileState:
     page_indices: list[int] | None = None
     layout_results: list[list[dict[str, Any]]] | None = None
     pdf_inspection: "PdfInspection | None" = None
-    pdf_inspection_accumulator: "PdfInspectionAccumulator | None" = None
     # Typed Region IR: OcrStage emits OcrRegionResult objects (wire-format
     # dicts stay stage-internal); ParseSegmentStage hands them to PDFParser.
     ocr_regions: "list[list[OcrRegionResult]] | None" = None
@@ -100,18 +99,9 @@ class FileState:
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""
         self.pdf_bytes = None
-        self.free_page_images()
+        self.page_images = None
         self.layout_results = None
         self.pdf_inspection = None
-        self.pdf_inspection_accumulator = None
-
-    def free_page_images(self):
-        """Release pixel buffers explicitly, including those retained by error tracebacks."""
-        for image in self.page_images or []:
-            close = getattr(image, "close", None)
-            if close is not None:
-                close()
-        self.page_images = None
 
     def free_pre_parse(self):
         """Free data consumed by parse stage."""
@@ -147,12 +137,17 @@ class FileState:
 
     def free_all(self):
         """Free all intermediate state after export."""
+        # A paper freed before its enrich stage ran (it errored) still owns an
+        # in-flight enrichment prefetch; cancel it rather than orphan it.
+        if self.paper is not None:
+            from bibr.pipeline.enrich_prefetch import cancel_prefetch
+
+            cancel_prefetch(self.paper)
         self.pdf_bytes = None
-        self.free_page_images()
+        self.page_images = None
         self.page_indices = None
         self.layout_results = None
         self.pdf_inspection = None
-        self.pdf_inspection_accumulator = None
         self.ocr_regions = None
         self.ref_line_geometry = None
         self.pdf_outline = None

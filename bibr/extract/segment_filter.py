@@ -63,6 +63,13 @@ _CITATION_TAIL_RE = re.compile(r"[\s.,;:)\]]*\Z")
 # title was lost upstream — leave it alone rather than risk dropping a real
 # (if incomplete) entry. In-text-cite fragments observed are far shorter.
 _MAX_INTEXT_CITATION_LEN = 80
+# Structure a bare in-text citation never carries. A printed list number
+# introduces a numbered bibliography entry ("12." / "[3]"), and a sentence
+# break before the year means a title/container preceded it. Both mark
+# Vancouver and IEEE entries, which terminate at the year the way an in-text
+# cite does ("… Boston: Little, Brown; 1986.") and would otherwise be dropped.
+_LIST_NUMBER_RE = re.compile(r"^\[?\d{1,3}[\].)]")
+_SENTENCE_BREAK_RE = re.compile(r"\.\s")
 
 
 def _is_intext_citation(s: str) -> bool:
@@ -90,6 +97,11 @@ def _is_intext_citation(s: str) -> bool:
     last = years[-1]
     # Page-range numbers (e.g. "1943–1977") are not citation years.
     if last.start() > 0 and core[last.start() - 1] in "-–—/":
+        return False
+    # Numbered styles (Vancouver, IEEE) do end at the year, so the tail test
+    # below cannot separate them from an in-text cite — reference structure in
+    # the text *before* the year does.
+    if _LIST_NUMBER_RE.match(core) or _SENTENCE_BREAK_RE.search(core[: last.start()]):
         return False
     # A real reference has its title *after* the year; an in-text cite has
     # nothing but punctuation there.

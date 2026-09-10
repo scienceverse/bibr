@@ -30,6 +30,10 @@ Explicit run flags such as `--ocr`, `--llm`, `--refs`, and `--memory` override
 their corresponding settings for that invocation. Source-checkout users should
 prefix the commands on this page with `uv run`.
 
+Set `BIBR_DISABLE_DOTENV=1` to skip both `.env` files entirely. Benchmark
+harnesses and CI should do this so every setting a run records came from the
+process environment, not from whatever `.env` happened to be in the checkout.
+
 ```bash
 bibr setup
 ```
@@ -47,38 +51,6 @@ machine is too weak but privacy still matters, use the private-server path:
 run the Docker OCR/API stack on a GPU machine and point your laptop's `.env`
 at that server.
 
-## Native input and PDF text
-
-DOCX, JATS XML, HTML, and ePub are parsed natively and bypass PDF rendering,
-layout detection, and OCR. Metadata embedded in JATS and supported HTML/ePub
-documents can become the extraction result directly; unstructured metadata and
-reference strings may still need the configured downstream models.
-
-For PDFs, `OCR_NATIVE_TEXT_ENABLED=true` is the default. After local layout
-detection, usable text-layer content fills eligible regions directly, with OCR
-for the remaining regions. This is selective: it does not remove the local
-layout dependency or guarantee that a text-layer PDF makes no OCR requests.
-Set `OCR_NATIVE_TEXT_ENABLED=false` to force recognition for those text regions.
-
-### Experimental native reconstruction
-
-Native PDF reconstruction keeps stable character indices, bounding boxes, font
-metadata and rotation in the inspection record. Set `OCR_NATIVE_REPAIR_ENABLED=true`
-to repair damaged native lines and separately recognize owned inline formulas.
-`OCR_NATIVE_CAPTIONS_ENABLED=true` additionally accepts unambiguous single-line
-captions beginning with a figure/table/chart marker; it requires native repair.
-Both options default to false and require `OCR_NATIVE_TEXT_ENABLED=true`.
-Ambiguous ownership falls back to region OCR. Repair output is marked unverified;
-failed or truncated repairs retain an unresolved marker and the original candidate.
-
-Exports made with `include_regions=True` include `_native_source` character and
-raster coverage diagnostics, plus region source IDs and typed native/repair spans.
-Unassigned native characters and ink outside layout boxes remain visible even
-when layout omits a block. Raster ink includes pictures and rules, so these counts
-are review signals, not proof of missing text or source fidelity. Native line
-grouping cannot reconstruct an entirely absent text layer. These diagnostics add
-memory and cache size proportional to the PDF's native character count.
-
 ## Namespaces
 
 There's no global `BIBR_` prefix. Instead, each settings group has its own
@@ -95,6 +67,13 @@ CROSSREF_API_EMAIL=you@example.org
 
 `LLM_PROVIDER` selects the LLM client's provider; `CROSSREF_API_EMAIL` is
 passed to Crossref's "polite pool" for reference enrichment lookups.
+
+Reference enrichment itself is opt-in: `CROSSREF_ENRICH` defaults to `false`,
+so a plain `bibr chew` (or `POST /papers/extract`) never calls Crossref or the
+resolver and the `bib_match` table stays empty. Set `CROSSREF_ENRICH=true` to
+enrich by default, or switch it per run — `bibr chew --crossref` /
+`--no-crossref`, `bibr.chew(..., crossref=True)`, or the `crossref=true|false`
+form field on `/papers/extract` — which wins over the setting either way.
 
 ## Choosing an OCR backend
 
@@ -161,10 +140,10 @@ OCR_PROFILE=paddle
 Profiles also preserve output semantics. The Paddle profile decodes OTSL table
 markers (`<fcel>`, `<lcel>`, `<nl>`, `<ecel>`) into HTML and removes one outer
 Markdown/LaTeX fence or balanced display wrapper from formulas. It retains the
-unmodified model response as `_raw_ocr_content` in the opt-in `_regions`
-diagnostic payload. The selected backend, model, and profile are included in
-`ocr_config` and in the OCR-cache identity, so a cache hit never crosses a
-Paddle/GLM or normalizer boundary.
+unmodified model response as `raw_ocr_content` in the opt-in
+`extraction.regions` diagnostic payload. The selected backend, model, and
+profile are included in `extraction.ocr` and in the OCR-cache identity, so a
+cache hit never crosses a Paddle/GLM or normalizer boundary.
 
 The managed llama.cpp servers default to full GPU offload, flash attention,
 and `q8_0` KV-cache quantization. OCR uses one parallel slot. The LLM can use
@@ -196,7 +175,8 @@ LLM_API_KEY=your-endpoint-key
 
 `--llm local` starts a managed server. It resolves to Rapid-MLX on Apple
 Silicon when that executable is available, otherwise vllm-mlx; llama.cpp on
-Windows or CUDA cards with at most 8 GB; and vLLM on larger Linux/CUDA systems.
+Windows or CUDA cards below 11 GB; and vLLM on Linux/CUDA systems with at
+least 11 GB (or when VRAM detection is unavailable).
 Explicit choices are `vllm`, `vllm-mlx`, `rapid-mlx`, `llama-cpp`, and `llmster`.
 The OCR and LLM choices are independent, so local OCR with a cloud LLM is a
 supported hybrid configuration.
@@ -213,8 +193,8 @@ model is NuExtract 3, with runtime-specific weights:
 These are model-fit estimates, not total pipeline memory guarantees. The
 advanced wizard also offers Gemma 4 E4B on CUDA and custom model IDs.
 `LLM_LOCAL_MODEL` selects managed local weights; `LLM_MODEL` and `--llm-model`
-select the provider model. The bare `LLM_LOCAL_MODEL` default is an MLX model,
-so run setup or set a compatible model explicitly on CUDA/Windows. Rapid-MLX
+select the provider model. When `LLM_LOCAL_MODEL` is unset, vLLM, llama.cpp,
+and vllm-mlx choose a compatible NuExtract 3 variant from the registry. Rapid-MLX
 has a separate `LLM_RAPID_MLX_MODEL` default (`qwen3.5-4b-4bit`) when no local
 model was explicitly configured.
 
@@ -227,86 +207,15 @@ first, then set `LLM_LLMSTER_MODEL` to its model key. Bibr can start its daemon
 and API server and load that existing model. It does not install the runtime
 or download a model, and cleans up only resources it started.
 
-For a custom `LLM_BASE_URL`, forward model-specific chat-template options with
-`LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'` when the runtime supports
-that option. Bibr sends this JSON object to the endpoint on every call, including
-recovery calls. It is separate from `LLM_REASONING_EFFORT` and is ignored when
-using the standard OpenAI endpoint.
-
-If a custom OpenAI-compatible endpoint aborts JSON-constrained decoding, bibr
-tries one recovery route with the schema in the prompt and validates the result
-in Python. This avoids reusing a failed server grammar; malformed recovery
-output still fails validation. Truncation and content-filter responses do not
-trigger this fallback.
-
-Reference parsing is configured separately from the metadata model. The default
-`--refs ner` uses the local reference parser even when a large LLM is selected.
-Use `--refs llm` to have the selected LLM parse reference fields; `--ref-seg`
-independently controls how the bibliography is split into entries.
-
-Local extraction speed and quality depend on the runtime, model, and paper.
-Rapid-MLX and vllm-mlx default to one concurrent LLM call. Managed llama.cpp
-matches its probed slot count (one or two); vLLM retains the configured
-`LLM_MAX_CONCURRENCY`. Benchmark representative papers before raising that
-setting; additional in-flight calls can increase memory pressure without
-improving throughput.
-
-## LLM input size
-
-`LLM_PER_TASK_CONTEXT=true` (the default) gives author and classification tasks
-separate context slices. `LLM_TITLE_CONTEXT=true` additionally lets the
-title/abstract request omit identified author and affiliation rows between a
-unique title and an abstract. This extra pruning is experimental and defaults to
-false. Check completeness and response validity on your own papers before
-enabling it. Unknown or mixed rows, publication evidence, and abstract text
-remain in the experimental slice.
-The author request and downstream grounding retain their own evidence. Ambiguous
-boundaries and the experimental merged metadata call keep the full input.
-Set `LLM_PER_TASK_CONTEXT=false` to send the full context to each metadata task.
-
-`LLM_COMPACT_METADATA_PROMPT=true` selects shorter title/abstract/publication
-instructions and response-field descriptions. It preserves the field types,
-validation, and abstract-boundary rules. This option also defaults to false;
-verify that it preserves the publication fields needed by your workflow. It
-does not change the merged metadata contract.
-Use the selected contract consistently when preparing fine-tuning data.
-
-The statistical-equation fallback excludes clear citation, date, cross-reference,
-and software-version parentheses when the sentence contains no other statistical
-signal. Uncertain numeric expressions remain eligible. It packs whole sentences
-into batches using an approximate input-token target:
-
-```bash
-LLM_EQUATION_BATCH_INPUT_TOKENS=1500
-```
-
-This estimates the sentence payload as UTF-8 bytes divided by three, with row
-framing overhead; it excludes instructions and the response schema. It is a
-packing target, not an exact tokenizer count or a hard context limit. A sentence
-larger than the target stays intact in its own batch. Each batch contains at most
-10 sentences to limit completion size. Lower the target for smaller context
-windows. The existing `EQUATION_LLM_FALLBACK_MIN_REGEX_STATS` paper-level gate
-remains optional and defaults to zero (disabled).
-
-`LLM_CITATION_SHORTLIST=true` (the default) reduces the bibliography sent to the
-citation-resolution fallback when every citation has usable author/year evidence.
-It keeps every reference sharing a cited surname or year, including year-suffix
-variants, and references with missing authors or years. Original bibliography IDs
-and source order are preserved. Uncertain retrieval keeps the full bibliography;
-numeric citation numbers are never treated as bibliography IDs.
-
-Shortlisting requires at least 512 characters and 25% less bibliography text.
-Unresolved, omitted, conflicting, or out-of-candidate model answers get one
-full-bibliography retry for those citations. Valid first-pass answers are kept.
-Both requests count toward LLM usage and rate limits. Existing input caps still
-apply. Set `LLM_CITATION_SHORTLIST=false` to retain the previous full-bibliography
-request. The shortlist is a retrieval heuristic, so a plausible incorrect answer
-can still pass without triggering a retry.
+Local inference speed depends on the runtime, model, hardware, and document.
+Validate the fields you need on representative papers before choosing a model
+for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
+with local OCR when local LLM throughput is insufficient.
 
 ## Presets
 
-If you switch between setups often — cloud vs. local, a fast model for bulk
-runs vs. a bigger one for precision — save each as a named preset instead of
+If you switch between setups often — cloud vs. local, different models for different
+corpora — save each as a named preset instead of
 hand-editing `.env` every time:
 
 ```bash
@@ -328,37 +237,6 @@ without touching `.env`:
 bibr chew paper.pdf --preset fast-gemini
 ```
 
-## PDF memory and concurrency
-
-`PIPELINE_MEMORY_MODE` (or `--memory`) controls model residency:
-
-- `aggressive` unloads models between phases; auto-selected for CUDA cards with
-  at most 8 GB VRAM or systems with at most 8 GB RAM.
-- `balanced` is the other automatic default and retains layout and segmentation
-  models while handing memory between OCR and a managed local LLM as needed.
-- `keep_all` retains models for throughput when sufficient memory is available.
-
-Local runs and `bibr serve` process PDFs in windows of eight pages by default.
-Each window completes rendering, layout, native text extraction, and OCR before
-its page images and temporary crops are released. Text and geometry accumulate
-for whole-document parsing, including references that continue across windows.
-
-```bash
-PIPELINE_PAGE_WINDOW_SIZE=8
-```
-
-Lower this on machines with limited RAM. This controls resident page images per
-active file; it does not truncate a document. `PIPELINE_MAX_PAGES` remains the
-separate document-length limit. Concurrent files and requests each have their
-own window, so also tune `OCR_MAX_CONCURRENT_FILES` and
-`PIPELINE_MAX_INFLIGHT_REQUESTS` for available RAM. Requested figure images and
-the final text output still grow with document size.
-
-Serve retains shared GPU batching across requests. Balanced and keep-all modes
-reuse models across page windows. Aggressive mode releases OCR between windows
-so layout can reclaim memory; smaller windows can therefore increase model
-reload overhead in that mode.
-
 ## Reference-extraction strategies
 
 Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
@@ -366,8 +244,9 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 - **`ner`** (default) — the default `geom` segmentation locates each
   reference with a local geometry model, cascading through layout-region
   anchors, LLM segmentation, and CRF when earlier tiers cannot resolve it.
-  A local ModernBERT-CRF model parses the resulting entries. Both local models
-  require `ml`; parsing has no per-reference LLM cost.
+  A local ModernBERT-CRF model parses the resulting entries. The core install
+  supports geometry and ONNX parsing; parsing has no per-reference LLM cost.
+  `REF_SEG_STRATEGY=crf` requires the `torch` extra.
 - **`llm`** — parses references with the configured LLM in batches of up to
   `REF_PARSE_BATCH_SIZE` entries (default 15), with NER recovery for failed
   batches when available.
@@ -377,29 +256,56 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
   citation-link tables) while keeping everything else — titles, authors,
   sections, equations.
 
-`--ref-seg` (or `REF_SEG_STRATEGY`) independently selects `geom` (default),
-`region`, `llm`, or `crf`. Set `REF_SEG_LLM_FALLBACK=false` to remove the LLM
-tier from automatic geometry/region cascades; this does not disable an explicit
-`--ref-seg llm`. Native reference boundaries and structured fields are reused
-where available. See [Architecture](architecture.md) for the complete flow.
+`--ref-seg` (or `REF_SEG_STRATEGY`) overrides just the segmentation step
+independently of parsing. The full set of strategies and how they cascade is
+covered in [Architecture](architecture.md).
 
-`--no-llm` disables downstream LLM extraction, equations, and Crossref. The
-configured OCR backend still runs when needed. Native metadata and already
-structured native references can survive this mode; it does not run NER to
-recover unstructured references. `--refs off` also clears native references.
+## Local model runtime
 
-## Enrichment and optional figure analysis
+Four of bibr's models run locally: the PP-DocLayoutV3 layout detector, the
+section classifier, the paper classifier and the ModernBERT+CRF reference
+parser. Each ships twice — as PyTorch weights, and as an ONNX bundle
+(`onnx/model.onnx` + `onnx/bibr_onnx.json`, plus `onnx/tokenizer.json` for the
+text models) in the same Hub repo at the same pinned revision. `ML_RUNTIME`
+picks which one is loaded:
 
-`CROSSREF_ENRICH=true` enables reference matching by default. Matches are kept
-separately from extracted bibliography fields. `CROSSREF_CONSOLIDATE=off`
-(default) preserves those original fields; `fill` fills missing fields from
-accepted matches, and `replace` replaces supplied fields. The CLI override is
-`--consolidate` (equivalent to `fill`) or `--consolidate=replace`; set
-`CROSSREF_CONSOLIDATE=off` to disable consolidation. Use `--no-crossref` for a run without this
-network service.
+| `ML_RUNTIME` | Behaviour |
+|---|---|
+| `auto` (default) | Use the ONNX bundle if it resolves; otherwise fall back to PyTorch if `torch` is importable; otherwise raise a `ConfigurationError` naming the model, `pip install 'bibr[torch]'`, and the setting that points at a local bundle. |
+| `onnx` | The ONNX bundle must resolve, or `ConfigurationError`. |
+| `torch` | `torch` must be importable, or `ConfigurationError`. |
 
-Figure metadata is exported normally; embedded images require `--figure-images`.
-The `FIG_*` settings reserve a future structured figure-analysis feature.
-`FIG_EXTRACT=meta` is accepted as a setting but is not implemented: it logs a
-warning and does not populate `figure[].analysis`. Keep its default, `off`,
-for normal use.
+This is what makes the [core install](../getting-started/install.md) able to run
+the full HTTP-service path — OCR and the LLM over HTTP, every bibr-owned model
+through ONNX Runtime — with no `torch`, `transformers` or OpenCV in the
+environment. The `torch` extra remains the training-parity runtime, the Apple
+MPS path, and the `torch.compile` path `bibr serve` uses for layout.
+
+A bundle resolves from a local directory containing `onnx/` (point the model's
+existing `*_MODEL_ID` / `NER_PARSER_CKPT` setting at it) or from the Hub at the
+pinned revision, offline-tolerant through the Hub cache. Layout is the one model
+whose PyTorch weights live in a third-party repo, so its ONNX artifact has its
+own pair of settings, `LAYOUT_ONNX_MODEL_ID` and `LAYOUT_ONNX_REVISION`.
+
+All four bundles are published, so a core install needs no configuration:
+
+| Model | Repo | Pinned revision |
+|---|---|---|
+| Layout | `scienceverse/bibr-layout-onnx` | `2bcb16a6` |
+| Section classifier | `scienceverse/bibr-section-classifier` | `ee1a83db` |
+| Paper classifier | `scienceverse/bibr-paper-classifier` | `6046171b` |
+| Reference parser | `scienceverse/bibr-parser-v4-5-gold` | `ff50a83e` |
+
+The three text-model pins moved forward from the previously audited commits to
+the commits that add `onnx/`. Those commits are purely additive — no existing
+file changed — so the PyTorch path still loads byte-identical weights.
+
+Execution providers come from the same chain the sentence segmenter uses
+(CUDA → CoreML → CPU), so `bibr[gpu]` accelerates all four models, not just
+segmentation.
+
+`Dockerfile.serve` sets `ML_RUNTIME=torch` explicitly. That image exists for the
+PyTorch stack — `torch.compile` on the layout model in particular — and since the
+classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
+setting unset would let `auto` move serve onto ONNX Runtime the next time the
+image is built. Switching it is a deliberate choice, not a build-time accident.

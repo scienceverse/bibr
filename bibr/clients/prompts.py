@@ -31,7 +31,6 @@ from typing import Literal
 from bibr.schemas import (
     AuthorsLLM,
     CitationResolutionResult,
-    CompactTitleKeywordsLLM,
     CoreMetadataLLM,
     EquationExtractionResult,
     PaperClassificationLLM,
@@ -105,8 +104,9 @@ An abstract may be unheaded or use structured subheadings, but must be a distinc
 summary of the paper. Return null when no such summary is present; do not write
 a summary yourself. Stop at the end of the abstract, before body text, keywords,
 funding, disclosures, or a separate plain-language or significance statement.
-If parallel language versions are printed, select the version in the language
-of the main title; do not concatenate or translate the versions.
+If parallel language abstracts are printed, prefer the printed English version
+when available; otherwise use the first complete printed version. Copy it
+verbatim; do not concatenate or translate the versions.
 """
 
 _TITLE_KEYWORDS_PROMPT = (
@@ -147,40 +147,6 @@ and never take values from a reference in the bibliography.
   → "CC BY 4.0")."""
     + _ABSTRACT_BOUNDARY_RULES
 )
-_COMPACT_TITLE_KEYWORDS_PROMPT = (
-    """The supplied fenced text is front matter from a scientific paper.
-Extract the title, abstract, and keywords.
-
-Title: the paper's title as written.
-
-Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
-and sentence boundaries. Exclude everything that is not abstract content:
-- running headers / journal-issue lines (e.g. "Psychological Science 2017, Vol. 28(5) 609-619")
-- copyright notices ("© The Author(s) 2017")
-- DOI URLs and "Reprints and permissions" / "Article reuse guidelines" banners
-- "www.<journal>.org" or publisher-logo fragments ("SAGE", "S Sage")
-- affiliation blocks (e.g. "1 Department of …")
-- "Statement of Relevance" boxes that some journals print alongside the abstract
-If the paper has no abstract (e.g. a commentary), return null.
-
-Keywords: return an empty list [] if absent.
-
-Publication details must belong to THIS paper, never a cited reference. Copy
-printed values from front matter, running headers, footers or copyright/license
-lines; return null when absent, never guess.
-- journal: venue name; issn: journal ISSN.
-- publisher: publishing house verbatim, including suffixes; never infer from
-  a journal name or DOI.
-- "Vol. 31(1)" → volume "31", issue "1".
-- Printed page range "65-74" → first_page "65", last_page "74"; otherwise null.
-- published: printed publication/issue or Published online/Available online
-  date. Keep YYYY-MM-DD when a full date is printed; use YYYY only when no
-  full publication date is printed. Exclude Received/Accepted/Revised dates.
-- license: only an explicit license, normalized to short form, e.g. Creative
-  Commons Attribution 4.0 → "CC BY 4.0". Preserve a printed version; never
-  infer one. "Open Access" alone is not a license: return null."""
-    + _ABSTRACT_BOUNDARY_RULES
-)
 
 _AUTHORS_PROMPT = """The supplied fenced text is the first page of a scientific paper.
 Extract the authors. Preserve the original order of the authors.
@@ -189,12 +155,13 @@ Author name rules:
 - "given" = the first name plus every middle name or initial, in printed order
 - "family" = the surname only, carrying any particles that precede it (van, van
   der, de, von, del, …) and any suffix printed as part of it (Jr., III)
+- A family name can contain several words even without a hyphen or particle.
+  Keep compound family names together; do not assume that only the final word
+  is the surname. Use the printed name and any abbreviated citation to resolve the split.
 - Single-letter tokens between first and last name are middle initials, not part of the surname
 - When a name has exactly two tokens and neither is a particle (van, de, von, etc.), the first is the given name and the second is the family name
 - Never invent, complete or substitute a name: every given/family value must be
   a verbatim span of the fenced text. If no byline is printed, return no authors.
-- Use the byline in the language/script of the main title when parallel versions
-  are printed. Prefer full byline names over initials in a 'how to cite' block.
 - Organisation or consortium authors (e.g. "DeepSeek-AI", "The ATLAS Collaboration"):
   set given: "" and put the full name in family.
 
@@ -289,6 +256,9 @@ Authors (preserve the original order):
 - "given" = the first name plus every middle name or initial, in printed order
 - "family" = the surname only, carrying any particles that precede it (van, van
   der, de, von, del, …) and any suffix printed as part of it (Jr., III)
+- A family name can contain several words even without a hyphen or particle.
+  Keep compound family names together; do not assume that only the final word
+  is the surname. Use the printed name and any abbreviated citation to resolve the split.
 - Single-letter tokens between first and last name are middle initials, not part of the surname
 - When a name has exactly two tokens and neither is a particle (van, de, von, etc.), the first is the given name and the second is the family name
 - Never invent, complete or substitute a name: every given/family value must be
@@ -683,15 +653,3 @@ PROMPTS: dict[str, PromptSpec] = {
         ),
     )
 }
-
-
-def title_keywords_spec(*, compact: bool = False) -> PromptSpec:
-    """Select the optional compact contract without changing other task prompts."""
-    if not compact:
-        return PROMPTS["title_keywords"]
-    return PromptSpec(
-        name="title_keywords",
-        system=_FRONT_MATTER_SYS,
-        response_model=CompactTitleKeywordsLLM,
-        build_user=_build_doc_first(_COMPACT_TITLE_KEYWORDS_PROMPT),
-    )

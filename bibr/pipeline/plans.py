@@ -18,8 +18,9 @@ def build_stage_plan(
 ) -> tuple[Stage, ...]:
     """Build a fresh, validated-by-owner ordered stage plan.
 
-    Render/OCR runs in bounded page windows in both modes. Serve's shared
-    GPU batchers still coalesce windows across concurrent requests.
+    The pipeline remains deliberately linear.  Local execution fuses the
+    render/OCR stages to bound memory, while serve keeps them separate so its
+    GPU batchers can coalesce work across requests.
     """
     from bibr.pipeline.stages.classifiers import ClassifierStage
     from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
@@ -72,10 +73,14 @@ def build_stage_plan(
         )
 
     if mode == "serve":
-        from bibr.pipeline.stages.render_ocr import InterleavedRenderOcrStage
+        from bibr.pipeline.stages.layout import LayoutStage
+        from bibr.pipeline.stages.native_text import NativeTextStage
+        from bibr.pipeline.stages.ocr import OcrStage
 
         return common_front + (
-            InterleavedRenderOcrStage(),
+            LayoutStage(),
+            NativeTextStage(),
+            OcrStage(),
             ClassifierStage(),
             ParseSegmentStage(),
             PostParseStage(),

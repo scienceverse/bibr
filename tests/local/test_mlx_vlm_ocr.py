@@ -54,6 +54,40 @@ def test_mlx_vlm_server_smoke_uses_paddle_client(monkeypatch):
     client.shutdown.assert_awaited_once()
 
 
+def test_mlx_vlm_smoke_tears_the_client_down_in_its_own_loop(monkeypatch):
+    """The httpx pool is bound to the loop that created it.
+
+    Running the request in one ``asyncio.run`` and the teardown in a second
+    raised ``RuntimeError: Event loop is closed`` out of the ``finally``,
+    replacing a successful smoke result — so the backend could never start.
+    """
+    import asyncio
+
+    from bibr.config import GlobalSettings
+    from bibr.local import mlx_vlm_ocr as mod
+
+    class LoopBoundClient:
+        def __init__(self, **_kwargs):
+            self.loop = None
+
+        async def recognize(self, _image, _prompt):
+            self.loop = asyncio.get_running_loop()
+            return "OCR OK"
+
+        async def shutdown(self):
+            if asyncio.get_running_loop() is not self.loop:
+                raise RuntimeError("Event loop is closed")
+
+    settings = GlobalSettings()
+    server = mod.MlxVlmOcrServer.__new__(mod.MlxVlmOcrServer)
+    server._settings = settings
+    server._model = "olragon/PaddleOCR-VL-1.6-8bit"
+    server._port = 8775
+    monkeypatch.setattr(mod, "PaddleHttpOcrClient", LoopBoundClient)
+
+    server._run_smoke()
+
+
 def test_mlx_vlm_reused_listener_must_pass_strict_smoke(monkeypatch):
     from bibr.config import GlobalSettings
     from bibr.local import mlx_vlm_ocr as mod

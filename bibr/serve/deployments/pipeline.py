@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, SafeLlmDiagnostics
 from bibr.serve.ingress import UploadIntegrityError, consume_upload_descriptor
+from bibr.serve.logsetup import configure_worker_logging
 
 if TYPE_CHECKING:
     from bibr.cache import ResponseCache
@@ -50,22 +51,30 @@ def _emit_extract_metric(
 ) -> None:
     """Emit one ``event="extract"`` JSON line for an extraction attempt.
 
-    Gated on ``METER_ENABLED``. ``llm_usage``/``llm_tokens_total`` are reported
-    only for fresh (non-cache) successes — a cache hit spends no LLM tokens, so
-    reporting the cached run's usage would double-count spend.
+    Gated on ``METER_ENABLED``. ``llm_usage_totals``/``llm_tokens_total`` are
+    reported only for fresh (non-cache) successes — a cache hit spends no LLM
+    tokens, so reporting the cached run's usage would double-count spend.
+
+    ``llm_usage_totals`` is flat pipeline-wide totals
+    (``calls``/``input_tokens``/``cached_input_tokens``/``output_tokens``/
+    ``total_tokens``). It replaces the pre-v11 ``llm_usage`` key, which was
+    keyed by model; the key was renamed rather than reshaped so consumers fail
+    loudly on a missing key instead of silently misreading a changed one.
     """
     if not settings.metering.enabled:
         return
-    llm_usage: dict | None = None
+    llm_usage_totals: dict | None = None
     tokens_total: int | None = None
     failure_diagnostics: dict[str, object] | None = None
     if success and not cache_hit and result_json:
-        llm_usage = result_json.get("llm_usage") or None
-        if llm_usage:
+        # v11: per-paper LLM spend is ``extraction.usage.totals`` (already
+        # aggregated over every (label, provider, model) row).
+        llm_usage_totals = ((result_json.get("extraction") or {}).get("usage") or {}).get(
+            "totals"
+        ) or None
+        if llm_usage_totals:
             try:
-                tokens_total = sum(
-                    int(model.get("total_tokens", 0) or 0) for model in llm_usage.values()
-                )
+                tokens_total = int(llm_usage_totals.get("total_tokens", 0) or 0)
             except (AttributeError, TypeError, ValueError):
                 tokens_total = None
     elif not success and type(safe_diagnostics) is SafeLlmDiagnostics:
@@ -82,7 +91,7 @@ def _emit_extract_metric(
                 "success": success,
                 "error_kind": error_kind,
                 "error_code": error_code,
-                "llm_usage": llm_usage,
+                "llm_usage_totals": llm_usage_totals,
                 "llm_tokens_total": tokens_total,
                 "llm_failure_diagnostics": failure_diagnostics,
             }
@@ -252,8 +261,13 @@ class BibrPipelineAPI(ls.LitAPI):
       - ``end_page``   (optional int, 0-indexed inclusive)
       - ``include_figures`` (optional bool, default false)
       - ``include_regions`` (optional bool, default false): emit the
-        ``_regions`` layout debug payload; off by default since standard
+        ``extraction.regions`` layout debug payload; off by default since standard
         consumers (Metacheck) don't read it.
+      - ``crossref`` (optional bool): run Crossref/resolver reference
+        enrichment for this request (``true``) or skip it (``false``);
+        absent → the server-side CROSSREF_ENRICH setting, which is off by
+        default. The response cache keys on the effective value, so an
+        enriched and an unenriched result never collide.
       - ``consolidate`` (optional, ``fill``/``replace``): merge accepted
         bib_match data into bib rows (absent → server-side
         CROSSREF_CONSOLIDATE setting; no per-request 'off' override)
@@ -277,6 +291,10 @@ class BibrPipelineAPI(ls.LitAPI):
 
     def setup(self, device: str) -> None:
         import httpx
+
+        # This runs in the spawned inference worker, a fresh interpreter with no
+        # logging configured: give it the serve sink and the metering sink.
+        configure_worker_logging(self._settings)
 
         from bibr.serve.deployments.layout import LayoutDetector
         from bibr.serve.deployments.segmenter import SentenceSegmenter
@@ -466,6 +484,9 @@ class BibrPipelineAPI(ls.LitAPI):
 
         include_figures = _opt_bool("include_figures", request.get("include_figures", "false"))
         include_regions = _opt_bool("include_regions", request.get("include_regions", "false"))
+        # Tri-state: absent/empty → None (defer to CROSSREF_ENRICH at run time).
+        crossref_raw = request.get("crossref")
+        crossref = None if crossref_raw in (None, "") else _opt_bool("crossref", crossref_raw)
 
         consolidate = request.get("consolidate")
         if consolidate in (None, ""):
@@ -496,6 +517,7 @@ class BibrPipelineAPI(ls.LitAPI):
             "end_page": end_page,
             "include_figures": include_figures,
             "include_regions": include_regions,
+            "crossref": crossref,
             "consolidate": consolidate,
             "refs": refs,
             "ref_seg": ref_seg,
@@ -526,6 +548,10 @@ class BibrPipelineAPI(ls.LitAPI):
         # request value — None defers to the setting at export time.
         consolidate = inputs["consolidate"]
         effective_consolidate = consolidate or self._settings.crossref.consolidate
+        # Same for enrichment: the cache key carries the *effective* switch so
+        # a ``crossref=true`` request never reads back a cached unenriched
+        # result (or vice versa) under the same file hash.
+        effective_crossref = self._effective_crossref(inputs.get("crossref"))
         # Per-request ref-strategy overrides (None → server-side settings). The
         # RunConfig keeps the raw request values (None defers at run time); the
         # cache key uses the *effective* resolved strategies so a refs=off pass
@@ -553,6 +579,7 @@ class BibrPipelineAPI(ls.LitAPI):
             effective_consolidate,
             refs=eff_refs,
             ref_seg=eff_ref_seg,
+            crossref=effective_crossref,
         )
 
         if not self._cache:
@@ -743,9 +770,10 @@ class BibrPipelineAPI(ls.LitAPI):
             logger.warning("Corrupt response cache entry %s; deleting", cache_key, exc_info=True)
             await self._bounded_cache_call(self._cache.delete(cache_key), what="delete")
             return None
-        info = paper_json.get("info") if isinstance(paper_json, dict) else None
-        if isinstance(info, dict):
-            info["file_name"] = filename
+        # v11: the input artifact's identity lives at the root ``source`` block.
+        source = paper_json.get("source") if isinstance(paper_json, dict) else None
+        if isinstance(source, dict):
+            source["file_name"] = filename
         _emit_extract_metric(
             file_hash=file_hash,
             filename=filename,
@@ -773,18 +801,24 @@ class BibrPipelineAPI(ls.LitAPI):
         consolidate = inputs["consolidate"]
         refs = inputs.get("refs")
         ref_seg = inputs.get("ref_seg")
+        crossref = inputs.get("crossref")
 
         # Per-request fields ride on a fresh RunConfig; the pipeline is shared.
-        config = dataclasses.replace(
-            self._pipeline._config,
-            start_page=start_page,
-            end_page=end_page,
-            include_figures=include_figures,
-            include_regions=include_regions,
-            consolidate=consolidate,
-            ref_seg_strategy=ref_seg,
-            ref_parse_strategy=refs,
-        )
+        overrides: dict[str, object] = {
+            "start_page": start_page,
+            "end_page": end_page,
+            "include_figures": include_figures,
+            "include_regions": include_regions,
+            "consolidate": consolidate,
+            "ref_seg_strategy": ref_seg,
+            "ref_parse_strategy": refs,
+        }
+        # Only an explicit request value replaces the deployment's tri-state
+        # ``crossref``; an absent field keeps whatever the pipeline was built
+        # with (normally None → CROSSREF_ENRICH).
+        if crossref is not None:
+            overrides["crossref"] = crossref
+        config = dataclasses.replace(self._pipeline._config, **overrides)
 
         # Gate entry into the expensive pipeline run. The async loop dispatches
         # unbounded concurrent predicts per worker; without this, a flood of
@@ -879,6 +913,17 @@ class BibrPipelineAPI(ls.LitAPI):
         # bibr that produced the result even on cache hits). No serve-side stamp.
         return output["paper_json"]
 
+    def _effective_crossref(self, requested: bool | None) -> bool:
+        """Resolve a request's tri-state ``crossref`` the way the pipeline will."""
+        if requested is not None:
+            return bool(requested)
+        pipeline = getattr(self, "_pipeline", None)
+        config = getattr(pipeline, "_config", None)
+        deployment_default = getattr(config, "crossref", None)
+        if deployment_default is not None:
+            return bool(deployment_default)
+        return bool(self._settings.crossref.enrich)
+
     @staticmethod
     def _cache_key(
         file_hash: str,
@@ -889,6 +934,7 @@ class BibrPipelineAPI(ls.LitAPI):
         consolidate: str | None,
         refs: str | None = None,
         ref_seg: str | None = None,
+        crossref: bool = False,
     ) -> str:
         key = f"json:{file_hash}"
         if start_page is not None:
@@ -905,6 +951,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += f":refs:{refs}"
         if ref_seg:
             key += f":rseg:{ref_seg}"
+        if crossref:
+            key += ":enrich"
         return key
 
     @staticmethod

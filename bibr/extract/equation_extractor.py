@@ -19,7 +19,7 @@ Four-pass strategy:
    ``BF10``, scientific notation) that the structured passes missed.
 
 Optional LLM fallback for sentences in methods/results sections that contain
-uncertain parenthesized numeric groups but where regex extraction found nothing.
+parenthesized numeric groups but where regex extraction found nothing.
 """
 
 import asyncio
@@ -60,6 +60,12 @@ _STAT_SIMPLE_NAMES = (
 )
 _STAT_SIMPLE_RE = re.compile(_STAT_SIMPLE_NAMES)
 
+# "chi2(1, N = 100)" is a statistic's own df argument, not a parenthesized stat
+# group of its own. Treating it as one emitted a bare "N = 100" and recorded
+# the span, which then vetoed the correct full match in both later passes.
+_DF_ARGUMENT_INNER_RE = re.compile(r"^[\d.,\s=Nn]+$")
+_DF_ARGUMENT_OWNER_RE = re.compile(r"(?:F|t|χ²|χ2|X²|X2)\s*$")
+
 # Full LHS pattern: either stat-with-df or simple stat name
 _LHS_PATTERN = r"(?:" + _STAT_WITH_DF.pattern + r"|" + _STAT_SIMPLE_NAMES + r")"
 
@@ -70,7 +76,9 @@ _LHS_PATTERN = r"(?:" + _STAT_WITH_DF.pattern + r"|" + _STAT_SIMPLE_NAMES + r")"
 _RHS_PATTERN = (
     r"(?:"
     r"\[[\d.,\s−–-]+\]"  # bracket range [a, b]
-    r"|[−–-]?\s*(?:\d+(?:\.\d+)?|\.\d+)"  # signed decimal / signed leading dot
+    # Grouped digits first: without it "1,204" matched only "1", so a sample
+    # size was exported three orders of magnitude too small.
+    r"|[−–-]?\s*(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
     r")"
 )
 
@@ -103,6 +111,11 @@ _LATEX_INLINE_RE = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
 # scientific notation) that the structured passes above may miss.
 
 _BROAD_OP_CHARS = "=<>~\u2248\u2260\u2264\u2265\u226a\u226b"
+# Group 2 of _BROAD_EQUATION_RE is one or two of these, so a sentence without
+# any cannot match — a necessary condition, not a heuristic. Measured on 86
+# real exports (29,521 sentences) 5.3% carry one, and the broad pass is the
+# most expensive of the four: ~25 ms/paper of the shared serve event loop.
+_BROAD_OP_PRESCAN_RE = re.compile("[" + re.escape(_BROAD_OP_CHARS) + "]")
 
 # LaTeX command in an LHS means the broad pass picked up a LaTeX fragment
 # that should be handled by the LaTeX pass (pass 3) instead.
@@ -148,100 +161,6 @@ _PLAUSIBLE_BROAD_LHS_RE = re.compile(
     r")(?:\s*\([^)]*\))?$"
 )
 
-_NUMERIC_PARENS_RE = re.compile(r"\([^()]*\d[^()]*\)")
-_YEAR_LIST_RE = re.compile(r"(?:18|19|20)\d{2}[a-z]?(?:\s*[,;–-]\s*(?:18|19|20)\d{2}[a-z]?)*")
-_CITATION_GROUP_RE = re.compile(
-    r"(?:[A-ZÀ-ÖØ-Þ][^\W\d_]+(?:[-’'][^\W\d_]+)*"
-    r"(?:\s+(?:et\s+al\.?|and|&|[A-ZÀ-ÖØ-Þ][^\W\d_]+))*"
-    r",?\s+(?:18|19|20)\d{2}[a-z]?)(?:\s*;\s*"
-    r"[A-ZÀ-ÖØ-Þ][^;\d]*,?\s+(?:18|19|20)\d{2}[a-z]?)*"
-)
-_CROSS_REFERENCE_GROUP_RE = re.compile(
-    r"(?:see\s+)?(?:fig(?:ure)?s?\.?|tables?|appendi(?:x|ces)|sections?|eq(?:uation)?s?\.?)"
-    r"\s+[A-Z]?\d+(?:[A-Za-z]|\s*[,;–-]\s*[A-Z]?\d+)*",
-    re.IGNORECASE,
-)
-_VERSION_GROUP_RE = re.compile(r"(?:version|ver\.|v\.)\s*\d+(?:\.\d+){0,3}", re.IGNORECASE)
-_DATE_CONTEXT_RE = re.compile(
-    r"\b(?:during|since|until|years?|collected|collection|began|ended)\b", re.IGNORECASE
-)
-_STAT_CONTEXT_RE = re.compile(
-    r"[=<>≤≥≈±%]|\b(?:mean|average|median|SD|SE|CI|OR|RR|HR|KMO|statistic\w*|"
-    r"variance|deviation|confidence|odds|ratio|coefficient|effect\s+size|"
-    r"p[ -]?value|t[ -]?test|F[ -]?test|chi[ -]?square)\b|"
-    r"\b[tpFzdrNn]\s*(?::|\(\s*\d)",
-    re.IGNORECASE,
-)
-
-
-def needs_equation_fallback(text: str) -> bool:
-    """Keep uncertain numeric groups; exclude only recognizable non-statistical ones.
-
-    This is a negative filter, not a vocabulary requirement for statistics.
-    Unknown/OCR-damaged forms and mixed citation/statistic sentences survive.
-    """
-    matches = list(_NUMERIC_PARENS_RE.finditer(text))
-    if not matches:
-        return False
-    if _STAT_CONTEXT_RE.search(text):
-        return True
-    if any(re.search(r"\b[A-Z]{2,}\b", match.group()) for match in matches):
-        # An unfamiliar statistic such as CFI must not look like an author.
-        # All-caps citations are conservatively retained as well.
-        return True
-    outside = _NUMERIC_PARENS_RE.sub("", text)
-    # A citation can accompany statistics expressed in prose outside it,
-    # e.g. "CFI was above 0.90 (Byrne, 2012)". Never prune that evidence.
-    if re.search(r"(?<!\w)(?:\d+\.\d+|\.\d+)(?!\w)", outside):
-        return True
-    return any(
-        not (
-            any(
-                pattern.fullmatch(match.group()[1:-1].strip())
-                for pattern in (
-                    _CITATION_GROUP_RE,
-                    _CROSS_REFERENCE_GROUP_RE,
-                    _VERSION_GROUP_RE,
-                )
-            )
-            or (
-                _YEAR_LIST_RE.fullmatch(match.group()[1:-1].strip())
-                and (
-                    _DATE_CONTEXT_RE.search(text)
-                    or re.search(r"\b[A-ZÀ-ÖØ-Þ][^\W\d_]+\s*$", text[: match.start()])
-                )
-            )
-        )
-        for match in matches
-    )
-
-
-def equation_batches(
-    candidates: list[tuple[int, str]], input_tokens: int = 1500
-) -> list[list[tuple[int, str]]]:
-    """Pack whole sentences by approximate payload tokens, preserving source order.
-
-    UTF-8 bytes / 3 plus row framing estimates tokens without loading a model
-    tokenizer. This is a packing target, not a context-window guarantee: a
-    single oversized sentence is kept intact in its own batch. Ten rows
-    also bound the amount of structured output requested in one completion.
-    """
-    if input_tokens < 1:
-        raise ValueError("Equation batch input-token target must be positive")
-    batches: list[list[tuple[int, str]]] = []
-    batch: list[tuple[int, str]] = []
-    size = 0
-    for candidate in candidates:
-        cost = (len(candidate[1].encode("utf-8")) + 2) // 3 + 8
-        if batch and (size + cost > input_tokens or len(batch) >= 10):
-            batches.append(batch)
-            batch, size = [], 0
-        batch.append(candidate)
-        size += cost
-    if batch:
-        batches.append(batch)
-    return batches
-
 
 def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
     """Return whether an LLM equation RHS occurs in its source sentence.
@@ -253,7 +172,7 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
         return False
 
     def _compact(value: str) -> str:
-        return re.sub(r"\s+", "", value.translate(str.maketrans("−–", "--")))
+        return re.sub(r"\s+", "", value.translate(str.maketrans({"−": "-", "–": "-"})))
 
     compact_rhs = _compact(rhs)
     compact_source = _compact(source_text)
@@ -341,7 +260,7 @@ class EquationExtractor:
         sections: list[PaperSection],
         llm_client=None,
         min_regex_stats: int = 0,
-        batch_input_tokens: int = 1500,
+        regex_equations: list[PaperEquation] | None = None,
     ) -> list[PaperEquation]:
         """Extract equations with optional LLM fallback for missed cases.
 
@@ -357,15 +276,16 @@ class EquationExtractor:
             Section metadata.
         llm_client : LLMClient | None
             Optional LLM client for fallback extraction.
+        regex_equations : list[PaperEquation] | None
+            Results of an already-completed regex pass. Callers that bound
+            this coroutine with a timeout run step 1 themselves so a slow LLM
+            fan-out cannot discard results that are already in hand.
         min_regex_stats : int
             Opt-in cost gate (0 = disabled). When > 0, the LLM fallback runs
             only if the regex pass already found at least this many non-LaTeX
             statistical components — a paper-level proxy for "this paper
             reports statistics". Skips the fallback on papers (e.g. math/CS
             preprints) unlikely to carry the prose stats the fallback targets.
-        batch_input_tokens : int
-            Approximate sentence-payload tokens per batch, excluding prompt/schema.
-            Sentences remain intact; at most ten sentences share a batch.
 
         Returns
         -------
@@ -375,7 +295,11 @@ class EquationExtractor:
         from bibr.paper_contents import CanonicalSection
 
         # Step 1: regex extraction
-        equations = self.extract_from_sentences(sentences, sections)
+        equations = (
+            self.extract_from_sentences(sentences, sections)
+            if regex_equations is None
+            else regex_equations
+        )
 
         if llm_client is None:
             return equations
@@ -402,7 +326,8 @@ class EquationExtractor:
             s.section_id for s in sections if s.section_type in target_section_types
         }
 
-        # Retain uncertain forms while excluding clear citations/dates/versions.
+        # Detect parenthesized groups with numbers but no regex hits
+        _paren_with_nums = re.compile(r"\([^)]*\d[^)]*\)")
         candidates: list[tuple[int, str]] = []
         for sent in sentences:
             if sent.text_id in extracted_text_ids:
@@ -414,7 +339,7 @@ class EquationExtractor:
             # re-decomposes content the parser already captured losslessly.
             if sent.is_display_formula:
                 continue
-            if needs_equation_fallback(sent.text):
+            if _paren_with_nums.search(sent.text):
                 candidates.append((sent.text_id, sent.text))
 
         if not candidates:
@@ -422,8 +347,9 @@ class EquationExtractor:
 
         # Step 3: LLM extraction in batches
         logger.info("LLM equation fallback: %d candidate sentences", len(candidates))
+        batch_size = 10
         existing_keys = {(eq.text_id, eq.lhs, eq.comp, eq.rhs) for eq in equations}
-        batches = equation_batches(candidates, batch_input_tokens)
+        batches = [candidates[i : i + batch_size] for i in range(0, len(candidates), batch_size)]
 
         async def _extract_batch(index, batch):
             try:
@@ -505,6 +431,13 @@ class EquationExtractor:
         for inner, paren_start, paren_end in _iter_parenthesized_groups(text):
             # Validate: must contain a comparison operator and a digit
             if not _COMP_RE.search(inner) or not re.search(r"\d", inner):
+                continue
+
+            # Unwrapped APA form: "chi2(1, N = 100) = 3.84". The df parenthesis
+            # is part of the statistic, not a group in its own right.
+            if _DF_ARGUMENT_INNER_RE.match(inner) and _DF_ARGUMENT_OWNER_RE.search(
+                text[:paren_start]
+            ):
                 continue
 
             # Split on commas/semicolons that are NOT inside () or []
@@ -697,6 +630,8 @@ class EquationExtractor:
         """
         results: list[PaperEquation] = []
         text = sent.text
+        if not _BROAD_OP_PRESCAN_RE.search(text):
+            return results
 
         kept: list[tuple[re.Match, str, str, str, str]] = []
         for m in _BROAD_EQUATION_RE.finditer(text):
@@ -805,7 +740,7 @@ def _split_respecting_brackets(text: str) -> list[str]:
     parts: list[str] = []
     current: list[str] = []
     depth = 0
-    for ch in text:
+    for idx, ch in enumerate(text):
         if ch in "([":
             depth += 1
             current.append(ch)
@@ -813,6 +748,17 @@ def _split_respecting_brackets(text: str) -> list[str]:
             depth = max(0, depth - 1)
             current.append(ch)
         elif ch in ",;" and depth == 0:
+            # A comma between digits is a thousands separator, not a
+            # component boundary: splitting "N = 1,204" gave "N = 1".
+            if (
+                ch == ","
+                and idx > 0
+                and text[idx - 1].isdigit()
+                and idx + 1 < len(text)
+                and text[idx + 1].isdigit()
+            ):
+                current.append(ch)
+                continue
             parts.append("".join(current))
             current = []
         else:

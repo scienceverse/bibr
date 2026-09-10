@@ -6,10 +6,16 @@ forward pass, and detection postprocessing (threshold → NMS → large-image
 filter → containment → read order). Variants layer lifecycle on top —
 ``bibr.local.layout`` adds explicit ``unload()`` for sequential GPU phases,
 ``bibr.serve.deployments.layout`` adds torch.compile + the GpuBatcher.
+
+Two runtimes sit behind the same class (``bibr/utils/ml_runtime.py``): the
+ONNX Runtime backend (:mod:`bibr.layout_onnx`, core install) and the original
+torch/transformers path (``torch`` extra). ``_runtime`` records which one a
+detector holds; ``_detect_images`` dispatches on it.
 """
 
 import logging
 import time
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -84,6 +90,35 @@ def _maybe_empty_cache() -> None:
     torch.cuda.empty_cache()
 
 
+def _is_oom_error(exc: BaseException) -> bool:
+    """True for a torch CUDA OOM or an ORT arena allocation failure."""
+    message = str(exc).lower()
+    return (
+        "out of memory" in message
+        or "bfcarena" in message
+        or "failed to allocate memory" in message
+    )
+
+
+def resolve_layout_runtime(settings: GlobalSettings):
+    """Apply the ``ML_RUNTIME`` rule to the layout model.
+
+    The ONNX bundle lives in ``LAYOUT_ONNX_MODEL_ID`` at ``LAYOUT_ONNX_REVISION``
+    (a bibr-owned repo or a local directory), since the torch weights are in
+    a third-party repo bibr cannot add files to.
+    """
+    from bibr.utils.ml_runtime import find_onnx_bundle, hub_bundle_hint, resolve_runtime
+
+    model_id = settings.layout.onnx_model_id
+    revision = settings.layout.onnx_revision
+    return resolve_runtime(
+        "layout detector (PP-DocLayoutV3)",
+        settings=settings,
+        bundle=lambda: find_onnx_bundle(model_id, revision, label="layout detector"),
+        bundle_hint=hub_bundle_hint("LAYOUT_ONNX_MODEL_ID", model_id, revision),
+    )
+
+
 class BaseLayoutDetector:
     """PP-DocLayoutV3 wrapper: loading, inference, and postprocessing.
 
@@ -110,16 +145,6 @@ class BaseLayoutDetector:
         # them available to sibling GPU processes (e.g. the OCR server).
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-        try:
-            import torch
-            from transformers import AutoImageProcessor, AutoModelForObjectDetection
-        except ImportError as e:
-            raise ImportError(
-                "PDF processing, including cloud OCR, requires the 'ml' extra for local layout "
-                "detection: pip install 'bibr[ml]' (or uv sync --extra ml). The core install "
-                "remains sufficient for native DOCX, JATS, HTML, and ePub inputs."
-            ) from e
-
         from bibr.utils.hf_cache import disable_hf_cache_symlinks_on_windows
 
         disable_hf_cache_symlinks_on_windows()
@@ -132,6 +157,54 @@ class BaseLayoutDetector:
         # Set True by variants that wrap the model in torch.compile — gates the
         # fixed-size batch padding (only compiled graphs recompile on new shapes).
         self._compiled: bool = False
+        self._model = None
+        self._image_processor = None
+
+        # Pre-allocate a dummy image for batch padding (avoids per-call PIL
+        # allocation).
+        from PIL import Image
+
+        self._pad_image = Image.new("RGB", (640, 480))
+
+        runtime, bundle_dir = resolve_layout_runtime(self._settings)
+        self._runtime = runtime
+        if runtime == "onnx":
+            self._init_onnx(bundle_dir, device)
+        else:
+            self._init_torch(model_id, device)
+
+        logger.info("LayoutDetector ready (runtime=%s, device=%s)", self._runtime, self._device)
+        from bibr.utils.device import report_device
+
+        report_device(
+            f"LayoutDetector ({self._variant}, {self._runtime})",
+            self._device.type,
+            gpu_capable=True,
+        )
+
+    def _init_onnx(self, bundle_dir, device: str | None) -> None:
+        """Open the ONNX bundle; ``self._model`` is the ORT backend."""
+        from bibr.layout_onnx import OnnxLayoutBackend
+
+        backend = OnnxLayoutBackend(bundle_dir, device=device, threshold=self.threshold)
+        # ``.type`` is what the variants read (warmup, unload, cache handback).
+        self._device = SimpleNamespace(type=backend.device)
+        self._install_model(backend)
+
+    def _init_torch(self, model_id: str, device: str | None) -> None:
+        """Load the transformers model; ``self._model`` is the torch module."""
+        try:
+            import torch
+            from transformers import AutoImageProcessor, AutoModelForObjectDetection
+        except ImportError as e:
+            from bibr.utils.ml_extra import TORCH_EXTRA_HINT
+
+            raise ImportError(
+                "PDF processing, including cloud OCR, needs the layout detector. Its ONNX "
+                "bundle was not selected (LAYOUT_ONNX_MODEL_ID / ML_RUNTIME), so it requires "
+                f"the 'torch' extra: {TORCH_EXTRA_HINT}. The core install remains sufficient "
+                "for native DOCX, JATS, HTML, and ePub inputs."
+            ) from e
 
         if device is None:
             from bibr.utils.device import detect_torch_device
@@ -139,8 +212,9 @@ class BaseLayoutDetector:
             device = detect_torch_device()
         self._device = torch.device(device)
 
-        self._image_processor = AutoImageProcessor.from_pretrained(model_id)
-        model = AutoModelForObjectDetection.from_pretrained(model_id)
+        revision = self._settings.layout.model_revision
+        self._image_processor = AutoImageProcessor.from_pretrained(model_id, revision=revision)
+        model = AutoModelForObjectDetection.from_pretrained(model_id, revision=revision)
         if self._device.type != "cpu":
             model = model.to(self._device)
         if self._device.type == "cuda":
@@ -150,19 +224,7 @@ class BaseLayoutDetector:
 
             configure_cuda_perf()
         model.eval()
-
-        # Pre-allocate a dummy image for batch padding (avoids per-call PIL
-        # allocation).
-        from PIL import Image
-
-        self._pad_image = Image.new("RGB", (640, 480))
-
         self._install_model(model)
-
-        logger.info("LayoutDetector ready (device=%s)", self._device)
-        from bibr.utils.device import report_device
-
-        report_device(f"LayoutDetector ({self._variant})", self._device.type, gpu_capable=True)
 
     def _install_model(self, model) -> None:
         """Take ownership of the loaded, eval-mode model."""
@@ -172,10 +234,11 @@ class BaseLayoutDetector:
         """Run detection on a batch of PIL images (orig sizes from image dims)."""
         orig_sizes = [(img.height, img.width) for img in images]  # (h, w) for post_process
         try:
+            if getattr(self, "_runtime", "torch") == "onnx":
+                return self._detect_onnx(images, orig_sizes)
             return self._detect_pytorch(images, orig_sizes)
-        except RuntimeError as exc:
-            message = str(exc).lower()
-            if ("out of memory" not in message and "bfcarena" not in message) or len(images) <= 1:
+        except Exception as exc:
+            if not _is_oom_error(exc) or len(images) <= 1:
                 raise
 
             # Compiled inference pads every call back to the configured maximum.
@@ -195,6 +258,14 @@ class BaseLayoutDetector:
         # Retry after leaving the exception handler: Python then clears the
         # traceback (which may retain failed-forward tensors and their VRAM).
         return self._detect_images(images[:half]) + self._detect_images(images[half:])
+
+    def _detect_onnx(self, pil_images: list, orig_sizes: list[tuple[int, int]]) -> list[list[dict]]:
+        """ONNX Runtime inference path: numpy pre/post-processing around one session run."""
+        results = self._model.run(pil_images)
+        return [
+            self._postprocess(result, orig_w, orig_h)
+            for result, (orig_h, orig_w) in zip(results, orig_sizes, strict=True)
+        ]
 
     def _detect_pytorch(
         self, pil_images: list, orig_sizes: list[tuple[int, int]]

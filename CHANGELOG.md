@@ -6,38 +6,459 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Use patched vLLM 0.27.0 for the optional CUDA runtime and isolated LLM/OCR
+  bootstraps, addressing GHSA-7m6h-x95x-82q5.
+- Restore publication-date precision from an unambiguous printed publication
+  date, and repair an empty author surname when the printed name and email
+  establish a unique partition. Preserve ambiguous and already complete values.
+- Preserve selected front-matter author evidence and distinguish explicit absent
+  abstracts from inferred opening prose. Author-information tables supplement
+  eligible single-record pages; generic literature-summary tables do not.
+- Prefer a printed English abstract when parallel versions are available; otherwise
+  retain the first complete printed version, without translating or concatenating.
+- Stop requesting downstream author roles from metadata LLMs. Custom
+  OpenAI-compatible endpoints can recover explicit decoder aborts through one
+  validated JSON route, with token caps and chat-template options preserved.
+- Structured-response caches distinguish generation schemas and chat-template
+  options, and preserve explicit-null versus blank abstract intent.
+- Recover a printed article DOI from complete retained OCR of a publisher box above
+  its uniquely selected title. Explicit DOI, ISSN and publication labels establish
+  identity; cited, ambiguous and truncated evidence remains excluded.
+
+- LLM responses that echo a JSON Schema, including extracted values incorrectly
+  nested under `properties`, now fail validation instead of being accepted as
+  empty metadata with the schema name as the paper title.
+
 ### Changed
 
+- Release preparation supports a manual rehearsal on `main` that tests and validates
+  the distributions without publishing. PyPI uploads use Trusted Publishing on a
+  GitHub-hosted runner and stay disabled until `PUBLISH_PYPI=true` is explicitly set.
+- Shorten the README, keep the illustrated banner, and link to detailed guides.
+  Add a draft LLM-use disclosure and clarify extraction accuracy limits and the
+  current focus on English-language social science papers.
+- The README opens with a paper-cream banner with square corners and no outer border.
+
+- **The launch export uses schema 11.0 (breaking).** `schema_version` is at the root;
+  `info` becomes `metadata`, `info_match` becomes `metadata_match`, and input file identity
+  moves to `source`. Root `affiliations` becomes `affiliation`. Telemetry moves under
+  `extraction`: engines, settings, timings (`stages` and `total_seconds`), usage (`totals`
+  and per-label/provider/model `breakdown`), enrichment, diagnostics, identity receipts,
+  warnings, and optional regions/trace. Validation findings live in `validation.issues`.
+  `xref[].xref_id` becomes `target_id`; equations and funding gain explicit IDs;
+  table cell contents are string grids. Match-table structured `authors`/`editors` become
+  singular `author`/`editor`. The v10 output mode is retired; core checkpoints and enrichment
+  sidecars reject older schema versions. The evaluation tools still read frozen v10 gold
+  alongside v11 predictions without changing the scoring rules.
+- **MCP Python SDK v2**, locked to 2.2.0. The server uses `MCPServer` and the public HTTP
+  lifespan/idle-timeout API. Paper tools run on the event loop and keep stores isolated
+  across initialized clients, including clients sharing a bearer key. HTTP clients negotiate
+  the session-based 2025-11-25 protocol, which the chew/query workflow requires; automatic
+  v2 clients fall back from sessionless discovery. Upload limits account for base64 overhead.
+
+### Security
+
+- Remove the unused Accelerate dependency from the PyTorch extras and lockfile,
+  eliminating CVE-2026-69112 from supported bibr installations. Existing environments
+  need a locked sync or rebuild to remove the previously installed package.
+- **A configuration error no longer prints your API keys.** `ConfigurationError` rendered
+  pydantic's `input` payload; for a model-level validation failure that payload is the whole
+  merged settings mapping, so one bad value printed every key in the environment to stderr
+  and into any log collecting it. Model-level errors now omit the input, and a secret-named
+  field's value is masked wherever it appears.
+- **`MCP_URL_ALLOWED_HOSTS` accepts the form the docs give.** As a bare `list[str]`,
+  pydantic-settings JSON-decoded it, so `MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` failed
+  startup outright — in practice no deployment had the `chew_url` SSRF allowlist on. The
+  comma-separated and JSON forms both parse now, here and for the CORS lists.
+- **No credential literals in the tree, and CI now scans for them.** Six tracked scripts
+  and a notebook carried a metacheck platform API key as a string; they read it from the
+  environment now (`PLATFORM_API_KEY`, `METACHECK_PLATFORM_API_KEY` for the `data/`
+  scripts). A required gitleaks job scans the checked-out tree and the commits every pull
+  request introduces, alongside Semgrep's tree-only secrets pack; `.gitleaks.toml` holds
+  the allowlist of documented placeholders and test fixtures. The same scan runs as a
+  pre-commit hook over the staged diff.
+
+### Added
+
+- **Structured reference names alongside the verbatim strings.**
+  `bib[].authors` and `bib[].editors` stay exactly as printed; new `bib[].author` and
+  `bib[].editor` carry a best-effort split into `{family, given, suffix}`, or a `{literal}`
+  fallback for corporate and unsplittable names, and are `null` when there was nothing to
+  split (never `[]`). Every emitted value is a substring of the verbatim string, so a consumer
+  can always fall back to it. `author[]` gains an optional `suffix`. Included in schema 11.0.
+- **A machine-readable JSON Schema of the export** is committed at
+  `docs/schema/bibr-export-v11.schema.json`, generated from the pydantic export models by
+  `scripts/generate_schema.py`. A test fails when the file drifts from the models, and its
+  `required` list is derived from the exporter's own omit rules (`OMITTABLE_ROOT_KEYS`), so the
+  artifact can never call an always-present table optional.
+- **Opt-in LLM response cache** (`CACHE_LLM=true`, directory `CACHE_LLM_DIR`, default
+  `$XDG_CACHE_HOME/bibr/llm`). Structured responses are cached on disk keyed by model,
+  response schema, system prompt, user text, per-task `max_tokens`/`reasoning_effort`, and
+  transport mode — so an entry can only serve a request that would have produced it. A hit
+  costs no tokens; a miss, a stale entry, or an unwritable cache directory all fall through
+  to a live call, so nothing about correctness depends on it. Re-running a corpus after a
+  parser change (or an evaluation sweep over the same papers under different non-LLM
+  settings) now pays for its LLM work once instead of every time. Off by default, like the
+  OCR disk cache. Note the key canonicalises the per-call `uuid4` prompt-injection fence
+  boundary, which 10 of the 13 call sites mint fresh each call — without that the same
+  logical request would hash differently on every run and never hit.
+- **`bib[]` carries the five reference fields the parser tagged and the decoder threw
+  away (export schema 10.8).** The NER parser's 39-tag BIO scheme has covered `ARXIV`,
+  `PMID`, `SERIES`, `ACCESS_DATE` and `NOTE` since v4, but `map_fields_to_paper_ref` had
+  no target for any of them, so every predicted value was discarded at decode — `PMID`
+  reaches 0.947 F1 on the JATS-supervised corpus and reached nothing else. They are now
+  `PaperReference` fields (`arxiv`, `pmid`, `series`, `access_date`, `note`), exported
+  verbatim as printed, and a test asserts no field type can be tagged and silently
+  dropped again. Output from the shipped `bibr-parser-v4-5-gold` is unchanged in
+  substance — its training corpus had no examples of any of the five, so it emits none —
+  and the fields are explicit nulls. The LLM reference schema is deliberately *not*
+  widened: the fields are removed from the JSON schema both LLM paths read, because the
+  NuExtract template is qualified against a fixed shape and the LFM2.5 student was
+  distilled on prompts embedding this exact schema.
+- **A torch-free core: bibr's four local models now run on ONNX Runtime.** The layout
+  detector, the section and paper classifiers and the ModernBERT+CRF reference parser each
+  ship an `onnx/` bundle (graph, a `bibr_onnx.json` contract carrying preprocessing
+  constants, label classes and CRF parameters, and the exact tokenizer) alongside the
+  PyTorch weights at the same pinned revision. `ML_RUNTIME=auto|onnx|torch` chooses:
+  `auto` prefers the ONNX bundle, falls back to PyTorch when the bundle is absent and
+  `torch` is importable, and otherwise raises a `ConfigurationError` naming the model and
+  the fix. `scripts/export_onnx_*.py` rebuild the bundles and check parity against the
+  PyTorch classes; `bibr/ner/crf_numpy.py` is a numpy Viterbi decoder so the parser needs
+  no `pytorch-crf`, and `bibr/utils/onnx_tokenizer.py` tokenizes through `tokenizers`
+  alone. Layout's PyTorch weights live in a third-party repo, so its ONNX artifact has its
+  own `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION`, published as
+  `scienceverse/bibr-layout-onnx`. All four bundles are on the Hub and pinned, so a core
+  install — 1.0 MB wheel, 677 MB venv, no `torch`, `transformers` or OpenCV — downloads
+  them on first use with nothing to configure.
+
+- **`JOBS_STORE=redis` shares async-job state between bibr-serve replicas.** Job status,
+  results (zlib-compressed, under their own key) and the active-job cap move into Redis,
+  so several `bibr serve` instances behind a load balancer answer status/result polls for
+  each other's jobs, and `JOBS_MAX_ACTIVE` / `JOBS_MAX_RETAINED` /
+  `JOBS_MAX_RETAINED_BYTES` bound the whole deployment. Uploads and execution stay on the
+  replica that received the upload, and every job status now reports that `replica`.
+  Admission is one Lua script (no cap race between replicas); every Redis call is bounded
+  by the `REDIS_*_TIMEOUT_SECONDS` budgets; an unreachable store answers
+  `503 {"detail": "job store unavailable"}` on the job routes and `jobs_store: error` on
+  `/ready`; a replica lost mid-job frees its cap slots after a 24 h safety TTL. New
+  settings: `JOBS_STORE`, `JOBS_REDIS_URL` (falls back to `REDIS_URL`), `JOBS_KEY_PREFIX`,
+  `JOBS_REPLICA_ID`. The in-process store is unchanged and remains the default
+  (`bibr.serve.jobs.JobStore` is now the protocol; the class is `MemoryJobStore`).
+  Handing queued work to another replica (a shared queue) is documented as a follow-up.
+- **Front-role classifier for front matter.** `bibr/extract/front_role.py` loads a small
+  gradient-boosted bundle (`ML_FRONT_ROLE_MODEL_ID`, defaulting to the published
+  `scienceverse/bibr-front-role-v1` at a pinned revision) that scores every OCR
+  region as title / byline / affiliation / abstract / keywords / doi_line / masthead /
+  heading / ref_header / body / other from page-relative geometry, relative font size and
+  script-independent text shape. Front-matter ownership uses the scores as additive
+  evidence (a model byline survives the English byline shape and the 45-word cap, a model
+  title seeds non-Latin records, a confident masthead cannot root a record) and
+  `RefLocator` accepts a model `ref_header` heading in any language. A title seed the model
+  confidently types as something else keeps its title role and loses only the right to root a
+  *second* record (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) — boxed headers
+  like `Correspondence` and `A R T I C L E I N F O` score `heading` at 1.00 and otherwise cut
+  a page's real title away from its own abstract. The model is trained from publisher JATS projected onto cached OCR regions;
+  see `docs/guides/classifiers.md`.
+
+- **`bibr batch` — a first-class, resumable corpus runner.** Takes manifests (one path per
+  line, `#` comments), directories (recursive) or files, writes `<out>/<paper_id>.json` per
+  paper and an append-only `<out>/outcomes.jsonl` ledger — one line per attempt with
+  status, error code and stage, timings, per-stage times, LLM tokens, reference and match
+  counts, warning frequencies, bibr version and build sha. Re-running the same command
+  resumes (`ok` skipped, `failed` skipped unless `--retry-failed`, `--force` for all;
+  interrupted papers run again by default); `--limit`, `--shuffle`/`--seed` and
+  `--deadline` shape a leg. Locally it feeds one warm pipeline in `--batch-size` chunks
+  with every `bibr chew` option; with `--serve-url` it drives a `bibr serve` job API with
+  adaptive concurrency (429 drops in-flight to `--min-concurrency`, 5xx/connection errors/
+  upstream outages retry with backoff, successes grow back toward `--max-concurrency`) and
+  a graceful Ctrl-C. `bibr batch report <out>` (or `--json`) summarises a ledger: ok/failed,
+  throughput, latency percentiles, stage-time shares, tokens, match rate, failure and
+  warning breakdowns; every run ends with the same table. `run_info.json` records the
+  options, the serve build and a secret-redacted settings snapshot. `bibr chew` gains
+  `--include-regions` as an alias of `--regions`. Guide: `docs/guides/batch.md`.
+- **A per-run switch for reference enrichment.** `bibr chew --crossref` (mutually
+  exclusive with `--no-crossref`), `bibr mcp --crossref`, `bibr.chew(..., crossref=True|False)`,
+  the `crossref=true|false` multipart field on `POST /papers/extract`, and the `crossref`
+  knob on the serve MCP `chew_paper`/`chew_url` tools all force enrichment on or off for
+  that run, overriding `CROSSREF_ENRICH` either way. `RunConfig.crossref` is tri-state
+  (`None` follows the setting) and resolves through `RunConfig.enrichment_enabled(settings)`;
+  the serve response cache keys on the effective value, so an enriched and an unenriched
+  result for the same file never collide. `bibr chew --dry-run` names why enrichment is
+  off and how to turn it on.
+
+- **`BIBR_DISABLE_DOTENV=1`** makes every settings model ignore `./.env` and `~/.bibr/.env`
+  (the process environment still applies). `python -m benchmarks run --tool bibr` refuses
+  to start while either file exists unless it is set, so a run's recorded configuration is
+  the profile plus the environment and nothing a developer's `.env` slipped in.
+- **`bibr.local-default` benchmark profile** (`geom` segmentation + `ner` parsing, what a
+  fresh `bibr setup` runs) next to the LLM-parse `bibr.default`, so the install default
+  can be promoted as its own row.
+
+### Changed
+
+- Evaluation, aspect scoring and the benchmark harness now share `metrics_version=6`.
+  The benchmark headline author score uses full printed names; family-name-only scores
+  remain available as diagnostics. Re-score older benchmark records before comparing them.
+
+- The LLM rate-limit slot is now acquired once inside `_invoke_structured`, below the cache
+  check, instead of separately at each of the twelve call sites. A cache hit spends no
+  provider quota, so it no longer waits on the budget that exists to protect that quota —
+  previously a fully-cached corpus re-run was still paced at `LLM_RATE_LIMIT_RPM`. Live
+  calls are unaffected: still one slot per dispatched request, plus one per retry.
+- **The install extras are reorganised around that runtime.** `onnxruntime`, `tokenizers`,
+  `huggingface-hub`, `scikit-learn` and `joblib` move into the core dependencies, so a
+  plain `pip install bibr` runs the whole HTTP-service path — OCR and the LLM over HTTP,
+  every bibr-owned model through ONNX Runtime — with no `torch`, `transformers` or OpenCV
+  in the environment. The PyTorch stack is now the **`torch`** extra (training parity,
+  Apple MPS, `torch.compile` on the serve layout model, transformers OCR, the CRF
+  reference segmenter, and the fallback runtime); **`ml` is kept as an alias for it**, so
+  existing installs, Dockerfiles and `bibr setup` plans are unaffected. `all` now bundles
+  `batch,cache,demo,mcp,torch`. The two OpenCV calls in `bibr/ocr/image_processing.py` are
+  Pillow/numpy.
+
+- **The CLI stops treating a missing `torch` as a broken install.** `bibr doctor` reports
+  the ONNX Runtime execution provider as the device instead of failing, and calls
+  `seg=geom, parse=ner` healthy on a core install; only `REF_SEG_STRATEGY=crf` (torch-only,
+  no ONNX export) and an explicit `ML_RUNTIME=torch` without torch still fail. `bibr chew`
+  no longer refuses PDFs when OpenCV is absent — cv2 is reachable only through the torch
+  layout path — and `--dry-run` names the ONNX provider it would use.
+
+- **Enrichment's network wait overlaps the extract stage.** When enrichment is on, the
+  enrich stage's up-front round-trips (resolver health probe and title searches, the
+  Crossref bulk DOI lookup) start as soon as the references are parsed — while citation
+  linking and structured-integrity LLM calls are still running — instead of strictly after
+  extraction. `enrich_references` consumes the
+  `EnrichmentPrefetch` when the pipeline hands it one and is unchanged otherwise; the core
+  checkpoint still sees unenriched references, the enrichment stage's accounting is
+  unchanged, and every path that does not enrich cancels the task. `extraction.timings`
+  gains `enrich_prefetch` (its wall time; excluded from `total_seconds`).
+- **Crossref reference enrichment is opt-in.** `CROSSREF_ENRICH` now defaults to `false`:
+  a plain `bibr chew`, `bibr.chew()` or `POST /papers/extract` no longer calls Crossref or
+  the resolver, `bib_match` stays empty, and `extraction.crossref_enrich` reports the
+  effective per-run value. Enrichment was a network fan-out that added seconds of serial
+  wall time per paper for every caller, including those that never read `bib_match`.
+  Deployments that relied on the old default must set `CROSSREF_ENRICH=true` (or pass the
+  per-run switch above); `bibr setup` now asks before writing it, and only offers
+  consolidation once enrichment is on.
+
+- **`bibr serve` keeps CPU-bound work off the shared event loop.** One LitServe worker runs
+  with `enable_async=True`, so synchronous CPU inside a coroutine is head-of-line blocking
+  for every co-resident request. Post-parse, citation linking and OCR post-processing now
+  offload to a thread like their neighbouring stages (40.0 ms → 5.2 ms loop-tick latency for
+  this class of work), four exact necessary-condition prefilters remove ~52 ms/paper of
+  regex sweeps outright, and OCR crops moved inside the region semaphore (`Image.crop` is an
+  eager copy; every crop of every page was held at once, ~1 GB at 8 in-flight requests).
 - **The serve container image ships the `mcp` extra.** `Dockerfile.serve` now installs
   `bibr[mcp]`, so `MCP_ENABLED=true` on the Compose stack mounts the remote MCP endpoint
   without a custom build. The dependency is inert unless enabled.
+- **CI runs for `main` only.** The retired February `dev` branch no longer triggers the
+  suite on push, and pull requests can no longer target it.
+- Removed unsupported comparative accuracy claims from the public documentation.
+- **Every Hub-loaded model is pinned to a commit.** PP-DocLayoutV3, the section and paper
+  classifiers and the default `sat-6l-sm` sentence segmenter loaded `main`, so a hub
+  push could change extraction output between two runs of the same bibr version. Their
+  audited commits are now the defaults (`LAYOUT_MODEL_REVISION`,
+  `ML_SECTION_CLASSIFIER_REVISION`, `ML_PAPER_CLASSIFIER_REVISION`,
+  `WTPSPLIT_MODEL_REVISION`; set any to `main` to track the head), `Dockerfile.serve`
+  bakes the same revisions, and `scripts/prefetch_segmenter.py` accepts `--revision`.
+- **The managed vLLM pin moves to 0.26.0** (`vllm` extra and the `uv tool run` bootstrap).
+  It closes GHSA-87x5-vmc3-756j (completion prompt lists fanning out into unbounded engine
+  requests) and drops `diskcache`, whose unfixed advisory bibr had been carrying as an audit
+  exception; torch stays at 2.11.0. The lock resolves cleanly and the extra installs;
+  serving with 0.26.0 has not yet been exercised on a GPU.
+- **`LIMITATIONS.md` is current again** (native-format inputs, the `ner` default, the
+  classifier-degraded warnings, single-tenant serve/MCP, and which benchmark numbers are
+  held-out), and the local model registry's sizes were re-verified against the Hub.
 
 ### Fixed
+
+- Numeric citations now follow reliable printed reference labels after dropped or spurious
+  bibliography entries shift internal IDs. Citation diagnostics use the same corrected
+  targets; duplicate and missing labels in that mapping cannot select a different entry.
+- Reference-type inference reads the complete printed reference, recognizing thesis,
+  preprint, conference and report labels outside the title when the parser omitted a type.
+- GROBID benchmark runs accept both plain-text and JSON version responses without putting
+  a JSON object into snapshot filenames or version columns.
+- Dependabot CI keeps the coverage threshold and stores its report without attempting
+  a Codecov upload that requires an unavailable Actions secret.
 
 - **Release tests collect on Windows again.** The process-group signal guard
   only installs where `os.killpg` exists; Unix runtime tests supply their own
   mock on other platforms.
-- **MCP extraction shares REST admission limits.** JSON uploads are bounded
-  before parsing, and `chew_paper` / `chew_url` acquire shared capacity before
-  decoding or downloading. In-flight slots remain held until dispatch finishes,
-  including when a caller cancels an extraction.
-- **MCP page ranges follow the advertised 1-based contract.** Page 1 now
-  selects the first physical page; zero and negative pages are rejected.
-  REST page indices remain zero-based.
+- **Cancelled REST and MCP extractions retain their admission slots.** The
+  in-flight slot now belongs to the dispatch task until it finishes, so cancelling
+  a caller cannot admit more work while its extraction is still running. Oversized
+  MCP uploads are also rejected before allocating a decoded base64 copy.
+
+- Async-job shutdown stops workers even if a dependency consumes cancellation while
+  completing a request. Queued uploads are discarded instead of starting more work or
+  waiting indefinitely for another job.
+- **Protected docs smoke tests identify their HTTP client.** Both probes send
+  `User-Agent: bibr-ci-smoke/1.0`, avoiding Cloudflare's error 1010 for Python's
+  default agent. A browser-signature block is reported separately from an Access
+  service-token rejection; anonymous protection and exact-revision checks remain enforced.
+- **Docs deployments retain their revision marker.** The CI artifact now includes
+  `.well-known/bibr-build`, so protected preview and production checks can verify
+  the deployed commit after downloading the built site. Both jobs install Node/npm
+  explicitly so Wrangler also runs on a freshly provisioned self-hosted runner.
+- Redis-backed job workers preserve shutdown cancellation when a Redis reply arrives
+  in the same event-loop turn. This prevents an intermittent Python 3.11 server shutdown
+  hang while retaining the configured Redis operation timeout.
+- Removed unsupported accuracy tables from the evaluation guide.
+- The private-site CI smoke now distinguishes a rejected Cloudflare Access service token
+  from a missing build marker, so deployment failures identify the required fix.
+
+- **Exported URLs no longer carry PDF line-wrap artifacts.** A URL broken across a line in the
+  source picked up the wrap whitespace when the text was re-joined, and a sentence-final period
+  was absorbed into the href. `url[].href` and `bib[].url` are now collapsed and stripped of
+  trailing dots at export, idempotently, so a downstream consumer can delete its own patch.
+- **A JATS bibliography in `<body>` is no longer dropped.** EuropePMC's `fullTextXML`
+  emits the reference list as a body `<sec sec-type="ref-list">` rather than inside
+  `<back>`; the parser only looked in `<back>`, so every reference in such a document
+  disappeared with no warning and the export shipped an empty `bib` — which is the whole
+  contract for a reference-checking consumer. A body-located `<ref-list>` is now ingested
+  into the section its producer already wrapped it in. A `<back>` ref-list still wins, so
+  no document that parses correctly today changes.
+- **JATS consortium authors survive.** A `<contrib>` carrying `<collab>` (a
+  working-group or consortium byline) has no `<name>`, so it was emitted as an author row
+  with an empty given *and* family name — a `VAL_AUTHOR_BLANK` validation error in place
+  of the group's name. The collaboration name is now kept the way Crossref models a group
+  author, and a `<contrib>` with no name of any kind is skipped instead of emitting a
+  blank row.
+- **JATS markup that means a line break no longer fuses words.** Flattening concatenated
+  descendant text with nothing between the pieces, so `Cognitive load<break/>and recall`
+  became `Cognitive loadand recall`, a structured `<aff>` became
+  `Department of PsychologyUtrecht University`, and a two-paragraph abstract ran its
+  sentences together. Block-level and structured-field elements now contribute a
+  separator; inline markup still does not, so `H<sub>2</sub>O` stays `H2O`. XML comments
+  are no longer flattened into the text either.
+- **DOCX line breaks and tabs no longer fuse words together.** `<w:br/>`, `<w:tab/>` and
+  `<w:cr/>` carry no text of their own and were dropped outright, so a title page laid out
+  with Shift+Enter came out as `Cognitive load and recallJane SmithDepartment of
+  Psychologyjane.smith@example.edu` — one unsplittable token where the title, author and
+  affiliation should be. The same applied to footnote and endnote text, which is where a
+  humanities bibliography lives. Those three elements now contribute a separator; adjacent
+  `<w:t>` runs still concatenate untouched, because Word splits runs mid-word for
+  formatting. Every DOCX fixture in the suite was built from python-docx plain strings,
+  which never emit either element, so nothing caught this.
+- **An unreadable DOCX is classified instead of crashing validation.** Validation only
+  caught `BadZipFile`, but reading a *member* fails differently: `zipfile` raises
+  `RuntimeError` for a password-protected entry and a truncated or damaged deflate stream
+  surfaces as `zlib.error` from the real-size check. Both escaped
+  `_check_docx_corruption` and took down the whole validation call rather than marking the
+  file corrupt. A zip whose members are encrypted — what third-party tools produce, as
+  opposed to the OLE container Word writes — is now reported as `encrypted_file` rather
+  than as generic corruption.
+- **The LLM rate limiter no longer freezes `bibr serve` while it probes Redis.** Deciding
+  between the shared and the local limiter ran a *synchronous* `redis.Redis.ping()` from
+  inside a coroutine. One LitServe worker with `enable_async=True` serves every concurrent
+  request on a single event loop, so a Redis that accepts the connection but never answers
+  stalled every in-flight paper, not just the caller — 5.1 s of total freeze, measured
+  against a wedged-but-reachable Redis. The probe is async now, guarded by a
+  loop-bound init lock so concurrent first callers build exactly one limiter, and the
+  command round-trip is bounded (`socket_connect_timeout` only ever covered the connect).
+  `CrossrefClient` was fixed this way already; `LLMClient` was missed.
+- **A reference the LLM returns empty is re-parsed instead of deleted.** A batch item that
+  came back with neither a title nor authors was counted as *covered*, so the NER recovery
+  never ran for that slot — and then the completeness filter dropped it. One printed
+  reference disappeared and every later `bib_id` shifted up by one, so an inline `[8]`
+  resolved to what the paper printed as `[7]`, all the way down the list. Nothing warned:
+  14 references returned for 15 entries clears the under-yield thresholds. Such a slot now
+  counts as missing, goes through the same NER recovery as an entry the LLM skipped
+  outright, and is reported if it cannot be recovered.
+- **A repeated reference index no longer leaves segment-anchored backfills on.** When the
+  LLM's reported indices are rejected the refs are re-numbered positionally, and the
+  backfills that copy a printed DOI or issue number off the anchored segment are supposed
+  to switch off whenever that mapping cannot be trusted. The check for that looked only at
+  the *count*, so three rows labelled 1, 2, 2 for three entries passed it — while entry 3
+  was missing and everything after the repeat sat one row off. The result was a
+  neighbouring reference's DOI stamped onto the wrong row, which then enriched cleanly
+  against Crossref and scored as a confident match. A repeated index now marks the batch
+  untrusted too. A batch merely numbered from 1 instead of from `start_index` still stays
+  trusted — positional re-indexing fixes that exactly.
+- **The OCR disk cache now keys on the model pins.** A complete entry lets the pipeline
+  skip layout detection and OCR inference outright, but the key recorded none of the
+  settings that select those weights — `LAYOUT_MODEL_REVISION`, `OCR_PADDLE_REVISION` and
+  `OCR_PADDLE_MODEL`. Re-pinning a model and re-running over cached papers silently
+  replayed the *old* model's regions, so an A/B evaluation of the two pins reported no
+  difference because it never ran the new one. `identity.model` did not cover this: for
+  every served backend it is the alias (`paddle-ocr-vl-1.6`) that vLLM is launched with
+  under `--served-model-name`, while `--revision` takes the pin — the alias is unchanged
+  by a re-pin. The cache format version is bumped, so entries written without the pins are
+  invalidated rather than trusted.
+- **JATS keeps its Greek letters and accents.** The parser reads uploads with entity
+  expansion disabled (the XXE and billion-laughs defense), which leaves every *named*
+  character entity — `&alpha;`, `&uuml;`, `&deg;`, `&mdash;` — as an unresolved node whose
+  text is the literal source string. Titles, author surnames and reference strings shipped
+  markup like `M&uuml;ller` and `Effects of &alpha;-synuclein`. Because XML's five
+  predefined entities and all numeric references resolve regardless, the output looked
+  plausible rather than obviously broken. Named entities are now resolved after the parse
+  against the HTML5 character table, which covers the ISO sets JATS DTDs pull in. Entities
+  a document declares in its own internal DTD subset are still never expanded — the same
+  applies to the ePub package document.
+- **Non-ASCII ePub text is no longer mojibake.** The spine is re-emitted as one synthesized
+  HTML document for the HTML parser, and that document declared no charset — so html5lib
+  fell back to windows-1252 and decoded the UTF-8 bytes wrongly. Every non-ASCII character
+  in an ePub's title, authors, publisher and body text was corrupted (`München` →
+  `MÃ¼nchen`), affecting every non-English ePub.
+- **Numbered bibliographies survive the in-text-citation filter.** Vancouver and IEEE entries
+  terminate at the year exactly as a bare in-text cite does, so `"12. Rothman KJ. Modern
+  epidemiology. Boston: Little, Brown; 1986."` was dropped as a citation — and because
+  survivors are renumbered, one dropped entry shifted every later `bib_id` and repointed
+  every numbered citation past the gap. Silent, with one `logger.info` line.
+- **Multi-study `Method`/`Results` headings are no longer demoted as running headers.**
+  Repetition alone was the test; page furniture's margin-band geometry is now required too,
+  so a paper with per-study sections keeps them instead of exporting neither.
+- **DOCX, JATS, HTML and ePub inputs no longer crash in the positional abstract fallback.**
+  `min()` over page numbers that are all `None` raised `TypeError` for every native-format
+  paper that reached it.
+- **A crafted ePub can no longer exhaust server memory.** Every zip limit was per member, so
+  a spine naming one member N times multiplied all of them: a 1 MB upload reached multi-GB
+  RSS and OOM-killed the serve worker. Spine documents, total expanded bytes and repeats are
+  bounded now, and percent-encoded hrefs resolve.
+- **Statistics keep their sample size.** `(N = 1,204)` truncated to `N = 1` on the thousands
+  separator, and a chi-square's own `df` parenthesis emitted a fabricated `N` that then
+  vetoed the real match.
+- **Figure and table numbers survive float merging.** Mergers renumbered survivors from 1, so
+  a body mention of `Figure N` resolved to the wrong figure; renumbering now honours the
+  printed label where a caption carries one.
+- **Rotated pages map their text correctly.** `page.render()` applies `/Rotate` and the text
+  layer does not, so on a rotated page every layout box sampled the wrong region of the PDF.
+  Crop-relative coordinates are also emitted in the frame their page dimensions describe.
+- **Plus 25 further defects** — a caption-dedup `KeyError` that surfaced as `parse_failed`
+  and dropped the paper, an equation-extraction timeout that discarded the regex results it
+  had already computed, OTSL row/column spans destroyed by a trailing newline, math exponents
+  linked as citations and deleted from the sentence, an OCR backend that could never start,
+  an OCR engine orphaned when an earlier stage failed, and a repeat scan whose cost grew
+  superlinearly with region length (~11 s on a 50,000-character region, now under 15 ms).
 - **`bibr serve` no longer crashes at startup when the `mcp` extra is installed.** LitServe
   0.2.17 enables its own MCP connector whenever the official `mcp` package is importable
   but builds it from the third-party `fastmcp` package, so `server.run()` died with
   `NameError: name 'MCPServer' is not defined` on any install of `bibr[mcp]` (including the
   serve image above). bibr now switches LitServe's detection off — it mounts its own
   `/mcp` endpoint and never wanted LitServe's.
+- **The scorer no longer charges an elided page range against its expansion.** Gold keeps
+  the printed ending ("486–92"); bibr and GROBID expand it to "492", and the exact
+  string compare counted every such pair as a pages miss on both sides. `ref_pages_acc`
+  now expands a compact ending against the first page on both sides before comparing.
+
+- **Half-emitted page ranges are completed from the printed reference.** The CRF parser
+  drops the start of a range and the LLM parser the end of a compact one ("339-42"); the
+  shared finalize step now fills the missing end anchored on the value the parser did
+  emit, only when the segment prints exactly one such range, and splits a range lumped
+  into one field. Nothing populated is overwritten. This is the LLM-path repair the July
+  analysis projected to lift `ref_pages_acc` from 0.389 to 0.745; measured by unit tests
+  so far.
 - **A plain Linux `bibr chew` no longer bootstraps vLLM behind your back.** The automatic
   `paddle` OCR chain only lists `paddle-vllm` on an NVIDIA GPU with at least 8 GB of VRAM;
   CPU-only and small-GPU Linux machines go straight to llama.cpp (`glm-llama`), as the
   tester guide always said. The managed vLLM launcher refuses to start without a suitable
   GPU (naming the alternatives), and when vLLM is not installed it now *warns* — with the
   `uv sync --extra vllm` remedy — before falling back to the isolated
-  `uv tool run --from vllm==0.25.1` environment, which downloads several GB on first use.
-  On Python 3.14, where `vllm==0.25.1` has no wheels, the bootstrap pins a managed 3.13
+  `uv tool run --from vllm==0.26.0` environment, which downloads several GB on first use.
+  On Python 3.14, where `vllm==0.26.0` has no wheels, the bootstrap pins a managed 3.13
   interpreter instead of failing to resolve. `bibr chew` also checks before loading any
   model that at least one local OCR runtime can start for the PDFs it was given, and
   fails fast with the install hints otherwise.
@@ -63,6 +484,89 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   write) is additionally bounded by the new `CACHE_OPERATION_TIMEOUT_SECONDS` (default
   5). A Redis that accepts connections but never answers now degrades to a cache miss
   instead of holding every request — and its admission slot — forever.
+- **A bearer token containing non-ASCII bytes is rejected with 401, not 500.** The
+  auth middleware and `/ready` compared the header as text, and `hmac.compare_digest`
+  raises on non-ASCII strings; the comparison now runs on UTF-8 bytes.
+- **502 bodies no longer name the internal OCR endpoint or the models it serves.** The
+  readiness errors raised by `bibr serve`'s OCR backend (unreachable, not ready,
+  cooling down) included `OCR_BASE_URL` and the server's model list; those details now
+  go to the operator log only, and the client sees the expected served alias at most.
+- **Idle MCP sessions now expire.** The serve MCP endpoint closes a client session after
+  `MCP_SESSION_IDLE_TIMEOUT_SECONDS` (default 1800) of inactivity and drops its papers,
+  as the MCP guide already promised. A client that reconnected without `DELETE` used to
+  pin its session — and up to sixteen full exports — for the process lifetime.
+- **Docker Compose publishes the API on loopback and passes the Redis password safely.**
+  `bibr-serve` was published as `0.0.0.0:8000`, which Docker routes past host firewalls,
+  with plaintext bearer tokens on the wire; it is now `127.0.0.1:8000` unless
+  `BIBR_PUBLISH_HOST` says otherwise. `REDIS_PASSWORD` is no longer interpolated raw into
+  `REDIS_URL` — a password with URL metacharacters silently disabled the cache — but
+  handed to bibr, which URL-encodes it into the connection URL itself.
+- **`LLM_LOCAL_MODEL` no longer defaults to the MLX weights on every platform.** The
+  config default was `numind/NuExtract3-mlx-8bits`, and the CUDA vLLM and llama.cpp
+  launchers read it too, so a hand-written `.env` with `LLM_BACKEND=vllm` or `llama-cpp`
+  downloaded 4.8 GB of MLX weights and failed to load. Unset now resolves per backend
+  (bf16 for vLLM, GGUF Q4_K_M for llama.cpp, 8-bit MLX on Apple Silicon); `bibr setup`
+  keeps writing an explicit value.
+- **`bibr setup` and `--llm local` no longer pick vLLM for a GPU that cannot hold the
+  model.** The rule was "vLLM above 8 GB", but NuExtract 3's only vLLM variant (bf16)
+  needs 11 GB, and the fit filter was dropped silently when nothing fit — a 9-10 GB
+  card got a plan that OOMed after OCR. Both now choose vLLM only when a vLLM variant of
+  the recommended model fits and llama.cpp otherwise; the wizard says which half (OCR,
+  LLM, or both) needs `llama-server`.
+- **The managed local LLM bootstrap matches the OCR one.** When vLLM is not installed the
+  LLM launcher now warns (naming `uv sync --extra vllm`) before its `uv tool run`
+  bootstrap and pins a managed Python 3.13 on 3.14, where `vllm==0.25.1` has no wheels
+  and the `vllm` extra installs nothing; it used to fail there after OCR with "LLM
+  server start failed" while `bibr doctor` reported vLLM as available. `bibr doctor`
+  now says the runner is uv-managed, that the first run downloads several GB, and
+  what 3.14 implies. Python 3.14 is listed in the package classifiers, matching CI.
+- **`bibr.chew()` and `bibr.Chewer()` check the LLM before loading any model.** The
+  library ran layout and OCR before discovering a missing API key or an unlaunchable
+  local backend; the CLI already checked first. Both entry points now run the same
+  preflight (skipped with `no_llm=True`), raising the provider's `ValueError` for
+  credentials and `ConfigurationError` for a managed local backend.
+- **A trained classifier that does not answer is now visible in the export.** When the
+  section or paper classifier is configured but cannot load (core install without
+  torch, failed download, a degraded serve resource) or errors during inference, the LLM
+  classifies instead; the JSON was indistinguishable from a healthy run. The section path
+  now records `section_classifier_degraded` in `processing_warnings` for every such
+  case (previously only inference errors), and the paper path records
+  `Metadata extraction WARNING: paper classifier degraded (<reason>)` — the exception
+  type only, never document text.
+
+
+- **Job results are bounded by size, not only by count.** `bibr serve` kept every completed
+  result as a live dict and evicted only beyond `JOBS_MAX_RETAINED` (128), so a run of large
+  exports could hold hundreds of megabytes for an hour. The result is now rendered once at
+  completion (the bytes `/result` serves) and the store evicts oldest-first until both the
+  count and the new `JOBS_MAX_RETAINED_BYTES` budget (default 256 MiB; `0` disables) fit;
+  the newest result is always kept, so an export larger than the budget can still be
+  fetched once.
+- **The MCP chew tools are under upload admission, and a 50 MiB file fits.** The admission
+  middleware only knew `/papers/extract` and `/papers/jobs`, so any number of `/mcp` calls
+  could hold their bodies and decoded bytes in API memory and dispatch straight to the
+  worker; and because `chew_paper` carries its file base64-encoded, LitServe's 51 MiB body
+  cap refused a 40 MB PDF before the advertised 50 MB check. A large `/mcp` body now holds
+  a `PIPELINE_MAX_ACTIVE_UPLOADS` slot while it is received, both chew tools take a spool
+  slot through the persist and an inflight slot for the extraction itself — matching
+  `POST /papers/extract`, so a running pipeline no longer refuses uploads the server has
+  capacity to accept (a `server busy` tool error when none is free), the outer body cap grows to
+  fit a full-size file in base64 when MCP is enabled, and an oversize body gets a `413` that
+  explains the arithmetic before a byte is read.
+- **`bibr serve` logs are configured — in both processes.** The CLI returned before its own
+  logging setup, so `bibr.*` INFO records were dropped, warnings fell through
+  `logging.lastResort` unformatted and unscrubbed, metering emitted nothing without
+  `METER_LOG_PATH`, and the spawned inference worker never installed the metering handler,
+  losing every per-extraction record with LLM token usage. Each process now installs one
+  formatted, secret-scrubbed stderr sink (`SERVE_LOG_LEVEL`, default `info`), uvicorn and
+  LitServe records ride it, and metering goes to stderr or, when configured, only to the
+  JSONL file — from the worker too.
+- **A born-digital window no longer starts an OCR engine it will not use.** OcrStage waited
+  for the engine before counting the regions that would call it, and the automatic `paddle`
+  chain was started before layout to key an OCR cache that is off by default. The count
+  now comes first and, when native text covers every region, no engine is started or
+  awaited; with `CACHE_OCR` off the automatic chain starts after native text is known.
+  Captions, table titles and formula numbers still go through OCR by design.
 
 ## [0.5.0] - 2026-09-01
 

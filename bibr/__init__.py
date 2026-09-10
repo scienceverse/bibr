@@ -48,7 +48,7 @@ For full control, drive :class:`LocalPipeline` directly:
 
     data = asyncio.run(main())
 
-The returned dict matches the bibr v10.7 JSON schema (:func:`chew` wraps it in
+The returned dict matches the bibr v11.0 JSON schema (:func:`chew` wraps it in
 a :class:`Result` view). Imports are lazy so the pipeline stages and ML deps
 don't load at ``import bibr`` time.
 """

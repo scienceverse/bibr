@@ -111,11 +111,18 @@ class BibrServeOcrBackend:
             if self._ready:
                 return
             now = time.monotonic()
+            # Client-facing messages (they become 502 bodies) name neither the
+            # internal endpoint nor what it serves; the log lines carry both.
             if now < self._cooldown_until:
+                logger.warning(
+                    "OCR server at %s: readiness check still cooling down for %.1fs",
+                    self._base_url,
+                    self._cooldown_until - now,
+                )
                 raise UpstreamServiceError(
                     "ocr",
-                    f"OCR server at {self._base_url} unavailable "
-                    f"(cooling down for {self._cooldown_until - now:.1f}s)",
+                    "OCR server unavailable "
+                    f"(readiness is retried in {self._cooldown_until - now:.0f}s)",
                 )
 
             deadline = now + self._ready_timeout
@@ -144,17 +151,23 @@ class BibrServeOcrBackend:
 
             self._cooldown_until = time.monotonic() + _OCR_READY_FAILURE_COOLDOWN
             if host_was_unreachable:
-                raise UpstreamServiceError(
-                    "ocr",
-                    f"OCR server at {self._base_url} is unreachable.",
+                logger.error(
+                    "OCR server at %s is unreachable (no connection within %.0fs)",
+                    self._base_url,
+                    self._ready_timeout,
                 )
+                raise UpstreamServiceError("ocr", "OCR server is unreachable.")
+            logger.error(
+                "OCR server at %s did not serve model %r within %.0fs; observed model ids: %r",
+                self._base_url,
+                self._model,
+                self._ready_timeout,
+                observed_model_ids,
+            )
             raise UpstreamServiceError(
                 "ocr",
-                (
-                    f"OCR server at {self._base_url} did not become ready within "
-                    f"{self._ready_timeout}s for model {self._model!r}; "
-                    f"observed model ids: {observed_model_ids!r}"
-                ),
+                f"OCR server did not become ready within {self._ready_timeout:.0f}s "
+                f"for model {self._model!r}.",
             )
 
     async def shutdown(self) -> None:
@@ -167,9 +180,18 @@ class BibrServeOcrBackend:
         from bibr.ocr.image_utils import encode_region_for_ocr
         from bibr.utils.circuit_breaker import CircuitOpenError
 
-        image_b64 = encode_region_for_ocr(image, self._profile.image)
+        # Resize + JPEG-encode + base64 is synchronous Pillow work, and it ran
+        # as the coroutine's first statement — before the semaphore — so it was
+        # neither offloaded nor bounded. On serve's single async worker that is
+        # head-of-line blocking for every co-resident request (max loop
+        # lateness 300 ms inline vs 15 ms threaded on 800 real crops); doing it
+        # inside the semaphore also bounds how many encoded payloads are
+        # resident at once. Pillow releases the GIL, so wall time improves too.
         try:
             async with self._sem_per_worker, self._breaker:
+                image_b64 = await asyncio.to_thread(
+                    encode_region_for_ocr, image, self._profile.image
+                )
                 result = await self._post_with_retry(image_b64, prompt)
                 task = self._profile.task_for_prompt(prompt)
                 if self._profile.name != "paddle" or task != "table":

@@ -295,8 +295,8 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
     # cache probe must preserve this test seam with a static Paddle identity,
     # rather than attempting managed startup or failing before native text can
     # bypass OCR.
-    assert result["ocr_config"]["ocr_backend"] == "paddle"
-    assert result["ocr_config"]["ocr_profile"] == "paddle"
+    assert result["extraction"]["ocr"]["backend"] == "paddle"
+    assert result["extraction"]["ocr"]["profile"] == "paddle"
 
     assert {
         "TitleKeywordsLLM",
@@ -309,7 +309,9 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
     assert validate_export(result) == []
     expected_keys = {
         "paper_id",
-        "info",
+        "schema_version",
+        "source",
+        "metadata",
         "author",
         "text",
         "section",
@@ -320,15 +322,14 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
         "table",
         "eq",
         "bib_match",
-        "ocr_config",
-        "processing_warnings",
+        "extraction",
     }
     assert expected_keys <= set(result.keys())
 
-    assert result["info"]["title"] == _TITLE
-    assert result["info"]["abstract"].startswith("This study examines")
-    assert result["info"]["input_format"] == "pdf"
-    assert result["info"]["paper_type"] == "empirical"
+    assert result["metadata"]["title"] == _TITLE
+    assert result["metadata"]["abstract"].startswith("This study examines")
+    assert result["source"]["input_format"] == "pdf"
+    assert result["metadata"]["paper_type"] == "empirical"
 
     headers = {s["header"] for s in result["section"]}
     assert {"Abstract", "Introduction", "References"} <= headers
@@ -347,11 +348,11 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
     assert result["bib"][0]["doi"] == "10.1234/jt.2020.001"
     assert [r["year"] for r in result["bib"]] == [2020, 2021]
 
-    assert result["ocr_config"]["no_llm"] is False
-    assert result["processing_warnings"] == [
-        "VALIDATION:warning:VAL_ABSTRACT_SUSPECT: abstract suspicion: non_reference_share_gt_20pct",
-        "VALIDATION:warning:VAL_AUTHOR_UNCHECKED: 1 extracted author(s) could not be checked: "
-        "the selected front matter carries no byline row",
-    ]
+    # The run had an LLM, so the engine is reported rather than null.
+    assert result["extraction"]["llm"]["provider"]
+    # Gate findings live only in ``validation.issues`` — never mirrored into
+    # warnings — and this smoke run emits no genuine processing warnings.
+    assert result["extraction"]["warnings"] == []
+    assert "VAL_ABSTRACT_SUSPECT" in {i["code"] for i in result["validation"]["issues"]}
 
     await pipeline.aclose()

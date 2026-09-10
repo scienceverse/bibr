@@ -181,7 +181,9 @@ class BaseHttpOcrClient:
         Returns:
             Recognized text content.
         """
-        image_b64 = encode_region_for_ocr(image, self._profile.image)
+        # Synchronous Pillow work on the caller's event loop; threaded so it
+        # is not head-of-line blocking under serve's single async worker.
+        image_b64 = await asyncio.to_thread(encode_region_for_ocr, image, self._profile.image)
         return await self._send_request(image_b64, prompt)
 
     def _build_payload(self, image_b64: str, prompt: str) -> dict:

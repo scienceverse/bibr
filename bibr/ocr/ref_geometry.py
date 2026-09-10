@@ -71,10 +71,13 @@ def group_chars_into_lines(
 
 
 def _extract_page_chars(textpage) -> list[tuple[str, tuple[float, float, float, float]]]:
-    from bibr.ocr.native_source import extract_characters
-
-    chars, _ = extract_characters(textpage, include_fonts=False)
-    return [(c.text, c.bbox or (0.0, 0.0, 0.0, 0.0)) for c in chars]
+    out = []
+    for i in range(textpage.count_chars()):
+        ch = textpage.get_text_range(i, 1)
+        if not ch:
+            continue
+        out.append((ch, textpage.get_charbox(i)))
+    return out
 
 
 def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:

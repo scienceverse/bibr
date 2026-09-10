@@ -181,10 +181,19 @@ class Pipeline:
             settings=self._settings,
         )
 
-        for stage in self._stages:
-            await run_stage(ctx, stage)
-            if not ctx.alive() and stage.name != "export":
-                break
+        try:
+            for stage in self._stages:
+                await run_stage(ctx, stage)
+                if not ctx.alive() and stage.name != "export":
+                    break
+        finally:
+            # A file that errored after post-parse but kept its result (so it
+            # was not freed at a stage boundary) never reaches the enrich
+            # stage, which is what normally consumes its enrichment prefetch.
+            # Cancel whatever is still pending so no task outlives the chunk.
+            from bibr.pipeline.enrich_prefetch import cancel_leftover_prefetches
+
+            cancel_leftover_prefetches(file_states)
 
     async def aclose(self) -> None:
         """Release pipeline-lifetime resources (LLM server, OCR engine).

@@ -1,0 +1,323 @@
+"""``bibr batch`` argument parsing and the thin CLI layer."""
+
+from __future__ import annotations
+
+import json
+import sys
+
+import pytest
+
+from bibr.local.cli import _build_parser
+from bibr.local.cli.batch import _form_fields, _run_batch, chew_options_from_config
+from bibr.local.cli.run_config import ResolvedRunConfig
+
+
+def _pdf(tmp_path, name="paper"):
+    path = tmp_path / f"{name}.pdf"
+    path.write_bytes(b"%PDF-1.4\n")
+    return path
+
+
+def _seed_ledger(out):
+    out.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "paper_id": "a",
+            "status": "ok",
+            "duration_s": 12.0,
+            "n_refs": 4,
+            "n_matched": 2,
+            "started_at": "2026-09-02T10:00:00+00:00",
+            "finished_at": "2026-09-02T10:30:00+00:00",
+        },
+        {"paper_id": "b", "status": "failed", "error_code": "poll_timeout"},
+    ]
+    (out / "outcomes.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+def test_dry_run_prints_the_plan_without_running(tmp_path, capsys, monkeypatch):
+    def boom(local):
+        raise AssertionError("dry-run must not open a pipeline")
+
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", boom)
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--dry-run", "--no-llm", "--batch-size", "3"]
+    )
+
+    assert _run_batch(args) == 0
+
+    printed = capsys.readouterr().out
+    assert "bibr batch · dry run" in printed
+    assert "Input (1 files)" in printed
+    assert str(pdf) in printed
+    assert "local" in printed and "batch size 3" in printed
+    assert "llm disabled (--no-llm)" in printed
+    assert "Dry run — nothing was processed." in printed
+    assert not out.exists()
+
+
+def test_remote_dry_run_shows_form_and_warns_about_local_only_flags(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+    pdf = _pdf(tmp_path)
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(pdf),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            "http://serve:8000/",
+            "--token",
+            "t0k",
+            "--refs",
+            "llm",
+            "--pages",
+            "2-4",
+            "--figure-images",
+            "--include-regions",
+            "--form",
+            "extra=1",
+            "--ocr",
+            "glm",
+            "--concurrency",
+            "3",
+        ]
+    )
+
+    assert _run_batch(args) == 0
+
+    captured = capsys.readouterr()
+    assert "remote       http://serve:8000" in captured.out
+    assert "in-flight    3 (min 1, max 4)" in captured.out
+    assert (
+        "refs=llm start_page=1 end_page=3 include_figures=true include_regions=true extra=1"
+        in captured.out
+    )
+    assert "token        set" in captured.out
+    assert "ignored by the remote executor" in captured.err
+    assert "--ocr" in captured.err
+
+
+def test_report_subcommand_text_and_json(tmp_path, capsys):
+    out = tmp_path / "run"
+    _seed_ledger(out)
+
+    assert _run_batch(_build_parser().parse_args(["batch", "report", str(out)])) == 0
+    text = capsys.readouterr().out
+    assert text.startswith("bibr batch report")
+    assert "1 ok · 1 failed · 2 total" in text
+    assert "poll_timeout ×1" in text
+
+    assert (
+        _run_batch(_build_parser().parse_args(["batch", "--report", "--out", str(out), "--json"]))
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["papers"] == {"total": 2, "ok": 1, "failed": 1, "attempts": 2}
+    assert report["references"]["match_rate"] == 0.5
+
+
+def test_report_without_ledger_is_an_error(tmp_path, capsys):
+    assert _run_batch(_build_parser().parse_args(["batch", "report", str(tmp_path)])) == 2
+    assert "No ledger found" in capsys.readouterr().err
+    assert _run_batch(_build_parser().parse_args(["batch", "report"])) == 2
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["batch", "--out", "x"],  # no inputs
+        ["batch", "paper.pdf"],  # no --out
+        ["batch", "paper.pdf", "--out", "x", "--deadline", "soon"],
+    ],
+)
+def test_usage_errors_exit_2(argv, tmp_path, capsys, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    _pdf(tmp_path)
+    assert _run_batch(_build_parser().parse_args(argv)) == 2
+    assert capsys.readouterr().err.strip()
+
+
+@pytest.fixture
+def _restore_logging():
+    """``main()`` configures the root logger and pins bibr.* levels; undo it."""
+    import logging
+
+    names = [
+        "bibr.local",
+        "bibr.pipeline",
+        "bibr.structure",
+        "bibr.extract",
+        "httpcore",
+        "httpx",
+        "urllib3",
+        "huggingface_hub",
+        "filelock",
+        "asyncio",
+        "hf_xet",
+    ]
+    root = logging.getLogger()
+    saved_root = (root.level, list(root.handlers))
+    saved = {name: logging.getLogger(name).level for name in names}
+    yield
+    root.setLevel(saved_root[0])
+    for handler in list(root.handlers):
+        if handler not in saved_root[1]:
+            root.removeHandler(handler)
+    for name, level in saved.items():
+        logging.getLogger(name).setLevel(level)
+
+
+def test_main_dispatches_batch_report(tmp_path, monkeypatch, capsys, _restore_logging):
+    from bibr.local.cli import main
+
+    out = tmp_path / "run"
+    _seed_ledger(out)
+    monkeypatch.setattr(sys, "argv", ["bibr", "batch", "report", str(out)])
+    with pytest.raises(SystemExit) as exc:
+        main()
+    assert exc.value.code == 0
+    assert "bibr batch report" in capsys.readouterr().out
+
+
+def test_cli_local_run_end_to_end_with_stubbed_pipeline(tmp_path, monkeypatch, capsys):
+    from bibr.api import ChewFailure
+
+    class _Result:
+        ok = True
+
+        def __init__(self, path):
+            self.data = {"info": {"title": path.stem}, "bib": [], "text": []}
+
+    class _Fake:
+        def __init__(self):
+            self.local = None
+
+        def __call__(self, paths, batch_size):
+            return [
+                ChewFailure(p, "corrupt", error_code="CORRUPT") if p.stem == "bad" else _Result(p)
+                for p in paths
+            ]
+
+    fake = _Fake()
+
+    def factory(local):
+        fake.local = local
+        return fake
+
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", factory)
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: "sha")
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
+    good = _pdf(tmp_path, "good")
+    _pdf(tmp_path, "bad")
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(good),
+            str(tmp_path / "bad.pdf"),
+            "--out",
+            str(out),
+            "--no-llm",
+            "--refs",
+            "off",
+        ]
+    )
+
+    assert _run_batch(args) == 1
+
+    assert fake.local.chew_options["no_llm"] is True
+    assert fake.local.chew_options["refs"] == "off"
+    assert fake.local.stages[0] == "validate"
+    assert (out / "good.json").is_file()
+    rows = [json.loads(line) for line in (out / "outcomes.jsonl").read_text().splitlines()]
+    assert {r["paper_id"]: r["status"] for r in rows} == {"good": "ok", "bad": "failed"}
+    info = json.loads((out / "run_info.json").read_text())
+    assert info["options"]["no_llm"] is True
+    assert "token" not in info["options"]
+    assert "1 ok · 1 failed" in capsys.readouterr().out
+
+
+def test_form_fields_map_flags_to_the_job_api(tmp_path):
+    from rich.console import Console
+
+    console = Console(stderr=True)
+    parse = _build_parser().parse_args
+    base = ["batch", "x", "--out", "y", "--serve-url", "http://s"]
+    assert _form_fields(parse(base), console) == {}
+    args = parse(
+        [
+            *base,
+            "--refs",
+            "ner",
+            "--ref-seg",
+            "geom",
+            "--consolidate",
+            "--pages",
+            "3",
+            "--figure-images",
+            "--regions",
+            "--form",
+            "k=v=w",
+        ]
+    )
+    assert _form_fields(args, console) == {
+        "refs": "ner",
+        "ref_seg": "geom",
+        "consolidate": "fill",
+        "start_page": "2",
+        "end_page": "2",
+        "include_figures": "true",
+        "include_regions": "true",
+        "k": "v=w",
+    }
+    assert _form_fields(parse([*base, "--form", "novalue"]), console) is None
+    assert _form_fields(parse([*base, "--pages", "0-3"]), console) is None
+
+
+def test_chew_options_from_config_mirrors_the_pipeline_construction():
+    config = ResolvedRunConfig(
+        ocr_backend="glm-http",
+        memory_mode="balanced",
+        llm_backend="cloud",
+        ocr_url="http://ocr",
+        device="cpu",
+        crossref=False,
+        no_llm=False,
+        figure_images=True,
+        start_page=0,
+        end_page=4,
+        consolidate="replace",
+        ref_seg="geom",
+        refs="ner",
+    )
+    options = chew_options_from_config(config)
+    assert options["ocr_backend"] == "glm-http"
+    assert options["llm_backend"] == "cloud"
+    assert options["memory_mode"] == "balanced"
+    assert options["ocr_url"] == "http://ocr"
+    assert options["device"] == "cpu"
+    assert options["crossref"] is False
+    assert options["figure_images"] is True
+    assert (options["start_page"], options["end_page"]) == (0, 4)
+    assert options["consolidate"] == "replace"
+    assert options["ref_seg"] == "geom"
+    assert options["refs"] == "ner"
+    bare = chew_options_from_config(ResolvedRunConfig("paddle", "balanced", "cloud"))
+    assert "consolidate" not in bare and "ref_seg" not in bare and "refs" not in bare
+
+
+def test_chew_and_batch_share_pipeline_options():
+    parser = _build_parser()
+    chew = parser.parse_args(["chew", "p.pdf", "--include-regions", "--refs", "off"])
+    batch = parser.parse_args(
+        ["batch", "p.pdf", "--out", "o", "--include-regions", "--refs", "off"]
+    )
+    assert chew.regions is True and batch.regions is True
+    assert chew.refs == batch.refs == "off"
+    for name in ("ocr", "llm", "memory", "pages", "device", "batch_size", "preset", "consolidate"):
+        assert hasattr(batch, name), name

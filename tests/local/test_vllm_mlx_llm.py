@@ -98,7 +98,8 @@ def test_nuextract_llm_server_uses_llm_role_settings(monkeypatch):
         return FakeServer()
 
     monkeypatch.setattr(ocr_mod, "VllmMlxServer", fake_server)
-    monkeypatch.setattr(Settings.llm, "local_model", "numind/NuExtract3-mlx-8bits")
+    # Unset LLM_LOCAL_MODEL resolves to the registry MLX default for this backend.
+    monkeypatch.setattr(Settings.llm, "local_model", None)
     monkeypatch.setattr(Settings.llm, "vllm_mlx_port", 8767)
     monkeypatch.setattr(Settings.llm, "vllm_mlx_extra_args", "")
     monkeypatch.setattr(Settings.llm, "vllm_mlx_continuous_batching", True)

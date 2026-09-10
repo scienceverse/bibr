@@ -162,7 +162,7 @@ async def test_run_always_uses_async_loader_no_preload():
     fs = FileState(path=Path("x.pdf"))
     fs.page_images = [MagicMock()]
     fs.page_indices = [0]
-    fs.layout_results = [[]]
+    fs.layout_results = [[{"label": "text", "task_type": "text"}]]
     rm = MagicMock()
     rm.ocr = MagicMock(recognize=AsyncMock(return_value="text"), loaded=True)
     rm.shutdown_ocr = AsyncMock(return_value=None)
@@ -193,6 +193,89 @@ async def test_run_always_uses_async_loader_no_preload():
     from bibr.pipeline.resources import ResourceManager
 
     assert not hasattr(ResourceManager, "ensure_ocr")
+
+
+def _native_only_file() -> FileState:
+    fs = FileState(path=Path("x.pdf"))
+    fs.page_images = [MagicMock()]
+    fs.page_indices = [0]
+    fs.layout_results = [
+        [
+            {"label": "text", "task_type": "text", "_native_text_used": True, "content": "native"},
+            {"label": "figure", "task_type": "skip"},
+            {"label": "header", "task_type": "abandon"},
+        ]
+    ]
+    return fs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["glm-llama", "paddle"])
+async def test_engine_not_started_when_native_text_covers_every_region(backend):
+    """A window whose regions were all filled natively never pays for OCR startup."""
+    fs = _native_only_file()
+    rm = MagicMock()
+    rm.ocr = None
+    rm.ocr_runtime_identity = None
+    rm.shutdown_ocr = AsyncMock(return_value=None)
+    rm.await_ocr = AsyncMock(side_effect=AssertionError("the OCR engine must not start"))
+    cfg = RunConfig(ocr_backend=backend)
+
+    with (
+        patch(
+            "bibr.pipeline.stages.ocr.ocr_page_regions",
+            AsyncMock(return_value=[{"content": "native", "_native_text_used": True}]),
+        ),
+        patch(
+            "bibr.pipeline.stages.ocr._postprocess_ocr_regions",
+            side_effect=lambda x, *_args, **_kwargs: x,
+        ),
+    ):
+        await OcrStage().run(
+            _ctx(
+                [fs],
+                resources=rm,
+                config=cfg,
+                signals=StageSignals(any_needs_ocr=True, preloading_ocr=False),
+            )
+        )
+
+    rm.await_ocr.assert_not_awaited()
+    assert fs.error is None
+    assert fs.ocr_regions is not None
+
+
+@pytest.mark.asyncio
+async def test_engine_starts_when_one_region_still_needs_ocr():
+    fs = _native_only_file()
+    fs.layout_results[0].append({"label": "table_title", "task_type": "text"})
+    rm = MagicMock()
+    rm.ocr = MagicMock(recognize=AsyncMock(return_value="text"), loaded=True)
+    del rm.ocr.wait_for_server
+    rm.shutdown_ocr = AsyncMock(return_value=None)
+    rm.await_ocr = AsyncMock(return_value=None)
+    cfg = RunConfig(ocr_backend="glm-llama")
+
+    with (
+        patch(
+            "bibr.pipeline.stages.ocr.ocr_page_regions",
+            AsyncMock(return_value=[{"content": "x"}]),
+        ),
+        patch(
+            "bibr.pipeline.stages.ocr._postprocess_ocr_regions",
+            side_effect=lambda x, *_args, **_kwargs: x,
+        ),
+    ):
+        await OcrStage().run(
+            _ctx(
+                [fs],
+                resources=rm,
+                config=cfg,
+                signals=StageSignals(any_needs_ocr=True, preloading_ocr=False),
+            )
+        )
+
+    rm.await_ocr.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -323,12 +406,19 @@ async def test_progress_ocr_end_runs_even_on_error(monkeypatch):
     progress.ocr_end.assert_called_once()
 
 
+def _pdf_needing_ocr(name: str) -> FileState:
+    """A PDF window with one region that must go to the backend."""
+    fs = FileState(path=Path(name))
+    fs.layout_results = [[{"label": "text", "task_type": "text"}]]
+    return fs
+
+
 @pytest.mark.asyncio
 async def test_ocr_init_failure_marks_all_files_errored_without_raising():
     """OCR backend init failure (missing model, unreachable URL) must fail
     per-file via set_error, not crash the whole chunk."""
-    fs1 = FileState(path=Path("a.pdf"))
-    fs2 = FileState(path=Path("b.pdf"))
+    fs1 = _pdf_needing_ocr("a.pdf")
+    fs2 = _pdf_needing_ocr("b.pdf")
     rm = MagicMock()
     rm.await_ocr = AsyncMock(side_effect=RuntimeError("model not found"))
     rm.shutdown_ocr = AsyncMock(return_value=None)
@@ -346,7 +436,7 @@ async def test_ocr_init_failure_marks_all_files_errored_without_raising():
 async def test_wait_for_server_failure_errors_files_without_unpaired_ocr_end():
     """wait_for_server failure happens before ocr_start; ocr_end must not be
     called without a matching ocr_start."""
-    fs = FileState(path=Path("a.pdf"))
+    fs = _pdf_needing_ocr("a.pdf")
     rm = MagicMock()
     rm.await_ocr = AsyncMock(return_value=None)
     rm.ocr.wait_for_server = AsyncMock(side_effect=RuntimeError("server unreachable"))
@@ -410,8 +500,8 @@ async def test_ocr_init_failure_not_retried_within_chunk():
     fast-fail without re-running the (slow, doomed) engine constructor once per
     file. The interleaved stage replaces file_states but shares one signals
     object."""
-    fs1 = FileState(path=Path("a.pdf"))
-    fs2 = FileState(path=Path("b.pdf"))
+    fs1 = _pdf_needing_ocr("a.pdf")
+    fs2 = _pdf_needing_ocr("b.pdf")
     rm = MagicMock()
     rm.await_ocr = AsyncMock(side_effect=RuntimeError("model not found"))
     rm.shutdown_ocr = AsyncMock(return_value=None)
@@ -860,14 +950,14 @@ class _AutomaticIdentityCaptureStage:
         self.captures = []
 
     async def run(self, ctx):
-        from bibr.pipeline.stages.export import _build_ocr_config
+        from bibr.pipeline.stages.export import _build_engines
 
         await OcrStage().run(ctx)
         self.captures.append(
             {
                 "identity": ctx.scratch["ocr_runtime_identity"],
                 "profile": ctx.scratch["ocr_profile"],
-                "provenance": _build_ocr_config(ctx),
+                "provenance": _build_engines(ctx)[0],
                 "regions": ctx.file_states[0].ocr_regions,
             }
         )
@@ -898,9 +988,9 @@ def _assert_glm_chunk_captures(captures, cache_store):
     assert [capture["regions"][0][1].raw_content for capture in captures] == [None, None]
     assert [
         (
-            capture["provenance"]["ocr_backend"],
-            capture["provenance"]["ocr_model"],
-            capture["provenance"]["ocr_profile"],
+            capture["provenance"]["backend"],
+            capture["provenance"]["model"],
+            capture["provenance"]["profile"],
         )
         for capture in captures
     ] == [
@@ -1111,9 +1201,9 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
     ]
     assert [
         (
-            capture["provenance"]["ocr_backend"],
-            capture["provenance"]["ocr_model"],
-            capture["provenance"]["ocr_profile"],
+            capture["provenance"]["backend"],
+            capture["provenance"]["model"],
+            capture["provenance"]["profile"],
         )
         for capture in stage.captures
     ] == [

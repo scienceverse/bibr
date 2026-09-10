@@ -49,21 +49,6 @@ def _abstract_contents(abstract_sentences: list[str]) -> PaperContents:
 
 
 class TestAbstractFinalize:
-    def test_explicit_null_is_not_overridden_by_synthetic_abstract(self):
-        contents = _abstract_contents(["Opening editorial body."])
-        contents.sections[1].header_is_synthetic = True
-        meta = PaperMetadata(doi="", title="Editorial")
-        meta._abstract_explicitly_absent = True
-        _finalize_abstract_and_keywords(contents, meta)
-        assert meta.abstract == ""
-        assert "_abstract_explicitly_absent" not in meta.model_dump()
-
-    def test_explicit_null_can_recover_a_printed_abstract(self):
-        meta = PaperMetadata(doi="", title="Study")
-        meta._abstract_explicitly_absent = True
-        _finalize_abstract_and_keywords(_abstract_contents(["Printed summary."]), meta)
-        assert meta.abstract == "Printed summary."
-
     def test_llm_abstract_kept_and_stripped(self):
         meta = PaperMetadata(doi="10.1/x", title="T", abstract="  The clean LLM abstract. ")
         _finalize_abstract_and_keywords(_abstract_contents(["Section noise."]), meta)
@@ -114,6 +99,21 @@ class TestAbstractFinalize:
         meta = PaperMetadata(doi="10.1/x", title="T", abstract="")
         _finalize_abstract_and_keywords(_abstract_contents([]), meta)
         assert meta.abstract == ""
+
+    def test_explicit_null_can_recover_a_printed_abstract(self):
+        meta = PaperMetadata(doi="", title="Study")
+        meta._abstract_explicitly_absent = True
+        _finalize_abstract_and_keywords(_abstract_contents(["Printed summary."]), meta)
+        assert meta.abstract == "Printed summary."
+
+    def test_explicit_null_is_not_overridden_by_synthetic_abstract(self):
+        contents = _abstract_contents(["Opening editorial body."])
+        contents.sections[1].header_is_synthetic = True
+        meta = PaperMetadata(doi="", title="Editorial")
+        meta._abstract_explicitly_absent = True
+        _finalize_abstract_and_keywords(contents, meta)
+        assert meta.abstract == ""
+        assert "_abstract_explicitly_absent" not in meta.model_dump()
 
 
 class TestKeywordFinalize:

@@ -367,23 +367,25 @@ def _get_paper_model(settings: GlobalSettings | None = None) -> PaperClassifierM
         if not model_id:
             _paper_model_cache = False
             return None
-        try:
-            from bibr.structure.paper_classifier_model import PaperClassifierModel
-        except ImportError as e:
-            # Core (non-'ml') install: torch/transformers are absent. Fall back
-            # to the LLM classifier rather than aborting extraction.
-            logger.info("Trained paper classifier unavailable (%s); using LLM fallback", e)
-            _paper_model_cache = False
-            return None
+        from bibr.exceptions import ConfigurationError
+        from bibr.structure.paper_classifier_common import load_paper_classifier
 
         revision = effective.ml.paper_classifier_revision
         device = effective.ml.paper_classifier_device
         logger.info(
             "Loading trained paper classifier %s@%s (device=%s)", model_id, revision, device
         )
-        _paper_model_cache = PaperClassifierModel.from_pretrained(
-            model_id, revision=revision, device=device
-        )
+        try:
+            _paper_model_cache = load_paper_classifier(
+                model_id, revision=revision, device=device, settings=effective
+            )
+        except (ImportError, ConfigurationError) as e:
+            # No usable runtime (core install without a published ONNX bundle,
+            # or the torch extra missing). Fall back to the LLM classifier
+            # rather than aborting extraction.
+            logger.warning("Trained paper classifier unavailable (%s); using LLM fallback", e)
+            _paper_model_cache = False
+            return None
         return _paper_model_cache  # type: ignore[return-value]
 
 

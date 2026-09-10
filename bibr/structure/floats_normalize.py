@@ -21,17 +21,22 @@ belongs to the ownership layer in
 printed ids against caption receipts and would be contradicted by a second,
 blinder survival heuristic here.
 
-Both mergers renumber survivors from 1, which invalidates the printed-id
-reservation ``_finalize_media`` already froze into the caption-assignment
-receipt. The ``*_with_remap`` variants therefore hand back the old→new
-object-id map, and :func:`remap_caption_receipt` replays it onto the receipt
-so its ``object_id`` values still name live floats.
+Both mergers renumber survivors, which moves the ids ``_finalize_media``
+already froze into the caption-assignment receipt. The ``*_with_remap``
+variants therefore hand back the old→new object-id map, and
+:func:`remap_caption_receipt` replays it onto the receipt so its
+``object_id`` values still name live floats. The renumbering keeps a printed
+"Figure N"/"Table N" label as the id where a caption carries one — a bare
+positional renumber from 1 broke the correspondence ``detect_xrefs`` resolves
+body mentions by.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+
+import pandas as pd
 
 from bibr.paper_contents import (
     CaptionAssignment,
@@ -49,6 +54,7 @@ _BARE_PANEL_RE = re.compile(r"^\(?(?:[A-Za-z]|\d{1,2})[\).]?$")
 
 # A caption that names its figure ("Figure 2:", "FIGURE 1 …", "Fig. 3").
 _FIGURE_LABEL_RE = re.compile(r"^fig(?:ure)?\.?\s*\d+\b", re.IGNORECASE)
+_FIGURE_LABEL_NUMBER_RE = re.compile(r"^fig(?:ure)?\.?\s*(\d+)\b", re.IGNORECASE)
 
 _TABLE_LABEL_RE = re.compile(r"^table\s+(\d+)\b", re.IGNORECASE)
 
@@ -87,6 +93,39 @@ def _vertically_near(a: list[float] | None, b: list[float] | None) -> bool:
     else:
         gap = 0
     return gap <= _MAX_VERTICAL_GAP
+
+
+def _renumber_honouring_printed_labels(objects, id_attribute: str, label_re) -> None:
+    """Renumber survivors, keeping the printed label as the id where there is one.
+
+    ``_reconcile_object_ids`` deliberately reserves the printed number as the
+    object id — that is how ``detect_xrefs`` resolves a body mention of
+    "Figure 2" — and it runs *before* the mergers here. Renumbering
+    positionally from 1 therefore broke the correspondence whenever anything
+    merged: with a caption-less panel absorbed into FIGURE 2, the survivors
+    became 1 and 2, so a mention of "Figure 2" resolved to the figure
+    captioned FIGURE 3. Unlabelled survivors take the lowest number the
+    printed labels have not claimed.
+    """
+    printed: dict[int, int] = {}
+    claimed: set[int] = set()
+    for index, obj in enumerate(objects):
+        match = label_re.match((obj.caption or "").strip())
+        if match is None:
+            continue
+        number = int(match.group(1))
+        if number > 0 and number not in claimed:
+            printed[index] = number
+            claimed.add(number)
+    next_free = 1
+    for index, obj in enumerate(objects):
+        if index in printed:
+            setattr(obj, id_attribute, printed[index])
+            continue
+        while next_free in claimed:
+            next_free += 1
+        setattr(obj, id_attribute, next_free)
+        claimed.add(next_free)
 
 
 def merge_figure_panels(figures: list[PaperFigure]) -> list[PaperFigure]:
@@ -189,8 +228,7 @@ def merge_figure_panels_with_remap(
         len(merged),
         len(absorbed),
     )
-    for ordinal, fig in enumerate(merged, start=1):
-        fig.figure_id = ordinal
+    _renumber_honouring_printed_labels(merged, "figure_id", _FIGURE_LABEL_NUMBER_RE)
     remap = {
         old_object_ids[i]: f"figure:{fig.figure_id}"
         for i, fig in enumerate(figures)
@@ -267,8 +305,7 @@ def merge_table_continuations_with_remap(
         len(result),
         merges,
     )
-    for ordinal, table in enumerate(result, start=1):
-        table.table_id = ordinal
+    _renumber_honouring_printed_labels(result, "table_id", _TABLE_LABEL_RE)
     remap = {old_object_ids[id(table)]: f"table:{table.table_id}" for table in result}
     # A consumed continuation page no longer exists, so its receipt entry
     # follows the table that swallowed its rows. Survivors are never
@@ -314,10 +351,27 @@ def remap_caption_receipt(
 
 
 def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool:
-    """Append a structurally compatible continuation, retaining all physical parts."""
-    from bibr.structure.table_merge import merge_table_contents
-
-    last_page = survivor.parts[-1].page_number if survivor.parts else survivor.page_number
-    if last_page is not None and continuation.page_number != last_page + 1:
+    """Append *continuation*'s rows to *survivor*; False when shapes differ."""
+    s_df, c_df = survivor.df, continuation.df
+    if len(s_df.columns) != len(c_df.columns):
+        logger.debug(
+            "table continuation on page %s not merged: %d vs %d columns",
+            continuation.page_number,
+            len(c_df.columns),
+            len(s_df.columns),
+        )
         return False
-    return merge_table_contents(survivor, continuation)
+    s_cols = [str(c) for c in s_df.columns]
+    if [str(c) for c in c_df.columns] == s_cols:
+        merged = pd.concat([s_df, c_df], ignore_index=True)
+    else:
+        # Headerless continuation page: the HTML parser promoted its first
+        # data row to column names — restore it and align positionally.
+        header_row = pd.DataFrame([[str(c) for c in c_df.columns]], columns=s_df.columns)
+        body = c_df.copy()
+        body.columns = s_df.columns
+        merged = pd.concat([s_df, header_row, body], ignore_index=True)
+    survivor.df = merged
+    survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
+    survivor.provenance.extend(continuation.provenance)
+    return True

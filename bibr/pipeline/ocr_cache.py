@@ -37,8 +37,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Version 7 removes the retired layout toggle from the cache-key contract.
-_CACHE_FORMAT_VERSION = 7
+# Version 8 adds the layout and PaddleOCR-VL model pins to the key. Entries
+# written before it were produced by unrecorded model revisions, so they cannot
+# be matched against the current ones and are invalidated wholesale.
+_CACHE_FORMAT_VERSION = 8
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -128,14 +130,24 @@ def _key(
         f"overlap_resolver={layout.overlap_resolver}",
         f"read_order_fallback={layout.read_order_fallback}",
         f"max_pages={effective.pipeline.max_pages}",
-        "native_source_schema=1",
-        f"native_repair={int(effective.ocr.native_repair_enabled)}",
-        f"native_captions={int(effective.ocr.native_captions_enabled)}",
         f"native_text={int(effective.ocr.native_text_enabled)}",
         f"native_text_min_chars={effective.ocr.native_text_min_chars}",
         f"native_text_min_printable_ratio={effective.ocr.native_text_min_printable_ratio}",
         f"outline_headings={int(effective.pipeline.outline_headings)}",
         f"ref_seg={_effective_ref_seg(cfg, effective)}",
+        # Which *weights* produced the cached artifacts. A complete entry lets
+        # the pipeline skip layout detection and OCR inference outright, so the
+        # pins that select those models decide its contents as surely as the
+        # tuning knobs above do — and unlike the knobs, a model swap changes
+        # every region in the bundle.
+        #
+        # ``identity.model`` does not cover this. For every served backend it
+        # is the *alias* ("paddle-ocr-vl-1.6"), which is what the vLLM server
+        # is launched with under `--served-model-name` while `--revision` takes
+        # the pin below; the alias is unchanged by a re-pin.
+        f"layout_model_revision={layout.model_revision}",
+        f"ocr_paddle_model={effective.ocr.paddle_model}",
+        f"ocr_paddle_revision={effective.ocr.paddle_revision}",
     ]
     raw = "\x1f".join(parts)
     return hashlib.sha256(raw.encode()).hexdigest()[:32]

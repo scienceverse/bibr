@@ -148,15 +148,16 @@ source("../../scripts/read_json_response.R")
 
 ```{r}
 result <- parse_bibr_json(resp_body_string(result_resp))
-cat("bibr version:", result$info$bibr_version, "\n")
+metadata <- result$metadata %||% result$info
+cat("bibr version:", result$extraction$bibr_version %||% metadata$bibr_version, "\n")
 ```
 
 ## 5. Explore the extracted data
 
-### Paper info
+### Paper metadata
 
 ```{r}
-result$info
+metadata
 ```
 
 ### Authors
@@ -235,8 +236,8 @@ jobs_df
 cat("File:           ", basename(FILE_PATH), "\n")
 cat("Job ID:         ", job_id, "\n")
 cat("Processing time:", elapsed, "seconds\n")
-cat("Title:          ", result$info$title, "\n")
-cat("DOI:            ", result$info$doi, "\n")
+cat("Title:          ", metadata$title, "\n")
+cat("DOI:            ", metadata$doi, "\n")
 cat("Sentences:      ", nrow(result$text), "\n")
 cat("Sections:       ", nrow(result$section), "\n")
 cat("Authors:        ", nrow(result$author), "\n")

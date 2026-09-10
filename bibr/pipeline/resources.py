@@ -125,6 +125,8 @@ class ResourceManager:
 
         self._layout: LayoutDetector | None = layout
         self._segmenter: SentenceSegmenter | None = segmenter
+        self._front_role = None
+        self._front_role_resolved = False
         self._ocr: OcrBackend | None = None
         self._ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._ocr_future: concurrent.futures.Future[OcrBackend] | None = None
@@ -209,6 +211,27 @@ class ResourceManager:
     @property
     def segmenter(self):
         return self._segmenter
+
+    # -- Front-role classifier (optional prior for front-matter ownership) --
+
+    def ensure_front_role(self):
+        """Return the front-role classifier, loading it on first use.
+
+        ``None`` when disabled (``ML_FRONT_ROLE_MODEL_ID`` unset) or when the
+        bundle cannot be loaded — the loader logs once and the pipeline keeps
+        going on heuristics alone.
+        """
+        if self._front_role_resolved:
+            return self._front_role
+        from bibr.extract.front_role import load_front_role_classifier
+
+        self._front_role = load_front_role_classifier(self._settings)
+        self._front_role_resolved = True
+        return self._front_role
+
+    @property
+    def front_role(self):
+        return self._front_role
 
     # -- OCR --
 
@@ -503,8 +526,40 @@ class ResourceManager:
                 f"No OCR startup candidate succeeded: {self.ocr_fallback_reason}",
             )
 
+    async def _drain_ocr_preload(self) -> None:
+        """Reclaim a preloaded engine that ``await_ocr`` never came to collect.
+
+        The preload submits the blocking OCR-backend constructor — which spawns
+        and health-waits a managed inference subprocess — to an executor, and
+        only ``await_ocr``, reached from ``OcrStage``, transfers the result. If
+        an earlier stage raises (classically: the layout model OOMs on the GPU
+        the preload just claimed), the future is never drained and the
+        subprocess outlives the run.
+        """
+        future, self._ocr_future = self._ocr_future, None
+        executor, self._ocr_executor = self._ocr_executor, None
+        try:
+            if future is None:
+                return
+            future.cancel()
+            client = None
+            try:
+                client = await asyncio.to_thread(future.result)
+            except concurrent.futures.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001 - a failed preload has nothing to reclaim
+                logger.debug("OCR preload failed before it was collected: %r", exc)
+                return
+            if client is not None and client is not self._ocr:
+                logger.info("Shutting down an OCR engine preloaded but never claimed")
+                await self._shutdown_failed_ocr_candidate(client)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False)
+
     async def shutdown_ocr(self) -> None:
         """Shutdown OCR client to free GPU memory."""
+        await self._drain_ocr_preload()
         client = self._ocr
         try:
             if client is not None and hasattr(client, "shutdown"):

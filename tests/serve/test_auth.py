@@ -74,6 +74,21 @@ def test_constant_time_compare_used(monkeypatch):
     assert calls, "hmac.compare_digest must be used for token comparison"
 
 
+def test_non_ascii_token_is_rejected_not_a_server_error():
+    """A high byte in the header must be a 401, not a TypeError-driven 500."""
+    from bibr.serve.auth import check_bearer
+
+    app = _build_app(api_key="sk_test")
+    assert check_bearer("Bearer sk_t\u00e9st") == "Invalid bearer token"
+
+    client = TestClient(app)
+    # Raw bytes bypass httpx's ASCII header validation, as a hostile or
+    # misconfigured client would.
+    r = client.get("/protected", headers={b"authorization": "Bearer sk_t\u00e9st".encode()})
+    assert r.status_code == 401
+    assert r.json()["detail"] == "Invalid bearer token"
+
+
 def test_empty_string_key_treated_as_disabled():
     app = _build_app(api_key="")
     client = TestClient(app)
@@ -239,6 +254,40 @@ def test_build_server_construction_failure_removes_owned_upload_root(
         for store in stores:
             if store.root.exists():
                 asyncio.run(store.close())
+
+
+def test_build_server_raises_the_body_cap_to_fit_base64_uploads_when_mcp_is_on(monkeypatch):
+    pytest.importorskip("litserve")
+    pytest.importorskip("mcp")
+
+    import asyncio
+
+    import litserve
+
+    from bibr.config import Settings
+    from bibr.serve.admission import base64_envelope
+    from bibr.serve.app import build_server
+
+    captured = {}
+    real_litserver = litserve.LitServer
+
+    def spy_litserver(*args, **kwargs):
+        captured.update(kwargs)
+        return real_litserver(*args, **kwargs)
+
+    monkeypatch.setattr(litserve, "LitServer", spy_litserver)
+    monkeypatch.setattr(Settings.mcp, "enabled", True)
+    server = build_server()
+    try:
+        expected = (
+            base64_envelope(Settings.pipeline.max_file_size)
+            + Settings.pipeline.multipart_overhead_bytes
+        )
+        assert captured["max_payload_size"] == expected
+        assert expected > Settings.pipeline.max_file_size * 4 // 3
+        assert server.app.state.upload_admission_gate.limit == Settings.pipeline.max_active_uploads
+    finally:
+        asyncio.run(server.app.state.inference_tracker.close())
 
 
 def test_build_server_preserves_payload_and_worker_runtime_options(monkeypatch):

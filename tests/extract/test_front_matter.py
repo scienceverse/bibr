@@ -31,27 +31,6 @@ def _front_matter_module():
         pytest.fail("front-matter ownership IR has not been implemented")
 
 
-def test_generated_section_label_is_not_rendered_as_printed_front_matter():
-    from bibr.extract.core_metadata import render_block_context
-
-    title = _section(1, "A study of forest disease", section_type=CanonicalSection.TITLE)
-    abstract = _section(2, "Abstract", section_type=CanonicalSection.ABSTRACT)
-    abstract.header_is_synthetic = True
-    contents = _contents(
-        [_sentence(1, "Opening prose about forest disease.", paragraph_id=1, section_id=2)],
-        sections=[title, abstract],
-        detected_title=title.header,
-    )
-    resolution, _ = _front_matter_module().resolve_front_matter(contents)
-    text = render_block_context(resolution)
-    assert "Opening prose about forest disease." in text
-    assert "Abstract" not in text
-
-    abstract.header_is_synthetic = False
-    resolution, _ = _front_matter_module().resolve_front_matter(contents)
-    assert "Abstract" in render_block_context(resolution)
-
-
 def _section(
     section_id: int,
     header: str,
@@ -3109,3 +3088,24 @@ def test_capitalised_kicker_is_not_treated_as_a_classifier_typed_byline():
         if candidate.raw_text.strip() == "CLINICAL PRACTICE PERSPECTIVES"
     )
     assert module.CLASSIFIED_BYLINE_TITLE_ROLE not in kicker.roles
+
+
+def test_generated_section_label_is_not_rendered_as_printed_front_matter():
+    from bibr.extract.core_metadata import render_block_context
+
+    title = _section(1, "A study of forest disease", section_type=CanonicalSection.TITLE)
+    abstract = _section(2, "Abstract", section_type=CanonicalSection.ABSTRACT)
+    abstract.header_is_synthetic = True
+    contents = _contents(
+        [_sentence(1, "Opening prose about forest disease.", paragraph_id=1, section_id=2)],
+        sections=[title, abstract],
+        detected_title=title.header,
+    )
+    resolution, _ = _front_matter_module().resolve_front_matter(contents)
+    text = render_block_context(resolution)
+    assert "Opening prose about forest disease." in text
+    assert "Abstract" not in text
+
+    abstract.header_is_synthetic = False
+    resolution, _ = _front_matter_module().resolve_front_matter(contents)
+    assert "Abstract" in render_block_context(resolution)

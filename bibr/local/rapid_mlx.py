@@ -609,13 +609,8 @@ class RapidMlxLlmServer:
         self._settings = settings if settings is not None else snapshot_settings()
         # An explicitly-set LLM_LOCAL_MODEL (e.g. written by `bibr setup`) wins
         # over the rapid-mlx alias default, so the served model never silently
-        # diverges from what the user picked.
-        explicit_local = (
-            self._settings.llm.local_model
-            if "local_model" in self._settings.llm.model_fields_set
-            else None
-        )
-        self._model = model or explicit_local or self._settings.llm.rapid_mlx_model
+        # diverges from what the user picked; unset defers to the alias.
+        self._model = model or self._settings.llm.local_model or self._settings.llm.rapid_mlx_model
         max_tokens = (
             self._settings.llm.max_tokens
             if "max_tokens" in self._settings.llm.model_fields_set

@@ -26,12 +26,6 @@ from bibr.pipeline.stages.render_ocr import InterleavedRenderOcrStage
 from bibr.pipeline.state import FileState
 
 
-@pytest.fixture(autouse=True)
-def fake_page_count(monkeypatch):
-    # These orchestration tests inject one-page layout/OCR doubles, not PDFs.
-    monkeypatch.setattr("bibr.ocr.utils.get_pdf_page_count", lambda _: 1)
-
-
 class _CountingLayout:
     """Fake LayoutStage: renders (marks page_images) and records the peak
     number of files holding page images simultaneously across the whole batch."""

@@ -182,8 +182,12 @@ def test_local_pipeline_consolidate_kwarg():
 class _FakePaper:
     def __init__(self, data):
         self._data = data
-        self.ocr_config = None
         self.processing_warnings = []
+        self.llm_usage_labels = {}
+        self.llm_trace = []
+        self.text_quality = None
+        self.metadata = None
+        self.extraction = None
 
     def export_to_json(self, *, include_regions=False, include_region_meta=False):
         return self._data
@@ -226,7 +230,7 @@ def _exportable(bib_match=None):
     return {
         "bib": [{"bib_id": 1, "doi": None}],
         "bib_match": bib_match if bib_match is not None else [],
-        "processing_warnings": [],
+        "extraction": {"warnings": []},
     }
 
 
@@ -264,4 +268,4 @@ def test_export_hook_warns_when_crossref_disabled():
 
     data = _exportable(bib_match=[])
     out = _run_export(data, RunConfig(consolidate="fill", crossref=False))
-    assert any("consolidate" in w for w in out["processing_warnings"])
+    assert any("consolidate" in w for w in out["extraction"]["warnings"])

@@ -438,7 +438,9 @@ async def test_invalid_native_usage_is_recorded_exactly_once_before_successful_f
         "total_tokens": 18,
         "cached_input_tokens": 3,
     }
-    labels = client.usage_labels_pop_file("paper#1")["title"]
+    labels = client.usage_labels_pop_file("paper#1")[
+        ("title", settings.llm.provider, settings.llm.model)
+    ]
     assert labels["input_tokens"] == 11
     assert labels["output_tokens"] == 7
     assert labels["total_tokens"] == 18
@@ -471,7 +473,9 @@ async def test_all_invalid_category_counters_are_initialized_on_success():
     with usage_file_context("paper#category-zeros"):
         await client._run_labeled_call("extract_title_keywords", lambda: _invoke(client))
 
-    labels = client.usage_labels_pop_file("paper#category-zeros")["extract_title_keywords"]
+    labels = client.usage_labels_pop_file("paper#category-zeros")[
+        ("extract_title_keywords", client._settings.llm.provider, client._settings.llm.model)
+    ]
     assert labels["attempts"] == 1
     assert labels["native_attempts"] == 1
     assert labels["instructor_attempts"] == 0

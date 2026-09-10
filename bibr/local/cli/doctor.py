@@ -325,19 +325,22 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         ok(f"{label}")
         return
 
-    # Verify cv2 is functional — a broken opencv install is a common
-    # silent failure (layout post-processing crashes mid-run).
-    opencv_reason = _opencv_unavailable_reason()
-    if opencv_reason is not None:
-        fail(
-            f"{label}: {opencv_reason}",
-            hint=(
-                "Install with: uv sync --extra ml"
-                if "not installed" in opencv_reason
-                else "Reinstall: uv pip install --reinstall opencv-python-headless"
-            ),
-        )
-        return
+    # Verify cv2 is functional — a broken opencv install is a common silent
+    # failure (layout post-processing crashes mid-run). Only the torch layout
+    # path can reach it: transformers' image processor imports cv2, while the
+    # ONNX path a core install uses is Pillow/numpy throughout.
+    if importlib.util.find_spec("torch") is not None:
+        opencv_reason = _opencv_unavailable_reason()
+        if opencv_reason is not None:
+            fail(
+                f"{label}: {opencv_reason}",
+                hint=(
+                    "Install with: uv sync --extra torch"
+                    if "not installed" in opencv_reason
+                    else "Reinstall: uv pip install --reinstall opencv-python-headless"
+                ),
+            )
+            return
 
     if soft_warn is not None:
         msg, hint = soft_warn
@@ -378,7 +381,12 @@ def _check_device(ok, warn, fail) -> None:
         else:
             ok("Device: cpu")
     except ImportError:
-        fail("Device: torch not installed", hint="Install with: uv sync --extra ml")
+        # Core install: bibr's own models run on ONNX Runtime, so report the
+        # provider it would pick rather than calling a missing torch a failure.
+        from bibr.utils.onnx_providers import get_ort_providers, selected_device
+
+        device = selected_device(get_ort_providers(model_name="doctor"))
+        ok(f"Device: {device} (ONNX Runtime; torch not installed)")
     except Exception as e:  # noqa: BLE001
         fail(f"Device: {e}")
 
@@ -395,17 +403,33 @@ def _check_ref_strategies(ok, fail) -> None:
         ok("References: extraction disabled (parse=off)")
         return
     label = f"References: seg={seg_strategy}, parse={parse_strategy}"
-    if (seg_strategy == "crf" or parse_strategy == "ner") and importlib.util.find_spec(
-        "torch"
-    ) is None:
-        fail(f"{label} requires ML dependencies", hint="Install with: uv sync --extra ml")
+    torch_missing = importlib.util.find_spec("torch") is None
+    if seg_strategy == "crf" and torch_missing:
+        # The CRF segmenter has no ONNX export; it is a torch-only opt-in.
+        fail(
+            f"{label}: the crf segmenter is torch-only",
+            hint="Install with: uv sync --extra torch, or set REF_SEG_STRATEGY=geom",
+        )
+        return
+    if parse_strategy == "ner" and torch_missing:
+        from bibr.config import Settings
+
+        if Settings.ml.runtime == "torch":
+            fail(
+                f"{label}: ML_RUNTIME=torch but torch is not installed",
+                hint="Install with: uv sync --extra torch, or set ML_RUNTIME=auto",
+            )
+            return
+        # A core install parses references through the ONNX bundle, which is
+        # fetched from the Hub on first use — nothing to verify offline here.
+        ok(f"{label} (ONNX Runtime)")
         return
     if seg_strategy == "geom" and importlib.util.find_spec("sklearn") is None:
-        # geom cascades to LLM seg when its deps are missing, so this is a soft
-        # failure: the pipeline still runs, just without the local segmenter.
+        # scikit-learn is a core dependency, so this only fires on a damaged
+        # environment. geom cascades to LLM seg, hence a soft failure.
         fail(
             f"{label}: geom segmenter unavailable, will cascade to LLM seg",
-            hint="Install with: uv sync --extra ml, or set REF_SEG_STRATEGY=llm",
+            hint="Reinstall bibr, or set REF_SEG_STRATEGY=llm",
         )
         return
     ok(label)
@@ -421,8 +445,22 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
     import shutil
 
     if backend == "vllm":
-        available = importlib.util.find_spec("vllm") is not None or shutil.which("uv") is not None
+        vllm_installed = importlib.util.find_spec("vllm") is not None
+        available = vllm_installed or shutil.which("uv") is not None
         hint = "Install with: uv sync --extra vllm, or install uv (https://astral.sh/uv)"
+        if available and not vllm_installed:
+            # Honest about the cost: the first chew bootstraps vLLM through uv
+            # (several GB), and on Python 3.14 — where the vllm extra installs
+            # nothing because vllm==0.27.0 has no 3.14 wheels — inside a
+            # managed Python 3.13.
+            note = "uv-managed vLLM runner; the first run downloads several GB"
+            if sys.version_info >= (3, 14):
+                note += (
+                    " into a managed Python 3.13 (vllm has no 3.14 wheels, so "
+                    "`uv sync --extra vllm` installs nothing on this interpreter)"
+                )
+            ok(f"LLM backend: {backend} ({note}, model={model}) — {hint}")
+            return
     elif backend == "vllm-mlx":
         from bibr.local.vllm_mlx_runtime import vllm_mlx_unavailable_reason
 

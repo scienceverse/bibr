@@ -9,11 +9,22 @@ import pytest
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "info": {"schema_version": "10.6", "title": title},
+        "schema_version": "11.0",
+        "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
-        "info_match": [],
-        "enrichment": None,
+        "metadata_match": [],
+        "extraction": {
+            "bibr_version": "0.0.0-test",
+            "completed_at": "2026-07-24T10:00:00Z",
+            "settings": {
+                "ref_seg": "geom",
+                "ref_parse": "ner",
+                "crossref_enrich": True,
+                "consolidate": "off",
+            },
+            "warnings": [],
+        },
     }
 
 
@@ -111,13 +122,13 @@ def test_sidecar_replay_requires_core_settings_and_schema_match():
         settings_digest="settings-v1",
         completeness="complete",
         bib_match=({"bib_id": 1, "service": "crossref", "doi": "10.1/ref"},),
-        info_match=({"service": "crossref", "doi": "10.1/self"},),
+        metadata_match=({"service": "crossref", "doi": "10.1/self"},),
     )
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings-v1")
     assert replayed["bib_match"] == list(sidecar.bib_match)
-    assert replayed["info_match"] == list(sidecar.info_match)
-    assert replayed["enrichment"] == {
+    assert replayed["metadata_match"] == list(sidecar.metadata_match)
+    assert replayed["extraction"]["enrichment"] == {
         "complete": True,
         "refs_enriched": 1,
         "refs_total": 1,
@@ -165,9 +176,9 @@ def test_local_sink_routes_blocking_core_and_receipts_to_quarantine(tmp_path):
     sink.record(fs, RunState.CORE_WRITTEN)
 
     destination = tmp_path / "results" / "_quarantine" / "identity_conflict" / "paper.json"
-    assert json.loads(destination.read_text(encoding="utf-8"))["info"]["title"] == "Café"
+    assert json.loads(destination.read_text(encoding="utf-8"))["metadata"]["title"] == "Café"
     immutable_core = sink.core_path(fs)
-    assert json.loads(immutable_core.read_text(encoding="utf-8"))["info"]["title"] == "Café"
+    assert json.loads(immutable_core.read_text(encoding="utf-8"))["metadata"]["title"] == "Café"
     receipt = json.loads(sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert [event["state"] for event in receipt["events"]] == ["started", "core_written"]
     assert receipt["disposition"] == "identity_conflict"
@@ -231,7 +242,7 @@ def test_chunk_writer_uses_quarantine_destination_for_blocking_payload(tmp_path)
     )
 
     quarantined = tmp_path / "out" / "_quarantine" / "references_incomplete" / "paper.json"
-    assert json.loads(quarantined.read_text(encoding="utf-8"))["info"]["title"] == "Café"
+    assert json.loads(quarantined.read_text(encoding="utf-8"))["metadata"]["title"] == "Café"
     assert not (tmp_path / "out" / "paper.json").exists()
 
 
@@ -320,7 +331,7 @@ def test_sidecar_rejects_duplicate_malformed_and_unknown_bibliography_rows(rows)
         replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
 
 
-def test_sidecar_rejects_duplicate_or_malformed_info_service_rows():
+def test_sidecar_rejects_duplicate_or_malformed_metadata_service_rows():
     from bibr.pipeline.artifacts import (
         ENRICHMENT_SIDECAR_SCHEMA_VERSION,
         ArtifactReplayError,
@@ -340,10 +351,36 @@ def test_sidecar_rejects_duplicate_or_malformed_info_service_rows():
             core_sha256=canonical_json_sha256(core),
             settings_digest="settings",
             completeness="complete",
-            info_match=rows,
+            metadata_match=rows,
         )
         with pytest.raises(ArtifactReplayError):
             replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
+
+
+def test_sidecar_replay_rejects_a_core_without_an_extraction_block():
+    """v11 hangs the completeness receipt and the enrichment diagnostics off
+    ``extraction``. A core lacking it would replay bib_match fine while both
+    vanish without trace — a partial enrichment reading as clean. Fail the
+    replay instead, so the caller falls back to the verified checkpoint."""
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    core.pop("extraction")
+    sidecar = make_enrichment_sidecar(
+        core,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="settings",
+        completeness="partial",
+        warnings=("transport failure",),
+    )
+
+    with pytest.raises(ArtifactReplayError, match="no extraction block"):
+        replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
 
 
 def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them():
@@ -371,10 +408,9 @@ def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them()
     assert encoded["warnings"][0].startswith("transport failure")
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
-    assert any("transport failure" in warning for warning in replayed["processing_warnings"])
-    assert any(
-        "1 of 1 terminal requests failed" in warning for warning in replayed["processing_warnings"]
-    )
+    warnings = replayed["extraction"]["warnings"]
+    assert any("transport failure" in warning for warning in warnings)
+    assert any("1 of 1 terminal requests failed" in warning for warning in warnings)
 
 
 def test_enrichment_settings_digest_includes_resolver_result_settings():

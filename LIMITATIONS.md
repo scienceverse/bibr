@@ -46,9 +46,14 @@ Less is known about performance on:
   proceedings, reports, and other non-article formats. Scanned PDFs deserve
   extra care; see the next section.
 
+- Inputs that are not PDFs. DOCX, JATS XML, HTML, and ePub files are parsed
+  natively and skip OCR and the core LLM extraction, which makes them fast and
+  cheap, but the benchmark sets are PDF-only, so their field coverage is less
+  measured.
+
 If you use bibr in a new domain, treat the first batch as a validation run:
 inspect representative JSON output manually, run `bibr inspect`, and keep an
-eye on `processing_warnings`.
+eye on `extraction.warnings`.
 
 ## Scanned PDFs are slower and less verified
 
@@ -87,7 +92,7 @@ Known caveats:
 - Edge cases such as long multi-citation spans, flattened superscripts,
   footnote-heavy styles, unusual author-year punctuation, and OCR-damaged
   citation text can still be missed or linked incorrectly.
-- `xref_id` values should be treated as best-effort links. Downstream systems
+- `xref.target_id` values should be treated as best-effort links. Downstream systems
   should tolerate missing links and verify important links against the source
   text or PDF.
 
@@ -139,8 +144,10 @@ Pay extra attention to:
   or copied only partially when the source has dense, footnote-style, or
   publisher-specific affiliation blocks. We are actively looking into improving
   affiliation extraction.
-- Crossref enrichment and consolidation. External metadata can be missing,
-  rate-limited, stale, or matched to the wrong record.
+- Crossref enrichment and consolidation. Enrichment is opt-in (off unless
+  `CROSSREF_ENRICH=true`, `--crossref`, or the API's `crossref=true` turns it
+  on), and when it runs the external metadata can be missing, rate-limited,
+  stale, or matched to the wrong record.
 - OECD/domain and paper-type classification outside familiar evaluation
   domains.
 - Funding, conflicts of interest, author contribution roles, ethics statements,
@@ -148,6 +155,33 @@ Pay extra attention to:
   bibliography metrics.
 - Local/offline model configurations. The same paper can produce different
   results with different OCR, LLM, reference parsing, or quantization settings.
+- References parsed with the default local parser (`--refs ner`), which trades
+  some field precision for speed and zero token cost; `--refs llm` is more
+  precise and sends every reference to the LLM.
+- Silent fallbacks are no longer silent, but they still change results. When a
+  trained section or paper-type classifier cannot load or fails, the LLM
+  classifies instead and the export records it in `processing_warnings`
+  (`section_classifier_degraded`, `paper classifier degraded`). Treat those
+  exports as less validated than a clean run.
+
+## Benchmark results depend on the evaluation protocol
+
+Some development datasets overlap the training data of the default reference
+models. Results on those datasets measure fit to familiar examples, not
+performance on unseen papers. Even a set excluded from model training stops
+being a blind test once its errors guide development. Use a fresh independent
+sample for a new accuracy claim, and report the exact models, settings and
+software version alongside any result.
+
+## `bibr serve` and the MCP endpoint are single-tenant
+
+The HTTP API and the remote MCP endpoint authenticate with one shared bearer
+key: every caller is the same principal, job results and MCP paper stores are
+not isolated per user, and unguessable job ids are the only thing keeping one
+caller's results from another. By default, results live in the memory of a single API process; the optional
+Redis store shares them across replicas. Both stores evict results by age,
+count and size, so a client must fetch a result within `JOBS_TTL_SECONDS`. Put the service behind your own gateway when
+you need per-user access control, quotas, or durable results.
 
 ## Recommended use
 

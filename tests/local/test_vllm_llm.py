@@ -39,18 +39,59 @@ def test_missing_vllm_and_uv_raises_actionable_error():
     assert "vllm" in msg
 
 
-def test_uv_fallback_when_vllm_absent():
+def test_uv_fallback_when_vllm_absent(monkeypatch):
+    from bibr.local import vllm_llm
+
+    # Pin the interpreter: on 3.14 the bootstrap adds ``--python 3.13`` (below).
+    monkeypatch.setattr(vllm_llm.sys, "version_info", (3, 13, 0, "final", 0))
     server, popen = _mk_server(
         vllm_installed=False, uv_present=True, model="org/m", port=9999, mem_fraction=0.5
     )
     cmd = popen.call_args[0][0]
-    assert cmd[:6] == ["uv", "tool", "run", "--from", "vllm==0.25.1", "vllm"]
-    assert cmd[6] == "serve"
-    assert cmd[7] == "org/m"  # model positional
+    assert cmd[:8] == [
+        "uv",
+        "tool",
+        "run",
+        "--from",
+        "vllm==0.27.0",
+        "--with",
+        "openai>=2.54.0,<3",
+        "vllm",
+    ]
+    assert cmd[8] == "serve"
+    assert cmd[9] == "org/m"  # model positional
     assert "--model" not in cmd
     assert "9999" in cmd
     assert "0.5" in cmd
     assert server.base_url == "http://localhost:9999"
+
+
+def test_uv_bootstrap_warns_with_the_install_remedy(caplog):
+    with caplog.at_level("WARNING", logger="bibr.local.vllm_llm"):
+        _mk_server(vllm_installed=False, uv_present=True, model="org/m")
+    messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("uv sync --extra vllm" in m and "several GB" in m for m in messages)
+
+
+def test_uv_bootstrap_pins_a_supported_interpreter_on_python_314(monkeypatch):
+    from bibr.local import vllm_llm
+
+    monkeypatch.setattr(vllm_llm.sys, "version_info", (3, 14, 0, "final", 0))
+    _server, popen = _mk_server(vllm_installed=False, uv_present=True, model="org/m")
+    cmd = popen.call_args[0][0]
+    assert cmd[:11] == [
+        "uv",
+        "tool",
+        "run",
+        "--python",
+        "3.13",
+        "--from",
+        "vllm==0.27.0",
+        "--with",
+        "openai>=2.54.0,<3",
+        "vllm",
+        "serve",
+    ]
 
 
 def test_command_and_base_url():
@@ -129,6 +170,16 @@ def test_defaults_from_settings(monkeypatch):
     cmd = popen.call_args[0][0]
     assert "org/from-settings" in cmd
     assert server.base_url == "http://localhost:8123"
+
+
+def test_unset_local_model_launches_the_cuda_bf16_variant(monkeypatch):
+    """The old config default was the MLX build, which vLLM cannot load."""
+    monkeypatch.setattr(Settings.llm, "local_model", None)
+    _server, popen = _mk_server()
+    cmd = popen.call_args[0][0]
+    assert "numind/NuExtract3" in cmd
+    assert not any("mlx" in part for part in cmd)
+    assert "--revision" in cmd  # the registry's launch args ride along
 
 
 def _bare_server(process=None):

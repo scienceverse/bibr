@@ -150,15 +150,25 @@ class MlxVlmOcrServer:
 
         image = Image.new("RGB", (128, 48), "white")
         ImageDraw.Draw(image).text((8, 16), "OCR OK", fill="black")
-        client = PaddleHttpOcrClient(
-            base_url=self.base_url, model=self._model, settings=self._settings
-        )
+
+        async def _smoke_request() -> str:
+            # The client's httpx pool binds to the loop that created it, so
+            # its teardown must run in that same loop. Closing it from a
+            # second ``asyncio.run`` raised "Event loop is closed" out of the
+            # ``finally``, replacing a successful smoke result and making the
+            # backend impossible to start.
+            client = PaddleHttpOcrClient(
+                base_url=self.base_url, model=self._model, settings=self._settings
+            )
+            try:
+                return await client.recognize(image, "OCR:")
+            finally:
+                await client.shutdown()
+
         try:
-            result = asyncio.run(client.recognize(image, "OCR:"))
+            result = asyncio.run(_smoke_request())
         except Exception as exc:
             self._raise_smoke_error(f"request failed: {exc}")
-        finally:
-            asyncio.run(client.shutdown())
         if (
             not isinstance(result, str)
             or "ocr" not in result.casefold()

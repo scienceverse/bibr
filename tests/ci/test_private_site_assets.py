@@ -72,7 +72,10 @@ def test_mkdocs_copies_site_policy_assets(tmp_path: Path) -> None:
     assert not (site_dir / "superpowers").exists()
 
     schema = json.loads((site_dir / "reference" / "paper.schema.json").read_text())
-    assert {"_regions", "_native_source"} <= schema["properties"].keys()
+    from bibr.export.schema_artifact import build_export_schema
+
+    assert schema == build_export_schema()
+    assert {"schema_version", "metadata", "extraction"} <= schema["properties"].keys()
     assert "author_id" in schema["$defs"]["AuthorExport"]["properties"]
 
 

@@ -9,6 +9,7 @@ import hashlib
 import logging
 import sys
 import zipfile
+import zlib
 from pathlib import Path
 
 try:
@@ -203,6 +204,12 @@ def _check_docx_corruption(file_content: bytes) -> bool:
             if "word/document.xml" not in zf.namelist():
                 return True
             entries = zf.infolist()
+            if any(info.flag_bits & 0x1 for info in entries):
+                # Zip-level member encryption. The archive is intact and
+                # readable-with-a-password, so it is not corrupt — return
+                # False and let _check_docx_encryption own the classification
+                # (the pipeline reports is_corrupted before is_encrypted).
+                return False
             if len(entries) > _DOCX_MAX_ENTRIES:
                 logger.warning("DOCX contains too many archive entries: %d", len(entries))
                 return True
@@ -236,6 +243,17 @@ def _check_docx_corruption(file_content: bytes) -> bool:
                 return True
             return False
     except zipfile.BadZipFile:
+        return True
+    except (RuntimeError, OSError, EOFError, ValueError, zlib.error):
+        # Reading a member — not just opening the archive — can fail in ways
+        # BadZipFile does not cover: zipfile raises RuntimeError for a
+        # password-protected entry and NotImplementedError (a RuntimeError)
+        # for a compression method it cannot inflate, and a truncated or
+        # damaged deflate stream surfaces as zlib.error or EOFError from the
+        # streaming size check. Every one of them means the archive is
+        # unreadable, which is exactly what this function reports; letting
+        # them escape crashed validation instead of classifying the file.
+        logger.warning("DOCX archive could not be read", exc_info=True)
         return True
 
 
@@ -275,7 +293,11 @@ def _check_docx_encryption(file_content: bytes) -> bool:
     """Check if a DOCX file is password-protected.
 
     Encrypted OOXML documents are stored as an OLE Compound File with an
-    ``EncryptedPackage`` stream rather than as a plain zip archive.
+    ``EncryptedPackage`` stream rather than as a plain zip archive. Third-party
+    tools instead produce an ordinary zip whose *members* are encrypted, which
+    the CFB check cannot see — detected here from the entry's general-purpose
+    flag so such a file is reported as password-protected rather than as
+    generic corruption.
 
     Args:
         file_content: Raw DOCX bytes.
@@ -283,7 +305,15 @@ def _check_docx_encryption(file_content: bytes) -> bool:
     Returns:
         True if the file is password-protected.
     """
-    return file_content.startswith(_CFB_MAGIC) and b"EncryptedPackage" in file_content
+    if file_content.startswith(_CFB_MAGIC):
+        return b"EncryptedPackage" in file_content
+    import io
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
+            return any(info.flag_bits & 0x1 for info in zf.infolist())
+    except Exception:  # noqa: BLE001 — unreadable archives are the corruption check's job
+        return False
 
 
 def _check_pdf_encryption(file_content: bytes) -> bool:

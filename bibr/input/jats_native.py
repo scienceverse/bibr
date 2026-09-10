@@ -25,8 +25,8 @@ from __future__ import annotations
 import logging
 
 import pandas as pd
-from lxml import etree
 
+from bibr.input.xml_entities import parse_xml
 from bibr.models import (
     PaperAuthor,
     PaperMetadata,
@@ -113,24 +113,88 @@ def _attr(el, name: str) -> str | None:
     return None
 
 
+# Elements that end the run of text they sit in. XML carries no whitespace of
+# its own between adjacent children, so plain concatenation fuses the words on
+# either side of these: "Line one<break/>Line two" collapses to "Line oneLine
+# two", and a structured <aff> becomes "Dept of PsychologyUtrecht University".
+# Inline markup (italic, sup, xref, ext-link...) is deliberately absent — a
+# separator there would split "H<sub>2</sub>O" into "H 2 O".
+_TEXT_BOUNDARY = frozenset(
+    {
+        # Explicit line break, and block-level containers.
+        "break",
+        "p",
+        "sec",
+        "title",
+        "label",
+        "abstract",
+        "disp-quote",
+        "list-item",
+        "def",
+        "term",
+        "tr",
+        "td",
+        "th",
+        # Structured <aff>/<address> fields — sibling values, not a sentence.
+        "institution",
+        "institution-wrap",
+        "institution-id",
+        "addr-line",
+        "city",
+        "state",
+        "country",
+        "postal-code",
+        "phone",
+        "fax",
+        "email",
+    }
+)
+
+
+def _flatten(el, exclude: set[str] | None = None) -> str:
+    """Concatenate descendant text, skipping local names in *exclude*.
+
+    Inserts a single space where :data:`_TEXT_BOUNDARY` markup implies a word
+    boundary the source itself does not spell out — but never where the text so
+    far already ends in whitespace, so an ``<aff>`` whose fields are separated
+    by ", " in the source stays "X, Y" instead of becoming "X , Y".
+    """
+    parts: list[str] = []
+
+    def boundary() -> None:
+        if parts and parts[-1] and not parts[-1][-1].isspace():
+            parts.append(" ")
+
+    def walk(node) -> None:
+        if node.text:
+            parts.append(node.text)
+        for child in node:
+            ln = _ln(child)
+            if not ln:  # comments / processing instructions are not content
+                if child.tail:
+                    parts.append(child.tail)
+                continue
+            if exclude is None or ln not in exclude:
+                if ln in _TEXT_BOUNDARY:
+                    boundary()
+                walk(child)
+            if child.tail:
+                parts.append(child.tail)
+
+    walk(el)
+    return "".join(parts)
+
+
 def _text(el) -> str:
     """Flatten all descendant text to a whitespace-collapsed string."""
     if el is None:
         return ""
-    return collapse_ws("".join(el.itertext())).strip()
+    return collapse_ws(_flatten(el)).strip()
 
 
 def _flatten_excluding(el, exclude: set[str]) -> str:
     """Concatenate text of *el* skipping subtrees whose local name is in *exclude*."""
-    parts: list[str] = []
-    if el.text:
-        parts.append(el.text)
-    for child in el:
-        if _ln(child) not in exclude:
-            parts.append(_flatten_excluding(child, exclude))
-        if child.tail:
-            parts.append(child.tail)
-    return "".join(parts)
+    return _flatten(el, exclude)
 
 
 class JatsParser:
@@ -164,6 +228,7 @@ class JatsParser:
         self._native_ref_strings: list[str] | None = None
         self._footnotes: list[str] = []
         self._aff_map: dict[str, str] = {}
+        self._body_ref_lists: list[tuple[object, int]] = []
 
     # ------------------------------------------------------------------
     # Public API (mirrors DocxParser / PDFParser)
@@ -184,9 +249,8 @@ class JatsParser:
             PaperSection(section_id=0, header="Root", level=0, parent_section_id=None)
         )
 
-        parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
         try:
-            root = etree.fromstring(self.xml_bytes, parser=parser)
+            root = parse_xml(self.xml_bytes)
         except Exception as exc:
             from bibr.exceptions import ProcessingError
 
@@ -207,6 +271,7 @@ class JatsParser:
             self._process_container(body, section_id=0, depth=0)
         if back is not None:
             self._parse_back(back)
+        self._recover_body_ref_list()
 
         return PaperContents(
             sentences=[],
@@ -470,7 +535,6 @@ class JatsParser:
                 continue
             if (_attr(contrib, "contrib-type") or "author") != "author":
                 continue
-            idx += 1
             name = _first_desc(contrib, "name")
             if name is None:
                 name = _first_desc(contrib, "string-name")
@@ -481,6 +545,19 @@ class JatsParser:
                 else:
                     given = _text(_first_child(name, "given-names"))
                     family = _text(_first_child(name, "surname"))
+            else:
+                # A consortium/working-group byline carries <collab> instead of
+                # a personal name. Treat it like <string-name>: one unsplit
+                # name in `family`, matching how Crossref models a group author.
+                collab = _first_desc(contrib, "collab")
+                if collab is not None:
+                    family = _text(collab)
+
+            if not given and not family:
+                # No name of any kind — emitting the row would only produce a
+                # blank author (VAL_AUTHOR_BLANK) and shift every later id.
+                continue
+            idx += 1
 
             email = _text(_first_desc(contrib, "email")) or None
 
@@ -540,6 +617,12 @@ class JatsParser:
             elif ln in ("list", "list-item"):
                 # Flatten list structure — list items carry <p> children.
                 self._process_container(child, section_id, depth)
+            elif ln == "ref-list":
+                # EuropePMC's fullTextXML puts the bibliography in <body> as a
+                # <sec sec-type="ref-list"> instead of in <back>. Record it and
+                # let parse() decide — <back> is walked after the body, and a
+                # ref-list there is the authoritative one.
+                self._body_ref_lists.append((child, section_id))
             # title (handled by the parent sec), label, and unknown wrappers
             # are intentionally ignored.
 
@@ -723,19 +806,50 @@ class JatsParser:
             if nested is not None:
                 self._handle_ref_list(nested)
 
-    def _handle_ref_list(self, ref_list) -> None:
-        self._section_counter += 1
-        ref_sid = self._section_counter
-        header = _text(_first_child(ref_list, "title")) or "References"
-        self.sections.append(
-            PaperSection(
-                section_id=ref_sid,
-                header=header,
-                level=1,
-                parent_section_id=0,
-                section_type=CanonicalSection.REFERENCES,
+    def _retype_as_references(self, section_id: int, ref_list) -> None:
+        """Mark an existing body section as the references section."""
+        for section in self.sections:
+            if section.section_id != section_id:
+                continue
+            section.section_type = CanonicalSection.REFERENCES
+            if not section.header:
+                section.header = _text(_first_child(ref_list, "title")) or "References"
+            return
+
+    def _recover_body_ref_list(self) -> None:
+        """Ingest a ``<ref-list>`` found in ``<body>`` when ``<back>`` had none.
+
+        Runs only when the document has otherwise yielded no references, so a
+        well-formed ``<back>`` ref-list always wins and no document that parses
+        correctly today changes. Without it a body-located bibliography is
+        dropped in silence — ``_process_container`` has nowhere to put it.
+        """
+        if self._native_references or self._native_ref_strings:
+            return
+        if not self._body_ref_lists:
+            return
+        ref_list, section_id = self._body_ref_lists[0]
+        # The enclosing <sec> is the references heading the producer already
+        # emitted; reuse it rather than appending a second, competing one.
+        self._handle_ref_list(ref_list, section_id=section_id or None)
+
+    def _handle_ref_list(self, ref_list, section_id: int | None = None) -> None:
+        if section_id is None:
+            self._section_counter += 1
+            ref_sid = self._section_counter
+            header = _text(_first_child(ref_list, "title")) or "References"
+            self.sections.append(
+                PaperSection(
+                    section_id=ref_sid,
+                    header=header,
+                    level=1,
+                    parent_section_id=0,
+                    section_type=CanonicalSection.REFERENCES,
+                )
             )
-        )
+        else:
+            ref_sid = section_id
+            self._retype_as_references(ref_sid, ref_list)
 
         refs = list(_iter_children(ref_list, "ref"))
         if not refs:

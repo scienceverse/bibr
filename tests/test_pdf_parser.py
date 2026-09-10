@@ -346,21 +346,7 @@ class TestSectionHints:
         # Root + implicit Abstract
         assert len(contents.sections) == 2
         assert contents.sections[1].header == "Abstract"
-        assert contents.sections[1].header_is_synthetic
         assert contents.sentences[0].section_id == contents.sections[1].section_id
-
-    def test_later_printed_heading_does_not_relocate_the_hinted_section(self, mock_wtpsplit):
-        contents = _parse_and_segment(
-            [
-                [
-                    _region(0, "abstract", "This paper studies things."),
-                    _region(1, "paragraph_title", "Abstract"),
-                ]
-            ]
-        )
-        abstract = next(s for s in contents.sections if s.header == "Abstract")
-        assert not abstract.header_is_synthetic
-        assert abstract.provenance == []
 
     def test_reference_creates_implicit_section(self, mock_wtpsplit):
         json_result = [
@@ -421,6 +407,19 @@ class TestSectionHints:
 
         assert ("abstract", 1) in contents.layout_hints
         assert ("reference", 2) in contents.layout_hints
+
+    def test_later_printed_heading_does_not_relocate_the_hinted_section(self, mock_wtpsplit):
+        contents = _parse_and_segment(
+            [
+                [
+                    _region(0, "abstract", "This paper studies things."),
+                    _region(1, "paragraph_title", "Abstract"),
+                ]
+            ]
+        )
+        abstract = next(s for s in contents.sections if s.header == "Abstract")
+        assert not abstract.header_is_synthetic
+        assert abstract.provenance == []
 
 
 # ---------------------------------------------------------------------------

@@ -38,10 +38,9 @@ Checks MIME type, file corruption, and encryption. Refuses unsupported formats (
 - PP-DocLayoutV3 detects PDF regions (headings, body text, tables, formulas, figures, and more); regions then flow through native-text inspection and recognition
 - `OCR_BACKEND=paddle` selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
 
-**Bounded PDF processing.** PDFs are rendered in windows of at most
-`PIPELINE_PAGE_WINDOW_SIZE` pages (default 8). Each window completes layout,
-native inspection, and OCR before its page images are released. The separate
-`PIPELINE_MAX_PAGES` setting limits the processed page count (default 200).
+**PDF limits.** `PIPELINE_MAX_PAGES` limits the processed page count
+(default 200). Render-pixel and dimension limits reject oversized pages before
+rasterization. Size memory for the processed pages and concurrent files.
 
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
@@ -51,11 +50,6 @@ Acceptance uses character-count and printable-text checks
 (`OCR_NATIVE_TEXT_MIN_CHARS=20`, `OCR_NATIVE_TEXT_MIN_PRINTABLE_RATIO=0.85`)
 plus guards for corrupt text. Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
-
-Experimental selective line and inline-formula repair is controlled by
-`OCR_NATIVE_REPAIR_ENABLED` (default `false`). Native caption acceptance has
-a separate `OCR_NATIVE_CAPTIONS_ENABLED` switch and requires repair to be
-enabled. These options are distinct from the default native-text bypass.
 
 ### 3. Structure (`bibr/structure/pdf_parser.py`)
 
@@ -89,26 +83,31 @@ it records typed evidence while preserving the compatibility scalar fields.
 
 ### 5. Enrich (`bibr/enrich/references.py`)
 
-Optional enrichment of the paper's own identity and extracted references:
+Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 
 - DOI lookup for direct matches
-- Bibliographic search and title-less bibliographic fingerprint matching where applicable
-- Optional `bibr-resolver` integration for additional lookup sources
-- Matches stay separate in `info_match` and `bib_match`; printed metadata is preserved
-- `CROSSREF_ENRICH` controls inline enrichment. `CROSSREF_CONSOLIDATE=fill|replace` explicitly merges accepted matches into `bib` during export; the default is `off`
-- `POST /papers/enrich` can backfill an existing 10.6/10.7 export without rerunning extraction; `Result.consolidate()` only merges matches already present
+- Bibliographic search as fallback (fuzzy title matching)
+- Matches stay in `bib_match` and `metadata_match`; explicit `fill`/`replace` consolidation can merge accepted reference fields into `bib`
+- Off by default. `CROSSREF_ENRICH=true` enables it for a deployment; per run, `bibr chew --crossref` / `--no-crossref`, `chew(crossref=True|False)` and the serve API's `crossref` form field override the setting either way (`extraction.settings.crossref_enrich` in the output records the effective value)
+- When enabled, the up-front network work (resolver health probe and title searches, Crossref bulk DOI lookup) starts as soon as the references are parsed and overlaps the rest of the extract stage (citation linking, structured integrity), so it no longer adds serial wall time after extraction; the core checkpoint still sees unenriched references
 
 ### 6. Export (`bibr/export/`)
 
 **JSON** (`bibr/export/json_export.py`):
 
 - JSON-serializable dict matching the bibr v{{ schema_version }} paper schema
-- Top-level keys include: `paper_id`, `info`, `author`, `text`, `section`, `url`, `bib`, `bib_match`, `info_match`, `funding`, `affiliations`, `xref`, `citation_linking`, optional `caption_assignment`, optional `reference_yield`, `figure`, `table`, `eq`, `ocr_config`, `enrichment`, `extraction`, `processing_warnings`, `llm_usage`, `llm_usage_by_label`, `qualification_provenance`, `validation`. Figure/table rows retain legacy primary fields and add ordered physical `parts` with provenance.
+- Top-level keys include: `paper_id`, `schema_version`, `source`, `metadata`, `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match`, `funding`, `affiliation`, `qualification_provenance`, `extraction`, `validation`. All telemetry (engines, timings, LLM usage, enrichment, warnings, diagnostics receipts, opt-in regions) lives under `extraction`. Figure/table rows retain legacy primary fields and add ordered physical `parts` with provenance.
 - Schema version: `{{ schema_version }}`
-- `info` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(info)`. Pipeline metadata (`ocr_config`, `processing_warnings`) lives at the top level.
+- `metadata` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(metadata)`. Pipeline telemetry lives under `extraction`; the input file's identity under `source`.
 - All positional IDs are 1-based; `section_id=0` is the Root sentinel (excluded from export)
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
-- Optional `_regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `_raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content. The same option includes `_native_source`: detached PDF characters with stable source IDs, geometry, fonts, rotation, geometric ownership and raster coverage diagnostics. Region records link to that evidence through source IDs and retain typed native/repair spans. Geometric coverage and recognized spans do not establish fidelity.
+- Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
+
+Within major version 11, the schema is additive-only: new fields may appear in
+any `11.x` release and readers must ignore keys they don't recognize. Dispatch
+on the *presence* of a root `schema_version` key, never on parsing its value —
+pre-v11 payloads have no such key at all. See `CHANGELOG.md` for the full v11
+break and forward-versioning policy.
 
 ### OCR selection and evidence
 
@@ -119,15 +118,15 @@ is detected, then `glm-llama`; without that GPU it uses `glm-llama` directly.
 Apple Silicon tries
 `paddle-rapid-mlx`, `paddle-mlx-vlm`, `glm-rapid-mlx`, then `glm-llama`.
 The selected backend/model/profile becomes the OCR runtime identity used in
-the OCR-cache key and export `ocr_config`, so cache entries and provenance
-cannot be confused across recognizers or normalizers. There is no silent
-per-request GLM fallback after a concrete runtime has passed startup.
+the OCR-cache key and export `extraction.ocr`, so cache entries and
+provenance cannot be confused across recognizers or normalizers. There is no
+silent per-request GLM fallback after a concrete runtime has passed startup.
 
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one
 outer Markdown/LaTeX fence or balanced display delimiter removed; the LaTeX
 body is otherwise preserved. The normalized value feeds parsing, while raw
-Paddle output remains available in `_raw_ocr_content` through `_regions`.
+Paddle output remains available in `raw_ocr_content` through `extraction.regions`.
 
 ## Key data structures
 
@@ -206,12 +205,12 @@ Pipeline orchestrator (`bibr/local/pipeline.py`). Loads models sequentially to f
 
 | Module | Purpose |
 |---|---|
-| `bibr/local/cli/` | CLI entry point (`bibr chew` command) |
+| `bibr/local/cli/` | CLI entry point (`bibr chew`, `bibr batch` and the other subcommands) |
 | `bibr/local/pipeline.py` | `LocalPipeline` orchestrator with memory management |
 | `bibr/local/layout.py` | PP-DocLayoutV3 layout detector |
 | `bibr/local/segmenter.py` | wtpsplit-lite sentence segmenter |
-| `bibr/ocr/registry.py`, `bibr/pipeline/resources.py` | OCR backend selection and managed runtime resources |
-| `bibr/pipeline/plans.py`, `bibr/pipeline/stages/` | Shared stage ordering and implementations |
+| `bibr/local/ocr.py`, `bibr/local/vllm_ocr.py`, `bibr/local/mlx_vlm_ocr.py`, `bibr/local/rapid_mlx.py`, `bibr/local/ocr_cloud.py` | OCR backends behind `bibr/ocr/registry.py`: managed `paddle-vllm` / `glm-llama` / `paddle-*-mlx` / `glm-rapid-mlx` servers, `paddle-http` / `glm-http` external servers, and the cloud vision LLMs |
+| `bibr/pipeline/` | The stage pipeline (`stages/`), run context, resources and caches shared by the local and LitServe entry points |
 
 Memory management modes control GPU VRAM usage: `aggressive` (load/unload per phase), `balanced` (keep layout + segmenter resident; OCR also stays resident across chunks unless a local LLM server needs the VRAM), `keep_all` (everything loaded).
 
@@ -229,7 +228,7 @@ Public multipart bodies never cross that process boundary. The request flow is:
 ```
 POST /papers/extract
   -> API admission + explicit multipart bounds
-     (one file, seven unique options at most 64 bytes each)
+     (one file, eight unique options at most 64 bytes each)
   -> one multipart spool (at most 1 MiB in memory)
   -> owner-only disk file (50 MiB file limit; 51 MiB body envelope)
   -> leased UUID/size/SHA-256/options descriptor
@@ -263,8 +262,10 @@ replacement cannot reliably notify the API waiter owned by a dead worker, so
 gate proves completion notification.
 
 Async jobs persist through the same upload store and submit the same descriptor
-to LitServe. Their queue and result store remain in the HTTP API process, so
-the server always pins exactly one API process, including with jobs disabled.
+to LitServe. The queue remains in the HTTP API process;
+`JOBS_STORE=memory` keeps results there too, while `JOBS_STORE=redis` shares
+status and results between replicas. The server pins exactly one API process
+per instance, including with jobs disabled.
 Upload leases keep queued and dispatched descriptors out of stale sweeping.
 LitServe is pinned below 0.3 because this boundary relies on 0.2.x
 manager/worker helpers; the spawned success and death-path compatibility tests
@@ -288,7 +289,7 @@ Key settings:
 | `LLM_REASONING_EFFORT_CITATIONS` | Reasoning effort override for citation resolution | `low` |
 | `OCR_BACKEND` | OCR runtime selector/backend | `paddle` |
 | `OCR_BASE_URL` | Base URL for an external HTTP OCR server | `http://localhost:8080` |
-| `CROSSREF_ENRICH` | Enable reference enrichment | `true` |
+| `CROSSREF_ENRICH` | Enable Crossref/resolver reference enrichment (per-run override: `--crossref`/`--no-crossref`, `chew(crossref=...)`, serve `crossref` field) | `false` |
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |
 | `FIGURE_IMAGES` | Include base64-encoded figure images in output | `false` |
 | `REF_SEG_STRATEGY` | Reference segmentation strategy (`geom`, `region`, `llm`, or `crf`) | `geom` |

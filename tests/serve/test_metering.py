@@ -193,9 +193,17 @@ class TestPredictMetering:
             async def process_file(self, filename, paper_id=None, content=None, config=None):
                 return {
                     "info": {},
-                    "llm_usage": {
-                        "gemini": {"total_tokens": 100},
-                        "modernbert": {"total_tokens": 23},
+                    "extraction": {
+                        "usage": {
+                            "totals": {
+                                "calls": 3,
+                                "input_tokens": 100,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 23,
+                                "total_tokens": 123,
+                            },
+                            "breakdown": [],
+                        }
                     },
                 }
 
@@ -227,6 +235,17 @@ class TestPredictMetering:
         assert rec["error_kind"] is None
         assert rec["llm_tokens_total"] == 123
         assert rec["filename"] == "a.pdf"
+        # v11 renamed the per-model ``llm_usage`` key to ``llm_usage_totals``
+        # (flat totals). The old key must be gone so consumers fail on a
+        # missing key rather than silently misreading a changed shape.
+        assert "llm_usage" not in rec
+        assert rec["llm_usage_totals"] == {
+            "calls": 3,
+            "input_tokens": 100,
+            "cached_input_tokens": 0,
+            "output_tokens": 23,
+            "total_tokens": 123,
+        }
 
     async def test_failure_record_has_error_kind(self, monkeypatch, caplog, tmp_path):
         from bibr.pipeline.context import RunConfig

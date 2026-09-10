@@ -1,0 +1,41 @@
+# gitleaks configuration — extends the default ruleset.
+#
+# CI runs two scans on every pull request and push (the `secrets` job in
+# .github/workflows/ci.yml): the checked-out tree, and the commits the event
+# introduced. Both must be clean. Semgrep's `p/secrets` pack scans the tree
+# only; this is the history-aware half. Run it locally with
+#
+#   gitleaks dir . --config .gitleaks.toml
+#   gitleaks git . --config .gitleaks.toml --log-opts="origin/main..HEAD"
+#
+# The allowlist names the documented placeholders and unit-test fixtures the
+# default rules trip on. Keep every entry a literal that no issuer would mint
+# (sequential runs, spelled-out words) rather than a path or a rule id, so a
+# real credential dropped into a test file is still caught.
+#
+title = "bibr"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders and unit-test fixtures"
+regexTarget = "match"
+regexes = [
+  # docs/reference/rest-api.md, docs/guides/deployment.md
+  '''Bearer your-secret-token''',
+  # tests/utils/test_redact.py, tests/test_cli_doctor.py
+  '''AIzaSyA1234567890abcdefGHIJKLMNOP''',
+  '''AIzaSyABCDEF1234567890xyz''',
+  # tests/test_config_cli.py
+  '''sk-1234567890abcdef''',
+  # tests/serve/test_mcp_endpoint.py
+  '''sk_test_0123456789abcdef0123456789abcdef''',
+  # tests/clients/test_nuextract_wire.py
+  '''UNIQUE-PYDANTIC-RAW-SECRET-[0-9]+''',
+  # tests/test_segmenter_base.py — fake Hub revisions
+  '''(?i)0123456789abcdef0123456789abcdef0123456''',
+]
+paths = [
+  '''__pycache__/''',
+]

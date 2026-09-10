@@ -1526,6 +1526,25 @@ class TestBoundedPositionalAbstract:
         assert sentences[1].section_id == methods.section_id
         assert sentences[2].section_id == title.section_id
 
+    def test_page_less_native_input_does_not_raise_and_still_selects(self):
+        """DOCX/JATS/HTML/ePub parses set page_number=None on every sentence:
+        min() over those raised TypeError, and a page equality test would
+        exclude every candidate."""
+        title = PaperSection(1, "Paper Title", 1, 0, CanonicalSection.UNKNOWN)
+        methods = PaperSection(2, "Methods", 1, 0, CanonicalSection.METHODS)
+        sentences = [
+            PaperSentence(1, "Bounded abstract prose.", 1, 1, page_number=None),
+            PaperSentence(3, "The study sampled 50 people.", 2, 2, page_number=None),
+            PaperSentence(4, "Title-section spill after body.", 1, 3, page_number=None),
+        ]
+        contents = _make_contents([title, methods], sentences)
+
+        _apply_positional_abstract_fallback(contents)
+
+        abstract = next(s for s in contents.sections if s.section_type == CanonicalSection.ABSTRACT)
+        assert sentences[0].section_id == abstract.section_id
+        assert sentences[2].section_id == title.section_id
+
     def test_bloated_abstract_is_retained_with_source_warning(self, caplog):
         abstract = PaperSection(1, "Abstract", 1, 0, CanonicalSection.ABSTRACT)
         intro = PaperSection(2, "Introduction", 1, 0, CanonicalSection.INTRODUCTION)

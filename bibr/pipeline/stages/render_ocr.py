@@ -1,9 +1,26 @@
-"""Bounded render → layout → native text → OCR for local and served PDFs.
+"""InterleavedRenderOcrStage — local-only render→OCR interleaving.
 
-Each active file holds at most PIPELINE_PAGE_WINDOW_SIZE page images. Text
-and geometry accumulate until the complete document can be parsed. Remote
-OCR still overlaps files, and served layout calls still use the shared GPU
-batcher, which can combine page windows from independent requests.
+The three page-image stages — ``LayoutStage`` (renders PDF pages to
+full-resolution PIL images), ``NativeTextStage``, and ``OcrStage`` — run
+stage-at-a-time across a whole chunk in the shared driver. That means every
+file's page images (~11.6 MB/page at 200 DPI) stay resident from the start of
+layout through the end of OCR: peak page-image RAM scales with the *chunk
+size*, not with one document. On a 16 GB unified-memory Mac (sharing RAM with
+the OCR/LLM models) an 8-file chunk of long PDFs spills into swap.
+
+This stage fuses those three into one and drives them per **window** of files,
+freeing each window's page images before the next window renders. Page-image
+RAM is then bounded by the window, independent of chunk size:
+
+- **local OCR** (GLM and generic local engines): sequential engine → window of 1,
+  so at most one file's pages are ever resident.
+- **remote OCR** (glm-http / cloud vision): network-bound → window of
+  ``OCR_MAX_CONCURRENT_FILES`` so cross-file HTTP concurrency is preserved
+  while still capping resident pages.
+
+It is used only by ``LocalPipeline``. The serve pipeline keeps the three
+stages separate on purpose: its ``GpuBatcher`` deliberately coalesces pages
+across concurrent requests, which per-file windowing would defeat.
 """
 
 from __future__ import annotations
@@ -100,6 +117,12 @@ class InterleavedRenderOcrStage:
             identity = runtime_identity
             ctx.scratch["ocr_runtime_identity"] = identity
         if requested_backend == "paddle" and identity is None and pending:
+            if not ocr_cache.is_enabled(ctx.settings):
+                # With no bundle to look up nothing here needs the concrete
+                # runtime identity. Leave the automatic chain unresolved so
+                # OcrStage starts it after native text is known — and only if
+                # a region still needs the backend.
+                return pending
             # A hard init failure in an earlier window of this chunk must not
             # re-run the slow, doomed engine constructor here.
             prior_error = ctx.signals.ocr_init_error
@@ -169,154 +192,26 @@ class InterleavedRenderOcrStage:
         # Let each window's OcrStage skip the per-chunk engine teardown; we do
         # it once below so a local LLM backend still reclaims VRAM without
         # reloading the OCR engine per window.
-        ctx.signals.defer_ocr_teardown = cfg.memory_mode != "aggressive"
+        ctx.signals.defer_ocr_teardown = True
 
         # Snapshot alive files up front: files that error inside a window drop
         # out of later inner stages via ``ctx.alive()`` but must still have
         # their page buffers freed, so we iterate the original grouping.
-        try:
-            for start in range(0, len(pending), window):
-                group = pending[start : start + window]
-                await self._run_page_windows(replace(ctx, file_states=group))
-        finally:
-            for fs in pending:
+        for start in range(0, len(pending), window):
+            group = pending[start : start + window]
+            sub = replace(ctx, file_states=group)
+            await self._layout.run(sub)
+            await self._native.run(sub)
+            await self._ocr.run(sub)
+            # Reclaim this window's page images (and pdf_bytes / layout_results)
+            # before the next window renders — the memory cap.
+            for fs in group:
                 fs.free_pre_ocr()
-            if _should_unload_ocr_after_chunk(cfg.memory_mode, cfg.llm_backend, ctx.settings):
-                await ctx.resources.shutdown_ocr()
 
-    async def _run_page_windows(self, ctx: PipelineContext) -> None:
-        """Keep only one window of images per file, publishing complete artifacts once."""
-        from bibr.exceptions import UpstreamServiceError
-        from bibr.ocr.pdf_inspection import PdfInspectionAccumulator
-        from bibr.ocr.utils import get_pdf_page_count
-        from bibr.pipeline import ocr_cache
-
-        cfg = ctx.config
-        size = ctx.settings.pipeline.page_window_size
-        ranges = {}
-        collected = {}
-        indices = {}
-        attempted = {}
-        failed = {}
-        timings = {}
-        window_identity = None
-        files = ctx.alive()
-        for fs in files:
-            try:
-                total = await asyncio.to_thread(get_pdf_page_count, fs.pdf_bytes)
-                start = cfg.start_page if cfg.start_page is not None else 0
-                end = min(cfg.end_page if cfg.end_page is not None else total - 1, total - 1)
-                if ctx.settings.pipeline.max_pages > 0:
-                    end = min(end, start + ctx.settings.pipeline.max_pages - 1)
-                if start < 0 or start > end:
-                    raise ValueError(f"Invalid page range: start={start}, end={end}, total={total}")
-                key = id(fs)
-                ranges[key] = (start, end)
-                collected[key] = [[] for _ in range(start)]
-                indices[key] = []
-                attempted[key] = failed[key] = 0
-                timings[key] = {"layout": 0.0, "ocr": 0.0}
-                fs.pdf_inspection_accumulator = PdfInspectionAccumulator()
-            except Exception as exc:  # noqa: BLE001 - per-file input/render failure
-                fs.set_error(str(exc), code="layout_failed", stage="layout", exc=exc)
-
-        # Only this subcontext sees partial-document semantics. Runtime identity
-        # and sticky OCR startup errors remain shared with the outer file loop.
-        previous_window = ctx.signals.ocr_page_window
-        ctx.signals.ocr_page_window = True
-        try:
-            while True:
-                active = []
-                if (
-                    cfg.memory_mode == "aggressive"
-                    and ctx.resources.ocr is not None
-                    and _should_unload_ocr_after_chunk(
-                        cfg.memory_mode, cfg.llm_backend, ctx.settings
-                    )
-                ):
-                    # The exact-identity cache probe may have started OCR.
-                    # Release it before the next layout phase on small devices.
-                    await ctx.resources.shutdown_ocr()
-                for fs in ctx.alive():
-                    key = id(fs)
-                    start, end = ranges[key]
-                    if start > end:
-                        continue
-                    active.append(fs)
-                    page_end = min(start + size - 1, end)
-                    page_ctx = replace(
-                        ctx,
-                        file_states=[fs],
-                        config=replace(cfg, start_page=start, end_page=page_end),
-                    )
-                    fs.ocr_regions = None
-                    fs.ocr_pages_attempted = fs.ocr_pages_failed = 0
-                    fs.stage_times.pop("ocr", None)
-                    await self._layout.run(page_ctx)
-                    ranges[key] = (page_end + 1, end)
-                    timings[key]["layout"] += fs.stage_times.get("layout", 0.0)
-                if not active:
-                    break
-                sub = replace(ctx, file_states=active)
-                try:
-                    await self._native.run(sub)
-                    await self._ocr.run(sub)
-                    identity = ctx.scratch.get("ocr_runtime_identity")
-                    if window_identity is None:
-                        window_identity = identity
-                    elif identity != window_identity:
-                        error = UpstreamServiceError(
-                            "ocr", "OCR runtime changed between page windows; retry the document"
-                        )
-                        for fs in ctx.alive():
-                            fs.set_error(str(error), code="ocr_failed", stage="ocr", exc=error)
-                    for fs in active:
-                        key = id(fs)
-                        page_ids = fs.page_indices or []
-                        # OcrStage pads preceding physical pages. Keep only this
-                        # window, leaving the initial padding exactly once.
-                        if fs.ocr_regions is not None:
-                            collected[key].extend(fs.ocr_regions[i] for i in page_ids)
-                        indices[key].extend(page_ids)
-                        attempted[key] += fs.ocr_pages_attempted
-                        failed[key] += fs.ocr_pages_failed
-                        timings[key]["ocr"] += fs.stage_times.get("ocr", 0.0)
-                finally:
-                    for fs in active:
-                        fs.free_page_images()
-                        fs.layout_results = None
-
-            for fs in files:
-                key = id(fs)
-                if key not in ranges:
-                    continue
-                fs.ocr_regions = collected[key] if fs.error is None else None
-                fs.page_indices = indices[key]
-                fs.ocr_pages_attempted = attempted[key]
-                fs.ocr_pages_failed = failed[key]
-                fs.stage_times.update(timings[key])
-                state = fs.pdf_inspection_accumulator
-                fs.ref_line_geometry = state.reference_lines() or None
-                if fs.pdf_inspection is not None:
-                    fs.pdf_inspection = replace(
-                        fs.pdf_inspection,
-                        layout_results=[],
-                        reference_lines=fs.ref_line_geometry or [],
-                    )
-                # Preserve the all-pages-failed gate even when the configured
-                # minimum success ratio is disabled.
-                if fs.error is None and attempted[key] and attempted[key] == failed[key]:
-                    fs.set_error("OCR failed for all pages", code="ocr_failed", stage="ocr")
-            OcrStage._check_ocr_success(ctx)
-            if ocr_cache.is_enabled(ctx.settings):
-                identity = ctx.scratch["ocr_runtime_identity"]
-                for fs in ctx.alive():
-                    if fs.ocr_regions is not None:
-                        ocr_cache.store(fs, cfg, identity, fs.ocr_regions, ctx.settings)
-        finally:
-            ctx.signals.ocr_page_window = previous_window
-            for fs in files:
-                fs.free_pre_ocr()
+        # Single per-chunk teardown, matching what OcrStage would have done once
+        # had it processed the whole chunk in one pass.
+        if _should_unload_ocr_after_chunk(cfg.memory_mode, cfg.llm_backend, ctx.settings):
+            await ctx.resources.shutdown_ocr()
 
 
 class StreamingRenderOcrStage(InterleavedRenderOcrStage):
@@ -417,7 +312,13 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
             for start in range(0, len(pending), window):
                 group = pending[start : start + window]
                 sub = replace(ctx, file_states=group)
-                await self._run_page_windows(sub)
+                await self._layout.run(sub)
+                await self._native.run(sub)
+                await self._ocr.run(sub)
+                # Reclaim this window's page images before the next renders —
+                # same memory cap as the non-streaming path.
+                for fs in group:
+                    fs.free_pre_ocr()
                 _spawn(group)
         finally:
             # Settle every spawned back half before the stage returns — no

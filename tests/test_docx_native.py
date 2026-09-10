@@ -8,8 +8,10 @@ pytest.importorskip("docx")
 
 from docx import Document
 
-from bibr.input.docx_native import DocxParser
+from bibr.input.docx_native import _NS, DocxParser
 from bibr.paper_contents import CanonicalSection
+
+_NS_W = _NS["w"]
 
 
 def _make_docx_bytes(build_fn) -> bytes:
@@ -358,3 +360,95 @@ class TestDocxParserFootnotes:
         xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(xrefs) == 1
         assert xrefs[0].xref_id == 1
+
+
+# ----- Run-level separators (w:br / w:tab / w:cr) -----
+
+
+def _deferred_texts(build_fn) -> list[str]:
+    """Paragraph text as the parser buffered it, before segmentation."""
+    parser = DocxParser(_make_docx_bytes(build_fn))
+    parser.parse()
+    return [entry[0] for entry in parser._deferred_texts]
+
+
+class TestRunSeparators:
+    """python-docx writes plain strings, so no fixture ever emitted these."""
+
+    def test_line_break_separates_words(self):
+        def build(doc):
+            para = doc.add_paragraph()
+            run = para.add_run("Cognitive load and recall")
+            run.add_break()
+            run.add_text("Jane Smith")
+
+        assert _deferred_texts(build) == ["Cognitive load and recall Jane Smith"]
+
+    def test_tab_separates_words(self):
+        def build(doc):
+            para = doc.add_paragraph()
+            run = para.add_run("Table 1")
+            run.add_tab()
+            run.add_text("Descriptive statistics")
+
+        assert _deferred_texts(build) == ["Table 1 Descriptive statistics"]
+
+    def test_a_shift_enter_title_block_stays_readable(self):
+        def build(doc):
+            para = doc.add_paragraph()
+            run = para.add_run("Cognitive load and recall")
+            for line in ("Jane Smith", "Department of Psychology", "jane.smith@example.edu"):
+                run.add_break()
+                run.add_text(line)
+
+        assert _deferred_texts(build) == [
+            "Cognitive load and recall Jane Smith Department of Psychology jane.smith@example.edu"
+        ]
+
+    def test_adjacent_runs_still_concatenate_untouched(self):
+        """Word splits runs mid-word for formatting — no separator may appear."""
+
+        def build(doc):
+            para = doc.add_paragraph()
+            para.add_run("Hyper")
+            para.add_run("tension").bold = True
+
+        assert _deferred_texts(build) == ["Hypertension"]
+
+    def test_a_break_next_to_existing_whitespace_is_not_doubled(self):
+        def build(doc):
+            para = doc.add_paragraph()
+            run = para.add_run("Methods ")
+            run.add_break()
+            run.add_text("We did things.")
+
+        assert _deferred_texts(build) == ["Methods We did things."]
+
+
+class TestNoteSeparators:
+    def test_breaks_and_paragraphs_separate_endnote_text(self):
+        from lxml import etree
+
+        from bibr.input.docx_footnotes import load_endnotes
+
+        w = _NS_W
+        xml = f"""
+        <w:endnotes xmlns:w="{w}">
+          <w:endnote w:id="1">
+            <w:p><w:r><w:t>Smith, J.</w:t><w:tab/><w:t>2020</w:t>
+              <w:br/><w:t>Title of the work</w:t></w:r></w:p>
+            <w:p><w:r><w:t>Journal of Testing.</w:t></w:r></w:p>
+          </w:endnote>
+        </w:endnotes>
+        """
+
+        class _FakePart:
+            element = etree.fromstring(xml.strip())
+
+        class _FakeDoc:
+            class part:
+                endnotes_part = _FakePart()
+
+        assert load_endnotes(_FakeDoc()) == {
+            "1": "Smith, J. 2020 Title of the work Journal of Testing."
+        }

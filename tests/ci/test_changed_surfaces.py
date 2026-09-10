@@ -140,6 +140,6 @@ def test_changed_paths_uses_merge_base_diff(monkeypatch) -> None:
         "git",
         "diff",
         "--name-only",
-        "--diff-filter=ACMRT",
+        "--diff-filter=ACDMRT",
         "base...head",
     ]

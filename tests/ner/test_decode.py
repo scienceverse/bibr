@@ -4,7 +4,9 @@ No model/weights required: ``decode_bio_spans`` is a pure function over
 (tags, offsets, text).
 """
 
-from bibr.ner.decode import decode_bio_spans, map_fields_to_paper_ref
+from bibr.models import PaperReference
+from bibr.ner.decode import _FIELD_TO_PAPER_REF, decode_bio_spans, map_fields_to_paper_ref
+from bibr.ner.tags import BIO_TAGS
 
 
 def test_single_field_multi_token_span():
@@ -189,9 +191,40 @@ def test_dashed_span_split_from_bio_sequence():
     assert map_fields_to_paper_ref(raw) == {"first_page": "20", "last_page": "26"}
 
 
-def test_unknown_field_is_ignored():
-    # ARXIV/PMID/etc. have no PaperReference target → dropped.
-    assert map_fields_to_paper_ref({"ARXIV": "2101.00001", "DOI": "10.1/x"}) == {"doi": "10.1/x"}
+def test_a_field_outside_the_tag_scheme_is_ignored():
+    assert map_fields_to_paper_ref({"NOT_A_TAG": "x", "DOI": "10.1/x"}) == {"doi": "10.1/x"}
+
+
+def test_the_identifiers_the_decoder_used_to_drop_now_land():
+    # ARXIV/PMID/SERIES/ACCESS_DATE/NOTE were tagged and thrown away until
+    # schema 10.8; PMID alone reaches 0.947 F1 on the JATS-supervised corpus.
+    raw = {
+        "ARXIV": "1803.04219",
+        "PMID": "28919116",
+        "SERIES": "Lecture Notes in Computer Science",
+        "ACCESS_DATE": "Accessed 12 March 2020",
+        "NOTE": "in Russian",
+    }
+    assert map_fields_to_paper_ref(raw) == {
+        "arxiv": "1803.04219",
+        "pmid": "28919116",
+        "series": "Lecture Notes in Computer Science",
+        "access_date": "Accessed 12 March 2020",
+        "note": "in Russian",
+    }
+
+
+def test_every_tagged_field_reaches_paper_reference():
+    """No field type may be tagged and then silently dropped again.
+
+    Five of them were for four model generations. YEAR is the sole exception:
+    it is the only field converted to an int, so it is handled inline.
+    """
+    tagged = {tag.split("-", 1)[1] for tag in BIO_TAGS if tag != "O"}
+    reachable = set(_FIELD_TO_PAPER_REF) | {"YEAR"}
+    assert tagged - reachable == set()
+    for target in _FIELD_TO_PAPER_REF.values():
+        assert target in PaperReference.model_fields
 
 
 def test_empty_fields_map_to_empty_dict():

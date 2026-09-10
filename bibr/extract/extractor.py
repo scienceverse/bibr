@@ -21,8 +21,10 @@ owning module directly.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.clients.llm import LLMClient
@@ -85,6 +87,28 @@ if TYPE_CHECKING:
     from bibr.pipeline.classifier_resources import ClassifierResources
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_references_ready(
+    callback: Callable[[list[PaperReference]], None], task: asyncio.Task
+) -> None:
+    """Done-callback: hand successfully parsed references to *callback*.
+
+    Runs on the loop right after the reference task completes — while the core
+    metadata task is still in flight — so a consumer (the enrichment prefetch)
+    can start its network work under the remaining LLM calls. Never fires for a
+    cancelled or failed task, never on an empty list, and never lets the
+    callback's own failure disturb extraction.
+    """
+    if task.cancelled() or task.exception() is not None:
+        return
+    references = task.result()
+    if not references:
+        return
+    try:
+        callback(references)
+    except Exception:  # noqa: BLE001 — a listener must never break extraction
+        logger.warning("on_references_ready callback failed", exc_info=True)
 
 
 async def _cancel_and_await(*tasks: asyncio.Task) -> None:
@@ -227,12 +251,24 @@ class MetadataExtractor:
         if hasattr(self, "core"):
             self.core.llm_client = value
 
-    async def extract_all_metadata(self) -> PaperMetadata:
+    async def extract_all_metadata(
+        self,
+        *,
+        on_references_ready: Callable[[list[PaperReference]], None] | None = None,
+    ) -> PaperMetadata:
         """
         Extract all metadata from the paper.
 
         Runs core metadata extraction concurrently with LLM-based reference
         extraction.
+
+        Args:
+            on_references_ready: Optional synchronous listener invoked with the
+                parsed references as soon as the reference task completes —
+                while core metadata is still being extracted — so downstream
+                network work (the enrichment prefetch) can overlap the LLM
+                tail. Not called when reference extraction is off, empty,
+                or failed.
 
         Returns:
             PaperMetadata object containing extracted information.
@@ -286,6 +322,10 @@ class MetadataExtractor:
             t0 = time.monotonic()
             core_task = asyncio.create_task(self.extract_core_metadata())
             ref_task = asyncio.create_task(self._extract_references(ref_df))
+            if on_references_ready is not None:
+                ref_task.add_done_callback(
+                    functools.partial(_notify_references_ready, on_references_ready)
+                )
             ref_result = await _await_core_and_reference_tasks(core_task, ref_task)
             core_time = time.monotonic() - t0
             refs_time = core_time  # concurrent, so same wall clock

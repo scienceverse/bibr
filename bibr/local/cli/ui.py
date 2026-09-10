@@ -36,6 +36,7 @@ INDENT = "  "
 # here (future subcommands) append in parser order.
 _COMMAND_ORDER = (
     "chew",
+    "batch",
     "setup",
     "doctor",
     "inspect",

@@ -136,8 +136,9 @@ cat("Saved:   ", json_path, " (", nchar(json_string), " chars)\n\n")
 # ── 5. Quick peek at result ──────────────────────────────────────────────────
 
 data <- fromJSON(json_string, simplifyVector = TRUE, flatten = TRUE)
+metadata <- data$metadata %||% data$info
 
-cat("bibr version:", data$info$bibr_version, "\n")
+cat("bibr version:", data$extraction$bibr_version %||% metadata$bibr_version, "\n")
 cat("Paper ID:    ", data$paper_id, "\n\n")
 
 # Helper for safe row count
@@ -153,11 +154,11 @@ for (tbl_name in table_names) {
 }
 
 # Show title if available
-if (!is.null(data$info$title)) {
-  cat("\nTitle:      ", data$info$title, "\n")
+if (!is.null(metadata$title)) {
+  cat("\nTitle:      ", metadata$title, "\n")
 }
-if (!is.null(data$info$doi)) {
-  cat("DOI:        ", data$info$doi, "\n")
+if (!is.null(metadata$doi)) {
+  cat("DOI:        ", metadata$doi, "\n")
 }
 
 cat("\nDone.\n")

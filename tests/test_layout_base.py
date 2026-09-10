@@ -30,7 +30,7 @@ def test_missing_ml_extra_explains_cloud_ocr_pdf_dependency(monkeypatch):
 
     with pytest.raises(
         ImportError,
-        match=r"PDF processing.*cloud OCR.*uv sync --extra ml",
+        match=r"PDF processing.*cloud OCR.*uv sync --extra torch",
     ):
         BaseLayoutDetector()
 
@@ -161,7 +161,7 @@ def test_init_disables_hf_cache_symlinks_before_transformers_load(monkeypatch):
         def eval(self):
             return self
 
-    def fake_from_pretrained(model_id):
+    def fake_from_pretrained(model_id, **kwargs):  # noqa: ARG001
         calls.append((model_id, os.environ.get("HF_HUB_DISABLE_SYMLINKS")))
         return object()
 
@@ -169,7 +169,7 @@ def test_init_disables_hf_cache_symlinks_before_transformers_load(monkeypatch):
     monkeypatch.setattr(
         model_cls,
         "from_pretrained",
-        lambda model_id: _FakeModel(),
+        lambda model_id, **kwargs: _FakeModel(),  # noqa: ARG005
     )
 
     class _Detector(BaseLayoutDetector):

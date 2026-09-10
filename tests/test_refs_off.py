@@ -210,13 +210,23 @@ class TestPipelineRefsOff:
         pipe = LocalPipeline(llm_backend="cloud", crossref=True, ref_parse_strategy="off")
         assert self._enrichment_stage(pipe)._enrichers == []
 
-    def test_default_keeps_crossref_enricher(self, monkeypatch):
+    def test_default_keeps_crossref_enricher_when_setting_on(self, monkeypatch):
         import bibr.config
         from bibr.local.pipeline import LocalPipeline
 
         monkeypatch.setattr(bibr.config.Settings.crossref, "enrich", True)
-        pipe = LocalPipeline(llm_backend="cloud", crossref=True)
+        pipe = LocalPipeline(llm_backend="cloud")
         assert len(self._enrichment_stage(pipe)._enrichers) == 1
+
+    def test_default_drops_crossref_enricher_when_setting_off(self, monkeypatch):
+        """CROSSREF_ENRICH is off by default: no enricher unless forced per run."""
+        import bibr.config
+        from bibr.local.pipeline import LocalPipeline
+
+        monkeypatch.setattr(bibr.config.Settings.crossref, "enrich", False)
+        assert self._enrichment_stage(LocalPipeline(llm_backend="cloud"))._enrichers == []
+        forced = LocalPipeline(llm_backend="cloud", crossref=True)
+        assert len(self._enrichment_stage(forced)._enrichers) == 1
 
 
 class TestConfigAcceptsOff:

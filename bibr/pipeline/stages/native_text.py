@@ -62,14 +62,6 @@ class NativeTextStage:
             if not fs.pdf_bytes or fs.layout_results is None:
                 continue
             try:
-                inspection_kwargs = {}
-                if settings.ocr.native_repair_enabled:
-                    inspection_kwargs.update(
-                        native_repair=True, native_captions=settings.ocr.native_captions_enabled
-                    )
-                accumulator = getattr(fs, "pdf_inspection_accumulator", None)
-                if accumulator is not None:
-                    inspection_kwargs["accumulator"] = accumulator
                 inspection = await asyncio.to_thread(
                     inspect_pdf,
                     fs.pdf_bytes,
@@ -81,7 +73,6 @@ class NativeTextStage:
                     include_ref_geometry=effective_seg == "geom",
                     min_chars=settings.ocr.native_text_min_chars,
                     min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
-                    **inspection_kwargs,
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:
@@ -91,17 +82,6 @@ class NativeTextStage:
                 logger.warning("PDF inspection failed for %s", fs.path.name, exc_info=True)
                 continue
             fs.pdf_inspection = inspection
-            if getattr(fs, "page_images", None):
-                from bibr.ocr.native_source import attach_visual_coverage
-
-                try:
-                    await asyncio.to_thread(
-                        attach_visual_coverage, inspection, fs.page_images, fs.page_indices
-                    )
-                except Exception:  # noqa: BLE001 - diagnostics cannot block recognition
-                    logger.warning(
-                        "Visual coverage audit failed for %s", fs.path.name, exc_info=True
-                    )
             fs.layout_results = inspection.layout_results
             fs.native_metadata = inspection.metadata or None
             fs.pdf_outline = inspection.outline or None

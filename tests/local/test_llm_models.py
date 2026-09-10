@@ -2,16 +2,38 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from bibr.local import llm_models
 from bibr.local.llm_models import (
     REGISTRY,
     LocalLLMModel,
     LocalLLMVariant,
+    default_local_model,
     detect_hardware,
     get_model,
     registry_server_args,
     variants_for,
 )
+
+
+def test_cuda_llm_backend_follows_the_registry_fit():
+    from bibr.local.llm_models import cuda_llm_backend_for
+
+    assert cuda_llm_backend_for(None) == "vllm"  # unknown VRAM keeps the fast path
+    assert cuda_llm_backend_for(8.0) == "llama-cpp"
+    assert cuda_llm_backend_for(10.0) == "llama-cpp"
+    assert cuda_llm_backend_for(11.0) == "vllm"
+
+
+def test_default_local_model_follows_the_backend_runtime():
+    """An unset LLM_LOCAL_MODEL must never hand vLLM or llama.cpp the MLX build."""
+    assert default_local_model("vllm") == "numind/NuExtract3"
+    assert default_local_model("llama-cpp") == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert default_local_model("vllm-mlx") == "numind/NuExtract3-mlx-8bits"
+    assert default_local_model("rapid-mlx") == "numind/NuExtract3-mlx-8bits"
+    with pytest.raises(ValueError, match="cloud"):
+        default_local_model("cloud")
 
 
 def test_registry_server_args_nuextract3_cuda_keeps_mtp_opt_in():

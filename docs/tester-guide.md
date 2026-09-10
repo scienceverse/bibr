@@ -227,12 +227,13 @@ uv run bibr doctor
 uv run bibr demo
 ```
 
-### Linux, NVIDIA GPU ≤ 8 GB (e.g. GTX 1060)
+### Linux, NVIDIA GPU below 11 GB (e.g. GTX 1060)
 
-For this low-memory path, use **llama.cpp** explicitly for OCR and let
-`--llm local` select it for the LLM. The OCR automatic selector tries Paddle
-vLLM when it detects at least 8 GB VRAM; the LLM selector uses llama.cpp at
-8 GB or less. Install a CUDA-capable llama.cpp build separately:
+Below 8 GB, the automatic selectors use **llama.cpp** for OCR and the local
+LLM. From 8 GB to below 11 GB (an RTX 3080 10 GB, say), OCR tries vLLM but
+the local LLM still uses llama.cpp, because NuExtract 3's vLLM build needs
+11 GB of VRAM. Install a
+**CUDA** (or Vulkan) build of llama.cpp separately:
 
 1. Install or build llama.cpp with CUDA support (`GGML_CUDA=ON` for a source
    build) and put `llama-server` on your `PATH`. Check the
@@ -280,23 +281,20 @@ from the platform and detected memory. The current defaults are:
 | Platform | OCR backend | Local LLM backend |
 |---|---|---|
 | Windows | `glm-llama` (llama.cpp) | llama.cpp |
-| Linux, NVIDIA GPU **> 8 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM |
-| Linux, NVIDIA GPU **8 GB** | `paddle-vllm` if the probe reports at least 8 GB; otherwise `glm-llama` | llama.cpp |
+| Linux, NVIDIA GPU **≥ 11 GB** (e.g. RTX 3090) | `paddle-vllm` | vLLM |
+| Linux, NVIDIA GPU **8–<11 GB** | `paddle-vllm` | llama.cpp |
 | Linux, NVIDIA GPU **< 8 GB** | `glm-llama` (llama.cpp) | llama.cpp |
 | Apple Silicon (M-series) | `paddle-rapid-mlx` (rapid-mlx) | rapid-mlx, else vllm-mlx |
-| No suitable GPU (setup recommendation) | cloud vision OCR or an external OCR server | a cloud LLM or private server |
+| No suitable GPU | cloud vision OCR or an external OCR server | a cloud LLM |
 
-The setup registry recommends NuExtract 3: GGUF Q4 for llama.cpp, bf16 for
-vLLM (an estimated 11 GB model-fit floor), and MLX quantizations for Apple
-Silicon. Run setup before `--llm local` to configure compatible weights.
-Rapid-MLX requires a separately installed executable; the `local` extra provides
-the vllm-mlx fallback. See [Configuration](guides/configuration.md#choosing-an-llm)
-for model settings, custom endpoints, and the optional LM Studio/llmster adapter.
+The setup wizard defaults to [NuExtract 3](https://huggingface.co/numind/NuExtract3)
+for local structured extraction. Windows and GPUs below 11 GB use llama.cpp;
+the CUDA vLLM variant requires Linux and at least 11 GB. These thresholds are
+model-fit estimates, not guarantees that every document fits available memory.
 
-Measure speed on representative papers rather than comparing aggregate server
-token benchmarks. Native PDF text can bypass OCR for eligible regions; scanned
-pages require more recognition. LLM input size, reference strategy, model
-loading, and memory mode also affect total time.
+Throughput depends on the model, backend, hardware, and document. Scanned PDFs
+require more OCR than PDFs with usable embedded text. Test a representative
+sample before starting a large batch, and inspect both metadata and references.
 
 If fully local inference does not run, or is too slow, walk down this ladder:
 

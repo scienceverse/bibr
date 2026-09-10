@@ -39,8 +39,6 @@ node_modules/
 *.Rhistory
 .RData
 .Rhistory
-AGENTS.md
-CLAUDE.md
 .claude/
 .codex/
 docs/superpowers/

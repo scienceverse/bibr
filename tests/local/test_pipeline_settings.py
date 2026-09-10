@@ -106,8 +106,21 @@ def test_crossref_enrich_respects_instance_settings():
     on = GlobalSettings()
     on.crossref.enrich = True
 
-    assert enrichers_of(LocalPipeline(crossref=True, settings=off)) == []
-    assert len(enrichers_of(LocalPipeline(crossref=True, settings=on))) == 1
+    # ``crossref=None`` (the default) follows the instance's setting.
+    assert enrichers_of(LocalPipeline(settings=off)) == []
+    assert len(enrichers_of(LocalPipeline(settings=on))) == 1
+    # An explicit per-pipeline switch wins over the setting either way.
+    assert len(enrichers_of(LocalPipeline(crossref=True, settings=off))) == 1
+    assert enrichers_of(LocalPipeline(crossref=False, settings=on)) == []
+
+
+def test_crossref_enrich_is_off_by_default():
+    """CROSSREF_ENRICH is opt-in: the field default is False, so a settings
+    object built without the variable does not enrich."""
+    from bibr.config import CrossrefOptions
+
+    assert CrossrefOptions.model_fields["enrich"].default is False
+    assert CrossrefOptions(_env_file=None, enrich=False).enrich is False
 
 
 def test_global_settings_exported_from_bibr():

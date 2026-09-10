@@ -1,6 +1,18 @@
-"""Typed export models and JSON serialization for Paper objects."""
+"""Typed export models and JSON serialization for Paper objects.
+
+The models come from :mod:`bibr.export.models` — the canonical home for the
+v11 schema types. :mod:`bibr.export.json_export` owns the *serialization*
+(building a payload from a :class:`~bibr.paper.Paper`) and imports the models
+from ``models`` like everyone else, so it is not in the import path for a
+caller that only wants a type.
+"""
 
 from bibr.export.json_export import (
+    build_paper_export,
+    export_paper_to_json,
+    validate_export,
+)
+from bibr.export.models import (
     AffiliationExport,
     AuthorExport,
     BibExport,
@@ -11,12 +23,15 @@ from bibr.export.json_export import (
     EqExport,
     FigureExport,
     FigurePartExport,
-    InfoExport,
+    MetadataExport,
+    MetadataMatchExport,
     PaperExport,
+    PersonNameExport,
     ProvenanceExport,
     ReferenceSegmentationAttemptExport,
     ReferenceYieldExport,
     SectionExport,
+    SourceExport,
     TableExport,
     TablePartExport,
     TextExport,
@@ -24,9 +39,6 @@ from bibr.export.json_export import (
     ValidationExport,
     ValidationIssueExport,
     XrefExport,
-    build_paper_export,
-    export_paper_to_json,
-    validate_export,
 )
 from bibr.export.qualification_provenance import (
     DeploymentIdentity,
@@ -45,12 +57,15 @@ __all__ = [
     "CaptionCandidateExport",
     "FigureExport",
     "FigurePartExport",
-    "InfoExport",
+    "MetadataExport",
+    "MetadataMatchExport",
     "PaperExport",
+    "PersonNameExport",
     "ProvenanceExport",
     "ReferenceSegmentationAttemptExport",
     "ReferenceYieldExport",
     "SectionExport",
+    "SourceExport",
     "TableExport",
     "TablePartExport",
     "TextExport",

@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import httpx
 from rapidfuzz import fuzz
@@ -105,12 +107,160 @@ def _record_fallback_warning(
     stats.failure_details.append(detail)
 
 
+@dataclass
+class EnrichmentPrefetch:
+    """The up-front network work for one reference batch, reusable by
+    :func:`enrich_references`.
+
+    Built by :func:`prefetch_enrichment`: the Crossref client whose response
+    cache the bulk DOI lookup seeded, the resolver client (constructed here
+    when settings enable it and none was supplied — then *owned*, and closed
+    by :meth:`aclose`), its one-time health verdict, and the batch of
+    title-search candidates keyed by ``id(ref)`` exactly as
+    ``_prefetch_resolver_searches`` returns them. Timing is recorded so the
+    pipeline can report how much of it overlapped extraction. The prefetch
+    only *reads* the references — ``enrich_references`` remains the sole
+    mutator of ``PaperReference`` objects.
+    """
+
+    crossref_client: Any
+    resolver_client: Any | None = None
+    owns_resolver: bool = False
+    resolver_healthy: bool | None = None
+    """``None`` when no resolver was configured, else the health-probe verdict."""
+    resolver_prefetch: dict[int, list[dict] | Exception] = field(default_factory=dict)
+    resolver_prefetch_error: Exception | None = None
+    """A failed prefetch search, replayed as a terminal failure per eligible ref."""
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    _closed: bool = field(default=False, repr=False)
+
+    @property
+    def seconds(self) -> float:
+        """Wall-clock seconds the prefetch took."""
+        return max(0.0, self.finished_at - self.started_at)
+
+    async def aclose(self) -> None:
+        """Close the resolver client if this prefetch constructed it. Idempotent."""
+        if self._closed:
+            return
+        self._closed = True
+        if self.owns_resolver and self.resolver_client is not None:
+            await self.resolver_client.close()
+
+
+async def prefetch_enrichment(
+    references: list[PaperReference],
+    *,
+    settings: GlobalSettings | None = None,
+    crossref_client=None,
+    resolver_client=None,
+) -> EnrichmentPrefetch:
+    """Run the network work that precedes the per-reference fan-out.
+
+    1. Resolver health probe (one call; an unhealthy service drops the whole
+       resolver tier to bare Crossref, with a warning — it was configured).
+    2. Every title-searchable reference's resolver search, concurrently.
+    3. Crossref's bulk DOI filter query for DOI-bearing references (skipped
+       for an authoritative resolver, whose clean miss never reaches Crossref).
+
+    Only *reads* the references, so it can start as soon as they are parsed
+    and overlap the rest of extraction; ``enrich_references`` then consumes the
+    result instead of repeating the round-trips. An owned resolver client is
+    closed on every failure path, including cancellation.
+    """
+    effective = settings if settings is not None else snapshot_settings()
+    started = time.monotonic()
+    if crossref_client is None:
+        from bibr.clients.crossref import get_client
+
+        crossref_client = get_client(settings=effective)
+    prefetch = EnrichmentPrefetch(crossref_client=crossref_client, started_at=started)
+    if not references:
+        prefetch.finished_at = time.monotonic()
+        return prefetch
+
+    try:
+        owns_resolver = False
+        if resolver_client is None and effective.resolver.url and effective.resolver.enrich:
+            from bibr.clients.resolver import ResolverClient
+
+            resolver_client = ResolverClient(
+                effective.resolver.url,
+                timeout=effective.resolver.timeout,
+            )
+            owns_resolver = True
+        prefetch.resolver_client = resolver_client
+        prefetch.owns_resolver = owns_resolver
+
+        # One-time health probe: a down service or degraded index means every
+        # reference would pay a failed round-trip before falling through. Skip
+        # the whole resolver tier instead.
+        if resolver_client is not None:
+            healthy = await resolver_client.healthy()
+            prefetch.resolver_healthy = healthy
+            if not healthy:
+                # A configured-but-unreachable resolver silently drops the whole
+                # batch to bare Crossref. That is a real degradation (you asked
+                # for the resolver and didn't get it), so warn rather than info —
+                # the fallback is otherwise invisible. Only fires when the
+                # resolver WAS configured, never when it is simply unset.
+                logger.warning(
+                    "Resolver unhealthy/unreachable — skipping resolver tier, "
+                    "falling back to Crossref for %d refs",
+                    len(references),
+                )
+                if owns_resolver:
+                    await resolver_client.close()
+                prefetch.resolver_client = None
+                prefetch.owns_resolver = False
+                resolver_client = None
+
+        # Resolve every no-DOI title search up front, concurrently, rather than
+        # inline inside the per-ref fan-out — off the CrossRef-sized semaphore.
+        # DOI-bearing refs keep the per-ref lookup_doi fast path. A prefetch
+        # failure degrades to empty so every ref simply falls through to
+        # CrossRef; the resolver never fails enrichment.
+        resolver_authoritative = effective.resolver.authoritative
+        if resolver_client is not None:
+            try:
+                prefetch.resolver_prefetch = await _prefetch_resolver_searches(
+                    references,
+                    resolver_client,
+                    settings=effective,
+                    raise_on_error=resolver_authoritative,
+                )
+            except Exception as e:  # noqa: BLE001 — must fall through, not crash
+                logger.warning("Resolver prefetch search failed, falling back to CrossRef: %s", e)
+                prefetch.resolver_prefetch_error = e
+
+        # Collapse every DOI-bearing reference into one filter query before the
+        # fan-out. The per-ref lookup is unchanged — it just finds these already
+        # cached, spending one rate-limited slot per chunk instead of one per
+        # reference. An authoritative resolver answers from the same corpus and
+        # its clean miss deliberately skips CrossRef, so a CrossRef prefetch
+        # there would buy nothing.
+        skip_bulk = resolver_client is not None and resolver_authoritative
+        if effective.crossref.bulk_doi_lookup and not skip_bulk:
+            try:
+                await crossref_client.prefetch_works_by_doi([r.doi for r in references if r.doi])
+            except Exception as e:  # noqa: BLE001 — must fall through to per-ref lookups
+                logger.debug("Crossref bulk DOI prefetch skipped: %s", e)
+    except BaseException:
+        await prefetch.aclose()
+        raise
+
+    prefetch.finished_at = time.monotonic()
+    return prefetch
+
+
 async def enrich_references(
     references: list[PaperReference],
     crossref_client=None,
     resolver_client=None,
     *,
     settings: GlobalSettings | None = None,
+    prefetch: EnrichmentPrefetch | None = None,
 ) -> EnrichmentReport:
     """Enrich references with Crossref metadata.
 
@@ -136,80 +286,34 @@ async def enrich_references(
             Created on demand if not provided.
         resolver_client: Optional ResolverClient instance. When provided (or
             auto-constructed from settings), the resolver is consulted first.
+        prefetch: An :class:`EnrichmentPrefetch` built earlier for *these same
+            reference objects* (the pipeline starts it while extraction is
+            still running). Its clients replace ``crossref_client`` /
+            ``resolver_client`` and its results replace the up-front round-trips;
+            ``None`` performs that work inline, exactly as before.
     """
     if not references:
         return EnrichmentReport()
     effective = settings if settings is not None else snapshot_settings()
     stats = ResolutionStats()
 
-    if crossref_client is None:
-        from bibr.clients.crossref import get_client
-
-        crossref_client = get_client(settings=effective)
-
-    owns_resolver = False
-    if resolver_client is None and effective.resolver.url and effective.resolver.enrich:
-        from bibr.clients.resolver import ResolverClient
-
-        resolver_client = ResolverClient(
-            effective.resolver.url,
-            timeout=effective.resolver.timeout,
+    if prefetch is None:
+        prefetch = await prefetch_enrichment(
+            references,
+            settings=effective,
+            crossref_client=crossref_client,
+            resolver_client=resolver_client,
         )
-        owns_resolver = True
-
-    # One-time health probe: a down service or degraded index means every
-    # reference would pay a failed round-trip before falling through. Skip the
-    # whole resolver tier instead.
-    if resolver_client is not None and not await resolver_client.healthy():
-        # A configured-but-unreachable resolver silently drops the whole batch to
-        # bare Crossref. That is a real degradation (you asked for the resolver and
-        # didn't get it), so warn rather than info — the fallback is otherwise
-        # invisible. Only fires when the resolver WAS configured, never when it is
-        # simply unset.
-        logger.warning(
-            "Resolver unhealthy/unreachable — skipping resolver tier, "
-            "falling back to Crossref for %d refs",
-            len(references),
-        )
-        if owns_resolver:
-            await resolver_client.close()
-        resolver_client = None
-        owns_resolver = False
-
-    # Resolve every no-DOI title search up front, concurrently, rather than inline inside
-    # the per-ref fan-out below — off the CrossRef-sized semaphore. DOI-bearing refs keep
-    # the per-ref lookup_doi fast path. A prefetch failure degrades to empty so every ref
-    # simply falls through to CrossRef; the resolver never fails enrichment.
+    crossref_client = prefetch.crossref_client
+    resolver_client = prefetch.resolver_client
     resolver_authoritative = effective.resolver.authoritative
-    resolver_prefetch: dict[int, list[dict] | Exception] = {}
-    if resolver_client is not None:
-        try:
-            resolver_prefetch = await _prefetch_resolver_searches(
-                references,
-                resolver_client,
-                settings=effective,
-                raise_on_error=resolver_authoritative,
-            )
-        except Exception as e:  # noqa: BLE001 — a prefetch failure must fall through, not crash
-            logger.warning("Resolver prefetch search failed, falling back to CrossRef: %s", e)
-            for ref in references:
-                if _resolver_search_eligible(ref):
-                    _record_terminal_failure(stats, ref, "resolver prefetch", e)
-
-    # Collapse every DOI-bearing reference into one filter query before the
-    # fan-out. The per-ref lookup below is unchanged — it just finds these
-    # already cached, spending one rate-limited slot per chunk instead of one
-    # per reference.
-    # An authoritative resolver answers from the same corpus and its clean miss
-    # deliberately skips CrossRef, so a CrossRef prefetch there would buy
-    # nothing. A non-authoritative resolver still falls through on every miss,
-    # so the batching keeps paying.
-    skip_bulk = resolver_client is not None and resolver_authoritative
-    if effective.crossref.bulk_doi_lookup and not skip_bulk:
-        try:
-            await crossref_client.prefetch_works_by_doi([r.doi for r in references if r.doi])
-        except Exception as e:  # noqa: BLE001 — must fall through to per-ref lookups
-            logger.debug("Crossref bulk DOI prefetch skipped: %s", e)
+    resolver_prefetch = prefetch.resolver_prefetch
+    if prefetch.resolver_prefetch_error is not None:
+        for ref in references:
+            if _resolver_search_eligible(ref):
+                _record_terminal_failure(
+                    stats, ref, "resolver prefetch", prefetch.resolver_prefetch_error
+                )
 
     semaphore = crossref_client.enrich_semaphore
 
@@ -256,8 +360,7 @@ async def enrich_references(
                     f"resolver fallback failed for {len(eligible)} refs: {' '.join(str(e).split())}",
                 )
     finally:
-        if owns_resolver and resolver_client is not None:
-            await resolver_client.close()
+        await prefetch.aclose()
 
     matched = sum(1 for ref in references if ref.match)
     logger.info(

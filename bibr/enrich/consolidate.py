@@ -1,6 +1,6 @@
 """Merge accepted ``bib_match`` rows into ``bib`` rows (consolidation).
 
-Operates on the v10.3 export-dict shape so the same function backs the
+Operates on the export-dict shape so the same function backs the
 pipeline post-export hook, ``Result.consolidate()``, and the serve API.
 ``bib_match`` rows are already threshold-gated by enrichment (DOI lookups
 score 100; bibliographic search is fuzzy-gated with author/year penalties),

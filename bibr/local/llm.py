@@ -29,10 +29,11 @@ class VllmMlxLlmServer:
     ):
         import shlex
 
+        from bibr.local.llm_models import default_local_model
         from bibr.local.ocr import VllmMlxServer
 
         self._settings = settings if settings is not None else snapshot_settings()
-        self._model = model or self._settings.llm.local_model
+        self._model = model or self._settings.llm.local_model or default_local_model("vllm-mlx")
         if not self._settings.llm.vllm_mlx_continuous_batching:
             logger.warning(
                 "Local vllm-mlx LLM inference is slow on Apple Silicon (SimpleEngine, "

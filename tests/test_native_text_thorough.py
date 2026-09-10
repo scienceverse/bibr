@@ -273,8 +273,11 @@ class TestAttachBboxPdfPts:
             ((0, 0, 612, 792), [0, 0, 500, 250], [0.0, 594.0, 306.0, 792.0]),
             # Full page maps to the full CropBox.
             ((0, 0, 612, 792), [0, 0, 1000, 1000], [0.0, 0.0, 612.0, 792.0]),
-            # Non-zero CropBox origin (40, 50): right-half top quadrant.
-            ((40, 50, 640, 850), [500, 0, 1000, 250], [340.0, 650.0, 640.0, 850.0]),
+            # Non-zero CropBox origin (40, 50): right-half top quadrant. The
+            # result is crop-relative, matching the _page_w / _page_h frame
+            # page.get_size() reports — leaving the origin in broke the
+            # 0 <= x1 <= x2 <= page_w invariant downstream consumers rely on.
+            ((40, 50, 640, 850), [500, 0, 1000, 250], [300.0, 600.0, 600.0, 800.0]),
         ],
     )
     def test_known_bbox_converts_to_pdf_points(self, crop_box, bbox_2d, expected):

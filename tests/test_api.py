@@ -14,15 +14,16 @@ from bibr.api import Records, Result, _pipeline_kwargs
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",
-        "info": {
+        "schema_version": "11.0",
+        "source": {
+            "file_name": "paper.pdf",
+            "file_hash": "abc123",
+            "input_format": "pdf",
+        },
+        "metadata": {
             "title": "A Paper",
             "keywords": [],
             "doi": "10.1234/example",
-            "file_hash": "abc123",
-            "input_format": "pdf",
-            "file_name": "paper.pdf",
-            "schema_version": "10.6",
-            "bibr_version": "0.3.0",
         },
         "author": [
             {
@@ -53,9 +54,40 @@ def _export_fixture() -> dict:
         "figure": [],
         "table": [],
         "eq": [],
-        "ocr_config": {"ocr_backend": "glm-mlx"},
-        "processing_warnings": [],
-        "llm_usage": {"some-model": {"input_tokens": 10, "output_tokens": 2}},
+        "extraction": {
+            "bibr_version": "0.3.0",
+            "completed_at": "2026-07-24T10:00:00Z",
+            "ocr": {"backend": "glm-mlx"},
+            "llm": {"provider": "google", "model": "some-model"},
+            "settings": {
+                "ref_seg": "geom",
+                "ref_parse": "ner",
+                "crossref_enrich": False,
+                "consolidate": "off",
+            },
+            "usage": {
+                "totals": {
+                    "calls": 1,
+                    "input_tokens": 10,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 2,
+                    "total_tokens": 12,
+                },
+                "breakdown": [
+                    {
+                        "label": "extract_authors",
+                        "provider": "google",
+                        "model": "some-model",
+                        "calls": 1,
+                        "input_tokens": 10,
+                        "cached_input_tokens": 0,
+                        "output_tokens": 2,
+                        "total_tokens": 12,
+                    }
+                ],
+            },
+            "warnings": [],
+        },
     }
 
 
@@ -101,6 +133,61 @@ def stub_pipeline():
         yield _StubPipeline
 
 
+# --- LLM preflight ----------------------------------------------------------
+
+
+def _fail_preflight(monkeypatch):
+    from bibr.clients import llm as llm_client_mod
+
+    def boom(settings=None):  # noqa: ARG001
+        raise ValueError("GOOGLE_API_KEY is not set")
+
+    monkeypatch.setattr(llm_client_mod, "preflight_credentials", boom)
+
+
+def test_chew_fails_on_missing_credentials_before_any_model_loads(stub_pipeline, monkeypatch):
+    """The CLI checks the key before OCR; the library used to find out after it."""
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
+        bibr.chew("paper.pdf")
+    assert stub_pipeline.instances == []
+
+
+def test_chewer_fails_on_missing_credentials_at_construction(stub_pipeline, monkeypatch):
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
+        bibr.Chewer()
+    assert stub_pipeline.instances == []
+
+
+def test_chew_skips_the_llm_preflight_with_no_llm(stub_pipeline, monkeypatch):
+    import bibr
+
+    _fail_preflight(monkeypatch)
+    result = bibr.chew("paper.pdf", no_llm=True)
+    assert result.ok
+    assert len(stub_pipeline.instances) == 1
+
+
+def test_chew_preflights_a_managed_local_backend(stub_pipeline, monkeypatch):
+    import bibr
+    from bibr.exceptions import ConfigurationError
+    from bibr.local.cli import run_config
+
+    monkeypatch.setattr(
+        run_config,
+        "_preflight_local_backend",
+        lambda backend: f"{backend} backend selected but no server executable was found.",
+    )
+    with pytest.raises(ConfigurationError, match="llama-cpp backend selected"):
+        bibr.chew("paper.pdf", llm="llama-cpp")
+    assert stub_pipeline.instances == []
+
+
 # --- Records / Result views -------------------------------------------------
 
 
@@ -121,13 +208,14 @@ def test_result_table_keys_and_aliases():
     assert list(result.references.df["doi"]) == ["10.1/1", "10.1/2"]
 
 
-def test_result_info_and_toplevel_passthrough():
+def test_result_metadata_source_and_toplevel_passthrough():
     result = Result(_export_fixture())
     assert result.title == "A Paper"
     assert result.doi == "10.1234/example"
     assert result.paper_id == "10.1234/example"
-    assert result.llm_usage["some-model"]["input_tokens"] == 10
-    assert result["info"]["title"] == "A Paper"
+    assert result.extraction["usage"]["totals"]["input_tokens"] == 10
+    assert result["metadata"]["title"] == "A Paper"
+    assert result.file_hash == "abc123"
     assert result.data is not None
 
 
@@ -138,7 +226,7 @@ def test_result_exposes_validated_export_model_without_replacing_raw_data():
     result = Result(payload)
 
     assert isinstance(result.model, PaperExport)
-    assert result.model.info.title == "A Paper"
+    assert result.model.metadata.title == "A Paper"
     assert result.data is payload
 
 
@@ -191,6 +279,14 @@ def test_chew_ocr_profile_is_forwarded_to_local_pipeline(stub_pipeline, tmp_path
     bibr.chew(path, ocr_profile="glm")
 
     assert stub_pipeline.instances[0].kwargs["ocr_profile"] == "glm"
+
+
+def test_pipeline_kwargs_crossref_is_tri_state():
+    """``crossref`` passes through untouched: True/False force, None defers."""
+    assert _pipeline_kwargs({"crossref": True}) == {"crossref": True}
+    assert _pipeline_kwargs({"crossref": False}) == {"crossref": False}
+    assert _pipeline_kwargs({"crossref": None}) == {"crossref": None}
+    assert "crossref" not in _pipeline_kwargs({})
 
 
 def test_pipeline_kwargs_pages():

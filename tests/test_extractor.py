@@ -1112,12 +1112,12 @@ class TestCollectReferenceRowsLayoutFallback:
     def test_fallback_to_last_unknown_section(self):
         """When no REFERENCES section is found but layout hints indicate references,
         the last UNKNOWN section should be used as fallback."""
-        sections = ["Introduction"] * 5 + ["Unclassified sources"] * 3
+        sections = ["Introduction"] * 5 + ["Literaturverzeichnis"] * 3
         texts = [f"Sentence {i}" for i in range(8)]
 
         paper_sections = [
             PaperSection(0, "Introduction", 2, None, CanonicalSection.INTRODUCTION, 1.0),
-            PaperSection(1, "Unclassified sources", 2, None, CanonicalSection.UNKNOWN, 0.3),
+            PaperSection(1, "Literaturverzeichnis", 2, None, CanonicalSection.UNKNOWN, 0.3),
         ]
         ext = _make_extractor(sections, texts, paper_sections=paper_sections)
         ext.contents.layout_hints = [("reference", 5), ("reference_content", 6)]
@@ -1127,12 +1127,12 @@ class TestCollectReferenceRowsLayoutFallback:
 
     def test_no_fallback_without_layout_hints(self):
         """Without layout hints, missing REFERENCES section raises ValueError."""
-        sections = ["Introduction"] * 5 + ["Unclassified sources"] * 3
+        sections = ["Introduction"] * 5 + ["Literaturverzeichnis"] * 3
         texts = [f"Sentence {i}" for i in range(8)]
 
         paper_sections = [
             PaperSection(0, "Introduction", 2, None, CanonicalSection.INTRODUCTION, 1.0),
-            PaperSection(1, "Unclassified sources", 2, None, CanonicalSection.UNKNOWN, 0.3),
+            PaperSection(1, "Literaturverzeichnis", 2, None, CanonicalSection.UNKNOWN, 0.3),
         ]
         ext = _make_extractor(sections, texts, paper_sections=paper_sections)
         ext.contents.layout_hints = []
@@ -1743,15 +1743,19 @@ class TestRefExtractionStrategy:
         with mock.patch("bibr.config.Settings.REF_PARSE_STRATEGY", "llm"):
             await ext.extract_all_metadata()
 
-        # Ref 2 (no title, no author) is still filtered out — it was returned
-        # by the LLM, so it counts as covered and is never re-parsed; the
-        # completeness filter then drops it.
+        # No reference survives with neither a title nor authors — that is what
+        # the completeness filter is for.
         # (Ref 3 has an empty title but real authors, so it legitimately stays.)
         titles = {r.title for r in ext.metadata.references}
         assert "Good Paper" in titles
         assert not any(not r.title and not r.authors for r in ext.metadata.references)
-        # Segments 4 and 5, which the LLM never returned at all, ARE recovered.
-        assert len(ext.metadata.references) == 4
+        # All five printed entries are represented. Ref 2 came back from the
+        # LLM with no title and no authors; the filter below drops such a row,
+        # so its slot counts as *missing* and goes to NER like segments 4 and
+        # 5, which the LLM never returned at all. Counting it as covered used
+        # to delete the entry outright and shift every later bib_id.
+        assert len(ext.metadata.references) == 5
+        assert [r.bib_id for r in ext.metadata.references] == [1, 2, 3, 4, 5]
 
 
 # ---------------------------------------------------------------------------
@@ -3425,6 +3429,26 @@ class TestFinalizeReferenceFields:
 
     def test_bib_type_inferred_from_container_when_missing(self):
         out = self._finalize({"title": "T", "container": "Nature"}, None)
+        assert out["bib_type"] == "journal_article"
+
+    @pytest.mark.parametrize(
+        ("tail", "expected"),
+        [
+            ("PhD thesis, Example University, 2020.", "thesis"),
+            ("arXiv:2301.12345, 2023.", "preprint"),
+            ("In Proceedings of ACM, 2020.", "conference_paper"),
+            ("Technical report TR-2020-01.", "report"),
+        ],
+    )
+    def test_bib_type_uses_the_printed_segment(self, tail, expected):
+        out = self._finalize({"title": "A useful method"}, f"Smith A. A useful method. {tail}")
+        assert out["bib_type"] == expected
+
+    def test_segment_does_not_override_explicit_type(self):
+        out = self._finalize(
+            {"title": "A useful method", "bib_type": "journal_article"},
+            "Smith A. A useful method. Earlier version: arXiv:2301.12345.",
+        )
         assert out["bib_type"] == "journal_article"
 
 

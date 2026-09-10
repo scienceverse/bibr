@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
-    branches: [main, dev]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -17,11 +17,16 @@ concurrency:
 env:
   UV_VERSION: "0.9.8"
   PRIMARY_PYTHON: "3.12"
+  CI_BUILDX_CACHE: ${{ vars.CI_BUILDX_CACHE || '/mnt/data/ci/buildx-cache' }}
 
 jobs:
   changes:
     name: Classify changed surfaces
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     outputs:
       python: ${{ steps.classify.outputs.python }}
@@ -31,7 +36,7 @@ jobs:
       workflow: ${{ steps.classify.outputs.workflow }}
     steps:
       - name: Checkout full history for the explicit event diff
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -62,16 +67,20 @@ jobs:
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -122,22 +131,26 @@ jobs:
         run: uv cache prune --ci
 
   test-primary:
-    name: Primary suite (Ubuntu, Python 3.12)
+    name: Primary suite (Linux, Python 3.12)
     needs: changes
     if: >-
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12"
@@ -145,28 +158,27 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install the canonical full environment
-        run: uv sync --locked --extra all
+        run: uv sync --locked --extra all --extra mcp
 
       - name: Run the non-slow suite once with coverage
         run: >-
-          uv run --locked --extra all pytest -m "not slow"
+          uv run --locked --extra all --extra mcp pytest -m "not slow"
           --cov=bibr --cov-report=xml --cov-fail-under=75
 
       - name: Upload coverage
+        # Dependabot cannot read Actions secrets; its local coverage gate still runs.
         if: >-
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.full_name == github.repository
+          github.actor != 'dependabot[bot]' &&
+          (github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository)
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: scienceverse/bibr
           fail_ci_if_error: true
 
-      # Reuse this report in the SonarQube job instead of re-running the suite.
-      # Kept to main pushes,
-      # which is the only ref SonarQube Community Build analyses.
-      - name: Hand coverage to the SonarQube job
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      # Preserve coverage for PRs without Codecov credentials and the main-only Sonar job.
+      - name: Preserve coverage report
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: coverage-${{ github.sha }}
@@ -179,13 +191,17 @@ jobs:
         run: uv cache prune --ci
 
   core-compat:
-    name: Core compatibility (Ubuntu, Python ${{ matrix.python-version }})
+    name: Core compatibility (Linux, Python ${{ matrix.python-version }})
     needs: changes
     if: >-
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -193,12 +209,12 @@ jobs:
         python-version: ["3.11", "3.14"]
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
@@ -222,16 +238,20 @@ jobs:
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -264,16 +284,20 @@ jobs:
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -289,13 +313,13 @@ jobs:
       - name: Install the wheel into a clean environment
         working-directory: /tmp
         run: |
-          uv venv /tmp/bibr-wheel-smoke
-          uv pip install --python /tmp/bibr-wheel-smoke/bin/python \
+          uv venv ${RUNNER_TEMP}/bibr-wheel-smoke
+          uv pip install --python ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python \
             "${{ github.workspace }}"/dist/*.whl
-          /tmp/bibr-wheel-smoke/bin/bibr --help
-          /tmp/bibr-wheel-smoke/bin/python -c \
+          ${RUNNER_TEMP}/bibr-wheel-smoke/bin/bibr --help
+          ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python -c \
             "import bibr; from bibr import LocalPipeline, Pipeline, Settings"
-          if /tmp/bibr-wheel-smoke/bin/python -c "import torch" >/dev/null 2>&1; then
+          if ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python -c "import torch" >/dev/null 2>&1; then
             echo "torch leaked into the core wheel" >&2
             exit 1
           fi
@@ -318,16 +342,20 @@ jobs:
     if: >-
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 25
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -335,7 +363,7 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install full contract environment
-        run: uv sync --locked --extra all
+        run: uv sync --locked --extra all --extra mcp
 
       - name: Prove public export and evaluation contracts
         run: >-
@@ -355,16 +383,20 @@ jobs:
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -372,7 +404,7 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install auditable environment
-        run: uv sync --locked --extra all
+        run: uv sync --locked --extra all --extra mcp
 
       - name: Validate exceptions and audit installed dependencies
         run: uv run --locked python scripts/ci/audit_dependencies.py
@@ -388,14 +420,18 @@ jobs:
       needs.changes.outputs.python == 'true' ||
       needs.changes.outputs.package == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     container:
       image: semgrep/semgrep@sha256:58889e4ef89e779e33dfd3f90c87dd1c568670584a2fee5ad376e5451e9a64e4
       options: --user 0
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
@@ -405,22 +441,74 @@ jobs:
           --config=p/security-audit --config=p/secrets --config=p/python
           --error --quiet
 
+  secrets:
+    name: Secret scan (gitleaks)
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    container:
+      image: ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f # v8.30.1
+      options: --user 0
+    steps:
+      - name: Checkout full history for the commit-range scan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Semgrep's p/secrets pack (the semgrep job) scans the tree at HEAD only.
+      # gitleaks adds the history-aware half: a credential committed and then
+      # deleted inside the same pull request still fails the range scan. The
+      # allowlist for documented placeholders lives in .gitleaks.toml.
+      - name: Scan the checked-out tree
+        run: >-
+          gitleaks dir . --config .gitleaks.toml
+          --redact --no-banner --exit-code 1
+
+      - name: Scan the commits this event introduced
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git config --global --add safe.directory "$PWD"
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            range="$PR_BASE_SHA..$PR_HEAD_SHA"
+          elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
+            range="$BEFORE_SHA..$HEAD_SHA"
+          else
+            echo "no commit range for a $EVENT_NAME event; the tree scan covers HEAD"
+            exit 0
+          fi
+          echo "scanning $range"
+          gitleaks git . --config .gitleaks.toml --log-opts="$range" \
+            --redact --no-banner --exit-code 1
+
   docs-build:
     name: Build strict MkDocs artifact
     needs: changes
     if: >-
       needs.changes.outputs.docs == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -443,6 +531,8 @@ jobs:
         with:
           name: mkdocs-site-${{ github.sha }}
           path: site/
+          # The generated site includes .well-known/bibr-build. Without this,
+          # the upload silently drops the revision marker needed by deployment.
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -457,24 +547,32 @@ jobs:
     if: >-
       needs.changes.outputs.container == 'true' ||
       needs.changes.outputs.workflow == 'true'
-    # Only pushes to the branches allowed above may use the persistent runner.
-    # PRs and manual runs use disposable hosted machines. Runner-group access
-    # must also restrict untrusted workflows; a PR can edit this routing rule.
-    # Clear CONTAINER_RUNNER to use hosted machines for trusted pushes as well.
-    runs-on: ${{ github.event_name == 'push' && vars.CONTAINER_RUNNER || 'ubuntu-latest' }}
+    # Use the dedicated container runner when configured, otherwise the common
+    # Linux CI runner. Persistent fleet runners accept private, trusted jobs only;
+    # public repositories and fork PRs use disposable GitHub-hosted runners.
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && (vars.CONTAINER_RUNNER || vars.CI_RUNNER) || 'ubuntu-latest' }}
     # A cold-cache build of this image takes ~45 min on its own, which left the
     # Trivy step boxed into the remainder of a 50-minute budget and killed it
     # mid-layer. Build and scan each need their own room.
     timeout-minutes: 80
     steps:
       - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
-      # Reclaim unused preinstalled toolchains on disposable hosted runners
-      # to make room for the CUDA image, build cache, and exported archive.
-      # Persistent self-hosted runners manage their own storage.
+      # The serve image is large (CUDA runtime base + torch/CUDA wheels + baked
+      # HF models), and buildkit needs room for its content store on top of the
+      # exported copy. Removing dotnet/android/ghc alone left too little and the
+      # build died at export with "no space left on device"; reclaim every
+      # preinstalled toolchain this job never touches. `df -h` on both sides
+      # makes the headroom visible when it changes again.
+      #
+      # Cleanup applies only to GitHub's disposable VM, never to a fleet host.
       - name: Free runner disk space
         if: runner.environment == 'github-hosted'
         run: |
@@ -493,15 +591,28 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      # Local buildx cache exports retain unused blobs. Export to a fresh
-      # directory and swap it in below to bound the retained cache. Check free
-      # space before building because the archive and new cache coexist at
-      # export time and other jobs may share the storage.
-      - name: Ensure DATA has room for the build
+      # The buildx `type=local` cache exporter has NO garbage collection — an
+      # export merges into the blobs already in the directory and never removes
+      # the ones no build needs any more. Measured 12G → 21G → 44G across three
+      # consecutive builds, which filled DATA to 95% and failed a build with "no
+      # space left on device" while writing into the cache itself.
+      #
+      # The cure is the export-and-swap further down, which bounds the directory
+      # at one build's worth. This step is the emergency brake behind it, and it
+      # guards FREE SPACE rather than cache size: the host disk is shared with the
+      # Quickwit index, the HF model cache, Docker's own store and a Steam
+      # library, any of which can grow underneath this job, so no fixed cache
+      # budget can keep the build safe. The floor covers the transient peak —
+      # the ~18.5G image archive in RUNNER_TEMP plus the second copy of the cache
+      # that exists mid-swap — and dropping the cache buys back its own size, so
+      # a build that trips the floor still has room to run cold. The job checks
+      # before every build because other host workloads can consume space. A cold build
+      # costs minutes; a full disk costs a red main.
+      - name: Ensure the cache disk has room for the build
         if: runner.environment == 'self-hosted'
         shell: bash
         env:
-          CACHE_DIR: /mnt/data/ci/buildx-cache
+          CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
           MIN_FREE_GB: "45"
         run: |
           mkdir -p "$CACHE_DIR"
@@ -509,16 +620,16 @@ jobs:
           rm -rf "${CACHE_DIR:?}.new"
           free_gb=$(df -BG --output=avail "$CACHE_DIR" | tail -1 | tr -dc '0-9')
           cache_gb=$(du -sBG "$CACHE_DIR" 2>/dev/null | cut -f1 | tr -d 'G')
-          echo "DATA free ${free_gb}G, layer cache ${cache_gb:-0}G, floor ${MIN_FREE_GB}G"
+          echo "Cache disk free ${free_gb}G, layer cache ${cache_gb:-0}G, floor ${MIN_FREE_GB}G"
           if (( free_gb < MIN_FREE_GB )); then
-            echo "::warning::DATA below ${MIN_FREE_GB}G free - dropping the layer cache; this build runs cold"
+            echo "::warning::Cache disk below ${MIN_FREE_GB}G free - dropping the layer cache; this build runs cold"
             rm -rf "${CACHE_DIR:?}"/*
             df -h "$CACHE_DIR" | tail -1
           fi
 
-      # Docker builds run outside the runner service's resource limits.
-      # Limit the buildkit container directly on shared self-hosted runners.
-      # Verify any limit changes with the container's cgroup cpu.max value.
+      # Also cap BuildKit explicitly. The proposed rootless fleet deployment
+      # bounds the whole user slice at 6 CPUs/48 GiB, including runner, daemon,
+      # job containers and builds; 32 GiB here leaves room for the other processes.
       - name: Choose buildx resource limits
         id: buildx-limits
         shell: bash
@@ -528,7 +639,7 @@ jobs:
           if [[ "$RUNNER_ENV" == "self-hosted" ]]; then
             {
               echo 'opts<<LIMITS'
-              printf 'memory=48g\ncpu-quota=1200000\ncpu-period=100000\n'
+              printf 'memory=32g\ncpu-quota=600000\ncpu-period=100000\n'
               echo 'LIMITS'
             } >> "$GITHUB_OUTPUT"
           else
@@ -537,7 +648,7 @@ jobs:
           fi
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.0.0
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.0.0
         with:
           driver-opts: ${{ steps.buildx-limits.outputs.opts }}
 
@@ -552,18 +663,15 @@ jobs:
           # second full copy of the image into /var/lib/docker purely so Trivy
           # can address it by tag; Trivy reads the tar directly instead.
           #
-          # Use runner-managed scratch storage for the image archive. /tmp
-          # may be memory-backed on a self-hosted runner.
+          # Keep the large archive on per-job disk, not a host's /tmp tmpfs.
           outputs: type=docker,dest=${{ runner.temp }}/bibr-ci-image.tar
           tags: bibr-ci:${{ github.sha }}
-          build-args: |
-            WITH_GPU=true
-            BIBR_BUILD_SHA=${{ github.sha }}
-          # Self-hosted runners reuse local layers; hosted runners use the
-          # GitHub Actions cache. Read the live directory and write a fresh
-          # one, then swap after a successful export.
-          cache-from: ${{ runner.environment == 'self-hosted' && 'type=local,src=/mnt/data/ci/buildx-cache' || 'type=gha' }}
-          cache-to: ${{ runner.environment == 'self-hosted' && 'type=local,dest=/mnt/data/ci/buildx-cache.new,mode=max' || 'type=gha,mode=max' }}
+          build-args: WITH_GPU=true
+          # Fleet builds keep layers on local disk between runs.
+          # Read the live directory, write a fresh one: see the swap step below
+          # for why the export must not go back into the directory it read.
+          cache-from: ${{ runner.environment == 'self-hosted' && format('type=local,src={0}', env.CI_BUILDX_CACHE) || 'type=gha' }}
+          cache-to: ${{ runner.environment == 'self-hosted' && format('type=local,dest={0}.new,mode=max', env.CI_BUILDX_CACHE) || 'type=gha,mode=max' }}
 
       # This is what actually bounds the cache. `type=local` cannot prune itself,
       # so exporting in place accumulates every layer every build has ever
@@ -577,7 +685,7 @@ jobs:
         if: always() && runner.environment == 'self-hosted'
         shell: bash
         env:
-          CACHE_DIR: /mnt/data/ci/buildx-cache
+          CACHE_DIR: ${{ env.CI_BUILDX_CACHE }}
           BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
           if [[ "$BUILD_OUTCOME" == "success" && -d "${CACHE_DIR}.new" ]]; then
@@ -626,12 +734,13 @@ jobs:
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
       needs.test-primary.result == 'success' &&
-      vars.CONTAINER_RUNNER != ''
-    runs-on: ${{ vars.CONTAINER_RUNNER || 'ubuntu-latest' }}
+      github.event.repository.private &&
+      (vars.CONTAINER_RUNNER != '' || vars.CI_RUNNER != '')
+    runs-on: ${{ vars.CONTAINER_RUNNER || vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - name: Checkout with full history
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           # Sonar attributes every issue to the commit that introduced it. A
           # shallow clone blames the whole tree on the checkout commit, which
@@ -664,9 +773,14 @@ jobs:
       - contract-smokes
       - security
       - semgrep
+      - secrets
       - docs-build
       - container-build-scan
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Require every applicable gate
@@ -680,13 +794,14 @@ jobs:
           CONTRACT_SMOKES: ${{ needs.contract-smokes.result }}
           SECURITY: ${{ needs.security.result }}
           SEMGREP: ${{ needs.semgrep.result }}
+          SECRETS: ${{ needs.secrets.result }}
           DOCS_BUILD: ${{ needs.docs-build.result }}
           CONTAINER_BUILD_SCAN: ${{ needs.container-build-scan.result }}
         run: |
           for result in \
             "$CHANGES" "$QUALITY" "$TEST_PRIMARY" "$CORE_COMPAT" "$CORE_INSTALL" \
-            "$PACKAGE" "$CONTRACT_SMOKES" "$SECURITY" "$SEMGREP" "$DOCS_BUILD" \
-            "$CONTAINER_BUILD_SCAN"; do
+            "$PACKAGE" "$CONTRACT_SMOKES" "$SECURITY" "$SEMGREP" "$SECRETS" \
+            "$DOCS_BUILD" "$CONTAINER_BUILD_SCAN"; do
             case "$result" in
               success|skipped) ;;
               *) echo "required dependency ended with: $result" >&2; exit 1 ;;
@@ -702,7 +817,11 @@ jobs:
       needs.docs-build.result == 'success' &&
       github.event_name == 'pull_request' &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -711,7 +830,7 @@ jobs:
       url: ${{ steps.deploy.outputs.deployment-url }}
     steps:
       - name: Checkout deployment smoke helper
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
@@ -720,6 +839,12 @@ jobs:
         with:
           name: mkdocs-site-${{ github.sha }}
           path: site/
+
+      - name: Install Node and npm for Wrangler
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
 
       - name: Deploy protected preview
         id: deploy
@@ -751,7 +876,11 @@ jobs:
       needs.docs-build.result == 'success' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.event.repository.private &&
+      (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository)
+      && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -760,7 +889,7 @@ jobs:
       url: https://bibr.org
     steps:
       - name: Checkout deployment smoke helper
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
         with:
           persist-credentials: false
 
@@ -769,6 +898,12 @@ jobs:
         with:
           name: mkdocs-site-${{ github.sha }}
           path: site/
+
+      - name: Install Node and npm for Wrangler
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          package-manager-cache: false
 
       - name: Deploy production
         id: deploy

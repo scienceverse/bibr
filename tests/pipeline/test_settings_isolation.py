@@ -51,6 +51,7 @@ PROCESS_BOUNDARY_SETTINGS_MODULES = {
     "bibr/serve/app.py",
     "bibr/serve/auth.py",
     "bibr/serve/jobs.py",
+    "bibr/serve/jobs_redis.py",  # same API-process boundary as jobs.py (Settings.jobs)
     "bibr/setup_wizard.py",
 }
 
@@ -196,9 +197,7 @@ def test_ocr_cache_key_uses_supplied_settings_snapshot():
     ) != ocr_cache._key(file_state, config, resolve_ocr_runtime_identity(config, second), second)
 
 
-async def test_render_ocr_window_uses_context_settings_snapshot(monkeypatch):
-    monkeypatch.setattr("bibr.ocr.utils.get_pdf_page_count", lambda _: 1)
-
+async def test_render_ocr_window_uses_context_settings_snapshot():
     class RecordingLayout:
         def __init__(self):
             self.windows = []
@@ -216,8 +215,8 @@ async def test_render_ocr_window_uses_context_settings_snapshot(monkeypatch):
         settings.cache.ocr = False
         layout = RecordingLayout()
         stage = InterleavedRenderOcrStage(
-            layout=NoopStage(),
-            native_text=layout,
+            layout=layout,
+            native_text=NoopStage(),
             ocr=NoopStage(),
         )
         files = [FileState(path=Path(f"{index}.pdf"), pdf_bytes=b"pdf") for index in range(3)]

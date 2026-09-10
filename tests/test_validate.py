@@ -208,6 +208,87 @@ class TestCheckDocx:
         assert result.is_valid is False
 
 
+def _deflated_docx_bytes() -> bytes:
+    """A structurally-valid DOCX whose members are *deflated*, not stored.
+
+    Every other DOCX fixture here is ZIP_STORED, so no test ever exercised the
+    decompression path where a damaged archive actually fails.
+    """
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", "<Types/>")
+        zf.writestr("word/document.xml", "<document><body>Some prose.</body></document>")
+    return buf.getvalue()
+
+
+def _break_deflate_stream(docx_bytes: bytes, name: str) -> bytes:
+    """Make *name*'s deflate stream start with the reserved block type.
+
+    A deflate block header of ``0b111`` (BFINAL set, BTYPE=11) is invalid by
+    definition, so zlib rejects it deterministically instead of the test
+    depending on random bytes happening to be undecodable.
+    """
+    import zipfile
+
+    with zipfile.ZipFile(io.BytesIO(docx_bytes)) as zf:
+        info = zf.getinfo(name)
+        assert info.compress_type == zipfile.ZIP_DEFLATED
+    buf = bytearray(docx_bytes)
+    off = info.header_offset
+    name_len = int.from_bytes(buf[off + 26 : off + 28], "little")
+    extra_len = int.from_bytes(buf[off + 28 : off + 30], "little")
+    buf[off + 30 + name_len + extra_len] = 0x07
+    return bytes(buf)
+
+
+def _flag_members_encrypted(docx_bytes: bytes) -> bytes:
+    """Set the zip encryption flag on every central-directory entry.
+
+    Python cannot *write* an encrypted zip, and third-party tools that produce
+    one leave the archive otherwise intact — which is the case this covers.
+    Only the central directory is patched (located via the end-of-central-
+    directory record) so a ``PK\x01\x02`` byte pair inside compressed data
+    cannot be mistaken for a header.
+    """
+    buf = bytearray(docx_bytes)
+    eocd = buf.rfind(b"PK\x05\x06")
+    assert eocd != -1
+    cd_start = int.from_bytes(buf[eocd + 16 : eocd + 20], "little")
+    i = cd_start
+    while (i := buf.find(b"PK\x01\x02", i, eocd)) != -1:
+        buf[i + 8] |= 0x01
+        i += 4
+    return bytes(buf)
+
+
+class TestDocxArchiveReadFailures:
+    """A DOCX that cannot be *read* must be classified, not crash validation."""
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/octet-stream")
+    def test_damaged_deflate_stream_is_corrupted(self, mock_mime):
+        damaged = _break_deflate_stream(_deflated_docx_bytes(), "word/document.xml")
+        result = validate_input_file(Path("/tmp/paper.docx"), damaged)
+        assert result.is_corrupted is True
+        assert result.is_valid is False
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/octet-stream")
+    def test_zip_encrypted_docx_is_encrypted_not_corrupted(self, mock_mime):
+        locked = _flag_members_encrypted(_deflated_docx_bytes())
+        result = validate_input_file(Path("/tmp/paper.docx"), locked)
+        assert result.is_encrypted is True
+        assert result.is_corrupted is False
+        assert result.is_valid is False
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/octet-stream")
+    def test_a_readable_deflated_docx_still_passes(self, mock_mime):
+        result = validate_input_file(Path("/tmp/paper.docx"), _deflated_docx_bytes())
+        assert result.is_corrupted is False
+        assert result.is_encrypted is False
+        assert result.is_valid is True
+
+
 class TestValidateInputFile:
     @patch("bibr.input.validate.detect_mime_type", return_value="application/pdf")
     def test_valid_pdf(self, mock_mime):

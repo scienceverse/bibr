@@ -2,11 +2,12 @@
 
 A quality audit found that catastrophic output defects (placeholder tokens,
 exploded author lists, empty equations, dangling references, …) passed
-silently because ``processing_warnings`` only ever carried
+silently because the processing warnings only ever carried
 reference-segmentation events. This module runs a battery of cheap, defensive
-checks over the finished export dict (schema v10.7 shape) and returns a list
-of :class:`ValidationIssue`; the export wiring surfaces them both as
-``processing_warnings`` strings and a structured top-level ``validation`` block.
+checks over the finished export dict (schema v11.0 shape) and returns a list
+of :class:`ValidationIssue`; the export wiring surfaces them in the structured
+top-level ``validation`` block, and there only — findings are never mirrored
+into ``extraction.warnings`` as prose.
 
 Every check is defensive: it must never raise on malformed input, degrading to
 skipping itself instead. :func:`validate_export` wraps each check so one broken
@@ -47,7 +48,7 @@ _PANEL_RE = re.compile(r"^\(?[a-z]\)$")
 _APPENDIX_LETTER_RE = re.compile(r"^([A-Z])[\s.:]")
 _APPENDIX_WORD_RE = re.compile(r"^Appendix", re.IGNORECASE)
 
-# Statement anchors → the info field that should carry the parsed statement.
+# Statement anchors → the metadata field that should carry the parsed statement.
 _STATEMENT_ANCHORS: tuple[tuple[str, str], ...] = (
     ("conflict of interest", "coi_statement"),
     ("ethical approval", "ethics_statement"),
@@ -95,7 +96,7 @@ def _string_leaves(obj: object):
 
 def _check_placeholder(payload: dict) -> list[ValidationIssue]:
     hits = 0
-    for key in ("info", "funding", "affiliations", "author"):
+    for key in ("metadata", "funding", "affiliation", "author"):
         for s in _string_leaves(payload.get(key)):
             if s.strip().casefold() in _SENTINEL_TOKENS:
                 hits += 1
@@ -210,7 +211,7 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
         if not isinstance(x, dict):
             continue
         pool = targets.get(x.get("xref_type"))
-        xid = x.get("xref_id")
+        xid = x.get("target_id")
         if pool is not None and xid is not None and xid not in pool:
             dangling += 1
     for s in sections:
@@ -291,7 +292,7 @@ def _check_url_malformed(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_title_generic(payload: dict) -> list[ValidationIssue]:
-    title = _as_dict(payload, "info").get("title")
+    title = _as_dict(payload, "metadata").get("title")
     t = _text(title)
     if not t or t.casefold() in _GENERIC_TITLES or is_exact_generic_article_label(t):
         return [
@@ -304,7 +305,7 @@ def _check_title_generic(payload: dict) -> list[ValidationIssue]:
     return []
 
 
-_CANONICAL_INFO_UNICODE_FIELDS = (
+_CANONICAL_METADATA_UNICODE_FIELDS = (
     "title",
     "doi",
     "journal",
@@ -332,8 +333,10 @@ def _check_unicode_canonical(payload: dict) -> list[ValidationIssue]:
     Body/reference text and all alternate-source diagnostics are deliberately
     outside this gate: they are evidence, not canonical bibliographic identity.
     """
-    info = _as_dict(payload, "info")
-    hits = sum(_private_use_count(info.get(field)) for field in _CANONICAL_INFO_UNICODE_FIELDS)
+    metadata = _as_dict(payload, "metadata")
+    hits = sum(
+        _private_use_count(metadata.get(field)) for field in _CANONICAL_METADATA_UNICODE_FIELDS
+    )
     for author in _as_list(payload, "author"):
         if not isinstance(author, dict):
             continue
@@ -366,12 +369,12 @@ def _check_abstract_missing(payload: dict) -> list[ValidationIssue]:
         for t in _as_list(payload, "text")
         if isinstance(t, dict) and t.get("section_id") in abstract_ids
     )
-    if n >= 2 and not _text(_as_dict(payload, "info").get("abstract")):
+    if n >= 2 and not _text(_as_dict(payload, "metadata").get("abstract")):
         return [
             ValidationIssue(
                 "VAL_ABSTRACT_MISSING",
                 "warning",
-                "abstract section has content but info.abstract is empty",
+                "abstract section has content but metadata.abstract is empty",
             )
         ]
     return []
@@ -385,7 +388,7 @@ def _check_abstract_suspect(payload: dict) -> list[ValidationIssue]:
     ):
         return []
 
-    abstract = _text(_as_dict(payload, "info").get("abstract"))
+    abstract = _text(_as_dict(payload, "metadata").get("abstract"))
     if not abstract:
         return []
 
@@ -514,7 +517,7 @@ def _check_xref_zero(payload: dict) -> list[ValidationIssue]:
         row.get("bib_id") for row in bib if isinstance(row, dict) and row.get("bib_id") is not None
     }
     has_bib_target = any(
-        isinstance(x, dict) and x.get("xref_type") == "bib" and x.get("xref_id") in valid_bib_ids
+        isinstance(x, dict) and x.get("xref_type") == "bib" and x.get("target_id") in valid_bib_ids
         for x in _as_list(payload, "xref")
     )
     if not has_bib_target:
@@ -564,11 +567,11 @@ def _check_xref_low_coverage(payload: dict) -> list[ValidationIssue]:
         if isinstance(row, dict) and isinstance(row.get("bib_id"), int)
     }
     linked_bib_ids = {
-        row.get("xref_id")
+        row.get("target_id")
         for row in _as_list(payload, "xref")
         if isinstance(row, dict)
         and row.get("xref_type") == "bib"
-        and isinstance(row.get("xref_id"), int)
+        and isinstance(row.get("target_id"), int)
     }
     issue = xref_low_coverage_issue(bib_ids, linked_bib_ids, bib_count=len(bib))
     return [issue] if issue is not None else []
@@ -603,7 +606,7 @@ def _check_ref_count_mismatch(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_statement_orphan(payload: dict) -> list[ValidationIssue]:
-    info = _as_dict(payload, "info")
+    metadata = _as_dict(payload, "metadata")
     corpus = " ".join(
         t.get("text", "")
         for t in _as_list(payload, "text")
@@ -614,14 +617,14 @@ def _check_statement_orphan(payload: dict) -> list[ValidationIssue]:
     orphans = [
         anchor
         for anchor, field_name in _STATEMENT_ANCHORS
-        if anchor in corpus and not _text(info.get(field_name))
+        if anchor in corpus and not _text(metadata.get(field_name))
     ]
     if orphans:
         return [
             ValidationIssue(
                 "VAL_STATEMENT_ORPHAN",
                 IssueSeverity.WARNING,
-                f"statement anchor(s) present in text but info field empty: {', '.join(orphans)}",
+                f"statement anchor(s) present in text but metadata field empty: {', '.join(orphans)}",
                 count=len(orphans),
             )
         ]

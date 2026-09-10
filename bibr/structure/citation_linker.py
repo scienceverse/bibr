@@ -6,6 +6,7 @@
   Tier 3: LLM fallback for ambiguous/unresolved candidates
 """
 
+import asyncio
 import logging
 import re
 import unicodedata
@@ -89,8 +90,21 @@ NUMERIC_CITE_RE = re.compile(
     r"\[(\d+(?:\s*[-\u2013]\s*\d+)?(?:\s*[,;]\s*\d+(?:\s*[-\u2013]\s*\d+)?)*)\]"
 )
 
-# Bare parenthetical-numeric citations (3), (7, 8), (6-8).
-# Accepted when recurring markers and printed bibliography evidence agree.
+# Tier 1b: Superscript citations ^{3}, ^{15,16}, ^{1-3}, ^{8,9}
+# Produced by OCR engines that render superscripts as LaTeX.  After
+# strip_inline_math() runs, $^{3}$ becomes ^{3}.  Note: strip_inline_math
+# and strip_latex_commands are deferred to finalize_text() (late-phase
+# cleaning) so these patterns are still intact at citation linking time.
+# The (?<!\$) lookbehind excludes math-mode superscripts like $^{2}$
+# (e.g. ηp$^{2}$ for partial eta-squared) which are not citations, and
+# (?<!\}) excludes a braced LaTeX base ($\mathrm{cm}^{2}$) — whose closing
+# brace is neither \w nor $, so it used to emit a false bib xref and have the
+# unit stripped from the sentence, leaving "Each plot measured cm in area."
+SUPERSCRIPT_CITE_RE = re.compile(r"(?<!\w)(?<!\$)(?<!\})\^\{(\d+(?:\s*[-\u2013,;]\s*\d+)*)\}")
+
+# Tier 1c: Bare parenthetical-numeric citations (3), (7, 8), (6-8).
+# Vancouver/Science-style papers where OCR kept the parentheses.  Only ever
+# activated as a fallback when the bracket/superscript tier found nothing.
 PAREN_NUMERIC_CITE_RE = re.compile(r"\((\d{1,3}(?:\s*[,\u2013-]\s*\d{1,3})*)\)")
 
 _PROCEDURAL_LABEL_BEFORE_RE = re.compile(
@@ -191,6 +205,11 @@ _ACRONYM_DEFINITION_RE = re.compile(
     r"\b((?:[A-Za-z][A-Za-z'-]*\s+){1,7}[A-Za-z][A-Za-z'-]*)"
     r"\s*\(([A-Z][A-Z0-9-]{1,9})\)"
 )
+# Exactly the parenthesised acronym the pattern above requires, so this is a
+# necessary condition, not a heuristic. Measured on 23,893 real sentences,
+# 1.6% pass it and the match set is identical — ~12 ms/paper of the shared
+# serve event loop.
+_ACRONYM_PARENTHETICAL_RE = re.compile(r"\([A-Z][A-Z0-9-]{1,9}\)")
 _ACRONYM_ALIAS_STOPWORDS = frozenset(
     {
         "about",
@@ -219,6 +238,8 @@ def _body_acronym_alias_tokens(body_sents) -> dict[str, set[str]]:
 
     aliases: dict[str, set[str]] = {}
     for sentence in body_sents:
+        if not _ACRONYM_PARENTHETICAL_RE.search(sentence.text):
+            continue
         for match in _ACRONYM_DEFINITION_RE.finditer(sentence.text):
             acronym_tokens = _citation_lexical_tokens(match.group(2))
             if len(acronym_tokens) != 1:
@@ -536,6 +557,11 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
 # ---------------------------------------------------------------------------
 
 
+# Unescaped ``$`` delimits an inline-math span.
+_UNESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)\$")
+# Greek and extended-Greek letters — notation, not prose.
+_MATH_BASE_LETTER_RE = re.compile(r"[\u0370-\u03ff\u1f00-\u1fff]")
+
 _STRIP_CITE_SUP_RE = re.compile(
     r"\$\s+\^\{(\d+(?:\s*[-–,;]\s*\d+)*)\}\s+\$"
     r"|(?<![\d$])\^\{(\d+(?:\s*[-–,;]\s*\d+)*)\}"
@@ -551,9 +577,29 @@ def _is_citation_superscript(m: re.Match) -> str:
         return ""
     pos = m.start()
     text = m.string
-    if pos > 0 and text[pos - 1].isalpha() and (pos < 2 or not text[pos - 2].isalpha()):
+    if pos == 0:
+        return ""
+    # Inside an inline-math span a superscript is an exponent, never a
+    # citation marker. Recognising math only by "one alphabetic character
+    # preceded by a non-alphabetic one" sent ``$\mathrm{cm}^{2}$`` down the
+    # citation path: it emitted a false xref *and* deleted the unit, leaving
+    # "Each plot measured cm in area."
+    if len(_UNESCAPED_DOLLAR_RE.findall(text[:pos])) % 2 == 1:
         return str(m.group(0))
-    return ""
+    if text[pos - 1] == "}":
+        # A braced base is LaTeX, not a word carrying a marker.
+        return str(m.group(0))
+    start = pos
+    while start > 0 and text[start - 1].isalpha():
+        start -= 1
+    base = text[start:pos]
+    if not base:
+        return ""
+    # A Greek letter in the base marks a statistic (``\u03b7p^{2}``);
+    # ``effective^{9}`` is an ordinary word followed by a citation marker.
+    if _MATH_BASE_LETTER_RE.search(base):
+        return str(m.group(0))
+    return str(m.group(0)) if len(base) == 1 else ""
 
 
 def strip_citation_superscripts(
@@ -607,7 +653,46 @@ _PRINTED_REFERENCE_PREFIX_RE = re.compile(
 )
 
 
-def _printed_reference_sources(sentences, sections, references) -> dict[int, str]:
+def _citation_number_to_bib_id(sentences, references) -> dict[int, int]:
+    """Resolve printed numbers after reference filtering has changed internal IDs.
+
+    Require a majority of uniquely numbered references before changing the
+    positional interpretation. Duplicate labels are ambiguous and missing labels
+    must not resolve to a different numbered entry just because its ID matches.
+    References without readable labels retain their identity fallback when that
+    number is not already claimed or ambiguous.
+    """
+    from bibr.extract.ref_locator import _printed_entry_number
+
+    text_by_id = {sent.text_id: sent.text for sent in sentences if sent.text}
+    mapping: dict[int, int] = {}
+    ambiguous: set[int] = set()
+    unnumbered: set[int] = set()
+    for reference in references:
+        source = text_by_id.get(reference.text_id, "")
+        match = _PRINTED_REFERENCE_PREFIX_RE.match(source)
+        number = (
+            int(next(value for value in match.groups() if value is not None))
+            if match
+            else _printed_entry_number(source)
+        )
+        if number is None or number <= 0:
+            unnumbered.add(reference.bib_id)
+        elif number in mapping or number in ambiguous:
+            ambiguous.add(number)
+            mapping.pop(number, None)
+        else:
+            mapping[number] = reference.bib_id
+    if len(mapping) * 2 <= len(references):
+        return {}
+    for bib_id in unnumbered - ambiguous:
+        mapping.setdefault(bib_id, bib_id)
+    return mapping
+
+
+def _printed_reference_sources(
+    sentences, sections, references, citation_to_bib: dict[int, int] | None = None
+) -> dict[int, str]:
     """Return raw reference rows keyed by their matching printed marker.
 
     Native/JATS references can lack ``PaperReference.text_id`` even though the
@@ -619,6 +704,7 @@ def _printed_reference_sources(sentences, sections, references) -> dict[int, str
 
     text_by_id = {sent.text_id: sent.text for sent in sentences if sent.text}
     valid_bib_ids = {reference.bib_id for reference in references}
+    numbering = citation_to_bib or {bib_id: bib_id for bib_id in valid_bib_ids}
     reference_section_ids = {
         section.section_id
         for section in sections
@@ -633,8 +719,8 @@ def _printed_reference_sources(sentences, sections, references) -> dict[int, str
         if match is None:
             continue
         marker = next((value for value in match.groups() if value is not None), None)
-        if marker is not None and int(marker) == reference.bib_id:
-            sources[reference.bib_id] = source
+        if marker is not None and numbering.get(int(marker)) == reference.bib_id:
+            sources[int(marker)] = source
     for sentence in sentences:
         if sentence.section_id not in reference_section_ids or not sentence.text:
             continue
@@ -642,7 +728,7 @@ def _printed_reference_sources(sentences, sections, references) -> dict[int, str
         if match is None:
             continue
         marker = next((value for value in match.groups() if value is not None), None)
-        if marker is not None and int(marker) in valid_bib_ids:
+        if marker is not None and int(marker) in numbering:
             sources.setdefault(int(marker), sentence.text)
     return sources
 
@@ -867,8 +953,13 @@ def _flattened_candidates(
     printed_numeric_ids: set[int],
     references,
     reference_sources: dict[int, str],
+    citation_to_bib: dict[int, int] | None = None,
 ) -> tuple[list[CitationCandidate], float]:
     references_by_id = {reference.bib_id: reference for reference in references}
+    if citation_to_bib:
+        references_by_id = {
+            number: references_by_id[bib_id] for number, bib_id in citation_to_bib.items()
+        }
     acronym_alias_tokens = _body_acronym_alias_tokens(body_sents)
     candidates: list[CitationCandidate] = []
     for sent in body_sents:
@@ -1030,36 +1121,32 @@ def _dedupe_candidates(candidates: list[CitationCandidate]) -> list[CitationCand
     return out
 
 
-async def detect_bib_xrefs_with_receipt(
-    sentences,
-    sections,
-    references,
-    llm_client=None,
-    file_hash="unknown",
-) -> tuple[list[PaperXref], CitationLinkingReceipt]:
-    """Detect bib xrefs and return the full evidence/rejection receipt."""
-
+def _detect_candidates(sentences, sections, references):
+    """Run every non-LLM citation tier. Synchronous; see the caller's note."""
     body_sents = _get_body_sentences(sentences, sections)
     valid_bib_ids = {reference.bib_id for reference in references}
-    reference_sources = _printed_reference_sources(sentences, sections, references)
+    citation_to_bib = _citation_number_to_bib_id(sentences, references)
+    valid_citation_numbers = set(citation_to_bib) or valid_bib_ids
+    reference_sources = _printed_reference_sources(sentences, sections, references, citation_to_bib)
     printed_numeric_ids = set(reference_sources)
 
-    numeric = _numeric_candidates(body_sents, valid_bib_ids)
+    numeric = _numeric_candidates(body_sents, valid_citation_numbers)
     numeric_sentence_count = len({candidate.text_id for candidate in numeric if candidate.accepted})
     numeric_score = min(numeric_sentence_count / _MIN_FALLBACK_STYLE_HITS, 1.0)
     equation_tags = frozenset(_collect_equation_tags(sentences))
     parenthetical, parenthetical_score = _parenthetical_candidates(
         body_sents,
-        valid_bib_ids,
+        valid_citation_numbers,
         equation_tags,
         printed_numeric_ids,
     )
     flattened, flattened_score = _flattened_candidates(
         body_sents,
-        valid_bib_ids,
+        valid_citation_numbers,
         printed_numeric_ids,
         references,
         reference_sources,
+        citation_to_bib,
     )
     parenthetical, flattened = _resolve_competing_fallback_styles(
         parenthetical,
@@ -1069,7 +1156,49 @@ async def detect_bib_xrefs_with_receipt(
     from bibr.structure.citation_matcher import match_with_candidates
 
     _tier2, _tier2_ambiguous, author_year = match_with_candidates(body_sents, references)
-    candidates = _dedupe_candidates(numeric + parenthetical + flattened + author_year)
+    # Detect ranges and ground superscripts in printed-number space, then keep
+    # both the receipt and emitted links in internal-ID space. Author-year and
+    # LLM matches already use internal IDs and must not be remapped.
+    numeric_candidates = [
+        replace(
+            candidate,
+            bib_ids=tuple(citation_to_bib.get(number, number) for number in candidate.bib_ids),
+        )
+        for candidate in numeric + parenthetical + flattened
+    ]
+    candidates = _dedupe_candidates(numeric_candidates + author_year)
+    return (
+        body_sents,
+        valid_bib_ids,
+        numeric_score,
+        parenthetical_score,
+        flattened_score,
+        candidates,
+    )
+
+
+async def detect_bib_xrefs_with_receipt(
+    sentences,
+    sections,
+    references,
+    llm_client=None,
+    file_hash="unknown",
+) -> tuple[list[PaperXref], CitationLinkingReceipt]:
+    """Detect bib xrefs and return the full evidence/rejection receipt."""
+
+    # Every tier below the LLM one is synchronous regex work over the whole
+    # body — median 23 ms, p99 120 ms, max 438 ms on 479 real PMC exports.
+    # ``bibr serve`` runs one async worker, so leaving it on the loop is
+    # head-of-line blocking for every co-resident request; the neighbouring
+    # parse_segment stage already offloads work of exactly this shape.
+    (
+        body_sents,
+        valid_bib_ids,
+        numeric_score,
+        parenthetical_score,
+        flattened_score,
+        candidates,
+    ) = await asyncio.to_thread(_detect_candidates, sentences, sections, references)
 
     all_xrefs: list[PaperXref] = []
     seen: set[tuple[int, int]] = set()
@@ -1097,8 +1226,15 @@ async def detect_bib_xrefs_with_receipt(
     )
 
     if llm_client:
+        # From the accepted candidates, not from ``all_xrefs``: those are
+        # de-duplicated on ``(text_id, xref_id)``, so when one sentence cites
+        # the same reference twice in different surface forms the second form
+        # never entered this set and was re-offered to the Tier-3 LLM — which
+        # could attach a second, different link to an already-linked citation.
         resolved_pairs = {
-            (xref.text_id, _normalize_citation_text(xref.contents)) for xref in all_xrefs
+            (candidate.text_id, _normalize_citation_text(candidate.raw))
+            for candidate in candidates
+            if candidate.accepted
         }
         ambiguous: list[tuple[int, str, int, int]] = []
         for candidate in candidates:

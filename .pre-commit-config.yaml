@@ -40,6 +40,15 @@ repos:
           - --error
           - --quiet
 
+  # Secret scan over the staged diff, with the same allowlist CI applies to
+  # the tree and to every pull request's commits (.gitleaks.toml). pre-commit
+  # bootstraps a Go toolchain if none is installed.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+        args: [--config=.gitleaks.toml]
+
   # General file checks (non-mutating)
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0

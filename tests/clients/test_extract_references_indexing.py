@@ -86,3 +86,47 @@ async def test_unnumbered_text_falls_back_to_positional(client):
     text = "Smith J. Ref A text\nDoe A. Ref B text"
     refs = await _extract(client, [_llm_ref(1, "A"), _llm_ref(2, "B")], text, 4)
     assert [r.index for r in refs] == [4, 5]
+
+
+# ---------------------------------------------------------------------------
+# Duplicate indices with a matching count (round-3 audit)
+# ---------------------------------------------------------------------------
+
+
+async def test_duplicate_index_with_matching_count_is_marked_untrusted(client):
+    """A repeat means the model was not tracking entries one-to-one.
+
+    The count check alone cannot see it: three rows for three entries labelled
+    1, 2, 2 passes ``len(refs) == len(expected)`` while entry 3 is missing and
+    every position after the repeat is off by one. Leaving these trusted let a
+    segment-anchored backfill stamp the neighbouring entry's printed DOI onto
+    the wrong reference.
+    """
+    text = "1. Ref A text\n2. Ref B text\n3. Ref C text"
+    refs = await _extract(client, [_llm_ref(1, "A"), _llm_ref(2, "B"), _llm_ref(2, "C")], text, 1)
+    assert [r.index for r in refs] == [1, 2, 3]
+    assert [r.index_trusted for r in refs] == [False, False, False]
+
+
+async def test_duplicate_index_with_mismatched_count_is_still_untrusted(client):
+    text = "1. Ref A text\n2. Ref B text\n3. Ref C text"
+    refs = await _extract(client, [_llm_ref(2, "A"), _llm_ref(2, "B")], text, 1)
+    assert all(not r.index_trusted for r in refs)
+
+
+async def test_a_pure_renumbering_stays_trusted(client):
+    """Batch numbered 1..n instead of from start_index.
+
+    Positional re-indexing fixes that exactly, so turning the backfills off
+    would cost enrichment for nothing.
+    """
+    text = "6. Ref A text\n7. Ref B text"
+    refs = await _extract(client, [_llm_ref(1, "A"), _llm_ref(2, "B")], text, 6)
+    assert [r.index for r in refs] == [6, 7]
+    assert all(r.index_trusted for r in refs)
+
+
+async def test_a_complete_in_order_batch_stays_trusted(client):
+    text = "1. Ref A text\n2. Ref B text\n3. Ref C text"
+    refs = await _extract(client, [_llm_ref(1, "A"), _llm_ref(2, "B"), _llm_ref(3, "C")], text, 1)
+    assert all(r.index_trusted for r in refs)

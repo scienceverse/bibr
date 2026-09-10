@@ -46,6 +46,15 @@ class LayoutDetector(BaseLayoutDetector):
         if not self._loaded:
             return
 
+        if self._runtime == "onnx":
+            # Dropping the session releases the ORT arena; nothing torch-side.
+            self._model.close()
+            self._model = None
+            self._loaded = False
+            gc.collect()
+            logger.info("LayoutDetector unloaded (runtime=onnx, device=%s)", self._device.type)
+            return
+
         import torch
 
         del self._model

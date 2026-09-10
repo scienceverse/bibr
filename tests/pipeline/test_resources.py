@@ -491,3 +491,61 @@ def test_resource_manager_accepts_serve_fields():
     assert rm.http_client == "fake"
     assert rm.ocr_sem_global is sem_g
     assert rm.ocr_breaker == "breaker"
+
+
+# --- Preloaded-but-unclaimed OCR engine (audit [21]) -------------------------
+
+
+def test_shutdown_drains_an_ocr_preload_nobody_claimed():
+    """Only await_ocr, reached from OcrStage, transfers the preload result.
+
+    When an earlier stage raises — classically the layout model OOMing on the
+    GPU the preload just claimed — the future was never drained and the
+    managed inference subprocess survived the run.
+    """
+    import concurrent.futures
+
+    client = MagicMock()
+    client.shutdown = MagicMock(return_value=None)
+    executor = concurrent.futures.ThreadPoolExecutor(1)
+    rm = ResourceManager()
+    rm._ocr_executor = executor
+    rm._ocr_future = executor.submit(lambda: client)
+
+    asyncio.run(rm.shutdown_ocr())
+
+    client.shutdown.assert_called_once()
+    assert rm._ocr_future is None
+    assert rm._ocr_executor is None
+
+
+def test_shutdown_does_not_double_shutdown_a_claimed_engine():
+    import concurrent.futures
+
+    client = MagicMock()
+    client.shutdown = MagicMock(return_value=None)
+    executor = concurrent.futures.ThreadPoolExecutor(1)
+    rm = ResourceManager()
+    rm._ocr = client
+    rm._ocr_executor = executor
+    rm._ocr_future = executor.submit(lambda: client)
+
+    asyncio.run(rm.shutdown_ocr())
+
+    client.shutdown.assert_called_once()
+
+
+def test_shutdown_survives_a_preload_that_raised():
+    import concurrent.futures
+
+    def _boom():
+        raise RuntimeError("OCR backend failed to start")
+
+    executor = concurrent.futures.ThreadPoolExecutor(1)
+    rm = ResourceManager()
+    rm._ocr_executor = executor
+    rm._ocr_future = executor.submit(_boom)
+
+    asyncio.run(rm.shutdown_ocr())
+
+    assert rm._ocr_future is None

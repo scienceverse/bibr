@@ -249,13 +249,17 @@ def load_ground_truth_gold(
                 continue
 
             extracted = extract_comparable_from_json(data, is_gold=True)
-            info = data.get("info", {})
+            info = data.get("metadata") or data.get("info") or {}
             # Use canonical DOI and PDF filename from the gold record itself.
             # `doi` (paper_id fallback) is the JOIN KEY; `doi_printed` is what
             # the page actually shows and is what doi_match scores against —
             # a paper that prints no DOI must be excluded, not penalized.
             doi = info.get("doi") or data.get("paper_id", "") or extracted.get("doi", "")
-            file_name = info.get("file_name") or json_path.stem
+            file_name = (
+                (data.get("source") or {}).get("file_name")
+                or info.get("file_name")
+                or json_path.stem
+            )
             rows.append(
                 {
                     "doi": doi,
@@ -416,7 +420,7 @@ def extract_sections_from_json(data: dict) -> dict[str, str]:
 
 
 def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
-    """Extract comparable fields from a bibr JSON export (v9.0 schema).
+    """Extract comparable fields from a bibr JSON export (current or legacy schema).
 
     Args:
         data: Parsed JSON export dict with top-level keys: info, author,
@@ -429,9 +433,9 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
         affiliation, email, orcid, corresponding), keywords, abstract,
         reference_count, references, file_name, abstained.
     """
-    info = data.get("info", {})
+    info = data.get("metadata") or data.get("info") or {}
 
-    # Score the abstract consumers receive in info.abstract. Reconstructing an
+    # Score the abstract consumers receive in metadata.abstract. Reconstructing an
     # empty prediction from sections would conceal a missing exported field.
     # Gold may instead store its independently prepared abstract as section text.
     if is_gold:
@@ -519,7 +523,9 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
         "references_enriched": refs_enriched,
         # PDF basename — used as fallback match key when extraction's DOI is
         # hallucinated. paper_id is the DOI in v10 schema, so prefer info.file_name.
-        "file_name": info.get("file_name") or data.get("paper_id", ""),
+        "file_name": (data.get("source") or {}).get("file_name")
+        or info.get("file_name")
+        or data.get("paper_id", ""),
         "abstained": _front_matter_abstained(data),
     }
 

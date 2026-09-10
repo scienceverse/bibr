@@ -2,13 +2,15 @@ def test_export_models_are_public():
     from bibr.export import (
         AuthorExport,
         BibExport,
-        InfoExport,
+        MetadataExport,
         PaperExport,
+        SourceExport,
         TextExport,
     )
 
     assert PaperExport.__name__ == "PaperExport"
-    assert InfoExport.__name__ == "InfoExport"
+    assert MetadataExport.__name__ == "MetadataExport"
+    assert SourceExport.__name__ == "SourceExport"
     assert AuthorExport.__name__ == "AuthorExport"
     assert TextExport.__name__ == "TextExport"
     assert BibExport.__name__ == "BibExport"

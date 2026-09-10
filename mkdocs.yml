@@ -59,6 +59,7 @@ nav:
   - Guides:
       - Python library: guides/library.md
       - MCP server: guides/mcp.md
+      - Batch runs: guides/batch.md
       - Configuration: guides/configuration.md
       - Production deployment: guides/deployment.md
       - Architecture: guides/architecture.md

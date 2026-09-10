@@ -712,12 +712,17 @@ def _apply_positional_abstract_fallback(contents: PaperContents) -> None:
     # (``--pages 5-12``, serve ``start_page``) no sentence carries page 1 and
     # a literal comparison would silently never select anything. Unsliced the
     # minimum is 1, so the default is unchanged.
-    front_page = min((sent.page_number for sent in contents.sentences), default=1)
+    # Native parses (DOCX, JATS, HTML, ePub) set page_number=None on every
+    # sentence: min() over those raises TypeError, and comparing against a
+    # page would exclude everything. Where there are no pages, drop the test.
+    page_numbers = [sent.page_number for sent in contents.sentences if sent.page_number is not None]
+    front_page = min(page_numbers, default=1)
+    has_pages = bool(page_numbers)
     abstract_sents = [
         sent
         for sent in contents.sentences
         if sent.section_id == title_section.section_id
-        and sent.page_number == front_page
+        and (not has_pages or sent.page_number == front_page)
         and sent.text_id < first_body_text_id
         and (allowed_text_ids is None or sent.text_id in allowed_text_ids)
     ]

@@ -59,3 +59,32 @@ def test_run_config_defaults_to_paddle_and_preserves_optional_ocr_profile():
     assert RunConfig().ocr_backend == "paddle"
     assert RunConfig().ocr_profile is None
     assert RunConfig(ocr_profile="glm").ocr_profile == "glm"
+
+
+def test_run_config_crossref_defaults_to_none():
+    assert RunConfig().crossref is None
+
+
+def test_enrichment_enabled_tri_state():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+
+    settings.crossref.enrich = False
+    assert RunConfig().enrichment_enabled(settings) is False
+    assert RunConfig(crossref=True).enrichment_enabled(settings) is True
+    assert RunConfig(crossref=False).enrichment_enabled(settings) is False
+
+    settings.crossref.enrich = True
+    assert RunConfig().enrichment_enabled(settings) is True
+    assert RunConfig(crossref=True).enrichment_enabled(settings) is True
+    assert RunConfig(crossref=False).enrichment_enabled(settings) is False
+
+
+def test_enrichment_enabled_is_forced_off_by_no_llm():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = True
+    assert RunConfig(no_llm=True).enrichment_enabled(settings) is False
+    assert RunConfig(no_llm=True, crossref=True).enrichment_enabled(settings) is False

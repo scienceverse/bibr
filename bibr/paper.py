@@ -8,7 +8,7 @@ compatibility and keeps the ``Paper`` class with its processing methods.
 
 import logging
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
 
@@ -269,18 +269,25 @@ class Paper:
     contents: PaperContents | None = None
     processing_status: ProcessingStatus = field(default_factory=ProcessingStatus)
     paper_id: str | None = None  # user-supplied ID
-    ocr_config: dict | None = None
     # Non-fatal warnings collected during processing (Crossref timeouts,
     # per-page OCR failures, etc.) — surfaced in the JSON export so consumers
     # can detect partial failures programmatically.
     processing_warnings: list[str] = field(default_factory=list)
-    # Per-paper LLM token usage by model, attached by post_parse. Empty when
-    # no LLM ran or usage tracking is disabled.
-    llm_usage: dict[str, dict[str, int]] = field(default_factory=dict)
-    # Per-paper LLM token usage by call-site label (e.g. "extract_authors"),
-    # attached by post_parse alongside llm_usage. Empty when no LLM ran or
-    # usage tracking is disabled.
-    llm_usage_by_label: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Per-paper LLM token usage keyed by the ``(label, provider, model)``
+    # triple (e.g. ``("extract_authors", "google", "gemini-flash-lite")``),
+    # attached by post_parse. One row per engine that ran a label — the source
+    # ``extraction.usage`` aggregates. Empty when no LLM ran or usage tracking
+    # is disabled. (A by-model-only ``llm_usage`` sibling existed until v11;
+    # its sole reader was the removed root ``llm_usage`` export key.)
+    llm_usage_labels: dict[tuple[str, str | None, str | None], dict[str, int]] = field(
+        default_factory=dict
+    )
+    # Opt-in LLM trace rows (LLM_CAPTURE_TRACE): each call's rendered prompt
+    # and raw response, attached by post_parse alongside llm_usage_labels.
+    # Empty when capture is off (default) or no LLM ran — export renders an
+    # empty list to `None` so `extraction.trace` is omitted entirely, per the
+    # absence rule.
+    llm_trace: list[dict] = field(default_factory=list)
     # Deployment-qualification provenance (identity SHAs, protocol hashes,
     # native-validity + fallback outcome, request counts). One object per paper,
     # attached by post_parse. None when no LLM ran or usage tracking is disabled.
@@ -302,6 +309,12 @@ class Paper:
     # extraction receipt.
     expected_identity: "ExpectedIdentity | None" = None
     doi_selection: "DoiSelection | None" = None
+    # Runtime-only: the in-flight enrichment prefetch task started by
+    # post_parse as soon as references were parsed
+    # (``bibr.pipeline.enrich_prefetch.EnrichmentPrefetchHandle``). Consumed by
+    # ``CrossrefEnricher``, cancelled by every path that skips enrichment.
+    # Never serialized — the export layer does not read it.
+    enrichment_prefetch: Any = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         internal_issues = (

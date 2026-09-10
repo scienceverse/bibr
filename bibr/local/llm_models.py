@@ -39,7 +39,8 @@ class LocalLLMModel:
     experimental_platforms: frozenset[str] = frozenset()
 
 
-# Numbers below are pinned from the HF API (Task 1 Step 1, verified 2026-07-03).
+# Numbers below are pinned from the HF API (Task 1 Step 1; re-verified 2026-09-02 —
+# NuExtract 3 bf16 is 4.539B params, every listed artifact is within 0.3 GB of the Hub).
 # bf16 variants: approx_download_gb = param_count * 2 / 2**30 (rounded 1 dp);
 # the nvfp4 variant uses its on-disk safetensors size. min_vram_gb =
 # ceil(approx_download_gb * 1.25).
@@ -138,6 +139,50 @@ REGISTRY: tuple[LocalLLMModel, ...] = (
         experimental_platforms=frozenset(),
     ),
 )
+
+
+def cuda_llm_backend_for(memory_gb: float | None) -> str:
+    """Managed LLM backend for a CUDA card with ``memory_gb`` of VRAM (None = unknown).
+
+    vLLM only when a vLLM variant of the recommended model actually fits;
+    otherwise llama.cpp, whose GGUF build needs 5 GB. The old rule ("vLLM
+    above 8 GB") handed 9-10 GB cards a plan whose only vLLM variant (bf16,
+    11 GB) OOMed after OCR, because the fit filter was dropped silently when
+    nothing fit.
+    """
+    if memory_gb is None:
+        return "vllm"
+    if variants_for(get_model("nuextract3"), "cuda", memory_gb, "vllm"):
+        return "vllm"
+    return "llama-cpp"
+
+
+#: Managed backend → (registry platform, runtime filter) used when
+#: ``LLM_LOCAL_MODEL`` is unset.
+_BACKEND_VARIANT_FILTER: dict[str, tuple[str, str | None]] = {
+    "vllm": ("cuda", "vllm"),
+    "llama-cpp": ("cuda", "llama-cpp"),
+    "vllm-mlx": ("mlx", None),
+    "rapid-mlx": ("mlx", None),
+}
+
+
+def default_local_model(backend: str) -> str:
+    """The recommended model's variant for ``backend`` when ``LLM_LOCAL_MODEL`` is unset.
+
+    Every managed server used to read one config default — the 8-bit MLX
+    build — so a hand-written ``LLM_BACKEND=vllm`` or ``llama-cpp`` downloaded
+    weights the runtime could not load. The answer is the registry's
+    best-quality NuExtract 3 entry that the backend's runtime can serve.
+    """
+    try:
+        platform_key, runtime = _BACKEND_VARIANT_FILTER[backend]
+    except KeyError:
+        raise ValueError(f"no default local model for LLM backend {backend!r}") from None
+    variants = variants_for(get_model("nuextract3"), platform_key, None, runtime)
+    if not variants:  # pragma: no cover - registry invariant
+        raise ValueError(f"the registry has no {platform_key}/{runtime} NuExtract 3 variant")
+    return variants[0].hf_id
 
 
 def registry_server_args(model: str) -> tuple[str, ...]:

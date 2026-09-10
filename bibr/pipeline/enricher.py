@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
@@ -58,12 +59,52 @@ class CrossrefEnricher:
         self._timeout = timeout
         self._settings = settings if settings is not None else snapshot_settings()
 
+    async def _await_prefetch(self, fs: FileState, handle, enrich_started_at: float):
+        """Consume the prefetch started under extraction; ``None`` → inline path.
+
+        Records the prefetch wall time as ``fs.stage_times["enrich_prefetch"]``
+        and logs how much of it was hidden under the extract stage. A failed
+        or cancelled prefetch is a debug-level event, never an enrichment
+        failure: the inline path simply redoes the round-trips.
+        """
+        from bibr.pipeline.enrich_prefetch import PrefetchUnavailable
+
+        try:
+            prefetch = await handle.result()
+        except PrefetchUnavailable as exc:
+            logger.debug(
+                "[%s] enrichment prefetch unavailable (%s); prefetching inline", fs.path.name, exc
+            )
+            prefetch = None
+        seconds = handle.seconds
+        if seconds is not None:
+            fs.stage_times["enrich_prefetch"] = seconds
+            hidden, exposed = handle.overlap(enrich_started_at)
+            logger.debug(
+                "[%s] enrichment prefetch for %d refs took %.2fs: %.2fs overlapped "
+                "extraction, %.2fs on the enrich stage's critical path%s",
+                fs.path.name,
+                handle.n_references,
+                seconds,
+                hidden,
+                exposed,
+                "" if exposed > 0 else " (fully hidden)",
+            )
+        return prefetch
+
     async def enrich(self, fs: FileState) -> EnrichmentOutcome:
         paper = fs.paper
         if paper is None or paper.metadata is None:
             return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
         meta = paper.metadata
+        from bibr.pipeline.enrich_prefetch import take_prefetch_handle
+
+        # Own the prefetch from here on: whether it is consumed below or the
+        # paper turns out to have nothing to enrich, nobody else must await it.
+        prefetch_handle = take_prefetch_handle(paper)
         if not meta.references and not meta.doi:
+            if prefetch_handle is not None:
+                await prefetch_handle.discard()
             return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
         from bibr.enrich.references import (
             EnrichmentReport,
@@ -74,6 +115,7 @@ class CrossrefEnricher:
         timeout = (
             self._timeout if self._timeout is not None else self._settings.crossref.enrich_timeout
         )
+        enrich_started_at = time.monotonic()
 
         async def _run() -> list[EnrichmentReport]:
             reports: list[EnrichmentReport] = []
@@ -86,12 +128,21 @@ class CrossrefEnricher:
                     else EnrichmentReport(attempted=1)
                 )
             if meta.references:
-                report = await enrich_references(meta.references, settings=self._settings)
+                kwargs: dict = {"settings": self._settings}
+                if prefetch_handle is not None:
+                    # Inside the timeout budget: a timed-out wait cancels the
+                    # prefetch along with the rest of the enrichment.
+                    prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
+                    if prefetch is not None:
+                        kwargs["prefetch"] = prefetch
+                report = await enrich_references(meta.references, **kwargs)
                 reports.append(
                     report
                     if isinstance(report, EnrichmentReport)
                     else EnrichmentReport(attempted=len(meta.references))
                 )
+            elif prefetch_handle is not None:
+                await prefetch_handle.discard()
             return reports
 
         try:

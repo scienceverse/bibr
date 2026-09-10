@@ -379,3 +379,32 @@ async def test_no_configured_classifier_keeps_initial_broad_call(monkeypatch):
     assert kwargs["include_classification"] is True
     ext.llm_client.extract_paper_classification.assert_not_awaited()
     assert ext.metadata.paper_type == "commentary"
+
+
+class TestDegradedClassifierIsVisibleInTheExport:
+    async def test_unavailable_classifier_marks_the_export(self, monkeypatch):
+        """Configured but not answering (core install, failed load): the LLM decides
+        and processing_warnings must say so."""
+
+        async def fake_classify(title, abstract):  # noqa: ARG001
+            return None
+
+        monkeypatch.setattr(paper_classifier, "classify_paper_async", fake_classify)
+        ext = _build_extractor(_base_llm_result())
+        await ext.extract_core_metadata()
+        assert any("paper classifier degraded" in w for w in ext.contents.processing_warnings), (
+            ext.contents.processing_warnings
+        )
+
+    async def test_classifier_error_is_recorded_by_type_only(self, monkeypatch):
+        async def fake_classify(title, abstract):  # noqa: ARG001
+            raise RuntimeError("tokenizer exploded on private document text")
+
+        monkeypatch.setattr(paper_classifier, "classify_paper_async", fake_classify)
+        ext = _build_extractor(_base_llm_result())
+        await ext.extract_core_metadata()
+        warning = next(
+            w for w in ext.contents.processing_warnings if "paper classifier degraded" in w
+        )
+        assert "RuntimeError" in warning
+        assert "private document text" not in warning

@@ -226,7 +226,9 @@ async def test_chunk_processor_filters_mixed_batch_progress_for_each_chunk():
     from bibr.local.cli import ChunkProcessor, ResolvedRunConfig
 
     files = [Path("/tmp/a.pdf"), Path("/tmp/b.docx")]
-    config = ResolvedRunConfig(ocr_backend="paddle", memory_mode="balanced", llm_backend="cloud")
+    config = ResolvedRunConfig(
+        ocr_backend="paddle", memory_mode="balanced", llm_backend="cloud", crossref=True
+    )
     observed_stages = []
 
     async def fake_chunk(states, *, progress):

@@ -177,8 +177,6 @@ class HeadingHandlersMixin:
             for section in self.sections:
                 if section.section_id == hint_section_id:
                     section.header_is_synthetic = False
-                    # Earlier prose already belongs to this hinted section.
-                    # A later heading does not relocate that span's boundary.
                     break
             logger.debug(
                 "Heading '%s' matches existing hint section (id=%d), reusing",

@@ -158,6 +158,65 @@ class TestStatisticalExtraction:
         assert grp_ids == [1, 2]
 
 
+class TestThousandsSeparators:
+    """A grouped-digit number is one value, not a component boundary."""
+
+    def test_sample_size_with_thousands_separator_survives(self):
+        sent = _make_sentence(1, "The sample (N = 12,345) was large.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        assert [(eq.lhs, eq.comp, eq.rhs) for eq in eqs] == [("N", "=", "12,345")]
+
+    def test_separator_does_not_split_a_multi_component_group(self):
+        sent = _make_sentence(1, "Results (N = 1,204, M = 3.4) held.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        assert [(eq.lhs, eq.rhs) for eq in eqs] == [("N", "1,204"), ("M", "3.4")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+
+class TestChiSquareDfArgument:
+    """A statistic's own df parenthesis is not an independent stat group.
+
+    Treating it as one emitted a bare ``N = 100``, recorded its span, and the
+    span then vetoed the correct full match in both later passes — so the
+    export carried N and p in different groups and no chi-square at all.
+    """
+
+    def test_unwrapped_chi_square_with_n_in_df(self):
+        sent = _make_sentence(1, "We found \u03c7\u00b2(1, N = 100) = 3.84, p = .05.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        by_lhs = {eq.lhs: eq for eq in eqs}
+        assert set(by_lhs) == {"\u03c7\u00b2", "p"}
+        assert by_lhs["\u03c7\u00b2"].df == "1, N = 100"
+        assert by_lhs["\u03c7\u00b2"].rhs == "3.84"
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_unwrapped_chi_square_with_grouped_n(self):
+        sent = _make_sentence(1, "We found \u03c7\u00b2(2, N = 1,024) = 9.11, p = .01.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        by_lhs = {eq.lhs: eq for eq in eqs}
+        assert by_lhs["\u03c7\u00b2"].rhs == "9.11"
+        assert "N" not in by_lhs
+
+    def test_wrapped_chi_square_is_unchanged(self):
+        sent = _make_sentence(1, "The model (\u03c7\u00b2(1, N = 100) = 3.84, p = .05) fit.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        by_lhs = {eq.lhs: eq for eq in eqs}
+        assert set(by_lhs) == {"\u03c7\u00b2", "p"}
+
+    def test_f_test_df_pair_is_still_a_df(self):
+        sent = _make_sentence(1, "F(2, 45) = 5.6, p = .007.")
+        eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
+
+        by_lhs = {eq.lhs: eq for eq in eqs}
+        assert by_lhs["F"].df == "2, 45"
+        assert by_lhs["F"].rhs == "5.6"
+
+
 class TestBareStatisticalExtraction:
     """Test extraction of stat expressions outside parenthesized groups."""
 

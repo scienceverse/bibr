@@ -1,8 +1,18 @@
 {
   "paper_id": "validation-placeholder-caption",
-  "info": {"title": "STRING"},
-  "author": [{"given": "Ann", "family": "Lee"}],
-  "text": [{"text_id": 1, "section_id": 1, "text": "Body text."}],
+  "author": [
+    {
+      "given": "Ann",
+      "family": "Lee"
+    }
+  ],
+  "text": [
+    {
+      "text_id": 1,
+      "section_id": 1,
+      "text": "Body text."
+    }
+  ],
   "section": [
     {
       "section_id": 1,
@@ -12,7 +22,17 @@
     }
   ],
   "figure": [],
-  "table": [{"table_id": 1, "caption": "", "contents": []}],
+  "table": [
+    {
+      "table_id": 1,
+      "caption": "",
+      "contents": []
+    }
+  ],
   "bib": [],
-  "xref": []
+  "xref": [],
+  "metadata": {
+    "title": "STRING"
+  },
+  "schema_version": "11.0"
 }

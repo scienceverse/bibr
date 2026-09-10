@@ -169,18 +169,90 @@ async def test_dry_run_no_llm_shows_disabled_marker(tmp_path, capsys):
     assert "section classifier" not in out
 
 
+async def test_dry_run_default_reports_enrichment_off_with_opt_in_hint(tmp_path, capsys):
+    """CROSSREF_ENRICH is off by default: the preview says so and how to turn it on."""
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    # Assign first: pydantic records every attribute assignment in
+    # ``model_fields_set``, and the "off by default" wording keys on the
+    # variable never having been set.
+    Settings.crossref.enrich = False
+    Settings.crossref.model_fields_set.discard("enrich")
+
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    assert re.search(
+        r"^  crossref\s+disabled \(off by default; enable with --crossref or CROSSREF_ENRICH=true\)",
+        out,
+        re.MULTILINE,
+    )
+
+
+async def test_dry_run_crossref_flag_enables_enrichment(tmp_path, capsys, monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    monkeypatch.setattr(Settings.crossref, "enrich", False)
+
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--crossref"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    assert re.search(r"^  crossref\s+enabled \(--crossref\)", out, re.MULTILINE)
+
+
+async def test_dry_run_no_crossref_overrides_true_setting(tmp_path, capsys, monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    monkeypatch.setattr(Settings.crossref, "enrich", True)
+
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--no-crossref"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    assert re.search(r"^  crossref\s+disabled \(--no-crossref\)", out, re.MULTILINE)
+
+
+async def test_dry_run_setting_true_reports_setting_as_reason(tmp_path, capsys, monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    monkeypatch.setattr(Settings.crossref, "enrich", True)
+
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    assert re.search(r"^  crossref\s+enabled \(CROSSREF_ENRICH=true\)", out, re.MULTILINE)
+
+
 async def test_dry_run_refs_off_shows_off_strategies(tmp_path, capsys):
     from bibr.local.cli import _build_parser, _run_process
 
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(_pdf_bytes())
 
-    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--refs", "off"])
+    args = _build_parser().parse_args(
+        ["chew", str(pdf), "--dry-run", "--refs", "off", "--crossref"]
+    )
     await _run_process(args)
 
     out = capsys.readouterr().out
     assert re.search(r"^  refs\s+seg \S+ · parse off", out, re.MULTILINE)
-    assert re.search(r"^  crossref\s+disabled", out, re.MULTILINE)
+    # refs=off leaves nothing to enrich, even with --crossref.
+    assert re.search(r"^  crossref\s+disabled \(refs=off\)", out, re.MULTILINE)
 
 
 # --- output destinations (no filesystem writes) -------------------------------

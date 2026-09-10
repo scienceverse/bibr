@@ -22,7 +22,6 @@ from bibr.paper_contents import (
     Provenance,
 )
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
-from bibr.structure.table_merge import merge_table_contents
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -565,6 +564,7 @@ class MediaHandlersMixin:
         canonical_indices: set[int] = set()
         duplicates: list[CaptionAssignment] = []
         self._caption_display_text_by_id = {}
+        self._caption_canonical_by_id = {}
         for members in clusters.values():
             canonical_index = max(
                 members,
@@ -577,6 +577,8 @@ class MediaHandlersMixin:
             )
             canonical = candidates[canonical_index]
             canonical_indices.add(canonical_index)
+            for index in members:
+                self._caption_canonical_by_id[candidates[index].caption_id] = canonical.caption_id
             if len(members) > 1:
                 useful_text = self._caption_useful_text(canonical.text)
                 if useful_text:
@@ -1004,7 +1006,17 @@ class MediaHandlersMixin:
                 None,
             )
             if confirmed_caption_id is not None:
-                caption_by_object[f"table:{table.table_id}"] = candidate_by_id[confirmed_caption_id]
+                # The id was recorded at parse time; de-duplication may since
+                # have elected a different cluster member as canonical, and
+                # only canonical members are in ``candidate_by_id``. Indexing
+                # it directly raised KeyError, which ParseSegmentStage turned
+                # into parse_failed — dropping the whole paper.
+                canonical_id = self._caption_canonical_by_id.get(
+                    confirmed_caption_id, confirmed_caption_id
+                )
+                confirmed_candidate = candidate_by_id.get(canonical_id)
+                if confirmed_candidate is not None:
+                    caption_by_object[f"table:{table.table_id}"] = confirmed_candidate
         for table in self.tables:
             candidate = caption_by_object.get(f"table:{table.table_id}")
             table.caption = candidate.text if candidate else None
@@ -1025,6 +1037,9 @@ class MediaHandlersMixin:
             current_candidate = base_candidate_by_identity.get(id(table))
             previous_label = self._table_label(previous.caption)
             current_label = self._table_label(table.caption)
+            compatible_columns = [str(item) for item in previous.df.columns] == [
+                str(item) for item in table.df.columns
+            ]
             adjacent_page = (
                 previous.parts
                 and table.parts
@@ -1068,13 +1083,17 @@ class MediaHandlersMixin:
             )
             if not (
                 adjacent_page
+                and compatible_columns
                 and no_heading_barrier
                 and (same_explicit_label or continuation_of_previous or implicit_repeated_header)
-                and merge_table_contents(previous, table)
             ):
                 grouped.append(table)
                 group_last_source[id(table)] = current_source
                 continue
+            previous.parts.extend(table.parts)
+            previous.provenance.extend(table.provenance)
+            previous.df = pd.concat([previous.df, table.df], ignore_index=True)
+            previous.tbl_html = previous.df.to_html(index=False)
             self._table_source_indices[id(previous)] = min(
                 self._table_source_indices[id(previous)], self._table_source_indices[id(table)]
             )
@@ -1434,10 +1453,8 @@ class MediaHandlersMixin:
             if dfs:
                 df = dfs[0].fillna("")
                 # When OCR HTML lacks <th> tags, pandas assigns integer column
-                # names (0, 1, 2, …). Promote the first data row to headers only
-                # when another row remains. A one-row continuation is data and
-                # must survive until cross-page ownership can be established.
-                if len(df) > 1 and all(isinstance(c, (int, float)) for c in df.columns):
+                # names (0, 1, 2, …).  Promote the first data row to headers.
+                if len(df) > 0 and all(isinstance(c, (int, float)) for c in df.columns):
                     df.columns = [str(v) for v in df.iloc[0]]
                     df = df.iloc[1:].reset_index(drop=True)
                 return df

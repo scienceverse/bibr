@@ -29,11 +29,25 @@ def _payload(*, promotable: bool = True) -> dict:
             }
         ]
     return {
-        "info": {"schema_version": "10.6", "title": "Core"},
+        "schema_version": "11.0",
+        "metadata": {"title": "Core"},
         "bib": [],
         "bib_match": [],
-        "info_match": [],
-        "enrichment": None,
+        "metadata_match": [],
+        # A pipeline-produced core always carries ``extraction``; enrichment
+        # replay now rejects a core without it rather than dropping the
+        # completeness receipt silently.
+        "extraction": {
+            "bibr_version": "0.0.0-test",
+            "completed_at": "2026-07-24T10:00:00Z",
+            "settings": {
+                "ref_seg": "geom",
+                "ref_parse": "ner",
+                "crossref_enrich": True,
+                "consolidate": "off",
+            },
+            "warnings": [],
+        },
         "validation": {
             "errors": len(issues),
             "warnings": 0,
@@ -45,11 +59,14 @@ def _payload(*, promotable: bool = True) -> dict:
 
 
 def _ctx(fs: FileState, *, config: RunConfig | None = None) -> PipelineContext:
+    # Enrichment is opt-in (CROSSREF_ENRICH off by default); the checkpoint
+    # tests below exercise the "enrichment requested" gate, so force it on
+    # per run unless a test supplies its own config.
     return PipelineContext(
         file_states=[fs],
         progress=NullProgress(),
         resources=MagicMock(),
-        config=config or RunConfig(),
+        config=config or RunConfig(crossref=True),
     )
 
 
@@ -103,7 +120,7 @@ async def test_core_checkpoint_writes_unenriched_payload_before_enrichment(tmp_p
     assert fs.core_sha256
     written = json.loads((tmp_path / "paper.json").read_text(encoding="utf-8"))
     assert written["bib_match"] == []
-    assert written["info_match"] == []
+    assert written["metadata_match"] == []
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert [event["state"] for event in receipt["events"]] == [
         RunState.STARTED,
@@ -143,7 +160,7 @@ async def test_checkpoint_interruption_keeps_quarantined_core_readable_and_retry
     from bibr.export.json_export import validate_export
 
     assert validate_export(core) == []
-    assert core["info"]["schema_version"] == "10.7"
+    assert core["schema_version"] == "11.0"
     assert core["validation"]["promotable"] is False
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert receipt["events"][-1]["state"] == "cutoff_interrupted"
@@ -195,7 +212,7 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
     enriched.update(
         {
             "bib_match": [{"bib_id": 1, "service": "crossref", "doi": "10.1/ref"}],
-            "info_match": [{"service": "crossref", "doi": "10.1/self"}],
+            "metadata_match": [{"service": "crossref", "doi": "10.1/self"}],
             "enrichment": {"complete": True, "refs_enriched": 1, "refs_total": 1},
         }
     )
@@ -206,7 +223,7 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
     fs.paper.validation_issues = []
     fs.paper.export_to_json.side_effect = [core, enriched]
     fs.artifact_sink = LocalArtifactSink(tmp_path / "paper.json")
-    ctx = _ctx(fs, config=RunConfig(consolidate="off"))
+    ctx = _ctx(fs, config=RunConfig(crossref=True, consolidate="off"))
 
     await CoreCheckpointStage(enrichment_requested=True).run(ctx)
     fs.enrichment_state = RunState.ENRICHMENT_COMPLETE
@@ -214,7 +231,7 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
 
     assert fs.error is None
     assert fs.result_json["bib_match"] == enriched["bib_match"]
-    assert fs.result_json["info_match"] == enriched["info_match"]
+    assert fs.result_json["metadata_match"] == enriched["metadata_match"]
     assert fs.result_json["validation"]["promotable"] is True
     assert not any(
         issue["code"] == "VAL_ENRICHMENT_PENDING"
@@ -230,7 +247,7 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
         "settings_digest",
         "completeness",
         "bib_match",
-        "info_match",
+        "metadata_match",
     }
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert receipt["events"][-1]["state"] == "enrichment_complete"
@@ -265,7 +282,7 @@ async def test_sidecar_write_failure_keeps_checkpoint_core_valid(tmp_path, monke
     from bibr.pipeline.stages.export import ExportStage
 
     core = _payload(promotable=False)
-    enriched = {**core, "info_match": [{"service": "crossref", "doi": "10.1/self"}]}
+    enriched = {**core, "metadata_match": [{"service": "crossref", "doi": "10.1/self"}]}
     fs = FileState(path=tmp_path / "paper.pdf")
     fs.paper = MagicMock()
     fs.paper.validation_issues = [
@@ -301,7 +318,7 @@ async def test_terminal_receipt_is_recorded_after_public_materialization(tmp_pat
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["info_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -315,7 +332,7 @@ async def test_terminal_receipt_is_recorded_after_public_materialization(tmp_pat
     def assert_materialized_before_terminal(state_fs, state, **kwargs):
         if state == RunState.ENRICHMENT_COMPLETE:
             durable = json.loads(sink.destination_path(state_fs).read_text())
-            assert durable["info_match"] == enriched["info_match"]
+            assert durable["metadata_match"] == enriched["metadata_match"]
             assert durable == state_fs.result_json
         return real_record(state_fs, state, **kwargs)
 
@@ -336,7 +353,7 @@ async def test_final_materialization_failure_preserves_checkpoint_and_retryable_
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["info_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -400,7 +417,7 @@ async def test_corrupt_durable_core_never_becomes_publishable_result(tmp_path):
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["info_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -410,7 +427,7 @@ async def test_corrupt_durable_core_never_becomes_publishable_result(tmp_path):
     verified_checkpoint = copy.deepcopy(fs.result_json)
     durable_public = sink.destination_path(fs).read_bytes()
     corrupted = copy.deepcopy(verified_checkpoint)
-    corrupted["info"]["title"] = "CORRUPTED"
+    corrupted["metadata"]["title"] = "CORRUPTED"
     atomic_write_json(sink.core_path(fs), corrupted)
     fs.enrichment_state = RunState.ENRICHMENT_COMPLETE
 
@@ -418,7 +435,7 @@ async def test_corrupt_durable_core_never_becomes_publishable_result(tmp_path):
 
     assert fs.result_json == verified_checkpoint
     assert sink.destination_path(fs).read_bytes() == durable_public
-    assert fs.result_json["info"]["title"] != "CORRUPTED"
+    assert fs.result_json["metadata"]["title"] != "CORRUPTED"
 
 
 async def test_export_replays_sidecar_read_back_from_disk(tmp_path, monkeypatch):
@@ -429,7 +446,7 @@ async def test_export_replays_sidecar_read_back_from_disk(tmp_path, monkeypatch)
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["info_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -453,7 +470,7 @@ async def test_export_replays_sidecar_read_back_from_disk(tmp_path, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    ("bib_rows", "info_rows"),
+    ("bib_rows", "metadata_rows"),
     [
         (({"bib_id": 1, "service": "crossref", "score": "bad"},), ()),
         (({"bib_id": 1, "service": "crossref", "authors": "bad"},), ()),
@@ -461,10 +478,15 @@ async def test_export_replays_sidecar_read_back_from_disk(tmp_path, monkeypatch)
     ],
 )
 async def test_malformed_typed_durable_sidecar_fails_closed_before_publication(
-    tmp_path, monkeypatch, bib_rows, info_rows
+    tmp_path, monkeypatch, bib_rows, metadata_rows
 ):
     from bibr.local.artifacts import LocalArtifactSink
-    from bibr.pipeline.artifacts import EnrichmentSidecar, RunState, enrichment_settings_digest
+    from bibr.pipeline.artifacts import (
+        ENRICHMENT_SIDECAR_SCHEMA_VERSION,
+        EnrichmentSidecar,
+        RunState,
+        enrichment_settings_digest,
+    )
     from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
     from bibr.pipeline.stages.export import ExportStage
 
@@ -480,13 +502,15 @@ async def test_malformed_typed_durable_sidecar_fails_closed_before_publication(
     checkpoint = copy.deepcopy(fs.result_json)
     public_before = sink.destination_path(fs).read_bytes()
     fs.enrichment_state = RunState.ENRICHMENT_COMPLETE
+    # The current sidecar version, deliberately: this test must reach the typed
+    # row validation, not short-circuit on the sidecar version check.
     malicious = EnrichmentSidecar(
-        schema_version="1",
+        schema_version=ENRICHMENT_SIDECAR_SCHEMA_VERSION,
         core_sha256=fs.core_sha256,
         settings_digest=enrichment_settings_digest(ctx),
         completeness="complete",
         bib_match=bib_rows,
-        info_match=info_rows,
+        metadata_match=metadata_rows,
     )
     monkeypatch.setattr(sink, "read_enrichment", MagicMock(return_value=malicious))
 
@@ -504,8 +528,10 @@ async def test_malformed_typed_durable_sidecar_fails_closed_before_publication(
 @pytest.mark.parametrize(
     ("enrichment_requested", "config"),
     [
-        (False, RunConfig()),
-        (True, RunConfig(ref_parse_strategy="off")),
+        (False, RunConfig(crossref=True)),
+        (True, RunConfig(crossref=True, ref_parse_strategy="off")),
+        (True, RunConfig(crossref=False)),
+        (True, RunConfig()),  # crossref=None follows CROSSREF_ENRICH (off)
     ],
 )
 async def test_authoritative_no_enrichment_core_skips_second_serialization(
@@ -560,7 +586,7 @@ async def test_sink_backed_consolidation_is_deterministic_by_bib_id_and_service(
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     fs.artifact_sink = LocalArtifactSink(tmp_path / "paper.json")
-    ctx = _ctx(fs, config=RunConfig(consolidate=mode))
+    ctx = _ctx(fs, config=RunConfig(crossref=True, consolidate=mode))
     await CoreCheckpointStage(enrichment_requested=True).run(ctx)
     fs.enrichment_state = RunState.ENRICHMENT_COMPLETE
 
@@ -620,8 +646,8 @@ async def test_immutable_core_identity_survives_public_checkpoint_failure(tmp_pa
 @pytest.mark.parametrize(
     ("enrichment_requested", "config"),
     [
-        (False, RunConfig()),
-        (True, RunConfig(ref_parse_strategy="off")),
+        (False, RunConfig(crossref=True)),
+        (True, RunConfig(crossref=True, ref_parse_strategy="off")),
     ],
 )
 async def test_no_enrichment_or_refs_off_checkpoint_is_not_pending(
@@ -645,3 +671,43 @@ async def test_no_enrichment_or_refs_off_checkpoint_is_not_pending(
     )
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text())
     assert receipt["retryable"] is False
+
+
+@pytest.mark.parametrize(
+    ("setting", "config", "pending"),
+    [
+        (False, RunConfig(), False),
+        (True, RunConfig(), True),
+        (False, RunConfig(crossref=True), True),
+        (True, RunConfig(crossref=False), False),
+    ],
+)
+async def test_pending_gate_follows_effective_enrichment_switch(tmp_path, setting, config, pending):
+    """The checkpoint's pending gate resolves the tri-state ``crossref`` per run."""
+    from bibr.config import GlobalSettings
+    from bibr.local.artifacts import LocalArtifactSink
+    from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = setting
+    fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
+    fs.paper.export_to_json.return_value = _payload(promotable=True)
+    fs.artifact_sink = LocalArtifactSink(tmp_path / "paper.json")
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=config,
+        settings=settings,
+    )
+
+    await CoreCheckpointStage(enrichment_requested=True).run(ctx)
+
+    core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
+    has_gate = any(
+        issue["code"] == "VAL_ENRICHMENT_PENDING" for issue in core["validation"]["issues"]
+    )
+    assert has_gate is pending
+    receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
+    detail = receipt["events"][-1].get("detail")
+    assert (detail == "enrichment_not_requested") is (not pending)

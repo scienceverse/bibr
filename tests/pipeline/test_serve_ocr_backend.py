@@ -433,6 +433,69 @@ class TestWaitForServer:
         assert attempts["n"] >= 2
 
     @pytest.mark.asyncio
+    async def test_readiness_failure_keeps_the_endpoint_and_model_list_out_of_the_error(
+        self, caplog
+    ):
+        """The error text becomes a 502 body; the internal URL and what the server
+        serves belong in the operator log only."""
+        from bibr.exceptions import UpstreamServiceError
+
+        async def handler(request):
+            return httpx.Response(200, json={"data": [{"id": "secret-internal-model"}]})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://ocr.internal.example"
+        )
+        backend = BibrServeOcrBackend(
+            base_url="http://ocr.internal.example:8080",
+            http_client=client,
+            sem_global=asyncio.Semaphore(1),
+            sem_per_file=asyncio.Semaphore(1),
+            breaker=AsyncCircuitBreaker(failure_threshold=3, reset_timeout=60, name="t"),
+            ready_poll_interval=0.01,
+            ready_timeout=0.05,
+        )
+        with caplog.at_level("ERROR", logger="bibr.serve.ocr_backend"):
+            with pytest.raises(UpstreamServiceError) as exc_info:
+                await backend.wait_for_server()
+        message = str(exc_info.value)
+        assert "ocr.internal.example" not in message
+        assert "secret-internal-model" not in message
+        assert "glm-ocr" in message  # the expected alias is deployment-visible config
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "ocr.internal.example:8080" in logged
+        assert "secret-internal-model" in logged
+
+        # The cooldown path is client-facing too.
+        with pytest.raises(UpstreamServiceError) as cooled:
+            await backend.wait_for_server()
+        assert "ocr.internal.example" not in str(cooled.value)
+        assert "unavailable" in str(cooled.value)
+
+    @pytest.mark.asyncio
+    async def test_unreachable_server_error_names_no_endpoint(self):
+        from bibr.exceptions import UpstreamServiceError
+
+        async def handler(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://ocr.internal.example"
+        )
+        backend = BibrServeOcrBackend(
+            base_url="http://ocr.internal.example:8080",
+            http_client=client,
+            sem_global=asyncio.Semaphore(1),
+            sem_per_file=asyncio.Semaphore(1),
+            breaker=AsyncCircuitBreaker(failure_threshold=3, reset_timeout=60, name="t"),
+            ready_poll_interval=0.01,
+            ready_timeout=0.05,
+        )
+        with pytest.raises(UpstreamServiceError, match="unreachable") as exc_info:
+            await backend.wait_for_server()
+        assert "ocr.internal.example" not in str(exc_info.value)
+
+    @pytest.mark.asyncio
     async def test_keeps_polling_refusals_until_ready_within_deadline(self):
         attempts = {"n": 0}
 

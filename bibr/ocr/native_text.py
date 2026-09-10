@@ -45,18 +45,14 @@ _pdfium_lock = pdfium_lock
 
 
 def _page_crop_box(page) -> tuple[float, float, float, float]:
-    """Return the effective rendered page box in PDF points.
+    """Return the page CropBox ``(x0, y0, x1, y1)`` in PDF points.
 
     This is the region pypdfium2 renders to the image PP-DocLayoutV3 indexes
     into. Falls back to ``(0, 0, width, height)`` when the CropBox is missing
     or degenerate so callers always get a usable box.
     """
     try:
-        # get_cropbox() does not inherit parent-page-tree boxes in PDFium and
-        # can report US Letter for an A4 page. get_bbox() resolves inheritance
-        # and intersects CropBox with MediaBox, matching the rendered image.
-        getter = getattr(page, "get_bbox", None) or page.get_cropbox
-        x0, y0, x1, y1 = getter()
+        x0, y0, x1, y1 = page.get_cropbox()
         if x1 - x0 > 0 and y1 - y0 > 0:
             return (float(x0), float(y0), float(x1), float(y1))
     except Exception:  # noqa: BLE001, S110 - fall back to mediabox-origin page size
@@ -65,9 +61,42 @@ def _page_crop_box(page) -> tuple[float, float, float, float]:
     return (0.0, 0.0, float(w), float(h))
 
 
+def _page_rotation(page) -> int:
+    """Page ``/Rotate`` in degrees clockwise, normalised to 0/90/180/270."""
+    try:
+        return int(page.get_rotation()) % 360
+    except Exception:  # noqa: BLE001, S110 - treat an unreadable rotation as none
+        return 0
+
+
+def _unrotate_normalized_bbox(
+    bbox_normalized: list[float], rotation: int
+) -> tuple[float, float, float, float]:
+    """Map a rendered-image bbox back into the unrotated CropBox frame.
+
+    ``page.render()`` applies the page's ``/Rotate``, so on a 90°/270° page the
+    image PP-DocLayoutV3 indexes is transposed while the CropBox and the char
+    boxes stay in unrotated user space. Without this the bbox emitted for a
+    text region queried no characters at all.
+    """
+    x1, y1, x2, y2 = (float(v) for v in bbox_normalized[:4])
+    if rotation == 90:
+        corners = ((y1, 1000.0 - x1), (y2, 1000.0 - x2))
+    elif rotation == 180:
+        corners = ((1000.0 - x1, 1000.0 - y1), (1000.0 - x2, 1000.0 - y2))
+    elif rotation == 270:
+        corners = ((1000.0 - y1, x1), (1000.0 - y2, x2))
+    else:
+        return (x1, y1, x2, y2)
+    us = [corner[0] for corner in corners]
+    vs = [corner[1] for corner in corners]
+    return (min(us), min(vs), max(us), max(vs))
+
+
 def _normalized_bbox_to_pdf_points(
     bbox_normalized: list[float],
     crop_box: tuple[float, float, float, float],
+    rotation: int = 0,
 ) -> tuple[float, float, float, float]:
     """Convert image-space (0..1000) bbox to PDF-point coords.
 
@@ -75,11 +104,14 @@ def _normalized_bbox_to_pdf_points(
     :func:`_page_crop_box`). The crop origin (``x0``/``y0``) is added back so
     the result lands in the page's native text-coordinate space; it is zero
     for the common case where MediaBox == CropBox == ``[0, 0, w, h]``.
+
+    ``rotation`` is the page's ``/Rotate`` in degrees clockwise, which
+    ``page.render()`` applies and the text layer does not.
     """
     cx0, cy0, cx1, cy1 = crop_box
     crop_w = cx1 - cx0
     crop_h = cy1 - cy0
-    bx1, by1, bx2, by2 = bbox_normalized
+    bx1, by1, bx2, by2 = _unrotate_normalized_bbox(bbox_normalized, rotation)
     left = cx0 + bx1 / 1000.0 * crop_w
     right = cx0 + bx2 / 1000.0 * crop_w
     top_pts = cy1 - (by1 / 1000.0 * crop_h)
@@ -88,11 +120,66 @@ def _normalized_bbox_to_pdf_points(
 
 
 def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
-    """Compatibility center view; overlapping layout boxes can still claim a glyph twice."""
-    from bibr.ocr.native_source import center_records, extract_characters
+    """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
-    chars, _ = extract_characters(textpage, include_fonts=False)
-    return center_records(chars)
+    ``get_text_bounded`` assigns a glyph to a region whenever its char box merely
+    INTERSECTS the query rect, so a region bbox edge that slices through an
+    adjacent line bleeds in that neighbor's partial glyphs as garbage. Using the
+    glyph's CENTER instead assigns each char to exactly one region.
+
+    Computing this once per page (rather than once per region) avoids
+    O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
+    which queries one region at a time over the same page.
+    """
+    import pypdfium2 as pdfium
+
+    def _charbox(index: int) -> tuple[float, float, float, float] | None:
+        try:
+            return textpage.get_charbox(index)
+        except Exception:  # noqa: BLE001 - pdfium per-char failures are noisy and benign here
+            return None
+
+    n_chars = textpage.count_chars()
+    records: list[tuple[str, float, float, bool]] = []
+    i = 0
+    while i < n_chars:
+        code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
+        consumed = 1
+        boxes = [_charbox(i)]
+
+        # PDFium exposes non-BMP text as UTF-16 code units. Joining each unit
+        # independently creates lone-surrogate Python strings that cannot be
+        # UTF-8 encoded and crash Hugging Face tokenizers downstream.
+        if 0xD800 <= code_unit <= 0xDBFF and i + 1 < n_chars:
+            low = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i + 1)
+            if 0xDC00 <= low <= 0xDFFF:
+                scalar = 0x10000 + ((code_unit - 0xD800) << 10) + (low - 0xDC00)
+                ch = chr(scalar)
+                consumed = 2
+                boxes.append(_charbox(i + 1))
+            else:
+                ch = "\ufffd"
+        elif 0xD800 <= code_unit <= 0xDFFF or code_unit > 0x10FFFF:
+            ch = "\ufffd"
+        else:
+            ch = chr(code_unit)
+
+        if ch in ("\n", "\r"):
+            records.append((ch, 0.0, 0.0, True))
+            i += consumed
+            continue
+
+        valid_boxes = [box for box in boxes if box is not None]
+        if not valid_boxes:
+            i += consumed
+            continue
+        cl = min(box[0] for box in valid_boxes)
+        cb = min(box[1] for box in valid_boxes)
+        cr = max(box[2] for box in valid_boxes)
+        ct = max(box[3] for box in valid_boxes)
+        records.append((ch, (cl + cr) / 2.0, (cb + ct) / 2.0, False))
+        i += consumed
+    return records
 
 
 def _reconstruct_text_from_records(
@@ -130,6 +217,7 @@ def _text_from_bbox_on_textpage(
     crop_box: tuple[float, float, float, float],
     bbox_normalized: list[float],
     *,
+    rotation: int = 0,
     records: list[tuple[str, float, float, bool]] | None = None,
 ) -> str:
     """Extract text inside *bbox_normalized* from an already-open textpage.
@@ -157,7 +245,7 @@ def _text_from_bbox_on_textpage(
     str
         Extracted text, or ``""`` if no characters fall inside the bbox.
     """
-    left, bottom, right, top = _normalized_bbox_to_pdf_points(bbox_normalized, crop_box)
+    left, bottom, right, top = _normalized_bbox_to_pdf_points(bbox_normalized, crop_box, rotation)
     if records is None:
         records = _build_page_char_records(textpage)
     return _reconstruct_text_from_records(records, left, bottom, right, top)
@@ -203,11 +291,14 @@ def get_native_text_in_bbox(
             page = doc[page_idx]
             try:
                 crop_box = _page_crop_box(page)
+                rotation = _page_rotation(page)
                 textpage = page.get_textpage()
                 try:
                     if textpage.count_chars() == 0:
                         return ""
-                    return _text_from_bbox_on_textpage(textpage, crop_box, bbox_normalized)
+                    return _text_from_bbox_on_textpage(
+                        textpage, crop_box, bbox_normalized, rotation=rotation
+                    )
                 finally:
                     textpage.close()
             finally:
@@ -379,7 +470,11 @@ def _attach_page_dimensions(page, regions: list[dict]) -> None:
         region["_page_h"] = round(float(page_h), 2)
 
 
-def _attach_bbox_pdf_pts(crop_box: tuple[float, float, float, float], regions: list[dict]) -> None:
+def _attach_bbox_pdf_pts(
+    crop_box: tuple[float, float, float, float],
+    regions: list[dict],
+    rotation: int = 0,
+) -> None:
     """Attach ``_bbox_pdf_pts`` (PDF points) to every region.
 
     Converts each region's ``bbox_2d`` from PP-DocLayoutV3 image space
@@ -403,8 +498,18 @@ def _attach_bbox_pdf_pts(crop_box: tuple[float, float, float, float], regions: l
         if not bbox:
             region["_bbox_pdf_pts"] = None
             continue
-        pts = _normalized_bbox_to_pdf_points(bbox, crop_box)
-        region["_bbox_pdf_pts"] = [round(v, 2) for v in pts]
+        left, bottom, right, top = _normalized_bbox_to_pdf_points(bbox, crop_box, rotation)
+        # Crop-relative, matching the ``_page_w`` / ``_page_h`` frame this
+        # docstring promises: ``page.get_size()`` returns the CropBox extent,
+        # so leaving the crop origin in broke the ``0 <= x1 <= x2 <= page_w``
+        # invariant on any page whose CropBox does not start at (0, 0).
+        cx0, cy0, _cx1, _cy1 = crop_box
+        region["_bbox_pdf_pts"] = [
+            round(left - cx0, 2),
+            round(bottom - cy0, 2),
+            round(right - cx0, 2),
+            round(top - cy0, 2),
+        ]
 
 
 def _sample_page_font_metadata(
@@ -412,6 +517,7 @@ def _sample_page_font_metadata(
     crop_box: tuple[float, float, float, float],
     n_chars: int,
     regions: list[dict],
+    rotation: int = 0,
 ) -> None:
     """Attach per-region font metadata sampled from an already-open textpage.
 
@@ -423,7 +529,7 @@ def _sample_page_font_metadata(
         bbox = region.get("bbox_2d")
         if not bbox:
             continue
-        left, bottom, right, top = _normalized_bbox_to_pdf_points(bbox, crop_box)
+        left, bottom, right, top = _normalized_bbox_to_pdf_points(bbox, crop_box, rotation)
         med_h, weight, is_italic = _sample_font_metadata_in_bbox(
             textpage, n_chars, left, bottom, right, top
         )
@@ -445,7 +551,7 @@ def _fill_page_regions_from_textpage(
     eligible_labels: frozenset[str],
     min_printable_ratio: float,
     page_idx: int,
-    records: list | None = None,
+    rotation: int = 0,
 ) -> None:
     """Pre-fill eligible regions' ``content`` from an already-open textpage.
 
@@ -456,8 +562,7 @@ def _fill_page_regions_from_textpage(
     computed ONCE and reused across every region on the page, avoiding
     O(regions × chars) pdfium calls.
     """
-    if records is None:
-        records = _build_page_char_records(textpage)
+    records = _build_page_char_records(textpage)
     for region in regions:
         label = region.get("label")
         if label not in eligible_labels:
@@ -465,7 +570,9 @@ def _fill_page_regions_from_textpage(
         bbox = region.get("bbox_2d")
         if not bbox:
             continue
-        native_text = _text_from_bbox_on_textpage(textpage, crop_box, bbox, records=records)
+        native_text = _text_from_bbox_on_textpage(
+            textpage, crop_box, bbox, rotation=rotation, records=records
+        )
         if not native_text:
             continue
         # Some born-digital PDFs expose a line-end hyphen as STX (U+0002),
@@ -542,13 +649,14 @@ def fill_font_metadata(
                     # attach it to every region before any char-sampling gate.
                     _attach_page_dimensions(page, regions)
                     crop_box = _page_crop_box(page)
-                    _attach_bbox_pdf_pts(crop_box, regions)
+                    rotation = _page_rotation(page)
+                    _attach_bbox_pdf_pts(crop_box, regions, rotation)
                     textpage = page.get_textpage()
                     try:
                         n_chars = textpage.count_chars()
                         if n_chars == 0:
                             continue
-                        _sample_page_font_metadata(textpage, crop_box, n_chars, regions)
+                        _sample_page_font_metadata(textpage, crop_box, n_chars, regions, rotation)
                     finally:
                         textpage.close()
                 finally:
@@ -717,7 +825,8 @@ def fill_regions_from_native_text(
                 page = doc[page_idx]
                 try:
                     crop_box = _page_crop_box(page)
-                    _attach_bbox_pdf_pts(crop_box, regions)
+                    rotation = _page_rotation(page)
+                    _attach_bbox_pdf_pts(crop_box, regions, rotation)
                     textpage = page.get_textpage()
                     try:
                         if textpage.count_chars() == 0:
@@ -730,6 +839,7 @@ def fill_regions_from_native_text(
                             eligible_labels=eligible_labels,
                             min_printable_ratio=min_printable_ratio,
                             page_idx=page_idx,
+                            rotation=rotation,
                         )
                     finally:
                         textpage.close()
@@ -777,11 +887,12 @@ def fill_native_text_and_fonts(
                 page = doc[page_idx]
                 try:
                     crop_box = _page_crop_box(page)
+                    rotation = _page_rotation(page)
                     # Page geometry (font pass) and the PDF-point bbox attach to
                     # every region with or without a text layer — set them before
                     # the char-count gate.
                     _attach_page_dimensions(page, regions)
-                    _attach_bbox_pdf_pts(crop_box, regions)
+                    _attach_bbox_pdf_pts(crop_box, regions, rotation)
                     textpage = page.get_textpage()
                     try:
                         n_chars = textpage.count_chars()
@@ -796,11 +907,14 @@ def fill_native_text_and_fonts(
                             eligible_labels=eligible_labels,
                             min_printable_ratio=min_printable_ratio,
                             page_idx=page_idx,
+                            rotation=rotation,
                         )
                         # Pass 2: font metadata — best-effort. A failure here
                         # must NOT discard the native-text fill above.
                         try:
-                            _sample_page_font_metadata(textpage, crop_box, n_chars, regions)
+                            _sample_page_font_metadata(
+                                textpage, crop_box, n_chars, regions, rotation
+                            )
                         except Exception:  # noqa: BLE001
                             logger.warning(
                                 "Font metadata sampling failed on page %d; "

@@ -1,8 +1,8 @@
 """Per-paper LLM token-usage attribution and export.
 
 Covers: contextvar-scoped per-file buckets in LLMClient (race-free across
-concurrent asyncio tasks), post_parse attaching ``paper.llm_usage``, and the
-top-level ``llm_usage`` key in the JSON export.
+concurrent asyncio tasks), post_parse attaching ``paper.llm_usage_labels``,
+and the ``extraction.usage`` block in the JSON export.
 """
 
 import asyncio
@@ -13,6 +13,7 @@ from unittest import mock
 import pytest
 
 from bibr.config import Settings
+from tests.export.conftest import extraction_block as _extraction_block
 
 
 @pytest.fixture()
@@ -192,9 +193,17 @@ class TestPostParseLlmUsage:
         monkeypatch.setattr(Settings, "EQUATION_EXTRACTION", False)
 
         file_usage = {"model-x": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}}
+        file_usage_labels = {
+            ("extract_title_keywords", "google", "model-x"): {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+            }
+        }
         llm_client = MagicMock()
         llm_client._track_usage = True
         llm_client.usage_pop_file = MagicMock(return_value=file_usage)
+        llm_client.usage_labels_pop_file = MagicMock(return_value=file_usage_labels)
 
         extractor = MagicMock()
         extractor.extract_all_metadata = AsyncMock(return_value=PaperMetadata(doi="", title="T"))
@@ -219,7 +228,9 @@ class TestPostParseLlmUsage:
         llm_client.usage_pop_file.assert_called_once()
         (key,) = llm_client.usage_pop_file.call_args.args
         assert key.startswith("deadbeef#")
-        assert paper.llm_usage == file_usage
+        # ``llm_usage_labels`` is the only usage surface Paper still carries;
+        # the by-model-only ``llm_usage`` field went with the root export key.
+        assert paper.llm_usage_labels == file_usage_labels
 
     async def test_post_parse_no_llm_has_empty_usage(self):
         from bibr.pipeline.stages.post_parse import post_parse
@@ -231,7 +242,7 @@ class TestPostParseLlmUsage:
             no_llm=True,
         )
 
-        assert paper.llm_usage == {}
+        assert paper.llm_usage_labels == {}
 
 
 # ── JSON export ────────────────────────────────────────────────────────
@@ -259,28 +270,40 @@ def _minimal_paper(**overrides):
 
 
 class TestExportLlmUsage:
-    def test_export_emits_llm_usage(self):
-        from bibr.export.json_export import export_paper_to_json, validate_export
+    """v11 replaced the per-model root ``llm_usage`` with ``extraction.usage``,
+    whose ``breakdown`` rows carry the (label, provider, model) dimensions."""
 
-        usage = {
-            "gemini-x": {
-                "input_tokens": 100,
-                "output_tokens": 20,
-                "total_tokens": 120,
-                "cached_input_tokens": 0,
+    def test_export_emits_usage_under_extraction(self):
+        from bibr.export.json_export import export_paper_to_json, validate_export
+        from bibr.export.usage import build_usage_export
+
+        paper = _minimal_paper(
+            llm_usage_labels={
+                ("extract_authors", "google", "gemini-x"): {
+                    "calls": 2,
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 20,
+                    "total_tokens": 120,
+                }
             }
-        }
-        paper = _minimal_paper(llm_usage=usage)
+        )
+        paper.extraction = _extraction_block(
+            usage=build_usage_export(paper.llm_usage_labels),
+        )
         result = export_paper_to_json(paper)
 
-        assert result["llm_usage"] == usage
+        assert result["extraction"]["usage"]["totals"]["total_tokens"] == 120
+        assert result["extraction"]["usage"]["breakdown"][0]["model"] == "gemini-x"
+        assert "llm_usage" not in result
         assert validate_export(result) == []
 
-    def test_export_emits_null_when_empty(self):
+    def test_export_omits_usage_when_empty(self):
         from bibr.export.json_export import export_paper_to_json, validate_export
 
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         result = export_paper_to_json(paper)
 
-        assert result["llm_usage"] is None
+        assert "usage" not in result["extraction"]
         assert validate_export(result) == []

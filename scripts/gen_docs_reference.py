@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import mkdocs_gen_files  # noqa: E402
 from docs_ref_core import render_cli_md, render_schema_md, render_settings_md  # noqa: E402
 
-from bibr.export.json_export import PaperExport  # noqa: E402
+from bibr.export.schema_artifact import build_export_schema  # noqa: E402
 
 for path, render in [
     ("reference/settings.md", render_settings_md),
@@ -25,7 +25,7 @@ for path, render in [
     mkdocs_gen_files.set_edit_path(path, "../scripts/gen_docs_reference.py")
 
 with mkdocs_gen_files.open("reference/paper.schema.json", "w") as f:
-    json.dump(PaperExport.model_json_schema(by_alias=True, mode="serialization"), f, indent=2)
+    json.dump(build_export_schema(), f, indent=2)
     f.write("\n")
 
 # Keep repository and site policy pages identical, adjusting only Markdown

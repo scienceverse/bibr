@@ -24,27 +24,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-async def _settle_on_cancel(task):
-    """Do not release images while a renderer/model thread still owns them."""
-    task = asyncio.ensure_future(task)
-    cancelled = False
-    while True:
-        try:
-            result = await asyncio.shield(task)
-            break
-        except asyncio.CancelledError:
-            if task.cancelled():
-                raise
-            cancelled = True
-        except Exception:
-            if cancelled:
-                raise asyncio.CancelledError from None
-            raise
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
-
-
 class LayoutStage:
     name = "layout"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -99,27 +78,16 @@ class LayoutStage:
             pdf_bytes_local: bytes = fs.pdf_bytes
 
             def _render_all() -> list[tuple[int, Image.Image]]:
-                pages = []
-                iterator = _iter_pdf_pages(
-                    pdf_bytes_local,
-                    settings.layout.dpi,
-                    start_page,
-                    end_page,
-                    settings.layout.max_render_pixels,
-                    settings.layout.max_render_dimension,
+                return list(
+                    _iter_pdf_pages(
+                        pdf_bytes_local,
+                        settings.layout.dpi,
+                        start_page,
+                        end_page,
+                        settings.layout.max_render_pixels,
+                        settings.layout.max_render_dimension,
+                    )
                 )
-                try:
-                    for item in iterator:
-                        pages.append(item)
-                    return pages
-                except BaseException:
-                    for _, img in pages:
-                        img.close()
-                    raise
-                finally:
-                    close = getattr(iterator, "close", None)
-                    if close is not None:
-                        close()
 
             page_tuples = await loop.run_in_executor(None, _render_all)
             fs.page_images = [img for _, img in page_tuples]
@@ -134,36 +102,30 @@ class LayoutStage:
         # One file of lookahead bounds the extra page images held in memory.
         todo = [fs for fs in ctx.alive() if _needs_ocr(fs)]
         pending: tuple[asyncio.Task, float] | None = None
-        try:
-            for i, fs in enumerate(todo):
-                prep_task, fs_t0 = pending or _start_prepare(fs)
-                pending = _start_prepare(todo[i + 1]) if i + 1 < len(todo) else None
-                try:
-                    page_images = await _settle_on_cancel(prep_task)
-                    if not page_images:
-                        fs.set_error(
-                            "Could not render any pages from this PDF",
-                            code="layout_failed",
-                            stage=self.name,
-                        )
-                        continue
-
-                    fs.layout_results = await _settle_on_cancel(rm.layout.detect_batch(page_images))
-                    fs.stage_times["layout"] = time.monotonic() - fs_t0
-                except Exception as e:  # noqa: BLE001
+        for i, fs in enumerate(todo):
+            prep_task, fs_t0 = pending or _start_prepare(fs)
+            pending = _start_prepare(todo[i + 1]) if i + 1 < len(todo) else None
+            try:
+                page_images = await prep_task
+                if not page_images:
                     fs.set_error(
-                        f"Layout analysis failed: {e}",
+                        "Could not render any pages from this PDF",
                         code="layout_failed",
                         stage=self.name,
-                        exc=e,
                     )
-                    logger.warning("Layout failed for %s", fs.path.name, exc_info=True)
-        finally:
-            if pending is not None:
-                await _settle_on_cancel(pending[0])
-            if asyncio.current_task().cancelling():
-                for fs in todo:
-                    fs.free_page_images()
+                    continue
+
+                fs.layout_results = await rm.layout.detect_batch(page_images)
+
+                fs.stage_times["layout"] = time.monotonic() - fs_t0
+            except Exception as e:  # noqa: BLE001
+                fs.set_error(
+                    f"Layout analysis failed: {e}",
+                    code="layout_failed",
+                    stage=self.name,
+                    exc=e,
+                )
+                logger.warning("Layout failed for %s", fs.path.name, exc_info=True)
 
         if cfg.memory_mode == "aggressive":
             rm.unload_layout()

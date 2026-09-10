@@ -27,11 +27,67 @@ from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
+    from bibr.config import GlobalSettings
+    from bibr.extract.front_role import FrontRolePredictions, RoleScores
     from bibr.paper_contents import PaperContents, PaperSentence, RegionSummary
     from bibr.pipeline.identity import ExpectedIdentity
 
 _DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
 _WORD_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", re.UNICODE)
+
+
+@dataclass(frozen=True)
+class FrontRolePolicy:
+    """How much the front-role classifier's scores count as evidence.
+
+    Defaults mirror ``ML_FRONT_ROLE_MIN_CONFIDENCE`` /
+    ``ML_FRONT_ROLE_MASTHEAD_CONFIDENCE``; ``from_settings`` reads the live values.
+    """
+
+    min_confidence: float = 0.5
+    masthead_confidence: float = 0.8
+    record_root_confidence: float = 0.9
+
+    @classmethod
+    def from_settings(cls, settings: GlobalSettings | None) -> FrontRolePolicy:
+        if settings is None:
+            return cls()
+        ml = settings.ml
+        return cls(
+            min_confidence=float(getattr(ml, "front_role_min_confidence", 0.5)),
+            masthead_confidence=float(getattr(ml, "front_role_masthead_confidence", 0.8)),
+            record_root_confidence=float(getattr(ml, "front_role_record_root_confidence", 0.9)),
+        )
+
+
+def _scores_for(
+    predictions: FrontRolePredictions | None,
+    summary: RegionSummary | None,
+) -> RoleScores | None:
+    if predictions is None or summary is None:
+        return None
+    return predictions.get(summary.page, summary.index)
+
+
+def _model_role(scores: RoleScores | None, role: str, threshold: float) -> bool:
+    return scores is not None and scores.get(role) >= threshold
+
+
+def _model_denies_title_seed(scores: RoleScores | None, policy: FrontRolePolicy) -> bool:
+    """The classifier scored this row and is confident it is not a title.
+
+    Used only to deny a title seed the right to *root a record*; the title role
+    itself is untouched, so a page whose only title seed is model-denied still
+    reports that title.
+    """
+
+    if scores is None or scores.top == "title":
+        return False
+    if scores.get("title") >= policy.min_confidence:
+        return False
+    return scores.confidence >= policy.record_root_confidence
+
+
 _BODY_SECTION_TYPES = frozenset(
     {
         CanonicalSection.INTRODUCTION,
@@ -133,6 +189,7 @@ _NAME_PARTICLES = frozenset(
 # evidence, on text that is byline-shaped. See ``_candidate_roles``.
 CLASSIFIED_BYLINE_TITLE_ROLE = "classified_byline_title"
 BYLINE_PROBATION_ROLE = "byline_probation"
+MODEL_NON_TITLE_SEED_ROLE = "model_non_title_seed"
 _NAME_LIST_SEPARATOR_RE = re.compile(r"\s*[;·•‣⁃∙⋅]\s*")
 _CONTRIBUTION_ROLE_RE = re.compile(
     r"\b(?:conceptuali[sz]ation|data\s+curation|formal\s+analysis|funding\s+acquisition|"
@@ -164,6 +221,10 @@ class FrontMatterCandidate:
     raw_text: str
     normalized_text: str
     roles: frozenset[str]
+    # Roles the front-role classifier contributed (subset of ``roles``) and its
+    # top scores, for audit trails; empty when the model was absent or silent.
+    model_roles: frozenset[str] = frozenset()
+    model_scores: tuple[tuple[str, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,7 +348,10 @@ def _paragraph_drafts(
     *,
     first_page: int | None,
     allow_byline_probation: bool,
+    policy: FrontRolePolicy | None = None,
 ) -> list[_CandidateDraft]:
+    policy = policy or FrontRolePolicy()
+    predictions = contents.front_role_predictions
     section_map = {section.section_id: section for section in contents.sections}
     groups: OrderedDict[tuple[int, int], list[tuple[int, PaperSentence]]] = OrderedDict()
     # Groups admitted only on the promise of being a byline: the section
@@ -315,10 +379,6 @@ def _paragraph_drafts(
         )
         if not raw_text:
             continue
-        if (section_id, paragraph_id) in byline_probation and not _looks_like_byline(
-            raw_text, _normalize_text(raw_text), source_kind="paragraph"
-        ):
-            continue
         first_order, first = members[0]
         unique_pages = {page for _, sentence in members for page in _sentence_pages(sentence)}
         page = next(iter(unique_pages)) if len(unique_pages) == 1 else None
@@ -343,6 +403,11 @@ def _paragraph_drafts(
             is not None
         }
         summary = matched_summaries[min(matched_summaries)] if matched_summaries else None
+        if (section_id, paragraph_id) in byline_probation and not (
+            _looks_like_byline(raw_text, _normalize_text(raw_text), source_kind="paragraph")
+            or _model_role(_scores_for(predictions, summary), "byline", policy.min_confidence)
+        ):
+            continue
         region_label = first_meta.get("region_type") or (summary.label if summary else None)
         font_size = first_meta.get("font_size")
         if font_size is None and summary is not None:
@@ -381,15 +446,26 @@ def _heading_drafts(
     paragraph_drafts: list[_CandidateDraft],
     first_page: int | None,
     allow_byline_probation: bool,
+    policy: FrontRolePolicy | None = None,
 ) -> list[_CandidateDraft]:
+    policy = policy or FrontRolePolicy()
+    predictions = contents.front_role_predictions
     summaries = list(contents.region_summaries or [])
     drafts: list[_CandidateDraft] = []
     for section_order, section in enumerate(contents.sections):
-        if section.level <= 0 or not section.header.strip():
-            continue
         if section.header_is_synthetic:
             continue
+        if section.level <= 0 or not section.header.strip():
+            continue
         page = section.provenance[0].page_no if section.provenance else None
+        boxes = [item.bbox for item in section.provenance if item.bbox is not None]
+        bbox = _bbox_union(boxes)
+        summary = _matching_region_summary(
+            summaries,
+            page=page,
+            bbox=bbox,
+            section_id=section.section_id,
+        )
         probation = section.section_type not in _FRONT_MATTER_SECTION_TYPES
         if probation:
             # A byline promoted to a section header (common for Cyrillic and
@@ -400,16 +476,11 @@ def _heading_drafts(
             header = section.header.strip()
             if page is None or page != first_page:
                 continue
-            if not _looks_like_byline(header, _normalize_text(header), source_kind="heading"):
+            if not (
+                _looks_like_byline(header, _normalize_text(header), source_kind="heading")
+                or _model_role(_scores_for(predictions, summary), "byline", policy.min_confidence)
+            ):
                 continue
-        boxes = [item.bbox for item in section.provenance if item.bbox is not None]
-        bbox = _bbox_union(boxes)
-        summary = _matching_region_summary(
-            summaries,
-            page=page,
-            bbox=bbox,
-            section_id=section.section_id,
-        )
         following_orders = [
             draft.source_order
             for draft in paragraph_drafts
@@ -765,9 +836,25 @@ def _candidate_roles(
     *,
     detected_title: str | None,
     allow_abstract_title: bool,
-) -> frozenset[str]:
+    scores: RoleScores | None = None,
+    policy: FrontRolePolicy | None = None,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return ``(roles, model_roles)``; ``model_roles`` is what the classifier added."""
+    policy = policy or FrontRolePolicy()
     roles: set[str] = set()
+    model_roles: set[str] = set()
     label = (draft.region_label or "").casefold()
+    # Front-role classifier evidence (bibr/extract/front_role.py). Additive
+    # for byline/affiliation/abstract/title; a confident masthead only vetoes
+    # the title seed. A doc_title layout label is trusted over the veto.
+    threshold = policy.min_confidence
+    model_title = _model_role(scores, "title", threshold)
+    model_byline = _model_role(scores, "byline", threshold)
+    model_affiliation = _model_role(scores, "affiliation", threshold)
+    model_abstract = _model_role(scores, "abstract", threshold)
+    model_masthead = (
+        _model_role(scores, "masthead", policy.masthead_confidence) and label != "doc_title"
+    )
     if draft.source_kind == "heading" or label in _HEADING_LABELS:
         roles.add("heading")
     abstract_owned = draft.section_type == CanonicalSection.ABSTRACT and not allow_abstract_title
@@ -777,10 +864,16 @@ def _candidate_roles(
         or bool(_ABSTRACT_HEADING_RE.fullmatch(draft.raw_text.strip()))
     ):
         roles.add("abstract")
+    elif model_abstract and not model_title:
+        roles.add("abstract")
+        model_roles.add("abstract")
     if _DOI_RE.search(draft.raw_text):
         roles.add("doi")
     if _looks_like_affiliation(draft.raw_text):
         roles.add("affiliation")
+    elif model_affiliation and not model_title:
+        roles.add("affiliation")
+        model_roles.add("affiliation")
 
     detected = _normalize_text(detected_title or "")
     detected_match = bool(
@@ -794,17 +887,22 @@ def _candidate_roles(
         )
     )
     if _is_false_title_seed(draft):
-        return frozenset(roles)
+        return frozenset(roles), frozenset(model_roles)
     explicit_title = bool(
         not abstract_owned
         and (
             label == "doc_title"
             or (draft.source_kind == "heading" and draft.section_type == CanonicalSection.TITLE)
             or detected_match
+            or model_title
         )
     )
     textual_seed = _starts_with_uppercase_title(draft.raw_text)
-    byline = _looks_like_byline(draft.raw_text, normalized, source_kind=draft.source_kind)
+    lexical_byline = _looks_like_byline(draft.raw_text, normalized, source_kind=draft.source_kind)
+    # The model sees geometry and script-independent shape, so it admits the
+    # 18-author consortium byline the 45-word cap rejects and the Cyrillic or
+    # CJK byline the Latin name shape cannot read.
+    byline = lexical_byline or (model_byline and not model_title)
     words = _WORD_RE.findall(draft.raw_text)
     paragraph_title = _paragraph_title_evidence(
         draft,
@@ -837,9 +935,25 @@ def _candidate_roles(
         (explicit_title or inferred_title)
         and not _looks_like_masthead(draft.raw_text, label)
         and not _is_ordinary_heading(normalized, draft.section_type)
+        and not model_masthead
     )
     if is_title:
         roles.add("title")
+        # "Correspondence", "A R T I C L E I N F O", "CITATION", "Key Features":
+        # section headers the heading+TITLE seed admits and the classifier types
+        # as headings at 1.00. Harmless as titles, ruinous as record roots — the
+        # abstract that follows them is anatomy enough to develop a second
+        # record, which cuts the real title away from it. Layout's own doc_title
+        # and a match against the parser's detected title outrank the veto.
+        if label != "doc_title" and not detected_match and _model_denies_title_seed(scores, policy):
+            roles.add(MODEL_NON_TITLE_SEED_ROLE)
+        if model_title and not (
+            label == "doc_title"
+            or (draft.source_kind == "heading" and draft.section_type == CanonicalSection.TITLE)
+            or detected_match
+            or inferred_title
+        ):
+            model_roles.add("title")
     # Parser paragraph_title evidence and classified/detected titles outrank a
     # broad punctuation-based byline shape.  Embedded proceedings candidates
     # intentionally retain both roles because they contain title + authors.
@@ -848,6 +962,8 @@ def _candidate_roles(
     )
     if (byline and (not is_title or embedded_title)) or embedded_byline:
         roles.add("byline")
+        if not lexical_byline and not embedded_byline:
+            model_roles.add("byline")
     # The section classifier has no byline class and can assign TITLE to an author line. Avoid
     # splitting that line into a separate record when byline evidence is present.
     if (
@@ -863,10 +979,14 @@ def _candidate_roles(
         roles.add(CLASSIFIED_BYLINE_TITLE_ROLE)
     if draft.byline_probation:
         roles.add(BYLINE_PROBATION_ROLE)
-    return frozenset(roles)
+    return frozenset(roles), frozenset(model_roles)
 
 
-def collect_front_matter_candidates(contents: PaperContents) -> tuple[FrontMatterCandidate, ...]:
+def collect_front_matter_candidates(
+    contents: PaperContents,
+    *,
+    policy: FrontRolePolicy | None = None,
+) -> tuple[FrontMatterCandidate, ...]:
     """Aggregate authoritative paragraph/heading text into immutable candidates.
 
     Byline probation is a *rescue*, not a widening.  Admitting page-1 rows from
@@ -877,28 +997,60 @@ def collect_front_matter_candidates(contents: PaperContents) -> tuple[FrontMatte
     pass, when the ordinary front matter yields no byline at all.
     """
 
-    candidates = _collect_candidates(contents, allow_byline_probation=False)
+    policy = policy or FrontRolePolicy()
+    candidates = _with_byline_probation(contents, policy, use_model=True)
+    # The classifier is evidence, never a veto of last resort. Its negative
+    # paths -- a confident masthead vetoing the title seed, an abstract or
+    # affiliation score claiming the block -- can erase the only title-bearing
+    # candidate on the page, and front matter then abstains on a paper the
+    # heuristics resolved. That was every title regression in the 2026-09-02
+    # validation replay (7 of 192; 6 abstained outright), against 73 bylines
+    # the same evidence recovered. So the model may add a role, but it may not
+    # be the reason a page ends up with no title at all.
+    if contents.front_role_predictions is not None and not any(
+        "title" in candidate.roles for candidate in candidates
+    ):
+        heuristic_only = _with_byline_probation(contents, policy, use_model=False)
+        if any("title" in candidate.roles for candidate in heuristic_only):
+            return heuristic_only
+    return candidates
+
+
+def _with_byline_probation(
+    contents: PaperContents, policy: FrontRolePolicy, *, use_model: bool
+) -> tuple[FrontMatterCandidate, ...]:
+    candidates = _collect_candidates(
+        contents, allow_byline_probation=False, policy=policy, use_model=use_model
+    )
     if any("byline" in candidate.roles for candidate in candidates):
         return candidates
-    return _collect_candidates(contents, allow_byline_probation=True)
+    return _collect_candidates(
+        contents, allow_byline_probation=True, policy=policy, use_model=use_model
+    )
 
 
 def _collect_candidates(
     contents: PaperContents,
     *,
     allow_byline_probation: bool,
+    policy: FrontRolePolicy | None = None,
+    use_model: bool = True,
 ) -> tuple[FrontMatterCandidate, ...]:
+    policy = policy or FrontRolePolicy()
+    predictions = contents.front_role_predictions if use_model else None
     first_page = _first_page(contents)
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
+        policy=policy,
     )
     drafts = paragraph_drafts + _heading_drafts(
         contents,
         paragraph_drafts=paragraph_drafts,
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
+        policy=policy,
     )
     overloaded_abstract_sections = _overloaded_abstract_section_ids(drafts)
     # Region order is authoritative only when it covers the whole candidate
@@ -911,6 +1063,19 @@ def _collect_candidates(
     candidates: list[FrontMatterCandidate] = []
     for reading_order, draft in enumerate(drafts):
         normalized = _normalize_text(draft.raw_text)
+        scores = (
+            predictions.get(*draft.region_order)
+            if predictions is not None and draft.region_order is not None
+            else None
+        )
+        roles, model_roles = _candidate_roles(
+            draft,
+            normalized,
+            detected_title=contents.detected_title,
+            allow_abstract_title=draft.section_id in overloaded_abstract_sections,
+            scores=scores,
+            policy=policy,
+        )
         candidates.append(
             FrontMatterCandidate(
                 candidate_id=f"front-matter-candidate-{reading_order + 1}",
@@ -926,11 +1091,12 @@ def _collect_candidates(
                 paragraph_id=draft.paragraph_id,
                 raw_text=draft.raw_text,
                 normalized_text=normalized,
-                roles=_candidate_roles(
-                    draft,
-                    normalized,
-                    detected_title=contents.detected_title,
-                    allow_abstract_title=draft.section_id in overloaded_abstract_sections,
+                roles=roles,
+                model_roles=model_roles,
+                model_scores=(
+                    tuple(sorted(scores.probs.items(), key=lambda item: -item[1])[:3])
+                    if scores is not None
+                    else ()
                 ),
             )
         )
@@ -1028,6 +1194,7 @@ def _record_title_indices(
         if strong_anatomy and not candidates[index].roles & {
             CLASSIFIED_BYLINE_TITLE_ROLE,
             BYLINE_PROBATION_ROLE,
+            MODEL_NON_TITLE_SEED_ROLE,
         }:
             developed.add(index)
     return frozenset(developed)
@@ -1498,6 +1665,14 @@ def _select_dominant_coherent_block(
     one coherent block while every competing block lacks byline, abstract
     content, and DOI alike — two independently developed records always stay
     fail-closed, and raw score is never consulted.
+
+    A competitor's veto weighs *heuristic* evidence only. The front-role
+    classifier is additive evidence, so a page-1 row it alone calls a byline is
+    not an independently developed record; letting it veto turned six papers in
+    the 2026-09-02 validation replay from ``unique_block`` into
+    ``multiple_plausible_blocks``, losing a title the heuristics had. The
+    dominant block may still qualify on model evidence — that is the byline
+    rescue the move exists for.
     """
 
     dominant: FrontMatterBlock | None = None
@@ -1514,9 +1689,20 @@ def _select_dominant_coherent_block(
             if dominant is not None:
                 return None
             dominant = block
-        elif has_byline or has_abstract_content or has_doi:
+        elif (
+            _heuristic_role(candidates, "byline")
+            or has_abstract_content
+            or _heuristic_role(candidates, "doi")
+        ):
             return None
     return dominant
+
+
+def _heuristic_role(candidates: tuple[FrontMatterCandidate, ...], role: str) -> bool:
+    """True when *role* is held on evidence the classifier did not supply."""
+    return any(
+        role in candidate.roles and role not in candidate.model_roles for candidate in candidates
+    )
 
 
 def _multi_item_issue(
@@ -1541,6 +1727,7 @@ def resolve_front_matter(
     *,
     expected_identity: ExpectedIdentity | None = None,
     target_required: bool | None = None,
+    settings: GlobalSettings | None = None,
 ) -> tuple[FrontMatterResolution, tuple[ValidationIssue, ...]]:
     """Build candidate blocks, select one deterministically, or abstain."""
 
@@ -1549,7 +1736,9 @@ def resolve_front_matter(
             expected_identity is not None
             and (expected_identity.doi_required or _has_expected_selectors(expected_identity))
         )
-    candidates = collect_front_matter_candidates(contents)
+    candidates = collect_front_matter_candidates(
+        contents, policy=FrontRolePolicy.from_settings(settings)
+    )
     blocks = group_front_matter_blocks(candidates)
     toc_listing = _is_toc_listing(candidates)
     selectable_blocks = () if toc_listing else blocks
@@ -1557,6 +1746,8 @@ def resolve_front_matter(
     selected: FrontMatterBlock | None = None
     method = "no_candidates" if not blocks else "abstained"
     reason_flags: list[str] = []
+    if any(candidate.model_roles for candidate in candidates):
+        reason_flags.append("front_role_model")
 
     expected_selection, expected_method, expected_flags = _select_with_expected_identity(
         selectable_blocks,
@@ -1622,6 +1813,7 @@ __all__ = [
     "FrontMatterBlock",
     "FrontMatterCandidate",
     "FrontMatterResolution",
+    "FrontRolePolicy",
     "collect_front_matter_candidates",
     "group_front_matter_blocks",
     "is_exact_front_matter_furniture",

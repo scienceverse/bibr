@@ -10,7 +10,6 @@ slash) case that a router mount alone would 307.
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import gc
 import hashlib
@@ -23,14 +22,12 @@ import pytest
 pytest.importorskip("mcp")
 pytest.importorskip("fastapi")
 
-import httpx  # noqa: E402
-from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+import httpx2 as httpx  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
-from mcp import ClientSession  # noqa: E402
-from mcp.client.streamable_http import streamablehttp_client  # noqa: E402
-from mcp.shared.memory import (  # noqa: E402
-    create_connected_server_and_client_session as memory_session,
-)
+from mcp import Client  # noqa: E402
+from mcp.client._memory import InMemoryTransport  # noqa: E402
+from mcp.client.streamable_http import streamable_http_client  # noqa: E402
 
 from bibr.mcp_server import _PaperStore  # noqa: E402
 from bibr.serve.admission import UploadAdmissionGate, add_upload_admission  # noqa: E402
@@ -63,14 +60,14 @@ class _FakeTracker:
 
 
 def _payload(result):
-    assert not result.isError, [c.text for c in result.content]
-    payload = result.structuredContent
+    assert not result.is_error, [c.text for c in result.content]
+    payload = result.structured_content
     assert payload is not None
     return payload["result"] if set(payload) == {"result"} else payload
 
 
 def _error_text(result) -> str:
-    assert result.isError
+    assert result.is_error
     return result.content[0].text
 
 
@@ -88,9 +85,9 @@ async def _tool_session(
             upload_store=store,
             tracker=tracker,
             max_papers_per_session=max_papers,
-            admission_gate=admission_gate or UploadAdmissionGate(8),
+            admission_gate=admission_gate,
         )
-        async with memory_session(server) as client:
+        async with Client(InMemoryTransport(server), mode="legacy") as client:
             yield client
     finally:
         await store.close()
@@ -111,11 +108,10 @@ async def test_chew_url_can_be_disabled():
         server = build_serve_mcp(
             upload_store=store,
             tracker=_FakeTracker(),
-            admission_gate=UploadAdmissionGate(8),
             max_papers_per_session=4,
             chew_url_enabled=False,
         )
-        async with memory_session(server) as client:
+        async with Client(InMemoryTransport(server), mode="legacy") as client:
             tools = {t.name for t in (await client.list_tools()).tools}
             assert "chew_url" not in tools
             assert "chew_paper" in tools
@@ -158,6 +154,27 @@ async def test_chew_url_fetches_and_dispatches(monkeypatch):
         assert descriptor["sha256"] == hashlib.sha256(PDF_BYTES).hexdigest()
 
 
+@pytest.mark.parametrize(("crossref", "expected"), [(True, "true"), (False, "false")])
+async def test_chew_paper_passes_crossref_switch_through(crossref, expected):
+    """The tool's ``crossref`` knob rides the descriptor exactly like the form field."""
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        await client.call_tool(
+            "chew_paper",
+            {"filename": "paper.pdf", "content_base64": PDF_B64, "crossref": crossref},
+        )
+        (descriptor,) = tracker.descriptors
+        assert descriptor["crossref"] == expected
+
+
+async def test_chew_paper_omits_crossref_when_not_given():
+    tracker = _FakeTracker()
+    async with _tool_session(tracker) as client:
+        await client.call_tool("chew_paper", {"filename": "paper.pdf", "content_base64": PDF_B64})
+        (descriptor,) = tracker.descriptors
+        assert "crossref" not in descriptor
+
+
 async def test_chew_url_option_validation_precedes_fetch(monkeypatch):
     import bibr.serve.mcp as serve_mcp
 
@@ -179,11 +196,10 @@ async def test_chew_url_enforces_allowlist_and_policy():
         server = build_serve_mcp(
             upload_store=store,
             tracker=_FakeTracker(),
-            admission_gate=UploadAdmissionGate(8),
             max_papers_per_session=4,
             url_allowed_hosts=["arxiv.org"],
         )
-        async with memory_session(server) as client:
+        async with Client(InMemoryTransport(server), mode="legacy") as client:
             assert "allowlist" in _error_text(
                 await client.call_tool("chew_url", {"url": "https://evil.org/p.pdf"})
             )
@@ -220,8 +236,8 @@ async def test_chew_paper_uploads_and_dispatches():
         assert descriptor["filename"] == "paper.pdf"
         assert descriptor["size"] == len(PDF_BYTES)
         assert descriptor["sha256"] == hashlib.sha256(PDF_BYTES).hexdigest()
-        assert descriptor["start_page"] == "0"
-        assert descriptor["end_page"] == "4"
+        assert descriptor["start_page"] == "1"
+        assert descriptor["end_page"] == "5"
         assert descriptor["refs"] == "ner"
         assert "consolidate" not in descriptor
 
@@ -266,6 +282,122 @@ async def test_chew_paper_too_large():
         )
 
 
+async def test_chew_tools_hold_an_upload_admission_slot():
+    """Both chew tools take the serve upload slot and give it back, like /papers/extract."""
+    gate = UploadAdmissionGate(1)
+    tracker = _FakeTracker()
+    async with _tool_session(tracker, admission_gate=gate) as client:
+        gate.try_acquire()  # another upload is in flight
+        busy = await client.call_tool(
+            "chew_paper", {"filename": "x.pdf", "content_base64": PDF_B64}
+        )
+        assert "server busy" in _error_text(busy)
+        assert tracker.descriptors == []
+        gate.release()
+
+        summary = _payload(
+            await client.call_tool("chew_paper", {"filename": "x.pdf", "content_base64": PDF_B64})
+        )
+        assert summary["paper_id"]
+        assert len(tracker.descriptors) == 1
+        assert gate.active == 0
+
+        # A failing extraction releases the slot too.
+        failing = _FakeTracker(error=HTTPException(status_code=422, detail="bad"))
+        async with _tool_session(failing, admission_gate=gate) as client2:
+            result = await client2.call_tool(
+                "chew_paper", {"filename": "x.pdf", "content_base64": PDF_B64}
+            )
+            assert result.is_error
+            assert gate.active == 0
+
+
+async def test_chew_url_holds_an_upload_admission_slot(monkeypatch):
+    from bibr.serve import mcp as serve_mcp
+
+    async def fake_fetch(url, *, max_size, allowed_hosts=None):
+        raise AssertionError("fetch must not run without an admission slot")
+
+    monkeypatch.setattr(serve_mcp, "fetch_url_safely", fake_fetch)
+    gate = UploadAdmissionGate(1)
+    gate.try_acquire()
+    async with _tool_session(_FakeTracker(), admission_gate=gate) as client:
+        busy = await client.call_tool("chew_url", {"url": "https://example.org/p.pdf"})
+        assert "server busy" in _error_text(busy)
+    assert gate.active == 1
+
+
+async def test_chew_tools_free_the_spool_slot_before_the_pipeline_runs():
+    """An extraction runs for 30-120s and holds an *inflight* slot for it, not a
+    spool slot — otherwise a busy pipeline rejects uploads on every route with
+    429 while the spooling phase itself sits idle."""
+    gate = UploadAdmissionGate(1)
+    seen: dict[str, int] = {}
+
+    class _ObservingTracker(_FakeTracker):
+        async def submit(self, descriptor, request_state=None, *, admission=None):
+            seen["spool"] = gate.spool.active
+            seen["inflight"] = gate.inflight.active
+            return await super().submit(descriptor, request_state)
+
+    async with _tool_session(_ObservingTracker(), admission_gate=gate) as client:
+        summary = _payload(
+            await client.call_tool("chew_paper", {"filename": "x.pdf", "content_base64": PDF_B64})
+        )
+        assert summary["paper_id"]
+
+    assert seen == {"spool": 0, "inflight": 1}
+    assert gate.spool.active == 0
+    assert gate.inflight.active == 0
+
+
+async def test_chew_paper_refused_when_only_inflight_is_exhausted():
+    """A saturated pipeline backs the tool off even with spool capacity free,
+    and hands the spool slot it took back on the way out."""
+    gate = UploadAdmissionGate(4, inflight_limit=1)
+    gate.inflight.try_acquire()  # a pipeline run is already going
+    tracker = _FakeTracker()
+    async with _tool_session(tracker, admission_gate=gate) as client:
+        busy = await client.call_tool(
+            "chew_paper", {"filename": "x.pdf", "content_base64": PDF_B64}
+        )
+        assert "too many requests in flight" in _error_text(busy)
+        assert tracker.descriptors == []
+        assert gate.spool.active == 0
+
+
+async def test_chew_url_frees_the_spool_slot_before_the_pipeline_runs(monkeypatch):
+    from bibr.serve import mcp as serve_mcp
+    from bibr.utils.safe_fetch import FetchedFile
+
+    async def fake_fetch(url, *, max_size, allowed_hosts=None, **kwargs):
+        # The fetch is the memory-heavy phase, so it runs under the spool slot.
+        assert gate.spool.active == 1
+        return FetchedFile(
+            content=PDF_BYTES,
+            filename="fetched.pdf",
+            content_type="application/pdf",
+            final_url=url,
+        )
+
+    monkeypatch.setattr(serve_mcp, "fetch_url_safely", fake_fetch)
+    gate = UploadAdmissionGate(1)
+    seen: dict[str, int] = {}
+
+    class _ObservingTracker(_FakeTracker):
+        async def submit(self, descriptor, request_state=None, *, admission=None):
+            seen["spool"] = gate.spool.active
+            seen["inflight"] = gate.inflight.active
+            return await super().submit(descriptor, request_state)
+
+    async with _tool_session(_ObservingTracker(), admission_gate=gate) as client:
+        assert _payload(await client.call_tool("chew_url", {"url": "https://example.org/p.pdf"}))
+
+    assert seen == {"spool": 0, "inflight": 1}
+    assert gate.spool.active == 0
+    assert gate.inflight.active == 0
+
+
 async def test_chew_paper_maps_pipeline_errors():
     tracker = _FakeTracker(error=HTTPException(status_code=422, detail="pipeline exploded"))
     async with _tool_session(tracker) as client:
@@ -274,54 +406,6 @@ async def test_chew_paper_maps_pipeline_errors():
         )
         assert "extraction failed for p.pdf" in text
         assert "pipeline exploded" in text
-
-
-@pytest.mark.parametrize("tool_name", ["chew_paper", "chew_url"])
-@pytest.mark.parametrize(
-    ("pages", "expected"),
-    [
-        ({}, {}),
-        ({"start_page": 1}, {"start_page": "0"}),
-        ({"end_page": 3}, {"end_page": "2"}),
-        ({"start_page": 1, "end_page": 1}, {"start_page": "0", "end_page": "0"}),
-    ],
-)
-async def test_mcp_page_numbers_are_converted_for_the_worker(
-    monkeypatch, tool_name, pages, expected
-):
-    from bibr.utils.safe_fetch import FetchedFile
-
-    async def fetch(*args, **kwargs):
-        return FetchedFile(PDF_BYTES, "p.pdf", "application/pdf", "https://example.org/p.pdf")
-
-    monkeypatch.setattr("bibr.serve.mcp.fetch_url_safely", fetch)
-    tracker = _FakeTracker()
-    arguments = (
-        {"filename": "p.pdf", "content_base64": PDF_B64}
-        if tool_name == "chew_paper"
-        else {"url": "https://example.org/p.pdf"}
-    )
-    async with _tool_session(tracker) as client:
-        _payload(await client.call_tool(tool_name, {**arguments, **pages}))
-    actual = {k: v for k, v in tracker.descriptors[0].items() if k in ("start_page", "end_page")}
-    assert actual == expected
-
-
-@pytest.mark.parametrize("tool_name", ["chew_paper", "chew_url"])
-@pytest.mark.parametrize("name", ["start_page", "end_page"])
-@pytest.mark.parametrize("page", [0, -1])
-async def test_mcp_rejects_nonpositive_page_numbers(tool_name, name, page):
-    tracker = _FakeTracker()
-    arguments = (
-        {"filename": "p.pdf", "content_base64": PDF_B64}
-        if tool_name == "chew_paper"
-        else {"url": "https://example.org/p.pdf"}
-    )
-    async with _tool_session(tracker) as client:
-        assert "pages are 1-based" in _error_text(
-            await client.call_tool(tool_name, {**arguments, name: page})
-        )
-    assert not tracker.descriptors
 
 
 async def test_tool_errors_release_slots_for_the_next_extraction():
@@ -345,7 +429,7 @@ def test_session_stores_isolate_and_release():
 
     class _Ctx:
         def __init__(self, session):
-            self.session = session
+            self.session = type("SessionProxy", (), {"client_params": session})()
 
     stores = _SessionStores(max_papers=4)
     a, b = _Session(), _Session()
@@ -391,15 +475,23 @@ def _restore_api_key():
 
 
 @asynccontextmanager
-async def _mounted_app(tracker: _FakeTracker, *, limit: int = 8):
+async def _mounted_app(tracker: _FakeTracker, *, max_size: int = 1_000_000, max_body: int = 4096):
     """A FastAPI app shaped like serve's: bearer gate middleware + /mcp mount."""
     from bibr.config import Settings
     from bibr.serve.auth import check_bearer
 
     Settings.auth.api_key = _TEST_KEY
     app = FastAPI()
-    gate = add_upload_admission(app, limit)
-    app.state.admission_gate = gate
+    # Same order as bibr.serve.app: admission inside, auth outside.
+    gate = add_upload_admission(
+        app,
+        1,
+        body_gated_paths=("/mcp", "/mcp/"),
+        body_threshold=1024,
+        max_body=max_body,
+        max_file_size=max(3 * 1024 * 1024, max_size),
+    )
+    app.state.upload_admission_gate = gate
 
     @app.middleware("http")
     async def _auth_gate(request, call_next):
@@ -410,7 +502,7 @@ async def _mounted_app(tracker: _FakeTracker, *, limit: int = 8):
             )
         return await call_next(request)
 
-    store = UploadStore.create(max_size=1_000_000, spool_memory_bytes=1024, stale_after_seconds=60)
+    store = UploadStore.create(max_size=max_size, spool_memory_bytes=1024, stale_after_seconds=60)
     try:
         mount_mcp(app, Settings, upload_store=store, tracker=tracker, admission_gate=gate)
         async with app.router.lifespan_context(app):
@@ -432,6 +524,23 @@ def _asgi_factory(app):
     return factory
 
 
+async def test_http_mount_expires_idle_sessions(monkeypatch):
+    """A client that vanishes without DELETE must not pin its papers forever."""
+    from bibr.config import Settings
+
+    store = UploadStore.create(max_size=1_000_000, spool_memory_bytes=1024, stale_after_seconds=60)
+    try:
+        monkeypatch.setattr(Settings.mcp, "session_idle_timeout_seconds", 123.0)
+        server = mount_mcp(FastAPI(), Settings, upload_store=store, tracker=_FakeTracker())
+        assert server.session_manager.session_idle_timeout == 123.0
+
+        monkeypatch.setattr(Settings.mcp, "session_idle_timeout_seconds", 0)
+        server = mount_mcp(FastAPI(), Settings, upload_store=store, tracker=_FakeTracker())
+        assert server.session_manager.session_idle_timeout is None
+    finally:
+        await store.close()
+
+
 async def test_http_mount_requires_bearer():
     async with _mounted_app(_FakeTracker()) as app:
         # The MCP client surfaces the 401 as a connection failure; assert the
@@ -443,6 +552,38 @@ async def test_http_mount_requires_bearer():
                 headers={"Accept": "application/json, text/event-stream"},
             )
             assert resp.status_code == 401
+
+
+async def test_http_mount_gates_large_bodies_before_the_transport_buffers_them():
+    async with _mounted_app(_FakeTracker()) as app:
+        headers = {
+            "Authorization": f"Bearer {_TEST_KEY}",
+            "Accept": "application/json, text/event-stream",
+        }
+        async with _asgi_factory(app)() as client:
+            # Declared above the body cap: a clean 413 that explains the base64 math.
+            resp = await client.post("/mcp", content=b"x" * 5000, headers=headers)
+            assert resp.status_code == 413
+            assert "chew_paper accepts files up to 3 MiB" in resp.json()["detail"]
+
+            # Under the cap but above the threshold: takes the (only) slot while
+            # the body is received — so with the gate full it is refused.
+            gate = app.state.upload_admission_gate
+            gate.try_acquire()
+            try:
+                resp = await client.post("/mcp", content=b"x" * 2000, headers=headers)
+                assert resp.status_code == 429
+            finally:
+                gate.release()
+
+            # A small JSON-RPC body is not an upload and reaches the transport.
+            resp = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "id": 1, "method": "initialize"},
+                headers=headers,
+            )
+            assert resp.status_code not in (413, 429)
+            assert gate.active == 0
 
 
 async def test_http_mount_serves_bare_path_without_redirect():
@@ -471,17 +612,23 @@ async def test_http_mount_serves_bare_path_without_redirect():
             assert resp.headers.get("mcp-session-id")
 
 
-async def test_http_round_trip_chew_and_query():
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_http_round_trip_chew_and_query(mode):
     tracker = _FakeTracker()
     async with _mounted_app(tracker) as app:
         headers = {"Authorization": f"Bearer {_TEST_KEY}"}
-        async with streamablehttp_client(
-            "http://testserver/mcp", headers=headers, httpx_client_factory=_asgi_factory(app)
-        ) as (read, write, get_session_id):
-            async with ClientSession(read, write) as session:
-                init = await session.initialize()
-                assert init.serverInfo.name == "bibr"
-                assert get_session_id()
+        async with (
+            _asgi_factory(app)(headers=headers) as http_client,
+            streamable_http_client("http://testserver/mcp", http_client=http_client) as streams,
+        ):
+
+            @asynccontextmanager
+            async def transport():
+                yield streams
+
+            async with Client(transport(), mode=mode) as session:
+                assert session.server_info.name == "bibr"
+                assert session.protocol_version == "2025-11-25"
 
                 tools = {t.name for t in (await session.list_tools()).tools}
                 assert "chew_paper" in tools
@@ -490,81 +637,51 @@ async def test_http_round_trip_chew_and_query():
                 res = await session.call_tool(
                     "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
                 )
-                assert not res.isError
-                assert res.structuredContent["paper_id"] == FIXTURE_ID
+                assert not res.is_error
+                assert res.structured_content["paper_id"] == FIXTURE_ID
 
                 papers = await session.call_tool("list_papers", {})
-                assert len(papers.structuredContent["result"]) == 1
+                assert len(papers.structured_content["result"]) == 1
 
 
-@pytest.mark.parametrize("first_source", ["mcp", "rest"])
-async def test_http_mcp_and_rest_share_extraction_capacity(first_source, monkeypatch):
-    from bibr.serve.admission import release_spool_slot
+@asynccontextmanager
+async def _http_client(app):
+    headers = {"Authorization": f"Bearer {_TEST_KEY}"}
+    async with _asgi_factory(app)(headers=headers) as http_client:
+        async with Client(
+            streamable_http_client("http://testserver/mcp", http_client=http_client)
+        ) as client:
+            yield client
 
-    entered = asyncio.Event()
-    finish = asyncio.Event()
 
-    class BlockingTracker(_FakeTracker):
-        async def submit(self, descriptor, request_state=None, *, admission=None):
-            self.descriptors.append(descriptor)
-            entered.set()
-            await finish.wait()
-            return self.result
+async def test_http_clients_sharing_bearer_key_have_separate_paper_stores():
+    async with _mounted_app(_FakeTracker()) as app:
+        async with _http_client(app) as first, _http_client(app) as second:
+            _payload(
+                await first.call_tool(
+                    "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
+                )
+            )
+            assert len(_payload(await first.call_tool("list_papers", {}))) == 1
+            assert _payload(await second.call_tool("list_papers", {})) == []
+            assert "unknown paper_id" in _error_text(
+                await second.call_tool("get_metadata", {"paper_id": FIXTURE_ID})
+            )
+        async with _http_client(app) as reconnected:
+            assert _payload(await reconnected.call_tool("list_papers", {})) == []
 
-    async def forbidden_fetch(*args, **kwargs):
-        raise AssertionError("busy URL extraction must not start a download")
 
-    monkeypatch.setattr("bibr.serve.mcp.fetch_url_safely", forbidden_fetch)
-    tracker = BlockingTracker()
-    async with _mounted_app(tracker, limit=1) as app:
-
-        @app.post("/papers/extract")
-        async def extract(request: Request):
-            await request.body()
-            release_spool_slot(request)
-            entered.set()
-            await finish.wait()
-            return {"ok": True}
-
-        headers = {"Authorization": f"Bearer {_TEST_KEY}"}
-        async with _asgi_factory(app)(headers=headers) as rest:
-            async with streamablehttp_client(
-                "http://testserver/mcp", headers=headers, httpx_client_factory=_asgi_factory(app)
-            ) as (read, write, _):
-                async with ClientSession(read, write) as client:
-                    await client.initialize()
-                    # Drain the initialization notification's HTTP upload
-                    # before competing with a one-slot REST upload.
-                    await client.list_tools()
-                    first = asyncio.create_task(
-                        client.call_tool(
-                            "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
-                        )
-                        if first_source == "mcp"
-                        else rest.post("/papers/extract", content=b"paper")
-                    )
-                    try:
-                        await asyncio.wait_for(entered.wait(), timeout=5)
-                        gate = app.state.admission_gate
-                        assert gate.spool.active == 0
-                        assert gate.inflight.active == 1
-                        rejected = await rest.post("/papers/extract", content=b"second")
-                        assert rejected.status_code == 429
-                        for tool, args in [
-                            ("chew_paper", {"filename": "p.pdf", "content_base64": "invalid!"}),
-                            ("chew_url", {"url": "https://example.org/p.pdf"}),
-                        ]:
-                            assert "Too many requests in flight" in _error_text(
-                                await client.call_tool(tool, args)
-                            )
-                        # Queries remain usable while inference consumes the cap.
-                        _payload(await client.call_tool("list_papers", {}))
-                    finally:
-                        finish.set()
-                        await first
-                    assert gate.spool.active == gate.inflight.active == 0
-                    _payload(
-                        await client.call_tool(
-                            "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
-                        )
-                    )
+async def test_http_upload_above_sdk_default_body_limit():
+    # The SDK defaults to 4 MiB of JSON; bibr's file limit must still apply.
+    content = PDF_BYTES + b"x" * (4 * 1024 * 1024)
+    tracker = _FakeTracker()
+    async with _mounted_app(tracker, max_size=5 * 1024 * 1024, max_body=8 * 1024 * 1024) as app:
+        async with _http_client(app) as client:
+            result = _payload(
+                await client.call_tool(
+                    "chew_paper",
+                    {"filename": "large.pdf", "content_base64": base64.b64encode(content).decode()},
+                )
+            )
+            assert result["paper_id"] == FIXTURE_ID
+            assert len(tracker.descriptors) == 1

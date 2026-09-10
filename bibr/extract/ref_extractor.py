@@ -95,7 +95,7 @@ GEOM_STRONG_REGION_ALIGN_FRACTION = 0.9
 
 # Parse-path degradation markers. ``--refs llm`` promises full-precision LLM
 # parsing, so any surviving fallback to the NER parser must be visible in the
-# exported ``processing_warnings`` — not just a log line. Do not reword.
+# exported ``extraction.warnings`` — not just a log line. Do not reword.
 PARSE_FALLBACK_WARNING_PREFIX = "Reference parsing fell back to NER"
 PARSE_SPLIT_RECOVERY_PREFIX = "Reference parsing recovered via batch split"
 
@@ -119,7 +119,7 @@ REF_SEG_HARD_FAILURE_PREFIX = "Reference extraction FAILED: refs region present 
 # unexpected NON-BibrError exception — a CUDA OOM / CUBLAS alloc failure or a
 # model-load error in the local NER parser is the observed case — that
 # ``MetadataExtractor.extract_all_metadata`` swallows to keep core metadata.
-# Surfaced on ``processing_warnings`` so a total reference wipeout is never
+# Surfaced on ``extraction.warnings`` so a total reference wipeout is never
 # silent: without it the ONLY downstream signal is VAL_REF_COUNT_MISMATCH, which
 # flags the symptom (N ref rows, 0 bib) but cannot name the cause. Do not reword.
 REF_EXTRACTION_ERROR_PREFIX = "Reference extraction FAILED with an unexpected error"
@@ -523,13 +523,14 @@ def _get_ner_parser(settings: GlobalSettings | None = None):
     if _NER_PARSER is None or key != _NER_PARSER_KEY:
         with _NER_LOCK:
             if _NER_PARSER is None or key != _NER_PARSER_KEY:
-                from bibr.ner.parser import RefParser
+                from bibr.ner.runtime import load_ref_parser
 
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
-                _NER_PARSER = RefParser(
+                _NER_PARSER = load_ref_parser(
                     settings.NER_PARSER_CKPT,
                     device=settings.NER_DEVICE,
                     revision=settings.NER_PARSER_REVISION,
+                    settings=settings,
                 )
                 _NER_PARSER_KEY = key
     return _NER_PARSER
@@ -917,31 +918,110 @@ def _backfill_vancouver_tail(fields: dict[str, Any], segment: str | None) -> Non
     _backfill_vancouver_numbers(fields, segment)
 
 
+# One end of a printed page range. A letter prefix ("S163", "e0123") and an
+# article-id dot ("1222.e1221") are how journals print them; the volume/issue
+# span never carries either.
+_PAGE_NUMBER = r"[A-Za-z]?\d+(?:\.[A-Za-z]?\d+)?"
+# A whole "<FIRST>-<LAST>" run that landed in one page field.
+_PAGE_RANGE_SPLIT_RE = re.compile(rf"^\s*({_PAGE_NUMBER})\s*[-–—]\s*({_PAGE_NUMBER})\s*$")
+# The anchor may not be the tail of a longer token (a DOI's "021-02446", an
+# ISSN, a year range "2010-2015" glued to a word) nor sit inside a volume
+# "12(3-4)" span, and the partner must end the run — so a hyphenated
+# identifier ("s12872-021-02446-z") never yields a page.
+_PAGE_RANGE_BOUNDARY_BEFORE = r"(?<![\w./(-])"
+_PAGE_RANGE_BOUNDARY_AFTER = r"(?![\w/-])"
+
+
+def _page_range_partner(anchor: str, segment: str, *, anchor_is_first: bool) -> str | None:
+    """The other end of the one printed page range that starts (or ends) with ``anchor``.
+
+    ``None`` when the segment prints no such range, or more than one distinct
+    candidate (a volume span and a page span sharing a number): an ambiguous
+    anchor must fill nothing, because a wrong page is worse than a missing one.
+    """
+    token = re.escape(anchor)
+    if anchor_is_first:
+        pattern = rf"{_PAGE_RANGE_BOUNDARY_BEFORE}{token}\s*[-–—]\s*({_PAGE_NUMBER}){_PAGE_RANGE_BOUNDARY_AFTER}"
+    else:
+        pattern = rf"{_PAGE_RANGE_BOUNDARY_BEFORE}({_PAGE_NUMBER})\s*[-–—]\s*{token}{_PAGE_RANGE_BOUNDARY_AFTER}"
+    candidates = set(re.findall(pattern, segment))
+    return candidates.pop() if len(candidates) == 1 else None
+
+
+def _backfill_page_range(fields: dict[str, Any], segment: str | None) -> None:
+    """Complete a half-emitted page range, fill-only.
+
+    Both parsers drop one end of a range: the CRF tags ``PAGE_RANGE_END``
+    without a start (audit M9: 421 of 5,071 val120 references), and the LLM
+    returns ``first_page`` alone on a compact "339-42". Three repairs, none of
+    which overwrites a populated field with a different value:
+
+    * a whole range lumped into one page field ("41–49") is split, and a
+      ``last_page`` that repeats the emitted ``first_page`` ("118–25") keeps
+      only its own end;
+    * a missing ``last_page`` is read from the segment anchored on the emitted
+      ``first_page``, and a missing ``first_page`` from the emitted
+      ``last_page`` — only when the segment prints exactly one such range.
+
+    Runs before the compact-range expansion, which then turns "339"/"42" into
+    "339"/"342" as it always did.
+    """
+    first = str(fields.get("first_page") or "").strip()
+    last = str(fields.get("last_page") or "").strip()
+    if last and (not first or last.startswith(first)):
+        m = _PAGE_RANGE_SPLIT_RE.match(last)
+        if m and (not first or m.group(1) == first):
+            fields["first_page"], fields["last_page"] = m.group(1), m.group(2)
+            return
+    if first and not last:
+        m = _PAGE_RANGE_SPLIT_RE.match(first)
+        if m:
+            fields["first_page"], fields["last_page"] = m.group(1), m.group(2)
+            return
+    if not segment or bool(first) == bool(last):
+        return
+    if first:
+        partner = _page_range_partner(first, segment, anchor_is_first=True)
+        if partner:
+            fields["last_page"] = partner
+    else:
+        partner = _page_range_partner(last, segment, anchor_is_first=False)
+        if partner:
+            fields["first_page"] = partner
+
+
 def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> dict[str, Any]:
     """Strategy-independent reference finalize shared by every parse path.
 
     DOI rescue: a clean printed doi:/doi.org token in the ref's own segment
     covers a DOI the parser under-emitted, but never overrides an emitted one.
-    Also expands compact last pages ("782-92" → "792"), backfills a dropped
-    Vancouver year/container from the segment, and migrates/infers ``bib_type``.
+    Also completes a half-emitted page range from the segment, expands compact
+    last pages ("782-92" → "792"), backfills a dropped Vancouver year/container
+    from the segment, and migrates/infers ``bib_type``.
     Parser-specific steps (issue handling, author rescue) stay in each parse path.
     """
     _backfill_vancouver_tail(fields, segment)
+    _backfill_page_range(fields, segment)
     fields["doi"] = normalize_doi(fields.get("doi")) or _rescue_doi_from_segment(segment)
     fields["last_page"] = _expand_compact_last_page(
         fields.get("first_page"), fields.get("last_page")
     )
     fields["bib_type"] = migrate_bib_type(
         fields.get("bib_type")
-        or _infer_bibtype(fields.get("container"), None, fields.get("title") or "")
+        or _infer_bibtype(fields.get("container"), None, segment or fields.get("title") or "")
     )
     return fields
+
+
+def _is_stub_reference(ref: PaperReference) -> bool:
+    """A reference carrying neither a title nor authors — nothing to match on."""
+    return not (ref.title or "").strip() and not (ref.authors or "").strip()
 
 
 def _sequence_references(refs: list[PaperReference]) -> list[PaperReference]:
     """Drop stub refs (no title AND no authors), then assign contiguous
     1-based ``bib_id``s — the single filter/sequence point for all paths."""
-    kept = [ref for ref in refs if (ref.title or "").strip() or (ref.authors or "").strip()]
+    kept = [ref for ref in refs if not _is_stub_reference(ref)]
     for i, ref in enumerate(kept, start=1):
         ref.bib_id = i
     return kept
@@ -1390,7 +1470,7 @@ class ReferenceExtractor:
             return segments
 
         if seg_strategy == "crf":
-            return self._crf_segment_or_recover(ref_text)
+            return await asyncio.to_thread(self._crf_segment_or_recover, ref_text)
 
         if seg_strategy == "geom":
             # Offload the synchronous GBM predict to a worker thread so it does
@@ -1450,7 +1530,7 @@ class ReferenceExtractor:
         self._record_seg_fallback("LLM seg tier disabled (REF_SEG_LLM_FALLBACK=false)")
         if region_reserve:
             return self._select_region_reserve(ref_text, region_reserve)
-        return self._crf_segment_or_recover(ref_text)
+        return await asyncio.to_thread(self._crf_segment_or_recover, ref_text)
 
     def _select_region_reserve(self, ref_text: str, reserve: list[str]) -> list[str]:
         """Re-select a held-back region segmentation after the LLM tier failed."""
@@ -1637,7 +1717,7 @@ class ReferenceExtractor:
                 return region_strings
         if reserve:
             return self._select_region_reserve(ref_text, reserve)
-        return self._crf_segment_or_recover(ref_text)
+        return await asyncio.to_thread(self._crf_segment_or_recover, ref_text)
 
     def _segment_region_anchors(
         self, ref_text: str, *, as_fallback: bool = True
@@ -1713,7 +1793,13 @@ class ReferenceExtractor:
 
     def _crf_segment_or_recover(self, ref_text: str) -> list[str]:
         """CRF last-resort segmentation, guarded so a populated references region
-        never silently yields 0. On CRF empty OR exception (e.g. a missing NER
+        never silently yields 0.
+
+        Synchronous: a ModernBERT-CRF load plus N sliding-window forward passes
+        holding the process-wide inference lock. Every caller offloads it with
+        ``asyncio.to_thread``, matching ``_segment_geom`` and
+        ``_parse_refs_via_ner`` — ``bibr serve`` runs one async worker, so this
+        on the loop is head-of-line blocking for every co-resident request. On CRF empty OR exception (e.g. a missing NER
         checkpoint), try a zero-LLM marker split; if that also fails on a
         substantial region, surface a HIGH-severity warning instead of 0 refs.
         """
@@ -2070,9 +2156,21 @@ class ReferenceExtractor:
         Recovery is the same NER parser the hard-failure path uses, applied
         only to the missing slots and tagged with their true document position.
         """
+        # A ref the LLM returned with neither a title nor authors does not
+        # count as covered: _sequence_references drops it further down, and it
+        # would take the entry's slot with it — deleting one printed reference
+        # and shifting every later bib_id, so [8]..[15] all resolve one row
+        # off. Treat those slots as missing and re-parse them like any other.
+        stubs = sorted({index for index, ref in positioned if _is_stub_reference(ref)})
         if not ref_strings:
+            if stubs:
+                self._record_seg_fallback(
+                    f"{len(stubs)} ref(s) parsed with no title and no authors were dropped; "
+                    "no reference strings were available to re-parse them",
+                    prefix=PARSE_FALLBACK_WARNING_PREFIX,
+                )
             return
-        covered = {index for index, _ in positioned}
+        covered = {index for index, ref in positioned if not _is_stub_reference(ref)}
         missing = [i for i in range(1, len(ref_strings) + 1) if i not in covered]
         if not missing:
             return
@@ -2101,7 +2199,20 @@ class ReferenceExtractor:
                 len(missing),
             )
             return
-        recovered = [(index, ref) for index, ref in zip(missing, aligned, strict=True) if ref]
+        recovered = [
+            (index, ref)
+            for index, ref in zip(missing, aligned, strict=True)
+            if ref and not _is_stub_reference(ref)
+        ]
+        # Drop the stub that occupied a slot NER has now filled, so the entry
+        # is not represented twice on the way into _sequence_references.
+        replaced = {index for index, _ in recovered}
+        if replaced:
+            positioned[:] = [
+                item
+                for item in positioned
+                if not (item[0] in replaced and _is_stub_reference(item[1]))
+            ]
         positioned.extend(recovered)
         self._record_seg_fallback(
             f"{len(recovered)}/{len(missing)} ref(s) skipped by the LLM recovered via NER",
@@ -2287,6 +2398,13 @@ class ReferenceExtractor:
                     "publisher": fields.get("publisher"),
                     "editors": fields.get("editors"),
                     "edition": fields.get("edition"),
+                    # The NER tag set has no in-press concept, so the tagger
+                    # drops the year *and* leaves the flag false — an
+                    # "(in press)" reference exported year: null,
+                    # is_in_press: false under the default parse strategy and
+                    # its in-text citation could never match. Read it off the
+                    # segment, the way _backfill_vancouver_tail already does.
+                    "is_in_press": _is_in_press(ref_text),
                 },
                 ref_text,
             )

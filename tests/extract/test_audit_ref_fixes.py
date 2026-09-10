@@ -291,3 +291,129 @@ class TestNativeTruncationIsDegenerate:
             cached_input_tokens=0,
         )
         assert exc.salvage_raw == ""
+
+
+class TestNerPathSetsInPress:
+    """The NER tag set has no in-press concept, so the tagger drops the year
+    *and* the field dict omitted the flag — under the default
+    REF_PARSE_STRATEGY=ner an "(in press)" reference exported year: null,
+    is_in_press: false and its in-text citation could never match."""
+
+    def test_in_press_segment_sets_the_flag(self):
+        from bibr.extract import ref_extractor
+
+        ext = _extractor()
+        ref_text = (
+            "Robertson, C. E., & Van Bavel, J. J. (in press). Inside the funhouse mirror factory."
+        )
+
+        class _Parser:
+            @staticmethod
+            def parse_batch(segments):
+                return [
+                    {
+                        "title": "Inside the funhouse mirror factory",
+                        "authors": "Robertson, C. E.; Van Bavel, J. J.",
+                    }
+                    for _ in segments
+                ]
+
+        with patch.object(ref_extractor, "_get_ner_parser", return_value=_Parser()):
+            aligned = ext._parse_references_ner_aligned([ref_text])
+
+        assert aligned[0] is not None
+        assert aligned[0].is_in_press is True
+
+    def test_an_ordinary_segment_leaves_the_flag_false(self):
+        from bibr.extract import ref_extractor
+
+        ext = _extractor()
+
+        class _Parser:
+            @staticmethod
+            def parse_batch(segments):
+                return [
+                    {"title": "A study", "authors": "Smith, J.", "year": "2020"} for _ in segments
+                ]
+
+        with patch.object(ref_extractor, "_get_ner_parser", return_value=_Parser()):
+            aligned = ext._parse_references_ner_aligned([REFS[0]])
+
+        assert aligned[0] is not None
+        assert aligned[0].is_in_press is False
+
+
+class TestStubRefsAreNotCountedAsCovered:
+    """Round 3: a ref with no title AND no authors is dropped further down.
+
+    ``_sequence_references`` filters it out, so counting it as covered blocked
+    the NER recovery for that slot and then deleted the entry outright —
+    shifting every later ``bib_id`` so the printed ``[3]`` resolved to what was
+    printed as ``[2]``. Nothing warned; 2 of 3 clears the under-yield checks.
+    """
+
+    async def test_a_stub_ref_slot_is_recovered_via_ner(self, monkeypatch):
+        monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)
+        ext = _extractor()
+        ext.llm_client.extract_references = AsyncMock(
+            return_value=[
+                _llm_ref(1),
+                _llm_ref(2, title=None, authors=None),
+                _llm_ref(3),
+            ]
+        )
+        with patch.object(
+            type(ext), "_parse_references_ner_aligned", return_value=[_ner_ref(2)]
+        ) as ner:
+            refs = await ext._parse_references_llm("\n".join(REFS), REFS)
+
+        ner.assert_called_once()
+        assert [r.title for r in refs] == ["Title 1", "Ner 2", "Title 3"]
+        assert [r.bib_id for r in refs] == [1, 2, 3]
+
+    async def test_the_stub_is_not_kept_alongside_its_replacement(self, monkeypatch):
+        monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)
+        ext = _extractor()
+        ext.llm_client.extract_references = AsyncMock(
+            return_value=[_llm_ref(1), _llm_ref(2, title=None, authors=None), _llm_ref(3)]
+        )
+        with patch.object(type(ext), "_parse_references_ner_aligned", return_value=[_ner_ref(2)]):
+            refs = await ext._parse_references_llm("\n".join(REFS), REFS)
+
+        assert len(refs) == 3
+
+    async def test_an_unrecoverable_stub_is_reported_not_silently_dropped(self, monkeypatch):
+        monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)
+        ext = _extractor()
+        ext.llm_client.extract_references = AsyncMock(
+            return_value=[_llm_ref(1), _llm_ref(2, title=None, authors=None), _llm_ref(3)]
+        )
+        with patch.object(
+            type(ext), "_parse_references_ner_aligned", autospec=True, side_effect=_no_recovery
+        ):
+            refs = await ext._parse_references_llm("\n".join(REFS), REFS)
+
+        assert [r.title for r in refs] == ["Title 1", "Title 3"]
+        assert any("skipped by the LLM" in w for w in ext.contents.processing_warnings), (
+            ext.contents.processing_warnings
+        )
+
+    async def test_a_ner_recovery_that_is_itself_a_stub_is_not_kept(self, monkeypatch):
+        monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)
+        ext = _extractor()
+        ext.llm_client.extract_references = AsyncMock(
+            return_value=[_llm_ref(1), _llm_ref(2, title=None, authors=None), _llm_ref(3)]
+        )
+        stub_ner = PaperReference(
+            bib_id=2,
+            title="",
+            authors=None,
+            year=None,
+            container=None,
+            volume=None,
+            first_page=None,
+        )
+        with patch.object(type(ext), "_parse_references_ner_aligned", return_value=[stub_ner]):
+            refs = await ext._parse_references_llm("\n".join(REFS), REFS)
+
+        assert [r.title for r in refs] == ["Title 1", "Title 3"]

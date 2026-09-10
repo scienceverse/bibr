@@ -1,0 +1,351 @@
+"""The ``outcomes.jsonl`` ledger: one JSON object per attempt, append-only.
+
+Every paper a run touches gets exactly one line per attempt, success or
+failure, so the run is auditable even for papers that produced no export.
+Resume semantics read the *latest* line per ``paper_id``:
+
+* ``ok`` → skipped (unless ``--force``);
+* ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except an
+  ``error_code`` of ``interrupted`` — that paper never really ran and is
+  picked up again by default.
+
+Schema (see ``docs/guides/batch.md`` for the table):
+
+``paper_id, stem, path, sha256, bytes, status, error_code, failed_stage,
+error, started_at, finished_at, duration_s, stage_times, llm_tokens,
+llm_input_tokens, llm_output_tokens, n_refs, n_matched, n_sentences,
+warnings, bibr_version, build_sha, executor, attempt, run_id`` plus, for the
+remote executor, ``job_id`` and ``retries``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+from bibr.batch.manifest import BatchItem, sha256_file
+
+logger = logging.getLogger(__name__)
+
+LEDGER_FILENAME = "outcomes.jsonl"
+ERROR_TEXT_LIMIT = 800
+WARNING_SAMPLE = 3
+WARNING_TEXT_LIMIT = 200
+INTERRUPTED = "interrupted"
+
+
+def utc_now_iso() -> str:
+    return datetime.now(tz=UTC).isoformat(timespec="seconds")
+
+
+def bounded_text(text: object, limit: int = ERROR_TEXT_LIMIT) -> str | None:
+    """Clip *text* to *limit* characters (``None`` stays ``None``)."""
+    if text is None:
+        return None
+    value = str(text)
+    if len(value) <= limit:
+        return value
+    return value[: limit - 1] + "…"
+
+
+def warning_key(warning: str) -> str:
+    """Collapse a ``processing_warnings`` string to a frequency key.
+
+    ``VALIDATION:<severity>:<CODE>: message`` keeps its first three segments;
+    anything else keeps the text before the first ``:`` (or its first 60
+    characters), so the report can count warning *kinds* across a corpus.
+    """
+    text = warning.strip()
+    if text.startswith("VALIDATION:"):
+        parts = text.split(":")
+        return ":".join(p.strip() for p in parts[:3])
+    head, sep, _ = text.partition(":")
+    key = head.strip() if sep else text
+    return key[:60]
+
+
+def _as_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return max(value, 0)
+    if isinstance(value, float):
+        return max(int(value), 0)
+    return 0
+
+
+def _llm_tokens(usage: object) -> tuple[int, int, int]:
+    """``(input, output, total)`` summed over the export's ``llm_usage`` block."""
+    if not isinstance(usage, Mapping):
+        return 0, 0, 0
+    total_in = total_out = total = 0
+    for counts in usage.values():
+        if not isinstance(counts, Mapping):
+            continue
+        n_in = _as_int(counts.get("input_tokens", counts.get("prompt_tokens")))
+        n_out = _as_int(counts.get("output_tokens", counts.get("completion_tokens")))
+        n_total = _as_int(counts.get("total_tokens")) or (n_in + n_out)
+        total_in += n_in
+        total_out += n_out
+        total += n_total
+    return total_in, total_out, total
+
+
+def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Per-paper facts for the ledger — never the export itself."""
+    if not isinstance(data, Mapping):
+        return {}
+    extraction = data.get("extraction")
+    timings = extraction.get("timings") if isinstance(extraction, Mapping) else None
+    stage_values = timings.get("stages", timings) if isinstance(timings, Mapping) else None
+    stage_times = (
+        {str(k): float(v) for k, v in stage_values.items() if isinstance(v, (int, float))}
+        if isinstance(stage_values, Mapping)
+        else None
+    )
+    total_seconds = extraction.get("total_seconds") if isinstance(extraction, Mapping) else None
+
+    if data.get("schema_version") == "11.0":
+        extraction = extraction if isinstance(extraction, Mapping) else {}
+        total_seconds = timings.get("total_seconds") if isinstance(timings, Mapping) else None
+        usage = extraction.get("usage") or {}
+        n_in, n_out, n_total = _llm_tokens({"totals": usage.get("totals")})
+    else:
+        n_in, n_out, n_total = _llm_tokens(data.get("llm_usage"))
+
+    bib = data.get("bib")
+    bib_match = data.get("bib_match")
+    enrichment = (extraction or {}).get("enrichment", data.get("enrichment"))
+    n_refs = len(bib) if isinstance(bib, list) else 0
+    if isinstance(bib_match, list):
+        n_matched = len(bib_match)
+    elif isinstance(enrichment, Mapping):
+        n_matched = _as_int(enrichment.get("refs_enriched"))
+    else:
+        n_matched = 0
+
+    text = data.get("text")
+    raw_warnings = (extraction or {}).get("warnings", data.get("processing_warnings"))
+    warnings = (
+        [w for w in raw_warnings if isinstance(w, str)] if isinstance(raw_warnings, list) else []
+    )
+    codes: dict[str, int] = {}
+    for w in warnings:
+        key = warning_key(w)
+        codes[key] = codes.get(key, 0) + 1
+
+    validation = data.get("validation")
+    n_val_errors = n_val_warnings = 0
+    if isinstance(validation, Mapping):
+        n_val_errors = _as_int(validation.get("errors", validation.get("error_count")))
+        n_val_warnings = _as_int(validation.get("warnings", validation.get("warning_count")))
+
+    return {
+        "stage_times": stage_times,
+        "total_seconds": float(total_seconds)
+        if isinstance(total_seconds, (int, float)) and not isinstance(total_seconds, bool)
+        else None,
+        "llm_tokens": n_total,
+        "llm_input_tokens": n_in,
+        "llm_output_tokens": n_out,
+        "n_refs": n_refs,
+        "n_matched": n_matched,
+        "n_sentences": len(text) if isinstance(text, list) else 0,
+        "n_validation_errors": n_val_errors,
+        "n_validation_warnings": n_val_warnings,
+        "warnings": {
+            "count": len(warnings),
+            "first": [bounded_text(w, WARNING_TEXT_LIMIT) for w in warnings[:WARNING_SAMPLE]],
+            "codes": codes,
+        },
+    }
+
+
+@dataclass
+class Outcome:
+    """What happened to one paper in one attempt."""
+
+    status: str  # "ok" | "failed"
+    error_code: str | None = None
+    failed_stage: str | None = None
+    error: str | None = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    duration_s: float | None = None
+    export: Mapping[str, Any] | None = None
+    sha256: str | None = None
+    size: int | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+@dataclass(frozen=True)
+class LedgerContext:
+    """Run-level fields stamped on every line."""
+
+    run_id: str
+    executor: str
+    bibr_version: str
+    build_sha: str | None
+
+
+@dataclass
+class ResumePlan:
+    to_run: list[BatchItem]
+    skipped_ok: list[BatchItem]
+    skipped_failed: list[BatchItem]
+
+
+class Ledger:
+    """Append-only JSONL ledger at ``<out>/outcomes.jsonl``."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._attempts: dict[str, int] | None = None
+
+    # -- reading ---------------------------------------------------------
+
+    def read(self) -> list[dict[str, Any]]:
+        """All well-formed lines, in file order. Malformed lines are skipped."""
+        if not self.path.is_file():
+            return []
+        entries: list[dict[str, Any]] = []
+        bad = 0
+        with self.path.open("r", encoding="utf-8") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    bad += 1
+                    continue
+                if isinstance(entry, dict) and entry.get("paper_id"):
+                    entries.append(entry)
+                else:
+                    bad += 1
+        if bad:
+            logger.warning("%s: skipped %d malformed ledger line(s)", self.path, bad)
+        return entries
+
+    def latest(self, entries: Iterable[Mapping[str, Any]] | None = None) -> dict[str, dict]:
+        """Latest line per ``paper_id`` (file order wins ties)."""
+        out: dict[str, dict] = {}
+        for entry in self.read() if entries is None else entries:
+            out[str(entry["paper_id"])] = dict(entry)
+        return out
+
+    def attempts(self, entries: Iterable[Mapping[str, Any]] | None = None) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for entry in self.read() if entries is None else entries:
+            pid = str(entry["paper_id"])
+            counts[pid] = counts.get(pid, 0) + 1
+        return counts
+
+    # -- planning --------------------------------------------------------
+
+    def plan(
+        self,
+        items: Sequence[BatchItem],
+        *,
+        force: bool = False,
+        retry_failed: bool = False,
+    ) -> ResumePlan:
+        """Split *items* into run / skip buckets from the latest line per paper."""
+        entries = self.read()
+        latest = self.latest(entries)
+        self._attempts = self.attempts(entries)
+        plan = ResumePlan(to_run=[], skipped_ok=[], skipped_failed=[])
+        for item in items:
+            last = latest.get(item.paper_id)
+            if force or last is None:
+                plan.to_run.append(item)
+                continue
+            status = last.get("status")
+            if status == "ok":
+                plan.skipped_ok.append(item)
+            elif last.get("error_code") == INTERRUPTED or retry_failed:
+                plan.to_run.append(item)
+            else:
+                plan.skipped_failed.append(item)
+        return plan
+
+    # -- writing ---------------------------------------------------------
+
+    def append(self, entry: Mapping[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(dict(entry), ensure_ascii=False, default=str) + "\n")
+            handle.flush()
+
+    def next_attempt(self, paper_id: str) -> int:
+        if self._attempts is None:
+            self._attempts = self.attempts()
+        count = self._attempts.get(paper_id, 0) + 1
+        self._attempts[paper_id] = count
+        return count
+
+    def record(
+        self,
+        item: BatchItem,
+        outcome: Outcome,
+        *,
+        context: LedgerContext,
+    ) -> dict[str, Any]:
+        """Append one line for *item* and return it.
+
+        ``sha256``/``bytes`` come from the outcome when the executor already
+        read the file (remote uploads), else are computed here.
+        """
+        sha256 = outcome.sha256
+        size = outcome.size
+        if sha256 is None or size is None:
+            try:
+                sha256 = sha256 or sha256_file(item.path)
+                size = size if size is not None else item.path.stat().st_size
+            except OSError:
+                pass
+        summary = summarize_export(outcome.export) if outcome.ok else {}
+        duration = outcome.duration_s
+        if duration is None and summary.get("total_seconds") is not None:
+            duration = summary["total_seconds"]
+        entry: dict[str, Any] = {
+            "paper_id": item.paper_id,
+            "stem": item.stem,
+            "path": str(item.path),
+            "sha256": sha256,
+            "bytes": size,
+            "status": outcome.status,
+            "error_code": outcome.error_code,
+            "failed_stage": outcome.failed_stage,
+            "error": bounded_text(outcome.error),
+            "started_at": outcome.started_at,
+            "finished_at": outcome.finished_at or utc_now_iso(),
+            "duration_s": round(duration, 3) if isinstance(duration, (int, float)) else None,
+            "pipeline_seconds": summary.get("total_seconds"),
+            "stage_times": summary.get("stage_times"),
+            "llm_tokens": summary.get("llm_tokens"),
+            "llm_input_tokens": summary.get("llm_input_tokens"),
+            "llm_output_tokens": summary.get("llm_output_tokens"),
+            "n_refs": summary.get("n_refs"),
+            "n_matched": summary.get("n_matched"),
+            "n_sentences": summary.get("n_sentences"),
+            "warnings": summary.get("warnings"),
+            "bibr_version": context.bibr_version,
+            "build_sha": context.build_sha,
+            "executor": context.executor,
+            "attempt": self.next_attempt(item.paper_id),
+            "run_id": context.run_id,
+        }
+        entry.update(outcome.extra)
+        self.append(entry)
+        return entry

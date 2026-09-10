@@ -215,17 +215,12 @@ _DOI_REGISTRANT_WRAP_RE = re.compile(
     rf"((?:{_DOI_HOST}|\bdoi\s*[:.]?[ \t]*)10\.)[ \t]*\r?\n?[ \t]*(?=\d{{4,9}}/)",
     re.IGNORECASE,
 )
-_BARE_DOI_REGISTRANT_WRAP_RE = re.compile(r"(?<!\S)(10\.)[ \t]+(?=\d{4,9}/[-._;()/:A-Za-z0-9]+)")
 
 
-def _repair_doi_text(text: str, *, furniture: bool = False) -> str:
+def _repair_doi_text(text: str) -> str:
     # Bridge the registrant wrap first: the downstream ``consolidate_text``
     # bridges (dot wrap, slash-space) only engage on an intact registrant.
     bridged = _DOI_REGISTRANT_WRAP_RE.sub(r"\1", text) if "10." in text else text
-    # Layout furniture supplies the missing DOI-label evidence for a bare
-    # header identifier. Never apply this unmarked repair to ordinary prose.
-    if furniture:
-        bridged = _BARE_DOI_REGISTRANT_WRAP_RE.sub(r"\1", bridged)
     cleaned = fix_ocr_artifacts(bridged)
     return re.sub(
         r"(10\.\d{4,9}/[-._;()/:A-Za-z0-9]*-)\s+"
@@ -282,10 +277,7 @@ def _raw_source_match(
 
 def _candidates_from_text(text: str, **provenance) -> list[DoiCandidate]:
     source = text or ""
-    furniture = provenance.get("source_kind") in {"header", "footer"} or provenance.get(
-        "region_type"
-    ) in {"header", "footer"}
-    cleaned = _repair_doi_text(source, furniture=furniture)
+    cleaned = _repair_doi_text(source)
     matches = tuple(_DOI_RE.finditer(cleaned))
     if not matches:
         return []
@@ -303,6 +295,100 @@ def _candidates_from_text(text: str, **provenance) -> list[DoiCandidate]:
         )
         is not None
     ]
+
+
+def _publication_table_doi_candidates(contents) -> list[DoiCandidate]:
+    """Recover a publisher's identity box above one selected article title.
+
+    Layout models sometimes call the journal's masthead a table. Require spatial
+    ownership, complete OCR, one explicit DOI, an ISSN and publication furniture; ordinary data,
+    literature-review tables and ambiguous multi-record pages remain excluded.
+    """
+    resolution = getattr(contents, "front_matter_resolution", None)
+    if resolution is None or resolution.selected_block_id is None:
+        return []
+    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
+    selected = next(
+        (block for block in resolution.blocks if block.block_id == resolution.selected_block_id),
+        None,
+    )
+    if selected is None:
+        return []
+    titles = [
+        by_id[key]
+        for key in selected.title_candidate_ids
+        if key in by_id and by_id[key].page is not None and by_id[key].bbox is not None
+    ]
+    if not titles:
+        return []
+    page = min(candidate.page for candidate in titles)
+    top = min(candidate.bbox[1] for candidate in titles if candidate.page == page)
+    for block in resolution.blocks:
+        if block.block_id == selected.block_id:
+            continue
+        pages = {by_id[key].page for key in block.candidate_ids if key in by_id}
+        if not pages or None in pages or page in pages:
+            return []
+
+    candidates = []
+    for region in getattr(contents, "region_summaries", ()):
+        if region.label != "table" or region.page != page or region.bbox is None:
+            continue
+        if region.bbox[3] > top:
+            continue
+        # A captioned table is a document object, even when its cells contain
+        # publication metadata. It is not the article's masthead.
+        if any(
+            table.caption
+            and any(p.page_no == page and p.bbox == region.bbox for p in table.provenance)
+            for table in getattr(contents, "tables", ())
+        ):
+            continue
+        # The compact summary may be truncated at 200 characters. Only complete
+        # retained OCR can establish that a publisher box has one DOI. Using it
+        # also recovers evidence from a one-row box dropped by the table parser,
+        # without inventing an additional scientific table in the public export.
+        raw = region.canonical_ocr_content or region.raw_ocr_content
+        if not raw or len(raw) > 2000:
+            continue
+        text = re.sub(r"<[^>]*>", "\n", raw)
+        # Journal identifiers belong to the serial, even in an otherwise owned
+        # publisher box. Keep the label intact before restoring field breaks.
+        if re.search(r"\bjournal\s+doi\s*[:.]", text, re.IGNORECASE):
+            continue
+        # OCR can concatenate masthead lines, including a year immediately
+        # followed by DOI. Restore boundaries only at explicit field labels.
+        text = re.sub(
+            r"(?<!\n)(?=DOI\s*:\s*10\.\d{4,9}/|Article\s+Number\s*:"
+            r"|(?:e[- ]?)?ISSN\s*:?\s*\d{4}[- ]\d{3}[\dX]"
+            r"|Copyright\s*(?:©|\(c\)|\d{4}))",
+            "\n",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if len(re.findall(r"\bDOI\s*:\s*10\.\d{4,9}/", text, re.IGNORECASE)) != 1:
+            continue
+        if not re.search(r"\b(?:e[- ]?)?ISSN\s*:?\s*\d{4}[- ]\d{3}[\dX]\b", text, re.IGNORECASE):
+            continue
+        if not re.search(
+            r"\b(?:Vol(?:ume)?\.?\s*\d|Copyright\b|Article\s+Number\s*:)", text, re.IGNORECASE
+        ):
+            continue
+        found = _candidates_from_text(
+            text,
+            source_kind="publication_region",
+            page=page,
+            section_id=region.section_id,
+            section_type=None,
+            region_index=region.index,
+            region_type="publication_metadata",
+            text_id=None,
+        )
+        # A second bare/linked DOI still makes this box ambiguous. Do not select
+        # a favourite just because only one candidate has the explicit marker.
+        if len({candidate.normalized.casefold() for candidate in found}) == 1:
+            candidates.extend(found)
+    return candidates
 
 
 def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
@@ -367,6 +453,7 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
                 selection_tier=EXPLICIT_SELF_ID,
             )
         )
+    candidates.extend(_publication_table_doi_candidates(contents))
     return tuple(candidates)
 
 

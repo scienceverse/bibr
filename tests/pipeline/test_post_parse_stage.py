@@ -137,7 +137,7 @@ async def test_failed_post_parse_attaches_usage_before_file_buckets_are_evicted(
         }
     }
     client.usage_labels_pop_file.return_value = {
-        "extract_title_keywords": {
+        ("extract_title_keywords", "openai", "numind/NuExtract3-FP8"): {
             "input_tokens": 21,
             "output_tokens": 9,
             "total_tokens": 30,

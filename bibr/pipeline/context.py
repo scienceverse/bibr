@@ -62,7 +62,11 @@ class RunConfig:
     ocr_model: str | None = None
     ocr_profile: str | None = None
     device: str | None = None
-    crossref: bool = True
+    crossref: bool | None = None
+    """Crossref/resolver reference enrichment for this run. ``None`` follows
+    ``Settings.crossref.enrich`` (off by default); ``True`` forces it on and
+    ``False`` forces it off regardless of the setting. Resolve through
+    :meth:`enrichment_enabled` rather than reading the field directly."""
     equations: bool = True
     start_page: int | None = None
     end_page: int | None = None
@@ -72,14 +76,14 @@ class RunConfig:
     figure_extract: FigureExtractTier | None = None
     """Figure-analysis tier. ``None`` defers to ``Settings.fig.extract``."""
     include_regions: bool = False
-    """Emit the ``_regions`` debug payload (per-region layout: bbox, font,
-    content, etc.). Off by default — the field is large and not consumed by
-    standard downstream consumers like Metacheck."""
+    """Emit the ``extraction.regions`` debug payload (per-region layout: bbox,
+    font, content, etc.). Off by default — the field is large and not
+    consumed by standard downstream consumers like Metacheck."""
     include_region_meta: bool = False
     """Emit the per-text underscore region metadata (``_bbox_2d``,
     ``_font_size``, ``_region_type``, …; v4 training features). Off by
-    default — like ``_regions``, not part of the
-    Metacheck-facing API."""
+    default — ≈19% of output bytes and, like ``extraction.regions``, not
+    part of the Metacheck-facing API."""
     no_llm: bool = False
     """When True, skip all LLM-driven steps (section classification fallback,
     implicit section detection, metadata extraction, equation extraction,
@@ -94,6 +98,22 @@ class RunConfig:
     ref_parse_strategy: RefParseStrategy | None = None
     """Per-run reference parse strategy ("ner"/"llm"). ``None`` defers to
     ``Settings.REF_PARSE_STRATEGY`` / the legacy alias."""
+
+    def enrichment_enabled(self, settings: GlobalSettings) -> bool:
+        """Whether Crossref/resolver reference enrichment runs for this chunk.
+
+        Tri-state resolution of :attr:`crossref`: an explicit ``True``/``False``
+        wins, ``None`` defers to ``settings.crossref.enrich``. ``no_llm`` runs
+        never enrich (there are no LLM-parsed references to enrich, and the
+        mode promises no external calls). Whether reference *extraction* is
+        off (``ref_parse_strategy == "off"``) is a separate question that the
+        stages check alongside this one.
+        """
+        if self.no_llm:
+            return False
+        if self.crossref is not None:
+            return bool(self.crossref)
+        return bool(settings.crossref.enrich)
 
     def figure_extract_tier(self, settings: GlobalSettings) -> FigureExtractTier:
         """Resolve the per-run figure-analysis tier.
@@ -141,8 +161,6 @@ class StageSignals:
     preloading_ocr: bool = False
     ocr_init_error: BaseException | None = None
     defer_ocr_teardown: bool = False
-    ocr_page_window: bool = False
-    """A partial document: defer OCR cache writes and success gates until all pages finish."""
 
 
 @dataclass

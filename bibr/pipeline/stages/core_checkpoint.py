@@ -40,8 +40,7 @@ class CoreCheckpointStage:
                 fs.artifact_disposition = disposition_for_issues(serialized_issues)
                 enrichment_requested = (
                     self._enrichment_requested
-                    and ctx.config.crossref
-                    and ctx.settings.crossref.enrich
+                    and ctx.config.enrichment_enabled(ctx.settings)
                     and ctx.config.ref_parse_strategy != "off"
                 )
                 if enrichment_requested:

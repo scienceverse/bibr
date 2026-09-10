@@ -4,7 +4,7 @@ Exposes the extraction pipeline as MCP tools over stdio so agents (Claude
 Code, Claude Desktop, any MCP client) can chew papers and query the results
 without shelling out to the CLI or parsing whole export files.
 
-A full v10.x export is far too large for a single tool result (sentence-level
+A full v11 export is far too large for a single tool result (sentence-level
 text spans, table HTML, optionally base64 figure images), so the surface
 follows a chew-once / query-granularly contract: ``chew_paper`` runs the
 pipeline and returns only a compact summary; the ``get_*`` and
@@ -38,8 +38,8 @@ from contextlib import asynccontextmanager, redirect_stdout
 from pathlib import Path
 from typing import Any, Unpack
 
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.api import Chewer, ChewOptions
 from bibr.exceptions import BibrError
@@ -83,7 +83,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
     from bibr.local.cli import _format_validation_line
     from bibr.local.inspect import _authors_line, _citation_coverage, _enrichment_state
 
-    info = data.get("info")
+    info = data.get("metadata")
     if not isinstance(info, dict):
         info = {}
 
@@ -97,7 +97,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
     else:
         validation = "not present"
 
-    llm_usage = data.get("llm_usage")
+    llm_usage = (data.get("extraction") or {}).get("usage")
     return {
         "paper_id": paper_id,
         "source": source,
@@ -232,21 +232,21 @@ class _McpProgress:
         pass
 
 
-def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _PaperStore]) -> None:
+def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _PaperStore]) -> None:
     """Register the read-only query tools shared by every transport.
 
     ``get_store`` resolves the paper store for the calling client: a single
     shared store for the stdio server (one agent per process), a per-MCP-
     session store over serve HTTP (see ``bibr.serve.mcp``). The ``ctx``
-    parameters are injected by FastMCP and hidden from the tool schemas.
+    parameters are injected by MCPServer and hidden from the tool schemas.
     """
 
     @server.tool()
-    def list_papers(*, ctx: Context) -> list[dict[str, Any]]:
+    async def list_papers(*, ctx: Context) -> list[dict[str, Any]]:
         """List papers loaded in this session, with id, title, DOI, and source."""
         out = []
         for pid, entry in get_store(ctx).items():
-            info = entry.data.get("info")
+            info = entry.data.get("metadata")
             info = info if isinstance(info, dict) else {}
             bib = entry.data.get("bib")
             out.append(
@@ -261,26 +261,26 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         return out
 
     @server.tool()
-    def get_paper_summary(paper_id: str, *, ctx: Context) -> dict[str, Any]:
+    async def get_paper_summary(paper_id: str, *, ctx: Context) -> dict[str, Any]:
         """The compact summary (title, counts, validation, LLM usage) for one paper."""
         entry = get_store(ctx).get(paper_id)
         return _summarize(paper_id, entry.data, entry.source)
 
     @server.tool()
-    def get_metadata(paper_id: str, *, ctx: Context) -> dict[str, Any]:
-        """Paper-level metadata: the full info block (title, abstract, DOI, journal,
+    async def get_metadata(paper_id: str, *, ctx: Context) -> dict[str, Any]:
+        """Paper-level metadata: the full metadata block (title, abstract, DOI, journal,
         paper type, research-integrity statements, ...), authors, affiliations, funding."""
         entry = get_store(ctx).get(paper_id)
         return {
             "paper_id": paper_id,
-            "info": entry.data.get("info"),
+            "metadata": entry.data.get("metadata"),
             "authors": entry.data.get("author"),
-            "affiliations": entry.data.get("affiliations"),
+            "affiliations": entry.data.get("affiliation"),
             "funding": entry.data.get("funding"),
         }
 
     @server.tool()
-    def get_sections(paper_id: str, *, ctx: Context) -> list[dict[str, Any]]:
+    async def get_sections(paper_id: str, *, ctx: Context) -> list[dict[str, Any]]:
         """Section headers with hierarchy (level, parent), IMRaD-style section_type,
         and per-section sentence counts. Use section_id with get_text."""
         from collections import Counter
@@ -300,7 +300,7 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         ]
 
     @server.tool()
-    def get_text(
+    async def get_text(
         paper_id: str,
         section_id: int | None = None,
         page: int | None = None,
@@ -329,7 +329,9 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         }
 
     @server.tool()
-    def search_text(paper_id: str, query: str, limit: int = 20, *, ctx: Context) -> dict[str, Any]:
+    async def search_text(
+        paper_id: str, query: str, limit: int = 20, *, ctx: Context
+    ) -> dict[str, Any]:
         """Case-insensitive substring search over the paper's sentences; each match
         carries its text_id/section_id/page_number for follow-up queries."""
         needle = query.lower()
@@ -350,7 +352,7 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         }
 
     @server.tool()
-    def get_references(
+    async def get_references(
         paper_id: str, offset: int = 0, limit: int = 50, *, ctx: Context
     ) -> dict[str, Any]:
         """Parsed bibliography entries, verbatim from the printed reference list
@@ -369,7 +371,9 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         }
 
     @server.tool()
-    def get_reference_citations(paper_id: str, bib_id: int, *, ctx: Context) -> dict[str, Any]:
+    async def get_reference_citations(
+        paper_id: str, bib_id: int, *, ctx: Context
+    ) -> dict[str, Any]:
         """Where a reference is cited: every in-text citation of the given bib_id,
         with the citation marker and the full sentence (text_id, section, page) it
         appears in — extracted facts trace back to source sentences."""
@@ -380,7 +384,7 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         text_by_id = {t.get("text_id"): t for t in store.rows(paper_id, "text")}
         citations = []
         for x in store.rows(paper_id, "xref"):
-            if x.get("xref_type") != "bib" or x.get("xref_id") != bib_id:
+            if x.get("xref_type") != "bib" or x.get("target_id") != bib_id:
                 continue
             sentence = text_by_id.get(x.get("text_id")) or {}
             citations.append(
@@ -395,7 +399,9 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         return {"paper_id": paper_id, "reference": _drop_empty(ref), "citations": citations}
 
     @server.tool()
-    def get_tables(paper_id: str, table_id: int | None = None, *, ctx: Context) -> dict[str, Any]:
+    async def get_tables(
+        paper_id: str, table_id: int | None = None, *, ctx: Context
+    ) -> dict[str, Any]:
         """Extracted tables. Without table_id: id/caption/page per table. With
         table_id: the full table including HTML markup and structured cells."""
         rows = get_store(ctx).rows(paper_id, "table")
@@ -418,7 +424,9 @@ def _register_query_tools(server: FastMCP, get_store: Callable[[Context], _Paper
         return {"paper_id": paper_id, "table": row}
 
     @server.tool()
-    def get_figures(paper_id: str, figure_id: int | None = None, *, ctx: Context) -> dict[str, Any]:
+    async def get_figures(
+        paper_id: str, figure_id: int | None = None, *, ctx: Context
+    ) -> dict[str, Any]:
         """Extracted figures (caption, page, section). Image data is never inlined —
         has_image says whether the export carries it; the full export JSON has the pixels."""
 
@@ -441,20 +449,20 @@ def build_server(
     refs: str | bool | None = None,
     settings: Any = None,
     **options: Unpack[ChewOptions],
-) -> FastMCP:
+) -> MCPServer:
     """Build the bibr MCP server; options mirror :class:`bibr.api.Chewer`."""
     chewer = Chewer(refs=refs, settings=settings, **options)
     store = _PaperStore()
     chew_lock = asyncio.Lock()
 
     @asynccontextmanager
-    async def _lifespan(_server: FastMCP):
+    async def _lifespan(_server: MCPServer):
         try:
             yield None
         finally:
             await chewer.aclose()
 
-    server = FastMCP("bibr", instructions=_INSTRUCTIONS, lifespan=_lifespan)
+    server = MCPServer("bibr", instructions=_INSTRUCTIONS, lifespan=_lifespan)
 
     @server.tool()
     async def chew_paper(path: str, paper_id: str | None = None, *, ctx: Context) -> dict[str, Any]:
@@ -524,7 +532,7 @@ def build_server(
         return summary
 
     @server.tool()
-    def load_paper(path: str) -> dict[str, Any]:
+    async def load_paper(path: str) -> dict[str, Any]:
         """Register an existing bibr export JSON (from `bibr chew`) for querying.
 
         No re-processing — reads the file, checks it looks like a bibr
@@ -534,7 +542,7 @@ def build_server(
 
         src = Path(path).expanduser()
         try:
-            raw = src.read_text(encoding="utf-8")
+            raw = await asyncio.to_thread(src.read_text, encoding="utf-8")
         except OSError as e:
             raise ToolError(f"cannot read {src}: {e}") from e
         except UnicodeDecodeError:
@@ -549,7 +557,7 @@ def build_server(
         return _summarize(pid, data, str(src))
 
     @server.tool()
-    def save_paper(paper_id: str, path: str, compact: bool = False) -> dict[str, Any]:
+    async def save_paper(paper_id: str, path: str, compact: bool = False) -> dict[str, Any]:
         """Write a paper's complete export JSON (schema-versioned, everything the
         query tools slice from) to the given path."""
         entry = store.get(paper_id)
@@ -557,7 +565,11 @@ def build_server(
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
             kwargs: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
-            out.write_text(json.dumps(entry.data, ensure_ascii=False, **kwargs), encoding="utf-8")
+            await asyncio.to_thread(
+                out.write_text,
+                json.dumps(entry.data, ensure_ascii=False, **kwargs),
+                encoding="utf-8",
+            )
         except OSError as e:
             raise ToolError(f"cannot write {out}: {e}") from e
         return {"paper_id": paper_id, "path": str(out), "bytes": out.stat().st_size}
@@ -573,7 +585,9 @@ def run_mcp(args: argparse.Namespace) -> int:
         value = getattr(args, opt, None)
         if value:
             options[opt] = value
-    if getattr(args, "no_crossref", False):
+    if getattr(args, "crossref", False):
+        options["crossref"] = True
+    elif getattr(args, "no_crossref", False):
         options["crossref"] = False
     if getattr(args, "no_equations", False):
         options["equations"] = False

@@ -18,9 +18,7 @@ import pytest
 
 pytest.importorskip("mcp")
 
-from mcp.shared.memory import (  # noqa: E402
-    create_connected_server_and_client_session as client_session,
-)
+from mcp import Client as client_session  # noqa: E402
 
 import bibr.api  # noqa: E402
 from bibr.mcp_server import build_server, run_mcp  # noqa: E402
@@ -31,15 +29,15 @@ FIXTURE_ID = "10.1234/example.5678"
 
 def _payload(result):
     """Unwrap a successful call_tool result into its structured payload."""
-    assert not result.isError, [c.text for c in result.content]
-    payload = result.structuredContent
+    assert not result.is_error, [c.text for c in result.content]
+    payload = result.structured_content
     assert payload is not None
     # FastMCP wraps non-dict returns (lists) under a "result" key.
     return payload["result"] if set(payload) == {"result"} else payload
 
 
 def _error_text(result) -> str:
-    assert result.isError
+    assert result.is_error
     return result.content[0].text
 
 
@@ -96,7 +94,7 @@ async def test_load_paper_returns_inspect_style_summary():
         assert summary["authors"].startswith("4 (")
         assert "references cited" in summary["in_text_citations"]
         assert "enriched" in summary["enrichment"]
-        assert "gemini-2.5-flash" in summary["llm_usage"]
+        assert any(row["model"] == "gemini-2.5-flash" for row in summary["llm_usage"]["breakdown"])
 
 
 async def test_load_paper_rejects_non_export(tmp_path):
@@ -135,7 +133,7 @@ async def test_list_papers():
 async def test_get_metadata():
     async with open_session(load=True) as loaded:
         meta = _payload(await loaded.call_tool("get_metadata", {"paper_id": FIXTURE_ID}))
-        assert meta["info"]["title"] == "Deep Learning for Something Great"
+        assert meta["metadata"]["title"] == "Deep Learning for Something Great"
         assert len(meta["authors"]) == 4
         assert meta["authors"][0]["family"] == "Doe"
 
@@ -291,7 +289,7 @@ async def test_chew_paper_runs_warm_pipeline(monkeypatch, tmp_path):
 
         # The chewed paper is registered for the query tools.
         meta = _payload(await client.call_tool("get_metadata", {"paper_id": "my-id"}))
-        assert meta["info"]["title"] == "Deep Learning for Something Great"
+        assert meta["metadata"]["title"] == "Deep Learning for Something Great"
 
 
 async def test_chew_paper_input_errors(tmp_path):
@@ -409,6 +407,31 @@ def test_run_mcp_translates_cli_flags(monkeypatch):
         "no_llm": True,
         "consolidate": "fill",
     }
+
+
+def test_run_mcp_maps_crossref_flag_to_forced_on(monkeypatch):
+    """``bibr mcp --crossref`` forces enrichment on for the warm pipeline."""
+    import argparse
+
+    captured = {}
+
+    class FakeServer:
+        def run(self, transport):
+            captured["transport"] = transport
+
+    def fake_build_server(*, refs=None, settings=None, **options):
+        captured["options"] = options
+        return FakeServer()
+
+    monkeypatch.setattr("bibr.mcp_server.build_server", fake_build_server)
+    args = argparse.Namespace(crossref=True, no_crossref=False, verbose=False)
+    assert run_mcp(args) == 0
+    assert captured["options"] == {"crossref": True}
+
+    # Neither flag → the option is absent, so CROSSREF_ENRICH decides.
+    args = argparse.Namespace(crossref=False, no_crossref=False, verbose=False)
+    assert run_mcp(args) == 0
+    assert captured["options"] == {}
 
 
 def test_cli_parser_accepts_mcp_subcommand():

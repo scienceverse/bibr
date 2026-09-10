@@ -1,6 +1,7 @@
 """Chunked file processing loop for ``bibr chew``."""
 
 import asyncio
+import importlib.util
 import json
 import logging
 import sys
@@ -58,10 +59,10 @@ def _format_validation_line(result_json: dict | None) -> str | None:
 
     ``None`` when there's nothing to report: the ``validation`` block is
     absent or its errors+warnings count is zero, so a clean payload prints
-    nothing extra. Otherwise: the top (by severity) 1-2 issues plus a count
-    of any non-validation ``processing_warnings`` (e.g. STATEMENT_LEXICAL_
-    FALLBACK) — the ``VALIDATION:<severity>:<code>:`` lines are excluded
-    from that count since they're already reflected in errors/warnings.
+    nothing extra. Otherwise: the top (by severity) 1-2 issues plus a count of
+    the processing warnings in ``extraction.warnings`` (e.g.
+    STATEMENT_LEXICAL_FALLBACK). Gate findings are not mirrored there, so every
+    entry is a genuine processing warning.
     """
     n_errors, n_warnings = _validation_counts(result_json)
     if n_errors + n_warnings <= 0:
@@ -74,12 +75,10 @@ def _format_validation_line(result_json: dict | None) -> str | None:
     top = sorted(issues, key=lambda i: severity_rank.get(i.get("severity"), 2))[:2]
     top_str = "; ".join(f"{i.get('code') or '?'}: {i.get('message') or '?'}" for i in top)
 
-    processing_warnings = result_json.get("processing_warnings")
+    processing_warnings = (result_json.get("extraction") or {}).get("warnings")
     if not isinstance(processing_warnings, list):
         processing_warnings = []
-    extra = sum(
-        1 for w in processing_warnings if not (isinstance(w, str) and w.startswith("VALIDATION:"))
-    )
+    extra = len(processing_warnings)
 
     warnings_part = f"{n_warnings} warnings"
     if extra > 0:
@@ -426,11 +425,19 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
-    if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
+    # opencv is only on the torch layout path (transformers' image processor
+    # imports cv2); a core install runs layout through ONNX Runtime, where the
+    # crop and post-processing are Pillow/numpy, so a missing cv2 is not a
+    # reason to refuse the PDF.
+    if (
+        not args.dry_run
+        and any(p.suffix.lower() == ".pdf" for p in files)
+        and importlib.util.find_spec("torch") is not None
+    ):
         opencv_reason = _opencv_unavailable_reason()
         if opencv_reason is not None:
             hint = (
-                "uv sync --extra ml"
+                "uv sync --extra torch"
                 if "not installed" in opencv_reason
                 else "uv pip install --reinstall opencv-python-headless"
             )

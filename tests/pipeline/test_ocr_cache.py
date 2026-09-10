@@ -348,14 +348,6 @@ def test_key_changes_with_native_text_settings(monkeypatch):
     assert ocr_cache._key(fs, cfg, _identity()) != base
 
 
-@pytest.mark.parametrize("flag", ["native_repair_enabled", "native_captions_enabled"])
-def test_key_changes_with_native_reconstruction_policy(monkeypatch, flag):
-    fs, cfg = _fs(), RunConfig(ocr_backend="glm-llama")
-    base = ocr_cache._key(fs, cfg, _identity())
-    monkeypatch.setattr(Settings.ocr, flag, not getattr(Settings.ocr, flag))
-    assert ocr_cache._key(fs, cfg, _identity()) != base
-
-
 def test_key_changes_with_effective_reference_segmentation_strategy():
     fs = _fs()
     geom = ocr_cache._key(
@@ -459,6 +451,9 @@ async def test_automatic_paddle_resolves_selected_identity_before_cache_lookup(e
     """An automatic chain cannot probe a cache under its unresolved alias."""
     cfg = RunConfig(ocr_backend="paddle")
     fs = _fs()
+    # A region that will call the backend: the chain must resolve before the
+    # lookup (a native-only file would need neither the engine nor its identity).
+    fs.layout_results = [[{"label": "text", "task_type": "text"}]]
     selected = _identity(
         backend="glm-llama",
         model="glm/selected",
@@ -510,6 +505,30 @@ async def test_interleaved_automatic_paddle_resolves_identity_before_bundle_cach
     assert pending == []
     rm.await_ocr.assert_awaited_once()
     assert load.call_args.args[2] == selected
+
+
+@pytest.mark.asyncio
+async def test_interleaved_automatic_paddle_defers_startup_when_cache_disabled(monkeypatch):
+    """No bundle to look up → no need for a concrete identity before layout.
+
+    The automatic chain used to start its engine here, before native text was
+    known, purely to key a cache that is off by default. OcrStage now starts it
+    after NativeTextStage, and only if a region still needs the backend.
+    """
+    monkeypatch.setattr(Settings.cache, "ocr", False)
+    cfg = RunConfig(ocr_backend="paddle")
+    rm = _ocr_rm()
+    rm.ocr = None
+    rm.ocr_runtime_identity = None
+    rm.await_ocr = AsyncMock(side_effect=AssertionError("must not start before native text"))
+    fs = _fs()
+    ctx = _ctx([fs], resources=rm, config=cfg)
+
+    pending = await InterleavedRenderOcrStage()._probe_cache(ctx)
+
+    assert pending == [fs]
+    rm.await_ocr.assert_not_awaited()
+    assert "ocr_runtime_identity" not in ctx.scratch
 
 
 @pytest.mark.asyncio
@@ -729,3 +748,67 @@ def test_key_changes_with_profile_image_geometry(monkeypatch):
     )
 
     assert baseline != ocr_cache._key(fs, cfg, _identity())
+
+
+# --- model pins ---------------------------------------------------------------
+#
+# A complete entry lets the pipeline skip layout detection and OCR inference
+# outright, so the pins selecting those weights decide its contents. Serving a
+# re-pinned model against a stale entry replays the *old* model's regions,
+# which also makes an A/B evaluation of the two report no difference at all.
+
+
+def _settings_pair():
+    from bibr.config import snapshot_settings
+
+    baseline = snapshot_settings()
+    return baseline, baseline.model_copy(deep=True)
+
+
+def test_key_changes_with_the_layout_model_revision():
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    baseline, repinned = _settings_pair()
+    repinned.layout.model_revision = "0" * 40
+
+    assert ocr_cache._key(fs, cfg, _identity(), baseline) != ocr_cache._key(
+        fs, cfg, _identity(), repinned
+    )
+
+
+def test_key_changes_with_the_paddle_model_revision():
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="serve-http", ocr_profile="paddle")
+    baseline, repinned = _settings_pair()
+    repinned.ocr.paddle_revision = "0" * 40
+
+    assert ocr_cache._key(fs, cfg, _identity(), baseline) != ocr_cache._key(
+        fs, cfg, _identity(), repinned
+    )
+
+
+def test_key_changes_with_the_paddle_model_id():
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="serve-http", ocr_profile="paddle")
+    baseline, other = _settings_pair()
+    other.ocr.paddle_model = "PaddlePaddle/PaddleOCR-VL-9.9"
+
+    assert ocr_cache._key(fs, cfg, _identity(), baseline) != ocr_cache._key(
+        fs, cfg, _identity(), other
+    )
+
+
+def test_the_served_alias_does_not_hide_a_repin():
+    """``identity.model`` is the alias vLLM is launched with, not the pin.
+
+    ``--served-model-name paddle-ocr-vl-1.6`` stays put while ``--revision``
+    changes, so the identity alone cannot tell the two runs apart.
+    """
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="serve-http", ocr_profile="paddle")
+    baseline, repinned = _settings_pair()
+    repinned.ocr.paddle_revision = "0" * 40
+    alias = _identity(model="paddle-ocr-vl-1.6")
+
+    assert alias.model == _identity().model
+    assert ocr_cache._key(fs, cfg, alias, baseline) != ocr_cache._key(fs, cfg, alias, repinned)

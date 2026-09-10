@@ -294,6 +294,12 @@ _ALPHANUMERIC_LINEWRAP_RE = re.compile(
 
 def _bridge_alphanumeric_linewraps(text: str) -> str:
     """Keep literal hyphens in scientific alphanumeric compounds."""
+    # Strict superset of what _ALPHANUMERIC_LINEWRAP_RE can match — both its
+    # alternatives require "-[ \t]*\r?\n". Its two neighbours already take
+    # this shortcut; without it the two-alternative sub ran over every OCR
+    # region, and on 13,248 real regions the rule fires on 0.02% of them.
+    if not _HYPHEN_AT_LINEBREAK_RE.search(text):
+        return text
 
     def _bridge(match: re.Match[str]) -> str:
         if match.group("alpha") is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from dataclasses import dataclass
 from enum import StrEnum
@@ -103,7 +104,7 @@ class ClassifierResources:
             estimated_peak_bytes=settings.ml.paper_classifier_estimated_peak_mb * _MIB,
             batch_size=settings.ml.paper_classifier_batch_size,
             batch_timeout_ms=settings.ml.paper_classifier_batch_timeout_ms,
-            loader=paper_loader or _load_paper_model,
+            loader=paper_loader or functools.partial(_load_paper_model, settings=settings),
         )
         self._section = _ManagedClassifier(
             name="section",
@@ -113,7 +114,7 @@ class ClassifierResources:
             estimated_peak_bytes=settings.ml.section_classifier_estimated_peak_mb * _MIB,
             batch_size=settings.ml.section_classifier_batch_size,
             batch_timeout_ms=settings.ml.section_classifier_batch_timeout_ms,
-            loader=section_loader or _load_section_model,
+            loader=section_loader or functools.partial(_load_section_model, settings=settings),
         )
 
     async def start(self) -> None:
@@ -240,13 +241,15 @@ def _peak_vram_bytes(device: str) -> int | None:
         return None
 
 
-def _load_paper_model(model_id: str, revision: str, device: str):
-    from bibr.structure.paper_classifier_model import PaperClassifierModel
+def _load_paper_model(model_id: str, revision: str, device: str, settings=None):
+    """Load the paper classifier on the runtime ``ML_RUNTIME`` selects (ONNX or torch)."""
+    from bibr.structure.paper_classifier_common import load_paper_classifier
 
-    return PaperClassifierModel.from_pretrained(model_id, revision=revision, device=device)
+    return load_paper_classifier(model_id, revision=revision, device=device, settings=settings)
 
 
-def _load_section_model(model_id: str, revision: str, device: str):
-    from bibr.structure.section_classifier_model import SectionClassifierModel
+def _load_section_model(model_id: str, revision: str, device: str, settings=None):
+    """Load the section classifier on the runtime ``ML_RUNTIME`` selects (ONNX or torch)."""
+    from bibr.structure.section_classifier_common import load_section_classifier
 
-    return SectionClassifierModel.from_pretrained(model_id, revision=revision, device=device)
+    return load_section_classifier(model_id, revision=revision, device=device, settings=settings)

@@ -5,10 +5,10 @@
     import bibr
 
     result = bibr.chew("paper.pdf", ocr="glm")
-    result.title             # from the info block
+    result.title             # from the metadata block
     result.references        # list of dicts (alias for the schema's "bib")
     result.references.df     # the same rows as a pandas DataFrame
-    result.data              # the raw v10.7 export dict
+    result.data              # the raw v11.0 export dict
     result.save("out.json")
 
 Inside an already-running event loop (Jupyter, async apps) use the async
@@ -55,7 +55,7 @@ __all__ = [
     "chew_many",
 ]
 
-# Table-shaped top-level keys of the v10.7 export schema.
+# Table-shaped top-level keys of the v11.0 export schema.
 _TABLE_KEYS = (
     "author",
     "text",
@@ -109,7 +109,7 @@ class ChewOptions(TypedDict, total=False):
     ocr_model: str | None
     ocr_profile: Literal["paddle", "glm"] | None
     device: str | None
-    crossref: bool
+    crossref: bool | None
     equations: bool
     no_llm: bool
     figure_images: bool | None
@@ -159,13 +159,14 @@ class ChewFailure:
 
 
 class Result:
-    """Read-only view over a bibr v10.7 export dict (also accepts v10.6).
+    """Read-only view over a bibr v11.0 export dict.
 
     Table keys (``bib``, ``author``, ``text``, ...) and their friendly
     aliases (``references``, ``authors``, ``sections``) come back as
-    :class:`Records`; ``info`` fields (``title``, ``doi``, ...) and the
-    remaining top-level keys (``paper_id``, ``llm_usage``, ...) pass through
-    as-is. The raw dict stays available as :attr:`data`.
+    :class:`Records`; ``metadata`` fields (``title``, ``doi``, ...) and
+    ``source`` fields (``file_name``, ``file_hash``, ``input_format``) resolve
+    as attributes, as do the remaining top-level keys (``paper_id``,
+    ``extraction``, ...). The raw dict stays available as :attr:`data`.
     """
 
     def __init__(self, data: dict[str, Any] | PaperExport):
@@ -180,12 +181,12 @@ class Result:
 
     @property
     def model(self) -> PaperExport:
-        """Validated v10.6/v10.7 export model for statically typed consumers."""
+        """Validated v11.0 export model for statically typed consumers."""
         return self._model
 
     @property
     def data(self) -> dict[str, Any]:
-        """The raw v10.6/v10.7 export dict."""
+        """The raw v11.0 export dict."""
         return self._data
 
     @property
@@ -205,20 +206,29 @@ class Result:
             return Records(data.get(key) or [])
         if key in data:
             return data[key]
-        info = data.get("info") or {}
-        if key in info:
-            return info[key]
+        # ``source`` is searched alongside ``metadata`` so ``result.file_hash``
+        # keeps resolving after v11 split file identity out of the old ``info``.
+        for container in ("metadata", "source"):
+            block = data.get(container) or {}
+            if key in block:
+                return block[key]
         raise AttributeError(f"{type(self).__name__!r} object has no attribute {name!r}")
 
     def __dir__(self) -> list[str]:
-        info = self._data.get("info") or {}
+        metadata = self._data.get("metadata") or {}
+        source = self._data.get("source") or {}
         return sorted(
-            set(super().__dir__()) | set(_TABLE_KEYS) | set(_ALIASES) | set(self._data) | set(info)
+            set(super().__dir__())
+            | set(_TABLE_KEYS)
+            | set(_ALIASES)
+            | set(self._data)
+            | set(metadata)
+            | set(source)
         )
 
     def __repr__(self) -> str:
-        info = self._data.get("info") or {}
-        title = info.get("title") or "untitled"
+        metadata = self._data.get("metadata") or {}
+        title = metadata.get("title") or "untitled"
         if len(title) > 60:
             title = title[:57] + "..."
         n_refs = len(self._data.get("bib") or [])
@@ -375,6 +385,36 @@ async def _chew_on(
     return await _process_batch(pipeline, batch, batch_size, progress)
 
 
+def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str, Any]) -> None:
+    """Fail before any model loads when the configured LLM cannot run.
+
+    Mirrors ``bibr chew``: a missing cloud credential, or a managed local
+    backend with no launcher or unsupported hardware, used to surface only on
+    the first LLM call — after the caller had already paid for layout and
+    OCR. Raises the provider's ``ValueError`` for credentials and
+    :class:`~bibr.exceptions.ConfigurationError` for a local backend.
+    """
+    if pipeline_kwargs.get("no_llm"):
+        return
+    from bibr.config import snapshot_settings
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
+
+    effective = settings if settings is not None else snapshot_settings()
+    backend = resolve_llm_backend(pipeline_kwargs.get("llm_backend") or effective.llm.backend)
+    if backend == "cloud":
+        from bibr.clients.llm import preflight_credentials
+
+        preflight_credentials(settings)
+    elif backend in LOCAL_LLM_BACKENDS:
+        from bibr.local.cli.run_config import _preflight_local_backend
+
+        problem = _preflight_local_backend(backend)
+        if problem:
+            from bibr.exceptions import ConfigurationError
+
+            raise ConfigurationError(problem)
+
+
 def _refs_kwargs(refs: str | bool | None) -> dict[str, Any]:
     """Translate the ``refs`` option into per-run pipeline kwargs.
 
@@ -413,6 +453,7 @@ async def achew(
 
     from bibr.local.pipeline import LocalPipeline
 
+    _preflight_llm(settings, kwargs)
     pipeline = LocalPipeline(settings=settings, **kwargs)
     try:
         return await _chew_on(pipeline, path, paper_id=paper_id, batch_size=batch_size)
@@ -454,6 +495,7 @@ class Chewer:
             **_refs_kwargs(refs),
             "settings": self._settings,
         }
+        _preflight_llm(self._settings, self._kwargs)
         self._pipeline: Any = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._closed = False
@@ -625,7 +667,9 @@ def chew(
     (``"llm"``/``"ner"``/``"llm-chunked"``, or ``"off"``/``False`` to skip
     reference extraction entirely), ``ref_seg`` (segmentation strategy:
     ``"geom"``/``"region"``/``"llm"``/``"crf"``), ``no_llm``, ``device``,
-    ``crossref``,
+    ``crossref`` (tri-state: ``True`` runs Crossref/resolver reference
+    enrichment for this call, ``False`` skips it, ``None``/omitted follows
+    the ``CROSSREF_ENRICH`` setting, which is off by default),
     ``equations``, ``pages`` (1-based, e.g. ``"1-5"``), ``figure_images``,
     ``include_regions``, ``ocr_url``, ``ocr_model``, ``paper_id``
     (single-file only), ``batch_size`` (files per chunk, batch only),

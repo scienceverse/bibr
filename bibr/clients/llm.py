@@ -14,7 +14,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from bibr.clients.prompts import PROMPTS, title_keywords_spec
+from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, SafeLlmDiagnostics, UpstreamServiceError
 from bibr.schemas import (
@@ -35,6 +35,12 @@ if TYPE_CHECKING:
     from bibr.utils.rate_limiter import AsyncLocalRateLimiter, AsyncRedisRateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Seconds allowed for the one-shot Redis reachability probe that decides
+# between the shared and the local rate limiter. A limiter is a fallback, not a
+# dependency: if Redis cannot answer this fast the local one is correct enough
+# and vastly better than making every request wait on it.
+_REDIS_PROBE_TIMEOUT = 1.0
 
 # Cloud default: number of times Instructor attempts a response when its output
 # fails schema validation (1 initial + 2 re-asks). Deterministic local servers
@@ -460,6 +466,83 @@ def _extract_retry_after_seconds(exc: BaseException) -> float | None:
     return None
 
 
+# Credential-shaped tokens for the providers this codebase actually talks to:
+# OpenAI (sk-...), Google (AIza...), the bibr-resolver (sv_...), Groq (gsk_...).
+# Deliberately not a general secret-scanner — it does not attempt to catch every
+# credential shape in existence (e.g. AWS AKIA... keys), only the ones that can
+# plausibly appear in a bibr prompt/completion via LLM_API_KEY or similar.
+_SECRET_RE = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{8,}|AIza[A-Za-z0-9_-]{8,}|sv_[A-Za-z0-9_-]{8,}|"
+    r"gsk_[A-Za-z0-9_-]{8,})\b"
+)
+
+
+def scrub_trace_text(text: str) -> str:
+    """Redact credential-shaped tokens before a prompt/completion is persisted.
+
+    A stored trace is precisely the artifact where a stray credential would
+    survive; a 2026-07-23 security audit of this repo found ~35 sites where a
+    credential can surface via a repr. Called on every message and completion
+    before a ``LlmTraceExport`` row is assembled — never on raw text that
+    might reach a log or export unscrubbed.
+    """
+    return _SECRET_RE.sub("[REDACTED]", text)
+
+
+def _sanitize_trace_value(value: Any) -> Any:
+    """Recursively coerce *value* to JSON-safe, scrubbed primitives for a trace row.
+
+    ``LlmTraceExport.params`` is an untyped ``dict`` (pydantic doesn't validate
+    its values), so it accepts anything at construction time. Every current
+    provider adapter's ``call_kwargs`` is already scalars or nested dicts of
+    scalars (Google nests ``temperature`` under ``generation_config``;
+    Anthropic nests ``thinking``) — this is a safety net, not a workaround for
+    something happening today. Without it, a future adapter threading an Enum
+    or an SDK sentinel (e.g. instructor's ``NotGiven``) into ``call_kwargs``
+    would construct a valid row and only fail later at
+    ``model_dump(mode="json")`` — failing the *entire file's* export, far from
+    where the bad value was introduced.
+
+    Strings are scrubbed here too: ``params`` gets no exemption from the same
+    credential-shaped-token check applied to ``messages``/``raw_completion``,
+    even though no current adapter puts a credential into ``call_kwargs``
+    (those live only in ``build_client()``).
+    """
+    if isinstance(value, str):
+        return scrub_trace_text(value)
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitize_trace_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_trace_value(v) for v in value]
+    # Unknown/non-primitive type (Enum, SDK sentinel, ...): coerce via repr
+    # rather than let it ride unsanitized into a "JSON-safe" row.
+    return scrub_trace_text(repr(value))
+
+
+def _trace_message_text(content: Any) -> str:
+    """Render a message's ``content`` as plain text for a trace row.
+
+    Handles the post-``transform_messages`` shape used by providers with a
+    transform hook (currently only Anthropic): a list of content blocks
+    (``{"type": "text", "text": ..., "cache_control": {...}}``) left behind by
+    cache-marker parts (:func:`bibr.clients.prompts.part`) that
+    ``_flatten_content_parts`` does not join, because the ``"cache"`` key it
+    looks for has already been replaced with ``"cache_control"`` by the
+    transform. Without this, an Anthropic trace row's message captured Python
+    repr noise (``"[{'type': 'text', 'text': ..., 'cache_control': ...}]"``)
+    instead of the actual prompt text — not a security issue (scrubbing still
+    ran on the repr), but it defeats the point: these rows exist to be
+    training data, not a debug dump of internal message shapes.
+    """
+    if isinstance(content, list):
+        parts = [str(p["text"]) for p in content if isinstance(p, dict) and "text" in p]
+        if parts:
+            return "".join(parts)
+    return str(content or "")
+
+
 def _build_call_kwargs(
     reasoning_effort: str | None = None,
     max_tokens: int | None = None,
@@ -638,6 +721,17 @@ class InstructorBackend:
                 max_retries=validation_retry,
                 **call_kwargs,
             )
+            # Known limitation (see LlmTraceExport docstring): max_retries
+            # above makes instructor re-ask internally on schema-validation
+            # failure, so a rejected completion never reaches this line —
+            # only the eventually-accepted call is ever captured here, hence
+            # parsed_ok is unconditionally True and attempt is always 1.
+            self._owner._record_trace(
+                messages=full_messages,
+                completion=completion,
+                params=call_kwargs,
+                parsed_ok=True,
+            )
             return result, completion
         if on_dispatch is not None:
             on_dispatch()
@@ -678,12 +772,25 @@ class LLMClient:
         self._markdown_json_client = None
         self._markdown_json_client_sig: tuple | None = None
         self._limiter: AsyncRedisRateLimiter | AsyncLocalRateLimiter | None = None
+        # Guards lazy-init across concurrent first callers; otherwise both
+        # coroutines pass the ``self._limiter is None`` check, both probe
+        # Redis, and one of the two limiters is orphaned. Bound to the loop it
+        # was created in so a client reused across loops rebuilds it.
+        self._limiter_init_lock: asyncio.Lock | None = None
+        self._limiter_init_loop: asyncio.AbstractEventLoop | None = None
         self._concurrency_sem: asyncio.Semaphore | None = None
+        self._llm_cache = None  # Lazy-init structured-response cache (CACHE_LLM)
         self._track_usage = self._settings.llm.track_usage
         self._usage: dict[str, dict[str, int]] = {}
         self._usage_by_file: dict[str, dict[str, dict[str, int]]] = {}
-        self._labels_by_file: dict[str, dict[str, dict[str, int]]] = {}
+        # Keyed by (label, provider, model): a label used under two engines
+        # within the same file must not blend one engine's stamp with the
+        # other's token counts (see _label_bucket).
+        self._labels_by_file: dict[str, dict[tuple[str, str, str], dict[str, int]]] = {}
         self._protocol_hashes_by_file: dict[str, dict[str, dict[str, str]]] = {}
+        # Opt-in trace rows (LLM_CAPTURE_TRACE), keyed like the usage buckets
+        # above. Always empty when capture is off — see _record_trace.
+        self._traces_by_file: dict[str, list[dict]] = {}
 
         from bibr.utils.circuit_breaker import AsyncCircuitBreaker
 
@@ -703,6 +810,20 @@ class LLMClient:
                 "LLM structured backend: NuExtract native template (model=%s)",
                 self._settings.llm.model,
             )
+            if self._settings.llm.capture_trace:
+                # Loud, not silent: NuExtractNativeBackend has no _owner and
+                # never calls _record_trace (see LlmTraceExport docstring).
+                # Without this, an operator on the primary local/self-hosted
+                # path believes they're collecting LoRA training data and
+                # gets an empty extraction.trace — indistinguishable from
+                # "off" or "nothing to capture" anywhere else in the export.
+                logger.warning(
+                    "LLM_CAPTURE_TRACE is on but the resolved structured backend is "
+                    "nuextract-native (model=%s), which is not yet instrumented for "
+                    "trace capture — extraction.trace will stay empty for calls routed "
+                    "through this backend.",
+                    self._settings.llm.model,
+                )
             return NuExtractNativeBackend(settings=self._settings)
         return InstructorBackend(self)
 
@@ -842,20 +963,53 @@ class LLMClient:
 
     @property
     def limiter(self):
-        """Rate limiter for LLM API calls. Uses Redis if available, local fallback otherwise."""
-        if self._limiter is None:
+        """The rate limiter, or ``None`` before the first request builds it.
+
+        Built by :meth:`_ensure_limiter`, not here: the Redis probe must run on
+        the event loop rather than block it. Mirrors ``CrossrefClient.limiter``.
+        """
+        return self._limiter
+
+    async def _ensure_limiter(self) -> None:
+        """Create the rate limiter on first request (Redis probe runs off-loop).
+
+        The probe used to be a *synchronous* ``redis.Redis.ping()`` inside the
+        ``limiter`` property, reached from a coroutine. ``bibr serve`` runs one
+        LitServe worker with ``enable_async=True``, so a single event loop
+        serves every concurrent request: a Redis that accepts the connection
+        but never answers froze the whole worker, not just the caller — every
+        in-flight paper stalled together (measured at 5.1 s of total freeze
+        against a wedged-but-reachable Redis). ``socket_connect_timeout``
+        bounds only the connect, not the command round-trip, so the read is
+        bounded explicitly here as well.
+        """
+        if self._limiter is not None:
+            return
+        loop = asyncio.get_running_loop()
+        if self._limiter_init_lock is None or self._limiter_init_loop is not loop:
+            self._limiter_init_lock = asyncio.Lock()
+            self._limiter_init_loop = loop
+        async with self._limiter_init_lock:
+            if self._limiter is not None:
+                return
             interval = 60.0 / self._settings.llm.rate_limit_rpm
             window = interval * self._BURST
             try:
                 if not self._settings.redis.url:
                     raise RuntimeError("Redis URL not configured")
-                from redis import Redis as SyncRedis
+                from redis.asyncio import Redis as AsyncRedis
 
                 from bibr.utils.rate_limiter import AsyncRedisRateLimiter
 
-                sr = SyncRedis.from_url(self._settings.redis.url, socket_connect_timeout=1)
-                sr.ping()
-                sr.close()
+                r = AsyncRedis.from_url(
+                    self._settings.redis.url,
+                    socket_connect_timeout=_REDIS_PROBE_TIMEOUT,
+                    socket_timeout=_REDIS_PROBE_TIMEOUT,
+                )
+                try:
+                    await asyncio.wait_for(r.ping(), timeout=_REDIS_PROBE_TIMEOUT)
+                finally:
+                    await r.aclose()
 
                 self._limiter = AsyncRedisRateLimiter(
                     redis_url=self._settings.redis.url,
@@ -872,7 +1026,6 @@ class LLMClient:
                     max_requests=self._BURST,
                     window_seconds=window,
                 )
-        return self._limiter
 
     def _concurrency_gate(self) -> "asyncio.Semaphore | contextlib.nullcontext":
         """Semaphore bounding in-flight LLM requests (``LLM_MAX_CONCURRENCY``).
@@ -924,13 +1077,22 @@ class LLMClient:
         long-lived (serve) clients."""
         return self._usage_by_file.pop(key, {})
 
-    def usage_labels_pop_file(self, key: str) -> dict[str, dict[str, int]]:
-        """Per-label usage for calls attributed to *key*; removes the bucket."""
+    def usage_labels_pop_file(self, key: str) -> dict[tuple[str, str, str], dict[str, int]]:
+        """Usage for calls attributed to *key*, keyed by ``(label, provider, model)``;
+        removes the bucket."""
         return self._labels_by_file.pop(key, {})
 
     def protocol_hashes_pop_file(self, key: str) -> dict[str, dict[str, str]]:
         """Per-label protocol hashes for calls attributed to *key*; removes the bucket."""
         return self._protocol_hashes_by_file.pop(key, {})
+
+    def traces_pop_file(self, key: str) -> list[dict]:
+        """Opt-in trace rows for calls attributed to *key*; removes the bucket.
+
+        Always ``[]`` when ``LLM_CAPTURE_TRACE`` is off — mirrors
+        ``usage_labels_pop_file``'s pop-and-evict contract so a shared
+        (serve/local) client's per-file map stays bounded."""
+        return self._traces_by_file.pop(key, [])
 
     @property
     def resolved_structured_backend(self) -> str:
@@ -944,8 +1106,12 @@ class LLMClient:
         if not file_key:
             return None
         label = _usage_label.get() or "unlabeled"
+        # Keyed by the full (label, provider, model) triple — not just label —
+        # so a label used under two engines within one file gets two buckets
+        # instead of one bucket whose provider/model stamp goes stale mid-file.
+        key = (label, self._settings.llm.provider, self._settings.llm.model)
         return self._labels_by_file.setdefault(file_key, {}).setdefault(
-            label,
+            key,
             {
                 "input_tokens": 0,
                 "output_tokens": 0,
@@ -973,6 +1139,64 @@ class LLMClient:
             return
         label = _usage_label.get() or "unlabeled"
         self._protocol_hashes_by_file.setdefault(file_key, {}).setdefault(label, hashes)
+
+    def _record_trace(
+        self,
+        *,
+        messages: list[dict],
+        completion: Any,
+        params: dict,
+        parsed_ok: bool,
+        attempt: int = 1,
+        error: str | None = None,
+    ) -> None:
+        """Append one opt-in trace row (``LLM_CAPTURE_TRACE``) for this call.
+
+        Mirrors ``_record_protocol_hashes``'s file/label attribution via the
+        same contextvars. Best-effort: a capture bug must never break the
+        actual structured-output call, so failures here are swallowed after a
+        debug log — never let trace capture take extraction down with it.
+        """
+        if not self._settings.llm.capture_trace:
+            return
+        file_key = _usage_file_hash.get()
+        if not file_key:
+            return
+        try:
+            raw: str | None = None
+            finish_reason: str | None = None
+            choices = getattr(completion, "choices", None) or []
+            if choices:
+                message = getattr(choices[0], "message", None)
+                content = getattr(message, "content", None)
+                raw = str(content) if content else None
+                finish_reason = getattr(choices[0], "finish_reason", None)
+            self._traces_by_file.setdefault(file_key, []).append(
+                {
+                    "label": _usage_label.get() or "unlabeled",
+                    "provider": self._settings.llm.provider,
+                    "model": self._settings.llm.model,
+                    "messages": [
+                        {**m, "content": scrub_trace_text(_trace_message_text(m.get("content")))}
+                        for m in messages
+                    ],
+                    "raw_completion": scrub_trace_text(raw) if raw else None,
+                    "parsed_ok": parsed_ok,
+                    "finish_reason": finish_reason,
+                    # Resolved sampling params as _build_call_kwargs produced
+                    # them for this call — shape is provider-dependent (e.g.
+                    # Google nests temperature under generation_config), but
+                    # always the actually-resolved values, never filtered down
+                    # to a "safe" subset that could drop them silently.
+                    # _sanitize_trace_value makes the (untyped) dict JSON-safe
+                    # and scrubs any embedded credential-shaped strings.
+                    "params": _sanitize_trace_value(dict(params)),
+                    "attempt": attempt,
+                    "error": error,
+                }
+            )
+        except Exception:  # noqa: BLE001 — trace capture must not affect extraction
+            logger.debug("Failed to capture LLM trace row", exc_info=True)
 
     async def _run_labeled_call(self, label: str, call):
         if not self._track_usage:
@@ -1016,7 +1240,9 @@ class LLMClient:
     async def _acquire_rate_limit(self) -> None:
         started = time.perf_counter()
         try:
-            await self.limiter.acquire()
+            await self._ensure_limiter()
+            assert self._limiter is not None  # noqa: S101 — _ensure_limiter sets it
+            await self._limiter.acquire()
         finally:
             self._record_label_metric(
                 "rate_limit_wait_ms",
@@ -1330,7 +1556,7 @@ class LLMClient:
         client_override: Any = None,
         max_tokens: int | None = None,
     ) -> Any:
-        """Run a captured route with at most one protocol recovery."""
+        """Run a captured route, allowing at most native -> Instructor once."""
         from bibr.clients.nuextract import NuExtractInvalidOutput
 
         try:
@@ -1402,6 +1628,90 @@ class LLMClient:
             self._record_label_metric("decoder_abort_fallbacks_recovered", 1)
             return recovered
 
+    @property
+    def _response_cache(self):
+        """The opt-in structured-response cache, or ``None`` when disabled."""
+        if not self._settings.cache.llm:
+            return None
+        if self._llm_cache is None:
+            from bibr.clients.llm_cache import LlmResponseCache
+
+            self._llm_cache = LlmResponseCache(settings=self._settings)
+        return self._llm_cache
+
+    def _cache_lookup_key(
+        self,
+        response_model: Any,
+        messages: list[dict],
+        system_prompt: str,
+        *,
+        protocol: str,
+        reasoning_effort: str | None,
+        client_override: Any,
+        max_tokens: int | None,
+    ) -> tuple[Any, str | None]:
+        """Resolve ``(cache, key)`` for one request, or ``(None, None)``."""
+        cache = self._response_cache
+        if cache is None:
+            return None, None
+        from bibr.clients.llm_cache import request_key
+
+        try:
+            flat = _flatten_content_parts(messages)
+            user_text = "".join(m["content"] for m in flat if isinstance(m.get("content"), str))
+            key = request_key(
+                model=self._settings.llm.model,
+                schema_name=getattr(response_model, "__name__", str(response_model)),
+                system=system_prompt,
+                user_text=user_text,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                # A caller-supplied client is the JSON-mode re-roll, which
+                # resends identical text expecting a different answer.
+                mode=f"{protocol}:{'override' if client_override is not None else 'default'}",
+                schema_json=json.dumps(response_model.model_json_schema(), sort_keys=True),
+                chat_template_json=json.dumps(
+                    self._settings.llm.chat_template_kwargs, sort_keys=True
+                ),
+            )
+        except Exception:  # noqa: BLE001 — caching is best-effort, never fatal
+            logger.debug("LLM cache key construction failed; proceeding uncached", exc_info=True)
+            return None, None
+        return cache, key
+
+    def _cached_result(self, cache, key: str, response_model: Any) -> Any:
+        """Return a validated cached response, or ``None`` to call live."""
+        body = cache.get(key)
+        if body is None:
+            return None
+        try:
+            result = response_model.model_validate(body)
+        except Exception:  # noqa: BLE001 — a stale entry is a miss, not an error
+            logger.debug("Discarding unusable LLM cache entry %s", key)
+            return None
+        self._record_label_metric("cache_hits", 1)
+        return result
+
+    def _cache_store(self, cache, key: str, result: Any, response_model: Any) -> None:
+        try:
+            body = result.model_dump(mode="json")
+            # Blank/omitted model output is sanitized to None, but is not an
+            # explicit refusal. Preserve that distinction when validating a hit.
+            if (
+                getattr(result, "_abstract_explicitly_absent", None) is False
+                and body.get("abstract") is None
+            ):
+                body.pop("abstract", None)
+            cache.put(
+                key,
+                body,
+                model=self._settings.llm.model,
+                schema_name=getattr(response_model, "__name__", str(response_model)),
+                label=_usage_label.get(),
+            )
+        except Exception:  # noqa: BLE001 — never let caching break an answer
+            logger.debug("LLM cache store failed for %s", key, exc_info=True)
+
     async def _invoke_structured(
         self,
         response_model: Any,
@@ -1426,8 +1736,30 @@ class LLMClient:
         from bibr.clients.nuextract import NuExtractInvalidOutput
         from bibr.models import ErrorCode
 
+        cache, cache_key = self._cache_lookup_key(
+            response_model,
+            messages,
+            system_prompt,
+            protocol=protocol,
+            reasoning_effort=reasoning_effort,
+            client_override=client_override,
+            max_tokens=max_tokens,
+        )
+        if cache is not None and cache_key is not None:
+            hit = self._cached_result(cache, cache_key, response_model)
+            if hit is not None:
+                return hit
+
+        # Below the cache check on purpose: a hit spends no provider quota, so
+        # it must not wait on a budget that exists to protect that quota — an
+        # otherwise fully-cached corpus re-run would still be paced at
+        # LLM_RATE_LIMIT_RPM. Callers used to acquire before building their
+        # prompt; acquiring here instead keeps it one slot per dispatched
+        # request while making that request the thing the slot is spent on.
+        await self._acquire_rate_limit()
+
         try:
-            return await self._invoke_with_protocol_fallback(
+            result = await self._invoke_with_protocol_fallback(
                 backend=backend,
                 protocol=protocol,
                 response_model=response_model,
@@ -1437,6 +1769,9 @@ class LLMClient:
                 client_override=client_override,
                 max_tokens=max_tokens,
             )
+            if cache is not None and cache_key is not None:
+                self._cache_store(cache, cache_key, result, response_model)
+            return result
         except NuExtractInvalidOutput as native_error:
             diagnostics = SafeLlmDiagnostics.from_native_error(native_error)
             # Parser/provider frames can retain the raw completion in locals.
@@ -1468,7 +1803,6 @@ class LLMClient:
         """
 
         async def invoke():
-            await self._acquire_rate_limit()
             return await self._invoke_structured(
                 response_model,
                 messages,
@@ -1488,9 +1822,7 @@ class LLMClient:
             f"Starting LLM title/keywords extraction (hash={file_hash}, input length: {len(text)})"
         )
         try:
-            await self._acquire_rate_limit()
-
-            spec = title_keywords_spec(compact=self._settings.llm.compact_metadata_prompt)
+            spec = PROMPTS["title_keywords"]
             boundary = boundary or uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
             result = await self._invoke_structured(
@@ -1525,8 +1857,6 @@ class LLMClient:
             f"json_mode={json_mode})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["authors"]
             boundary = boundary or uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
@@ -1575,8 +1905,6 @@ class LLMClient:
             f"Starting LLM paper classification (hash={file_hash}, input length: {len(text)})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["classification"]
             boundary = boundary or uuid.uuid4().hex
             compact = text[: self._settings.llm.classification_max_chars]
@@ -1616,8 +1944,6 @@ class LLMClient:
         """
         logger.debug(f"Starting LLM paper_type labeling (hash={file_hash})")
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["paper_type_label"]
             result = await self._invoke_structured(
                 spec.response_model,
@@ -1655,8 +1981,6 @@ class LLMClient:
             f"(hash={file_hash}, input length: {len(text)})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["core_metadata"]
             boundary = uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
@@ -1810,6 +2134,7 @@ class LLMClient:
             published=title_kw.published,
             license=title_kw.license,
         )
+
         combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
 
         logger.info(f"Successfully extracted core metadata (hash={file_hash})")
@@ -1827,8 +2152,6 @@ class LLMClient:
             f"Starting LLM reference extraction (hash={file_hash}, input length: {len(text)})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["references_parse"]
             boundary = uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
@@ -1864,12 +2187,24 @@ class LLMClient:
                         f"positionally (hash={file_hash}, start_index={start_index})"
                     )
                 # Position N of the output is only input N when the LLM
-                # returned one ref per numbered entry. If the count also
-                # disagrees, the mapping has slipped: mark these so downstream
+                # returned one ref per numbered entry, in order. Two separate
+                # things break that:
+                #   - the count disagrees, so an entry was dropped or merged;
+                #   - an index repeats, which means the model was not tracking
+                #     entries one-to-one even where the count happens to line
+                #     up — 15 rows labelled 1,2,3,3,5,… for 15 entries.
+                # The second was checked for ``trusted`` but not here, so a
+                # duplicate with a matching count took the positional path with
+                # backfills left *on*.
+                # Either way the mapping has slipped: mark these so downstream
                 # segment-anchored backfills (issue recovery, DOI rescue) stay
                 # off rather than copying the neighbouring segment's printed
-                # DOI onto the wrong reference.
-                slipped = bool(expected) and len(extracted_refs) != len(expected)
+                # DOI onto the wrong reference. Indices that are merely out of
+                # range — a batch numbered 1..n instead of from start_index —
+                # are a renumbering, which positional re-indexing fixes exactly,
+                # so they deliberately do not count as slipped.
+                repeated = len(set(reported)) != len(reported)
+                slipped = bool(expected) and (repeated or len(extracted_refs) != len(expected))
                 for offset, ref in enumerate(extracted_refs):
                     ref.index = start_index + offset
                     if slipped:
@@ -1906,8 +2241,6 @@ class LLMClient:
             f"input length: {len(text)})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["references_parse_chunk"]
             boundary = uuid.uuid4().hex
             capped_text = self._cap_input(text, self._settings)
@@ -2004,7 +2337,6 @@ class LLMClient:
 
     async def _segment_window(self, window_text: str) -> list[str]:
         """LLM-segment one references window into verbatim opening anchors."""
-        await self._acquire_rate_limit()
         spec = PROMPTS["references_segment"]
         boundary = uuid.uuid4().hex
         result = await self._invoke_structured(
@@ -2040,8 +2372,6 @@ class LLMClient:
             f"affiliations={len(affiliation_list)})"
         )
         try:
-            await self._acquire_rate_limit()
-
             spec = PROMPTS["research_integrity"]
             boundary = uuid.uuid4().hex
             authors_block = (
@@ -2096,45 +2426,44 @@ class LLMClient:
             file_hash: file hash for logging
 
         Returns:
-            list of CitationMatch objects. Retains accepted first-pass matches
-            if a full-bibliography expansion is unavailable. ProcessingError propagates.
+            list of CitationMatch objects. Returns [] on failure (graceful degradation).
         """
         logger.debug(
             f"Starting LLM citation resolution (hash={file_hash}, "
             f"{len(ambiguous_citations)} candidates, {len(reference_summary)} refs)"
         )
-        from bibr.structure.citation_shortlist import (
-            partition_shortlist_matches,
-            shortlist_references,
-        )
-        from bibr.utils.text import collapse_ws
-
-        matches = []
         try:
-            shortlist = (
-                shortlist_references(ambiguous_citations, reference_summary)
-                if self._settings.llm.citation_shortlist
-                else None
-            )
-            self._record_label_metric("citation_reference_rows_full", len(reference_summary))
-            self._record_label_metric(
-                "citation_shortlist_calls", int(bool(shortlist and shortlist.narrowed))
-            )
-            matches = await self._resolve_citation_batch(
-                ambiguous_citations, shortlist.references if shortlist else reference_summary
-            )
-            if shortlist and shortlist.narrowed:
-                matches, pending = partition_shortlist_matches(
-                    ambiguous_citations, matches, shortlist.candidate_ids
+            # Build compact reference table
+            ref_lines = []
+            for r in reference_summary:
+                ref_lines.append(
+                    f'  bib_id={r["bib_id"]}: {r["author"]} ({r["year"]}) "{r["title"]}"'
                 )
-                if pending:
-                    self._record_label_metric("citation_full_expansions", 1)
-                    expanded = await self._resolve_citation_batch(pending, reference_summary)
-                    full_ids = frozenset(r["bib_id"] for r in reference_summary)
-                    recovered, _ = partition_shortlist_matches(
-                        pending, expanded, {collapse_ws(t): full_ids for _, t in pending}
-                    )
-                    matches.extend(recovered)
+            ref_block = "\n".join(ref_lines)
+
+            # Build citation list
+            cite_lines = []
+            for text_id, cite_text in ambiguous_citations:
+                cite_lines.append(f"  text_id={text_id}: {cite_text}")
+            cite_block = "\n".join(cite_lines)
+
+            spec = PROMPTS["citation_resolution"]
+            boundary = uuid.uuid4().hex
+            prompt = spec.build_user(
+                boundary=boundary,
+                ref_block=self._cap_input(ref_block, self._settings),
+                cite_block=self._cap_input(cite_block, self._settings),
+            )
+
+            result = await self._invoke_structured(
+                spec.response_model,
+                [{"role": "user", "content": prompt}],
+                spec.system,
+                reasoning_effort=self._settings.llm.reasoning_effort_citations,
+                max_tokens=_task_max_tokens(self._settings, self._settings.llm.citation_max_tokens),
+            )
+
+            matches = result.matches
             logger.info(
                 f"LLM resolved {sum(1 for m in matches if m.bib_id is not None)}/{len(matches)} "
                 f"citations (hash={file_hash})"
@@ -2145,35 +2474,7 @@ class LLMClient:
             raise
         except Exception as e:
             logger.warning(f"LLM citation resolution failed (hash={file_hash}): {e}")
-            # An unavailable expansion must not discard accepted first-pass links.
-            return matches
-
-    async def _resolve_citation_batch(
-        self, citations: list[tuple[int, str]], references: list[dict]
-    ) -> list:
-        """One physical request, charged to the caller's usage and rate limit."""
-        from bibr.structure.citation_shortlist import reference_table
-
-        await self._acquire_rate_limit()
-        ref_block = self._cap_input(reference_table(references), self._settings)
-        cite_block = self._cap_input(
-            "\n".join(f"  text_id={text_id}: {text}" for text_id, text in citations),
-            self._settings,
-        )
-        self._record_label_metric("citation_reference_rows_sent", len(references))
-        self._record_label_metric("citation_reference_chars_sent", len(ref_block))
-        spec = PROMPTS["citation_resolution"]
-        prompt = spec.build_user(
-            boundary=uuid.uuid4().hex, ref_block=ref_block, cite_block=cite_block
-        )
-        result = await self._invoke_structured(
-            spec.response_model,
-            [{"role": "user", "content": prompt}],
-            spec.system,
-            reasoning_effort=self._settings.llm.reasoning_effort_citations,
-            max_tokens=_task_max_tokens(self._settings, self._settings.llm.citation_max_tokens),
-        )
-        return cast("list", result.matches)
+            return []
 
     @track_llm_usage
     async def extract_equations(
@@ -2196,12 +2497,10 @@ class LLMClient:
             f"Starting LLM equation extraction (hash={file_hash}, {len(sentences)} sentences)"
         )
         try:
-            await self._acquire_rate_limit()
-
             sent_lines = []
             text_id_map = {}
             for i, (text_id, text) in enumerate(sentences):
-                sent_lines.append(f"[{i}] {text}")
+                sent_lines.append(f"  [{i}] (text_id={text_id}): {text}")
                 text_id_map[i] = text_id
             sent_block = "\n".join(sent_lines)
 
@@ -2262,5 +2561,6 @@ class LLMClient:
         self._usage.clear()
         self._usage_by_file.clear()
         self._labels_by_file.clear()
+        self._traces_by_file.clear()
         if self._limiter:
             await self._limiter.close()

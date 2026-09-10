@@ -2,7 +2,7 @@
 
 ``RefLocator`` owns everything about WHERE the paper's front matter and
 reference list live in ``sentences_df`` — canonical-section mapping, the
-metadata cutoff, reference-section discovery (bibliography spans → header-alias override →
+metadata cutoff, reference-section discovery (header-alias override →
 canonical map → layout-hint → header-text fallbacks), and boundary-orphan
 reclaim. It never calls an LLM and never parses reference contents; those
 belong to ``bibr.extract.core_metadata`` and ``bibr.extract.ref_extractor``.
@@ -15,7 +15,6 @@ import pandas as pd
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE
-from bibr.ocr.ref_patterns import _REF_HEADER_RE as _BIBLIOGRAPHY_HEADER_RE
 from bibr.ocr.ref_patterns import _looks_like_author_date_start
 from bibr.paper_contents import CanonicalSection, PaperContents
 from bibr.structure.reference_boundaries import TERMINAL_REFERENCE_BOUNDARY_RE
@@ -32,14 +31,6 @@ _REF_HEADER_RE = re.compile(
     r"(?:references|bibliography|works cited|literature cited|reference list)\b",
     re.IGNORECASE,
 )
-# These labels are meaningful only inside a bibliography span; elsewhere
-# "Reports" or "Cases" can be ordinary article sections. Numbering may restart.
-_REF_SUBSECTION_RE = re.compile(
-    r"\s*(?:(?:\d+|[IVX]+|[A-Z])[.)]?\s+)?"
-    r"(?:books|articles(?:\s+and\s+research\s+papers)?|research\s+papers|"
-    r"reports|cases|websites|web\s+sites|online\s+sources)\s*[:.]?\s*",
-    re.IGNORECASE,
-)
 
 # Recognize parenthesized, dash-delimited, whitespace-separated, and period-delimited reference
 # numbers, including non-Latin author text.
@@ -52,6 +43,16 @@ _ENTRY_NUMBERING_RE = re.compile(
     r"|\d{1,3}\s+(?=[A-ZÀ-ÖØ-ÞЀ-ЯҊ-Ҿ])"
     r")"
 )
+
+
+def _printed_entry_number(text: str) -> int | None:
+    """Return the printed list number of a reference row, when present."""
+    match = _ENTRY_NUMBERING_RE.match(text)
+    if match is None:
+        return None
+    digits = re.search(r"\d{1,3}", match.group(0))
+    return int(digits.group(0)) if digits else None
+
 
 # Boundary-only evidence that a row opens an unnumbered author/byline entry.
 # Deliberately narrower than ``_looks_like_complete_entry_start``: journal and
@@ -233,30 +234,44 @@ class RefLocator:
 
         return combined_df
 
+    def _model_reference_header(self, threshold: float = 0.5) -> str | None:
+        """Header of the last section whose heading region the front-role model
+        calls ``ref_header`` with probability >= ``threshold``, else None."""
+        from bibr.extract.front_role import FrontRolePredictions
+
+        predictions = getattr(self.contents, "front_role_predictions", None)
+        if not isinstance(predictions, FrontRolePredictions):
+            return None
+        summaries = getattr(self.contents, "region_summaries", None) or []
+        by_section: dict[int, list] = {}
+        for summary in summaries:
+            if summary.section_id is not None and summary.label in ("paragraph_title", "doc_title"):
+                by_section.setdefault(summary.section_id, []).append(summary)
+        for section in reversed(self.contents.sections):
+            header = (section.header or "").strip()
+            if section.level <= 0 or not header:
+                continue
+            for summary in by_section.get(section.section_id, ()):
+                scores = predictions.get(summary.page, summary.index)
+                if scores is not None and scores.get("ref_header") >= threshold:
+                    return section.header
+        return None
+
     def collect_reference_rows(self) -> pd.DataFrame:
         """Collects all rows considered part of the reference list.
 
-        Contiguous sections with printed bibliography headings, and their
-        subsections, take precedence over the classifier-assigned canonical map: the classifier
+        A section whose printed header IS a references heading takes
+        precedence over the classifier-assigned canonical map: the classifier
         occasionally types a body section as REFERENCES while the literal
         "References" header gets UNKNOWN (exp #2: 09567976241258149), and the
         canonical-map path would then short-circuit on the wrong section.
-        Legacy single-section, layout-hint, and header-text fallbacks remain
-        available when no bibliography span can be established.
+        Falls back to the canonical map, then to layout-hint and header-text
+        heuristics.
         """
         self.contents.reference_boundary_reason_flags = []
         self.map_canonical_sections()
 
         has_section_col = "section_name" in self.sentences_df.columns
-
-        # A bibliography can span translated/continuation headings and named
-        # subsections, including an empty root heading with entries in children.
-        # Resolve ownership before the legacy single-section fallbacks.
-        span = self._collect_bibliography_span()
-        if not span.empty:
-            self._reclassify_as_references(span)
-            reclaimed = self._reclaim_boundary_orphans(span, str(span.iloc[0]["section_name"]))
-            return self._trim_terminal_boundary(reclaimed)
 
         # Step 0: trust what is printed — a literal references heading wins.
         if has_section_col:
@@ -276,6 +291,26 @@ class RefLocator:
                 self._reclassify_as_references(header_df)
                 reclaimed = self._reclaim_boundary_orphans(header_df, section_name)
                 return self._trim_terminal_boundary(reclaimed)
+
+        # Step 0b: a heading the front-role classifier scores as a reference
+        # header (any language/script) is as good as the printed English one.
+        # The regex above is English-only and misses ~19% of val120 headers
+        # (Literaturverzeichnis, Bibliografía, Список литературы, 参考文献),
+        # which silently disabled the geometry segmenter tier.
+        if has_section_col:
+            model_header = self._model_reference_header()
+            if model_header is not None:
+                mask = self.sentences_df["section_name"] == model_header
+                if mask.any():
+                    logger.info(
+                        f"Front-role model header: using section '{model_header}' "
+                        "as the reference section"
+                    )
+                    self.contents.reference_boundary_reason_flags.append("front_role_ref_header")
+                    header_df: pd.DataFrame = self.sentences_df[mask].copy()
+                    self._reclassify_as_references(header_df)
+                    reclaimed = self._reclaim_boundary_orphans(header_df, model_header)
+                    return self._trim_terminal_boundary(reclaimed)
 
         if has_section_col and CanonicalSection.REFERENCES in self._canonical_map:
             ref_section_name = self._canonical_map[CanonicalSection.REFERENCES]
@@ -318,54 +353,6 @@ class RefLocator:
                     return self._trim_terminal_boundary(fallback_df)
 
         raise ValueError("No reference section found.")
-
-    def _collect_bibliography_span(self) -> pd.DataFrame:
-        """Select the last contiguous bibliography group in document order.
-
-        Exact multilingual headings establish roots. Known bibliography labels
-        and structurally owned unknown children may extend a group. A body or
-        terminal heading closes it, so an earlier reference-like footnote is
-        not joined to the actual bibliography later in the document.
-        """
-        if "section_name" not in self.sentences_df.columns:
-            return self.sentences_df.iloc[:0]
-
-        groups = []
-        group = []
-        owned_ids = set()
-        for section in self.contents.sections:
-            is_root = bool(_BIBLIOGRAPHY_HEADER_RE.fullmatch(section.header.strip()))
-            is_child = (
-                bool(group)
-                and section.section_type
-                in {
-                    None,
-                    CanonicalSection.UNKNOWN,
-                    CanonicalSection.REFERENCES,
-                }
-                and (
-                    section.parent_section_id in owned_ids
-                    or _REF_SUBSECTION_RE.fullmatch(section.header)
-                )
-            )
-            if is_root or is_child:
-                group.append(section)
-                owned_ids.add(section.section_id)
-            elif group:
-                groups.append(group)
-                group = []
-                owned_ids = set()
-        if group:
-            groups.append(group)
-
-        for group in reversed(groups):
-            if "section_id" in self.sentences_df.columns:
-                mask = self.sentences_df["section_id"].isin(s.section_id for s in group)
-            else:
-                mask = self.sentences_df["section_name"].isin(s.header for s in group)
-            if mask.any():
-                return self.sentences_df[mask].copy()
-        return self.sentences_df.iloc[:0]
 
     def _trim_terminal_boundary(self, ref_df: pd.DataFrame) -> pd.DataFrame:
         """Trim only a strong terminal transition after genuine ref rows.

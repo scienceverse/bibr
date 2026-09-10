@@ -16,6 +16,7 @@ from bibr.input.consolidate_text import clean_text_content_late
 
 if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterResolution
+    from bibr.extract.front_role import FrontRolePredictions
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
 
@@ -408,7 +409,7 @@ class Provenance:
     ``bbox`` follows glmocr's normalised 0–1000 coordinate system as
     ``(x1, y1, x2, y2)``.  Multiple instances per node are allowed when
     content spans pages or non-contiguous regions (e.g. column wraps).
-    Internal-only: never exported in the v10.3 JSON schema.
+    Internal-only: never exported in the JSON schema.
     """
 
     page_no: int
@@ -525,9 +526,6 @@ class RegionSummary:
     raw_ocr_content: str | None = None
     native_text_candidate: str | None = None
     native_text_rejection_reason: str | None = None
-    source_region_ids: list[str] | None = None
-    native_spans: list[dict] | None = None
-    formula_proposals: list[dict] | None = None
     bbox_height: float | None = None
     bbox_width: float | None = None
     char_density: float | None = None
@@ -709,6 +707,11 @@ class PaperContents:
     # before implicit-section normalization mutates the section structure.
     # Internal-only; metadata consumers opt into it incrementally.
     front_matter_resolution: "FrontMatterResolution | None" = None
+    # Per-region role scores from the optional front-role classifier
+    # (bibr/extract/front_role.py), keyed by (page_number, region index) —
+    # the same key RegionSummary carries. None when the model is disabled or
+    # the input had no OCR regions (native DOCX/JATS/HTML). Internal-only.
+    front_role_predictions: "FrontRolePredictions | None" = None
     # Warnings recorded during content-level extraction (e.g. reference
     # segmentation falling back to CRF); surfaced onto
     # ``Paper.processing_warnings`` in post_parse.
@@ -717,7 +720,6 @@ class PaperContents:
     # the OCR-stage native-text pass; consumed by the geom segmenter in extract.
     # None for DOCX / non-native / no-text-layer input (→ LLM cascade).
     ref_line_geometry: list[dict] | None = None
-    native_source: dict | None = None
     # Front-matter metadata parsed natively from a structured input format
     # (JATS XML); when set, post-parse uses it as the PaperMetadata base and
     # skips the core LLM extraction. None for PDF/DOCX (→ LLM extraction).

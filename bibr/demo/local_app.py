@@ -123,7 +123,7 @@ def _compute_section_levels(sections: list[dict]) -> None:
 
 def _parse_json_response(paper_json: dict) -> dict:
     """Normalize a JSON API response into the dict structure the builder functions expect."""
-    info = paper_json.get("info", {})
+    metadata = paper_json.get("metadata", {})
     authors = paper_json.get("author", [])
     text = paper_json.get("text", [])
     sections = paper_json.get("section", [])
@@ -148,7 +148,7 @@ def _parse_json_response(paper_json: dict) -> dict:
                     bib_matches.append({"bib_id": b["bib_id"], "service": source_name, **m})
 
     return {
-        "info": info,
+        "metadata": metadata,
         "authors": authors,
         "text": text,
         "sections": sections,
@@ -168,8 +168,8 @@ def _write_json_file(paper_json: dict, suffix: str = "") -> str:
     Returns the path so a DownloadButton can serve it; the basename becomes the
     downloaded filename. ``suffix`` disambiguates variants (e.g. no-images).
     """
-    info = paper_json.get("info", {}) or {}
-    slug = info.get("doi") or info.get("title") or "bibr"
+    metadata = paper_json.get("metadata", {}) or {}
+    slug = metadata.get("doi") or metadata.get("title") or "bibr"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(slug)).strip("_")[:60] or "bibr"
     tmpdir = tempfile.mkdtemp(prefix="bibr_json_")
     path = os.path.join(tmpdir, f"{slug}{suffix}.json")
@@ -195,24 +195,24 @@ def _strip_figure_images(paper_json: dict) -> dict:
 
 def _build_summary_md(result: dict) -> str:
     """Build a markdown summary card from the API result dict."""
-    info = result.get("info", {})
+    meta = result.get("metadata", {})
     lines = []
-    lines.append(f"### {info.get('title') or '(untitled)'}")
-    if info.get("doi"):
-        lines.append(f"**DOI:** `{info['doi']}`")
-    if info.get("paper_type"):
+    lines.append(f"### {meta.get('title') or '(untitled)'}")
+    if meta.get("doi"):
+        lines.append(f"**DOI:** `{meta['doi']}`")
+    if meta.get("paper_type"):
         conf = (
-            f" ({info['paper_type_confidence']:.2f})" if info.get("paper_type_confidence") else ""
+            f" ({meta['paper_type_confidence']:.2f})" if meta.get("paper_type_confidence") else ""
         )
-        lines.append(f"**Paper type:** {info['paper_type']}{conf}")
-    if info.get("oecd_l1"):
-        domain = info["oecd_l1"]
-        if info.get("oecd_l2"):
-            domain += f" > {info['oecd_l2']}"
-        conf = f" ({info['oecd_confidence']:.2f})" if info.get("oecd_confidence") else ""
+        lines.append(f"**Paper type:** {meta['paper_type']}{conf}")
+    if meta.get("oecd_l1"):
+        domain = meta["oecd_l1"]
+        if meta.get("oecd_l2"):
+            domain += f" > {meta['oecd_l2']}"
+        conf = f" ({meta['oecd_confidence']:.2f})" if meta.get("oecd_confidence") else ""
         lines.append(f"**OECD domain:** {domain}{conf}")
-    if info.get("keywords"):
-        lines.append(f"**Keywords:** {', '.join(info['keywords'])}")
+    if meta.get("keywords"):
+        lines.append(f"**Keywords:** {', '.join(meta['keywords'])}")
     authors = result.get("authors", [])
     refs = result.get("bib", [])
     sections = result.get("sections", [])
@@ -322,7 +322,7 @@ def _build_bib_matches_data(result: dict) -> list[list]:
             m.get("service", "") or m.get("source", ""),
             round(m.get("score", 0) or 0, 1),
             m.get("title", ""),
-            _format_bib_authors(m.get("authors")),
+            _format_bib_authors(m.get("author")),
             m.get("year", ""),
             m.get("container", ""),
             m.get("doi", ""),
@@ -346,7 +346,7 @@ def _build_text_html(result: dict) -> str:
     section_map = {s.get("section_id", i): s for i, s in enumerate(sections)}
 
     parts = []
-    # section_id is None for root / front-matter sentences (the v10.3 schema
+    # section_id is None for root / front-matter sentences (the schema
     # remaps section 0 → null). Sort those first and never compare None to int.
     for sec_id, paragraphs in sorted(by_section.items(), key=lambda kv: (kv[0] is not None, kv[0])):
         sec = section_map.get(sec_id, {})
@@ -412,7 +412,7 @@ def _build_xrefs_data(result: dict) -> list[list]:
                 x.get("xref_type", ""),
                 x.get("contents", ""),
                 x.get("text_id", ""),
-                x.get("xref_id", ""),
+                x.get("target_id", ""),
             ]
         )
     return rows

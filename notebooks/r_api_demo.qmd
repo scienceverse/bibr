@@ -85,13 +85,13 @@ cat("Status:", resp_status(resp), "\n")
 ### Paper metadata
 
 ```{r}
-info <- data$info
-cat("Title:      ", info$title, "\n")
-cat("DOI:        ", info$doi, "\n")
-cat("Keywords:   ", paste(info$keywords, collapse = ", "), "\n")
-cat("Paper type: ", info$paper_type %||% "(unknown)", "\n")
-cat("OECD L1:    ", info$oecd_l1 %||% "(unclassified)", "\n")
-cat("OECD L2:    ", info$oecd_l2 %||% "(unclassified)", "\n")
+meta <- data$metadata
+cat("Title:      ", meta$title, "\n")
+cat("DOI:        ", meta$doi, "\n")
+cat("Keywords:   ", paste(meta$keywords, collapse = ", "), "\n")
+cat("Paper type: ", meta$paper_type %||% "(unknown)", "\n")
+cat("OECD L1:    ", meta$oecd_l1 %||% "(unclassified)", "\n")
+cat("OECD L2:    ", meta$oecd_l2 %||% "(unclassified)", "\n")
 cat("Authors:    ", length(data$author), "\n")
 cat("References: ", length(data$bib), "\n")
 cat("Sections:   ", length(data$section), "\n")

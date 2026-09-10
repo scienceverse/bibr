@@ -56,6 +56,17 @@ _NS = {
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
 }
 
+# Run-level children that end the run of text they sit in without carrying any
+# text of their own: an explicit line/page/column break, a tab, and the legacy
+# carriage return. Concatenating around them fuses the words on either side.
+_RUN_SEPARATORS: frozenset[str] = frozenset(
+    {
+        f"{{{_NS['w']}}}br",
+        f"{{{_NS['w']}}}tab",
+        f"{{{_NS['w']}}}cr",
+    }
+)
+
 _HEADING_STYLE_LEVELS: dict[str, int] = {
     "Title": 1,
     "Heading 1": 1,
@@ -507,12 +518,29 @@ class DocxParser:
             its display text without re-implementing this walk.
             """
             nonlocal had_image
+
+            def emit_separator() -> None:
+                """Space for markup that ends a run of text, if not already spaced."""
+                if text_buf and text_buf[-1] and not text_buf[-1][-1].isspace():
+                    text_buf.append(" ")
+                    if extra_buf is not None:
+                        extra_buf.append(" ")
+
             for run_child in run_el.iterchildren():
                 rt = run_child.tag
                 if rt == f"{{{w}}}t" and run_child.text:
                     text_buf.append(run_child.text)
                     if extra_buf is not None:
                         extra_buf.append(run_child.text)
+                elif rt in _RUN_SEPARATORS:
+                    # A line break, tab or carriage return inside a run carries
+                    # no text of its own, so dropping it fused the words on
+                    # either side: a Shift+Enter title page collapsed to
+                    # "Cognitive load and recallJane SmithDepartment of...".
+                    # Word splits runs mid-word for formatting, so only these
+                    # explicit separators may contribute whitespace — adjacent
+                    # <w:t> must still concatenate untouched.
+                    emit_separator()
                 elif rt == f"{{{w}}}footnoteReference":
                     fn_id = run_child.get(f"{{{w}}}id")
                     if fn_id is not None:

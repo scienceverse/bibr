@@ -280,7 +280,7 @@ class TestExportSurfaceEndToEnd:
         client.resolved_structured_backend = "nuextract-native"
         client.usage_pop_file.return_value = {}
         client.usage_labels_pop_file.return_value = {
-            "extract_title_keywords": {
+            ("extract_title_keywords", settings.llm.provider, settings.llm.model): {
                 "logical_calls": 1,
                 "attempts": 1,
                 "native_attempts": 1,
@@ -371,7 +371,7 @@ class TestExportSurfaceEndToEnd:
         client.resolved_structured_backend = "instructor"
         client.usage_pop_file.return_value = {}
         client.usage_labels_pop_file.return_value = {
-            "extract_title_keywords": {
+            ("extract_title_keywords", settings.llm.provider, settings.llm.model): {
                 "logical_calls": 1,
                 "attempts": 1,
                 "instructor_attempts": 1,

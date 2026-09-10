@@ -35,7 +35,8 @@ def test_stage_list_contains_expected_names():
     names = [s.name for s in pl._stages]
     assert "validate" in names
     assert "docx" in names
-    assert "render_ocr" in names
+    assert "layout" in names
+    assert "ocr" in names
     assert "extract" in names
     assert "export" in names
 
@@ -108,3 +109,109 @@ def test_serve_pipeline_requests_the_paddle_alias_under_paddle_http():
     )
     assert pl._config.ocr_model == "paddle-ocr-vl-1.6"
     assert pl._config.ocr_profile == "paddle"
+
+
+def _enrichment_stage(pl):
+    from bibr.pipeline.stages.enrich import EnrichmentStage
+
+    (stage,) = [s for s in pl._stages if isinstance(s, EnrichmentStage)]
+    return stage
+
+
+def _build_with(settings):
+    from bibr.serve.pipeline import ServePipeline
+
+    return ServePipeline(
+        layout=MagicMock(),
+        segmenter=MagicMock(),
+        http_client=MagicMock(),
+        ocr_base_url="http://ocr.local",
+        ocr_sem_global=asyncio.Semaphore(16),
+        ocr_breaker=MagicMock(),
+        settings=settings,
+    )
+
+
+def test_enricher_is_built_even_when_crossref_enrich_setting_is_off():
+    """Enrichment is a per-request switch on serve: the stage must exist for a
+    ``crossref=true`` request even though CROSSREF_ENRICH is off (the default)."""
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.enricher import CrossrefEnricher
+    from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = False
+    pl = _build_with(settings)
+
+    enrichers = _enrichment_stage(pl)._enrichers
+    assert len(enrichers) == 1 and isinstance(enrichers[0], CrossrefEnricher)
+    (checkpoint,) = [s for s in pl._stages if isinstance(s, CoreCheckpointStage)]
+    assert checkpoint._enrichment_requested is True
+    assert pl._config.crossref is None
+
+
+def test_refs_off_setting_still_drops_the_enricher():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = True
+    settings.REF_PARSE_STRATEGY = "off"
+
+    assert _enrichment_stage(_build_with(settings))._enrichers == []
+
+
+async def _run_enrichment(pl, *, crossref, setting):
+    """Drive the serve pipeline's EnrichmentStage with a per-request RunConfig."""
+    import dataclasses
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
+    from bibr.pipeline.context import PipelineContext
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.state import FileState
+
+    stage = _enrichment_stage(pl)
+    (enricher,) = stage._enrichers
+    enricher.enrich = AsyncMock(return_value=None)
+    settings = pl.settings
+    settings.crossref.enrich = setting
+    fs = FileState(path=Path("paper.pdf"), paper=MagicMock())
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=dataclasses.replace(pl._config, crossref=crossref),
+        settings=settings,
+    )
+    await stage.run(ctx)
+    return enricher.enrich
+
+
+async def test_request_crossref_true_runs_enrichment_when_setting_is_off():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = False
+    pl = _build_with(settings)
+
+    enrich = await _run_enrichment(pl, crossref=True, setting=False)
+    enrich.assert_awaited_once()
+
+
+async def test_request_crossref_false_skips_enrichment_when_setting_is_on():
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.crossref.enrich = True
+    pl = _build_with(settings)
+
+    enrich = await _run_enrichment(pl, crossref=False, setting=True)
+    enrich.assert_not_awaited()
+
+
+async def test_request_without_crossref_follows_setting():
+    from bibr.config import GlobalSettings
+
+    pl = _build_with(GlobalSettings())
+    assert not (await _run_enrichment(pl, crossref=None, setting=False)).await_count
+    assert (await _run_enrichment(pl, crossref=None, setting=True)).await_count == 1

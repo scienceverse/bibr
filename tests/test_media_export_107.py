@@ -23,6 +23,7 @@ from bibr.paper_contents import (
     ReferenceSegmentationAttempt,
     ReferenceYieldReceipt,
 )
+from tests.export.conftest import extraction_block as _extraction_block
 
 
 def _paper(*, receipts: bool = True) -> Paper:
@@ -109,9 +110,12 @@ def _paper(*, receipts: bool = True) -> Paper:
 def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
     from bibr.export import PaperExport, export_paper_to_json
 
-    output = export_paper_to_json(_paper(), validate=False)
+    paper = _paper()
+    paper.extraction = _extraction_block()
+    output = export_paper_to_json(paper, validate=False)
+    diagnostics = output["extraction"]["diagnostics"]
 
-    assert output["info"]["schema_version"] == "10.7"
+    assert output["schema_version"] == "11.0"
     assert output["figure"][0]["parts"] == [
         {
             "part_index": 1,
@@ -123,12 +127,12 @@ def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
     ]
     assert output["table"][0]["parts"][0]["part_index"] == 1
     assert output["table"][0]["parts"][0]["contents"] == [["A"], ["1"]]
-    assert output["caption_assignment"]["candidates"][0]["bbox"] == [10.0, 42.0, 30.0, 48.0]
-    assert output["caption_assignment"]["assignments"][0]["reasons"] == ["same_page"]
-    assert output["reference_yield"]["attempts"][0]["spans"] == [[0, 10], [10, 20]]
-    assert output["reference_yield"]["attempts"][0]["reason_flags"] == ["credible_starts"]
-    assert output["reference_yield"]["selected_spans"] == [[0, 10], [10, 20]]
-    assert output["reference_yield"]["reason_flags"] == ["complete_coverage"]
+    assert diagnostics["caption_assignment"]["candidates"][0]["bbox"] == [10.0, 42.0, 30.0, 48.0]
+    assert diagnostics["caption_assignment"]["assignments"][0]["reasons"] == ["same_page"]
+    assert diagnostics["reference_yield"]["attempts"][0]["spans"] == [[0, 10], [10, 20]]
+    assert diagnostics["reference_yield"]["attempts"][0]["reason_flags"] == ["credible_starts"]
+    assert diagnostics["reference_yield"]["selected_spans"] == [[0, 10], [10, 20]]
+    assert diagnostics["reference_yield"]["reason_flags"] == ["complete_coverage"]
     assert (
         PaperExport.model_validate(output).model_dump(by_alias=True, exclude_unset=True) == output
     )
@@ -138,52 +142,71 @@ def test_v107_omits_unavailable_receipts_and_native_empty_parts_are_valid():
     from bibr.export import PaperExport, export_paper_to_json
 
     paper = _paper(receipts=False)
+    paper.extraction = _extraction_block()
     paper.contents.figures[0].parts = []
     paper.contents.tables[0].parts = []
     output = export_paper_to_json(paper, validate=False)
 
-    assert "caption_assignment" not in output
-    assert "reference_yield" not in output
+    assert "caption_assignment" not in output["extraction"]["diagnostics"]
+    assert "reference_yield" not in output["extraction"]["diagnostics"]
     assert output["figure"][0]["parts"] == []
     assert output["table"][0]["parts"] == []
     PaperExport.model_validate(output)
 
 
-def test_typed_model_and_result_still_accept_v106_payload_without_additive_fields():
+def test_typed_model_and_result_reject_a_v10_payload():
+    """v11 is a clean break — there is no dual-read and no compatibility shim,
+    so a v10-shaped payload must fail validation rather than half-load."""
+    import pytest
+    from pydantic import ValidationError
+
     from bibr.api import Result
     from bibr.export import PaperExport, export_paper_to_json
 
     legacy = deepcopy(export_paper_to_json(_paper(receipts=False), validate=False))
-    legacy["info"]["schema_version"] = "10.6"
-    for figure in legacy["figure"]:
-        figure.pop("parts")
-    for table in legacy["table"]:
-        table.pop("parts")
+    legacy["info"] = {**legacy.pop("metadata"), **legacy.pop("source"), "schema_version": "10.6"}
+    legacy.pop("schema_version")
 
-    assert PaperExport.model_validate(legacy).info.schema_version == "10.6"
-    assert Result(legacy).model.info.schema_version == "10.6"
+    with pytest.raises(ValidationError):
+        PaperExport.model_validate(legacy)
+    with pytest.raises(ValidationError):
+        Result(legacy)
 
 
-def test_durable_replay_accepts_exact_bound_v106_and_v107_cores():
+def test_durable_replay_accepts_a_v11_core_and_rejects_a_v10_one():
+    import pytest
+
     from bibr.export import export_paper_to_json
     from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
         canonical_json_sha256,
         make_enrichment_sidecar,
         replay_enrichment_sidecar,
     )
 
-    current = export_paper_to_json(_paper(receipts=False), validate=False)
+    paper = _paper(receipts=False)
+    # Replay operates on pipeline-produced cores, which always carry
+    # ``extraction`` (the enrichment receipt's home).
+    paper.extraction = _extraction_block()
+    current = export_paper_to_json(paper, validate=False)
     legacy = deepcopy(current)
-    legacy["info"]["schema_version"] = "10.6"
-    for core in (legacy, current):
-        sidecar = make_enrichment_sidecar(
-            core,
-            core_sha256=canonical_json_sha256(core),
-            settings_digest="settings",
-            completeness="complete",
-        )
+    legacy["schema_version"] = "10.7"
 
-        replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
+    sidecar = make_enrichment_sidecar(
+        current,
+        core_sha256=canonical_json_sha256(current),
+        settings_digest="settings",
+        completeness="complete",
+    )
+    replayed = replay_enrichment_sidecar(current, sidecar, expected_settings_digest="settings")
+    assert replayed["schema_version"] == "11.0"
+    assert canonical_json_sha256(current) == sidecar.core_sha256
 
-        assert replayed["info"]["schema_version"] == core["info"]["schema_version"]
-        assert canonical_json_sha256(core) == sidecar.core_sha256
+    legacy_sidecar = make_enrichment_sidecar(
+        legacy,
+        core_sha256=canonical_json_sha256(legacy),
+        settings_digest="settings",
+        completeness="complete",
+    )
+    with pytest.raises(ArtifactReplayError, match="schema does not match"):
+        replay_enrichment_sidecar(legacy, legacy_sidecar, expected_settings_digest="settings")

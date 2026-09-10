@@ -66,18 +66,26 @@ class LayoutDetector(BaseLayoutDetector):
     _variant = "serve"
 
     def _install_model(self, model) -> None:
-        if self._settings.layout.torch_compile and self._device.type == "cuda":
-            model = self._compile_model(model)
+        if self._runtime == "onnx":
+            # ORT owns graph optimisation; torch.compile does not apply. The
+            # warmup still matters on CUDA (arena growth, cuDNN algorithm
+            # search inside the EP).
+            self._model = model
+            if self._device.type == "cuda":
+                self._run_warmup()
         else:
-            logger.info("torch.compile disabled for layout (LAYOUT_TORCH_COMPILE=false)")
-        self._model = model
-        # Warm up on GPU whether compiled or eager: the first real forward
-        # otherwise pays cuDNN autotuning + CUDA allocator growth + GPU clock
-        # ramp, which surfaces as an inflated layout time on the first paper(s)
-        # after a (re)start. Running it here moves that cost into setup(), inside
-        # the healthcheck start_period, so real requests hit a warm model.
-        if self._device.type == "cuda":
-            self._run_warmup()
+            if self._settings.layout.torch_compile and self._device.type == "cuda":
+                model = self._compile_model(model)
+            else:
+                logger.info("torch.compile disabled for layout (LAYOUT_TORCH_COMPILE=false)")
+            self._model = model
+            # Warm up on GPU whether compiled or eager: the first real forward
+            # otherwise pays cuDNN autotuning + CUDA allocator growth + GPU clock
+            # ramp, which surfaces as an inflated layout time on the first paper(s)
+            # after a (re)start. Running it here moves that cost into setup(), inside
+            # the healthcheck start_period, so real requests hit a warm model.
+            if self._device.type == "cuda":
+                self._run_warmup()
 
         # Single GPU thread + a single batching collector serialize every layout
         # forward, so peak VRAM is bounded to one batch no matter how many
@@ -139,11 +147,19 @@ class LayoutDetector(BaseLayoutDetector):
         Runs for both the eager and torch.compile paths (compile additionally
         needs it to trigger Inductor autotuning). Best-effort: never fatal.
         """
+        from PIL import Image
+
+        if self._runtime == "onnx":
+            try:
+                self._model.run([Image.new("RGB", (640, 480))] * self._settings.layout.batch_size)
+                logger.info("Layout model warmup complete (onnxruntime)")
+            except Exception:
+                logger.warning("Layout model warmup failed", exc_info=True)
+            return
+
         import torch
 
         try:
-            from PIL import Image
-
             dummy = Image.new("RGB", (640, 480))
             inputs = self._image_processor(
                 images=[dummy] * self._settings.layout.batch_size,

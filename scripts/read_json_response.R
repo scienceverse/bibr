@@ -1,10 +1,10 @@
-# R Helper for Reading bibr JSON Format (v10.6/v10.7)
+# R Helper for Reading bibr JSON Format (v11 and legacy v10)
 #
 # The main record tables and paper metadata are:
-#   paper_id, info, author, text, section, url, bib, bib_match, xref, figure, table, eq
+#   paper_id, metadata, source, author, text, section, url, bib, bib_match, xref, figure, table, eq
 #
-# Each listed key except paper_id and info contains an array of objects.
-# The "info" key is a single object with paper-level metadata. Other top-level
+# Each listed key except paper_id, metadata, and source contains an array of objects.
+# The "metadata" key ("info" in legacy exports) is a single object with paper-level metadata. Other top-level
 # fields (including validation and provenance) are preserved.
 
 library(jsonlite)
@@ -12,7 +12,7 @@ library(jsonlite)
 #' Read a bibr JSON file into a structured list
 #'
 #' @param json_path Path to a bibr JSON file on disk
-#' @return A named list with paper_id, info (named metadata list),
+#' @return A named list with paper_id, metadata (named list),
 #'   and data.frames for author, text, section, url, bib, bib_match, xref, figure, table, eq
 #' @export
 read_bibr_json <- function(json_path) {
@@ -42,7 +42,7 @@ read_bibr_response <- function(json_bytes) {
 
 # Internal: convert the parsed JSON list into a clean structure with data.frames
 .structure_bibr <- function(raw) {
-  # Keep info as a list: null scalars and nested metadata are valid in exports.
+  # Keep metadata and source as lists: null scalars and nested metadata are valid in exports.
   # Preserve other fields, including provenance and validation receipts.
   table_names <- c("author", "text", "section", "url", "bib", "bib_match",
                    "xref", "figure", "table", "eq")
@@ -72,9 +72,9 @@ read_bibr_response <- function(json_bytes) {
 #
 # # Access the data
 # data$paper_id           # character: paper identifier
-# data$info$title         # paper title
-# data$info$doi           # DOI
-# data$info$bibr_version  # bibr schema version
+# data$metadata$title         # paper title
+# data$metadata$doi           # DOI
+# data$extraction$bibr_version  # producing package version
 # data$author             # data.frame of authors
 # data$text               # data.frame of sentences
 # data$section            # data.frame of sections
@@ -87,8 +87,8 @@ read_bibr_response <- function(json_bytes) {
 #
 # # Print summary
 # cat("Paper ID:", data$paper_id, "\n")
-# cat("Title:   ", data$info$title[1], "\n")
-# cat("DOI:     ", data$info$doi[1], "\n")
+# cat("Title:   ", data$metadata$title[1], "\n")
+# cat("DOI:     ", data$metadata$doi[1], "\n")
 # cat("Sentences:", nrow(data$text), "\n")
 # cat("Authors:  ", nrow(data$author), "\n")
 # cat("Refs:     ", nrow(data$bib), "\n")

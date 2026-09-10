@@ -27,8 +27,9 @@ bibr serve --host 127.0.0.1 --port 9000
 ```
 
 Binding to a non-loopback address is refused unless `AUTH_API_KEY` is set
-and is at least 32 characters long. Install the `ml` extra for the server's
-layout detector and classifiers (`uv sync --extra ml` in a source checkout).
+and is at least 32 characters long. Core installs run local layout and
+classifiers through ONNX Runtime. The bundled serve image selects the PyTorch
+runtime; see [local model runtime](configuration.md#local-model-runtime).
 Add `cache` to use Redis and `mcp` for the optional agent endpoint.
 
 The REST surface itself — `/papers/extract`, the async job API, health
@@ -45,7 +46,7 @@ callers also receive the individual checks and `BIBR_BUILD_SHA`.
 underlying `POST /_bibr/inference` route is private descriptor dispatch, not a
 second upload API; direct HTTP requests to it always receive `404`.
 
-The API process accepts exactly one `file` part and at most the seven documented
+The API process accepts exactly one `file` part and at most the eight documented
 option fields. Duplicate/unknown fields, a second file, or any option value over
 64 bytes is rejected with `400` before descriptor creation. Starlette retains at
 most 1 MiB of the one file in API memory by default before its multipart spool
@@ -60,7 +61,9 @@ default limits are separate:
 
 Consequently, the default complete multipart-body envelope is 51 MiB while the
 file itself remains capped at 50 MiB. Increasing envelope headroom does not
-increase the accepted file size.
+increase the accepted file size. With `MCP_ENABLED=true` the envelope grows to
+fit a 50 MiB file in base64 form (about 68 MiB), because `chew_paper` carries
+its upload inside a JSON-RPC body; the file limit is unchanged.
 
 Only an opaque descriptor crosses LitServe's multiprocessing queue: the
 canonical UUID, filename, byte size, SHA-256, and extraction options. Neither
@@ -81,8 +84,8 @@ request. The default therefore fail-stops the API and inference processes; use
 an external supervisor to restart the service. Setting the variable to `true`
 is an unsupported opt-in until the locked real-process compatibility gate
 proves reliable death-path completion notification. It does not provide durable
-request replay: the upload store, dispatch tracker, and async job records remain
-process-local.
+request replay: uploads and dispatch remain process-local. Redis-backed job
+status/results can survive an instance restart, but do not replay a lost upload.
 
 The private manager/worker startup and fail-stop death contracts are covered by
 real spawned-process compatibility tests. Keep LitServe constrained to `<0.3`;
@@ -105,7 +108,7 @@ Scale concurrency with these settings:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `PIPELINE_MAX_ACTIVE_UPLOADS` | `8` | Fail-fast API-server admission cap applied before multipart parsing; excess uploads receive `429`. |
+| `PIPELINE_MAX_ACTIVE_UPLOADS` | `8` | Fail-fast API-server admission cap applied before multipart parsing; excess uploads receive `429`. Also covers the MCP chew tools: a large `/mcp` body holds a slot while it is received, and the tool holds one during extraction. |
 | `PIPELINE_MAX_INFLIGHT_REQUESTS` | `8` | Max requests running the pipeline concurrently per worker (`0` = unlimited). Bounds peak host RAM (page images) under an upload flood. |
 | `PIPELINE_RESTART_WORKERS` | `false` | Fail-stop on worker death. `true` is an unsupported opt-in until the locked death-path gate proves reliable completion notification. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
@@ -119,10 +122,9 @@ Scale concurrency with these settings:
 | `JOBS_MAX_ACTIVE` | `32` | Maximum queued plus running async jobs. |
 | `JOBS_MAX_RETAINED` | `128` | Maximum completed job results held in memory; oldest completed records are evicted. |
 
-Page windows apply independently to each concurrent file, so size host RAM for
-the window size multiplied by the in-flight request count. `PIPELINE_MAX_PAGES`
-caps the requested processing range separately; raise it explicitly if the
-whole document exceeds that cap. `PIPELINE_TIMEOUT` defaults to 300 seconds.
+`PIPELINE_MAX_PAGES` caps the requested processing range; raise it explicitly
+for longer documents and size memory for the concurrent file count.
+`PIPELINE_TIMEOUT` defaults to 300 seconds.
 
 ### Why there is no worker-count setting
 
@@ -138,12 +140,86 @@ are async request concurrency, model batch sizes, and the coalescing windows.
 ignored rather than rejected, but it no longer does anything and should be
 deleted.
 
-`bibr serve` also uses one HTTP API-server process, even when jobs are
-disabled. The upload root, leases,
-dispatch tracker, admission accounting, readiness state, and optional job
-queue/results are process-local and share one destructive cleanup lifecycle.
-Multiple API servers require explicit per-process upload namespaces plus shared
-job and ownership state in a separate design.
+`bibr serve` always uses one HTTP API-server process, even when jobs are
+disabled or the inference-worker count is raised. The upload root, leases,
+dispatch tracker, admission accounting, readiness state, and the job queue are
+process-local and share one destructive cleanup lifecycle. To add capacity
+beyond one instance, run more *instances* of `bibr serve` — each with its own
+API process, inference worker, and upload root — behind a load balancer, and
+share job state between them through Redis as described next.
+
+## Multiple bibr-serve replicas
+
+One instance scales by async concurrency (above). Past that, run several
+instances — *replicas* — behind a load balancer. `/papers/extract` needs
+nothing extra: each request is served entirely by the replica that receives
+it. The async job API does, because a status poll can land on a different
+replica than the upload did. `JOBS_STORE=redis` moves job state into a Redis
+that every replica shares:
+
+| Shared through Redis | Stays on the replica that took the upload |
+|---|---|
+| Job status and timestamps (`GET /papers/jobs/{id}`) | The uploaded file, in that replica's owner-only temporary directory |
+| Results (`GET /papers/jobs/{id}/result`; stored zlib-compressed under their own key) | Execution: the replica's own `JOBS_MAX_RUNNING` dispatcher runs the job through its inference worker |
+| The active-job cap: `JOBS_MAX_ACTIVE` counts queued + running jobs across all replicas | Admission (`PIPELINE_MAX_ACTIVE_UPLOADS`) and the in-flight limits |
+| Retention: `JOBS_TTL_SECONDS`, `JOBS_MAX_RETAINED`, `JOBS_MAX_RETAINED_BYTES` bound the whole namespace, oldest first | |
+
+Every job status carries `replica`, the id of the instance executing it.
+
+```bash
+# .env on every replica
+JOBS_STORE=redis
+# Redis for job state. Unset it to reuse the cache's REDIS_URL / REDIS_PASSWORD
+# (the usual choice); set it to keep job state on a separate Redis or database.
+JOBS_REDIS_URL=redis://redis-host:6379/1
+JOBS_KEY_PREFIX=bibr:jobs   # identical on every replica that shares a namespace
+JOBS_REPLICA_ID=api-1       # optional; defaults to <hostname>:<pid>
+```
+
+Point the load balancer at every replica's `/ready` and use plain round-robin;
+no session affinity is needed. A replica that cannot reach the job store reports
+`"jobs_store": "error"` (HTTP `503`) there, and until Redis is back its job routes
+answer `503 {"detail": "job store unavailable"}` — the upload is dropped and nothing
+is queued, so the client can simply retry. Every job-store call is bounded by
+`REDIS_CONNECT_TIMEOUT_SECONDS` + `REDIS_SOCKET_TIMEOUT_SECONDS`, the same budgets
+the response cache uses, so a stalled Redis cannot wedge a request. TLS termination,
+the bearer token, and `/papers/extract` are unchanged. Replicas that share a Redis
+but must not see each other's jobs (staging next to production, say) get distinct
+`JOBS_KEY_PREFIX` values.
+
+Two consequences of keeping execution on the receiving replica:
+
+- A replica that *crashes* mid-job leaves its queued/running jobs reporting their
+  last status until a 24-hour safety TTL reaps them, and they hold cap slots that
+  long. A clean shutdown is different: the replica marks the jobs it abandons
+  `failed` with `503 replica shut down before the job finished`, so they free their
+  slots at once and clients know to resubmit. Drain a replica before stopping it
+  (stop routing new uploads to it, let its running jobs finish) to avoid even that.
+- Work spreads by which replica receives the upload, not by queue depth.
+
+**Follow-up (not implemented): a shared queue.** Letting an idle replica execute a
+job another replica accepted would need the upload bytes on shared storage and a
+Redis work queue with a visibility timeout, so a dead replica's jobs are re-run
+instead of stranded. The job record already separates state from executor; the
+queue and the upload hand-off are the missing pieces.
+
+## Logging and metering
+
+`bibr serve` configures one log sink per process: the API process and the
+spawned inference worker each write formatted lines (`time level logger:
+message`) to stderr, where Docker and systemd collect them. `SERVE_LOG_LEVEL`
+(default `info`) sets the level for bibr's own loggers and is handed to uvicorn
+and LitServe; HTTP client libraries are held at `warning` so request URLs are
+not logged. Every sink carries the secret scrubber, so bearer tokens, URL
+credentials and `?key=` query strings are masked before they are written,
+tracebacks included.
+
+Metering (`METER_ENABLED`, default on) emits one JSON line per HTTP request
+from the API process and one per extraction — with LLM token usage — from the
+worker. With `METER_LOG_PATH` unset they go to stderr with the other logs; set
+it to route them to a size-rotated JSONL file instead (`METER_LOG_MAX_BYTES`,
+`METER_LOG_BACKUP_COUNT`), which both processes append to. Metering does not
+follow `SERVE_LOG_LEVEL`.
 
 ## Authentication
 
@@ -262,6 +338,15 @@ docker compose --profile serve --profile ocr up -d
 # Verify readiness (OCR, classifier artifacts, and enabled Redis cache)
 curl http://localhost:8000/ready
 ```
+
+Compose publishes the API on the host's loopback interface only
+(`127.0.0.1:8000`): Docker bypasses host firewalls for ports it publishes on
+`0.0.0.0`, and the API speaks plaintext HTTP with a bearer token. Put a
+TLS-terminating reverse proxy in front for remote clients, or set
+`BIBR_PUBLISH_HOST=0.0.0.0` when you deliberately want the port exposed.
+`REDIS_PASSWORD` reaches `bibr-serve` as its own variable and is URL-encoded
+into `REDIS_URL` at startup, so passwords containing `@`, `:`, `/`, `?`
+or `#` work.
 
 **Split deployment** (bibr-serve and the OCR server on different hosts):
 the bundled OCR container has no published host port. Expose it through a
@@ -417,6 +502,16 @@ reference extraction entirely (empty `bib`/`bib_match`/`xref`) while
 keeping core metadata. See [Architecture](architecture.md) for how the
 segmentation cascade and parsing strategies fit together internally.
 
+Crossref reference enrichment is off by default (`CROSSREF_ENRICH=false`):
+requests get the extracted `bib` table with an empty `bib_match`. Set
+`CROSSREF_ENRICH=true` to enrich every request, or let callers decide per
+request with the `crossref=true|false` form field on `/papers/extract` (and
+the `crossref` knob on the MCP `chew_paper`/`chew_url` tools), which
+overrides the setting either way. The response cache keys on the effective
+value, so an enriched and an unenriched result for the same file never
+collide. Deployments that upgraded from a version where enrichment was on
+by default must now set `CROSSREF_ENRICH=true` to keep that behaviour.
+
 At volume, Crossref enrichment is rate-limited (`CROSSREF_RATE_LIMIT_RPM`,
 default `200`; raise it once you've set `CROSSREF_API_EMAIL` or have an
 API key) and can optionally be cached in Redis across requests
@@ -451,7 +546,7 @@ includes PyTorch, the layout model, classifiers, and the sentence segmenter;
 it is not a torch-free installation even when OCR and LLM calls are remote.
 The API can run these local stages on CPU. The bundled SGLang OCR service
 requires an NVIDIA GPU. Exact RAM and VRAM requirements depend on the model,
-PDF page dimensions, batch sizes, and concurrent page windows; measure a
+PDF page dimensions, batch sizes, and concurrently processed pages; measure a
 representative workload before raising concurrency.
 
 For local CLI runtime and platform choices, see

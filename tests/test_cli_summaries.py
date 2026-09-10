@@ -158,9 +158,9 @@ def test_top_issues_sorted_highest_severity_first_max_two(tmp_path):
 
 
 def test_processing_warnings_folded_into_warnings_count(tmp_path):
-    """Non-VALIDATION-prefixed ``processing_warnings`` entries add a
-    ``+ K processing warnings`` suffix; VALIDATION:-prefixed entries (already
-    reflected in the structured counts) must not be double-counted."""
+    """``extraction.warnings`` entries add a ``+ K processing warnings``
+    suffix. v11 stopped mirroring gate findings there, so every entry is a
+    genuine processing warning and nothing is double-counted."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -172,10 +172,7 @@ def test_processing_warnings_folded_into_warnings_count(tmp_path):
                 {"code": "VAL_TITLE_GENERIC", "severity": "warning", "message": "generic title"},
             ],
         },
-        "processing_warnings": [
-            "VALIDATION:warning:VAL_TITLE_GENERIC: generic title",
-            "STATEMENT_LEXICAL_FALLBACK: funding_statement",
-        ],
+        "extraction": {"warnings": ["STATEMENT_LEXICAL_FALLBACK: funding_statement"]},
     }
     console = MagicMock()
 
@@ -194,8 +191,7 @@ def test_processing_warnings_folded_into_warnings_count(tmp_path):
 
 
 def test_processing_warnings_absent_no_plus_suffix(tmp_path):
-    """No non-VALIDATION processing_warnings -> no '+ K processing warnings'
-    suffix at all."""
+    """No ``extraction.warnings`` -> no '+ K processing warnings' suffix."""
     from bibr.local.cli import _write_chunk_results
 
     fs = FileState(path=tmp_path / "dirty.pdf")
@@ -205,7 +201,7 @@ def test_processing_warnings_absent_no_plus_suffix(tmp_path):
             "warnings": 0,
             "issues": [{"code": "VAL_EMPTY_EQ", "severity": "error", "message": "bad eq"}],
         },
-        "processing_warnings": ["VALIDATION:error:VAL_EMPTY_EQ: bad eq"],
+        "extraction": {"warnings": []},
     }
     console = MagicMock()
 

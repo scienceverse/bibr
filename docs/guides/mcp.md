@@ -11,7 +11,7 @@ configured memory mode, just as it does with `bibr.Chewer`.
 
 ## Setup
 
-The server needs the `mcp` extra:
+The server uses the MCP Python SDK v2 (minimum 2.2.0) and needs the `mcp` extra:
 
 ```bash
 uv sync --extra mcp        # add MCP to a source checkout
@@ -43,9 +43,20 @@ or in JSON client configs (Claude Desktop and most others):
 
 Pipeline options are fixed at server start (they configure the shared warm
 pipeline, exactly like `bibr.Chewer`): pass a subset of the `bibr chew`
-flags after `bibr mcp`, e.g. `bibr mcp --refs ner --no-crossref`. Everything
+flags after `bibr mcp`, e.g. `bibr mcp --refs ner --crossref` (enrichment is
+off unless `--crossref` or `CROSSREF_ENRICH=true` turns it on). Everything
 else (provider keys, model choice) comes from your `.env` /
 [settings](../reference/settings.md) as usual.
+
+The HTTP endpoint keeps papers within an initialized MCP session and negotiates
+protocol `2025-11-25`. SDK v2 clients in automatic mode negotiate this protocol;
+clients configured for the sessionless `2026-07-28` protocol must enable automatic
+or legacy negotiation. The stdio server also supports the newer protocol because
+its process already belongs to a single client.
+
+Exports and query results use schema v11. `get_metadata` returns its paper fields
+under `metadata`; summaries expose LLM `usage` as `totals` and `breakdown` within
+the existing `llm_usage` summary field.
 
 ## The tool surface
 
@@ -61,7 +72,7 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `load_paper(path)` | Registers an existing bibr export JSON without re-processing; same summary |
 | `list_papers()` | Papers loaded this session (id, title, DOI, source) |
 | `get_paper_summary(paper_id)` | The compact summary again |
-| `get_metadata(paper_id)` | Full info block (title, abstract, journal, paper type, integrity statements, …), authors, affiliations, funding |
+| `get_metadata(paper_id)` | Full metadata block (title, abstract, journal, paper type, integrity statements, …), authors, affiliations, funding |
 | `get_sections(paper_id)` | Section hierarchy with IMRaD-style types and per-section sentence counts |
 | `get_text(paper_id, section_id?, page?, offset?, limit?)` | Sentence spans with `text_id`/`section_id`/`page_number`, filtered and paginated |
 | `search_text(paper_id, query, limit?)` | Case-insensitive substring search over sentences |
@@ -130,28 +141,34 @@ claude mcp add --transport http bibr https://bibr.example.org/mcp \
 It is gated by the same bearer auth as every REST route (`AUTH_API_KEY`),
 and extraction rides the regular serve dispatch — the LitServe workers'
 resident models, admission control, and upload size caps all apply; no
-second pipeline is loaded.
+second pipeline is loaded. Concretely: `chew_paper` and `chew_url` accept
+files up to `PIPELINE_MAX_FILE_SIZE` (50 MiB), and because `chew_paper`
+carries its file base64-encoded inside the JSON-RPC body, enabling MCP raises
+the outer request-body cap to fit a full-size file in that form (about
+68 MiB by default) — a larger body is refused with a `413` that says so. An
+upload counts against `PIPELINE_MAX_ACTIVE_UPLOADS` both while its body is
+received (HTTP `429`) and while it is extracted (a `server busy` tool
+error), exactly like a `POST /papers/extract` request.
 
 Three differences from the stdio server:
 
 - **`chew_paper` takes an upload, not a path** — `filename` plus base64
   `content_base64`, because client paths don't exist on the server (and the
-  server never reads its own filesystem for clients). The supported subset
-  of REST per-call options is `start_page`/`end_page`, `refs`, and `consolidate`;
-  figure/debug export flags are not exposed by these MCP tools.
-  MCP page numbers are **1-based and inclusive** (`1` selects the first page);
-  the REST API uses zero-based page indices.
+  server never reads its own filesystem for clients). Per-call options match
+  `POST /papers/extract`: `start_page`/`end_page`, `refs`, `consolidate`,
+  and `crossref` (`true`/`false`; omit to follow the server's
+  `CROSSREF_ENRICH`, which is off by default).
+  Both MCP and REST use zero-based, inclusive page indices (`0` is the first page).
   `chew_url` avoids the upload entirely: the server downloads a public
   `https://` URL itself under the SSRF policy above, capped at the serve
   upload limit. Operators can pin it to specific hosts
   (`MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` — subdomains included) or
   remove the tool with `MCP_CHEW_URL_ENABLED=false`.
-  MCP and REST share upload and extraction admission limits. Overloaded
-  HTTP uploads return `429`; a tool whose extraction cannot be admitted
-  returns a retryable tool error before decoding or downloading the file.
 - **No `load_paper` / `save_paper`** — both are host-filesystem tools; use
   the REST API when you want the full export JSON as a file.
 - **Papers are per-session and bounded** — each MCP client session gets its
   own in-memory store, capped at `MCP_MAX_PAPERS_PER_SESSION` (default 16,
-  oldest evicted) and dropped when the session ends. Re-chew after a
-  disconnect.
+  oldest evicted) and dropped when the session ends. A session that goes
+  quiet for `MCP_SESSION_IDLE_TIMEOUT_SECONDS` (default 1800) is closed by
+  the server and its papers are dropped, so clients that disconnect without
+  `DELETE` do not pin memory. Re-chew after a disconnect.

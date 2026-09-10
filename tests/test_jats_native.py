@@ -1,7 +1,12 @@
 """Tests for bibr.input.jats_native.JatsParser."""
 
+import re
+from pathlib import Path
+
 from bibr.input.jats_native import JatsParser
 from bibr.paper_contents import CanonicalSection
+
+EUROPEPMC_FIXTURE = Path(__file__).parent / "fixtures" / "jats" / "PMC4383902.xml"
 
 # ---------------------------------------------------------------------------
 # Fixtures (inline JATS XML bytes)
@@ -382,3 +387,237 @@ class TestContract:
         }
         ref_sents = [s for s in c.sentences if s.section_id in ref_sec_ids]
         assert len(ref_sents) == 2
+
+
+# ---------------------------------------------------------------------------
+# DTD named entities (&alpha; etc.)
+# ---------------------------------------------------------------------------
+
+# A DOCTYPE plus named entities from the ISO sets JATS pulls in. The parser
+# never fetches the DTD, so libxml2 leaves these as unresolved entity nodes;
+# jats_native resolves them itself after the parse.
+ENTITY_JATS = b"""<?xml version="1.0"?>
+<!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.2 20190208//EN"
+ "JATS-journalpublishing1.dtd">
+<article>
+  <front><article-meta>
+    <title-group><article-title>Effects of &alpha;-synuclein &amp; A&beta; at 37&deg;C</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>M&uuml;ller</surname><given-names>J&oacute;n</given-names></name>
+      </contrib>
+    </contrib-group>
+    <abstract><p>Levels rose by 5&#37; &mdash; the &alpha; band was &lt;10&nbsp;Hz.</p></abstract>
+  </article-meta></front>
+  <body><sec><title>Results</title>
+    <p>The &beta;&gamma; dimer bound <italic>in&nbsp;vitro</italic> at 25&deg;C.</p></sec></body>
+  <back><ref-list>
+    <ref><mixed-citation>Sch&ouml;n, K. (2019). The &alpha; problem. Journal, 1, 2-3.</mixed-citation></ref>
+  </ref-list></back>
+</article>"""
+
+
+class TestNamedEntities:
+    def test_title_resolves_entities(self):
+        m = _parse(ENTITY_JATS)._contents.preparsed_metadata
+        assert m.title == "Effects of α-synuclein & Aβ at 37°C"
+
+    def test_author_names_resolve_entities(self):
+        m = _parse(ENTITY_JATS)._contents.preparsed_metadata
+        assert m.authors[0].family == "Müller"
+        assert m.authors[0].given == "Jón"
+
+    def test_body_text_resolves_entities_around_inline_markup(self):
+        # Entities before, inside the tail of, and after a child element.
+        c = _segment(_parse(ENTITY_JATS))
+        body = " ".join(s.text for s in c.sentences)
+        assert "βγ dimer" in body
+        assert "in vitro" in body  # &nbsp; resolves, then collapses
+        assert "25°C" in body
+
+    def test_reference_string_resolves_entities(self):
+        c = _parse(ENTITY_JATS)._contents
+        assert "Schön" in c.native_ref_strings[0]
+        assert "The α problem" in c.native_ref_strings[0]
+
+    def test_no_raw_entity_markup_survives_anywhere(self):
+        p = _parse(ENTITY_JATS)
+        c = _segment(p)
+        m = c.preparsed_metadata
+        blob = " ".join(
+            [m.title or "", m.abstract or "", *c.native_ref_strings]
+            + [f"{a.given} {a.family}" for a in m.authors]
+            + [s.text for s in c.sentences]
+        )
+        # A bare "&" is legitimate (from &amp;); "&name;" markup is not.
+        assert re.search(r"&[A-Za-z][A-Za-z0-9]*;", blob) is None
+
+    def test_predefined_and_numeric_references_still_work(self):
+        m = _parse(ENTITY_JATS)._contents.preparsed_metadata
+        assert "5%" in (m.abstract or "")  # &#37;
+        assert "<10" in (m.abstract or "")  # &lt;
+        assert "—" in (m.abstract or "")  # &mdash;
+
+
+# ---------------------------------------------------------------------------
+# Body-located <ref-list> (EuropePMC fullTextXML shape)
+# ---------------------------------------------------------------------------
+
+BODY_REFLIST_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Body Bibliography</article-title></title-group>
+  </article-meta></front>
+  <body>
+    <sec><title>Intro</title><p>Body text citing [1].</p></sec>
+    <sec sec-type="ref-list" disp-level="1"><title>REFERENCES</title>
+      <sec disp-level="2">
+        <ref-list>
+          <ref><mixed-citation>Alpha, A. (2010). First. Journal A, 1, 1-2.</mixed-citation></ref>
+          <ref><mixed-citation>Beta, B. (2011). Second. Journal B, 2, 3-4.</mixed-citation></ref>
+        </ref-list>
+      </sec>
+    </sec>
+  </body>
+</article>"""
+
+
+class TestBodyRefList:
+    """EuropePMC's fullTextXML emits the bibliography in <body>, not <back>."""
+
+    def test_body_ref_list_is_ingested(self):
+        c = _parse(BODY_REFLIST_JATS)._contents
+        assert c.native_ref_strings == [
+            "Alpha, A. (2010). First. Journal A, 1, 1-2.",
+            "Beta, B. (2011). Second. Journal B, 2, 3-4.",
+        ]
+
+    def test_refs_land_in_a_references_section(self):
+        p = _parse(BODY_REFLIST_JATS)
+        c = _segment(p)
+        ref_ids = {
+            s.section_id for s in c.sections if s.section_type == CanonicalSection.REFERENCES
+        }
+        assert ref_ids
+        in_refs = [s.text for s in c.sentences if s.section_id in ref_ids]
+        assert len(in_refs) == 2
+        assert in_refs[0].startswith("Alpha, A.")
+
+    def test_the_enclosing_sec_is_reused_not_duplicated(self):
+        c = _parse(BODY_REFLIST_JATS)._contents
+        refs_secs = [s for s in c.sections if s.section_type == CanonicalSection.REFERENCES]
+        assert len(refs_secs) == 1
+
+    def test_a_back_ref_list_still_wins(self):
+        """A document with both keeps <back> — the authoritative location."""
+        xml = BODY_REFLIST_JATS.replace(
+            b"</body>",
+            b"</body><back><ref-list>"
+            b"<ref><mixed-citation>Gamma, G. (2012). Canonical.</mixed-citation></ref>"
+            b"</ref-list></back>",
+        )
+        c = _parse(xml)._contents
+        assert c.native_ref_strings == ["Gamma, G. (2012). Canonical."]
+
+    def test_europepmc_fixture_yields_its_references(self):
+        """The tracked PMC4383902 fixture carries its 17 refs inside <body>."""
+        c = _parse(EUROPEPMC_FIXTURE.read_bytes())._contents
+        assert len(c.native_ref_strings or c.native_references or []) == 17
+
+
+# ---------------------------------------------------------------------------
+# <collab> (consortium) authors
+# ---------------------------------------------------------------------------
+
+COLLAB_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Group Authorship</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>Smith</surname><given-names>Jane</given-names></name>
+      </contrib>
+      <contrib contrib-type="author">
+        <collab>The Genome Sequencing Consortium</collab>
+      </contrib>
+      <contrib contrib-type="author">
+        <xref ref-type="aff" rid="a1"/>
+      </contrib>
+    </contrib-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Text.</p></sec></body>
+</article>"""
+
+
+class TestCollabAuthors:
+    def test_collab_name_is_kept(self):
+        m = _parse(COLLAB_JATS)._contents.preparsed_metadata
+        names = [(a.given, a.family) for a in m.authors]
+        assert ("", "The Genome Sequencing Consortium") in names
+
+    def test_nameless_contrib_is_dropped_not_emitted_blank(self):
+        m = _parse(COLLAB_JATS)._contents.preparsed_metadata
+        assert all(a.given or a.family for a in m.authors)
+        assert len(m.authors) == 2
+
+    def test_author_ids_stay_contiguous(self):
+        m = _parse(COLLAB_JATS)._contents.preparsed_metadata
+        assert [a.author_id for a in m.authors] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
+# Text flattening — markup that implies a word boundary
+# ---------------------------------------------------------------------------
+
+BOUNDARY_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Cognitive load<break/>and recall</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>Smith</surname><given-names>Jane</given-names></name>
+        <xref ref-type="aff" rid="a1"/>
+      </contrib>
+      <aff id="a1"><label>1</label><institution>Department of Psychology</institution>\
+<institution>Utrecht University</institution><addr-line>Heidelberglaan 1</addr-line>\
+<city>Utrecht</city><country>Netherlands</country></aff>
+      <aff id="a2"><institution>Institute of Testing</institution>, <city>Leiden</city></aff>
+    </contrib-group>
+    <abstract><title>Abstract</title><p>First paragraph.</p><p>Second paragraph.</p></abstract>
+  </article-meta></front>
+  <body><sec><title>Intro</title>
+    <p>Water is H<sub>2</sub>O and <italic>very</italic>wet.</p>
+    <fig><label>Figure 1</label><caption><title>Overview</title><p>The design.</p></caption>
+      <graphic/></fig>
+  </sec></body>
+</article>"""
+
+
+class TestTextBoundaries:
+    def test_break_separates_words(self):
+        m = _parse(BOUNDARY_JATS)._contents.preparsed_metadata
+        assert m.title == "Cognitive load and recall"
+
+    def test_structured_aff_fields_are_separated(self):
+        m = _parse(BOUNDARY_JATS)._contents.preparsed_metadata
+        assert m.authors[0].affiliation == (
+            "Department of Psychology Utrecht University Heidelberglaan 1 Utrecht Netherlands"
+        )
+
+    def test_existing_source_punctuation_is_not_doubled(self):
+        p = _parse(BOUNDARY_JATS)
+        assert p._aff_map["a2"] == "Institute of Testing, Leiden"
+
+    def test_abstract_paragraphs_are_separated(self):
+        m = _parse(BOUNDARY_JATS)._contents.preparsed_metadata
+        assert m.abstract == "First paragraph. Second paragraph."
+
+    def test_inline_markup_is_not_separated(self):
+        p = _parse(BOUNDARY_JATS)
+        c = _segment(p)
+        texts = [s.text for s in c.sentences]
+        assert "Water is H2O and verywet." in texts
+
+    def test_caption_title_and_body_are_separated(self):
+        c = _parse(BOUNDARY_JATS)._contents
+        assert c.figures[0].caption == "Figure 1 Overview The design."

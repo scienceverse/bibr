@@ -7,7 +7,7 @@ import pytest
 
 from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
-from bibr.pipeline.stages.export import ExportStage, _build_ocr_config
+from bibr.pipeline.stages.export import ExportStage, _build_engines
 from bibr.pipeline.state import FileState
 
 
@@ -93,16 +93,17 @@ async def test_gc_throttle_is_per_instance(monkeypatch):
     assert len(calls) == 2
 
 
-def test_ocr_config_reports_backend_specific_rapid_mlx_model(monkeypatch):
+def test_ocr_engine_reports_backend_specific_rapid_mlx_model(monkeypatch):
     from bibr.config import Settings
 
+    monkeypatch.setattr(Settings.ocr, "model", "numind/NuExtract3-mlx-8bits")
     monkeypatch.setattr(Settings.ocr, "rapid_mlx_model", "mlx-community/GLM-OCR-8bit")
     ctx = _ctx([], config=RunConfig(ocr_backend="glm-rapid-mlx", llm_backend="rapid-mlx"))
 
-    assert _build_ocr_config(ctx)["ocr_model"] == "mlx-community/GLM-OCR-8bit"
+    assert _build_engines(ctx)[0]["model"] == "mlx-community/GLM-OCR-8bit"
 
 
-def test_ocr_config_reports_default_glm_model(monkeypatch):
+def test_ocr_engine_reports_default_sglang_glm_model(monkeypatch):
     from bibr.config import Settings
 
     monkeypatch.setattr(Settings.ocr, "model", None)
@@ -114,10 +115,10 @@ def test_ocr_config_reports_default_glm_model(monkeypatch):
     # gate poll for a model id the server never advertises.
     ctx = _ctx([], config=RunConfig(ocr_backend="glm-http"))
 
-    assert _build_ocr_config(ctx)["ocr_model"] == "glm-ocr"
+    assert _build_engines(ctx)[0]["model"] == "glm-ocr"
 
 
-def test_ocr_config_uses_concrete_runtime_identity_from_scratch():
+def test_ocr_engine_uses_concrete_runtime_identity_from_scratch():
     from bibr.ocr.profiles import OcrRuntimeIdentity
 
     ctx = _ctx([], config=RunConfig(ocr_backend="serve-http"))
@@ -128,53 +129,41 @@ def test_ocr_config_uses_concrete_runtime_identity_from_scratch():
         normalizer_version="paddle-canonical-v1",
     )
 
-    config = _build_ocr_config(ctx)
+    config = _build_engines(ctx)[0]
 
-    assert {
-        "ocr_backend": config["ocr_backend"],
-        "ocr_model": config["ocr_model"],
-        "ocr_profile": config["ocr_profile"],
-    } == {
-        "ocr_backend": "serve-http",
-        "ocr_model": "paddle-ocr-vl-1.6",
-        "ocr_profile": "paddle",
+    assert config == {
+        "backend": "serve-http",
+        "model": "paddle-ocr-vl-1.6",
+        "profile": "paddle",
     }
 
 
-def test_ocr_config_resolves_concrete_identity_without_ocr_startup(monkeypatch):
+def test_ocr_engine_resolves_concrete_identity_without_ocr_startup(monkeypatch):
     from bibr.config import Settings
 
     monkeypatch.setattr(Settings.ocr, "paddle_served_model", "paddle-ocr-vl-1.6")
     ctx = _ctx([], config=RunConfig(ocr_backend="serve-http", ocr_profile="paddle"))
 
-    config = _build_ocr_config(ctx)
+    config = _build_engines(ctx)[0]
 
-    assert {
-        "ocr_backend": config["ocr_backend"],
-        "ocr_model": config["ocr_model"],
-        "ocr_profile": config["ocr_profile"],
-    } == {
-        "ocr_backend": "serve-http",
-        "ocr_model": "paddle-ocr-vl-1.6",
-        "ocr_profile": "paddle",
+    assert config == {
+        "backend": "serve-http",
+        "model": "paddle-ocr-vl-1.6",
+        "profile": "paddle",
     }
 
 
-def test_ocr_config_serve_http_default_profile_follows_served_model(monkeypatch):
+def test_ocr_engine_serve_http_default_profile_follows_served_model(monkeypatch):
     from bibr.config import Settings
 
     monkeypatch.setattr(Settings.ocr, "model", None)
     monkeypatch.setattr(Settings.ocr, "profile", None)
     ctx = _ctx([], config=RunConfig(ocr_backend="serve-http"))
 
-    config = _build_ocr_config(ctx)
+    config = _build_engines(ctx)[0]
 
-    assert {
-        "ocr_backend": config["ocr_backend"],
-        "ocr_model": config["ocr_model"],
-        "ocr_profile": config["ocr_profile"],
-    } == {
-        "ocr_backend": "serve-http",
-        "ocr_model": "glm-ocr",
-        "ocr_profile": "glm",
+    assert config == {
+        "backend": "serve-http",
+        "model": "glm-ocr",
+        "profile": "glm",
     }

@@ -78,14 +78,22 @@ services:
       nofile:
         soft: 65536
         hard: 65536
+    # Published on the host's loopback only: Docker bypasses host firewalls
+    # for ports it publishes on 0.0.0.0, and the API speaks plaintext HTTP
+    # with a bearer token. Put a TLS-terminating reverse proxy in front for
+    # remote clients, or set BIBR_PUBLISH_HOST=0.0.0.0 to expose it on purpose.
     ports:
-      - "8000:8000"
+      - "${BIBR_PUBLISH_HOST:-127.0.0.1}:8000:8000"
     depends_on:
       redis:
         condition: service_healthy
     env_file: .env
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      # Host-only URL: bibr URL-encodes REDIS_PASSWORD into it at startup, so
+      # a password containing @ : / ? or # still authenticates. Interpolating
+      # the raw password into the URL here silently disabled the cache.
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - OCR_BASE_URL=${OCR_BASE_URL:-http://bibr-ocr:8080}
       # The bundled OCR hop stays on Docker's private bridge network.
       - OCR_ALLOW_INSECURE_HTTP=${OCR_ALLOW_INSECURE_HTTP:-true}

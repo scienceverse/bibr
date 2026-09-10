@@ -148,9 +148,9 @@ def main():
     import json
 
     data = json.loads(content)
-    info = data.get("info", {})
-    print(f"\nTitle:        {info.get('title', 'N/A')}")
-    print(f"DOI:          {info.get('doi', 'N/A')}")
+    metadata = data.get("metadata") or data.get("info") or {}
+    print(f"\nTitle:        {metadata.get('title', 'N/A')}")
+    print(f"DOI:          {metadata.get('doi', 'N/A')}")
     print(f"Authors:      {len(data.get('author', []))}")
     print(f"References:   {len(data.get('bib', []))}")
     print(f"Sections:     {len(data.get('section', []))}")

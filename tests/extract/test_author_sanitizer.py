@@ -62,6 +62,49 @@ def test_numbered_affiliations_are_reconciled_from_byline_and_blocks():
     assert authors[3].affiliation == "Stichting Mindfit, Thubble, Deventer, The Netherlands"
 
 
+def test_a_page_one_caption_does_not_redefine_an_affiliation_marker():
+    """ "<digit> <Capital…>" is also the shape of a figure caption and of a
+    publication-history line. With no institution test, adding a caption row
+    to correct front matter rewrote author 1's affiliation to the caption."""
+    authors = _convert(
+        [AuthorLLM(given="Ada", family="Lovelace", affiliation="University of Twente")]
+    )
+    meta_df = pd.DataFrame(
+        {
+            "page_number": [1, 1, 1],
+            "text": [
+                "Ada Lovelace1",
+                "1 Department of Health, University of Twente, Enschede, The Netherlands",
+                "Figure 1 Study design and participant flow",
+            ],
+        }
+    )
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, meta_df)
+
+    assert authors[0].affiliation.startswith("Department of Health")
+
+
+def test_publication_history_line_does_not_define_an_affiliation_marker():
+    authors = _convert(
+        [AuthorLLM(given="Ada", family="Lovelace", affiliation="University of Twente")]
+    )
+    meta_df = pd.DataFrame(
+        {
+            "page_number": [1, 1, 1],
+            "text": [
+                "Ada Lovelace2",
+                "2 Department of Health, University of Twente, Enschede, The Netherlands",
+                "2 Received 12 March 2019; accepted 5 May 2019",
+            ],
+        }
+    )
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, meta_df)
+
+    assert authors[0].affiliation.startswith("Department of Health")
+
+
 async def test_affiliation_reconciliation_uses_rows_beyond_metadata_cutoff():
     full_df = pd.DataFrame(
         {

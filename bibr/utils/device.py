@@ -1,21 +1,24 @@
 """Shared device detection for model inference.
 
-Single source for the CUDA → MPS → CPU ladder. Import lazily (inside
-functions) from modules that avoid torch at import time.
+Single source for the CUDA → MPS → CPU ladder. The module itself imports
+without torch (a core install reaches ``report_device`` through the sentence
+segmenter); only the functions that genuinely need torch import it, and they
+raise the 'torch'-extra ImportError when it is absent.
 """
 
 import logging
 import os
+import sys
 import warnings
 
 from bibr.utils.ml_extra import ml_import_error
 
-try:
-    import torch
-except ImportError as e:  # pragma: no cover
-    raise ml_import_error("Torch device detection (bibr.utils.device)") from e
-
 logger = logging.getLogger(__name__)
+
+# Bound lazily by ``_torch_module()``; kept as a module attribute so tests can
+# patch ``bibr.utils.device.torch`` exactly as they did when it was a plain
+# import.
+torch = None
 
 # Cap bibr's PyTorch VRAM usage so concurrent inference cannot grow unbounded
 # and crash the NVIDIA driver.  On a shared single GPU, SGLang's
@@ -25,6 +28,29 @@ logger = logging.getLogger(__name__)
 _CUDA_MEM_FRACTION = float(os.environ.get("BIBR_CUDA_MEM_FRACTION", "0.35"))
 _cuda_mem_configured = False
 _cuda_perf_configured = False
+
+
+def _torch_module(*, required: bool = True):
+    """Return torch, importing it on first use.
+
+    With ``required=False`` only an *already imported* torch is returned: the
+    ONNX runtime path must never pull torch into the process just to log a
+    device line, and a core install has nothing to import anyway.
+    """
+    global torch
+    if torch is not None:
+        return torch
+    loaded = sys.modules.get("torch")
+    if loaded is None:
+        if not required:
+            return None
+        try:
+            import torch as _torch
+        except ImportError as e:
+            raise ml_import_error("Torch device detection (bibr.utils.device)") from e
+        loaded = _torch
+    torch = loaded
+    return torch
 
 
 def configure_cuda_perf() -> None:
@@ -49,6 +75,7 @@ def configure_cuda_perf() -> None:
     if _cuda_perf_configured:
         return
     _cuda_perf_configured = True
+    torch = _torch_module()
     try:
         if os.environ.get("BIBR_ALLOW_TF32", "1") != "0":
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -66,6 +93,7 @@ def _configure_cuda_memory() -> None:
     if _cuda_mem_configured:
         return
     _cuda_mem_configured = True
+    torch = _torch_module()
     try:
         torch.cuda.set_per_process_memory_fraction(_CUDA_MEM_FRACTION)
         logger.info(
@@ -89,10 +117,11 @@ def cuda_incompatibility() -> str | None:
     heuristic: cubins are forward-compatible within a major version, and
     ``compute_XY`` PTX entries can JIT up to any newer architecture.
 
-    Returns ``None`` when CUDA is absent, compatible, or the probe itself
-    fails (never knock out a GPU on a probe error).
+    Returns ``None`` when CUDA is absent, torch is not loaded, compatible, or
+    the probe itself fails (never knock out a GPU on a probe error).
     """
-    if not torch.cuda.is_available():
+    torch = _torch_module(required=False)
+    if torch is None or not torch.cuda.is_available():
         return None
 
     def _majors(arch_list: list[str], prefix: str) -> set[int]:
@@ -141,8 +170,9 @@ def detect_torch_device() -> str:
     the per-process VRAM cap (once). A CUDA device whose architecture is
     unsupported by the installed wheel (see :func:`cuda_incompatibility`) is
     skipped — kernels would crash at launch — and the ladder falls through to
-    the next rung.
+    the next rung. Raises the 'torch'-extra ImportError without torch.
     """
+    torch = _torch_module()
     if torch.cuda.is_available():
         reason = cuda_incompatibility()
         if reason is None:
@@ -165,10 +195,12 @@ def report_device(component: str, device: str, *, gpu_capable: bool = True) -> N
     CUDA GPU is present (``is_available()`` and architecture-compatible — see
     :func:`cuda_incompatibility`). Pass ``gpu_capable=False`` for components
     with no GPU implementation, so their CPU placement is reported as INFO,
-    not flagged as a regression.
+    not flagged as a regression. Torch is consulted only when it is already
+    loaded, so the ONNX path never imports it here.
     """
     on_cpu = str(device).split(":", 1)[0].strip().lower() == "cpu"
-    gpu_usable = torch.cuda.is_available() and cuda_incompatibility() is None
+    torch = _torch_module(required=False)
+    gpu_usable = torch is not None and torch.cuda.is_available() and cuda_incompatibility() is None
     if gpu_capable and on_cpu and gpu_usable:
         logger.warning(
             "%s is running on CPU while a usable CUDA GPU is available — this is "

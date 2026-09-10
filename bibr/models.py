@@ -190,6 +190,16 @@ class PaperReference(_Base):
     edition: str | None = None
     version: str | None = None
     is_in_press: bool = False  # True for "in press"/"forthcoming"/"advance online" refs
+    # Identifiers and trailing matter the NER parser has always tagged and that
+    # had nowhere to go: the 39-tag BIO scheme carries ARXIV, PMID, SERIES,
+    # ACCESS_DATE and NOTE, and every value was dropped at decode because
+    # ``_FIELD_TO_PAPER_REF`` had no target for them. Verbatim as printed, like
+    # the fields above -- ``date`` is the only normalised one.
+    arxiv: str | None = None  # arXiv id as printed ("1803.04219", "arXiv:1803.04219")
+    pmid: str | None = None  # PubMed id as printed
+    series: str | None = None  # book or report series title
+    access_date: str | None = None  # "Accessed 12 March 2020", verbatim
+    note: str | None = None  # trailing free text no other field claims
     match: dict[MatchSource, ExternalMatch] = Field(default_factory=dict)
 
 

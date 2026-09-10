@@ -529,3 +529,66 @@ def test_no_subcommand_prints_parser_help_and_exits_nonzero():
 
     exit_code = config_cli.run_config_command(_args(config_command=None), parser=config_parser)
     assert exit_code != 0
+
+
+# ---------------------------------------------------------------------------
+# _env_chain follows BIBR_ENV_FILE (audit [31])
+# ---------------------------------------------------------------------------
+
+
+def test_env_chain_follows_the_bibr_env_file_override(tmp_path, monkeypatch):
+    """The chain was hardcoded to (./.env, ~/.bibr/.env) while claiming to
+    mirror config._default_env_files(), which BIBR_ENV_FILE makes overridable
+    — so `bibr config` reported and wrote a file the running settings were
+    not reading."""
+    import os
+
+    from bibr.config import ENV_FILE_OVERRIDE_VAR
+
+    override = tmp_path / "override.env"
+    override.write_text("LLM_MODEL=from-override\n")
+    monkeypatch.setenv(ENV_FILE_OVERRIDE_VAR, str(override))
+
+    assert config_cli._env_chain() == (override,)
+
+    # Precedence order is highest-first, the reverse of the last-wins merge
+    # order _default_env_files() hands to pydantic-settings.
+    low = tmp_path / "low.env"
+    high = tmp_path / "high.env"
+    low.write_text("LLM_MODEL=low\n")
+    high.write_text("LLM_MODEL=high\n")
+    monkeypatch.setenv(ENV_FILE_OVERRIDE_VAR, os.pathsep.join([str(low), str(high)]))
+
+    assert config_cli._env_chain() == (high, low)
+
+
+def test_provenance_reads_the_overridden_env_file(tmp_path, monkeypatch):
+    from bibr.config import ENV_FILE_OVERRIDE_VAR
+
+    override = tmp_path / "override.env"
+    override.write_text("LLM_MODEL=from-override\n")
+    monkeypatch.setenv(ENV_FILE_OVERRIDE_VAR, str(override))
+    _clean_env(monkeypatch, "LLM_MODEL")
+
+    provenance = config_cli.resolve_provenance(_doc("LLM_MODEL"))
+
+    assert provenance.tier == "dotenv"
+    assert provenance.value == "from-override"
+    assert provenance.path == str(override)
+
+
+def test_set_writes_to_the_overridden_env_file(tmp_path, monkeypatch):
+    from bibr.config import ENV_FILE_OVERRIDE_VAR
+
+    override = tmp_path / "override.env"
+    override.write_text("LLM_MODEL=old\n")
+    monkeypatch.setenv(ENV_FILE_OVERRIDE_VAR, str(override))
+
+    from rich.console import Console
+
+    exit_code = config_cli._cmd_set(
+        _args(key="LLM_MODEL", value="new-model"), Console(force_terminal=False)
+    )
+
+    assert exit_code == 0
+    assert "new-model" in override.read_text()

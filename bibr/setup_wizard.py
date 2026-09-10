@@ -25,7 +25,13 @@ from rich.prompt import Confirm, Prompt
 from bibr.env_utils import _format_env_value
 from bibr.env_utils import merge_env as _merge_env  # re-exported for tests
 from bibr.local.cli import ui
-from bibr.local.llm_models import REGISTRY, detect_hardware, get_model, variants_for
+from bibr.local.llm_models import (
+    REGISTRY,
+    cuda_llm_backend_for,
+    detect_hardware,
+    get_model,
+    variants_for,
+)
 from bibr.presets import PresetManager
 
 # ---------------------------------------------------------------------------
@@ -192,9 +198,9 @@ def _default_local_llm_backend(
         if rapid_mlx_unavailable_reason() is None:
             return "rapid-mlx"
         return "vllm-mlx"
-    if sys_platform_name == "win32" or (memory_gb is not None and memory_gb <= 8):
+    if sys_platform_name == "win32":
         return "llama-cpp"
-    return "vllm"
+    return cuda_llm_backend_for(memory_gb)
 
 
 def _runtime_for_variant(variant, default_backend: str) -> str:
@@ -296,20 +302,34 @@ def _build_recommended_setup(
         ocr_backend = "paddle"
         env = {**base_env, "OCR_BACKEND": ocr_backend}
         env.update(_local_llm_env(platform_key, accelerator_memory_gb, sys_platform_name))
-        # On Linux the LLM backend mirrors the automatic OCR chain: at or below
-        # 8 GB of VRAM both run through llama.cpp, so the plan needs no GPU
-        # runtime extra — it needs llama-server on PATH, which only the user
-        # can install.
-        llama_cpp_runtime = (
-            sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
-        ) or ocr_backend == "glm-llama"
+        # On Linux each half has its own VRAM gate: the automatic OCR chain
+        # runs paddle-vllm from 8 GB (bibr.ocr.registry) and the LLM picks
+        # vLLM only when a vLLM variant of the recommended model fits (11 GB
+        # for NuExtract 3, bibr.local.llm_models). Below its gate a half runs
+        # through llama.cpp, which needs llama-server on PATH — something only
+        # the user can install — while the other half may still need the
+        # vllm extra.
+        llm_on_llama_cpp = sys_platform_name == "linux" and env.get("LLM_BACKEND") == "llama-cpp"
+        ocr_on_llama_cpp = ocr_backend == "glm-llama"
+        if sys_platform_name == "linux" and accelerator_memory_gb is not None:
+            from bibr.ocr.registry import paddle_vllm_unavailable_reason
+
+            ocr_on_llama_cpp = ocr_on_llama_cpp or (
+                paddle_vllm_unavailable_reason(vram_gb=accelerator_memory_gb) is not None
+            )
         runtime = "Fully local runs can be slow and may download several GB."
-        if llama_cpp_runtime:
+        if ocr_on_llama_cpp:
             runtime = (
                 "Uses llama.cpp for OCR/LLM: install a CUDA (or Vulkan) build separately "
                 "and put llama-server on PATH. Layout and NER use PyTorch; on older GPUs "
                 "(Pascal / GTX 10-series) PyTorch falls back to CPU automatically — that "
                 "is expected."
+            )
+        elif llm_on_llama_cpp:
+            runtime = (
+                "Uses vLLM for OCR and llama.cpp for the LLM (NuExtract 3's vLLM build needs "
+                "11 GB of VRAM): install a CUDA (or Vulkan) build of llama.cpp separately "
+                "and put llama-server on PATH."
             )
         elif platform_key == "mlx" and env.get("LLM_BACKEND") == "rapid-mlx":
             runtime = (
@@ -328,7 +348,7 @@ def _build_recommended_setup(
             *_platform_local_extra(
                 sys_platform_name,
                 machine_name,
-                ocr_backend="glm-llama" if llama_cpp_runtime else ocr_backend,
+                ocr_backend="glm-llama" if ocr_on_llama_cpp else ocr_backend,
             ),
         }
         if "vllm" in extras and sys.version_info >= (3, 14):
@@ -1300,13 +1320,21 @@ class SetupWizard:
             self.env_vars["CROSSREF_API_EMAIL"] = email
 
         self.console.print(
-            "\n[dim]Reference consolidation: fill fields missing from extracted\n"
-            "references (DOI, pages, ...) with matched Crossref data. Printed\n"
-            "values are never overwritten ('replace' mode exists via\n"
-            "CROSSREF_CONSOLIDATE in .env).[/dim]"
+            "\n[dim]Reference enrichment: look each extracted reference up in\n"
+            "Crossref (and the optional bibr-resolver) to attach DOIs and a\n"
+            "bib_match table. Off by default — it adds network round-trips per\n"
+            "paper. Per-run switches: `bibr chew --crossref` / `--no-crossref`.[/dim]"
         )
-        if Confirm.ask("  Enable reference consolidation?", default=False):
-            self.env_vars["CROSSREF_CONSOLIDATE"] = "fill"
+        if Confirm.ask("  Enable Crossref reference enrichment?", default=False):
+            self.env_vars["CROSSREF_ENRICH"] = "true"
+            self.console.print(
+                "\n[dim]Reference consolidation: fill fields missing from extracted\n"
+                "references (DOI, pages, ...) with matched Crossref data. Printed\n"
+                "values are never overwritten ('replace' mode exists via\n"
+                "CROSSREF_CONSOLIDATE in .env).[/dim]"
+            )
+            if Confirm.ask("  Enable reference consolidation?", default=False):
+                self.env_vars["CROSSREF_CONSOLIDATE"] = "fill"
 
         if "cache" in self.selected_extras:
             self.console.print("\n[dim]You selected the cache extra — additional config:[/dim]")
@@ -1379,11 +1407,17 @@ class SetupWizard:
         if refs != "ner":
             self.env_vars["REF_PARSE_STRATEGY"] = refs
 
+        # `bibr setup` installs the full local stack: the ONNX runtime in core
+        # serves these models too, but the ml (torch) extra is what gives this
+        # machine the GPU/MPS path and the CRF segmenter the wizard's defaults
+        # can reach.
         if "ml" not in self.selected_extras and not _ml_extra_available():
             self.selected_extras.add("ml")
-            reason = "PDF layout detection requires the ml extra"
+            reason = "PDF layout detection runs fastest with the ml extra"
             if refs == "ner":
-                reason = "PDF layout detection and NER reference parsing require the ml extra"
+                reason = (
+                    "PDF layout detection and NER reference parsing run fastest with the ml extra"
+                )
             self._install_selected_extras(reason)
 
     def _step_memory_mode(self) -> None:
@@ -1609,8 +1643,8 @@ class SetupWizard:
 
         elapsed = time.monotonic() - t0
         data = result.data
-        info = data.get("info") or {}
-        title = info.get("title") or "(no title extracted)"
+        metadata = data.get("metadata") or {}
+        title = metadata.get("title") or "(no title extracted)"
         n_authors = len(data.get("author") or [])
         n_refs = len(data.get("bib") or [])
         ui.ok(self.console, f"Pipeline smoke test succeeded ({elapsed:.1f}s)")

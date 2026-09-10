@@ -307,6 +307,16 @@ class TestWarningPropagation:
             file_hash="deadbeef",
             no_llm=True,
         )
+        paper.extraction = {
+            "bibr_version": "0.0.0-test",
+            "completed_at": "2026-07-24T10:00:00Z",
+            "settings": {
+                "ref_seg": "geom",
+                "ref_parse": "ner",
+                "crossref_enrich": False,
+                "consolidate": "off",
+            },
+        }
         result = export_paper_to_json(paper)
 
-        assert warning in result["processing_warnings"]
+        assert warning in result["extraction"]["warnings"]

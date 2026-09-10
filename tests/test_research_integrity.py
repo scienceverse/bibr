@@ -687,7 +687,7 @@ async def test_affiliation_output_order_follows_input_not_llm():
 # ── E) export ───────────────────────────────────────────────────────────
 
 
-def test_export_statements_in_info_and_funding_roundtrips():
+def test_export_statements_in_metadata_and_funding_roundtrips():
     from bibr.models import FundingEntry
 
     contents = _contents([(1, "Intro", CanonicalSection.INTRODUCTION, ["Hello."])])
@@ -704,11 +704,11 @@ def test_export_statements_in_info_and_funding_roundtrips():
     metadata.authors[0].role = ["Conceptualization"]
     out = export_paper_to_json(_paper(metadata, contents))
 
-    assert out["info"]["funding_statement"] == "Funded by the NSF."
-    assert out["info"]["coi_statement"] == "No conflict."
-    assert out["info"]["ethics_statement"] == "IRB approved."
-    assert out["info"]["data_availability"] == "On OSF."
-    assert out["funding"] == [{"funder": "NSF", "award_ids": ["123"]}]
+    assert out["metadata"]["funding_statement"] == "Funded by the NSF."
+    assert out["metadata"]["coi_statement"] == "No conflict."
+    assert out["metadata"]["ethics_statement"] == "IRB approved."
+    assert out["metadata"]["data_availability"] == "On OSF."
+    assert out["funding"] == [{"funding_id": 1, "funder": "NSF", "award_ids": ["123"]}]
     assert out["author"][0]["role"] == ["Conceptualization"]
 
 
@@ -716,9 +716,9 @@ def test_export_defaults_when_absent():
     contents = _contents([(1, "Intro", CanonicalSection.INTRODUCTION, ["Hello."])])
     metadata = PaperMetadata(doi="10.1/x", title="T", authors=[_author(1, "A", "B")])
     out = export_paper_to_json(_paper(metadata, contents))
-    assert out["info"]["funding_statement"] is None
+    assert out["metadata"]["funding_statement"] is None
     assert out["funding"] == []
-    assert out["affiliations"] == []
+    assert out["affiliation"] == []
     assert out["author"][0]["role"] == []
 
 
@@ -743,7 +743,7 @@ def test_export_affiliations_roundtrips():
         ],
     )
     out = export_paper_to_json(_paper(metadata, contents))
-    assert out["affiliations"] == [
+    assert out["affiliation"] == [
         {
             "affiliation_id": 1,
             "text": "Dept of Psychology, Univ X, London, UK",

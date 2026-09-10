@@ -45,6 +45,28 @@ def test_keywords_f1():
     assert keywords_f1(["alpha"], []) is None
 
 
+def test_v11_and_frozen_v10_metadata_score_identically():
+    metadata = {"title": "T", "doi": "10.1/x", "abstract": None, "keywords": ["alpha"]}
+    common = {
+        "author": [{"family": "Byron", "given": "Ada"}],
+        "text": [{"text": "Printed abstract", "section_id": 1}],
+        "section": [{"section_id": 1, "section_type": "abstract"}],
+        "bib": [],
+    }
+    legacy = {**common, "info": {**metadata, "file_name": "paper.pdf"}}
+    current = {
+        **common,
+        "schema_version": "11.0",
+        "metadata": metadata,
+        "source": {"file_name": "paper.pdf"},
+    }
+    for is_gold in (False, True):
+        assert extract_comparable_from_json(current, is_gold=is_gold) == (
+            extract_comparable_from_json(legacy, is_gold=is_gold)
+        )
+    assert extract_comparable_from_json(current)["abstract"] == ""
+
+
 def test_email_orcid_corresponding():
     e = [
         {

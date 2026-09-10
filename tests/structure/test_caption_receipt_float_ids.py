@@ -99,7 +99,9 @@ class TestReceiptSurvivesFloatMerging:
     def test_every_receipt_object_id_resolves_to_a_live_float(self):
         contents = _parse(_panel_document())
 
-        assert [figure.figure_id for figure in contents.figures] == [1]
+        # The survivor keeps the printed label as its id — that is what
+        # detect_xrefs resolves a body mention of "Figure 12" by.
+        assert [figure.figure_id for figure in contents.figures] == [12]
         receipt = contents.caption_assignment_receipt
         assigned = [item.object_id for item in receipt.assignments if item.object_id is not None]
         assert assigned, "the fixture must produce at least one owned caption"
@@ -115,8 +117,8 @@ class TestReceiptSurvivesFloatMerging:
 
         # "B" owned the panel figure that merge_figure_panels absorbed; its
         # entry must follow the survivor, not vanish and not keep the dead id.
-        assert by_text["B"].object_id == "figure:1"
-        assert by_text["FIGURE 12 Panels of the thing."].object_id == "figure:1"
+        assert by_text["B"].object_id == "figure:12"
+        assert by_text["FIGURE 12 Panels of the thing."].object_id == "figure:12"
 
     def test_export_emits_no_dangling_assignment_object_id(self):
         from bibr.export import export_paper_to_json
@@ -138,6 +140,9 @@ class TestReceiptSurvivesFloatMerging:
             metadata=PaperMetadata(title="Panels", doi=""),
             contents=contents,
         )
+        from tests.export.conftest import extraction_block
+
+        paper.extraction = extraction_block()
         output = export_paper_to_json(paper, validate=False)
 
         live = {f"figure:{item['figure_id']}" for item in output["figure"]} | {
@@ -145,7 +150,7 @@ class TestReceiptSurvivesFloatMerging:
         }
         exported = [
             item["object_id"]
-            for item in output["caption_assignment"]["assignments"]
+            for item in output["extraction"]["diagnostics"]["caption_assignment"]["assignments"]
             if item["object_id"] is not None
         ]
         assert exported
@@ -161,8 +166,12 @@ class TestMergeRemaps:
         ]
         merged, remap = merge_figure_panels_with_remap(figures)
 
-        assert [figure.figure_id for figure in merged] == [1]
-        assert remap == {"figure:12": "figure:1", "figure:13": "figure:1", "figure:14": "figure:1"}
+        assert [figure.figure_id for figure in merged] == [12]
+        assert remap == {
+            "figure:12": "figure:12",
+            "figure:13": "figure:12",
+            "figure:14": "figure:12",
+        }
 
     def test_figure_remap_is_empty_when_nothing_merged(self):
         figures = [_fig(3, 4, "FIGURE 1 One"), _fig(7, 5, "FIGURE 2 Two")]

@@ -53,6 +53,15 @@ class TestApplyCorrectionNoticeGuard:
             # Negative: prefix is plural / variant — alternation matches
             # the singular only.
             ("Corrigenda from the editors", False, ""),
+            # Negative: research titles that merely open with the word. The
+            # trailing character class used to include \s, which made the
+            # requirement vacuous — every one of these was wiped.
+            ("Correction for attenuation in meta-analysis: a simulation study", False, ""),
+            ("Correction of measurement error in survey research", False, ""),
+            ("Retraction of a flawed analysis", False, ""),
+            # Positive: the "Note"/"Notice" form journals print.
+            ("Retraction Note to: Some Paper", True, "retraction"),
+            ("Correction Notice: A Study of...", True, "corrigendum"),
             # Negative: prefix word appears mid-string but the regex is
             # anchored with ^\s* so it must be at the start.
             ("Some paper about corrigendum revisited", False, ""),

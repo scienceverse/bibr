@@ -644,7 +644,8 @@ def test_extract_route_persists_descriptor_and_maps_upload_errors(monkeypatch):
         ],
         [
             ("file", ("paper.pdf", b"paper", "application/pdf")),
-            *((f"extra_{index}", (None, "x")) for index in range(8)),
+            # One more text part than the route accepts (len(_FORM_OPTION_NAMES)).
+            *((f"extra_{index}", (None, "x")) for index in range(9)),
         ],
     ],
 )
@@ -992,7 +993,72 @@ def test_extract_route_closes_starlette_upload_before_dispatch(monkeypatch):
         asyncio.run(store.close())
 
 
-@pytest.mark.parametrize("field", ["include_figures", "include_regions"])
+@pytest.mark.parametrize("value", ["true", "False", "1", "0", "yes", "NO"])
+def test_validate_upload_options_accepts_crossref_boolean_spellings(value):
+    from bibr.serve.ingress import _validate_upload_options
+
+    assert _validate_upload_options({"crossref": value}) == {"crossref": value}
+
+
+def test_validate_upload_options_rejects_non_boolean_crossref():
+    from bibr.serve.ingress import InvalidUploadOptionError, _validate_upload_options
+
+    with pytest.raises(InvalidUploadOptionError, match="crossref must be a boolean"):
+        _validate_upload_options({"crossref": "maybe"})
+
+
+def test_validate_upload_options_drops_empty_crossref():
+    """Absent/empty ``crossref`` means "server default", not false."""
+    from bibr.serve.ingress import _validate_upload_options
+
+    assert "crossref" not in _validate_upload_options({"crossref": ""})
+
+
+def test_extract_route_passes_crossref_option_through():
+    import asyncio
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from bibr.serve.ingress import (
+        InferenceDispatchTracker,
+        UploadStore,
+        register_extract_route,
+    )
+
+    received = []
+
+    async def dispatch(descriptor):
+        received.append(descriptor)
+        return {"ok": True}
+
+    app = FastAPI()
+    store = UploadStore.create(max_size=100, spool_memory_bytes=4, stale_after_seconds=120)
+    tracker = InferenceDispatchTracker(dispatch=dispatch, store=store)
+    register_extract_route(app, store, tracker)
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/papers/extract",
+                files={"file": ("paper.pdf", b"content", "application/pdf")},
+                data={"crossref": "true"},
+            )
+            assert response.status_code == 200
+            assert received[-1]["crossref"] == "true"
+
+            rejected = client.post(
+                "/papers/extract",
+                files={"file": ("paper.pdf", b"content", "application/pdf")},
+                data={"crossref": "sometimes"},
+            )
+            assert rejected.status_code == 400
+            assert "crossref must be a boolean" in rejected.json()["detail"]
+    finally:
+        asyncio.run(tracker.close())
+        asyncio.run(store.close())
+
+
+@pytest.mark.parametrize("field", ["include_figures", "include_regions", "crossref"])
 def test_extract_route_treats_empty_optional_boolean_as_absent(field):
     """Catches explicit form parsing changing FastAPI Form(None) empty-value semantics."""
     import asyncio
@@ -1146,11 +1212,13 @@ def test_extract_route_openapi_retains_multipart_contract():
             "end_page",
             "include_figures",
             "include_regions",
+            "crossref",
             "consolidate",
             "refs",
             "ref_seg",
         }
         assert multipart["properties"]["file"]["format"] == "binary"
+        assert "CROSSREF_ENRICH" in multipart["properties"]["crossref"]["description"]
     finally:
         asyncio.run(tracker.close())
         asyncio.run(store.close())

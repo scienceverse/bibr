@@ -24,22 +24,6 @@ from bibr.schemas import (
 _TEXT = "Some Paper Title\nJane Doe, John Smith\nAbstract: things happened."
 
 
-@pytest.mark.parametrize("abstract_fields", [{}, {"abstract": None}, {"abstract": " "}])
-async def test_core_preserves_explicit_null_versus_omitted_abstract(monkeypatch, abstract_fields):
-    monkeypatch.setattr(Settings.llm, "merged_core_metadata", False)
-    client = LLMClient()
-    title = TitleKeywordsLLM(title="Paper", **abstract_fields)
-    monkeypatch.setattr(client, "extract_title_keywords", mock.AsyncMock(return_value=title))
-    monkeypatch.setattr(
-        client,
-        "extract_authors",
-        mock.AsyncMock(return_value=AuthorsLLM(authors=[AuthorLLM(given="A", family="B")])),
-    )
-    combined = await client.extract_core_metadata(_TEXT, include_classification=False)
-    assert ("abstract" in combined.model_fields_set) is ("abstract" in abstract_fields)
-    assert combined._abstract_explicitly_absent is (abstract_fields == {"abstract": None})
-
-
 def _result_for(response_model):
     if response_model is TitleKeywordsLLM:
         return TitleKeywordsLLM(title="Some Paper Title", abstract="things", keywords=["k"])
@@ -125,3 +109,19 @@ async def test_merged_failure_raises_upstream_error(monkeypatch):
 
     with pytest.raises(UpstreamServiceError):
         await client.extract_core_metadata(_TEXT)
+
+
+@pytest.mark.parametrize("abstract_fields", [{}, {"abstract": None}, {"abstract": " "}])
+async def test_core_preserves_explicit_null_versus_omitted_abstract(monkeypatch, abstract_fields):
+    monkeypatch.setattr(Settings.llm, "merged_core_metadata", False)
+    client = LLMClient()
+    title = TitleKeywordsLLM(title="Paper", **abstract_fields)
+    monkeypatch.setattr(client, "extract_title_keywords", mock.AsyncMock(return_value=title))
+    monkeypatch.setattr(
+        client,
+        "extract_authors",
+        mock.AsyncMock(return_value=AuthorsLLM(authors=[AuthorLLM(given="A", family="B")])),
+    )
+    combined = await client.extract_core_metadata(_TEXT, include_classification=False)
+    assert ("abstract" in combined.model_fields_set) is ("abstract" in abstract_fields)
+    assert combined._abstract_explicitly_absent is (abstract_fields == {"abstract": None})

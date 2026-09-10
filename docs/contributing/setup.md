@@ -15,7 +15,7 @@ uv sync --locked --extra all --all-groups
 ```
 
 `--extra all` selects the cloud + ML superset (`batch`, `cache`, `demo`,
-`mcp`, `ml`). The hardware-specific serving extras (`local`, `vllm`,
+`mcp`, `torch`). The hardware-specific serving extras (`local`, `vllm`,
 `local-mlx`, `gpu`) are opt-in; `--all-extras` also resolves if you want
 every one, subject to their platform markers. `local` is an Apple Silicon
 serving extra; it does not install a universal in-process OCR engine.
@@ -67,9 +67,6 @@ reading live code and docstrings — don't edit the built output directly. To
 change what those pages say, edit `scripts/docs_ref_core.py` or the
 docstrings/field descriptions it reads from. The docs build also validates
 internal links; add pages to `mkdocs.yml` when they should appear in navigation.
-Only navigated pages and reviewed static assets are published. Keep paper
-corpora, extraction captures, model experiments, and local filesystem paths out
-of documentation sources and generated descriptions.
 
 For the documentation contracts and CLI examples:
 

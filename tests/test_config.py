@@ -413,6 +413,23 @@ def test_section_classifier_model_default_points_to_latest_hf_repo(monkeypatch):
     assert s.ml.section_classifier_model_id == "scienceverse/bibr-section-classifier"
 
 
+def test_front_role_defaults_to_the_published_bundle(monkeypatch):
+    """The front-role tagger is on by default: it beat the heuristics on every
+    column of the 192-paper gold replay (title 0.849 -> 0.901, byline 0.260 ->
+    0.698) with nothing broken. Set the id to null to fall back to the lexical
+    heuristics alone."""
+    monkeypatch.delenv("ML_FRONT_ROLE_MODEL_ID", raising=False)
+    from bibr.config import GlobalSettings
+
+    s = GlobalSettings()
+    assert s.ml.front_role_model_id == "scienceverse/bibr-front-role-v1"
+    assert s.ml.front_role_revision == "7f01b57e1999d93cb5f17895ed10fdfa27cf6e0b"
+    assert s.ml.front_role_enabled is True
+    assert s.ml.front_role_min_confidence == 0.5
+    assert s.ml.front_role_masthead_confidence == 0.8
+    assert s.ml.front_role_record_root_confidence == 0.9
+
+
 def test_paper_classifier_defaults_to_published_model(monkeypatch):
     """paper_classifier_model_id defaults to the published multitask classifier
     so the trained OECD/paper_type model is live by default (set to null to fall
@@ -422,7 +439,7 @@ def test_paper_classifier_defaults_to_published_model(monkeypatch):
 
     s = GlobalSettings()
     assert s.ml.paper_classifier_model_id == "scienceverse/bibr-paper-classifier"
-    assert s.ml.paper_classifier_revision == "main"
+    assert s.ml.paper_classifier_revision == "6046171b3198a255acb1f07f81a586a32f399ac4"
     assert s.ml.paper_classifier_min_confidence == 0.5
     assert s.ml.paper_classifier_l2_min_confidence == 0.5
     assert s.ml.paper_classifier_llm_escalation is True
@@ -503,6 +520,35 @@ def test_dotenv_value_with_dollar_is_not_interpolated(tmp_path, monkeypatch):
 
     opts = LlmOptions(_env_file=str(env))
     assert opts.api_key == "abc${HOME}xyz"
+
+
+def test_dotenv_loading_can_be_disabled(tmp_path, monkeypatch):
+    """``BIBR_DISABLE_DOTENV=1`` makes every section ignore ``.env`` files.
+
+    Harnesses pin their variables in the environment; a developer's ``.env``
+    in the checkout (or ``~/.bibr/.env``) must not supply the ones they forgot.
+    The process environment still wins, and the knob applies to section
+    models (``LlmOptions`` here), not only the top-level settings object.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.delenv("BIBR_DISABLE_DOTENV", raising=False)
+    # conftest pins BIBR_ENV_FILE="" suite-wide; this test is about the default
+    # chain, so it has to opt back into it.
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    (tmp_path / ".env").write_text("LLM_MODEL=from-dotenv\n", encoding="utf-8")
+
+    from bibr.config import GlobalSettings, dotenv_disabled, dotenv_files_present
+
+    assert dotenv_files_present() == [tmp_path / ".env"]
+    assert GlobalSettings().llm.model == "from-dotenv"
+
+    monkeypatch.setenv("BIBR_DISABLE_DOTENV", "1")
+    assert dotenv_disabled()
+    assert GlobalSettings().llm.model != "from-dotenv"
+    monkeypatch.setenv("LLM_MODEL", "from-env")
+    assert GlobalSettings().llm.model == "from-env"
 
 
 def test_crossref_email_from_flat_env(monkeypatch):
@@ -805,6 +851,135 @@ def test_cors_explicit_origins_pass_through(monkeypatch):
 
     s = GlobalSettings()
     assert s.cors.origins == ["https://app.example.com"]
+
+
+# --- Comma-separated list settings (audit [11]) ------------------------------
+
+
+def test_mcp_url_allowed_hosts_accepts_the_documented_comma_form(monkeypatch):
+    """This is the SSRF mitigation for chew_url, and docs/guides/mcp.md
+    prescribes the comma-separated form. A bare list[str] field is
+    JSON-decoded by pydantic-settings, so following the docs raised
+    SettingsError on the first attribute access of Settings anywhere — taking
+    bibr serve down with an unhandled traceback, which meant no deployment
+    realistically had host allowlisting on."""
+    monkeypatch.setenv("MCP_URL_ALLOWED_HOSTS", "arxiv.org,zenodo.org")
+    from bibr.config import McpOptions
+
+    assert McpOptions().url_allowed_hosts == ["arxiv.org", "zenodo.org"]
+
+
+def test_mcp_url_allowed_hosts_lowercases_and_trims(monkeypatch):
+    monkeypatch.setenv("MCP_URL_ALLOWED_HOSTS", " ArXiv.org , ZENODO.org ,")
+    from bibr.config import McpOptions
+
+    assert McpOptions().url_allowed_hosts == ["arxiv.org", "zenodo.org"]
+
+
+def test_mcp_url_allowed_hosts_still_accepts_json(monkeypatch):
+    monkeypatch.setenv("MCP_URL_ALLOWED_HOSTS", '["arxiv.org"]')
+    from bibr.config import McpOptions
+
+    assert McpOptions().url_allowed_hosts == ["arxiv.org"]
+
+
+def test_cors_lists_accept_the_comma_form(monkeypatch):
+    monkeypatch.setenv("CORS_ORIGINS", "https://a.example,https://b.example")
+    monkeypatch.setenv("CORS_ALLOW_METHODS", "GET,POST")
+    monkeypatch.setenv("CORS_ALLOW_HEADERS", "Authorization,Content-Type")
+    from bibr.config import CorsOptions
+
+    options = CorsOptions()
+    assert options.origins == ["https://a.example", "https://b.example"]
+    assert options.allow_methods == ["GET", "POST"]
+    assert options.allow_headers == ["Authorization", "Content-Type"]
+
+
+# --- Configuration errors must not print credentials (audit [10]) ------------
+
+
+def test_model_level_validation_error_does_not_print_the_source_mapping(monkeypatch):
+    """For a model-level validator pydantic reports loc == () and input ==
+    the whole merged source mapping — every env/dotenv value matching a field
+    on that model. The settings models' own redaction cannot apply, because
+    what pydantic hands back is a plain dict."""
+    import pytest
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-plaintext-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic-plaintext-secret")
+    monkeypatch.setenv("WTPSPLIT_BLOCK_SIZE", "512")
+    monkeypatch.delenv("WTPSPLIT_STRIDE", raising=False)
+    from bibr.config import GlobalSettings, _configuration_error
+
+    with pytest.raises(ValidationError) as excinfo:
+        GlobalSettings()
+    message = str(_configuration_error(excinfo.value))
+
+    assert "google-plaintext-secret" not in message
+    assert "anthropic-plaintext-secret" not in message
+    assert "must be set together" in message
+
+
+def test_field_level_error_masks_a_secret_value():
+    from pydantic import ValidationError
+
+    from bibr.config import _configuration_error
+
+    error = ValidationError.from_exception_data(
+        "AuthOptions",
+        [
+            {
+                "type": "string_too_short",
+                "loc": ("api_key",),
+                "input": "too-short-but-still-a-credential",
+                "ctx": {"min_length": 32},
+            }
+        ],
+    )
+
+    assert "too-short-but-still-a-credential" not in str(_configuration_error(error))
+
+
+# --- Cache fingerprint must see LLM budgets (audit [12]) ---------------------
+
+
+def test_max_tokens_fields_are_not_treated_as_secrets():
+    """An unanchored "token" substring match hid every *_max_tokens knob from
+    compute_behavior_fingerprint, so changing a budget left the serve cache
+    namespace byte-identical and old-budget results were re-served."""
+    from bibr.config import _is_secret_name
+
+    assert not _is_secret_name("LLM_MAX_TOKENS")
+    assert not _is_secret_name("REF_PARSE_MAX_TOKENS")
+    assert not _is_secret_name("section_max_tokens")
+
+    assert _is_secret_name("GOOGLE_API_KEY")
+    assert _is_secret_name("api_key")
+    assert _is_secret_name("password")
+    assert _is_secret_name("api_email")
+
+
+def test_changing_a_max_tokens_budget_changes_the_behavior_fingerprint(monkeypatch):
+    from bibr.config import GlobalSettings, compute_behavior_fingerprint
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    before = compute_behavior_fingerprint(GlobalSettings())
+    monkeypatch.setenv("LLM_MAX_TOKENS", "8192")
+    after = compute_behavior_fingerprint(GlobalSettings())
+
+    assert before != after
+
+
+def test_rotating_a_credential_still_leaves_the_fingerprint_alone(monkeypatch):
+    from bibr.config import GlobalSettings, compute_behavior_fingerprint
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "key-one")
+    before = compute_behavior_fingerprint(GlobalSettings())
+    monkeypatch.setenv("GOOGLE_API_KEY", "key-two")
+    after = compute_behavior_fingerprint(GlobalSettings())
+
+    assert before == after
 
 
 def test_redis_url_left_none_when_neither_password_nor_url_set(monkeypatch):

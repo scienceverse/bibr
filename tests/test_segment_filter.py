@@ -53,6 +53,12 @@ REAL_REFERENCES = [
     "Gelman, A., & Stern, H. (2006). The difference between significant and not "
     "significant. The American Statistician, 60(4), 328–331.",
     "Wang, X.-J. (2010). Cortical rhythms in cognition. Physiological Reviews, 90(3), 1195.",
+    # Numbered styles END at the year, exactly like an in-text cite — only the
+    # reference structure *before* the year separates them.
+    "12. Rothman KJ. Modern epidemiology. Boston: Little, Brown; 1986.",
+    "7. Doe J, Roe A. A trial of X. Lancet. 2019.",
+    '[3] J. Smith, "Deep nets," IEEE Trans. Comput., vol. 5, no. 2, pp. 1-10, 1999.',
+    "[8] A. Kumar and B. Lee, Handbook of Signals. New York, NY: Springer, 2004.",
 ]
 
 # In-text parenthetical citations that leaked into ref_text (exp #2 paper

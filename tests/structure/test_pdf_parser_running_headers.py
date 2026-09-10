@@ -228,3 +228,50 @@ def test_full_parse_eyecolor_style_running_header_does_not_split_body():
     assert "METHODS" in headers
     # The author-line running header must NOT have become a section.
     assert "Lisa M. DeBruine, Benedict C. Jones, Anthony C. Little" not in headers
+
+
+def test_repeated_mid_page_section_headings_are_not_running_headers():
+    """Multi-study papers legitimately repeat Method/Results per study.
+
+    Repetition alone used to demote them, deleting the headings and folding
+    their body text into the preceding Study section — so the export had no
+    METHODS and no RESULTS at all.
+    """
+    pages = [
+        [_heading("paragraph_title", "Study 1", y=380), _text("Study 1 intro.", y=430)],
+        [_heading("paragraph_title", "Method", y=300), _text("Study 1 method.", y=350)],
+        [_heading("paragraph_title", "Results", y=300), _text("Study 1 results.", y=350)],
+        [_heading("paragraph_title", "Study 2", y=380), _text("Study 2 intro.", y=430)],
+        [_heading("paragraph_title", "Method", y=300), _text("Study 2 method.", y=350)],
+        [_heading("paragraph_title", "Results", y=300), _text("Study 2 results.", y=350)],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert not parser._running_header_regions
+
+
+def test_repeated_heading_in_the_margin_band_is_still_demoted():
+    """The geometry gate must not stop demoting genuine page furniture."""
+    pages = [
+        [_heading("paragraph_title", "Journal of Examples", y=20), _text("Page 1 body.")],
+        [_heading("paragraph_title", "Journal of Examples", y=20), _text("Page 2 body.")],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (0, 0) in parser._running_header_regions
+    assert (1, 0) in parser._running_header_regions
+
+
+def test_footer_band_repeats_are_demoted():
+    pages = [
+        [_text("Page 1 body.", y=300), _heading("paragraph_title", "Preprint 2026", y=940)],
+        [_text("Page 2 body.", y=300), _heading("paragraph_title", "Preprint 2026", y=940)],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    # The page-1 occurrence keeps its existing title reprieve; the repeat in
+    # the footer band is demoted.
+    assert (1, 1) in parser._running_header_regions

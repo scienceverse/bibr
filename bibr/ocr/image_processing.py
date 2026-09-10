@@ -9,14 +9,7 @@ import io
 import math
 
 import numpy as np
-from PIL import Image
-
-from bibr.utils.ml_extra import ml_import_error
-
-try:
-    import cv2
-except ImportError as e:  # pragma: no cover
-    raise ml_import_error("OCR image processing (opencv)") from e
+from PIL import Image, ImageDraw
 
 
 def smart_resize(
@@ -189,13 +182,19 @@ def crop_image_region(
         polygon_pixels[i, 0] = max(0, min(int(point[0] * scale_x) - x1, crop_width - 1))
         polygon_pixels[i, 1] = max(0, min(int(point[1] * scale_y) - y1, crop_height - 1))
 
-    mask = np.zeros((crop_height, crop_width), dtype=np.uint8)
-    cv2.fillPoly(mask, [polygon_pixels], 1)
+    # Rasterise the polygon with Pillow (boundary pixels included, as
+    # cv2.fillPoly did) and composite: inside → source pixels, outside → fill.
+    mask_image = Image.new("L", (crop_width, crop_height), 0)
+    ImageDraw.Draw(mask_image).polygon(
+        [(int(x), int(y)) for x, y in polygon_pixels], fill=1, outline=1
+    )
+    mask = np.asarray(mask_image, dtype=bool)
+    if mask.shape != img_crop.shape[:2]:  # defensive: PIL sizes are (w, h)
+        mask = mask[: img_crop.shape[0], : img_crop.shape[1]]
 
-    if len(img_crop.shape) == 3:
-        output = np.full_like(img_crop, fill_color, dtype=np.uint8)
+    if img_crop.ndim == 3:
+        output = np.where(mask[..., None], img_crop, np.uint8(fill_color))
     else:
-        output = np.full((crop_height, crop_width), fill_color, dtype=np.uint8)
-    cv2.copyTo(img_crop, mask, output)
+        output = np.where(mask, img_crop, np.uint8(fill_color))
 
-    return Image.fromarray(output)
+    return Image.fromarray(output.astype(np.uint8))

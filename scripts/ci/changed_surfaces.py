@@ -13,6 +13,8 @@ _GENERATED_DOC_INPUTS = {
     "bibr/config.py",
     "bibr/config_introspect.py",
     "bibr/export/json_export.py",
+    "bibr/export/models.py",
+    "bibr/export/schema_artifact.py",
     "bibr/input/supported_files.py",
     "bibr/demo/server.py",
 }
@@ -95,7 +97,7 @@ def changed_paths(base: str, head: str) -> list[str]:
             "git",
             "diff",
             "--name-only",
-            "--diff-filter=ACMRT",
+            "--diff-filter=ACDMRT",
             f"{base}...{head}",
         ],
         check=True,

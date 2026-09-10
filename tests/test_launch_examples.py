@@ -60,7 +60,7 @@ def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, t
     monkeypatch.setattr(tempfile, "gettempdir", lambda: str(tmp_path))
     export = {
         "paper_id": "synthetic",
-        "info": {"title": "Example", "doi": None, "keywords": []},
+        "metadata": {"title": "Example", "doi": None, "keywords": []},
         "author": [{"given": "Ada", "family": "Example"}],
         "section": [{"header": "Methods", "section_type": "method", "classification_score": 0.9}],
         "bib": [{"bib_id": 1, "authors": "Example A", "year": 2026, "title": "Reference"}],
@@ -92,8 +92,8 @@ async def test_library_notebook_uses_public_async_api(monkeypatch, tmp_path, use
     import bibr
 
     export = json.loads((ROOT / "tests/fixtures/inspect_full_export.json").read_text())
-    export["info"]["paper_type_confidence"] = None
-    export["info"]["oecd_confidence"] = None
+    export["metadata"]["paper_type_confidence"] = None
+    export["metadata"]["oecd_confidence"] = None
     export["table"][0]["contents"] = [["Example", "Value"], ["A", "1"]]
     if use_supplied_path:
         export["text"] = []
@@ -150,7 +150,7 @@ async def test_library_notebook_uses_public_async_api(monkeypatch, tmp_path, use
     assert len(displayed) == (1 if use_supplied_path else 2)
 
 
-def test_r_helper_preserves_nullable_info_and_current_media(tmp_path):
+def test_r_helper_preserves_nullable_metadata_and_current_media(tmp_path):
     rscript = shutil.which("Rscript")
     if rscript is None:
         pytest.skip("Rscript is not installed")
@@ -166,7 +166,7 @@ def test_r_helper_preserves_nullable_info_and_current_media(tmp_path):
         json.dumps(
             {
                 "paper_id": "synthetic",
-                "info": {"title": "Example", "doi": None, "keywords": []},
+                "metadata": {"title": "Example", "doi": None, "keywords": []},
                 "figure": [{"figure_id": 1}],
                 "bib": [],
                 "validation": {"errors": 0},
@@ -179,7 +179,7 @@ def test_r_helper_preserves_nullable_info_and_current_media(tmp_path):
             "-e",
             (
                 "args <- commandArgs(TRUE); source(args[1]); x <- read_bibr_json(args[2]); "
-                'stopifnot(x$paper_id == "synthetic", is.null(x$info$doi), '
+                'stopifnot(x$paper_id == "synthetic", x$metadata$title == "Example", is.null(x$metadata$doi), '
                 "nrow(x$figure) == 1, nrow(x$bib) == 0, x$validation$errors == 0)"
             ),
             str(ROOT / "scripts/read_json_response.R"),

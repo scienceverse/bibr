@@ -112,13 +112,13 @@ def test_schema_md_pins_live_version(core):
 
     md = core.render_schema_md()
     assert f"v{_SCHEMA_VERSION}" in md
-    assert "`info`" in md
+    assert "`metadata`" in md
     assert "`validation`" in md
 
 
 # Block/type names are backtick-delimited and never contain a backtick
 # themselves, so this splits correctly on backticks even though a union type
-# cell (e.g. ``OcrConfigExport | None``) contains a raw, unescaped pipe that
+# cell (e.g. ``ExtractionExport | None``) contains a raw, unescaped pipe that
 # a naive pipe-split would mistake for a column separator. Pipes inside a
 # code span don't need escaping in Python-Markdown's `tables` extension
 # (mkdocs-material's toolchain), which is code-span-aware when splitting
@@ -158,7 +158,7 @@ def test_schema_md_list_field_keeps_item_type(core):
     assert rows["author"] == "list[AuthorExport]"
     assert rows["text"] == "list[TextExport]"
     # unions render short names, not fully-qualified module paths
-    assert rows["ocr_config"] == "OcrConfigExport | None"
+    assert rows["extraction"] == "ExtractionExport | None"
 
 
 def test_schema_md_type_cells_have_no_module_paths(core):
@@ -178,13 +178,16 @@ def test_schema_md_union_type_cell_is_not_escaped(core):
     # to checking every backticked Type cell is unescaped.
     md = core.render_schema_md()
     assert "\\|" not in md
-    assert "`OcrConfigExport | None`" in md
+    assert "`ExtractionExport | None`" in md
 
 
 def test_schema_md_uses_serialized_json_names(core):
     rows = {name for name, _, _ in _schema_table_rows(core.render_schema_md())}
-    assert {"_regions", "_native_source"} <= rows
-    assert not {"regions", "native_source"} & rows
+    assert {"schema_version", "source", "metadata", "extraction"} <= rows
+    assert not {"info", "_regions", "native_source"} & rows
+    text_fields = core.render_schema_md().split("### TextExport\n", 1)[1].split("###", 1)[0]
+    assert "`_bbox_2d`" in text_fields
+    assert "`region_bbox_2d`" not in text_fields
 
 
 def test_schema_md_explains_nested_records_and_links_schema(core):

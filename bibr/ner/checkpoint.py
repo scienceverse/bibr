@@ -108,26 +108,6 @@ def _local_snapshot_dir(repo_id: str, revision: str | None) -> Path | None:
 
 def _download(repo_id: str, filename: str, revision: str | None) -> str:
     """Download ``filename`` from ``repo_id``, falling back to cache when offline."""
-    from bibr.utils.hf_cache import hf_hub_download_no_symlink
+    from bibr.utils.hf_cache import hf_download_or_cached
 
-    try:
-        return hf_hub_download_no_symlink(repo_id=repo_id, filename=filename, revision=revision)
-    except Exception:
-        # Hub unreachable (offline mode, DNS failure, 5xx, …). The weights may
-        # already be fully cached from a prior run — serve them without a network
-        # round-trip. If nothing is cached, surface the original error.
-        cached = _cached_download(repo_id, filename, revision)
-        if cached is not None:
-            return cached
-        raise
-
-
-def _cached_download(repo_id: str, filename: str, revision: str | None) -> str | None:
-    from bibr.utils.hf_cache import hf_hub_download_no_symlink
-
-    try:
-        return hf_hub_download_no_symlink(
-            repo_id=repo_id, filename=filename, revision=revision, local_files_only=True
-        )
-    except Exception:
-        return None
+    return hf_download_or_cached(repo_id, filename, revision)

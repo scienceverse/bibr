@@ -11,13 +11,13 @@ import bibr
 
 result = bibr.chew("paper.pdf")
 
-result.title            # info fields pass through as attributes
+result.title            # metadata fields pass through as attributes
 result.references        # list of dicts (alias for the schema's "bib" table)
 result.save("paper.json")
 ```
 
 `chew()` returns a `Result`, an attribute-based view over the export dict
-with a validated `PaperExport` model available as `result.model`.
+with a validated v11 `PaperExport` model available as `result.model`.
 Table-shaped keys (`bib`, `author`, `text`, `section`, `url`, `bib_match`,
 `xref`, `figure`, `table`, `eq`) come back as `Records`, a `list` subclass
 with a `.df` convenience property for pandas:
@@ -26,26 +26,14 @@ with a `.df` convenience property for pandas:
 result.references.df    # bib rows as a pandas DataFrame
 result.authors.df       # alias for the "author" table
 result.data              # the raw export dict backing the Result
-result.model.info.title  # typed Pydantic model access
+result.model.metadata.title  # typed Pydantic model access
 ```
 
 `references`, `authors`, and `sections` are friendly aliases for the
-schema's `bib`, `author`, and `section` tables; anything else on `info`
-(`title`, `doi`, `paper_id`, …) or the top-level export dict passes through
-as an attribute. `result.data` exposes the underlying mutable dictionary;
-changing it does not rebuild `result.model`.
-
-To load an existing export without running extraction:
-
-```python
-import json
-from pathlib import Path
-
-result = bibr.Result(json.loads(Path("paper.json").read_text(encoding="utf-8")))
-```
-
-`Result` validates schema 10.6 and 10.7 exports. Invalid exports raise a
-Pydantic validation error.
+schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
+`doi`, …), `source` fields (`file_name`, `file_hash`, `input_format`), and
+remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
+too.
 
 ## Batch
 
@@ -100,12 +88,12 @@ chew` CLI flags:
 | `ref_seg` | `--ref-seg` | Reference segmentation strategy: `"geom"` (default), `"region"`, `"llm"`, `"crf"` |
 | `no_llm` | `--no-llm` | Skip metadata LLM calls, equation extraction, citation linking, and Crossref; native metadata survives. OCR still uses the selected backend |
 | `device` | `--device` | Force compute device: `"cuda"`, `"mps"`, `"cpu"` |
-| `crossref` | `--no-crossref` (inverted) | Enable/disable Crossref reference enrichment |
+| `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
 | `pages` | `--pages` | Page range to process, 1-based (e.g. `"1-5"`) |
 | `figure_images` | `--figure-images` | Include base64-encoded figure images in the output |
-| `include_regions` | `--regions` | Include `_regions` and `_native_source` diagnostic evidence |
-| `include_region_meta` | `--region-meta` | Include the per-text `_bbox_2d`/`_font_size`/`_region_type`/... underscore fields (opt-in region metadata, distinct from `_regions`) |
+| `include_regions` | `--regions` | Include the `extraction.regions` debug payload (per-region bbox/font/content) |
+| `include_region_meta` | `--region-meta` | Include the per-text `_bbox_2d`/`_font_size`/`_region_type`/... underscore fields (opt-in v4-training metadata, distinct from `extraction.regions`) |
 | `ocr_url` | `--ocr-url` | URL for an external OCR server |
 | `ocr_model` | `--ocr-model` | OCR model path or served model alias |
 | `ocr_profile` | `--ocr-profile` | `"paddle"` or `"glm"`; required when a custom model alias does not identify its family |
@@ -224,9 +212,25 @@ OCR_PROFILE=paddle
 Custom `ocr_model` aliases must also set `OCR_PROFILE` (`paddle` or `glm`) so
 the model prompt and normalizer are unambiguous. Paddle table output is decoded
 from OTSL to HTML and formulas are normalized to their LaTeX body. To inspect
-those transformations, request `include_regions=True`; `_regions` preserves
-the canonical content and `_raw_ocr_content`. The export `ocr_config` and OCR
-cache identity retain the selected backend/model/profile.
+those transformations, request `include_regions=True`; `extraction.regions`
+preserves the canonical content and `raw_ocr_content`. The export
+`extraction.ocr` and OCR cache identity retain the selected
+backend/model/profile.
+
+The equivalent per-call configuration is:
+
+```python
+result = bibr.chew_file(
+    "paper.pdf",
+    ocr="paddle-http",
+    ocr_url="http://localhost:8080/v1",
+    ocr_model="my-paddle-model",
+    ocr_profile="paddle",
+)
+```
+
+A bare `ocr_url` selects the GLM HTTP compatibility path, so specify
+`ocr="paddle-http"` when connecting to Paddle.
 
 The equivalent per-call configuration is:
 

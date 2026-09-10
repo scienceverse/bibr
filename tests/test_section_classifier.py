@@ -805,6 +805,68 @@ async def test_trained_inference_failure_falls_back_and_warns(monkeypatch):
     assert warnings == ["section_classifier_degraded"]
 
 
+async def test_configured_but_unloadable_model_warns(monkeypatch):
+    """A core install (no torch) or a failed download must not look like a healthy run."""
+    import bibr.structure.section_classifier as sc
+
+    async def no_model(*_args):
+        return None
+
+    settings = GlobalSettings()
+    settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
+    settings.ml.section_classifier_llm_escalation = False
+    warnings: list[str] = []
+    monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    results = await sc.classify_headers_batch_async(
+        ["unfamiliar section"],
+        settings=settings,
+        degradation_warnings=warnings,
+    )
+    assert results == [(CanonicalSection.UNKNOWN, 0.0, None, None)]
+    assert warnings == ["section_classifier_degraded"]
+
+
+async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
+    import bibr.structure.section_classifier as sc
+
+    async def no_model(*_args):
+        return None
+
+    settings = GlobalSettings()
+    settings.ml.section_classifier_model_id = None
+    settings.ml.section_classifier_llm_escalation = False
+    warnings: list[str] = []
+    monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    await sc.classify_headers_batch_async(
+        ["unfamiliar section"],
+        settings=settings,
+        degradation_warnings=warnings,
+    )
+    assert warnings == []
+
+
+async def test_degraded_serve_classifier_resource_warns():
+    """serve: a classifier that failed to load answers None; the export must say so."""
+    import bibr.structure.section_classifier as sc
+
+    class Degraded:
+        async def classify_sections(self, items):  # noqa: ARG002
+            return None
+
+    settings = GlobalSettings()
+    settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
+    settings.ml.section_classifier_llm_escalation = False
+    warnings: list[str] = []
+    results = await sc.classify_headers_batch_async(
+        ["unfamiliar section"],
+        classifier_resources=Degraded(),
+        settings=settings,
+        degradation_warnings=warnings,
+    )
+    assert results == [(CanonicalSection.UNKNOWN, 0.0, None, None)]
+    assert warnings == ["section_classifier_degraded"]
+
+
 class TestLlmEscalation:
     """UNKNOWN results from the trained model escalate to the LLM."""
 

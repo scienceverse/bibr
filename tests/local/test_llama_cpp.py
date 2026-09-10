@@ -707,6 +707,18 @@ def test_llm_server_configures_serial_openai_client(monkeypatch):
     assert server._settings.llm.max_input_chars <= 24_000
 
 
+def test_llm_server_defaults_to_the_gguf_variant_when_local_model_is_unset(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local import llama_cpp
+
+    fake = MagicMock(base_url="http://127.0.0.1:8770", model="x", n_slots=1)
+    ctor = MagicMock(return_value=fake)
+    monkeypatch.setattr(llama_cpp, "LlamaCppServer", ctor)
+    monkeypatch.setattr(Settings.llm, "local_model", None)
+    llama_cpp.LlamaCppLlmServer()
+    assert ctor.call_args.kwargs["model"] == "numind/NuExtract3-GGUF:Q4_K_M"
+
+
 def test_llm_server_concurrency_follows_slot_count(monkeypatch):
     from bibr.config import Settings
     from bibr.local import llama_cpp

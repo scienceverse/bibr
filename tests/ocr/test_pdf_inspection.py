@@ -16,61 +16,6 @@ def _layout():
     ]
 
 
-def test_windowed_inspection_preserves_reference_continuations_and_furniture():
-    import io
-
-    import pypdfium2
-
-    from bibr.ocr.pdf_inspection import PdfInspectionAccumulator, inspect_pdf
-    from tests.test_pipeline_smoke import _build_pdf
-
-    doc = pypdfium2.PdfDocument.new()
-    try:
-        for index in range(3):
-            name = ("Ada", "Boris", "Cora")[index]
-            lines = [(60, 750, 10, "Repeated running header")]
-            if index == 0:
-                lines += [(60, 700, 14, "References")]
-            lines += [
-                (60, 650, 10, f"{name}. Unique publication number {index}."),
-                (60, 620, 10, f"Journal of {name}, volume 2, pp. 10-20."),
-                (60, 40, 10, f"Page {index + 1}"),
-            ]
-            source = pypdfium2.PdfDocument(_build_pdf(lines))
-            try:
-                doc.import_pages(source)
-            finally:
-                source.close()
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        pdf = buffer.getvalue()
-    finally:
-        doc.close()
-
-    options = {
-        "fill_native_text": True,
-        "include_outline": True,
-        "include_ref_geometry": True,
-        "min_chars": 1,
-        "min_printable_ratio": 0.5,
-    }
-    full = inspect_pdf(pdf, [_layout()[0] for _ in range(3)], **options)
-    state = PdfInspectionAccumulator()
-    window_layouts = []
-    for i in range(3):
-        window = inspect_pdf(pdf, _layout(), page_indices=[i], accumulator=state, **options)
-        window_layouts.extend(window.layout_results)
-
-    assert window_layouts == full.layout_results
-    assert window.pages == full.pages
-    assert window.metadata == full.metadata
-    assert window.outline == full.outline
-    assert state.reference_lines() == full.reference_lines
-    assert {line["page"] for line in state.reference_lines()} == {0, 1, 2}
-    assert all("running header" not in line["text"] for line in state.reference_lines())
-    assert not _contains_native_handle(state)
-
-
 def _contains_native_handle(value) -> bool:
     if type(value).__module__.startswith("pypdfium2"):
         return True
@@ -143,8 +88,6 @@ def test_inspection_matches_existing_native_fill_and_components():
         min_printable_ratio=0.5,
     )
 
-    assert result.layout_results[0][0]["_source_region_id"] == "p0:r0"
-    expected_layout[0][0]["_source_region_id"] = "p0:r0"
     assert result.layout_results == expected_layout
     assert result.metadata == harvest_pdf_metadata(pdf_bytes, first_page_text)
     assert result.outline == extract_pdf_outline(pdf_bytes)

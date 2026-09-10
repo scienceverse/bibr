@@ -68,7 +68,12 @@ def check_bearer(authorization: str | None) -> str | None:
     if scheme.lower() != "bearer" or not token:
         return "Missing bearer token"
 
-    if not hmac.compare_digest(token, expected):
+    # Compare bytes: ``compare_digest`` refuses str operands with non-ASCII
+    # characters (TypeError), and Starlette decodes header bytes as latin-1,
+    # so a stray high byte in the header would otherwise surface as a 500
+    # instead of a 401. ``surrogateescape`` also covers a transport that hands
+    # us undecodable bytes as lone surrogates. Encoding stays constant-time.
+    if not hmac.compare_digest(token.encode("utf-8", "surrogateescape"), expected.encode("utf-8")):
         return "Invalid bearer token"
 
     return None

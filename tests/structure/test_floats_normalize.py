@@ -68,7 +68,9 @@ class TestMergeFigurePanels:
         ]
         out = merge_figure_panels(figures)
         assert [f.caption for f in out] == ["FIGURE 4 First group", "FIGURE 5 Second group"]
-        assert [f.figure_id for f in out] == [1, 2]
+        # The printed label is the id: renumbering positionally from 1 made a
+        # body mention of "Figure 4" resolve to whatever landed in slot 4.
+        assert [f.figure_id for f in out] == [4, 5]
 
     def test_panels_after_label_fall_back_to_preceding_target(self):
         figures = [
@@ -252,3 +254,48 @@ class TestMergeTableContinuations:
         tables = [_tbl(1, 4, None), _tbl(2, 5, None)]
         out = merge_table_continuations(tables)
         assert len(out) == 2
+
+
+class TestPrintedLabelsSurviveMerging:
+    """``_reconcile_object_ids`` reserves the printed number as the object id
+    and runs before these mergers, so a positional renumber from 1 silently
+    repointed every body mention: with a caption-less panel absorbed into
+    FIGURE 2, a mention of "Figure 2" resolved to the figure captioned
+    FIGURE 3."""
+
+    def test_absorbed_leading_panel_does_not_shift_the_survivors(self):
+        figures = [
+            _fig(1, 4, "A", image="panel"),
+            _fig(2, 4, "FIGURE 2 Second"),
+            _fig(3, 5, "FIGURE 3 Third"),
+        ]
+
+        out = merge_figure_panels(figures)
+
+        assert [f.caption for f in out] == ["FIGURE 2 Second", "FIGURE 3 Third"]
+        assert [f.figure_id for f in out] == [2, 3]
+
+    def test_unlabelled_survivors_take_the_unclaimed_numbers(self):
+        figures = [
+            _fig(1, 4, None, image="orphan"),
+            _fig(2, 9, "FIGURE 1 First"),
+            _fig(3, 9, "A", image="panel"),
+        ]
+
+        out = merge_figure_panels(figures)
+
+        assert [f.figure_id for f in out] == [2, 1]
+
+    def test_continuation_merge_keeps_the_printed_table_numbers(self):
+        caption = "Table 3 Inventory"
+        df1 = pd.DataFrame([["a", "1"]], columns=["Species", "Uses"])
+        df2 = pd.DataFrame([["b", "2"]], columns=["Species", "Uses"])
+        tables = [
+            _tbl(3, 4, caption, df1),
+            _tbl(4, 5, f"{caption} (Continued)", df2),
+            _tbl(5, 20, "Table 4 Other"),
+        ]
+
+        out = merge_table_continuations(tables)
+
+        assert [t.table_id for t in out] == [3, 4]

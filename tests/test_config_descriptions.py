@@ -36,7 +36,7 @@ def test_current_docs_describe_the_paddle_first_ocr_contract():
         "startup-only",
         "GLM fallback",
         "OTSL",
-        "_raw_ocr_content",
+        "raw_ocr_content",
     ):
         assert required in content
 

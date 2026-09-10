@@ -203,6 +203,13 @@ def _validate_sealed_manifest(
     return threshold, revision, block_size, eval_stride
 
 
+#: Hub revisions for the default segmenter (HF API, 2026-09-02). Other Hub
+#: models load ``main`` unless ``WTPSPLIT_MODEL_REVISION`` pins them.
+_WTPSPLIT_PINNED_REVISIONS: dict[str, str] = {
+    "sat-6l-sm": "d85d2b6ddfb19036c4c8e8b3b7ca45da684b0905",
+}
+
+
 @dataclass(frozen=True)
 class ResolvedSegmenterModel:
     """Resolved wtpsplit model source and optional local bundle metadata."""
@@ -210,6 +217,8 @@ class ResolvedSegmenterModel:
     model_name: str
     hub_prefix: str | None
     is_local: bool
+    #: Hub revision to load (``None`` = the repo head); local bundles use the manifest.
+    revision: str | None = None
     manifest_threshold: float | None = None
     manifest_revision: str | None = None
     manifest_block_size: int | None = None
@@ -249,8 +258,42 @@ def _read_local_manifest(
     return _validate_sealed_manifest(model_dir, manifest)
 
 
-def resolve_wtpsplit_model(model_name: str) -> ResolvedSegmenterModel:
-    """Resolve a short wtpsplit name, full Hub ID, or existing local bundle."""
+def materialize_hub_snapshot(repo_id: str, revision: str) -> tuple[str, str | None]:
+    """Fetch the files wtpsplit-lite opens at ``revision``; return (model dir, tokenizer dir).
+
+    wtpsplit-lite forwards ``from_pretrained_kwargs`` to its own config loader,
+    which takes no ``revision``, so a pinned Hub model cannot be requested
+    through ``SaT`` itself. Download (or, for a commit hash already in the
+    cache, merely locate — no network round-trip) ``model_optimized.onnx``
+    and ``config.json`` at the pinned commit and hand ``SaT`` the snapshot
+    directory instead. The tokenizer directory is ``None`` when the repo
+    ships no ``tokenizer.json`` (the ``sat-*`` repos), in which case
+    wtpsplit-lite loads its XLM-R base tokenizer as it does for any Hub name.
+    """
+    from huggingface_hub import hf_hub_download
+    from huggingface_hub.errors import EntryNotFoundError
+
+    onnx_path = Path(hf_hub_download(repo_id, "model_optimized.onnx", revision=revision))
+    config_path = Path(hf_hub_download(repo_id, "config.json", revision=revision))
+    if config_path.parent != onnx_path.parent:
+        raise RuntimeError(
+            f"Pinned wtpsplit files for {repo_id}@{revision} resolved to different snapshots"
+        )
+    try:
+        tokenizer_path = Path(hf_hub_download(repo_id, "tokenizer.json", revision=revision))
+    except EntryNotFoundError:
+        # Covers both the remote 404 and the offline cache miss for a repo
+        # that has no tokenizer.json at this commit.
+        return str(onnx_path.parent), None
+    return str(onnx_path.parent), str(tokenizer_path.parent)
+
+
+def resolve_wtpsplit_model(model_name: str, revision: str | None = None) -> ResolvedSegmenterModel:
+    """Resolve a short wtpsplit name, full Hub ID, or existing local bundle.
+
+    ``revision`` pins a Hub model to a commit; unset, the default short name
+    resolves to its audited commit and anything else to the repo head.
+    """
     local_path = Path(model_name).expanduser()
     if local_path.is_dir():
         if local_path.is_symlink():
@@ -286,6 +329,7 @@ def resolve_wtpsplit_model(model_name: str) -> ResolvedSegmenterModel:
         model_name=model_name,
         hub_prefix=None if is_full_repo_id else "segment-any-text",
         is_local=False,
+        revision=revision or _WTPSPLIT_PINNED_REVISIONS.get(model_name),
         tokenizer_name_or_path=model_name if is_full_repo_id else None,
     )
 
@@ -336,7 +380,10 @@ class BaseSentenceSegmenter:
         from bibr.utils.onnx_providers import cuda_provider_available, get_ort_providers
 
         self._settings = settings if settings is not None else snapshot_settings()
-        self._resolved_model = resolve_wtpsplit_model(model_name or self._settings.WTPSPLIT_MODEL)
+        self._resolved_model = resolve_wtpsplit_model(
+            model_name or self._settings.WTPSPLIT_MODEL,
+            revision=self._settings.WTPSPLIT_MODEL_REVISION,
+        )
         self._model_name = self._resolved_model.model_name
         if threshold is not None:
             self._threshold = _validate_threshold(threshold, source="constructor")
@@ -391,7 +438,17 @@ class BaseSentenceSegmenter:
         }
         if self._resolved_model.tokenizer_name_or_path is not None:
             model_kwargs["tokenizer_name_or_path"] = self._resolved_model.tokenizer_name_or_path
-        self.model = SaT(self._model_name, **model_kwargs)
+        sat_target = self._model_name
+        if not self._resolved_model.is_local and self._resolved_model.revision is not None:
+            # Pinned Hub model: materialise the snapshot at that commit and load
+            # it as a directory (see materialize_hub_snapshot for why).
+            sat_target, pinned_tokenizer = materialize_hub_snapshot(
+                self._resolved_model.repo_id, self._resolved_model.revision
+            )
+            model_kwargs["hub_prefix"] = None
+            if pinned_tokenizer is not None:
+                model_kwargs["tokenizer_name_or_path"] = pinned_tokenizer
+        self.model = SaT(sat_target, **model_kwargs)
         on_cuda = any(
             (p[0] if isinstance(p, tuple) else p) == "CUDAExecutionProvider" for p in providers
         )

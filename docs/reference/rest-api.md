@@ -33,9 +33,11 @@ Extract metadata from a scientific paper synchronously. Returns JSON.
 
 This is the only public synchronous extraction ingress. The complete multipart
 body is limited to 51 MiB by default, including boundaries, headers, and form
-fields; the `file` bytes within it are limited to 50 MiB. At most 1 MiB of the
-upload remains in API memory before the multipart spool rolls to disk.
-Exactly one `file` part is accepted. The seven optional fields below must each
+fields; the `file` bytes within it are limited to 50 MiB (with `MCP_ENABLED`
+the body cap grows to fit a 50 MiB file in base64 form — see the MCP guide).
+At most 1 MiB of the upload remains in API memory before the multipart spool
+rolls to disk.
+Exactly one `file` part is accepted. The eight optional fields below must each
 appear at most once and are capped at 64 bytes; duplicate/unknown parts or a
 second file return `400`.
 
@@ -45,30 +47,29 @@ second file return `400`.
 | `start_page` | int | No | Start page for PDFs (0-indexed, inclusive) |
 | `end_page` | int | No | End page for PDFs (0-indexed, inclusive) |
 | `include_figures` | bool | No | Emit base64-encoded figure images (default: `false`) |
-| `include_regions` | bool | No | Emit `_regions` and `_native_source` diagnostics (default: `false`). Character geometry and repair receipts can substantially increase response size. |
+| `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
+| `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
 | `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
-Page indexes must be nonnegative, and `end_page` must not precede `start_page`.
-The server caps the processed PDF range at `PIPELINE_MAX_PAGES` (default 200).
-`refs=off` keeps core metadata extraction but produces empty bibliography,
-reference matches, and citation links. Native DOCX, XML/JATS, HTML, and ePub
-inputs skip PDF OCR; embedded PDF text is used for eligible regions.
+**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys include: `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 from earlier versions), `source` (input-artifact identity: file name, content hash, format), `metadata` (scalar paper-level metadata), `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match` (enrichment matches for the paper's own identity), `funding`, `affiliation`, `qualification_provenance` (deployment-qualification surface: identity SHAs, per-task protocol hashes, native-validity + fallback outcome, request counts; `null` when no LLM ran), `extraction` (all extraction provenance and telemetry: engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, diagnostics receipts and warnings; `regions` is added there when `include_regions=true`), and `validation` (output-validation-gate result: error/warning counts and issue list). Figure and table rows retain their legacy primary fields and add ordered `parts` with physical payload and source provenance.
 
-**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys include: `paper_id`, `info`, `author`, `text`, `section`, `url`, `bib`, `bib_match`, `info_match`, `funding`, `affiliations`, `xref`, `citation_linking` (optional citation detector scores and accepted/rejected candidate receipt), `caption_assignment` (optional document-wide caption ownership receipt), `reference_yield` (optional reference segmentation/yield receipt), `figure`, `table`, `eq`, `ocr_config`, `enrichment`, `extraction`, `processing_warnings`, `llm_usage` (per-paper LLM token counts by model; `null` when no LLM ran), `llm_usage_by_label` (the same token counts attributed per extraction task; `null` when no LLM ran), `qualification_provenance` (deployment-qualification surface: identity SHAs, per-task protocol hashes, native-validity + fallback outcome, request counts; `null` when no LLM ran), and `validation` (output-validation-gate result: error/warning counts and issue list). Figure and table rows retain their legacy primary fields and add ordered `parts` with physical payload and source provenance. `_regions` is appended when `include_regions=true`.
+`metadata` is scalar-only by design — pipeline telemetry lives under `extraction` and the input file's identity under `source` — so R consumers can call `as.data.frame(metadata)` cleanly.
 
-`info` is scalar-only by design — pipeline metadata (`ocr_config`, `processing_warnings`) lives at the top level so R consumers can call `as.data.frame(info)` cleanly.
-See the generated [JSON schema reference](schema.md) for current fields and
-their definitions. `include_regions=true` also includes `_native_source`
-when native PDF diagnostics are available.
+Within major version 11 the schema is additive-only: new fields may appear in
+any `11.x` release and clients should ignore keys they don't recognize.
+Dispatch on the *presence* of the root `schema_version` key, never on parsing
+its value — pre-v11 responses have no such key at all. See `CHANGELOG.md` for
+the full v11 break and forward-versioning policy.
 
 **Example:**
 
 ```bash
 curl -X POST http://localhost:8000/papers/extract \
   -F "file=@paper.pdf" \
-  -F "include_regions=false"
+  -F "include_regions=false" \
+  -F "crossref=true"
 ```
 
 LitServe's internal `POST /_bibr/inference` route accepts only the API
@@ -76,61 +77,6 @@ process's opaque disk descriptor and returns `404` to direct HTTP callers.
 Only the upload UUID, filename, size, SHA-256, and extraction options cross the
 worker queue; neither bytes nor a filesystem path do. Worker decode securely
 reads and verifies the owned file once, then deletes it.
-
-#### `POST /papers/enrich`
-
-Backfill external enrichment from a **saved extraction**, without a PDF upload,
-OCR, layout detection, reference parsing, or LLM calls. This endpoint runs even
-when `CROSSREF_ENRICH=false` disabled enrichment during extraction.
-
-**Request:** `application/json`, `{"paper": <saved bibr JSON>}`. Accepts export
-schemas 10.6 and 10.7. The submitted object must be a valid full export; duplicate
-bibliography IDs, dangling matches and inconsistent enrichment counts return
-`422`. Request bodies are limited to 16 MiB and bibliographies to 5,000 entries.
-At most four backfills run concurrently; additional requests receive `429` with
-`Retry-After: 1`. An incomplete body upload times out after 30 seconds (`408`).
-
-```bash
-jq '{paper: .}' paper.json > backfill-request.json
-curl http://localhost:8000/papers/enrich \
-  -H "Authorization: Bearer your-secret-token" \
-  -H "Content-Type: application/json" \
-  --data-binary @backfill-request.json > backfill-response.json
-jq '.paper' backfill-response.json > paper-enriched.json
-jq '.enrichment' backfill-response.json > paper-enrichment.json
-```
-
-**Response:** an envelope with:
-
-| Field | Meaning |
-|---|---|
-| `paper` | The saved extraction with `bib_match`, `info_match`, and enrichment completeness updated |
-| `enrichment` | Replayable sidecar containing `core_sha256`, `settings_digest`, schema version, completeness, matches, and any warnings |
-| `enrichment_version` | Backfill policy revision (`crossref-backfill-v1`) |
-| `enrichment_key` | Hash of the exact submitted artifact and the enrichment settings digest |
-| `status` | `complete`, `partial`, or `no_work` |
-
-Existing matches are retained. A bibliography already marked `enrichment.complete`
-is skipped, including references with a completed lookup that found no match.
-Otherwise, only entries without a match are looked up. The paper's own DOI is
-looked up when `info_match` is empty. Submit the returned `paper` to retry a
-partial result; successful matches survive upstream failures and timeouts.
-`complete` describes completion of the lookups, not a promise that every entry
-has a match. A paper-DOI miss has no separate persistent receipt in the export,
-so it may be looked up again on a subsequent submission.
-
-The endpoint uses the configured resolver/Crossref routing, caches, rate limits,
-and `CROSSREF_ENRICH_TIMEOUT`. `CROSSREF_CONSOLIDATE` does not apply: printed
-`bib`, `info`, body text, and extraction provenance remain unchanged. The existing
-enrichment-pending validation gate is cleared only on complete enrichment; other
-validation issues remain. Partial results return `200` with `status: "partial"`
-and diagnostic warnings, so callers can save the usable matches.
-
-An empty bibliography remains empty: papers extracted with `refs=off` need
-reference extraction before reference enrichment. The endpoint stores no papers
-or sidecars itself. Keep the submitted JSON alongside its sidecar; replay rejects
-a different core hash or settings digest. The key identifies the input and policy,
-not an immutable snapshot of the external databases or a server-side job/cache.
 
 ### Async jobs
 
@@ -158,18 +104,24 @@ Returns the extracted paper JSON once the job has `succeeded` (same shape
 as `/papers/extract`'s response). Responds `409` while the job is still
 queued/running, or the job's original error and status code if it failed.
 
-Jobs are held in an in-process store. The server admits up to
-`JOBS_MAX_ACTIVE` (default `32`) queued plus running jobs and dispatches
-at most `JOBS_MAX_RUNNING` (default `2`) concurrently. Excess submissions
-receive `429`. Completed job records expire after `JOBS_TTL_SECONDS`
-(default `3600`), and `JOBS_MAX_RETAINED` (default `128`) also bounds retained
-results by evicting the oldest completed records. Fetch and save results
-before they expire or are evicted; later requests receive `404`.
-
-The whole async API can be disabled with `JOBS_ENABLED=false`. Job queue,
-status, and results are process-local. The service always pins one HTTP API process—even with jobs
-disabled—because upload ownership and dispatch tracking are also process-local.
-A complete server restart loses those records. `PIPELINE_RESTART_WORKERS=false`
+Jobs are held in an in-process store and purged after `JOBS_TTL_SECONDS`
+(default `3600`); `JOBS_MAX_ACTIVE` (default `32`) caps concurrently
+active jobs, returning `429` past the cap, and `JOBS_MAX_RUNNING` (default
+`2`) caps how many run at once. Completed results are also evicted
+oldest-first beyond `JOBS_MAX_RETAINED` results (default `128`) or
+`JOBS_MAX_RETAINED_BYTES` of encoded JSON (default 256 MiB; `0` disables the
+byte budget); the newest result is always kept, so a fetch of `/result` can
+answer `404` once a result has been evicted. The whole async API can be
+disabled with `JOBS_ENABLED=false`. By default (`JOBS_STORE=memory`) the job
+queue, status, and results are process-local and a server restart loses them.
+`JOBS_STORE=redis` keeps status and results in Redis instead, so any replica of
+a load-balanced deployment answers the polls for a job another replica accepted
+and the active-job cap spans all replicas — see
+[Multiple bibr-serve replicas](../guides/deployment.md#multiple-bibr-serve-replicas).
+Each status carries `replica`, the instance executing the job; with the Redis
+store unreachable the job routes answer `503`. The service always pins one HTTP
+API process per instance—even with jobs disabled—because upload ownership and
+dispatch tracking are process-local. `PIPELINE_RESTART_WORKERS=false`
 fail-stops on worker death; `true` is an unsupported opt-in until the locked
 LitServe compatibility gate proves reliable completion notification and does
 not make jobs durable.
@@ -227,15 +179,14 @@ tokens as new usage.
 |---|---|
 | `400` | Invalid input (missing filename, malformed/bounded option, duplicate or unknown multipart part) |
 | `401` | Missing or invalid bearer token (`AUTH_API_KEY` set) |
-| `404` | Unknown, expired, or evicted job; direct request to the private inference route |
-| `408` | Saved-export enrichment body upload exceeded 30 seconds |
+| `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
-| `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope), or enrichment exceeded 16 MiB / 5,000 references |
-| `415` | `/papers/enrich` received a content type other than `application/json` |
-| `422` | Extraction processing error, or invalid saved export for enrichment |
-| `429` | Upload admission, async-job active cap, or enrichment concurrency limit reached |
+| `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
+| `422` | Extraction processing error |
+| `429` | Upload admission or async-job active cap reached |
 | `500` | Unexpected internal error |
 | `502` | Upstream service failed (OCR server, LLM API) |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
 | `504` | Pipeline processing timed out |
+| `503` | Job store unreachable (`JOBS_STORE=redis`): the upload was dropped and nothing queued — retry later |
 | `507` | Insufficient temporary storage for the disk-backed upload spool |

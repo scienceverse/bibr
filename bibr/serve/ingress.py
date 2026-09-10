@@ -32,6 +32,7 @@ _FORM_OPTION_NAMES = (
     "end_page",
     "include_figures",
     "include_regions",
+    "crossref",
     "consolidate",
     "refs",
     "ref_seg",
@@ -54,6 +55,14 @@ MULTIPART_OPENAPI_EXTRA = {
                         "end_page": {"type": "string"},
                         "include_figures": {"type": "string"},
                         "include_regions": {"type": "string"},
+                        "crossref": {
+                            "type": "string",
+                            "description": (
+                                "Boolean (true/false, 1/0, yes/no): run Crossref/resolver "
+                                "reference enrichment for this request. Omit to follow the "
+                                "server's CROSSREF_ENRICH setting (off by default)."
+                            ),
+                        },
                         "consolidate": {"type": "string"},
                         "refs": {"type": "string"},
                         "ref_seg": {"type": "string"},
@@ -285,7 +294,7 @@ def _validate_upload_options(values: Mapping[str, str]) -> dict[str, str]:
             f"start_page ({start_page}) must be <= end_page ({end_page})"
         )
 
-    for name in ("include_figures", "include_regions"):
+    for name in ("include_figures", "include_regions", "crossref"):
         value = bounded.get(name)
         if value is None:
             continue

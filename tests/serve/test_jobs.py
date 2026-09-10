@@ -1,6 +1,7 @@
-"""Tests for the async job API (D1) — JobStore lifecycle + HTTP routes."""
+"""Tests for the async job API (D1) — job store lifecycle (both backends) + HTTP routes."""
 
 import asyncio
+import time
 
 import pytest
 
@@ -11,7 +12,7 @@ from fastapi.testclient import TestClient
 from bibr.config import Settings
 from bibr.serve import jobs as jobs_mod
 from bibr.serve.ingress import UploadStore
-from bibr.serve.jobs import JobCapacityError, JobStore, register_job_routes
+from bibr.serve.jobs import JobCapacityError, JobStore, MemoryJobStore, register_job_routes
 
 
 class _Clock:
@@ -47,46 +48,133 @@ class _FakeTracker:
 
 
 # --------------------------------------------------------------------------- #
-# JobStore unit tests
+# JobStore unit tests (parametrized over the memory and Redis backends)
 # --------------------------------------------------------------------------- #
 
 
+class _MemoryHarness:
+    """Builds ``MemoryJobStore`` instances; ``clock`` drives its monotonic clock."""
+
+    backend = "memory"
+
+    def __init__(self):
+        self.stores = []
+
+    def make(self, clock=None, *, replica_id="replica-a"):
+        store = MemoryJobStore(clock=clock or time.monotonic, replica_id=replica_id)
+        self.stores.append(store)
+        return store
+
+    async def count(self, store) -> int:
+        return len(store._jobs)
+
+    async def close(self):
+        for store in self.stores:
+            await store.close()
+
+
+class _RedisHarness:
+    """Builds ``RedisJobStore`` instances on one shared fake server.
+
+    ``clock`` drives the store's wall clock (the Redis store has no monotonic
+    clock — replicas cannot share one), so the same ``_Clock`` exercises TTL and
+    duration logic on both backends.
+    """
+
+    backend = "redis"
+    prefix = "test:jobs"
+
+    def __init__(self):
+        self.fakeredis = pytest.importorskip("fakeredis")
+        pytest.importorskip("lupa")  # Lua scripting in fakeredis
+        self.server = self.fakeredis.FakeServer()
+        self.stores = []
+
+    def client(self, _url=None):
+        return self.fakeredis.aioredis.FakeRedis(server=self.server)
+
+    def make(self, clock=None, *, replica_id="replica-a", **kwargs):
+        from bibr.serve.jobs_redis import RedisJobStore
+
+        store = RedisJobStore(
+            "redis://fake",
+            key_prefix=self.prefix,
+            replica_id=replica_id,
+            wall_clock=clock or time.time,
+            client_factory=self.client,
+            **kwargs,
+        )
+        self.stores.append(store)
+        return store
+
+    async def count(self, store) -> int:
+        return len(await store._redis.keys(f"{self.prefix}:job:*"))
+
+    async def close(self):
+        for store in self.stores:
+            await store.close()
+
+
+@pytest.fixture(params=["memory", "redis"])
+async def harness(request):
+    harness = _MemoryHarness() if request.param == "memory" else _RedisHarness()
+    try:
+        yield harness
+    finally:
+        await harness.close()
+
+
 class TestJobStore:
-    async def test_create_and_get(self):
-        store = JobStore()
+    """Behaviour every ``JobStore`` backend must share (parametrized over both)."""
+
+    async def test_create_and_get(self, harness):
+        store = harness.make()
         job = await store.create(filename="a.pdf")
         assert job.status == "queued"
         assert job.filename == "a.pdf"
+        assert job.replica == "replica-a"
         got = await store.get(job.job_id)
-        assert got is job
+        assert got is not None
+        assert got.job_id == job.job_id
+        assert got.status == "queued"
+        assert got.filename == "a.pdf"
+        assert got.status_dict()["replica"] == "replica-a"
 
-    async def test_lifecycle_transitions(self):
-        store = JobStore()
+    async def test_lifecycle_transitions(self, harness):
+        clock = _Clock()
+        store = harness.make(clock)
         job = await store.create(filename="a.pdf")
+        clock.advance(1)
         await store.set_running(job.job_id)
         assert (await store.get(job.job_id)).status == "running"
+        clock.advance(2.5)
         await store.set_succeeded(job.job_id, {"paper_id": "x"})
         done = await store.get(job.job_id)
         assert done.status == "succeeded"
         assert done.result == {"paper_id": "x"}
-        assert done.duration_ms is not None
-        assert done.status_dict()["result_url"] == f"/papers/jobs/{job.job_id}/result"
+        assert done.duration_ms == 2500
+        status = done.status_dict()
+        assert status["duration_ms"] == 2500
+        assert status["result_url"] == f"/papers/jobs/{job.job_id}/result"
+        # A status poll may leave the body behind but still knows its size.
+        summary = await store.get(job.job_id, include_result=False)
+        assert summary.status == "succeeded"
+        assert summary.result_size == len(jobs_mod.encode_result({"paper_id": "x"}))
 
-    async def test_failed_records_status_and_error(self):
-        store = JobStore()
+    async def test_failed_records_status_and_error(self, harness):
+        store = harness.make()
         job = await store.create(filename="a.pdf")
         await store.set_failed(job.job_id, http_status=422, error={"detail": "bad parse"})
         got = await store.get(job.job_id)
         assert got.status == "failed"
         assert got.http_status == 422
         assert got.status_dict()["error"] == {"detail": "bad parse"}
+        assert got.result_size == 0
 
-    async def test_ttl_purge_on_access(self, monkeypatch):
-        from bibr.config import Settings
-
+    async def test_ttl_purge_on_access(self, harness, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "ttl_seconds", 100)
         clock = _Clock()
-        store = JobStore(clock=clock)
+        store = harness.make(clock)
         job = await store.create(filename="a.pdf")
         await store.set_succeeded(job.job_id, {"ok": True})
         # Still within TTL.
@@ -96,32 +184,26 @@ class TestJobStore:
         clock.advance(60)
         assert await store.get(job.job_id) is None
 
-    async def test_unfinished_jobs_never_purged(self, monkeypatch):
-        from bibr.config import Settings
-
+    async def test_unfinished_jobs_never_purged(self, harness, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "ttl_seconds", 10)
         clock = _Clock()
-        store = JobStore(clock=clock)
+        store = harness.make(clock)
         job = await store.create(filename="a.pdf")
         clock.advance(10_000)
-        # Queued job has no finished_mono → never expires.
+        # Queued job has no finished timestamp → never expires on the job TTL.
         assert await store.get(job.job_id) is not None
 
-    async def test_max_active_cap_raises(self, monkeypatch):
-        from bibr.config import Settings
-
+    async def test_max_active_cap_raises(self, harness, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "max_active", 2)
-        store = JobStore()
+        store = harness.make()
         await store.create(filename="1.pdf")
         await store.create(filename="2.pdf")
         with pytest.raises(JobCapacityError):
             await store.create(filename="3.pdf")
 
-    async def test_finished_jobs_free_capacity(self, monkeypatch):
-        from bibr.config import Settings
-
+    async def test_finished_jobs_free_capacity(self, harness, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "max_active", 1)
-        store = JobStore()
+        store = harness.make()
         j1 = await store.create(filename="1.pdf")
         with pytest.raises(JobCapacityError):
             await store.create(filename="2.pdf")
@@ -130,10 +212,28 @@ class TestJobStore:
         j2 = await store.create(filename="2.pdf")
         assert j2.status == "queued"
 
-    async def test_completed_result_retention_is_bounded(self, monkeypatch):
+    async def test_discard_frees_capacity(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_active", 1)
+        store = harness.make()
+        job = await store.create(filename="1.pdf")
+        await store.discard(job.job_id)
+        assert await store.get(job.job_id) is None
+        assert (await store.create(filename="2.pdf")).status == "queued"
+
+    async def test_transitions_on_a_discarded_job_are_noops(self, harness):
+        store = harness.make()
+        job = await store.create(filename="1.pdf")
+        await store.discard(job.job_id)
+        await store.set_running(job.job_id)
+        await store.set_succeeded(job.job_id, {"ok": True})
+        await store.set_failed(job.job_id, http_status=500, error={"detail": "x"})
+        assert await store.get(job.job_id) is None
+        assert await harness.count(store) == 0
+
+    async def test_completed_result_retention_is_bounded(self, harness, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "max_retained", 2)
         clock = _Clock()
-        store = JobStore(clock=clock)
+        store = harness.make(clock)
         jobs = []
         for i in range(3):
             job = await store.create(filename=f"{i}.pdf")
@@ -141,13 +241,98 @@ class TestJobStore:
             jobs.append(job)
             clock.advance(1)
 
-        assert len(store._jobs) == 2
+        assert await harness.count(store) == 2
         assert await store.get(jobs[0].job_id) is None
         assert await store.get(jobs[1].job_id) is not None
         assert await store.get(jobs[2].job_id) is not None
 
+    async def test_result_retention_is_bounded_by_bytes(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_retained", 128)
+        payload = {"text": "x" * 100}
+        one = len(jobs_mod.encode_result(payload))
+        monkeypatch.setattr(Settings.jobs, "max_retained_bytes", 2 * one)
+        clock = _Clock()
+        store = harness.make(clock)
+        jobs = []
+        for i in range(3):
+            job = await store.create(filename=f"{i}.pdf")
+            await store.set_succeeded(job.job_id, payload)
+            jobs.append(job)
+            clock.advance(1)
+
+        # Three results overflow a two-result budget: the oldest goes, count untouched.
+        assert await store.get(jobs[0].job_id) is None
+        assert await store.get(jobs[1].job_id) is not None
+        assert await store.get(jobs[2].job_id) is not None
+        # A failed job holds no result body, so it costs nothing against the budget.
+        failed = await store.create(filename="f.pdf")
+        await store.set_failed(failed.job_id, http_status=422, error={"detail": "bad"})
+        assert (await store.get(failed.job_id)).result_size == 0
+        assert await harness.count(store) == 3
+
+    async def test_newest_result_survives_the_byte_budget(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_retained_bytes", 16)
+        clock = _Clock()
+        store = harness.make(clock)
+        first = await store.create(filename="1.pdf")
+        await store.set_succeeded(first.job_id, {"text": "x" * 100})
+        clock.advance(1)
+        # Larger than the whole budget, yet still fetchable while it is the newest.
+        assert (await store.get(first.job_id)).result_size > 16
+        second = await store.create(filename="2.pdf")
+        await store.set_succeeded(second.job_id, {"text": "y" * 100})
+        assert await store.get(first.job_id) is None
+        assert (await store.get(second.job_id)).result == {"text": "y" * 100}
+
+    async def test_zero_byte_budget_keeps_count_only_retention(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_retained_bytes", 0)
+        monkeypatch.setattr(Settings.jobs, "max_retained", 128)
+        store = harness.make()
+        for i in range(3):
+            job = await store.create(filename=f"{i}.pdf")
+            await store.set_succeeded(job.job_id, {"text": "x" * 1000})
+        assert await harness.count(store) == 3
+
 
 class TestJobDispatcher:
+    async def test_close_stops_worker_if_job_suppresses_cancellation(self, monkeypatch):
+        entered = asyncio.Event()
+        started = []
+
+        async def run_job(*, job_id, **kwargs):
+            started.append(job_id)
+            if job_id == "running":
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    # A dependency can consume cancellation when its response
+                    # completes in the same event-loop turn (Python 3.11).
+                    return
+
+        monkeypatch.setattr(jobs_mod, "_run_job", run_job)
+        tracker = _FakeTracker()
+        dispatcher = jobs_mod.JobDispatcher(store=MemoryJobStore(), tracker=tracker, max_running=1)
+        for job_id in ("running", "queued"):
+            await dispatcher.submit(job_id, jobs_mod.JobPayload(descriptor={"upload_id": job_id}))
+        await entered.wait()
+        closing = asyncio.create_task(dispatcher.close())
+        try:
+            done, _pending = await asyncio.wait({closing}, timeout=1)
+            assert closing in done, (
+                "shutdown waited for another job after cancellation was consumed"
+            )
+            await closing
+        finally:
+            # Bound the pre-fix failure too: the worker has returned to queue.get.
+            for worker in dispatcher._workers:
+                worker.cancel()
+            await closing
+
+        assert started == ["running"]
+        assert tracker.discarded == [{"upload_id": "queued"}]
+        await dispatcher.join()
+
     async def test_queues_fifo_and_bounds_running(self, monkeypatch):
         dispatcher_cls = getattr(jobs_mod, "JobDispatcher", None)
         payload_cls = getattr(jobs_mod, "JobPayload", None)
@@ -169,7 +354,7 @@ class TestJobDispatcher:
 
         monkeypatch.setattr(jobs_mod, "_run_job", fake_run_job)
         tracker = _FakeTracker()
-        dispatcher = dispatcher_cls(store=JobStore(), tracker=tracker, max_running=2)
+        dispatcher = dispatcher_cls(store=MemoryJobStore(), tracker=tracker, max_running=2)
         payloads = []
         for index in range(4):
             payload = payload_cls(descriptor={"upload_id": str(index)})
@@ -197,7 +382,7 @@ class TestJobDispatcher:
 
         monkeypatch.setattr(jobs_mod, "_run_job", blocked_run_job)
         tracker = _FakeTracker()
-        dispatcher = jobs_mod.JobDispatcher(store=JobStore(), tracker=tracker, max_running=1)
+        dispatcher = jobs_mod.JobDispatcher(store=MemoryJobStore(), tracker=tracker, max_running=1)
         queued_descriptor = {"upload_id": "queued"}
         for index in range(2):
             descriptor = {"upload_id": "running"} if index == 0 else queued_descriptor
@@ -208,6 +393,43 @@ class TestJobDispatcher:
         await dispatcher.close()
 
         assert tracker.discarded == [queued_descriptor]
+
+    async def test_close_fails_the_jobs_it_abandons(self, harness, monkeypatch):
+        """A shut-down replica must not leave queued/running records (and cap slots) behind."""
+        monkeypatch.setattr(Settings.jobs, "max_active", 2)
+        store = harness.make()
+        entered = asyncio.Event()
+
+        class _BlockingTracker(_FakeTracker):
+            async def submit(self, descriptor, request_state=None):
+                self.descriptors.append(descriptor)
+                entered.set()
+                await asyncio.Event().wait()
+
+        tracker = _BlockingTracker()
+        dispatcher = jobs_mod.JobDispatcher(store=store, tracker=tracker, max_running=1)
+        running = await store.create(filename="running.pdf")
+        queued = await store.create(filename="queued.pdf")
+        for job in (running, queued):
+            await dispatcher.submit(
+                job.job_id, jobs_mod.JobPayload(descriptor={"upload_id": job.filename})
+            )
+        await entered.wait()
+        assert (await store.get(running.job_id)).status == "running"
+        with pytest.raises(JobCapacityError):
+            await store.create(filename="third.pdf")
+
+        await dispatcher.close()
+
+        for job in (running, queued):
+            got = await store.get(job.job_id)
+            assert got.status == "failed"
+            assert got.http_status == 503
+            assert got.error == {"detail": "replica shut down before the job finished"}
+        assert tracker.discarded == [{"upload_id": "queued.pdf"}]
+        # Both cap slots are free again.
+        await store.create(filename="third.pdf")
+        await store.create(filename="fourth.pdf")
 
     async def test_stale_sweep_preserves_upload_while_job_is_queued(self):
         """Catches a later upload deleting an old descriptor before queue dispatch."""
@@ -233,7 +455,7 @@ class TestJobDispatcher:
             stale_after_seconds=10,
         )
         tracker = InferenceDispatchTracker(dispatch=dispatch, store=upload_store)
-        job_store = JobStore()
+        job_store = MemoryJobStore()
         dispatcher = jobs_mod.JobDispatcher(store=job_store, tracker=tracker, max_running=1)
         try:
             first = await upload_store.persist(
@@ -306,7 +528,7 @@ def _poll_until(client: TestClient, job_id: str, target: str, tries: int = 100) 
 class TestJobRoutes:
     def test_submission_openapi_documents_202_multipart_contract(self):
         """Catches explicit parsing losing the async route's documented status/body."""
-        store = JobStore()
+        store = MemoryJobStore()
         client = _client(store)
         try:
             operation = client.app.openapi()["paths"]["/papers/jobs"]["post"]
@@ -318,7 +540,7 @@ class TestJobRoutes:
             asyncio.run(client.app.state.upload_store.close())
 
     def test_submission_persists_shared_upload_and_queues_descriptor(self):
-        store = JobStore()
+        store = MemoryJobStore()
         tracker = _FakeTracker(result={"paper_id": "abc"})
         client = _client(store, tracker=tracker)
         try:
@@ -334,7 +556,9 @@ class TestJobRoutes:
                 assert response.json()["status_url"] == f"/papers/jobs/{job_id}"
                 status = _poll_until(client, job_id, "succeeded")
                 assert status["result_url"] == f"/papers/jobs/{job_id}/result"
-                assert client.get(f"/papers/jobs/{job_id}/result").json() == {"paper_id": "abc"}
+                result = client.get(f"/papers/jobs/{job_id}/result")
+                assert result.headers["content-type"] == "application/json"
+                assert result.json() == {"paper_id": "abc"}
 
             descriptor = tracker.descriptors[0]
             assert descriptor["filename"] == "a.pdf"
@@ -349,7 +573,7 @@ class TestJobRoutes:
 
     def test_submission_caps_filename_in_descriptor_and_job_status(self):
         """Catches the job store retaining attacker-sized raw filename metadata."""
-        store = JobStore()
+        store = MemoryJobStore()
         tracker = _FakeTracker(result={"paper_id": "abc"})
         client = _client(store, tracker=tracker)
         try:
@@ -375,7 +599,7 @@ class TestJobRoutes:
     )
     def test_submission_rejects_invalid_options_before_job_or_descriptor(self, field, value):
         """Catches raw form metadata amplifying the queue or bypassing validation."""
-        store = JobStore()
+        store = MemoryJobStore()
         tracker = _FakeTracker(result={"paper_id": "abc"})
         client = _client(store, tracker=tracker)
         try:
@@ -392,13 +616,13 @@ class TestJobRoutes:
             asyncio.run(client.app.state.upload_store.close())
 
     def test_empty_file_rejected(self):
-        store = JobStore()
+        store = MemoryJobStore()
         client = _client(store)
         resp = client.post("/papers/jobs", files={"file": ("a.pdf", b"", "application/pdf")})
         assert resp.status_code == 400
 
     def test_oversized_file_rejected_413(self, monkeypatch):
-        store = JobStore()
+        store = MemoryJobStore()
         monkeypatch.setattr(Settings.pipeline, "max_file_size", 10)
         client = _client(store)
         resp = client.post("/papers/jobs", files={"file": ("a.pdf", b"x" * 11, "application/pdf")})
@@ -408,7 +632,7 @@ class TestJobRoutes:
         assert not store._jobs
 
     def test_file_at_exact_limit_is_accepted(self, monkeypatch):
-        store = JobStore()
+        store = MemoryJobStore()
         monkeypatch.setattr(Settings.pipeline, "max_file_size", 10)
         client = _client(store)
 
@@ -420,7 +644,7 @@ class TestJobRoutes:
         assert response.status_code == 202
 
     def test_failed_job_result_uses_recorded_status(self):
-        store = JobStore()
+        store = MemoryJobStore()
         client = _client(store, tracker=_FakeTracker(error=HTTPException(422, "bad parse")))
 
         job_id = client.post(
@@ -434,7 +658,7 @@ class TestJobRoutes:
         assert result.json()["detail"] == "bad parse"
 
     def test_result_409_while_running(self, monkeypatch):
-        store = JobStore()
+        store = MemoryJobStore()
 
         # Never advances past running.
         async def fake_run_job(*, store, job_id, **kw):
@@ -452,7 +676,7 @@ class TestJobRoutes:
         assert resp.json()["status"] == "running"
 
     def test_unknown_job_404(self):
-        store = JobStore()
+        store = MemoryJobStore()
         client = _client(store)
         assert client.get("/papers/jobs/nope").status_code == 404
         assert client.get("/papers/jobs/nope/result").status_code == 404
@@ -461,7 +685,7 @@ class TestJobRoutes:
         from bibr.config import Settings
 
         monkeypatch.setattr(Settings.jobs, "max_active", 1)
-        store = JobStore()
+        store = MemoryJobStore()
 
         # Keep jobs in "running" so they stay active and consume capacity.
         async def fake_run_job(*, store, job_id, **kw):
@@ -482,7 +706,7 @@ class TestJobRoutes:
     def test_max_active_rejects_before_private_upload_persistence(self, monkeypatch):
         """Catches copying a full admitted body after the process-local queue is full."""
         monkeypatch.setattr(Settings.jobs, "max_active", 1)
-        store = JobStore()
+        store = MemoryJobStore()
         asyncio.run(store.create(filename="active.pdf"))
         client = _client(store)
         upload_store = client.app.state.upload_store
@@ -516,7 +740,7 @@ class TestJobRoutes:
             raise OSError(errno.ENOSPC, "private job spool path")
 
         monkeypatch.setattr(UploadFile, "write", fail_write)
-        store = JobStore()
+        store = MemoryJobStore()
         base_client = _client(store)
         client = TestClient(base_client.app, raise_server_exceptions=False)
         try:
@@ -534,7 +758,7 @@ class TestJobRoutes:
 
     def test_repeated_file_part_is_rejected_before_job_creation(self):
         """Catches job ingress admitting multiple independent file spools."""
-        store = JobStore()
+        store = MemoryJobStore()
         client = _client(store)
         try:
             response = client.post(
@@ -551,7 +775,7 @@ class TestJobRoutes:
             asyncio.run(client.app.state.upload_store.close())
 
     def test_enqueue_failure_discards_descriptor_and_reservation(self, monkeypatch):
-        store = JobStore()
+        store = MemoryJobStore()
         tracker = _FakeTracker()
 
         async def fail_submit(*args, **kwargs):
@@ -577,7 +801,7 @@ class TestJobRoutes:
 
 class TestRunJobDispatch:
     async def test_success_records_result(self):
-        store = JobStore()
+        store = MemoryJobStore()
         job = await store.create(filename="a.pdf")
         tracker = _FakeTracker(result={"paper_id": "xyz"})
         descriptor = {"upload_id": "opaque"}
@@ -592,8 +816,23 @@ class TestRunJobDispatch:
         assert got.result == {"paper_id": "xyz"}
         assert tracker.descriptors == [descriptor]
 
+    async def test_unrenderable_result_fails_the_job(self):
+        store = MemoryJobStore()
+        job = await store.create(filename="a.pdf")
+        tracker = _FakeTracker(result={"when": object()})
+        await jobs_mod._run_job(
+            store=store,
+            job_id=job.job_id,
+            descriptor={"upload_id": "opaque"},
+            tracker=tracker,
+        )
+        got = await store.get(job.job_id)
+        assert got.status == "failed"
+        assert got.http_status == 500
+        assert got.error == {"detail": "internal job error"}
+
     async def test_http_exception_records_compatible_failure(self):
-        store = JobStore()
+        store = MemoryJobStore()
         job = await store.create(filename="a.pdf")
         tracker = _FakeTracker(error=HTTPException(status_code=422, detail="bad parse"))
         await jobs_mod._run_job(
@@ -608,7 +847,7 @@ class TestRunJobDispatch:
         assert got.error == {"detail": "bad parse"}
 
     async def test_structured_http_detail_is_preserved(self):
-        store = JobStore()
+        store = MemoryJobStore()
         job = await store.create(filename="a.pdf")
         detail = {
             "message": "LLM returned invalid structured output",
@@ -626,7 +865,7 @@ class TestRunJobDispatch:
         assert got.error == detail
 
     async def test_unexpected_exception_is_sanitized(self):
-        store = JobStore()
+        store = MemoryJobStore()
         job = await store.create(filename="a.pdf")
         await jobs_mod._run_job(
             store=store,

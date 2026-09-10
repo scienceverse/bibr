@@ -1,6 +1,6 @@
 """``bibr inspect`` — human-readable summary of a bibr JSON export.
 
-Reads a single extraction-output JSON file (any v10.x export from
+Reads a single extraction-output JSON file (a v11 export from
 ``bibr.export.json_export.export_paper_to_json``) and prints title/authors/
 DOI/paper-type, structure counts (sections/sentences/tables/figures/
 equations), reference stats (bib count, in-text citation coverage,
@@ -10,14 +10,16 @@ usage.
 Degradation contract: any missing block renders as ``—`` (scalars) or "not
 present" (blocks/lists) and the command exits 0 — a file that legitimately
 lacks a block (e.g. ``--refs off``, ``--no-llm``) is not an error. A file that
-isn't valid UTF-8/JSON, or is JSON but clearly not a bibr export (no
-``info``-with-version-fields and none of the bibr-only top-level blocks —
-see ``_looks_like_bibr_export``), exits 1 with a single clear error line and
+isn't valid UTF-8/JSON, or is JSON but clearly not a bibr export (no root
+``schema_version`` and none of the bibr-only top-level blocks — see
+``_looks_like_bibr_export``), exits 1 with a single clear error line and
 never a traceback.
 
-Field names below are read verbatim from the export builder
-(``bibr/export/json_export.py``) — see the module docstring lines cited in
-each helper rather than re-deriving them here.
+Field names below are read verbatim from the export models
+(``bibr/export/models.py``) — see the symbol cited in each helper (class or
+field name, not a line number: the top-of-file changelog comment in that
+module grows with every schema version, which makes line-number citations
+rot silently) rather than re-deriving them here.
 """
 
 from __future__ import annotations
@@ -36,23 +38,22 @@ from bibr.local.cli import _format_validation_line
 
 
 def _looks_like_bibr_export(data: Any) -> bool:
-    """A top-level ``info`` *dict* alone is too loose a gate — plenty of
-    unrelated JSON (an OpenAPI spec being the canonical example) also has a
-    top-level ``info`` object. Require either an ``info`` that carries one of
-    the version/format fields every bibr export has had since early v10.x
-    (``schema_version``, ``bibr_version``, ``input_format`` —
-    json_export.py:122-160, ``InfoExport``), or a top-level block that only a
-    bibr export would ever have (``author``, ``bib``, ``xref``, ``text``,
-    ``section``, ``validation``, ``processing_warnings``, ``llm_usage`` —
-    json_export.py:438-, ``PaperExport``). This keeps old pre-v10.3 exports
-    and the hand-built degraded fixture (``info`` + ``author`` only)
-    accepted, while rejecting generic ``info``-shaped JSON."""
+    """A root ``schema_version`` is the v11 dispatch signal, so accept it
+    outright. Otherwise fall back to a top-level block that only a bibr export
+    would ever have (``author``, ``bib``, ``xref``, ``text``, ``section``,
+    ``validation``, ``extraction`` — ``PaperExport`` in bibr/export/models.py),
+    which keeps pre-v11 exports and the hand-built degraded fixture accepted
+    while still rejecting unrelated JSON such as an OpenAPI spec.
+
+    ``metadata`` and ``source`` are deliberately NOT in that list even though
+    v11 emits both: they are two of the most generic keys in JSON (a Jupyter
+    notebook has a top-level ``metadata``), so accepting them would make this
+    gate wave through foreign files and print an all-dashes report instead of
+    the promised exit-1. Every real v11 export carries ``schema_version``
+    anyway, so they add no reach."""
     if not isinstance(data, dict):
         return False
-    info = data.get("info")
-    if isinstance(info, dict) and any(
-        key in info for key in ("schema_version", "bibr_version", "input_format")
-    ):
+    if "schema_version" in data:
         return True
     return any(
         key in data
@@ -63,14 +64,13 @@ def _looks_like_bibr_export(data: Any) -> bool:
             "text",
             "section",
             "validation",
-            "processing_warnings",
-            "llm_usage",
+            "extraction",
         )
     )
 
 
-def _scalar(info: dict, key: str) -> str:
-    val = info.get(key)
+def _scalar(block: dict, key: str) -> str:
+    val = block.get(key)
     if val in (None, ""):
         return "—"
     return str(val)
@@ -87,7 +87,7 @@ def _count_or_dash(data: dict, key: str) -> str:
 
 
 def _authors_line(data: dict) -> str:
-    """``author`` (json_export.py:452-455, ``AuthorExport`` at :166-177):
+    """``author`` (``PaperExport.author``, ``models.py::AuthorExport``):
     count plus the first three as "Given Family", folding any remainder into
     a "+N more" marker."""
     authors = data.get("author")
@@ -111,19 +111,19 @@ def _authors_line(data: dict) -> str:
 
 def _citation_coverage(data: dict) -> str:
     """In-text citation coverage: NOT a "matched/total over the xref list"
-    rate — that field-shape looks meaningful (``xref_id`` is nullable
-    per json_export.py:341-348, ``XrefExport``) but is empirically vacuous:
+    rate — that field-shape looks meaningful (``target_id`` is nullable
+    per ``models.py::XrefExport``) but is empirically vacuous:
     every code path that ever constructs a ``xref_type == "bib"`` entry
     (``bibr/structure/citation_linker.py``, ``bibr/structure/
     citation_matcher.py``) only appends it *after* a match is already found —
     an unresolved in-text citation candidate is dropped, never stored with a
-    null ``xref_id``. So "matched/total" over that list reads ~100% on every
+    null ``target_id``. So "matched/total" over that list reads ~100% on every
     real export and carries no signal.
 
     What genuinely varies per paper: how many of the *references themselves*
     got cited at least once in the body text. N = count of ``xref`` entries
     with ``xref_type == "bib"`` (in-text citation occurrences); M = count of
-    distinct non-null ``xref_id`` values among those (references cited at
+    distinct non-null ``target_id`` values among those (references cited at
     least once); K = ``len(bib)`` (total references). Reported as
     "N linked → M of K references cited (pct%)", where the percentage is
     only ever attached to the M/K coverage figure, never to N."""
@@ -134,7 +134,7 @@ def _citation_coverage(data: dict) -> str:
     n = len(bib_xrefs)
     if n == 0:
         return "not present"
-    cited_ids = {x.get("xref_id") for x in bib_xrefs if x.get("xref_id") is not None}
+    cited_ids = {x.get("target_id") for x in bib_xrefs if x.get("target_id") is not None}
     m = len(cited_ids)
     bib = data.get("bib")
     k = len(bib) if isinstance(bib, list) else 0
@@ -151,13 +151,12 @@ def _as_nonneg_int(value: Any) -> int:
 
 
 def _enrichment_state(data: dict) -> str:
-    """Prefer the dedicated ``enrichment`` block (json_export.py:426-436,
-    ``EnrichmentExport``: ``complete``/``refs_enriched``/``refs_total`` —
-    null when enrichment never ran). When absent, fall back to counting
-    unique ``bib_id``s covered by ``bib_match`` (json_export.py:260-285,
-    flattened enrichment matches — one row per external-service hit) against
-    the ``bib`` count."""
-    enrichment = data.get("enrichment")
+    """Prefer the dedicated ``extraction.enrichment`` block
+    (``EnrichmentExport``: ``complete``/``refs_enriched``/``refs_total`` —
+    absent when enrichment never ran). When absent, fall back to counting
+    unique ``bib_id``s covered by ``bib_match`` (flattened enrichment matches —
+    one row per external-service hit) against the ``bib`` count."""
+    enrichment = (data.get("extraction") or {}).get("enrichment")
     if isinstance(enrichment, dict):
         complete = bool(enrichment.get("complete"))
         enriched = _as_nonneg_int(enrichment.get("refs_enriched"))
@@ -180,22 +179,32 @@ def _enrichment_state(data: dict) -> str:
 
 
 def _llm_usage_lines(data: dict) -> list[str]:
-    """Per-model token counts from ``llm_usage`` (a
-    ``dict[model_name, {input_tokens, output_tokens, total_tokens}]``,
-    json_export.py:524-530). No cost estimate: there is no $/token price
-    table anywhere in the codebase, and the task brief is explicit that one
-    must never be invented — tokens only."""
-    usage = data.get("llm_usage")
-    if not isinstance(usage, dict) or not usage:
+    """Per-engine token counts from ``extraction.usage.breakdown`` (one row per
+    ``(label, provider, model)``; ``UsageExport``). Rows are folded to one line
+    per model here — the label dimension is more detail than a summary wants.
+    No cost estimate: there is no $/token price table anywhere in the codebase,
+    and inventing one is forbidden — tokens only."""
+    usage = (data.get("extraction") or {}).get("usage")
+    if not isinstance(usage, dict):
         return ["  not present"]
-    lines = []
-    for model, counts in usage.items():
-        if not isinstance(counts, dict):
+    breakdown = usage.get("breakdown")
+    if not isinstance(breakdown, list) or not breakdown:
+        return ["  not present"]
+    by_model: dict[str, dict[str, int]] = {}
+    for row in breakdown:
+        if not isinstance(row, dict):
             continue
-        inp = _as_nonneg_int(counts.get("input_tokens"))
-        out = _as_nonneg_int(counts.get("output_tokens"))
-        total = _as_nonneg_int(counts.get("total_tokens"))
-        lines.append(f"  {model}: in={inp:,} out={out:,} total={total:,}")
+        model = str(row.get("model") or "unknown")
+        bucket = by_model.setdefault(
+            model, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        )
+        for name in bucket:
+            bucket[name] += _as_nonneg_int(row.get(name))
+    lines = [
+        f"  {model}: in={counts['input_tokens']:,} out={counts['output_tokens']:,} "
+        f"total={counts['total_tokens']:,}"
+        for model, counts in by_model.items()
+    ]
     return lines or ["  not present"]
 
 
@@ -213,16 +222,16 @@ def _validation_lines(data: dict) -> list[str]:
 
 
 def _print_report(console, data: dict, source: str) -> None:
-    info = data.get("info")
-    if not isinstance(info, dict):
-        info = {}
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
 
     console.print(f"[bold]bibr inspect[/bold] — {source}\n")
 
-    console.print(f"Title: {_scalar(info, 'title')}")
+    console.print(f"Title: {_scalar(metadata, 'title')}")
     console.print(f"Authors: {_authors_line(data)}")
-    console.print(f"DOI: {_scalar(info, 'doi')}")
-    console.print(f"Paper type: {_scalar(info, 'paper_type')}")
+    console.print(f"DOI: {_scalar(metadata, 'doi')}")
+    console.print(f"Paper type: {_scalar(metadata, 'paper_type')}")
     console.print()
 
     console.print(f"Sections: {_count_or_dash(data, 'section')}")

@@ -128,77 +128,6 @@ def test_render_block_context_uses_selected_candidates_and_heading_only_byline()
     assert "Wrong record title" not in context
 
 
-def test_author_context_keeps_surrounding_rows_when_title_is_only_byline_candidate():
-    from bibr.extract.core_metadata import render_author_context, render_block_context
-
-    citation_and_byline = _candidate(
-        "c1",
-        "Cite this article: 10.1234/example. Alice AUTHOR, Bob WRITER",
-        roles=frozenset({"doi"}),
-        text_ids=(1,),
-    )
-    title = _candidate(
-        "c2",
-        "EVALUATION OF ORGANIC FERTILIZATION AS AN ALTERNATIVE",
-        roles=frozenset({"title", "byline"}),
-    )
-    resolution = _resolution(citation_and_byline, title)
-    full_text = render_block_context(resolution)
-    assert render_author_context(resolution, full_text=full_text) == full_text
-
-
-@pytest.mark.parametrize("label", ["Author information", "INFO PENULIS"])
-def test_author_information_table_is_available_as_front_matter(label):
-    from types import SimpleNamespace
-
-    from bibr.extract.core_metadata import author_table_context
-    from bibr.paper_contents import PaperTable
-
-    table = PaperTable(
-        table_id=1,
-        section_id=9,
-        tbl_html="",
-        page_number=1,
-        df=pd.DataFrame([["Alice Example"], ["Example University"]], columns=[label]),
-    )
-    title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
-    resolution = _resolution(title)
-    contents = SimpleNamespace(tables=[table])
-    assert "Alice Example" in author_table_context(contents, resolution)
-    assert "Example University" in author_table_context(contents, resolution)
-    table.page_number = 2
-    assert author_table_context(contents, resolution) == ""
-    table.page_number = 1
-    table.caption = "Table 1. Authors in the reviewed literature"
-    assert author_table_context(contents, resolution) == ""
-
-
-def test_author_table_is_not_borrowed_across_records_or_from_unlabelled_data():
-    from dataclasses import replace
-    from types import SimpleNamespace
-
-    from bibr.extract.core_metadata import author_table_context
-    from bibr.paper_contents import PaperTable
-
-    table = PaperTable(
-        table_id=1,
-        section_id=9,
-        tbl_html="",
-        page_number=1,
-        df=pd.DataFrame([["Alice Example"]], columns=["Authors"]),
-    )
-    title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
-    other = _candidate("c2", "Other title", roles=frozenset({"title"}), text_ids=(2,))
-    resolution = _resolution(title, other, selected_ids=("c1",))
-    second = replace(resolution.blocks[0], block_id="other", candidate_ids=("c2",))
-    resolution = replace(resolution, blocks=(*resolution.blocks, second))
-    contents = SimpleNamespace(tables=[table])
-    assert author_table_context(contents, resolution) == ""
-    assert author_table_context(contents, None) == ""
-    table.df.columns = ["Participants"]
-    assert author_table_context(contents, _resolution(title)) == ""
-
-
 @pytest.mark.parametrize("boundary_role", ["abstract", "doi"])
 def test_author_context_falls_back_when_byline_roles_cross_record_boundary(boundary_role):
     from bibr.extract.core_metadata import render_author_context, render_block_context
@@ -1544,7 +1473,7 @@ async def test_active_untargeted_abstention_is_blocking_and_not_promotable(monke
     async def no_op(*_args, **_kwargs):
         return None
 
-    def resolve(_contents, *, expected_identity=None, target_required=False):
+    def resolve(_contents, *, expected_identity=None, target_required=False, settings=None):
         assert expected_identity is None
         assert target_required is True
         return resolution, (issue,)
@@ -2047,3 +1976,81 @@ class TestAffiliationReconciliationUnderOwnership:
         CoreMetadataExtractor._reconcile_numbered_affiliations([author], frame)
 
         assert author.affiliation == "University of Twente, Enschede, The Netherlands"
+
+
+def test_author_context_keeps_surrounding_rows_when_title_is_only_byline_candidate():
+    from bibr.extract.core_metadata import render_author_context, render_block_context
+
+    citation_and_byline = _candidate(
+        "c1",
+        "Cite this article: 10.1234/example. Alice AUTHOR, Bob WRITER",
+        roles=frozenset({"doi"}),
+        text_ids=(1,),
+    )
+    title = _candidate(
+        "c2",
+        "EVALUATION OF ORGANIC FERTILIZATION AS AN ALTERNATIVE",
+        roles=frozenset({"title", "byline"}),
+    )
+    resolution = _resolution(citation_and_byline, title)
+    full_text = render_block_context(resolution)
+    assert render_author_context(resolution, full_text=full_text) == full_text
+
+
+def test_author_table_is_not_borrowed_across_records_or_from_unlabelled_data():
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from bibr.extract.core_metadata import author_table_context
+    from bibr.paper_contents import PaperTable
+
+    table = PaperTable(
+        table_id=1,
+        section_id=9,
+        tbl_html="",
+        page_number=1,
+        df=pd.DataFrame([["Alice Example"]], columns=["Authors"]),
+    )
+    title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
+    other = _candidate("c2", "Other title", roles=frozenset({"title"}), text_ids=(2,))
+    resolution = _resolution(title, other, selected_ids=("c1",))
+    second = replace(resolution.blocks[0], block_id="other", candidate_ids=("c2",))
+    resolution = replace(resolution, blocks=(*resolution.blocks, second))
+    contents = SimpleNamespace(tables=[table])
+    assert author_table_context(contents, resolution) == ""
+    assert author_table_context(contents, None) == ""
+    table.df.columns = ["Participants"]
+    assert author_table_context(contents, _resolution(title)) == ""
+    # An uncaptained literature-summary table may also appear on the front page.
+    # A generic Authors column does not identify this paper's byline.
+    table.df = pd.DataFrame(
+        [["Alice Example", "2020", "Results from another paper"]],
+        columns=["Authors", "Year", "Findings"],
+    )
+    assert author_table_context(contents, _resolution(title)) == ""
+
+
+@pytest.mark.parametrize("label", ["Author information", "INFO PENULIS"])
+def test_author_information_table_is_available_as_front_matter(label):
+    from types import SimpleNamespace
+
+    from bibr.extract.core_metadata import author_table_context
+    from bibr.paper_contents import PaperTable
+
+    table = PaperTable(
+        table_id=1,
+        section_id=9,
+        tbl_html="",
+        page_number=1,
+        df=pd.DataFrame([["Alice Example"], ["Example University"]], columns=[label]),
+    )
+    title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
+    resolution = _resolution(title)
+    contents = SimpleNamespace(tables=[table])
+    assert "Alice Example" in author_table_context(contents, resolution)
+    assert "Example University" in author_table_context(contents, resolution)
+    table.page_number = 2
+    assert author_table_context(contents, resolution) == ""
+    table.page_number = 1
+    table.caption = "Table 1. Authors in the reviewed literature"
+    assert author_table_context(contents, resolution) == ""

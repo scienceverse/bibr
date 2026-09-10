@@ -63,7 +63,11 @@ def check_otsl_completeness(raw: str) -> OtslCompleteness:
 
 def decode_otsl(raw: str) -> OtslDecodeResult:
     """Decode native Paddle OTSL, preserving text if its spans are malformed."""
-    rows = _tokenize(raw)
+    # ``check_otsl_completeness`` normalises with ``.strip()`` and this did
+    # not, so a single trailing newline — routine from OpenAI-compatible chat
+    # completions, i.e. the default PaddleOCR-VL path — became a phantom cell
+    # and destroyed the row's rowspan/colspan structure.
+    rows = _tokenize(raw.strip())
     _pad_rows(rows)
     try:
         return OtslDecodeResult(_render_spanned(rows))
@@ -80,14 +84,15 @@ def _tokenize(raw: str) -> list[list[_Cell]]:
     rows: list[list[_Cell]] = []
     row: list[_Cell] = []
 
-    if parts[0]:
+    # Whitespace between structural markers is layout, not a cell.
+    if parts[0].strip():
         row.append(_Cell("<text>", parts[0]))
 
     for index in range(1, len(parts), 2):
         marker = parts[index]
         content = parts[index + 1]
         if marker == "<nl>":
-            if content:
+            if content.strip():
                 row.append(_Cell("<text>", content))
             rows.append(row)
             row = []

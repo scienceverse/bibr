@@ -3,8 +3,9 @@
 import pytest
 from pydantic import ValidationError
 
-from bibr.models import BibType
+from bibr.models import BibType, PaperReference
 from bibr.schemas import (
+    _NER_ONLY_REFERENCE_FIELDS,
     AffiliationLLM,
     AuthorLLM,
     AuthorsLLM,
@@ -90,17 +91,6 @@ class TestPaperClassificationLLM:
 
 
 class TestAuthorLLM:
-    @pytest.mark.parametrize("model", [AuthorsLLM, CoreMetadataLLM])
-    def test_generation_schema_excludes_downstream_fields(self, model):
-        schema = model.model_json_schema()["$defs"]["AuthorLLM"]
-        assert "role" not in schema["properties"]
-        assert "author_id" not in schema["properties"]
-        # They remain available to downstream assembly and older cached responses.
-        author = AuthorLLM(given="Jane", family="Doe")
-        assert author.author_id is None
-        assert author.role == []
-        assert author.model_dump()["role"] == []
-
     def test_minimal(self):
         author = AuthorLLM(given="Jane", family="Doe")
         assert author.given == "Jane"
@@ -134,16 +124,19 @@ class TestAuthorLLM:
         with pytest.raises(ValidationError):
             AuthorLLM()
 
+    @pytest.mark.parametrize("model", [AuthorsLLM, CoreMetadataLLM])
+    def test_generation_schema_excludes_downstream_roles(self, model):
+        schema = model.model_json_schema()["$defs"]["AuthorLLM"]
+        assert "role" not in schema["properties"]
+        assert "author_id" in schema["properties"]
+        # They remain available to downstream assembly and older cached responses.
+        author = AuthorLLM(given="Jane", family="Doe")
+        assert author.author_id is None
+        assert author.role == []
+        assert author.model_dump()["role"] == []
+
 
 class TestCoreMetadataLLM:
-    @pytest.mark.parametrize("model", [TitleKeywordsLLM, CoreMetadataLLM])
-    @pytest.mark.parametrize("abstract", [None, "", "  ", "verbatim-string"])
-    def test_only_explicit_json_null_is_an_abstract_refusal(self, model, abstract):
-        value = model(title="Study", authors=[], abstract=abstract)
-        assert value.abstract is None
-        assert value._abstract_explicitly_absent is (abstract is None)
-        assert "_abstract_explicitly_absent" not in value.model_dump()
-
     def test_basic(self):
         meta = CoreMetadataLLM(
             title="A Study",
@@ -162,6 +155,14 @@ class TestCoreMetadataLLM:
     def test_missing_title_degrades_to_none(self):
         meta = CoreMetadataLLM(authors=[], keywords=[])
         assert meta.title is None
+
+    @pytest.mark.parametrize("model", [TitleKeywordsLLM, CoreMetadataLLM])
+    @pytest.mark.parametrize("abstract", [None, "", "  ", "verbatim-string"])
+    def test_only_explicit_json_null_is_an_abstract_refusal(self, model, abstract):
+        value = model(title="Study", authors=[], abstract=abstract)
+        assert value.abstract is None
+        assert value._abstract_explicitly_absent is (abstract is None)
+        assert "_abstract_explicitly_absent" not in value.model_dump()
 
 
 class TestPaperReferenceLLM:
@@ -291,6 +292,45 @@ class TestPaperReferenceLLM:
         assert ref.last_page == "S42"
         assert ref.volume == "4"
         assert ref.issue == "2"
+
+
+class TestNerOnlyReferenceFields:
+    """The parser's own fields must never widen an LLM-facing schema.
+
+    The NuExtract reference template is qualified against a fixed shape, and
+    the LFM2.5 student was distilled on prompts that embed this exact schema --
+    an extra property desynchronises the student from the runtime serving it.
+    """
+
+    def test_they_are_absent_from_the_direct_schema(self):
+        properties = PaperReferenceLLM.model_json_schema()["properties"]
+        assert _NER_ONLY_REFERENCE_FIELDS.isdisjoint(properties)
+
+    def test_they_are_absent_when_nested_in_the_list_wrapper(self):
+        # pydantic builds nested models through the schema graph, so a
+        # model_json_schema override would not have covered this one.
+        schema = PaperReferenceList.model_json_schema()
+        reference = next(
+            body for name, body in schema["$defs"].items() if "PaperReferenceLLM" in name
+        )
+        assert _NER_ONLY_REFERENCE_FIELDS.isdisjoint(reference["properties"])
+
+    def test_they_are_absent_from_required(self):
+        schema = PaperReferenceLLM.model_json_schema()
+        assert _NER_ONLY_REFERENCE_FIELDS.isdisjoint(schema.get("required", []))
+
+    def test_they_remain_real_model_fields_for_the_ner_path(self):
+        # Hidden from the LLM, not removed: RefParser fills them and the export
+        # reads them off the same model.
+        assert set(PaperReferenceLLM.model_fields) >= _NER_ONLY_REFERENCE_FIELDS
+        assert set(PaperReference.model_fields) >= _NER_ONLY_REFERENCE_FIELDS
+
+    def test_the_nuextract_policy_does_not_have_to_name_them(self):
+        # They are gone from the JSON schema the native builder reads, so
+        # ``exclude`` stays exactly the downstream-only fields it documents.
+        assert PaperReferenceLLM.nuextract_policy.exclude == frozenset(
+            {"bib_id", "text_id", "match"}
+        )
 
 
 class TestPaperReferenceList:

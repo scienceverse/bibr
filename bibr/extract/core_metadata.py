@@ -23,6 +23,7 @@ from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
+from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
@@ -59,6 +60,12 @@ AUTHOR_ANOMALY_WARNING_PREFIX = "Metadata extraction WARNING: author anomaly"
 # marker below unchanged for downstream consumers.
 FABRICATED_AUTHORS_WARNING_PREFIX = "Metadata extraction WARNING: ungrounded author list"
 
+# The trained paper classifier is configured but did not answer (core install
+# without torch, failed weight load, serve resource degraded, inference error)
+# and the LLM classified the paper instead. Carries the exception type only —
+# never the message, which can quote document text.
+PAPER_CLASSIFIER_DEGRADED_WARNING_PREFIX = "Metadata extraction WARNING: paper classifier degraded"
+
 # Above this incoming author count the list is treated as a model degeneration
 # and trimmed to the leading distinct run. Real bylines in bibr's domain
 # (psych/econ/MDPI) sit well under it; the 40-author consortium gold cases pass.
@@ -75,8 +82,15 @@ _AUTHOR_ANOMALY_MIN_DROP = 2
 # with one of the prefix words. See
 # docs/superpowers/specs/2026-05-07-corrigendum-erratum-guard-design.md
 # for the failure mode this guards against.
+# The trailing requirement must carry information: with ``\s`` inside the
+# character class it added nothing beyond the preceding ``\b``, so any title
+# opening with the bare word matched — "Correction for attenuation in
+# meta-analysis: a simulation study" classified as a corrigendum and had its
+# authors, abstract and keywords wiped. Require notice punctuation, the
+# preposition, or the "Note"/"Notice" form journals print.
 _CORRECTION_NOTICE_TITLE_RE = re.compile(
-    r"^\s*(?P<kind>corrigendum|erratum|correction|retraction)\b[\s:.\-—–\"]",
+    r"^\s*(?P<kind>corrigendum|erratum|correction|retraction)"
+    r"\b(?:\s*[:.\-—–]|\s+to\b|\s+(?:note|notice)\b|\s*[\"\u201c\u2018'])",
     re.IGNORECASE,
 )
 
@@ -103,6 +117,46 @@ _AFFILIATION_ORG_RE = re.compile(
     r"centre|center|clinic|laborator(?:y|ies))\b",
     re.IGNORECASE,
 )
+
+# Positive evidence that a captured ``<number> <Capital…>`` run really is an
+# institution. Without it the numbered-affiliation reconciler accepted any
+# page-1 line of that shape, so a figure or table caption ("Figure 1 Study
+# design and participant flow") or a publication-history line overwrote a
+# correctly-extracted affiliation. Wider than ``_AFFILIATION_ORG_RE`` above,
+# which gates a different, already name-anchored path.
+_AFFILIATION_ORG_EVIDENCE_RE = re.compile(
+    r"\b(?:"
+    r"depart[ae]ment\w*|d[ée]partement\w*|dept"
+    r"|facult\w*"
+    r"|institut\w*"
+    r"|universit\w*|universida\w*|univ"
+    r"|college\w*|school\w*|academ(?:y|ia|ie)"
+    r"|hospital\w*|h[ôo]pital|clinic\w*|klinik\w*|infirmary"
+    r"|cent(?:re|er)\w*|centro|zentrum"
+    r"|laborator\w*|laboratoire"
+    r"|ministry|minist[èe]re|foundation|fondation|fundac[ií][óo]n"
+    r"|corporation|inc|ltd|llc|gmbh|plc"
+    r"|nhs|cnrs|inserm|cdc|nih"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Postal-address shape, for institutions the keyword list cannot name — Dutch
+# "Stichting Mindfit, Thubble, Deventer, The Netherlands" carries no English
+# organisational word but is unmistakably an address. Requires a place-like
+# final segment, which is what separates it from a comma-bearing caption
+# ("Baseline characteristics, by group, for all participants").
+_AFFILIATION_PLACE_TAIL_RE = re.compile(
+    r"^(?:[A-Z\u00c0-\u00de][\w.'\u2019-]*)(?:\s+[A-Za-z\u00c0-\u00ff][\w.'\u2019-]*){0,3}$"
+)
+
+
+def _looks_like_affiliation(value: str) -> bool:
+    """Positive evidence that *value* is an institution, not caption prose."""
+    if _AFFILIATION_ORG_EVIDENCE_RE.search(value):
+        return True
+    segments = [segment.strip() for segment in value.split(",")]
+    return len(segments) >= 3 and bool(_AFFILIATION_PLACE_TAIL_RE.match(segments[-1]))
 
 
 def _front_page(df) -> int:
@@ -153,57 +207,6 @@ def render_block_context(
         for candidate in _selected_block_candidates(resolution)
         if candidate.raw_text.strip() and (wanted is None or not candidate.roles.isdisjoint(wanted))
     )
-
-
-_PUBLICATION_EVIDENCE_RE = re.compile(
-    r"\b(?:doi|issn|isbn|journal|vol(?:ume)?\.?|issue|publisher|published|"
-    r"copyright|license|licence|creative\s+commons|received|accepted|revised)\b|"
-    r"©|\b10\.\d{4,9}/|\b\d{4}-\d{3}[\dXx]\b|\bpp?\.\s*\d",
-    re.IGNORECASE,
-)
-
-
-def render_title_context(resolution: FrontMatterResolution, *, full_text: str) -> str:
-    """Omit known author rows only in a well-bounded title-to-abstract zone.
-
-    Preserve unknown/mixed rows, publication evidence, and everything from
-    the abstract onwards. A missing/ambiguous boundary keeps the full input.
-    The marker retains the separation that the removed byline supplied.
-    """
-    selected = _selected_block_candidates(resolution)
-    titles = [i for i, candidate in enumerate(selected) if "title" in candidate.roles]
-    abstracts = [i for i, candidate in enumerate(selected) if "abstract" in candidate.roles]
-    if len(titles) != 1 or not abstracts or titles[0] >= abstracts[0]:
-        return full_text
-    title_index, abstract_index = titles[0], abstracts[0]
-    lines: list[str] = []
-    omitted = False
-    in_omission = False
-    for index, candidate in enumerate(selected):
-        text = candidate.raw_text.strip()
-        if not text:
-            continue
-        removable = (
-            title_index < index < abstract_index
-            and bool(candidate.roles & {"byline", "affiliation"})
-            and candidate.roles <= {"heading", "byline", "affiliation"}
-            and not _PUBLICATION_EVIDENCE_RE.search(text)
-        )
-        if removable:
-            omitted = True
-            if not in_omission:
-                lines.append("[Author details omitted]")
-            in_omission = True
-        else:
-            lines.append(text)
-            in_omission = False
-    # Preserve appendices to the rendered block, notably author-information
-    # tables: their rows are not covered by the candidate-role guarantee.
-    block_text = render_block_context(resolution)
-    if not omitted or not full_text.startswith(block_text):
-        return full_text
-    narrowed = "\n".join(lines) + full_text[len(block_text) :]
-    return narrowed if len(narrowed) < len(full_text) else full_text
 
 
 def render_author_context(
@@ -283,7 +286,6 @@ def author_table_context(contents: PaperContents, resolution: FrontMatterResolut
             return ""
 
     labels = {
-        "authors",
         "author information",
         "author details",
         "info penulis",
@@ -440,12 +442,6 @@ def _strip_email_fragments(value: str) -> str:
 # into trailing ASCII digits ("Kian Jafari¹" -> "Jafari1"). Strip only digits
 # directly attached to letters so standalone numbers stay untouched.
 _ATTACHED_MARKER_DIGITS_RE = re.compile(r"(?<=[^\W\d_])\d+", re.UNICODE)
-# A digit separates the surname from a single affiliation/footnote letter
-# ("Mori2a"). Consume the whole marker before the digit-only repair would
-# erase that evidence and leave the letter looking like part of the surname.
-_ATTACHED_MIXED_MARKER_RE = re.compile(
-    r"(?<=[^\W\d_])\d{1,2}[a-z](?:\s*,\s*\d{1,2}[a-z]?)*(?!\w)", re.UNICODE
-)
 _ATTACHED_MARKER_LIST_RE = re.compile(
     r"(?<=[^\W\d_])[a-z](?:\s*,\s*[a-z])+(?![^\W\d_])", re.UNICODE
 )
@@ -468,7 +464,6 @@ def _drop_letter_marker(match: re.Match[str]) -> str:
 def _strip_attached_markers(value: str) -> str:
     """Remove printed affiliation markers glued to a name by OCR/NFKC folding."""
 
-    value = _ATTACHED_MIXED_MARKER_RE.sub("", value)
     return _ATTACHED_MARKER_LETTER_RE.sub(
         _drop_letter_marker,
         _ATTACHED_MARKER_DIGITS_RE.sub("", _ATTACHED_MARKER_LIST_RE.sub("", value)),
@@ -1319,18 +1314,13 @@ class CoreMetadataExtractor:
                     doi_text += "\n\n[Page headers/footers]\n" + "\n".join(hf_lines)
                 doi = self._find_doi_with_fallback(doi_text)
 
-            # Keep the original text for DOI/author grounding and narrow only
-            # the corresponding model request. The merged call needs all rows.
-            llm_text = full_text
+            # Per-task context slices (LLM_PER_TASK_CONTEXT): the authors and
+            # classification calls get narrower, task-specific text; title/
+            # keywords keeps the full blob. Off => None => client uses full text.
             authors_text = None
             classification_text = None
             if self._settings.llm.per_task_context:
                 if resolution is not None:
-                    if (
-                        self._settings.llm.title_context
-                        and not self._settings.llm.merged_core_metadata
-                    ):
-                        llm_text = render_title_context(resolution, full_text=full_text)
                     authors_text = render_author_context(
                         resolution,
                         full_text=full_text,
@@ -1350,7 +1340,7 @@ class CoreMetadataExtractor:
                 authors_text += "\n" + table_text
 
             llm_metadata = await self._call_core_llm(
-                llm_text,
+                full_text,
                 authors_text=authors_text,
                 classification_text=classification_text,
             )
@@ -1427,6 +1417,21 @@ class CoreMetadataExtractor:
                     notice_type,
                 )
 
+            # Refinements see only owned front matter. Supplemental tables and
+            # unowned headers can contain another publication's dates/names.
+            precision_context = render_block_context(resolution) if resolution is not None else ""
+            published = refine_publication_date(llm_metadata.published, precision_context)
+            if published != llm_metadata.published:
+                self.validation_issues.append(
+                    ValidationIssue(
+                        code="VAL_PUBLICATION_DATE_REFINED",
+                        severity=IssueSeverity.WARNING,
+                        message="Restored publication-date precision from labelled front matter",
+                        origin_stage="extract",
+                        evidence_ids=("reason:printed_publication_date", f"published:{published}"),
+                    )
+                )
+
             metadata = PaperMetadata(
                 doi=doi if doi else "",
                 title=title,
@@ -1445,12 +1450,15 @@ class CoreMetadataExtractor:
                 last_page=llm_metadata.last_page,
                 issn=llm_metadata.issn,
                 publisher=llm_metadata.publisher,
-                published=llm_metadata.published,
+                published=published,
                 license=llm_metadata.license,
             )
             metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
 
             self._email_harvester.harvest(metadata.authors)
+            self.validation_issues.extend(
+                repair_author_partitions(metadata.authors, precision_context)
+            )
 
             if resolution is not None and not is_notice:
                 self.validation_issues.extend(
@@ -1984,7 +1992,13 @@ class CoreMetadataExtractor:
                     end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
                     value = line[match.end() : end].strip(" ,;")
                     value = _CORRESPONDENCE_SUFFIX_RE.split(value, maxsplit=1)[0].strip(" ,;")
-                    if value:
+                    # "<digit> <Capital>" is also the shape of a figure or
+                    # table caption and of a publication-history line, so the
+                    # captured run has to look like an institution before it
+                    # can define a marker. Abstaining makes the
+                    # ``len(resolved) == len(numbers)`` guard below drop the
+                    # author, which is the fail-closed answer.
+                    if value and _looks_like_affiliation(value):
                         found.setdefault(number, []).append(value)
             return found
 
@@ -2091,6 +2105,7 @@ class CoreMetadataExtractor:
 
         from bibr.structure import paper_classifier
 
+        degraded_reason: str | None = None
         try:
             if self._explicit_classifier_runtime:
                 result = await paper_classifier.classify_paper_async(
@@ -2106,7 +2121,12 @@ class CoreMetadataExtractor:
         except Exception as exc:
             logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
             result = None
+            degraded_reason = type(exc).__name__
         if result is None:
+            self._record_metadata_warning(
+                degraded_reason or "trained classifier unavailable; the LLM classified the paper",
+                prefix=PAPER_CLASSIFIER_DEGRADED_WARNING_PREFIX,
+            )
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             else:
@@ -2136,6 +2156,29 @@ class CoreMetadataExtractor:
         l2_gate = float(self._settings.ml.paper_classifier_l2_min_confidence)
         if oecd_l2 and l2_score < l2_gate:
             oecd_l2 = ""
+
+        # The two heads are independent softmaxes over disjoint label spaces
+        # sharing one encoding — nothing ties the L2 argmax to the L1 argmax,
+        # so the pair can violate the taxonomy. Each L2 belongs to exactly one
+        # L1: backfill an empty L1 from it, and otherwise apply the same
+        # preference the gate above states — null beats a wrong subdomain.
+        if oecd_l2:
+            from bibr.structure.paper_classifier import OECD_L2_TO_L1
+
+            parent = OECD_L2_TO_L1.get(oecd_l2)
+            if parent is None:
+                oecd_l2 = ""
+            elif not oecd_l1:
+                oecd_l1 = parent
+            elif parent != oecd_l1:
+                logger.info(
+                    "classifier heads disagree: OECD L2 '%s' belongs to '%s', not '%s'; "
+                    "dropping the subdomain",
+                    oecd_l2,
+                    parent,
+                    oecd_l1,
+                )
+                oecd_l2 = ""
 
         threshold = float(self._settings.ml.paper_classifier_min_confidence)
         if pt_score < threshold and self._settings.ml.paper_classifier_llm_escalation:

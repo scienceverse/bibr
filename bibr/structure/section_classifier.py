@@ -25,6 +25,10 @@ from bibr.paper_contents import (
     CanonicalSection,
     is_exact_front_matter_furniture,
 )
+
+# Pure-Python bucket helper, shared with both classifier runtimes (torch-free
+# module, so building the composite dedup key never forces torch).
+from bibr.structure.section_classifier_common import _position_bucket
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
 from bibr.utils.text import normalize_text
 
@@ -36,6 +40,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 SECTION_CLASSIFIER_DEGRADED_WARNING = "section_classifier_degraded"
+
+
+def _note_section_classifier_degraded(degradation_warnings: list[str] | None) -> None:
+    """Record once per paper that the configured trained tier did not answer.
+
+    Whatever the cause — a core install without torch, weights that failed
+    to load, a serve-side classifier resource in its degraded state, or an
+    inference error — the LLM tier decides instead, and the export must say
+    so rather than look like a healthy run.
+    """
+    if (
+        degradation_warnings is not None
+        and SECTION_CLASSIFIER_DEGRADED_WARNING not in degradation_warnings
+    ):
+        degradation_warnings.append(SECTION_CLASSIFIER_DEGRADED_WARNING)
 
 
 def _normalize_header_echo(header: str | None) -> str:
@@ -58,22 +77,6 @@ class HeaderContext:
     relative_position: float = 0.5
     prev_heading: str = ""
     next_heading: str = ""
-
-
-try:
-    # Pure-Python bucket helper — no torch dependency of its own, but it lives
-    # in a module that hard-imports torch/transformers at module load time.
-    # Import it when the ml extra is present; on a core (torch-free) install
-    # fall back to a local copy (byte-identical thresholds) so building the
-    # composite dedup key never forces the ml dependency.
-    from bibr.structure.section_classifier_model import _position_bucket
-except ImportError:  # pragma: no cover - exercised only on core installs
-
-    def _position_bucket(rel_pos: float) -> str:  # type: ignore[no-redef]
-        for threshold, name in [(0.10, "start"), (0.35, "early"), (0.65, "middle"), (0.85, "late")]:
-            if rel_pos < threshold:
-                return name
-        return "end"
 
 
 # Process-wide cache of the loaded trained classifier. Sentinel ``False`` means
@@ -106,23 +109,25 @@ def _get_trained_model(settings: GlobalSettings | None = None) -> SectionClassif
         if not model_id:
             _model_cache = False
             return None
-        try:
-            from bibr.structure.section_classifier_model import SectionClassifierModel
-        except ImportError as e:
-            # Core (non-'ml') install: torch/transformers are absent. Fall back
-            # to the LLM classifier rather than aborting the structure stage.
-            logger.info("Trained section classifier unavailable (%s); using LLM fallback", e)
-            _model_cache = False
-            return None
+        from bibr.exceptions import ConfigurationError
+        from bibr.structure.section_classifier_common import load_section_classifier
 
         revision = effective.ml.section_classifier_revision
         device = effective.ml.section_classifier_device
         logger.info(
             "Loading trained section classifier %s@%s (device=%s)", model_id, revision, device
         )
-        _model_cache = SectionClassifierModel.from_pretrained(
-            model_id, revision=revision, device=device
-        )
+        try:
+            _model_cache = load_section_classifier(
+                model_id, revision=revision, device=device, settings=effective
+            )
+        except (ImportError, ConfigurationError) as e:
+            # No usable runtime (core install without a published ONNX bundle,
+            # or the torch extra missing). Fall back to the LLM classifier
+            # rather than aborting the structure stage.
+            logger.warning("Trained section classifier unavailable (%s); using LLM fallback", e)
+            _model_cache = False
+            return None
         return _model_cache  # type: ignore[return-value]
 
 
@@ -646,6 +651,8 @@ async def classify_headers_batch_async(
                 else await _get_trained_model_async()
             )
             trained_available = model is not None
+            if not trained_available and effective.ml.section_classifier_model_id:
+                _note_section_classifier_degraded(degradation_warnings)
         if trained_available:
             # Composite dedup key: header text alone collapses two headers
             # with the same wording but different document context (e.g. two
@@ -688,11 +695,7 @@ async def classify_headers_batch_async(
                     "falling back to alias/LLM classification",
                     type(exc).__name__,
                 )
-                if (
-                    degradation_warnings is not None
-                    and SECTION_CLASSIFIER_DEGRADED_WARNING not in degradation_warnings
-                ):
-                    degradation_warnings.append(SECTION_CLASSIFIER_DEGRADED_WARNING)
+                _note_section_classifier_degraded(degradation_warnings)
                 trained_results = []
             if len(trained_results) != len(unique_keys):
                 logger.warning(
@@ -701,6 +704,8 @@ async def classify_headers_batch_async(
                     len(trained_results),
                     len(unique_keys),
                 )
+                if effective.ml.section_classifier_model_id:
+                    _note_section_classifier_degraded(degradation_warnings)
                 trained_results = [(CanonicalSection.UNKNOWN, 0.0, None)] * len(unique_keys)
             unique_map: dict[str, tuple[CanonicalSection, float, bool | None, str | None]] = {
                 key: (

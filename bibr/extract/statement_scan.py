@@ -121,6 +121,17 @@ _ANCHORS: dict[str, tuple[re.Pattern[str], ...]] = {
 
 _STATEMENT_FIELDS = tuple(_ANCHORS)
 
+# One alternation per field, exactly equivalent to "does any of this field's
+# anchors match" but a single C-level pass instead of a Python loop over up to
+# nine compiled patterns. ``_has_field_anchor`` runs for every (sentence,
+# field) pair, so on the shared serve event loop that loop cost ~22 ms/paper.
+# Match positions still come from the individual patterns; this is the boolean
+# test only.
+_ANCHOR_ANY: dict[str, re.Pattern[str]] = {
+    field: re.compile("|".join(f"(?:{pattern.pattern})" for pattern in patterns), re.IGNORECASE)
+    for field, patterns in _ANCHORS.items()
+}
+
 # Funding anchors split by reliability. The STRONG anchors are unambiguous —
 # a funder-ish token anywhere in the captured window is enough (existing
 # behavior). "supported by" alone is ambiguous — generic prose like
@@ -581,7 +592,7 @@ def _categories_in(text: str) -> set[str]:
 
 
 def _has_field_anchor(field: str, text: str) -> bool:
-    return any(pattern.search(text) for pattern in _ANCHORS[field]) or (
+    return bool(_ANCHOR_ANY[field].search(text)) or (
         text.strip().casefold() in _BARE_CATEGORY_LABELS[field]
     )
 

@@ -129,3 +129,23 @@ def test_decode_otsl_converts_literal_encoded_newline_before_non_command_text():
     result = decode_otsl(r"<fcel>line one\n line two\n2<nl>")
 
     assert result.html == "<table><tr><td>line one<br> line two<br>2</td></tr></table>"
+
+
+_SPANNED = '<table><tr><td colspan="2">A</td></tr><tr><td>B</td><td>C</td></tr></table>'
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "<fcel>A<lcel><nl><fcel>B<fcel>C<nl>",
+        "<fcel>A<lcel><nl><fcel>B<fcel>C<nl>\n",
+        "\n<fcel>A<lcel><nl><fcel>B<fcel>C<nl>",
+        "  <fcel>A<lcel><nl><fcel>B<fcel>C<nl>  \n",
+    ],
+)
+def test_decode_otsl_ignores_surrounding_whitespace(raw):
+    """check_otsl_completeness normalises with .strip() and decode_otsl did
+    not, so a single trailing newline — routine from OpenAI-compatible chat
+    completions, i.e. the default PaddleOCR-VL path — became a phantom cell
+    and the colspan was lost."""
+    assert decode_otsl(raw).html == _SPANNED

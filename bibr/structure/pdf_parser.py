@@ -53,6 +53,7 @@ from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.carry_over_manager import CarryOverState
 from bibr.structure.floats_normalize import (
     merge_figure_panels_with_remap,
+    merge_table_continuations_with_remap,
     remap_caption_receipt,
 )
 from bibr.structure.footnote_buffer import FootnoteBuffer, printed_marker
@@ -127,6 +128,12 @@ _BODY_TEXT_LABELS: frozenset[str] = frozenset({"text", "content", "vertical_text
 # header. Furniture (banners, footers, watermarks) is short; a real paragraph
 # that happens to repeat across pages is longer and must be preserved.
 _RUNNING_HEADER_MAX_LEN = 200
+# Running heads are page furniture: they sit in the top or bottom margin band.
+# ``bbox_2d`` is 0..1000 image space, matching the page-edge test in
+# ``parse_media``. A heading in the middle of a column is never furniture,
+# however often it repeats.
+_RUNNING_HEADER_TOP_Y = 100.0
+_RUNNING_HEADER_BOTTOM_Y = 900.0
 
 
 def _bbox_containment_fraction(inner: list | tuple | None, outer: list | tuple | None) -> float:
@@ -285,6 +292,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # captionless target.
         self._caption_candidates = []
         self._caption_display_text_by_id: dict[str, str] = {}
+        # Every caption candidate id -> the id of the candidate that survived
+        # de-duplication for its cluster. Ids recorded at parse time can be
+        # de-duplicated away, so anything holding one must resolve it here.
+        self._caption_canonical_by_id: dict[str, str] = {}
         self._table_caption_fragments: dict[str, str] = {}
         self._confirmed_table_caption_owners: dict[str, int] = {}
         self._non_caption_candidate_reasons: dict[str, tuple[str, ...]] = {}
@@ -425,11 +436,16 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # Collapse per-panel figures and per-page continuation tables before
         # detect_xrefs / create_content_sections consume the ids.
         self.figures, figure_remap = merge_figure_panels_with_remap(self.figures)
-        # Table continuations were resolved with caption/section barriers in _finalize_media.
-        # A second caption-only merge would override those ownership decisions.
+        self.tables, table_remap = merge_table_continuations_with_remap(self.tables)
 
-        # Figure merging renumbers survivors, so update the frozen caption receipt.
-        caption_assignment_receipt = remap_caption_receipt(caption_assignment_receipt, figure_remap)
+        # Both mergers renumber survivors from 1, discarding the printed-id
+        # reservation _finalize_media already froze into the receipt above —
+        # an assignment naming "figure:12" would otherwise dangle in a
+        # document whose highest figure_id is 1. The keys are namespaced
+        # ("figure:" / "table:"), so the two maps cannot collide.
+        caption_assignment_receipt = remap_caption_receipt(
+            caption_assignment_receipt, {**figure_remap, **table_remap}
+        )
 
         processing_warnings: list[str] = []
         if self._corrupt_region_count:
@@ -648,6 +664,19 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # Page processing
     # ------------------------------------------------------------------
 
+    def _is_in_margin_band(self, page_idx: int, region_idx: int) -> bool:
+        """True if the region sits in a page's top or bottom margin band.
+
+        A missing bbox is unknown rather than disqualifying — falling back to
+        the pre-geometry behaviour keeps genuine furniture demoted on inputs
+        whose layout carries no coordinates.
+        """
+        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
+        if bbox is None:
+            return True
+        _, y1, _, y2 = bbox
+        return y1 <= _RUNNING_HEADER_TOP_Y or y2 >= _RUNNING_HEADER_BOTTOM_Y
+
     def _mark_running_headers(self) -> None:
         """Detect heading regions that are actually per-page running headers.
 
@@ -719,6 +748,14 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     and not FRONT_MATTER_MASTHEAD_RE.match(normalized)
                 ):
                     demoted = occurrences[1:]
+                # Repetition alone is not evidence: multi-study papers
+                # legitimately repeat ``Method``/``Results``/``Participants``
+                # per study, and demoting those deletes the heading and folds
+                # its body into the preceding section. Require the geometry of
+                # actual page furniture.
+                demoted = [occ for occ in demoted if self._is_in_margin_band(*occ)]
+                if not demoted:
+                    continue
                 self._running_header_regions.update(demoted)
                 logger.debug(
                     "Demoting repeated heading %r as running header (%d of %d occurrences)",
@@ -845,9 +882,6 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 raw_ocr_content=region.raw_content,
                 native_text_candidate=region.native_text_candidate,
                 native_text_rejection_reason=region.native_text_rejection_reason,
-                source_region_ids=region.source_region_ids,
-                native_spans=region.native_spans,
-                formula_proposals=region.formula_proposals,
                 bbox_height=bbox_h,
                 bbox_width=bbox_w,
                 char_density=char_dens,

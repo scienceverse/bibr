@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import random
 import zipfile
 from pathlib import Path
 
@@ -109,6 +110,72 @@ def test_epub_allows_normal_spine_member(monkeypatch):
     epub_bytes = _make_epub_with_chapter("<html><body><p>Small chapter.</p></body></html>")
     doc = epub_native.read_epub_document(epub_bytes)
     assert b"Small chapter." in doc.html_bytes
+
+
+# --- Spine repetition and percent-encoded hrefs ------------------------------
+
+
+def _make_epub_spine(*, repeats: int, href: str, member: str, body: str = "<p>Hi.</p>") -> bytes:
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    itemrefs = "".join('<itemref idref="c1"/>' for _ in range(repeats))
+    opf_xml = f"""<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest><item id="c1" href="{href}" media-type="application/xhtml+xml"/></manifest>
+  <spine>{itemrefs}</spine>
+</package>""".encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+        zf.writestr(member, f"<html><body>{body}</body></html>")
+    return buf.getvalue()
+
+
+def test_epub_spine_repetition_does_not_multiply_member_caps():
+    """Every zip limit is per member, so a spine repeating one 1 MiB chapter
+    N times used to reach N MiB of resident text from a ~1 MB upload."""
+    from bibr.input import epub_native
+
+    # Poorly-compressible so the archive-wide ratio guard is not what rejects it.
+    rng = random.Random(1234)  # noqa: S311 - deterministic test fixture, not crypto
+    body = "".join(rng.choice("abcdefghijklmnopqrstuvwxyz0123456789 ") for _ in range(1 << 20))
+    epub_bytes = _make_epub_spine(
+        repeats=300, href="chapter.xhtml", member="OEBPS/chapter.xhtml", body=body
+    )
+    assert len(epub_bytes) < 2 << 20
+    doc = epub_native.read_epub_document(epub_bytes)
+    # The repeated member is read once, not 300 times.
+    assert len(doc.html_bytes) < 4 << 20
+
+
+def test_epub_rejects_spine_longer_than_cap(monkeypatch):
+    from bibr.input import epub_native
+
+    monkeypatch.setattr(epub_native, "_EPUB_MAX_SPINE_DOCUMENTS", 4)
+    epub_bytes = _make_epub_spine(repeats=5, href="chapter.xhtml", member="OEBPS/chapter.xhtml")
+    with pytest.raises(ValueError):
+        epub_native.read_epub_document(epub_bytes)
+
+
+def test_epub_accepts_percent_encoded_manifest_href():
+    """OPF hrefs are URL references, so a member name with a space is
+    percent-encoded in the manifest but not in the zip directory."""
+    from bibr.input import epub_native
+
+    epub_bytes = _make_epub_spine(
+        repeats=1,
+        href="chapter%201.xhtml",
+        member="OEBPS/chapter 1.xhtml",
+        body="<p>Encoded chapter.</p>",
+    )
+    doc = epub_native.read_epub_document(epub_bytes)
+    assert b"Encoded chapter." in doc.html_bytes
 
 
 def test_docx_rejects_real_oversized_document_xml(monkeypatch):

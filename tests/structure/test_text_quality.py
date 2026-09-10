@@ -283,19 +283,31 @@ def _minimal_paper(**overrides):
 
 
 class TestExportTextQuality:
+    """v11 moved the score out of paper metadata: it is a parse-quality
+    diagnostic, so it rides ``extraction.diagnostics.text_quality`` (populated
+    by ``_build_extraction`` — see TestExtractionProvenance in
+    tests/test_export_units.py) and is absent when a Paper is exported outside
+    the pipeline."""
+
     def test_export_emits_text_quality(self):
         from bibr.export.json_export import export_paper_to_json, validate_export
+        from tests.export.conftest import extraction_block
 
         paper = _minimal_paper(text_quality=0.42)
+        paper.extraction = extraction_block(diagnostics={"text_quality": paper.text_quality})
         result = export_paper_to_json(paper)
 
-        assert result["info"]["text_quality"] == pytest.approx(0.42)
+        assert result["extraction"]["diagnostics"]["text_quality"] == pytest.approx(0.42)
+        assert "text_quality" not in result["metadata"]
         assert validate_export(result) == []
 
     def test_export_emits_null_when_unscored(self):
         from bibr.export.json_export import export_paper_to_json, validate_export
+        from tests.export.conftest import extraction_block
 
-        result = export_paper_to_json(_minimal_paper())
+        paper = _minimal_paper()
+        paper.extraction = extraction_block(diagnostics={"text_quality": paper.text_quality})
+        result = export_paper_to_json(paper)
 
-        assert result["info"]["text_quality"] is None
+        assert result["extraction"]["diagnostics"]["text_quality"] is None
         assert validate_export(result) == []

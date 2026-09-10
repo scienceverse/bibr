@@ -64,7 +64,7 @@ class ServePipeline(Pipeline):
         ocr_base_url: str,
         ocr_sem_global: asyncio.Semaphore,
         ocr_breaker: AsyncCircuitBreaker,
-        crossref: bool = True,
+        crossref: bool | None = None,
         equations: bool = True,
         ocr_profile: str | None = None,
         settings: GlobalSettings | None = None,
@@ -80,9 +80,12 @@ class ServePipeline(Pipeline):
         settings_snapshot = snapshot_settings(settings)
         ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)
 
-        # Per-request fields (start_page / end_page / include_figures) are
-        # supplied via ``process_file(config=...)`` so a single ServePipeline
-        # instance can be shared across concurrent requests on one worker.
+        # Per-request fields (start_page / end_page / include_figures /
+        # crossref) are supplied via ``process_file(config=...)`` so a single
+        # ServePipeline instance can be shared across concurrent requests on
+        # one worker. ``crossref`` here is the deployment-level tri-state
+        # (None = follow CROSSREF_ENRICH); a request's ``crossref`` form field
+        # overrides it per run.
         config = RunConfig(
             memory_mode="keep_all",
             ocr_backend="serve-http",
@@ -109,16 +112,18 @@ class ServePipeline(Pipeline):
             segmenter=segmenter,
         )
 
-        # Mirror LocalPipeline: refs=off produces an empty bib table, so
-        # Crossref enrichment has nothing to enrich. Serve consulted only
-        # ``crossref.enrich`` and kept the stage, so a deployment configured
-        # with ``REF_PARSE_STRATEGY=off`` still ran an enrich stage that idled
-        # on every request — and diverged from the local pipeline's stage list
-        # for identical settings.
+        # Enrichment is decided per request (the ``crossref`` form field can
+        # switch it on for a deployment whose CROSSREF_ENRICH is off, and off
+        # for one where it is on), so the enricher is built whenever some
+        # request could need it and ``EnrichmentStage`` gates each run on
+        # ``RunConfig.enrichment_enabled``. The one construction-time
+        # exclusion mirrors LocalPipeline: ``REF_PARSE_STRATEGY=off`` produces
+        # an empty bib table, so Crossref would have nothing to enrich and the
+        # stage would only idle on every request.
         refs_off = (settings_snapshot.REF_PARSE_STRATEGY or "").lower() == "off"
 
         enrichers: list = []
-        if crossref and settings_snapshot.crossref.enrich and not refs_off:
+        if not refs_off:
             from bibr.pipeline.enricher import CrossrefEnricher
 
             enrichers.append(CrossrefEnricher(settings=settings_snapshot))

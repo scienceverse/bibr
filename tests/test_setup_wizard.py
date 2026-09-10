@@ -656,7 +656,7 @@ def test_external_services_auto_installs_ml_for_layout_and_ner(monkeypatch):
     wizard._step_external_services()
 
     assert "ml" in wizard.selected_extras
-    assert calls == ["PDF layout detection and NER reference parsing require the ml extra"]
+    assert calls == ["PDF layout detection and NER reference parsing run fastest with the ml extra"]
 
 
 @pytest.mark.parametrize(
@@ -691,7 +691,7 @@ def test_external_services_auto_installs_ml_for_layout_with_llm_references(
     wizard._step_external_services()
 
     assert "ml" in wizard.selected_extras
-    assert calls == ["PDF layout detection requires the ml extra"]
+    assert calls == ["PDF layout detection runs fastest with the ml extra"]
 
 
 def test_step_external_services_no_longer_offers_glm_mlx():
@@ -743,30 +743,56 @@ def _quiet_wizard():
     return wizard
 
 
-def test_external_services_writes_consolidate_and_llm(monkeypatch):
+def test_external_services_writes_enrich_consolidate_and_llm(monkeypatch):
     wizard = _quiet_wizard()
     # Prompt order: crossref email, wtpsplit model, ocr backend, ref parsing
     prompts = iter(["user@example.com", "sat-6l-sm", "glm-http", "llm"])
-    # Confirm order: consolidate, layout detection
-    confirms = iter([True, True])
+    # Confirm order: enrichment, consolidate, layout detection
+    confirms = iter([True, True, True])
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: next(confirms))
 
     wizard._step_external_services()
 
+    assert wizard.env_vars["CROSSREF_ENRICH"] == "true"
     assert wizard.env_vars["CROSSREF_CONSOLIDATE"] == "fill"
     assert wizard.env_vars["REF_PARSE_STRATEGY"] == "llm"
+
+
+def test_external_services_enrich_declined_skips_consolidate_question(monkeypatch):
+    """Enrichment is opt-in; declining it leaves CROSSREF_ENRICH unset (off) and
+    never asks about consolidation, which would have nothing to merge."""
+    wizard = _quiet_wizard()
+    prompts = iter(["", "sat-6l-sm", "glm-http", "ner"])
+    questions: list[str] = []
+
+    def confirm(question, *a, **k):
+        questions.append(question)
+        # enrichment: no; layout detection: yes
+        return "enrichment" not in question
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", confirm)
+
+    wizard._step_external_services()
+
+    assert "CROSSREF_ENRICH" not in wizard.env_vars
+    assert "CROSSREF_CONSOLIDATE" not in wizard.env_vars
+    assert not any("consolidation" in q for q in questions)
+    assert "REF_PARSE_STRATEGY" not in wizard.env_vars
 
 
 def test_external_services_consolidate_declined(monkeypatch):
     wizard = _quiet_wizard()
     prompts = iter(["", "sat-6l-sm", "glm-http", "ner"])
-    confirms = iter([False, True])
+    # Confirm order: enrichment (yes), consolidate (no), layout detection
+    confirms = iter([True, False, True])
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: next(confirms))
 
     wizard._step_external_services()
 
+    assert wizard.env_vars["CROSSREF_ENRICH"] == "true"
     assert "CROSSREF_CONSOLIDATE" not in wizard.env_vars
     assert "REF_PARSE_STRATEGY" not in wizard.env_vars
 
@@ -831,6 +857,37 @@ def test_recommended_setup_low_vram_cuda_keeps_paddle_automatic_ocr():
     assert "local" not in setup.extras
     assert "local-cuda" not in setup.extras
     assert "llama.cpp" in setup.runtime_summary
+
+
+def test_recommended_setup_mid_vram_cuda_splits_ocr_and_llm_runtimes():
+    """8-11 GB: paddle-vllm OCR fits (8 GB gate) but NuExtract 3's vLLM build (11 GB)
+    does not — the old plan picked vLLM anyway and OOMed after OCR."""
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=10.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["OCR_BACKEND"] == "paddle"
+    assert setup.env["LLM_BACKEND"] == "llama-cpp"
+    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3-GGUF:Q4_K_M"
+    assert "vllm" in setup.extras  # OCR still runs through paddle-vllm
+    assert "llama.cpp for the LLM" in setup.runtime_summary
+    assert "llama-server" in setup.runtime_summary
+
+
+def test_recommended_setup_cuda_picks_vllm_once_the_bf16_variant_fits():
+    setup = _build_recommended_setup(
+        platform_key="cuda",
+        accelerator_memory_gb=11.0,
+        system_memory_gb=32.0,
+        sys_platform="linux",
+        machine="x86_64",
+    )
+    assert setup.env["LLM_BACKEND"] == "vllm"
+    assert setup.env["LLM_LOCAL_MODEL"] == "numind/NuExtract3"
+    assert "llama-server" not in setup.runtime_summary
 
 
 def test_recommended_setup_apple_silicon_warns_about_runtime():
@@ -1092,15 +1149,16 @@ def test_smoke_test_declines_by_default():
 def _smoke_export(*, n_authors: int, n_refs: int) -> dict:
     return {
         "paper_id": "sample",
-        "info": {
+        "schema_version": "11.0",
+        "source": {
+            "file_name": "sample_paper.pdf",
+            "file_hash": "sample-hash",
+            "input_format": "pdf",
+        },
+        "metadata": {
             "title": "The Coefficient of Rodential Efficiency: A Synthetic Benchmark",
             "keywords": [],
             "doi": None,
-            "file_hash": "sample-hash",
-            "input_format": "pdf",
-            "file_name": "sample_paper.pdf",
-            "schema_version": "10.6",
-            "bibr_version": "0.3.0",
         },
         "author": [
             {
@@ -1309,7 +1367,7 @@ def test_smoke_test_real_extraction_no_llm():
 
     assert result.ok
     assert isinstance(result.data, dict)
-    assert result.data.get("info") is not None
+    assert result.data.get("metadata") is not None
 
 
 @pytest.mark.parametrize(

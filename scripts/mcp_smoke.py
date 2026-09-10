@@ -38,16 +38,18 @@ def _parse(result) -> dict | list | str:
 
 
 async def run(url: str, token: str, chew: Path | None, refs: str | None, timeout: float) -> int:
+    import httpx2
     from mcp import ClientSession
-    from mcp.client.streamable_http import streamablehttp_client
+    from mcp.client.streamable_http import streamable_http_client
 
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     async with (
-        streamablehttp_client(url, headers=headers, timeout=timeout) as (read, write, _),
+        httpx2.AsyncClient(headers=headers, timeout=timeout) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write),
         ClientSession(read, write) as session,
     ):
         init = await session.initialize()
-        print(f"server    : {init.serverInfo.name} {init.serverInfo.version}")
+        print(f"server    : {init.server_info.name} {init.server_info.version}")
         tools = await session.list_tools()
         names = sorted(t.name for t in tools.tools)
         print(f"tools ({len(names)}): {', '.join(names)}")
@@ -66,7 +68,7 @@ async def run(url: str, token: str, chew: Path | None, refs: str | None, timeout
         t0 = time.monotonic()
         res = await session.call_tool("chew_paper", args)
         elapsed = time.monotonic() - t0
-        if res.isError:
+        if res.is_error:
             print(
                 f"FAIL: chew_paper error after {elapsed:.0f}s: {_text(res)[:600]}",
                 file=sys.stderr,
@@ -82,7 +84,7 @@ async def run(url: str, token: str, chew: Path | None, refs: str | None, timeout
 
         meta = _parse(await session.call_tool("get_metadata", {"paper_id": paper_id}))
         if isinstance(meta, dict):
-            info = meta.get("info") or meta
+            info = meta.get("metadata") or meta
             print(f"title     : {str(info.get('title'))[:100]}")
             print(f"doi       : {info.get('doi')}")
             print(f"authors   : {len(meta.get('authors') or meta.get('author') or [])}")

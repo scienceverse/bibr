@@ -11,10 +11,10 @@ import io
 import posixpath
 import zipfile
 from dataclasses import dataclass
-
-from lxml import etree
+from urllib.parse import unquote
 
 from bibr.input.html_native import HtmlParser
+from bibr.input.xml_entities import parse_xml
 from bibr.input.zip_limits import ZipExpansionLimitError, read_zip_member_capped
 from bibr.paper_contents import PaperContents
 
@@ -25,6 +25,11 @@ _EPUB_MAX_COMPRESSION_RATIO = 100
 # a single spine document could still be huge, so bound each member on its actual
 # decompressed size (audit L10/M7).
 _EPUB_MAX_MEMBER_BYTES = 64 * 1024 * 1024
+# Every limit above is per member, so a spine that names one member N times
+# multiplies all of them. Bound the spine itself, and the bytes it actually
+# accumulates, independently of how the archive is packed.
+_EPUB_MAX_SPINE_DOCUMENTS = 2_000
+_EPUB_MAX_SPINE_BYTES = 64 * 1024 * 1024
 
 
 @dataclass
@@ -51,11 +56,6 @@ def _text(el) -> str:
     if el is None:
         return ""
     return " ".join("".join(el.itertext()).split()).strip()
-
-
-def _parse_xml(data: bytes):
-    parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
-    return etree.fromstring(data, parser=parser)
 
 
 def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
@@ -92,16 +92,19 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
         if mimetype != "application/epub+zip":
             raise ValueError("ePub mimetype file is missing or invalid")
 
-        container = _parse_xml(_read_zip_member(zf, "META-INF/container.xml"))
+        container = parse_xml(_read_zip_member(zf, "META-INF/container.xml"))
         rootfile_path = None
         for el in container.iter():
             if _ln(el) == "rootfile":
-                rootfile_path = _attr(el, "full-path")
+                # OCF/OPF hrefs are URL references: a name with a space is
+                # percent-encoded, but zip member names are not.
+                full_path = _attr(el, "full-path")
+                rootfile_path = unquote(full_path) if full_path else None
                 break
         if not rootfile_path:
             raise ValueError("ePub container has no rootfile")
 
-        opf = _parse_xml(_read_zip_member(zf, rootfile_path))
+        opf = parse_xml(_read_zip_member(zf, rootfile_path))
         base = posixpath.dirname(rootfile_path)
 
         manifest: dict[str, str] = {}
@@ -114,7 +117,7 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
                 item_id = _attr(el, "id")
                 href = _attr(el, "href")
                 if item_id and href:
-                    manifest[item_id] = posixpath.normpath(posixpath.join(base, href))
+                    manifest[item_id] = posixpath.normpath(posixpath.join(base, unquote(href)))
             elif ln == "itemref":
                 idref = _attr(el, "idref")
                 if idref:
@@ -140,13 +143,29 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
             elif ln == "rights" and not metadata.get("license"):
                 metadata["license"] = _text(el)
 
-        spine_paths = [manifest[idref] for idref in spine_ids if idref in manifest]
+        if len(spine_ids) > _EPUB_MAX_SPINE_DOCUMENTS:
+            raise ValueError("ePub archive exceeds expansion limits")
+        # De-duplicate: a repeated idref contributes nothing but a second copy
+        # of the same text, and is the cheapest way to multiply the per-member
+        # caps above.
+        seen_paths: set[str] = set()
+        spine_paths: list[str] = []
+        for idref in spine_ids:
+            path = manifest.get(idref)
+            if path is None or path in seen_paths:
+                continue
+            seen_paths.add(path)
+            spine_paths.append(path)
         if not spine_paths:
             raise ValueError("ePub package has no readable spine documents")
 
         body_parts: list[str] = []
+        spine_bytes = 0
         for path in spine_paths:
             data = _read_zip_member(zf, path)
+            spine_bytes += len(data)
+            if spine_bytes > _EPUB_MAX_SPINE_BYTES:
+                raise ValueError("ePub archive exceeds expansion limits")
             body_parts.append(data.decode("utf-8", errors="replace"))
 
     head_parts = []
@@ -170,8 +189,11 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
                 f'<meta name="{meta_name}" content="{html.escape(str(metadata[field]))}">'
             )
 
+    # html5lib sniffs the encoding and falls back to windows-1252 without a
+    # declaration, which mojibakes every non-ASCII character in the metadata
+    # and body below. Declare it first: the scan only reads the opening bytes.
     combined = (
-        "<!doctype html><html><head>"
+        '<!doctype html><html><head><meta charset="utf-8">'
         + "".join(head_parts)
         + "</head><body><article>"
         + "\n".join(body_parts)

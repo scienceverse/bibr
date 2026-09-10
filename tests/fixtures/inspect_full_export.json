@@ -1,15 +1,12 @@
 {
   "paper_id": "10.1234/example.5678",
-  "info": {
+  "schema_version": "11.0",
+  "source": {"file_name": "example.pdf", "file_hash": "abc123", "input_format": "pdf"},
+  "metadata": {
     "title": "Deep Learning for Something Great",
     "abstract": "This is an abstract.",
     "keywords": ["deep learning", "nlp"],
     "doi": "10.1234/example.5678",
-    "file_hash": "abc123",
-    "input_format": "pdf",
-    "file_name": "example.pdf",
-    "schema_version": "10.6",
-    "bibr_version": "0.3.0",
     "paper_type": "empirical",
     "paper_type_confidence": 0.92,
     "oecd_l1": null,
@@ -49,13 +46,13 @@
   ],
   "url": [],
   "bib": [
-    {"bib_id": 1, "text_id": 3, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "authors": "Smith, J.", "editors": null, "publisher": null, "year": 2020, "year_suffix": null, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null, "is_in_press": false},
-    {"bib_id": 2, "text_id": 4, "bib_type": "article-journal", "doi": null, "title": "Ref Two", "authors": "Lee, B.", "editors": null, "publisher": null, "year": 2021, "year_suffix": null, "date": null, "container": "Journal Y", "volume": "2", "issue": "2", "first_page": "20", "last_page": "30", "edition": null, "version": null, "url": null, "is_in_press": false}
+    {"bib_id": 1, "text_id": 3, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "authors": "Smith, J.", "author": [{"family": "Smith", "given": "J."}], "editors": null, "editor": [], "publisher": null, "year": 2020, "year_suffix": null, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null, "is_in_press": false},
+    {"bib_id": 2, "text_id": 4, "bib_type": "article-journal", "doi": null, "title": "Ref Two", "authors": "Lee, B.", "author": [{"family": "Lee", "given": "B."}], "editors": null, "editor": [], "publisher": null, "year": 2021, "year_suffix": null, "date": null, "container": "Journal Y", "volume": "2", "issue": "2", "first_page": "20", "last_page": "30", "edition": null, "version": null, "url": null, "is_in_press": false}
   ],
   "xref": [
-    {"xref_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 3},
-    {"xref_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 4},
-    {"xref_id": 1, "xref_type": "table", "contents": "Table 1", "text_id": 5}
+    {"target_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 3},
+    {"target_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 4},
+    {"target_id": 1, "xref_type": "table", "contents": "Table 1", "text_id": 5}
   ],
   "figure": [
     {"figure_id": 1, "section_id": 2, "image": null, "caption": "Figure 1 caption", "page_number": 1}
@@ -64,19 +61,31 @@
     {"table_id": 1, "section_id": 2, "html": "<table></table>", "contents": [], "caption": "Table 1 caption", "page_number": 1}
   ],
   "eq": [
-    {"text_id": 4, "grp_id": 1, "lhs": "t", "df": "28", "comp": "=", "rhs": "2.3"}
+    {"eq_id": 1, "text_id": 4, "grp_id": 1, "verbatim": null, "lhs": "t", "df": "28", "comp": "=", "rhs": "2.3"}
   ],
   "bib_match": [
-    {"bib_id": 1, "service": "crossref", "service_id": "10.1/aaa", "score": 0.99, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "authors": [{"given": "J.", "family": "Smith"}], "editors": null, "publisher": null, "year": 2020, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null}
+    {"bib_id": 1, "service": "crossref", "service_id": "10.1/aaa", "score": 0.99, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "author": [{"given": "J.", "family": "Smith"}], "editor": null, "publisher": null, "year": 2020, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null}
   ],
-  "info_match": [],
+  "metadata_match": [],
   "funding": [],
-  "affiliations": [],
-  "ocr_config": {"ocr_backend": "glm-sglang", "ocr_model": null, "llm_provider": "google", "llm_model": "gemini-2.5-flash", "no_llm": false},
-  "enrichment": {"complete": true, "refs_enriched": 1, "refs_total": 2},
-  "processing_warnings": ["VALIDATION:warning:VAL_XREF_ZERO: low xref count", "STATEMENT_LEXICAL_FALLBACK: funding_statement"],
-  "llm_usage": {"gemini-2.5-flash": {"input_tokens": 12345, "output_tokens": 678, "total_tokens": 13023}},
-  "extraction": {"bibr_version": "0.3.0", "ref_seg_strategy": "geom", "ref_parse_strategy": "ner", "ref_seg_fallback_used": false, "crossref_enrich": true, "consolidate": "off", "timings": {"ocr": 1.2}, "total_seconds": 3.4},
+  "affiliation": [],
+  "extraction": {
+    "bibr_version": "0.3.0",
+    "completed_at": "2026-07-24T10:00:00Z",
+    "ocr": {"backend": "glm-sglang", "model": null, "profile": "glm"},
+    "llm": {"provider": "google", "model": "gemini-2.5-flash", "backend": "cloud"},
+    "settings": {"ref_seg": "geom", "ref_parse": "ner", "crossref_enrich": true, "consolidate": "off"},
+    "timings": {"stages": {"ocr": 1.2}, "total_seconds": 3.4},
+    "usage": {
+      "totals": {"calls": 4, "input_tokens": 12345, "cached_input_tokens": 0, "output_tokens": 678, "total_tokens": 13023},
+      "breakdown": [
+        {"label": "extract_title_keywords", "provider": "google", "model": "gemini-2.5-flash", "calls": 4, "input_tokens": 12345, "cached_input_tokens": 0, "output_tokens": 678, "total_tokens": 13023}
+      ]
+    },
+    "enrichment": {"complete": true, "refs_enriched": 1, "refs_total": 2},
+    "diagnostics": {"references_complete": true, "ref_seg_fallback_used": false},
+    "warnings": ["STATEMENT_LEXICAL_FALLBACK: funding_statement"]
+  },
   "validation": {
     "errors": 0,
     "warnings": 1,

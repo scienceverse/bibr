@@ -203,8 +203,8 @@ def _annotation_repr(annotation: object) -> str:
     A bare ``getattr(annotation, "__name__", None)`` collapses every
     parameterized generic to its origin name (``list[TextExport]`` ->
     ``"list"``) and falls back to ``str(annotation)`` for unions, which
-    prints fully-qualified module paths (``bibr.export.json_export.
-    OcrConfigExport | None``). This recurses through ``get_origin``/
+    prints fully-qualified module paths (``bibr.export.models.
+    ExtractionExport | None``). This recurses through ``get_origin``/
     ``get_args`` instead, preserving generic structure and stripping
     module paths from every leaf.
     """
@@ -249,20 +249,19 @@ def _nested_export_models(model: type[BaseModel]) -> list[type[BaseModel]]:
 
 
 def render_schema_md() -> str:
-    from bibr.export.json_export import _SCHEMA_VERSION, PaperExport
+    from bibr.export.models import _SCHEMA_VERSION, PaperExport
 
     nested_models = _nested_export_models(PaperExport)
     parts = [
         _HEADER,
         f"# JSON schema (v{_SCHEMA_VERSION})\n",
         "Top-level blocks of the export produced by `bibr chew` / `POST /papers/extract`. "
-        "The Pydantic model `bibr.export.json_export.PaperExport` is the single source "
-        "of truth for output structure. Accepted schema versions are listed in "
-        "`InfoExport.schema_version` below. "
-        "Schema validation does not establish factual accuracy.\n",
-        "[Download the generated JSON Schema](paper.schema.json). "
-        "JSON names below include serialization aliases such as `_regions`; "
-        "Python model attributes can have different names.\n",
+        "The Pydantic model `bibr.export.models.PaperExport` is the single source "
+        "of truth for output structure. Schema validation does not establish "
+        "factual accuracy.\n",
+        "[Download the generated JSON Schema](paper.schema.json). This uses the "
+        "same schema builder as the checked-in export artifact, including its "
+        "required-root-field contract.\n",
         "## Top-level blocks\n",
         "| Block | Type | Description |",
         "|---|---|---|",
@@ -281,21 +280,26 @@ def render_schema_md() -> str:
     parts.extend(
         [
             "\n## Reading an export\n",
-            "`info.schema_version` identifies the output schema; `info.bibr_version` "
-            "identifies the producing package. Table rows connect through IDs: "
+            "The root `schema_version` identifies the output schema; "
+            "`extraction.bibr_version` identifies the producing package. "
+            "Paper fields live in `metadata`, input identity in `source`, and "
+            "telemetry in `extraction`. Table rows connect through IDs: "
             "`text.section_id` points to `section.section_id`, and `xref` links "
             "a source `text_id` to an object identified by `xref_type` and `xref_id`. "
             "Do not treat IDs as array positions.\n",
-            "`bib` starts with parsed references. `bib_match` and `info_match` hold "
+            "`bib` starts with parsed references. `bib_match` and `metadata_match` hold "
             "external enrichment separately. Explicit consolidation (`fill` or "
             "`replace`) can update reference fields and records `consolidated_fields`. "
             "[See enrichment and consolidation](../guides/configuration.md).\n",
-            "Optional blocks may be absent rather than null. `_regions` and "
-            "`_native_source` require `include_regions=True` / `--regions`; "
+            "Optional blocks may be absent rather than null. `extraction.regions` "
+            "requires `include_regions=True` / `--regions`; "
             "per-sentence underscore fields require `include_region_meta=True` / "
             "`--region-meta`. The `validation` gate is enabled by default "
             "and can be disabled independently of the typed export builder. "
-            "Inspect `processing_warnings` and `validation` when reviewing results.\n",
+            "Inspect `extraction.warnings` and `validation` when reviewing results. "
+            "The root `schema_version` key distinguishes v11 from legacy exports. "
+            "For compatibility and structured reference names, see "
+            "[the export overview](../guides/architecture.md).\n",
             "## Nested record fields\n",
             "These tables describe the models referenced above. Required means "
             "required by the model constructor; a nullable field may still be "

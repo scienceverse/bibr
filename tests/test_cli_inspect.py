@@ -1,7 +1,7 @@
 """Tests for ``bibr inspect`` — a human-readable summary of a bibr JSON export.
 
 Fixtures:
-  - ``fixtures/inspect_full_export.json``: a hand-built, schema-faithful v10.6
+  - ``fixtures/inspect_full_export.json``: a hand-built, schema-faithful v11.0
     export (verified against ``bibr.export.json_export.PaperExport`` in this
     test module's own setup) covering every block ``bibr inspect`` reports on.
   - ``fixtures/inspect_degraded_export.json``: only ``info`` + ``author`` —
@@ -9,8 +9,11 @@ Fixtures:
     (missing block -> placeholder, exit 0).
 
 Two more contracts are covered without dedicated fixture files: a file that
-isn't JSON, and JSON that is clearly not a bibr export (no top-level ``info``
-object) — both must exit 1 with a clear one-line message, never a traceback.
+isn't JSON, and JSON that is clearly not a bibr export — one carrying neither a
+root ``schema_version`` nor any of the bibr-only blocks
+``_looks_like_bibr_export`` falls back on (``author``, ``bib``, ``xref``,
+``text``, ``section``, ``validation``, ``extraction``). Both must exit 1 with a
+clear one-line message, never a traceback.
 """
 
 from __future__ import annotations
@@ -102,10 +105,10 @@ def test_full_export_structure_counts(capsys):
 def test_full_export_references_block(capsys):
     """Bib count from ``bib``; in-text citation coverage from ``xref``
     (xref_type == "bib": N = count of such entries, M = count of distinct
-    non-null xref_id values among them, K = ``len(bib)``) — this is the
+    non-null target_id values among them, K = ``len(bib)``) — this is the
     truthful replacement for the old "matched/total over the xref list"
     metric, which read ~100% on every real export because the production
-    citation linker never stores an xref with a null xref_id (unresolved
+    citation linker never stores an xref with a null target_id (unresolved
     candidates are dropped before an xref entry is ever created, see
     bibr/structure/citation_linker.py). Enrichment state from the dedicated
     ``enrichment`` block — see bibr/export/json_export.py:467-474 (xref),
@@ -116,7 +119,7 @@ def test_full_export_references_block(capsys):
     out = capsys.readouterr().out
 
     assert "Bibliography entries: 2" in out
-    # Fixture: 2 xref entries of type "bib", both non-null xref_id=1 (bib_id 2
+    # Fixture: 2 xref entries of type "bib", both non-null target_id=1 (bib_id 2
     # is never cited in text) -> N=2 linked, M=1 of K=2 references cited.
     assert "In-text citations: 2 linked → 1 of 2 references cited (50%)" in out
     assert "complete" in out
@@ -131,8 +134,7 @@ def test_full_export_validation_block(capsys):
 
     assert "VAL_XREF_ZERO" in out
     assert "low xref count" in out
-    # non-VALIDATION-prefixed processing_warnings entry folded in by Task 5's
-    # _format_validation_line.
+    # ``extraction.warnings`` entry folded in by _format_validation_line.
     assert "processing warnings" in out
 
 
@@ -174,9 +176,10 @@ def test_degraded_export_renders_info_and_author(capsys):
 
 def test_degraded_export_missing_blocks_are_placeholders(capsys):
     """Every block absent from the degraded fixture (text, section, table,
-    figure, eq, bib, xref, bib_match, enrichment, validation, llm_usage) must
-    render as a placeholder, never a crash and never a bare 0 that would be
-    indistinguishable from "present but empty"."""
+    figure, eq, bib, xref, bib_match, validation, and the ``extraction``
+    sub-blocks ``enrichment``/``usage``) must render as a placeholder, never a
+    crash and never a bare 0 that would be indistinguishable from "present but
+    empty"."""
     from bibr.local.inspect import run_inspect
 
     run_inspect(str(DEGRADED))
@@ -315,17 +318,17 @@ def test_real_pre_v10_3_export_still_exits_zero():
     assert code == 0
 
 
-def test_synthetic_pre_v10_3_export_without_schema_version_exits_zero(tmp_path):
-    """Fixture-free, always-running regression coverage for the same code
-    path ``test_real_pre_v10_3_export_still_exits_zero`` exercises: a v10.x
-    export whose ``info`` block predates ``schema_version`` (but still
-    carries ``bibr_version``/``input_format``, like
-    ``attention_is_all_you_need.json``) must still be recognized as a bibr
-    export by ``_looks_like_bibr_export`` and exit 0.
+def test_legacy_export_without_a_root_schema_version_exits_zero(tmp_path):
+    """Fixture-free, always-running regression coverage for the same code path
+    ``test_real_pre_v10_3_export_still_exits_zero`` exercises. v11 dispatches on
+    a root ``schema_version``, but a file that predates it must still be
+    *recognized* as a bibr export by ``_looks_like_bibr_export`` (via its
+    bibr-only top-level blocks) and degrade to exit 0 rather than being rejected
+    as foreign JSON.
 
     Built by deep-copying the redistributable, schema-validated
-    ``inspect_full_export.json`` fixture and deleting ``schema_version`` —
-    no copyrighted paper text involved, so this survives the SCI-120 history
+    ``inspect_full_export.json`` fixture and reverting it to the v10 root shape
+    — no copyrighted paper text involved, so this survives the SCI-120 history
     purge that may remove the real corpus export above."""
     import copy
     import json
@@ -333,18 +336,16 @@ def test_synthetic_pre_v10_3_export_without_schema_version_exits_zero(tmp_path):
     from bibr.local.inspect import run_inspect
 
     data = copy.deepcopy(json.loads(FULL.read_text()))
-    assert "schema_version" in data["info"]  # sanity: fixture actually has it to remove
-    del data["info"]["schema_version"]
-    # Sanity: the other version/format fields the real pre-v10.3 file still
-    # carries must remain, so the gate is exercised via the *same* tolerance
-    # path (bibr_version/input_format), not accidentally via schema_version.
-    assert "bibr_version" in data["info"]
-    assert "input_format" in data["info"]
+    assert "schema_version" in data  # sanity: fixture actually has it to remove
+    del data["schema_version"]
+    data["info"] = {**data.pop("metadata"), **data.pop("source")}
+    # The gate must fire on the bibr-only blocks, not on anything version-ish.
+    assert {"author", "bib", "text", "section"} <= set(data)
 
-    synthetic = tmp_path / "pre_v10_3_export.json"
-    synthetic.write_text(json.dumps(data))
+    legacy = tmp_path / "legacy_export.json"
+    legacy.write_text(json.dumps(data))
 
-    code = run_inspect(str(synthetic))
+    code = run_inspect(str(legacy))
 
     assert code == 0
 
@@ -353,7 +354,7 @@ def test_synthetic_pre_v10_3_export_without_schema_version_exits_zero(tmp_path):
 
 
 def test_malformed_validation_and_llm_usage_do_not_crash(tmp_path, capsys):
-    """Non-dict issues, non-int counts, wrong-typed llm_usage — the report
+    """Non-dict issues, non-int counts, wrong-typed usage rows — the report
     must degrade gracefully (inherits Task 5's hardened validation helpers),
     never raise, and still exit 0 for an otherwise-parseable export."""
     import json
@@ -361,10 +362,12 @@ def test_malformed_validation_and_llm_usage_do_not_crash(tmp_path, capsys):
     from bibr.local.inspect import run_inspect
 
     payload = {
-        "info": {"title": "x"},
+        "metadata": {"title": "x"},
         "author": "not-a-list",
         "validation": {"errors": "bad", "warnings": None, "issues": "nope"},
-        "llm_usage": {"model-a": "not-a-dict", "model-b": {"input_tokens": "x"}},
+        "extraction": {
+            "usage": {"totals": "nope", "breakdown": ["not-a-dict", {"input_tokens": "x"}]}
+        },
     }
     path = tmp_path / "weird.json"
     path.write_text(json.dumps(payload))

@@ -360,17 +360,18 @@ def test_every_root_and_nested_response_model_has_an_explicit_policy():
     assert all("nuextract_policy" in model.__dict__ for model in POLICY_MODELS)
 
 
-def test_native_contract_excludes_exactly_downstream_fields():
+def test_native_contract_excludes_remaining_downstream_fields():
+    # Role is absent from the shared schema; native templates also omit author IDs.
+    assert AuthorLLM.nuextract_policy.exclude == frozenset({"author_id"})
     absolute_exclusions = {f"authors[].{field}" for field in AuthorLLM.nuextract_policy.exclude} | {
         f"references[].{field}" for field in PaperReferenceLLM.nuextract_policy.exclude
     }
     assert absolute_exclusions == {
+        "authors[].author_id",
         "references[].bib_id",
         "references[].text_id",
         "references[].match",
     }
-    # Author runtime fields are already absent from the shared generation schema.
-    assert not {"author_id", "role"} & AuthorLLM.model_json_schema()["properties"].keys()
     assert all(
         not model.nuextract_policy.exclude
         for model in POLICY_MODELS - {AuthorLLM, PaperReferenceLLM}
