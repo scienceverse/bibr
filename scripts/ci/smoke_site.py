@@ -12,6 +12,7 @@ from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+USER_AGENT = "bibr-ci-smoke/1.0"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -43,13 +44,21 @@ def _fetch(
     url: str, *, headers: dict[str, str] | None = None, follow_redirects: bool
 ) -> tuple[int, str | None, str]:
     opener = build_opener() if follow_redirects else build_opener(NoRedirect)
-    request = Request(url, headers=headers or {}, method="GET")  # noqa: S310 - URL is validated
+    # Identify both probes so Cloudflare does not reject Python's default client.
+    request = Request(  # noqa: S310 - URL is validated
+        url, headers={"User-Agent": USER_AGENT, **(headers or {})}, method="GET"
+    )
     try:
         with opener.open(request, timeout=20) as response:  # noqa: S310 - URL is validated
             body = response.read().decode("utf-8", errors="replace")
             return response.status, response.headers.get("Location"), body
     except HTTPError as error:
         body = error.read().decode("utf-8", errors="replace")
+        if error.code == 403 and body.strip() == "error code: 1010":
+            raise ValueError(
+                "Cloudflare rejected the client's browser signature (error 1010) "
+                "before Access authentication; check the smoke client's User-Agent"
+            ) from error
         return error.code, error.headers.get("Location"), body
 
 

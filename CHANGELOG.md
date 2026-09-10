@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-10
+
 ### Fixed
 
 - Use patched vLLM 0.27.0 for the optional CUDA runtime and isolated LLM/OCR
@@ -30,249 +32,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - LLM responses that echo a JSON Schema, including extracted values incorrectly
   nested under `properties`, now fail validation instead of being accepted as
   empty metadata with the schema name as the paper title.
-
-### Changed
-
-- Release preparation supports a manual rehearsal on `main` that tests and validates
-  the distributions without publishing. PyPI uploads use Trusted Publishing on a
-  GitHub-hosted runner and stay disabled until `PUBLISH_PYPI=true` is explicitly set.
-- Shorten the README, keep the illustrated banner, and link to detailed guides.
-  Add a draft LLM-use disclosure and clarify extraction accuracy limits and the
-  current focus on English-language social science papers.
-- The README opens with a paper-cream banner with square corners and no outer border.
-
-- **The launch export uses schema 11.0 (breaking).** `schema_version` is at the root;
-  `info` becomes `metadata`, `info_match` becomes `metadata_match`, and input file identity
-  moves to `source`. Root `affiliations` becomes `affiliation`. Telemetry moves under
-  `extraction`: engines, settings, timings (`stages` and `total_seconds`), usage (`totals`
-  and per-label/provider/model `breakdown`), enrichment, diagnostics, identity receipts,
-  warnings, and optional regions/trace. Validation findings live in `validation.issues`.
-  `xref[].xref_id` becomes `target_id`; equations and funding gain explicit IDs;
-  table cell contents are string grids. Match-table structured `authors`/`editors` become
-  singular `author`/`editor`. The v10 output mode is retired; core checkpoints and enrichment
-  sidecars reject older schema versions. The evaluation tools still read frozen v10 gold
-  alongside v11 predictions without changing the scoring rules.
-- **MCP Python SDK v2**, locked to 2.2.0. The server uses `MCPServer` and the public HTTP
-  lifespan/idle-timeout API. Paper tools run on the event loop and keep stores isolated
-  across initialized clients, including clients sharing a bearer key. HTTP clients negotiate
-  the session-based 2025-11-25 protocol, which the chew/query workflow requires; automatic
-  v2 clients fall back from sessionless discovery. Upload limits account for base64 overhead.
-
-### Security
-
-- Remove the unused Accelerate dependency from the PyTorch extras and lockfile,
-  eliminating CVE-2026-69112 from supported bibr installations. Existing environments
-  need a locked sync or rebuild to remove the previously installed package.
-- **A configuration error no longer prints your API keys.** `ConfigurationError` rendered
-  pydantic's `input` payload; for a model-level validation failure that payload is the whole
-  merged settings mapping, so one bad value printed every key in the environment to stderr
-  and into any log collecting it. Model-level errors now omit the input, and a secret-named
-  field's value is masked wherever it appears.
-- **`MCP_URL_ALLOWED_HOSTS` accepts the form the docs give.** As a bare `list[str]`,
-  pydantic-settings JSON-decoded it, so `MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` failed
-  startup outright — in practice no deployment had the `chew_url` SSRF allowlist on. The
-  comma-separated and JSON forms both parse now, here and for the CORS lists.
-- **No credential literals in the tree, and CI now scans for them.** Six tracked scripts
-  and a notebook carried a metacheck platform API key as a string; they read it from the
-  environment now (`PLATFORM_API_KEY`, `METACHECK_PLATFORM_API_KEY` for the `data/`
-  scripts). A required gitleaks job scans the checked-out tree and the commits every pull
-  request introduces, alongside Semgrep's tree-only secrets pack; `.gitleaks.toml` holds
-  the allowlist of documented placeholders and test fixtures. The same scan runs as a
-  pre-commit hook over the staged diff.
-
-### Added
-
-- **Structured reference names alongside the verbatim strings.**
-  `bib[].authors` and `bib[].editors` stay exactly as printed; new `bib[].author` and
-  `bib[].editor` carry a best-effort split into `{family, given, suffix}`, or a `{literal}`
-  fallback for corporate and unsplittable names, and are `null` when there was nothing to
-  split (never `[]`). Every emitted value is a substring of the verbatim string, so a consumer
-  can always fall back to it. `author[]` gains an optional `suffix`. Included in schema 11.0.
-- **A machine-readable JSON Schema of the export** is committed at
-  `docs/schema/bibr-export-v11.schema.json`, generated from the pydantic export models by
-  `scripts/generate_schema.py`. A test fails when the file drifts from the models, and its
-  `required` list is derived from the exporter's own omit rules (`OMITTABLE_ROOT_KEYS`), so the
-  artifact can never call an always-present table optional.
-- **Opt-in LLM response cache** (`CACHE_LLM=true`, directory `CACHE_LLM_DIR`, default
-  `$XDG_CACHE_HOME/bibr/llm`). Structured responses are cached on disk keyed by model,
-  response schema, system prompt, user text, per-task `max_tokens`/`reasoning_effort`, and
-  transport mode — so an entry can only serve a request that would have produced it. A hit
-  costs no tokens; a miss, a stale entry, or an unwritable cache directory all fall through
-  to a live call, so nothing about correctness depends on it. Re-running a corpus after a
-  parser change (or an evaluation sweep over the same papers under different non-LLM
-  settings) now pays for its LLM work once instead of every time. Off by default, like the
-  OCR disk cache. Note the key canonicalises the per-call `uuid4` prompt-injection fence
-  boundary, which 10 of the 13 call sites mint fresh each call — without that the same
-  logical request would hash differently on every run and never hit.
-- **`bib[]` carries the five reference fields the parser tagged and the decoder threw
-  away (export schema 10.8).** The NER parser's 39-tag BIO scheme has covered `ARXIV`,
-  `PMID`, `SERIES`, `ACCESS_DATE` and `NOTE` since v4, but `map_fields_to_paper_ref` had
-  no target for any of them, so every predicted value was discarded at decode — `PMID`
-  reaches 0.947 F1 on the JATS-supervised corpus and reached nothing else. They are now
-  `PaperReference` fields (`arxiv`, `pmid`, `series`, `access_date`, `note`), exported
-  verbatim as printed, and a test asserts no field type can be tagged and silently
-  dropped again. Output from the shipped `bibr-parser-v4-5-gold` is unchanged in
-  substance — its training corpus had no examples of any of the five, so it emits none —
-  and the fields are explicit nulls. The LLM reference schema is deliberately *not*
-  widened: the fields are removed from the JSON schema both LLM paths read, because the
-  NuExtract template is qualified against a fixed shape and the LFM2.5 student was
-  distilled on prompts embedding this exact schema.
-- **A torch-free core: bibr's four local models now run on ONNX Runtime.** The layout
-  detector, the section and paper classifiers and the ModernBERT+CRF reference parser each
-  ship an `onnx/` bundle (graph, a `bibr_onnx.json` contract carrying preprocessing
-  constants, label classes and CRF parameters, and the exact tokenizer) alongside the
-  PyTorch weights at the same pinned revision. `ML_RUNTIME=auto|onnx|torch` chooses:
-  `auto` prefers the ONNX bundle, falls back to PyTorch when the bundle is absent and
-  `torch` is importable, and otherwise raises a `ConfigurationError` naming the model and
-  the fix. `scripts/export_onnx_*.py` rebuild the bundles and check parity against the
-  PyTorch classes; `bibr/ner/crf_numpy.py` is a numpy Viterbi decoder so the parser needs
-  no `pytorch-crf`, and `bibr/utils/onnx_tokenizer.py` tokenizes through `tokenizers`
-  alone. Layout's PyTorch weights live in a third-party repo, so its ONNX artifact has its
-  own `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION`, published as
-  `scienceverse/bibr-layout-onnx`. All four bundles are on the Hub and pinned, so a core
-  install — 1.0 MB wheel, 677 MB venv, no `torch`, `transformers` or OpenCV — downloads
-  them on first use with nothing to configure.
-
-- **`JOBS_STORE=redis` shares async-job state between bibr-serve replicas.** Job status,
-  results (zlib-compressed, under their own key) and the active-job cap move into Redis,
-  so several `bibr serve` instances behind a load balancer answer status/result polls for
-  each other's jobs, and `JOBS_MAX_ACTIVE` / `JOBS_MAX_RETAINED` /
-  `JOBS_MAX_RETAINED_BYTES` bound the whole deployment. Uploads and execution stay on the
-  replica that received the upload, and every job status now reports that `replica`.
-  Admission is one Lua script (no cap race between replicas); every Redis call is bounded
-  by the `REDIS_*_TIMEOUT_SECONDS` budgets; an unreachable store answers
-  `503 {"detail": "job store unavailable"}` on the job routes and `jobs_store: error` on
-  `/ready`; a replica lost mid-job frees its cap slots after a 24 h safety TTL. New
-  settings: `JOBS_STORE`, `JOBS_REDIS_URL` (falls back to `REDIS_URL`), `JOBS_KEY_PREFIX`,
-  `JOBS_REPLICA_ID`. The in-process store is unchanged and remains the default
-  (`bibr.serve.jobs.JobStore` is now the protocol; the class is `MemoryJobStore`).
-  Handing queued work to another replica (a shared queue) is documented as a follow-up.
-- **Front-role classifier for front matter.** `bibr/extract/front_role.py` loads a small
-  gradient-boosted bundle (`ML_FRONT_ROLE_MODEL_ID`, defaulting to the published
-  `scienceverse/bibr-front-role-v1` at a pinned revision) that scores every OCR
-  region as title / byline / affiliation / abstract / keywords / doi_line / masthead /
-  heading / ref_header / body / other from page-relative geometry, relative font size and
-  script-independent text shape. Front-matter ownership uses the scores as additive
-  evidence (a model byline survives the English byline shape and the 45-word cap, a model
-  title seeds non-Latin records, a confident masthead cannot root a record) and
-  `RefLocator` accepts a model `ref_header` heading in any language. A title seed the model
-  confidently types as something else keeps its title role and loses only the right to root a
-  *second* record (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) — boxed headers
-  like `Correspondence` and `A R T I C L E I N F O` score `heading` at 1.00 and otherwise cut
-  a page's real title away from its own abstract. The model is trained from publisher JATS projected onto cached OCR regions;
-  see `docs/guides/classifiers.md`.
-
-- **`bibr batch` — a first-class, resumable corpus runner.** Takes manifests (one path per
-  line, `#` comments), directories (recursive) or files, writes `<out>/<paper_id>.json` per
-  paper and an append-only `<out>/outcomes.jsonl` ledger — one line per attempt with
-  status, error code and stage, timings, per-stage times, LLM tokens, reference and match
-  counts, warning frequencies, bibr version and build sha. Re-running the same command
-  resumes (`ok` skipped, `failed` skipped unless `--retry-failed`, `--force` for all;
-  interrupted papers run again by default); `--limit`, `--shuffle`/`--seed` and
-  `--deadline` shape a leg. Locally it feeds one warm pipeline in `--batch-size` chunks
-  with every `bibr chew` option; with `--serve-url` it drives a `bibr serve` job API with
-  adaptive concurrency (429 drops in-flight to `--min-concurrency`, 5xx/connection errors/
-  upstream outages retry with backoff, successes grow back toward `--max-concurrency`) and
-  a graceful Ctrl-C. `bibr batch report <out>` (or `--json`) summarises a ledger: ok/failed,
-  throughput, latency percentiles, stage-time shares, tokens, match rate, failure and
-  warning breakdowns; every run ends with the same table. `run_info.json` records the
-  options, the serve build and a secret-redacted settings snapshot. `bibr chew` gains
-  `--include-regions` as an alias of `--regions`. Guide: `docs/guides/batch.md`.
-- **A per-run switch for reference enrichment.** `bibr chew --crossref` (mutually
-  exclusive with `--no-crossref`), `bibr mcp --crossref`, `bibr.chew(..., crossref=True|False)`,
-  the `crossref=true|false` multipart field on `POST /papers/extract`, and the `crossref`
-  knob on the serve MCP `chew_paper`/`chew_url` tools all force enrichment on or off for
-  that run, overriding `CROSSREF_ENRICH` either way. `RunConfig.crossref` is tri-state
-  (`None` follows the setting) and resolves through `RunConfig.enrichment_enabled(settings)`;
-  the serve response cache keys on the effective value, so an enriched and an unenriched
-  result for the same file never collide. `bibr chew --dry-run` names why enrichment is
-  off and how to turn it on.
-
-- **`BIBR_DISABLE_DOTENV=1`** makes every settings model ignore `./.env` and `~/.bibr/.env`
-  (the process environment still applies). `python -m benchmarks run --tool bibr` refuses
-  to start while either file exists unless it is set, so a run's recorded configuration is
-  the profile plus the environment and nothing a developer's `.env` slipped in.
-- **`bibr.local-default` benchmark profile** (`geom` segmentation + `ner` parsing, what a
-  fresh `bibr setup` runs) next to the LLM-parse `bibr.default`, so the install default
-  can be promoted as its own row.
-
-### Changed
-
-- Evaluation, aspect scoring and the benchmark harness now share `metrics_version=6`.
-  The benchmark headline author score uses full printed names; family-name-only scores
-  remain available as diagnostics. Re-score older benchmark records before comparing them.
-
-- The LLM rate-limit slot is now acquired once inside `_invoke_structured`, below the cache
-  check, instead of separately at each of the twelve call sites. A cache hit spends no
-  provider quota, so it no longer waits on the budget that exists to protect that quota —
-  previously a fully-cached corpus re-run was still paced at `LLM_RATE_LIMIT_RPM`. Live
-  calls are unaffected: still one slot per dispatched request, plus one per retry.
-- **The install extras are reorganised around that runtime.** `onnxruntime`, `tokenizers`,
-  `huggingface-hub`, `scikit-learn` and `joblib` move into the core dependencies, so a
-  plain `pip install bibr` runs the whole HTTP-service path — OCR and the LLM over HTTP,
-  every bibr-owned model through ONNX Runtime — with no `torch`, `transformers` or OpenCV
-  in the environment. The PyTorch stack is now the **`torch`** extra (training parity,
-  Apple MPS, `torch.compile` on the serve layout model, transformers OCR, the CRF
-  reference segmenter, and the fallback runtime); **`ml` is kept as an alias for it**, so
-  existing installs, Dockerfiles and `bibr setup` plans are unaffected. `all` now bundles
-  `batch,cache,demo,mcp,torch`. The two OpenCV calls in `bibr/ocr/image_processing.py` are
-  Pillow/numpy.
-
-- **The CLI stops treating a missing `torch` as a broken install.** `bibr doctor` reports
-  the ONNX Runtime execution provider as the device instead of failing, and calls
-  `seg=geom, parse=ner` healthy on a core install; only `REF_SEG_STRATEGY=crf` (torch-only,
-  no ONNX export) and an explicit `ML_RUNTIME=torch` without torch still fail. `bibr chew`
-  no longer refuses PDFs when OpenCV is absent — cv2 is reachable only through the torch
-  layout path — and `--dry-run` names the ONNX provider it would use.
-
-- **Enrichment's network wait overlaps the extract stage.** When enrichment is on, the
-  enrich stage's up-front round-trips (resolver health probe and title searches, the
-  Crossref bulk DOI lookup) start as soon as the references are parsed — while citation
-  linking and structured-integrity LLM calls are still running — instead of strictly after
-  extraction. `enrich_references` consumes the
-  `EnrichmentPrefetch` when the pipeline hands it one and is unchanged otherwise; the core
-  checkpoint still sees unenriched references, the enrichment stage's accounting is
-  unchanged, and every path that does not enrich cancels the task. `extraction.timings`
-  gains `enrich_prefetch` (its wall time; excluded from `total_seconds`).
-- **Crossref reference enrichment is opt-in.** `CROSSREF_ENRICH` now defaults to `false`:
-  a plain `bibr chew`, `bibr.chew()` or `POST /papers/extract` no longer calls Crossref or
-  the resolver, `bib_match` stays empty, and `extraction.crossref_enrich` reports the
-  effective per-run value. Enrichment was a network fan-out that added seconds of serial
-  wall time per paper for every caller, including those that never read `bib_match`.
-  Deployments that relied on the old default must set `CROSSREF_ENRICH=true` (or pass the
-  per-run switch above); `bibr setup` now asks before writing it, and only offers
-  consolidation once enrichment is on.
-
-- **`bibr serve` keeps CPU-bound work off the shared event loop.** One LitServe worker runs
-  with `enable_async=True`, so synchronous CPU inside a coroutine is head-of-line blocking
-  for every co-resident request. Post-parse, citation linking and OCR post-processing now
-  offload to a thread like their neighbouring stages (40.0 ms → 5.2 ms loop-tick latency for
-  this class of work), four exact necessary-condition prefilters remove ~52 ms/paper of
-  regex sweeps outright, and OCR crops moved inside the region semaphore (`Image.crop` is an
-  eager copy; every crop of every page was held at once, ~1 GB at 8 in-flight requests).
-- **The serve container image ships the `mcp` extra.** `Dockerfile.serve` now installs
-  `bibr[mcp]`, so `MCP_ENABLED=true` on the Compose stack mounts the remote MCP endpoint
-  without a custom build. The dependency is inert unless enabled.
-- **CI runs for `main` only.** The retired February `dev` branch no longer triggers the
-  suite on push, and pull requests can no longer target it.
-- Removed unsupported comparative accuracy claims from the public documentation.
-- **Every Hub-loaded model is pinned to a commit.** PP-DocLayoutV3, the section and paper
-  classifiers and the default `sat-6l-sm` sentence segmenter loaded `main`, so a hub
-  push could change extraction output between two runs of the same bibr version. Their
-  audited commits are now the defaults (`LAYOUT_MODEL_REVISION`,
-  `ML_SECTION_CLASSIFIER_REVISION`, `ML_PAPER_CLASSIFIER_REVISION`,
-  `WTPSPLIT_MODEL_REVISION`; set any to `main` to track the head), `Dockerfile.serve`
-  bakes the same revisions, and `scripts/prefetch_segmenter.py` accepts `--revision`.
-- **The managed vLLM pin moves to 0.26.0** (`vllm` extra and the `uv tool run` bootstrap).
-  It closes GHSA-87x5-vmc3-756j (completion prompt lists fanning out into unbounded engine
-  requests) and drops `diskcache`, whose unfixed advisory bibr had been carrying as an audit
-  exception; torch stays at 2.11.0. The lock resolves cleanly and the extra installs;
-  serving with 0.26.0 has not yet been exercised on a GPU.
-- **`LIMITATIONS.md` is current again** (native-format inputs, the `ner` default, the
-  classifier-degraded warnings, single-tenant serve/MCP, and which benchmark numbers are
-  held-out), and the local model registry's sizes were re-verified against the Hub.
-
-### Fixed
 
 - Numeric citations now follow reliable printed reference labels after dropped or spurious
   bibliography entries shift internal IDs. Citation diagnostics use the same corrected
@@ -568,42 +327,127 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   awaited; with `CACHE_OCR` off the automatic chain starts after native text is known.
   Captions, table titles and formula numbers still go through OCR by design.
 
-## [0.5.0] - 2026-09-01
+- `bibr doctor` now reports a missing system **libmagic** as its own named check, and
+  `bibr.input.validate` imports the `python-magic` binding defensively instead of at
+  module scope. libmagic is a system library a `pip install` cannot supply, so a fresh
+  macOS/Linux setup died with a bare "failed to find libmagic" during `bibr setup`'s test
+  extraction — and the import failure took down `import bibr` wholesale, so `doctor` could
+  not run to diagnose it. The error now names the platform's install command
+  (`brew install libmagic`, `apt install libmagic1`, `dnf install file-libs`). (#64)
+- A managed local server whose port is held by an unrelated process now fails with a
+  message naming the port, instead of spawning a subprocess that cannot bind it and dies
+  with an unrelated-looking startup crash. The pre-spawn guard treated "listener with an
+  unusable /v1/models" the same as "port free"; it now confirms the port is genuinely
+  held with a TCP connect before reporting a conflict. (#82)
 
-### Added
-
-- **`bibr mcp` — MCP server for agents** (new optional `mcp` extra, included in `all`).
-  Exposes extraction as Model Context Protocol tools over stdio: `chew_paper` /
-  `load_paper` register a paper and return a compact `bibr inspect`-style summary, then
-  `get_metadata`, `get_sections`, `get_text`, `search_text`, `get_references`,
-  `get_reference_citations`, `get_tables`, `get_figures`, and `save_paper` query the
-  stored export in slices sized for an agent's context. One warm pipeline serves the
-  whole session (models load once), extraction progress streams as MCP progress
-  notifications, and pipeline options are fixed at server start via a subset of the
-  `bibr chew` flags. Register with e.g. `claude mcp add bibr -- uv run bibr mcp`; see
-  the new [MCP server guide](https://bibr.org/guides/mcp/).
-- `Chewer.chew` / `achew` (and `chew_file` / `achew_file`) accept a `progress=` tracker
-  (`bibr.pipeline.progress.ProgressTracker`, e.g. `RichProgress`) to observe stage
-  transitions and per-region OCR progress from library code.
-- **Remote MCP on `bibr serve`** (`MCP_ENABLED=true`, requires the `mcp` extra): mounts a
-  streamable-HTTP Model Context Protocol endpoint at `/mcp` with the same chew-then-query
-  tool surface as `bibr mcp`. Gated by the existing bearer auth; extraction rides the
-  regular serve inference dispatch (resident worker models, admission control, size caps —
-  no second pipeline). `chew_paper` takes base64 file content plus per-call
-  `start_page`/`end_page`/`refs`/`consolidate` options; the filesystem tools
-  (`load_paper`/`save_paper`) are not exposed remotely, and papers are held per MCP
-  session, capped by `MCP_MAX_PAPERS_PER_SESSION` (default 16). See the
-  [MCP server guide](https://bibr.org/guides/mcp/).
-- **`chew_url` MCP tool** on both servers: extract a paper straight from a public
-  `https://` URL. The download is SSRF-guarded by the new `bibr.utils.safe_fetch`
-  (HTTPS/443 only, every DNS answer must be public unicast, the connection is pinned to
-  the validated IP with TLS SNI/verification kept on the hostname to defeat DNS
-  rebinding, redirects re-validated per hop, size-capped under a deadline). Capped at
-  100MB on `bibr mcp`; on `bibr serve` it uses the upload size limit and rides the same
-  inference dispatch, with `MCP_URL_ALLOWED_HOSTS` to pin hosts and
-  `MCP_CHEW_URL_ENABLED=false` to remove the tool.
+- LLM retries now acquire their own rate-limit slot. Only the first attempt of each logical
+  call took one, so a retry storm spent budget it never acquired — precisely when the
+  provider was already rate-limiting and, with Redis configured, when the shared limiter is
+  meant to hold the whole fleet back.
+- A missing `CROSSREF_API_EMAIL` now warns with the concrete rates: without it Crossref's
+  anonymous pool caps the client at 60 RPM, so a configured `CROSSREF_RATE_LIMIT_RPM=200`
+  was silently a third of that (~81s of an 80-reference paper's 120s enrichment budget).
 
 ### Changed
+
+- Release preparation supports a manual rehearsal on `main` that tests and validates
+  the distributions without publishing. PyPI uploads use Trusted Publishing on a
+  GitHub-hosted runner and stay disabled until `PUBLISH_PYPI=true` is explicitly set.
+- Shorten the README, keep the illustrated banner, and link to detailed guides.
+  Add a draft LLM-use disclosure and clarify extraction accuracy limits and the
+  current focus on English-language social science papers.
+- The README opens with a paper-cream banner with square corners and no outer border.
+
+- **The launch export uses schema 11.0 (breaking).** `schema_version` is at the root;
+  `info` becomes `metadata`, `info_match` becomes `metadata_match`, and input file identity
+  moves to `source`. Root `affiliations` becomes `affiliation`. Telemetry moves under
+  `extraction`: engines, settings, timings (`stages` and `total_seconds`), usage (`totals`
+  and per-label/provider/model `breakdown`), enrichment, diagnostics, identity receipts,
+  warnings, and optional regions/trace. Validation findings live in `validation.issues`.
+  `xref[].xref_id` becomes `target_id`; equations and funding gain explicit IDs;
+  table cell contents are string grids. Match-table structured `authors`/`editors` become
+  singular `author`/`editor`. The v10 output mode is retired; core checkpoints and enrichment
+  sidecars reject older schema versions. The evaluation tools still read frozen v10 gold
+  alongside v11 predictions without changing the scoring rules.
+- **MCP Python SDK v2**, locked to 2.2.0. The server uses `MCPServer` and the public HTTP
+  lifespan/idle-timeout API. Paper tools run on the event loop and keep stores isolated
+  across initialized clients, including clients sharing a bearer key. HTTP clients negotiate
+  the session-based 2025-11-25 protocol, which the chew/query workflow requires; automatic
+  v2 clients fall back from sessionless discovery. Upload limits account for base64 overhead.
+
+- Evaluation, aspect scoring and the benchmark harness now share `metrics_version=6`.
+  The benchmark headline author score uses full printed names; family-name-only scores
+  remain available as diagnostics. Re-score older benchmark records before comparing them.
+
+- The LLM rate-limit slot is now acquired once inside `_invoke_structured`, below the cache
+  check, instead of separately at each of the twelve call sites. A cache hit spends no
+  provider quota, so it no longer waits on the budget that exists to protect that quota —
+  previously a fully-cached corpus re-run was still paced at `LLM_RATE_LIMIT_RPM`. Live
+  calls are unaffected: still one slot per dispatched request, plus one per retry.
+- **The install extras are reorganised around that runtime.** `onnxruntime`, `tokenizers`,
+  `huggingface-hub`, `scikit-learn` and `joblib` move into the core dependencies, so a
+  plain `pip install bibr` runs the whole HTTP-service path — OCR and the LLM over HTTP,
+  every bibr-owned model through ONNX Runtime — with no `torch`, `transformers` or OpenCV
+  in the environment. The PyTorch stack is now the **`torch`** extra (training parity,
+  Apple MPS, `torch.compile` on the serve layout model, transformers OCR, the CRF
+  reference segmenter, and the fallback runtime); **`ml` is kept as an alias for it**, so
+  existing installs, Dockerfiles and `bibr setup` plans are unaffected. `all` now bundles
+  `batch,cache,demo,mcp,torch`. The two OpenCV calls in `bibr/ocr/image_processing.py` are
+  Pillow/numpy.
+
+- **The CLI stops treating a missing `torch` as a broken install.** `bibr doctor` reports
+  the ONNX Runtime execution provider as the device instead of failing, and calls
+  `seg=geom, parse=ner` healthy on a core install; only `REF_SEG_STRATEGY=crf` (torch-only,
+  no ONNX export) and an explicit `ML_RUNTIME=torch` without torch still fail. `bibr chew`
+  no longer refuses PDFs when OpenCV is absent — cv2 is reachable only through the torch
+  layout path — and `--dry-run` names the ONNX provider it would use.
+
+- **Enrichment's network wait overlaps the extract stage.** When enrichment is on, the
+  enrich stage's up-front round-trips (resolver health probe and title searches, the
+  Crossref bulk DOI lookup) start as soon as the references are parsed — while citation
+  linking and structured-integrity LLM calls are still running — instead of strictly after
+  extraction. `enrich_references` consumes the
+  `EnrichmentPrefetch` when the pipeline hands it one and is unchanged otherwise; the core
+  checkpoint still sees unenriched references, the enrichment stage's accounting is
+  unchanged, and every path that does not enrich cancels the task. `extraction.timings`
+  gains `enrich_prefetch` (its wall time; excluded from `total_seconds`).
+- **Crossref reference enrichment is opt-in.** `CROSSREF_ENRICH` now defaults to `false`:
+  a plain `bibr chew`, `bibr.chew()` or `POST /papers/extract` no longer calls Crossref or
+  the resolver, `bib_match` stays empty, and `extraction.crossref_enrich` reports the
+  effective per-run value. Enrichment was a network fan-out that added seconds of serial
+  wall time per paper for every caller, including those that never read `bib_match`.
+  Deployments that relied on the old default must set `CROSSREF_ENRICH=true` (or pass the
+  per-run switch above); `bibr setup` now asks before writing it, and only offers
+  consolidation once enrichment is on.
+
+- **`bibr serve` keeps CPU-bound work off the shared event loop.** One LitServe worker runs
+  with `enable_async=True`, so synchronous CPU inside a coroutine is head-of-line blocking
+  for every co-resident request. Post-parse, citation linking and OCR post-processing now
+  offload to a thread like their neighbouring stages (40.0 ms → 5.2 ms loop-tick latency for
+  this class of work), four exact necessary-condition prefilters remove ~52 ms/paper of
+  regex sweeps outright, and OCR crops moved inside the region semaphore (`Image.crop` is an
+  eager copy; every crop of every page was held at once, ~1 GB at 8 in-flight requests).
+- **The serve container image ships the `mcp` extra.** `Dockerfile.serve` now installs
+  `bibr[mcp]`, so `MCP_ENABLED=true` on the Compose stack mounts the remote MCP endpoint
+  without a custom build. The dependency is inert unless enabled.
+- **CI runs for `main` only.** The retired February `dev` branch no longer triggers the
+  suite on push, and pull requests can no longer target it.
+- Removed unsupported comparative accuracy claims from the public documentation.
+- **Every Hub-loaded model is pinned to a commit.** PP-DocLayoutV3, the section and paper
+  classifiers and the default `sat-6l-sm` sentence segmenter loaded `main`, so a hub
+  push could change extraction output between two runs of the same bibr version. Their
+  audited commits are now the defaults (`LAYOUT_MODEL_REVISION`,
+  `ML_SECTION_CLASSIFIER_REVISION`, `ML_PAPER_CLASSIFIER_REVISION`,
+  `WTPSPLIT_MODEL_REVISION`; set any to `main` to track the head), `Dockerfile.serve`
+  bakes the same revisions, and `scripts/prefetch_segmenter.py` accepts `--revision`.
+- **The managed vLLM pin moves to 0.26.0** (`vllm` extra and the `uv tool run` bootstrap).
+  It closes GHSA-87x5-vmc3-756j (completion prompt lists fanning out into unbounded engine
+  requests) and drops `diskcache`, whose unfixed advisory bibr had been carrying as an audit
+  exception; torch stays at 2.11.0. The lock resolves cleanly and the extra installs;
+  serving with 0.26.0 has not yet been exercised on a GPU.
+- **`LIMITATIONS.md` is current again** (native-format inputs, the `ner` default, the
+  classifier-degraded warnings, single-tenant serve/MCP, and which benchmark numbers are
+  held-out), and the local model registry's sizes were re-verified against the Hub.
 
 - Removed ignored/no-op config names: `LLM_VLLM_MLX_CACHE_MB`, `LLM_BATCH_PROVIDER`;
   `OCR_API_HOST`, `OCR_API_PORT`, `OCR_CONFIG_PATH`, `OCR_ENABLE_LAYOUT`, `OCR_API_PATH`,
@@ -645,28 +489,174 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   quota; against a server bibr owns it capped bulk runs near 8-12 papers/min regardless of
   hardware.
 
-### Fixed
+### Security
 
-- `bibr doctor` now reports a missing system **libmagic** as its own named check, and
-  `bibr.input.validate` imports the `python-magic` binding defensively instead of at
-  module scope. libmagic is a system library a `pip install` cannot supply, so a fresh
-  macOS/Linux setup died with a bare "failed to find libmagic" during `bibr setup`'s test
-  extraction — and the import failure took down `import bibr` wholesale, so `doctor` could
-  not run to diagnose it. The error now names the platform's install command
-  (`brew install libmagic`, `apt install libmagic1`, `dnf install file-libs`). (#64)
-- A managed local server whose port is held by an unrelated process now fails with a
-  message naming the port, instead of spawning a subprocess that cannot bind it and dies
-  with an unrelated-looking startup crash. The pre-spawn guard treated "listener with an
-  unusable /v1/models" the same as "port free"; it now confirms the port is genuinely
-  held with a TCP connect before reporting a conflict. (#82)
+- Remove the unused Accelerate dependency from the PyTorch extras and lockfile,
+  eliminating CVE-2026-69112 from supported bibr installations. Existing environments
+  need a locked sync or rebuild to remove the previously installed package.
+- **A configuration error no longer prints your API keys.** `ConfigurationError` rendered
+  pydantic's `input` payload; for a model-level validation failure that payload is the whole
+  merged settings mapping, so one bad value printed every key in the environment to stderr
+  and into any log collecting it. Model-level errors now omit the input, and a secret-named
+  field's value is masked wherever it appears.
+- **`MCP_URL_ALLOWED_HOSTS` accepts the form the docs give.** As a bare `list[str]`,
+  pydantic-settings JSON-decoded it, so `MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` failed
+  startup outright — in practice no deployment had the `chew_url` SSRF allowlist on. The
+  comma-separated and JSON forms both parse now, here and for the CORS lists.
+- **No credential literals in the tree, and CI now scans for them.** Six tracked scripts
+  and a notebook carried a metacheck platform API key as a string; they read it from the
+  environment now (`PLATFORM_API_KEY`, `METACHECK_PLATFORM_API_KEY` for the `data/`
+  scripts). A required gitleaks job scans the checked-out tree and the commits every pull
+  request introduces, alongside Semgrep's tree-only secrets pack; `.gitleaks.toml` holds
+  the allowlist of documented placeholders and test fixtures. The same scan runs as a
+  pre-commit hook over the staged diff.
 
-- LLM retries now acquire their own rate-limit slot. Only the first attempt of each logical
-  call took one, so a retry storm spent budget it never acquired — precisely when the
-  provider was already rate-limiting and, with Redis configured, when the shared limiter is
-  meant to hold the whole fleet back.
-- A missing `CROSSREF_API_EMAIL` now warns with the concrete rates: without it Crossref's
-  anonymous pool caps the client at 60 RPM, so a configured `CROSSREF_RATE_LIMIT_RPM=200`
-  was silently a third of that (~81s of an 80-reference paper's 120s enrichment budget).
+### Added
+
+- **Structured reference names alongside the verbatim strings.**
+  `bib[].authors` and `bib[].editors` stay exactly as printed; new `bib[].author` and
+  `bib[].editor` carry a best-effort split into `{family, given, suffix}`, or a `{literal}`
+  fallback for corporate and unsplittable names, and are `null` when there was nothing to
+  split (never `[]`). Every emitted value is a substring of the verbatim string, so a consumer
+  can always fall back to it. `author[]` gains an optional `suffix`. Included in schema 11.0.
+- **A machine-readable JSON Schema of the export** is committed at
+  `docs/schema/bibr-export-v11.schema.json`, generated from the pydantic export models by
+  `scripts/generate_schema.py`. A test fails when the file drifts from the models, and its
+  `required` list is derived from the exporter's own omit rules (`OMITTABLE_ROOT_KEYS`), so the
+  artifact can never call an always-present table optional.
+- **Opt-in LLM response cache** (`CACHE_LLM=true`, directory `CACHE_LLM_DIR`, default
+  `$XDG_CACHE_HOME/bibr/llm`). Structured responses are cached on disk keyed by model,
+  response schema, system prompt, user text, per-task `max_tokens`/`reasoning_effort`, and
+  transport mode — so an entry can only serve a request that would have produced it. A hit
+  costs no tokens; a miss, a stale entry, or an unwritable cache directory all fall through
+  to a live call, so nothing about correctness depends on it. Re-running a corpus after a
+  parser change (or an evaluation sweep over the same papers under different non-LLM
+  settings) now pays for its LLM work once instead of every time. Off by default, like the
+  OCR disk cache. Note the key canonicalises the per-call `uuid4` prompt-injection fence
+  boundary, which 10 of the 13 call sites mint fresh each call — without that the same
+  logical request would hash differently on every run and never hit.
+- **`bib[]` carries the five reference fields the parser tagged and the decoder threw
+  away (export schema 10.8).** The NER parser's 39-tag BIO scheme has covered `ARXIV`,
+  `PMID`, `SERIES`, `ACCESS_DATE` and `NOTE` since v4, but `map_fields_to_paper_ref` had
+  no target for any of them, so every predicted value was discarded at decode — `PMID`
+  reaches 0.947 F1 on the JATS-supervised corpus and reached nothing else. They are now
+  `PaperReference` fields (`arxiv`, `pmid`, `series`, `access_date`, `note`), exported
+  verbatim as printed, and a test asserts no field type can be tagged and silently
+  dropped again. Output from the shipped `bibr-parser-v4-5-gold` is unchanged in
+  substance — its training corpus had no examples of any of the five, so it emits none —
+  and the fields are explicit nulls. The LLM reference schema is deliberately *not*
+  widened: the fields are removed from the JSON schema both LLM paths read, because the
+  NuExtract template is qualified against a fixed shape and the LFM2.5 student was
+  distilled on prompts embedding this exact schema.
+- **A torch-free core: bibr's four local models now run on ONNX Runtime.** The layout
+  detector, the section and paper classifiers and the ModernBERT+CRF reference parser each
+  ship an `onnx/` bundle (graph, a `bibr_onnx.json` contract carrying preprocessing
+  constants, label classes and CRF parameters, and the exact tokenizer) alongside the
+  PyTorch weights at the same pinned revision. `ML_RUNTIME=auto|onnx|torch` chooses:
+  `auto` prefers the ONNX bundle, falls back to PyTorch when the bundle is absent and
+  `torch` is importable, and otherwise raises a `ConfigurationError` naming the model and
+  the fix. `scripts/export_onnx_*.py` rebuild the bundles and check parity against the
+  PyTorch classes; `bibr/ner/crf_numpy.py` is a numpy Viterbi decoder so the parser needs
+  no `pytorch-crf`, and `bibr/utils/onnx_tokenizer.py` tokenizes through `tokenizers`
+  alone. Layout's PyTorch weights live in a third-party repo, so its ONNX artifact has its
+  own `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION`, published as
+  `scienceverse/bibr-layout-onnx`. All four bundles are on the Hub and pinned, so a core
+  install — 1.0 MB wheel, 677 MB venv, no `torch`, `transformers` or OpenCV — downloads
+  them on first use with nothing to configure.
+
+- **`JOBS_STORE=redis` shares async-job state between bibr-serve replicas.** Job status,
+  results (zlib-compressed, under their own key) and the active-job cap move into Redis,
+  so several `bibr serve` instances behind a load balancer answer status/result polls for
+  each other's jobs, and `JOBS_MAX_ACTIVE` / `JOBS_MAX_RETAINED` /
+  `JOBS_MAX_RETAINED_BYTES` bound the whole deployment. Uploads and execution stay on the
+  replica that received the upload, and every job status now reports that `replica`.
+  Admission is one Lua script (no cap race between replicas); every Redis call is bounded
+  by the `REDIS_*_TIMEOUT_SECONDS` budgets; an unreachable store answers
+  `503 {"detail": "job store unavailable"}` on the job routes and `jobs_store: error` on
+  `/ready`; a replica lost mid-job frees its cap slots after a 24 h safety TTL. New
+  settings: `JOBS_STORE`, `JOBS_REDIS_URL` (falls back to `REDIS_URL`), `JOBS_KEY_PREFIX`,
+  `JOBS_REPLICA_ID`. The in-process store is unchanged and remains the default
+  (`bibr.serve.jobs.JobStore` is now the protocol; the class is `MemoryJobStore`).
+  Handing queued work to another replica (a shared queue) is documented as a follow-up.
+- **Front-role classifier for front matter.** `bibr/extract/front_role.py` loads a small
+  gradient-boosted bundle (`ML_FRONT_ROLE_MODEL_ID`, defaulting to the published
+  `scienceverse/bibr-front-role-v1` at a pinned revision) that scores every OCR
+  region as title / byline / affiliation / abstract / keywords / doi_line / masthead /
+  heading / ref_header / body / other from page-relative geometry, relative font size and
+  script-independent text shape. Front-matter ownership uses the scores as additive
+  evidence (a model byline survives the English byline shape and the 45-word cap, a model
+  title seeds non-Latin records, a confident masthead cannot root a record) and
+  `RefLocator` accepts a model `ref_header` heading in any language. A title seed the model
+  confidently types as something else keeps its title role and loses only the right to root a
+  *second* record (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) — boxed headers
+  like `Correspondence` and `A R T I C L E I N F O` score `heading` at 1.00 and otherwise cut
+  a page's real title away from its own abstract. The model is trained from publisher JATS projected onto cached OCR regions;
+  see `docs/guides/classifiers.md`.
+
+- **`bibr batch` — a first-class, resumable corpus runner.** Takes manifests (one path per
+  line, `#` comments), directories (recursive) or files, writes `<out>/<paper_id>.json` per
+  paper and an append-only `<out>/outcomes.jsonl` ledger — one line per attempt with
+  status, error code and stage, timings, per-stage times, LLM tokens, reference and match
+  counts, warning frequencies, bibr version and build sha. Re-running the same command
+  resumes (`ok` skipped, `failed` skipped unless `--retry-failed`, `--force` for all;
+  interrupted papers run again by default); `--limit`, `--shuffle`/`--seed` and
+  `--deadline` shape a leg. Locally it feeds one warm pipeline in `--batch-size` chunks
+  with every `bibr chew` option; with `--serve-url` it drives a `bibr serve` job API with
+  adaptive concurrency (429 drops in-flight to `--min-concurrency`, 5xx/connection errors/
+  upstream outages retry with backoff, successes grow back toward `--max-concurrency`) and
+  a graceful Ctrl-C. `bibr batch report <out>` (or `--json`) summarises a ledger: ok/failed,
+  throughput, latency percentiles, stage-time shares, tokens, match rate, failure and
+  warning breakdowns; every run ends with the same table. `run_info.json` records the
+  options, the serve build and a secret-redacted settings snapshot. `bibr chew` gains
+  `--include-regions` as an alias of `--regions`. Guide: `docs/guides/batch.md`.
+- **A per-run switch for reference enrichment.** `bibr chew --crossref` (mutually
+  exclusive with `--no-crossref`), `bibr mcp --crossref`, `bibr.chew(..., crossref=True|False)`,
+  the `crossref=true|false` multipart field on `POST /papers/extract`, and the `crossref`
+  knob on the serve MCP `chew_paper`/`chew_url` tools all force enrichment on or off for
+  that run, overriding `CROSSREF_ENRICH` either way. `RunConfig.crossref` is tri-state
+  (`None` follows the setting) and resolves through `RunConfig.enrichment_enabled(settings)`;
+  the serve response cache keys on the effective value, so an enriched and an unenriched
+  result for the same file never collide. `bibr chew --dry-run` names why enrichment is
+  off and how to turn it on.
+
+- **`BIBR_DISABLE_DOTENV=1`** makes every settings model ignore `./.env` and `~/.bibr/.env`
+  (the process environment still applies). `python -m benchmarks run --tool bibr` refuses
+  to start while either file exists unless it is set, so a run's recorded configuration is
+  the profile plus the environment and nothing a developer's `.env` slipped in.
+- **`bibr.local-default` benchmark profile** (`geom` segmentation + `ner` parsing, what a
+  fresh `bibr setup` runs) next to the LLM-parse `bibr.default`, so the install default
+  can be promoted as its own row.
+
+- **`bibr mcp` — MCP server for agents** (new optional `mcp` extra, included in `all`).
+  Exposes extraction as Model Context Protocol tools over stdio: `chew_paper` /
+  `load_paper` register a paper and return a compact `bibr inspect`-style summary, then
+  `get_metadata`, `get_sections`, `get_text`, `search_text`, `get_references`,
+  `get_reference_citations`, `get_tables`, `get_figures`, and `save_paper` query the
+  stored export in slices sized for an agent's context. One warm pipeline serves the
+  whole session (models load once), extraction progress streams as MCP progress
+  notifications, and pipeline options are fixed at server start via a subset of the
+  `bibr chew` flags. Register with e.g. `claude mcp add bibr -- uv run bibr mcp`; see
+  the new [MCP server guide](https://bibr.org/guides/mcp/).
+- `Chewer.chew` / `achew` (and `chew_file` / `achew_file`) accept a `progress=` tracker
+  (`bibr.pipeline.progress.ProgressTracker`, e.g. `RichProgress`) to observe stage
+  transitions and per-region OCR progress from library code.
+- **Remote MCP on `bibr serve`** (`MCP_ENABLED=true`, requires the `mcp` extra): mounts a
+  streamable-HTTP Model Context Protocol endpoint at `/mcp` with the same chew-then-query
+  tool surface as `bibr mcp`. Gated by the existing bearer auth; extraction rides the
+  regular serve inference dispatch (resident worker models, admission control, size caps —
+  no second pipeline). `chew_paper` takes base64 file content plus per-call
+  `start_page`/`end_page`/`refs`/`consolidate` options; the filesystem tools
+  (`load_paper`/`save_paper`) are not exposed remotely, and papers are held per MCP
+  session, capped by `MCP_MAX_PAPERS_PER_SESSION` (default 16). See the
+  [MCP server guide](https://bibr.org/guides/mcp/).
+- **`chew_url` MCP tool** on both servers: extract a paper straight from a public
+  `https://` URL. The download is SSRF-guarded by the new `bibr.utils.safe_fetch`
+  (HTTPS/443 only, every DNS answer must be public unicast, the connection is pinned to
+  the validated IP with TLS SNI/verification kept on the hostname to defeat DNS
+  rebinding, redirects re-validated per hop, size-capped under a deadline). Capped at
+  100MB on `bibr mcp`; on `bibr serve` it uses the upload size limit and rides the same
+  inference dispatch, with `MCP_URL_ALLOWED_HOSTS` to pin hosts and
+  `MCP_CHEW_URL_ENABLED=false` to remove the tool.
 
 ## [0.4.0] - 2026-07-26
 

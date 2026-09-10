@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from contextlib import nullcontext
+from io import BytesIO
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -162,3 +165,45 @@ def test_cli_only_requires_access_credentials_for_protected_sites(
     )
 
     assert smoke.main() == expected_status
+
+
+@pytest.mark.parametrize("authorized", [False, True])
+def test_http_probe_identifies_the_client_and_preserves_auth_headers(
+    monkeypatch, authorized
+) -> None:
+    smoke = load_smoke_site()
+    url = "https://preview.example.pages.dev/.well-known/bibr-build"
+    headers = (
+        {"CF-Access-Client-Id": "id", "CF-Access-Client-Secret": TEST_SECRET} if authorized else {}
+    )
+    captured = []
+
+    def open_request(request, timeout):
+        assert timeout == 20
+        captured.append({key.lower(): value for key, value in request.header_items()})
+        return nullcontext(
+            SimpleNamespace(status=200, headers={}, url=url, read=lambda: SHA.encode())
+        )
+
+    monkeypatch.setattr(smoke, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+
+    assert smoke._fetch(url, headers=headers, follow_redirects=authorized) == (200, None, SHA)
+    assert captured == [
+        {"user-agent": "bibr-ci-smoke/1.0", **{k.lower(): v for k, v in headers.items()}}
+    ]
+
+
+@pytest.mark.parametrize("follow_redirects", [False, True])
+def test_browser_signature_block_is_not_reported_as_access_authentication(
+    monkeypatch, follow_redirects
+) -> None:
+    smoke = load_smoke_site()
+    url = "https://preview.example.pages.dev/.well-known/bibr-build"
+
+    def open_request(request, timeout):
+        raise HTTPError(url, 403, "Forbidden", {}, BytesIO(b"error code: 1010\n"))
+
+    monkeypatch.setattr(smoke, "build_opener", lambda *args: SimpleNamespace(open=open_request))
+
+    with pytest.raises(ValueError, match="browser signature.*1010.*before Access"):
+        smoke._fetch(url, follow_redirects=follow_redirects)
