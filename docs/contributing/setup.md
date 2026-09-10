@@ -108,6 +108,17 @@ The `pypi` environment allows `v*` tags. No PyPI API token is needed. Keep the
 repository variable `PUBLISH_PYPI=false` between releases; a release owner enables
 it after approving publication.
 
+Container registry delivery is a separate opt-in: `PUBLISH_GHCR=true` enables
+edge and release uploads, including manual container workflow runs. It is
+disabled for the initial public 0.5.0 launch; users can build the containers
+from the public source. CI still builds the serve image and blocks fixable
+HIGH/CRITICAL vulnerabilities before `CI / required` passes.
+
+Before enabling GHCR, configure a clean package with the intended visibility
+and repository Actions access, then verify anonymous pulls for public images.
+Do not expose a legacy private package's old versions as part of that setup.
+See [Docker deployment](../guides/deployment.md#docker-deployment).
+
 1. Update the package version, lockfile, changelog, and public documentation on
    `main`. Wait for `CI / required` to pass on the exact commit to be released.
 2. Rehearse the release from `main` with
@@ -120,8 +131,11 @@ it after approving publication.
    matching `project.version`. The workflow rejects mismatched tags and commits
    that are not reachable from `main`.
 4. Watch the tag-triggered Release workflow to completion. PyPI receives the
-   verified distributions, the release container is scanned before its version
-   tags are promoted, and GitHub Release assets are attached after both succeed.
+   verified distributions and GitHub Release assets are attached after each
+   enabled delivery channel succeeds. If GHCR is enabled, the release container
+   must also pass its digest scan before its version tags are promoted. A failed
+   enabled channel blocks finalization; only deliberately disabled channels may
+   be skipped.
 5. Verify the live PyPI description and install that exact version from PyPI in
    a fresh environment. Then reset
    `gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body false`.

@@ -378,6 +378,19 @@ def test_main_promotes_edge_only_after_required_ci_and_container_changes() -> No
     assert "needs.changes.outputs.container == 'true'" in publish["if"]
 
 
+def test_registry_opt_in_covers_all_entrypoints_without_disabling_validation() -> None:
+    for filename, job_id in (
+        ("ci.yml", "publish-edge"),
+        ("release.yml", "publish-container"),
+        ("docker.yml", "publish"),
+    ):
+        assert "vars.PUBLISH_GHCR == 'true'" in workflow(filename)["jobs"][job_id]["if"]
+
+    ci = workflow("ci.yml")["jobs"]
+    assert "PUBLISH_GHCR" not in yaml.dump(ci["container-build-scan"])
+    assert "container-build-scan" in ci["required"]["needs"]
+
+
 def test_release_proves_tag_version_and_remote_main_reachability() -> None:
     release = workflow("release.yml")
     validation = yaml.dump(release["jobs"]["validate"])
@@ -465,7 +478,7 @@ def test_release_source_validation_executes_against_git_history(
         assert not output.exists()
 
 
-def test_release_builds_dist_once_and_publishes_both_channels_before_github_release() -> None:
+def test_release_builds_dist_once_and_awaits_delivery_channels_before_github_release() -> None:
     jobs = workflow("release.yml")["jobs"]
     text = workflow_text("release.yml")
 
@@ -509,6 +522,8 @@ def test_github_release_requires_successful_pypi_when_enabled_and_explicit_repos
     job = workflow("release.yml")["jobs"]["github-release"]
     assert "needs.publish-pypi.result == 'success'" in job["if"]
     assert "vars.PUBLISH_PYPI != 'true' && needs.publish-pypi.result == 'skipped'" in job["if"]
+    assert "needs.publish-container.result == 'success'" in job["if"]
+    assert "vars.PUBLISH_GHCR != 'true' && needs.publish-container.result == 'skipped'" in job["if"]
     release_step = next(step for step in job["steps"] if "gh release" in step.get("run", ""))
     assert release_step["env"]["GH_REPO"] == "${{ github.repository }}"
 

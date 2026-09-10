@@ -52,6 +52,9 @@ env:
 jobs:
   publish:
     name: Build, scan, and promote one image digest
+    # Registry delivery is opt-in, including direct manual dispatches. CI's
+    # unprivileged container build and vulnerability gate remain independent.
+    if: ${{ vars.PUBLISH_GHCR == 'true' }}
     runs-on: >-
       ${{ github.event.repository.private &&
       (github.event_name != 'pull_request' ||

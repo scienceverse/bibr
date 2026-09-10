@@ -227,7 +227,10 @@ jobs:
 
   publish-container:
     name: Publish exact release container
-    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    if: >-
+      ${{ github.event_name == 'push'
+          && startsWith(github.ref, 'refs/tags/v')
+          && vars.PUBLISH_GHCR == 'true' }}
     needs: [validate, build-dist]
     permissions:
       contents: read
@@ -241,15 +244,15 @@ jobs:
   github-release:
     name: Finalize GitHub Release
     needs: [validate, build-dist, publish-pypi, publish-container]
-    # Still finalize the (private-repo, internal) Release when PyPI publishing is
-    # gated off: require the build and the container, tolerate a *skipped*
-    # publish-pypi, but never proceed if publish-pypi actually failed.
+    # Each delivery channel must succeed when enabled. A deliberately disabled
+    # channel may be skipped; an attempted publication failure still blocks.
     if: >-
       ${{ !cancelled()
           && github.event_name == 'push'
           && startsWith(github.ref, 'refs/tags/v')
           && needs.build-dist.result == 'success'
-          && needs.publish-container.result == 'success'
+          && (needs.publish-container.result == 'success'
+              || (vars.PUBLISH_GHCR != 'true' && needs.publish-container.result == 'skipped'))
           && (needs.publish-pypi.result == 'success'
               || (vars.PUBLISH_PYPI != 'true' && needs.publish-pypi.result == 'skipped')) }}
     runs-on: >-

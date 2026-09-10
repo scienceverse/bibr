@@ -862,6 +862,7 @@ jobs:
     if: >-
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main' &&
+      vars.PUBLISH_GHCR == 'true' &&
       needs.changes.outputs.container == 'true'
     permissions:
       contents: read
