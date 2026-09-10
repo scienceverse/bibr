@@ -1,0 +1,31 @@
+{
+  "paper_id": "validation-author-bbox-panel",
+  "info": {"title": "Frozen validation regression fixture"},
+  "author": [
+    {"given": "Jo", "family": "Ng"},
+    {"given": "Jo", "family": "Ng"},
+    {"given": "Jo", "family": "Ng"}
+  ],
+  "text": [
+    {
+      "text_id": 1,
+      "section_id": 1,
+      "text": "Body text.",
+      "_bbox_2d": [10, 10, 9999, 20],
+      "_page_w": 600,
+      "_page_h": 800
+    }
+  ],
+  "section": [
+    {
+      "section_id": 1,
+      "header": "Introduction",
+      "section_type": "intro",
+      "parent_section_id": null
+    }
+  ],
+  "figure": [{"figure_id": 1, "caption": "(a)", "page_number": 1}],
+  "table": [],
+  "bib": [],
+  "xref": []
+}

@@ -1,0 +1,106 @@
+site_name: bibr
+site_url: https://bibr.org
+site_description: Scientific paper extraction from PDF, DOCX, JATS XML, HTML, and ePub
+site_author: bibr developers
+repo_url: https://github.com/scienceverse/bibr
+repo_name: scienceverse/bibr
+edit_uri: edit/main/docs/
+
+# Defense in depth: local engineering records are never published as pages.
+exclude_docs: |
+  superpowers/
+  reports/
+  releases/
+  llm-ref-parse-silent-drop-bug.md
+  local-runtime-evaluation.md
+  renobench-evaluation.md
+
+validation:
+  nav:
+    omitted_files: info
+    not_found: warn
+    absolute_links: info
+  links:
+    not_found: warn
+    anchors: warn
+    unrecognized_links: warn
+    absolute_links: info
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - search.highlight
+    - content.code.copy
+    - navigation.tabs
+    - navigation.top
+    - search.suggest
+  logo: assets/logo.svg
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quickstart: getting-started/quickstart.md
+      - Installation: getting-started/install.md
+      - Tester guide: tester-guide.md
+  - Guides:
+      - Python library: guides/library.md
+      - MCP server: guides/mcp.md
+      - Configuration: guides/configuration.md
+      - Production deployment: guides/deployment.md
+      - Architecture: guides/architecture.md
+      - Classifiers: guides/classifiers.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Settings: reference/settings.md
+      - JSON schema: reference/schema.md
+      - REST API: reference/rest-api.md
+  - Contributing:
+      - Development setup: contributing/setup.md
+      - Evaluating extraction quality: contributing/evaluation.md
+  - About:
+      - Known limitations: limitations.md
+      - LLM use: llm-use.md
+  - Scienceverse ↗: https://scienceverse.org/
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - tables
+  - attr_list
+  - md_in_html
+
+hooks:
+  - scripts/docs_link_guard.py
+  - scripts/docs_public_guard.py
+
+plugins:
+  - search
+  - gen-files:
+      scripts:
+        - scripts/gen_docs_reference.py
+  - macros:
+      module_name: scripts/docs_macros
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/scienceverse/bibr
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/bibr/

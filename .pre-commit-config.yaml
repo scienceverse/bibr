@@ -1,0 +1,54 @@
+# Pre-commit hooks for bibr
+# Install with: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+
+repos:
+  # Ruff via the project venv so the hook matches CI exactly
+  # (CI runs `uv run ruff check .` / `uv run ruff format --check .`).
+  - repo: local
+    hooks:
+      - id: public-source-boundary
+        name: public source boundary
+        entry: python scripts/check_public_tree.py
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix --exit-non-zero-on-fix
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+  # Static security analysis (same rule packs as CI's semgrep job).
+  # --config pins explicit registry packs instead of `auto` so the ruleset
+  # is reproducible and doesn't phone home for repo context.
+  - repo: https://github.com/semgrep/semgrep
+    rev: v1.168.0
+    hooks:
+      - id: semgrep
+        args:
+          - --config=p/security-audit
+          - --config=p/secrets
+          - --config=p/python
+          - --error
+          - --quiet
+
+  # General file checks (non-mutating)
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+        args: [--unsafe]  # Allow custom tags in docker-compose
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      - id: check-merge-conflict
+      - id: detect-private-key

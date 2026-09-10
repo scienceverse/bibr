@@ -1,0 +1,14 @@
+<|im_start|>system
+System<|im_end|>
+<|im_start|>user
+【task】structured
+【template_start】{"title":"verbatim-string"}【template_end】
+【instructions_start】Extract title【instructions_end】
+【document_start】
+Document
+【document_end】<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+

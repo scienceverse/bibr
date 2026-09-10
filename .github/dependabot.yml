@@ -1,0 +1,45 @@
+# Ecosystem ownership is split to avoid two bots contending over one lockfile:
+#   - Renovate owns the ROOT uv project (Python / root uv.lock) — see
+#     renovate.json5. It expresses holds (sglang/vllm/mkdocs-gen-files),
+#     groups non-majors, and isolates majors for eval; Dependabot cannot.
+#   - Dependabot owns everything below: the /ci/tools uv project, GitHub
+#     Actions, and Docker.
+#
+# Security: enable "Dependabot alerts" in repo Settings for the Security
+# dashboard. Leave "Dependabot security updates" OFF for the root uv project so
+# Dependabot never opens competing root-uv.lock PRs — Renovate owns those
+# (renovate.json5 -> vulnerabilityAlerts).
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /ci/tools
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 2
+    groups:
+      ci-tools:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 3

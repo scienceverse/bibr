@@ -1,0 +1,540 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Source: https://www.ebi.ac.uk/europepmc/webservices/rest/PMC4383902/fullTextXML (CC BY 4.0) -->
+<article xml:lang="en" article-type="research-article">
+  <front>
+    <journal-meta>
+      <journal-id journal-id-type="pmc-domain-id">4</journal-id>
+      <journal-id journal-id-type="pmc-domain">nar</journal-id>
+      <journal-title-group>
+        <journal-title>Nucleic Acids Research</journal-title>
+        <abbrev-journal-title>Nucleic Acids Res</abbrev-journal-title>
+      </journal-title-group>
+      <publisher>
+        <publisher-name>Oxford University Press</publisher-name>
+      </publisher>
+    </journal-meta>
+    <article-meta>
+      <article-id pub-id-type="pmcid">PMC4383902</article-id>
+      <article-id pub-id-type="pmcaid">4383902</article-id>
+      <article-id pub-id-type="pmcaiid">4383902</article-id>
+      <article-id pub-id-type="pmid">25378340</article-id>
+      <article-id pub-id-type="doi">10.1093/nar/gku1061</article-id>
+      <title-group>
+        <article-title>Europe PMC: a full-text literature database for the life sciences and platform for innovation</article-title>
+      </title-group>
+      <contrib-group content-type="author">
+        <contrib>
+          <collab>The Europe PMC Consortium</collab>
+          <xref ref-type="aff" rid="AFF1">1</xref>
+          <xref ref-type="aff" rid="AFF2">2</xref>
+          <xref ref-type="aff" rid="AFF3">3</xref>
+          <xref ref-type="aff" rid="AFF4">4</xref>
+          <xref rid="COR1" ref-type="author-notes">*</xref>
+        </contrib>
+      </contrib-group>
+      <aff id="AFF1"><label>1</label>European Molecular Biology Laboratory, European Bioinformatics Institute (EMBL-EBI), Wellcome Trust Genome Campus, Hinxton, Cambridge CB10 1SD, UK</aff>
+      <aff id="AFF2"><label>2</label>The British Library, 96 Euston Road, London NW1 2DB, UK</aff>
+      <aff id="AFF3"><label>3</label>Mimas, Roscoe Building, The University of Manchester, Oxford Road, Manchester M13 9PL, UK</aff>
+      <aff id="AFF4"><label>4</label>National Centre for Text Mining, School of Computer Science, University of Manchester, 131 Princess Street, Manchester M1 7DN, UK</aff>
+      <author-notes>
+        <fn id="COR1">
+          <label>*</label>
+          <p>To whom correspondence should be addressed. Johanna McEntyre. Tel: + 44 1223 492 599; Fax: + 44 1223 494 468; Email: <email>mcentyre@ebi.ac.uk</email></p>
+        </fn>
+      </author-notes>
+      <pub-date>
+        <day>6</day>
+        <month>11</month>
+        <year>2014</year>
+      </pub-date>
+      <volume>43</volume>
+      <issue>Database issue</issue>
+      <fpage>D1042</fpage>
+      <page-range>D1042–D1048</page-range>
+      <pub-history>
+        <event event-type="pmc-release">
+          <date>
+            <day>8</day>
+            <month>4</month>
+            <year>2015</year>
+          </date>
+        </event>
+      </pub-history>
+      <permissions>
+        <copyright-statement>© The Author(s) 2014. Published by Oxford University Press on behalf of Nucleic Acids Research.</copyright-statement>
+        <license>
+          <license-p>This is an Open Access article distributed under the terms of the Creative Commons Attribution License (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="https://creativecommons.org/licenses/by/4.0/" ext-link-type="uri">http://creativecommons.org/licenses/by/4.0/</ext-link>), which permits unrestricted reuse, distribution, and reproduction in any medium, provided the original work is properly cited.</license-p>
+        </license>
+      </permissions>
+      <self-uri xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="gku1061.pdf" content-type="pmc-pdf">
+        <?cloudpmc-path 32b0/4383902/693f878c5892/gku1061.pdf?>
+        <?cloudpmc-bucket app?>
+        <?size 1399648?>
+      </self-uri>
+      <abstract id="abstract1">
+        <title>Abstract</title>
+        <p>This article describes recent developments of Europe PMC (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org" ext-link-type="uri">http://europepmc.org</ext-link>), the leading database for life science literature. Formerly known as UKPMC, the service was rebranded in November 2012 as Europe PMC to reflect the scope of the funding agencies that support it. Several new developments have enriched Europe PMC considerably since then. Europe PMC now offers RESTful web services to access both articles and grants, powerful search tools such as citation-count sort order and data citation features, a service to add publications to your ORCID, a variety of export formats, and an External Links service that enables any related resource to be linked from Europe PMC content.</p>
+      </abstract>
+      <custom-meta-group>
+        <custom-meta>
+          <meta-name>status</meta-name>
+          <meta-value>released</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>display-pdf</meta-name>
+          <meta-value>yes</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-olf</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-manuscript</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-preprint</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-journal-matter</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-scanned</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+        <custom-meta>
+          <meta-name>is-retracted</meta-name>
+          <meta-value>no</meta-value>
+        </custom-meta>
+      </custom-meta-group>
+    </article-meta>
+    <notes notes-type="article-notes">
+      <sec id="historyarticle-meta1" sec-type="history" disp-level="2">
+        <p>Accepted 2014 Oct 15; Revised 2014 Oct 9; Received 2014 Sep 12; Issue date 2015 Jan 28.</p>
+      </sec>
+    </notes>
+  </front>
+  <body>
+    <sec id="SEC1" disp-level="1">
+      <title>BACKGROUND</title>
+      <p>The core mission of Europe PMC (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org" ext-link-type="uri">http://europepmc.org</ext-link>) is to build open, full-text scientific literature resources and support innovation by engaging users, enabling contributors and integrating related research data.</p>
+      <p>Europe PMC does this primarily by providing access and adding value to over 29 million abstracts and 3 million full-text articles. It was first described in the 2011 NAR database issue (<xref rid="B1" ref-type="bibr">1</xref>) when it was operating as UKPMC; however in November 2012 it was rebranded as Europe PMC to reflect the Europe-wide funders that support it. Europe PMC is now the designated repository for the open access publication mandates of 26 funders of life sciences, including international organizations such as the European Research Council and World Health Organization. Europe PMC is a partner in PMC International (PMCi), along with PMC USA and PMC Canada (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://www.ncbi.nlm.nih.gov/pmc/about/pmci/" ext-link-type="uri">http://www.ncbi.nlm.nih.gov/pmc/about/pmci/</ext-link>), which means that full-text content is shared by and available from any of these three nodes. The main Europe PMC database is hosted at EMBL-EBI, where this core full-text collection is extended with all PubMed abstracts, selected Agricola abstracts (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://www.ntis.gov/products/agricola.aspx" ext-link-type="uri">http://www.ntis.gov/products/agricola.aspx</ext-link>), international patents from the European Patent Office and abstracts from several other smaller sources.</p>
+      <p>To be clear, as with PubMed or PMC (<xref rid="B2" ref-type="bibr">2</xref>), the content of Europe PMC includes abstracts and articles from anywhere in the world, and they are not limited by funder or geographical location. The full scope of content in PubMed and PMC is available from Europe PMC and delivered through a single search interface.</p>
+      <p>Where Europe PMC differs from PMC/PubMed is in the services and features layered on top of the content. Since 2011, we have added several new search features and tools, which are described below.</p>
+    </sec>
+    <sec id="SEC2" disp-level="1">
+      <title>EUROPE PMC CORE CONTENT</title>
+      <p>It is important to note that Europe PMC contains both abstracts and full-text articles in a single search interface.</p>
+      <sec id="SEC2-1" disp-level="2">
+        <title>Full-text articles in Europe PMC: correspondence with PMC</title>
+        <p>There are four ways that full-text content is added to Europe PMC and PMC, which were outlined in the previous NAR article (<xref rid="B1" ref-type="bibr">1</xref>) (see Box <xref rid="BX1" ref-type="sec">1</xref>). If you want your article to be archived in Europe PMC, and the work is funded by one of the Europe PMC funders, then all of those four options are open to you. However if the work is not funded by one of the Europe PMC funders, then the simplest way to ensure your article is archived in PMCi is to publish your work in a journal that deposits 100% of its content into the archive. Paying an article processing charge (APC) and publishing your article in the Open Access track of a ‘hybrid’ journal does not always result in the article being deposited in the PMCi archives—this can also depend on the funder—so if you are paying an APC and expect your article to therefore become available in Europe PMC, it is worth checking that this is indeed the case. To self-archive manuscripts in <italic>Europe PMC</italic> via Europe PMC plus, you must be funded by one of the Europe PMC funders.</p>
+        <boxed-text id="boxed-text1" position="float">
+          <sec id="BX1" disp-level="3">
+            <label>Box 1.</label>
+            <title>The four routes of article deposition into Europe PMC</title>
+            <list list-type="order">
+              <list-item>
+                <p>The journal makes 100% of its content available in the archive</p>
+              </list-item>
+              <list-item>
+                <p>The journal deposits content on an article-by-article basis</p>
+              </list-item>
+              <list-item>
+                <p>The final, accepted manuscript of an article is deposited via the Manuscript Submission System</p>
+              </list-item>
+              <list-item>
+                <p>The article is available as a part of the PMC Back Issue Digitization Project.</p>
+              </list-item>
+            </list>
+            <p>For more details on these deposition routes, see Ref (<xref rid="B1" ref-type="bibr">1</xref>).</p>
+          </sec>
+        </boxed-text>
+      </sec>
+      <sec id="SEC2-2" disp-level="2">
+        <title>Abstracts in Europe PMC: correspondence with PubMed</title>
+        <p>Europe PMC supplements the full-text article collection with abstracts from a variety of sources. In particular, Europe PMC ingests all of PubMed, updated daily (currently about 24 million records), adds records from the agricultural collection Agricola monthly (about 600 000 records) and contains international patent abstracts from the life sciences domain and ad hoc additions of metadata from other smaller sources. In cases where a full-text article in Europe PMC does not have a PubMed record, we also create a metadata record—there are about 440K of these, and they reflect records in flux (not yet in PubMed but will be) or records for articles of a type not taken by PubMed. The total content available in Europe PMC at the time of writing can be seen in Figure <xref rid="F1" ref-type="fig">1a</xref>.</p>
+        <fig id="F1" position="float">
+          <?disp-level 3?>
+          <label>Figure 1.</label>
+          <caption>
+            <p>(<bold>a</bold>) Total scope of content (abstracts and articles) available in Europe PMC. Blue columns represent abstracts; the green column represents full text. Actual numbers of records at the time of writing: PubMed: 24 174 318; Patents: 4 229 297; Agricola: 577 871; Europe PMC full-text abstract not in PubMed: 447 427; Other smaller sources of metadata: 201 988; Europe PMC full text: 2 988 235. (<bold>b</bold>) Proportion of full-text articles in Europe PMC expressed, for comparative purposes, as a proportion of abstracts available in PubMed (100%, gray bar), per publication year. Open Access full-text articles are in yellow; ‘read only’ full-text articles are in green. For publication year 2012, around 25% of PubMed is available as full text in Europe PMC, and of those, about 50% are available open access. The slight drop in read-only articles seen in 2013 is due to many articles published in 2013 still being under a 12-month embargo period at the time of writing.</p>
+          </caption>
+          <alternatives>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="image" xlink:href="gku1061fig1.jpg">
+              <?cloudpmc-path blobs/32b0/4383902/de2e64bbd44c/gku1061fig1.jpg?>
+              <?cloudpmc-bucket cdn?>
+              <?image-server-status LOAD_COMPLETED?>
+              <?original-height 835?>
+              <?original-width 709?>
+              <?scaled-height 835?>
+              <?scaled-width 709?>
+            </graphic>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="thumb" xlink:href="gku1061fig1.gif">
+              <?cloudpmc-path blobs/32b0/4383902/b15b2aca99ab/gku1061fig1.gif?>
+              <?cloudpmc-bucket cdn?>
+            </graphic>
+          </alternatives>
+        </fig>
+      </sec>
+      <sec id="SEC2-3" disp-level="2">
+        <title>Open access: why licensing is important</title>
+        <p>While all of the content in Europe PMC is free to read, not all of it is free to reuse, for example to redistribute, translate or text mine. At the time of writing, about 870 000 articles are open access, i.e. they can be reused based on criteria stipulated in the article license, and this number increases daily. These articles are available for bulk download on the Europe PMC FTP site (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org/FtpSite" ext-link-type="uri">http://europepmc.org/FtpSite</ext-link>), and are also served in full through the Europe PMC web services (see below). The open access article set makes up a growing proportion of the total full-text content available via Europe PMC (Figure <xref rid="F1" ref-type="fig">1b</xref>).</p>
+      </sec>
+    </sec>
+    <sec id="SEC3" disp-level="1">
+      <title>SEARCHING EUROPE PMC IS EASY AND POWERFUL</title>
+      <p>Several improvements have recently been made to the Europe PMC search service. Here we describe a few highlights. The full list of fields available to search can be found in Europe PMC Help. While this section describes how to use these features via the website, all are also enabled in the RESTful web services.</p>
+      <sec id="SEC3-1" disp-level="2">
+        <title>Citation count sort order</title>
+        <p>The articles can now be returned ranked by the number of citations. For example, it is now easy to browse classic papers (i.e. the most highly cited articles) in Europe PMC.</p>
+      </sec>
+      <sec id="SEC3-2" disp-level="2">
+        <title>Author search</title>
+        <p>If you search Europe PMC for an author name, for example Bradford MM or Janet Thornton, we automatically detect that this looks like an author name and limit the search to the author field. This results in a cleaner results list than would have been retrieved previously. If this default behavior proves problematic, you can force a different behavior via the new Advanced Search form.</p>
+      </sec>
+      <sec id="SEC3-3" disp-level="2">
+        <title>Advanced search</title>
+        <p>Use this form (found under the wheel icon to the right of the search box) if you know specifically what you are looking for. Many fields operate with autosuggest—which is particularly useful for restricting searches to a journal name, for example. The Advanced Search also makes it easy to find records that cite data (<xref rid="B3" ref-type="bibr">3</xref>) or are linked from various data resources; for example, articles that cite PDB, articles cited in Uniprot or abstracts that have freely available full text in institutional repositories that are not available in Europe PMC (under the External Links tab on abstract pages).</p>
+      </sec>
+      <sec id="SEC3-4" disp-level="2">
+        <title>Section search</title>
+        <p>One of the new options on the Advanced Search relates only to the full-text article set: Section Search (submitted, J. Biomed. Semantics). Here, it is possible to limit searches to specific sections such as Acknowledgments (try searching for papers that have acknowledged you) or figure legends.</p>
+        <p>Finally, when you find something that you want to share, there is a tweet button on every article page.</p>
+      </sec>
+    </sec>
+    <sec id="SEC4" disp-level="1">
+      <title>EUROPE PMC AND ORCID</title>
+      <sec id="SEC4-1" disp-level="2">
+        <title>Link publications to your ORCID</title>
+        <p>ORCIDs are unique identifiers for researchers, allowing them to unequivocally showcase their work and make publication processes more straightforward (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://orcid.org" ext-link-type="uri">http://orcid.org</ext-link>). We have developed a simple tool for researchers to link publications found in Europe PMC to their ORCID record (see: <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org/orcid/import" ext-link-type="uri">http://europepmc.org/orcid/import</ext-link>). So far, about 17 000 unique ORCIDs have been linked to over 300 000 publication claims using this tool. The tool is available from the Europe PMC homepage, and is also discoverable on the ORCID Foundation website.</p>
+      </sec>
+      <sec id="SEC4-2" disp-level="2">
+        <title>Use ORCID to search Europe PMC</title>
+        <p>Europe PMC has integrated ORCIDs into article records and search systems (Figure <xref rid="F2" ref-type="fig">2</xref>). If someone has claimed an article, the ORCID is displayed below the abstract; clicking on it will elicit a search based on that ORCID. A search by ORCID is also available as an option by clicking on an author name. If you know someone's ORCID, the correct search syntax can be ensured by selecting ‘ORCID’ from the pull-down list of Bibliographic Fields in the Advanced Search page. This is a particularly useful approach for people who have frequently occurring last names, or have changed their name.</p>
+        <fig id="F2" position="float">
+          <?disp-level 3?>
+          <label>Figure 2.</label>
+          <caption>
+            <p>ORCIDs in Europe PMC. ORCIDs can be used to search for authors unambiguously in Europe PMC, and are apparent in several different ways. Abstract pages: (<bold>a</bold>) If the ORCID has been matched to a specific author in an article, there is an option to use the ORCID instead of the name to search for a particular author. (<bold>b</bold>) ORCIDs that have claimed the article are listed below the abstract; the name linked to the ORCID is shown on mouse-over and clicking on the ORCID triggers a search. Search page: (<bold>c</bold>) If you know an ORCID, search for it using the syntax shown, or select ‘ORCID’ from the Bibliographic Fields menu on the Advanced Search Page. Here the results are shown ranked by citation count.</p>
+          </caption>
+          <alternatives>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="image" xlink:href="gku1061fig2.jpg">
+              <?cloudpmc-path blobs/32b0/4383902/e304b185de40/gku1061fig2.jpg?>
+              <?cloudpmc-bucket cdn?>
+              <?image-server-status LOAD_COMPLETED?>
+              <?original-height 942?>
+              <?original-width 1045?>
+              <?scaled-height 627?>
+              <?scaled-width 696?>
+            </graphic>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="thumb" xlink:href="gku1061fig2.gif">
+              <?cloudpmc-path blobs/32b0/4383902/fb3e66ede4cb/gku1061fig2.gif?>
+              <?cloudpmc-bucket cdn?>
+            </graphic>
+          </alternatives>
+        </fig>
+      </sec>
+    </sec>
+    <sec id="SEC5" disp-level="1">
+      <title>INTEGRATING DATA WITH LITERATURE VIA EUROPE PMC</title>
+      <p>The idea that in the future, the scientific article stands shoulder-to-shoulder with data, seamlessly integrated and enriched with structured information, is a vision that has emerged over the past decade (<xref rid="B3" ref-type="bibr">3</xref>), and is something that Europe PMC actively contributes to. To this end, we have recently developed new ways to foster links between the literature and data:</p>
+      <sec id="SEC5-1" disp-level="2">
+        <title>Database records that cite articles</title>
+        <p>In addition to the database links described in the 2011 article, these now also include OMIM (<xref rid="B4" ref-type="bibr">4</xref>) and ArrayExpress (<xref rid="B5" ref-type="bibr">5</xref>), and are updated at least monthly. Several large central databases such as UniProt (<xref rid="B6" ref-type="bibr">6</xref>) are covered (to date over 900 000 articles are associated with UniProt) as well as thematic databases such as the Genome RNAi database (<xref rid="B7" ref-type="bibr">7</xref>). The External Links service is open to any database that cites the life science literature and uses a simple combination of Excel spreadsheet (or XML) and FTP to upload lists of article-database links, which are then published to the website, usually within 24 h. The External Links service can also be used by repositories that hold the full-text articles for which Europe PMC only has the metadata. See: <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org/LabsLink" ext-link-type="uri">http://europepmc.org/LabsLink</ext-link> for more details.</p>
+      </sec>
+      <sec id="SEC5-2" disp-level="2">
+        <title>Articles that cite data</title>
+        <p>Europe PMC now routinely discovers several types of data citations in the form of accession numbers, for example to the European Nucleotide Archive (<xref rid="B8" ref-type="bibr">8</xref>), and DOIs out of the full text of Europe PMC articles (<xref rid="B9" ref-type="bibr">9</xref>) via the Europe PMC text-mining engine, which is based on Whatizit (<xref rid="B10" ref-type="bibr">10</xref>). Since 2013, these and Europe PMC's article citation counts have been incorporated into the PLOS Article Level Metrics <italic>system</italic>.</p>
+      </sec>
+      <sec id="SEC5-3" disp-level="2">
+        <title>Text-mined concepts</title>
+        <p>As well as text mining gene/protein names, organisms, chemicals, diseases, and Gene Ontology terms (<xref rid="B11" ref-type="bibr">11</xref>), Experimental Factor Ontology (EFO) terms are now also routinely mined as a force for data integration (<xref rid="B12" ref-type="bibr">12</xref>). (The EFO is an ‘umbrella’ ontology designed to work across a wide range of biological domains).</p>
+        <p>All the data-literature citations and crosslinks can be explored through the BioEntities and External Links tabs on abstract and article pages (Figure <xref rid="F3" ref-type="fig">3</xref>), ‘Data Links and Citations’ and ‘External Links’ menus on the Advanced Search page, and through the Europe PMC APIs.</p>
+        <fig id="F3" position="float">
+          <?disp-level 3?>
+          <label>Figure 3.</label>
+          <caption>
+            <p>The BioEntities tab in Europe PMC. The BioEntities tab contains rich information on key concepts mined from the article as well as links to and from related data resources. In this example, several Uniprot records cite this article, and we have also found one data citation, to a dataset in the Dryad database (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://datadryad.org" ext-link-type="uri">http://datadryad.org</ext-link>). In the case of chemical entities mined from text, we have used a BioJS module (<ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://www.ebi.ac.uk/Tools/biojs/registry/" ext-link-type="uri">http://www.ebi.ac.uk/Tools/biojs/registry/</ext-link>) to display the chemical structure of the entity (<xref rid="B13" ref-type="bibr">13</xref>). The same applies to mined PDB citations (not shown). In other cases, links to the database in question, or to invoke a search of Europe PMC for that concept, are provided. This figure has been modified and abbreviated from the actual screenshot to show the breadth of coverage in this example article.</p>
+          </caption>
+          <alternatives>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="image" xlink:href="gku1061fig3.jpg">
+              <?cloudpmc-path blobs/32b0/4383902/19354966e05e/gku1061fig3.jpg?>
+              <?cloudpmc-bucket cdn?>
+              <?image-server-status NEVER_LOAD?>
+              <?original-height 761?>
+              <?original-width 496?>
+              <?scaled-height 761?>
+              <?scaled-width 496?>
+            </graphic>
+            <graphic xmlns:xlink="http://www.w3.org/1999/xlink" content-type="thumb" xlink:href="gku1061fig3.gif">
+              <?cloudpmc-path blobs/32b0/4383902/d679b93c8bb7/gku1061fig3.gif?>
+              <?cloudpmc-bucket cdn?>
+            </graphic>
+          </alternatives>
+        </fig>
+      </sec>
+    </sec>
+    <sec id="SEC6" disp-level="1">
+      <title>DOWNLOADING DATA FROM EUROPE PMC</title>
+      <p>Europe PMC offers several routes to download data, depending on what you want to do and the scale at which you want to do it.</p>
+      <sec id="SEC6-1" disp-level="2">
+        <title>Export articles from the website</title>
+        <p>For occasional use (for example, downloading a bibliography, inserting a citation into a document or checking the full-text XML of an Open Access article), select records from a search results list, or, to download the whole list (or single article), just click on ‘Export’ to the right of the page. The download formats offered are:
+</p>
+        <list list-type="bullet">
+          <list-item>
+            <p>ID list (PMIDs and others)</p>
+          </list-item>
+          <list-item>
+            <p>BibTex</p>
+          </list-item>
+          <list-item>
+            <p>RIS (for use to export to a variety of citation manager products)</p>
+          </list-item>
+          <list-item>
+            <p>Tab separated values</p>
+          </list-item>
+          <list-item>
+            <p>Citation (core citation details in plain text form for inserting into documents)</p>
+          </list-item>
+          <list-item>
+            <p>XML (metadata including abstracts)</p>
+          </list-item>
+          <list-item>
+            <p>Full-text XML (Open Access articles only)</p>
+          </list-item>
+        </list>
+        <p>There is no limit on the number of records that can be downloaded via this route, although if the number is more than 2000, then it has to be done in batches. We strongly recommend that you use the APIs described below if you are gathering more than a few hundred records, or if you are retrieving information routinely</p>
+      </sec>
+      <sec id="SEC6-2" disp-level="2">
+        <title>Web services and APIs</title>
+        <sec id="SEC6-2-1" disp-level="3">
+          <title>Articles</title>
+          <p>Europe PMC offers a modular RESTful API that outputs in XML or JSON formats, through which it is possible to search all content and retrieve metadata, plus full text, figures and supplementary files for the Open Access full-text articles. In the case of full-text articles that do not have a license that allows redistribution, the full text is searched but only metadata will be returned. A Dublin Core output format is also available for metadata.</p>
+        </sec>
+        <sec id="SEC6-2-2" disp-level="3">
+          <title>Grants</title>
+          <p>The 26 funders of Europe PMC supply grant award data to Europe PMC. These data are used to validate researchers funded by any of the Europe PMC funders so that those researchers can use the Europe PMC manuscript submission system, Europe PMC plus. However, all the public grant data submitted by the funders can also be searched and browsed in the Grant Lookup Tool, and, more recently, are also available via a public RESTful API.</p>
+        </sec>
+      </sec>
+      <sec id="SEC6-3" disp-level="2">
+        <title>FTP and RSS</title>
+        <p>For bulk download of the XML of the Open Access article set, visit the Europe PMC FTP site. The main article set is updated weekly. A quarterly snapshot is archived to make it easier to cite the collection as dataset.</p>
+        <p>Finally, if you like information to be pushed, you can set up an RSS feed for your favorite search. This could include, for example, articles that cite a particular data type (e.g. protein structures) or cite a particular article, or articles by a specific author, institute or on a topic of interest.</p>
+      </sec>
+    </sec>
+    <sec id="SEC7" disp-level="1">
+      <title>EUROPE PMC RESOURCES FOR TEXT AND DATA MINERS</title>
+      <p>The Europe PMC core text mining service provides some basic utility to integrate literature and data. However, we envision that algorithms and applications based on text and data mining, developed by the research community, will add significant value to the content, in particular to the growing Open Access article set in the context of biological data. To this end, Europe PMC aspires to provide text and data miners with the means to publish the outcomes of their algorithms in the context of articles in Europe PMC. This is exemplified by the Evidence Finder application, which is invoked on the full-text search for queries based on gene/protein names, diseases, organisms, chemicals and anatomical entities (<xref rid="B14" ref-type="bibr">14</xref>), extracted using the text mining workbench Argo (<xref rid="B15" ref-type="bibr">15</xref>,<xref rid="B16" ref-type="bibr">16</xref>). Evidence Finder shows facts or claims, together with their interpretations (<xref rid="B17" ref-type="bibr">17</xref>), hidden in full-text articles based on the user's query, displaying relevant text fragments alongside the article metadata on search results lists on Europe PMC Labs. For each query, it also displays a list of automatically generated questions (e.g. ‘<italic>What causes melanoma</italic>?’) that can be used by the user to narrow down the search results to only those documents that contain the answer to a selected question.</p>
+      <p>The External Links service provides a straightforward means to publish the outputs of text mining. In this way, phrases or triples identified by the text mining of full text can be linked to other articles, data or websites that provide useful extra information related to the source article. More information on the External Links service can be found here: <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org/LabsLink" ext-link-type="uri">http://europepmc.org/LabsLink</ext-link>.</p>
+      <p>Finally, Europe PMC is making use of the EMBL-EBI Embassy Cloud to host Evidence Finder, bringing the computational aspects of the application closer to the data and providing an easy way for text mining algorithms to update outputs daily, based on incoming open access content. This mechanism is being extended to academic text mining groups that wish to routinely publish algorithm outputs to Europe PMC via the External Links service.</p>
+    </sec>
+    <sec id="SEC8" disp-level="1">
+      <title>SUMMARY</title>
+      <p>Europe PMC is a fast, reliable and comprehensive resource for accessing the life science literature. Based on open access and open data principles, we strive to foster a sense of ‘collaborative community’ by applying layers of value on the core full-text content through engagement with users in the many roles in which they interact with Europe PMC. Europe PMC is embedded in a big data environment, and we see smarter integration of the open full-text literature and open data as critical in supporting life science research. Europe PMC will continue to be developed toward these goals in the future.</p>
+      <p>We welcome comments and questions about any aspect of the service. The best way to contact us is via the Feedback button at the bottom of every page, or via Twitter (follow us @EuropePMC_news).</p>
+    </sec>
+    <sec id="ack1" sec-type="ack" disp-level="1">
+      <title>Acknowledgments</title>
+      <p>We would like to thank the Europe PMC Project and Advisory Boards and the EMBL-EBI Literature Services Advisory Board for strategic guidance on the development of Europe PMC.</p>
+    </sec>
+    <sec id="app1" sec-type="app" disp-level="1">
+      <title>APPENDIX</title>
+      <p>Author List:</p>
+      <p>Yuci Gou, Florian Graff, Oliver Kilian, Senay Kafkas, Jyothi Katuri, Jee-Hyub Kim, Nikos Marinos, Johanna McEntyre, Andrew Morrison, Xingjun Pi, Philip Rossiter, Francesco Talo, Vid Vartak (European Molecular Biology Laboratory, European Bioinformatics Institute (EMBL-EBI), Wellcome Trust Genome Campus, Hinxton, Cambridge CB10 1SD, UK); Lee-Ann Coleman, Craig Hawkins, Anna Kinsey, Sami Mansoor, Victoria Morris, Rob Rowbotham, (The British Library, 96 Euston Road London NW1 2DB, UK); David Chaplin, Ross MacIntyre, Yogesh Patel (Mimas, Roscoe Building, The University of Manchester, Oxford Road, Manchester M13 9PL, UK); Sophia Ananiadou, William J. Black, John McNaught, Rafal Rak and Andrew Rowley (National Centre for Text Mining, School of Computer Science, University of Manchester, 131 Princess Street, Manchester, M1 7DN, UK).</p>
+    </sec>
+    <sec id="fn-group1" sec-type="fn-group" disp-level="1">
+      <title>Footnotes</title>
+      <fn-group>
+        <fn id="FN1">
+          <label>†</label>
+          <p>The list of authors of the Europe PMC Consortium is provided in the Appendix.</p>
+        </fn>
+      </fn-group>
+    </sec>
+    <sec id="SEC9" disp-level="1">
+      <title>FUNDING</title>
+      <p>Twenty-six European-based funders of life science research: <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="http://europepmc.org/Funders/" ext-link-type="uri">http://europepmc.org/Funders/</ext-link> under a Wellcome Trust grant [098231] awarded to EMBL-EBI. Funding for open access charge: Wellcome Trust [098231].</p>
+      <p><italic>Conflict of interest statement</italic>. None declared.</p>
+    </sec>
+    <sec id="ref-list1" sec-type="ref-list" disp-level="1">
+      <title>REFERENCES</title>
+      <sec id="ref-list1_sec2" disp-level="2">
+        <ref-list>
+          <ref id="B1">
+            <label>1.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">McEntyre J.R., Ananiadou S., Andrews S., Black W.J., Boulderstone R., Buttery P., Chaplin D., Chevuru S., Cobley N., Coleman L.A. UKPMC: a full text article resource for the life sciences. Nucleic Acids Res. 2011;39:D58–D65. doi: 10.1093/nar/gkq1063.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gkq1063"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3013671"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="21062818"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=UKPMC: a full text article resource for the life sciences&amp;author=J.R. McEntyre&amp;author=S. Ananiadou&amp;author=S. Andrews&amp;author=W.J. Black&amp;author=R. Boulderstone&amp;volume=39&amp;publication_year=2011&amp;pages=D58-D65&amp;pmid=21062818&amp;doi=10.1093/nar/gkq1063&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B2">
+            <label>2.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">NCBI Resource Coordinators. Database resources of the National Center for Biotechnology Information. Nucleic Acids Res. 2014;42:D7–D17. doi: 10.1093/nar/gkt1146.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gkt1146"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3965057"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="24259429"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=Database resources of the National Center for Biotechnology Information&amp;volume=42&amp;publication_year=2014&amp;pages=D7-D17&amp;pmid=24259429&amp;doi=10.1093/nar/gkt1146&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B3">
+            <label>3.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Bourne P. Will a biological database be different from a biological journal? PLoS Comput. Biol. 2005;1:179–181. doi: 10.1371/journal.pcbi.0010034.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1371/journal.pcbi.0010034"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC1193993"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="16158097"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=PLoS Comput. Biol.&amp;title=Will a biological database be different from a biological journal?&amp;author=P. Bourne&amp;volume=1&amp;publication_year=2005&amp;pages=179-181&amp;pmid=16158097&amp;doi=10.1371/journal.pcbi.0010034&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B4">
+            <label>4.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Hamosh A., Scott A.F., Amberger J.S., Bocchini C.A., McKusick V.A. Online Mendelian Inheritance in Man (OMIM), a knowledgebase of human genes and genetic disorders. Nucleic Acids Res. 2005;33:D514–D517. doi: 10.1093/nar/gki033.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gki033"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC539987"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="15608251"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=Online Mendelian Inheritance in Man (OMIM), a knowledgebase of human genes and genetic disorders&amp;author=A. Hamosh&amp;author=A.F. Scott&amp;author=J.S. Amberger&amp;author=C.A. Bocchini&amp;author=V.A. McKusick&amp;volume=33&amp;publication_year=2005&amp;pages=D514-D517&amp;pmid=15608251&amp;doi=10.1093/nar/gki033&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B5">
+            <label>5.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Rustici G., Kolesnikov N., Brandizi M., Burdett T., Dylag M., Emam I., Farne A., Hastings E., Ison J., Keays M. ArrayExpress update—trends in database growth and links to data analysis tools. Nucleic Acids Res. 2013;41:D987–D990. doi: 10.1093/nar/gks1174.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gks1174"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3531147"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="23193272"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=ArrayExpress update—trends in database growth and links to data analysis tools&amp;author=G. Rustici&amp;author=N. Kolesnikov&amp;author=M. Brandizi&amp;author=T. Burdett&amp;author=M. Dylag&amp;volume=41&amp;publication_year=2013&amp;pages=D987-D990&amp;pmid=23193272&amp;doi=10.1093/nar/gks1174&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B6">
+            <label>6.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">UniProt Consortium. Activities at the Universal Protein Resource (UniProt) Nucleic Acids Res. 2014;42:D191–D198. doi: 10.1093/nar/gkt1140.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gkt1140"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3965022"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="24253303"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=Activities at the Universal Protein Resource (UniProt)&amp;volume=42&amp;publication_year=2014&amp;pages=D191-D198&amp;pmid=24253303&amp;doi=10.1093/nar/gkt1140&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B7">
+            <label>7.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Schmidt E.E., Pelz O., Buhlmann S., Kerr G., Horn T., Boutros M. GenomeRNAi: a database for cell-based and in vivo RNAi phenotypes, 2013 update. Nucleic Acids Res. 2013;41:D1021–D1026. doi: 10.1093/nar/gks1170.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gks1170"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3531141"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="23193271"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=GenomeRNAi: a database for cell-based and in vivo RNAi phenotypes, 2013 update&amp;author=E.E. Schmidt&amp;author=O. Pelz&amp;author=S. Buhlmann&amp;author=G. Kerr&amp;author=T. Horn&amp;volume=41&amp;publication_year=2013&amp;pages=D1021-D1026&amp;pmid=23193271&amp;doi=10.1093/nar/gks1170&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B8">
+            <label>8.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Pakseresht N., Alako B., Amid C., Cerdeño-Tárraga A., Cleland I., Gibson R., Goodgame N., Gur T., Jang M., Kay S. Assembly information services in the European Nucleotide Archive. Nucleic Acids Res. 2014;42:D38–D43. doi: 10.1093/nar/gkt1082.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gkt1082"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3965037"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="24214989"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Nucleic Acids Res.&amp;title=Assembly information services in the European Nucleotide Archive&amp;author=N. Pakseresht&amp;author=B. Alako&amp;author=C. Amid&amp;author=A. Cerdeño-Tárraga&amp;author=I. Cleland&amp;volume=42&amp;publication_year=2014&amp;pages=D38-D43&amp;pmid=24214989&amp;doi=10.1093/nar/gkt1082&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B9">
+            <label>9.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Kafkas Ş., Kim J.H., McEntyre J.R. Database citation in full text biomedical articles. PLoS One. 2013;8:e63184. doi: 10.1371/journal.pone.0063184.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1371/journal.pone.0063184"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3667078"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="23734176"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=PLoS One&amp;title=Database citation in full text biomedical articles&amp;author=Ş. Kafkas&amp;author=J.H. Kim&amp;author=J.R. McEntyre&amp;volume=8&amp;publication_year=2013&amp;pages=e63184&amp;pmid=23734176&amp;doi=10.1371/journal.pone.0063184&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B10">
+            <label>10.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Rebholz-Schuhmann D., Arregui M., Gaudan S., Kirsch H., Jimeno A. Text processing through web services: calling Whatizit. Bioinformatics. 2008;24:296–298. doi: 10.1093/bioinformatics/btm557.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/bioinformatics/btm557"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="18006544"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Bioinformatics&amp;title=Text processing through web services: calling Whatizit&amp;author=D. Rebholz-Schuhmann&amp;author=M. Arregui&amp;author=S. Gaudan&amp;author=H. Kirsch&amp;author=A. Jimeno&amp;volume=24&amp;publication_year=2008&amp;pages=296-298&amp;pmid=18006544&amp;doi=10.1093/bioinformatics/btm557&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B11">
+            <label>11.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Gene Ontology Consortium. Gene Ontology annotations and resources. 2013;41:D530–D535. doi: 10.1093/nar/gks1050.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/nar/gks1050"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3531070"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="23161678"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="Gene Ontology Consortium. Gene Ontology annotations and resources. 2013;41:D530–D535. doi: 10.1093/nar/gks1050."/>
+            </mixed-citation>
+          </ref>
+          <ref id="B12">
+            <label>12.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Malone J., Holloway E., Adamusiak T., Kapushesky M., Zheng J., Kolesnikov N., Zhukova A., Brazma A., Parkinson H. Modelling sample variables with an Experimental Factor Ontology. Bioinformatics. 2010;26:1112–1118. doi: 10.1093/bioinformatics/btq099.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/bioinformatics/btq099"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC2853691"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="20200009"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Bioinformatics&amp;title=Modelling sample variables with an Experimental Factor Ontology&amp;author=J. Malone&amp;author=E. Holloway&amp;author=T. Adamusiak&amp;author=M. Kapushesky&amp;author=J. Zheng&amp;volume=26&amp;publication_year=2010&amp;pages=1112-1118&amp;pmid=20200009&amp;doi=10.1093/bioinformatics/btq099&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B13">
+            <label>13.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Corpas M., Jimenez R., Carbon S.J., García A., Garcia L., Goldberg T., Gomez J., Kalderimis A., Lewis S.E., Mulvany I. BioJS: an open source standard for biological visualisation—its status in 2014. F1000Res. 2014;3:55. doi: 10.12688/f1000research.3-55.v1.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.12688/f1000research.3-55.v1"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC4103492"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="25075290"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=F1000Res&amp;title=BioJS: an open source standard for biological visualisation—its status in 2014&amp;author=M. Corpas&amp;author=R. Jimenez&amp;author=S.J. Carbon&amp;author=A. García&amp;author=L. Garcia&amp;volume=3&amp;publication_year=2014&amp;pages=55&amp;pmid=25075290&amp;doi=10.12688/f1000research.3-55.v1&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B14">
+            <label>14.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Pyysalo S., Ananiadou S. Anatomical entity mention recognition at literature scale. Bioinformatics. 2014;30:868–875. doi: 10.1093/bioinformatics/btt580.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/bioinformatics/btt580"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3957068"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="24162468"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Bioinformatics&amp;title=Anatomical entity mention recognition at literature scale&amp;author=S. Pyysalo&amp;author=S. Ananiadou&amp;volume=30&amp;publication_year=2014&amp;pages=868-875&amp;pmid=24162468&amp;doi=10.1093/bioinformatics/btt580&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B15">
+            <label>15.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Rak R., Batista-Navarro R., Rowley A., Carter J., Ananiadou S. Text mining-assisted biocuration workflows in Argo. Database (Oxford) 2014;2014:doi: 10.1093/database/bau070. doi: 10.1093/database/bau070.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/database/bau070"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC4103424"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="25037308"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Database (Oxford)&amp;title=Text mining-assisted biocuration workflows in Argo&amp;author=R. Rak&amp;author=R. Batista-Navarro&amp;author=A. Rowley&amp;author=J. Carter&amp;author=S. Ananiadou&amp;volume=2014&amp;publication_year=2014&amp;pages=doi: 10.1093/database/bau070&amp;pmid=25037308&amp;doi=10.1093/database/bau070&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B16">
+            <label>16.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Rak R., Batista-Navarro R., Carter J., Rowley A., Ananiadou S. Processing biological literature with customizable web services supporting interoperable formats. Database (Oxford) 2014;2014:doi: 10.1093/database/bau064. doi: 10.1093/database/bau064.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1093/database/bau064"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC4086403"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="25006225"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=Database (Oxford)&amp;title=Processing biological literature with customizable web services supporting interoperable formats&amp;author=R. Rak&amp;author=R. Batista-Navarro&amp;author=J. Carter&amp;author=A. Rowley&amp;author=S. Ananiadou&amp;volume=2014&amp;publication_year=2014&amp;pages=doi: 10.1093/database/bau064&amp;pmid=25006225&amp;doi=10.1093/database/bau064&amp;"/>
+            </mixed-citation>
+          </ref>
+          <ref id="B17">
+            <label>17.</label>
+            <mixed-citation>
+              <named-content content-type="citation-string">Miwa M., Thompson P., McNaught J., Kell D.B., Ananiadou S. Extracting semantically enriched events from biomedical literature. BMC Bioinformatics. 2012;13:108. doi: 10.1186/1471-2105-13-108.</named-content>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="doi" xlink:href="10.1186/1471-2105-13-108"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmcid" xlink:href="PMC3464657"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="pmid" xlink:href="22621266"/>
+              <ext-link xmlns:xlink="http://www.w3.org/1999/xlink" ext-link-type="google-scholar" xlink:href="journal=BMC Bioinformatics&amp;title=Extracting semantically enriched events from biomedical literature&amp;author=M. Miwa&amp;author=P. Thompson&amp;author=J. McNaught&amp;author=D.B. Kell&amp;author=S. Ananiadou&amp;volume=13&amp;publication_year=2012&amp;pages=108&amp;pmid=22621266&amp;doi=10.1186/1471-2105-13-108&amp;"/>
+            </mixed-citation>
+          </ref>
+        </ref-list>
+      </sec>
+    </sec>
+  </body>
+</article>
+

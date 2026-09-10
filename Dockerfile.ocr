@@ -1,0 +1,47 @@
+# ---------------------------------------------------------------------------
+# bibr OCR — Standalone SGLang server (GLM-OCR)
+# Runs as an independent HTTP server with OpenAI-compatible API on port 8080.
+# The pipeline communicates with it over HTTP.
+#
+# Pinned to v0.5.13.post1 by digest for reproducible builds and Gemma 4 (26B-A4B)
+# support for the shared-GPU LLM. The prior floating :dev tag pulled builds that
+# device-side-assert during GLM-OCR warmup. NEXTN/MTP speculative decoding is
+# disabled in entrypoint-ocr.sh because it asserts on GLM-OCR across recent sglang
+# (both :dev and v0.5.13.post1: gather-index-out-of-bounds in the EAGLE V2 draft
+# path); plain decoding is stable. Re-enable once upstream fixes GLM-OCR + NEXTN.
+# ---------------------------------------------------------------------------
+
+FROM lmsysorg/sglang:v0.5.13.post1@sha256:74084d80c3b7e5649f4b3433b1169db3da26c9b1e31752a43045a34cc26ba5d5
+
+# transformers >= 5.1 provides glm_ocr natively. Pin the audited runtime so a
+# rebuild cannot silently pull new executable package code.
+RUN pip install --no-cache-dir 'transformers==5.6.0'
+
+# Run model-serving code without root privileges. The model itself is pinned
+# below to an immutable Hub commit and uses only native Transformers classes,
+# so trust_remote_code is deliberately not enabled.
+RUN useradd --create-home --uid 10001 bibr
+ENV HF_HOME=/home/bibr/.cache/huggingface \
+    GLM_OCR_REVISION=ca5d8b3e287e52589e37c28385d9655ee4372f9d
+RUN mkdir -p "$HF_HOME" && chown -R bibr:bibr /home/bibr
+USER bibr
+
+# Pre-cache GLM-OCR weights so first startup is fast.
+# A failed download must fail the build — otherwise the image ships without
+# weights and first-run downloads multi-GB inside the healthcheck start_period.
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+import os; \
+snapshot_download('zai-org/GLM-OCR', revision=os.environ['GLM_OCR_REVISION'])"
+
+# Number of GPUs for tensor parallelism (set via docker-compose environment)
+ENV SGLANG_GPUS=1
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=300s --retries=5 \
+    CMD curl -sf http://localhost:8080/health || exit 1
+
+COPY --chmod=755 entrypoint-ocr.sh /app/entrypoint-ocr.sh
+
+CMD ["/app/entrypoint-ocr.sh"]

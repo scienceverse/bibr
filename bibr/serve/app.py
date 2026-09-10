@@ -1,0 +1,525 @@
+"""LitServe application entry point — ``bibr serve`` CLI.
+
+Builds a single ``litserve.LitServer`` hosting the full bibr pipeline. The
+server exposes:
+  - ``POST /papers/extract``           — multipart upload, returns the bibr JSON schema
+  - ``POST /papers/enrich``            — backfill enrichment from saved extraction JSON
+  - ``POST /papers/jobs``              — submit an async extraction job (202)
+  - ``GET  /papers/jobs/{id}``         — poll job status
+  - ``GET  /papers/jobs/{id}/result``  — fetch the paper_json once succeeded
+  - ``GET  /health``                   — LitServe's built-in liveness check
+  - ``GET  /ready``                    — custom readiness probe (OCR + Redis)
+
+Every response carries ``x-request-id`` (echoed from the request when a sane
+one is supplied, else generated) and ``x-bibr-duration-ms``; one structured
+JSON record per request is emitted on the ``bibr.serve.metering`` logger. Both
+the async-job API (``JOBS_ENABLED``) and metering (``METER_ENABLED``) are
+on by default and independently toggleable.
+"""
+
+import json
+import logging
+import time
+import uuid
+
+logger = logging.getLogger(__name__)
+
+
+def classifier_readiness(statuses) -> tuple[str, bool]:
+    """Summarize worker classifier states without initiating model loading."""
+    from bibr.pipeline.classifier_resources import ClassifierState
+
+    states = {status.state for status in statuses.values()}
+    if ClassifierState.FAILED_REQUIRED in states:
+        return ("failed_required", False)
+    if ClassifierState.DEGRADED in states:
+        return ("degraded", True)
+    if states <= {ClassifierState.READY, ClassifierState.UNCONFIGURED}:
+        return ("ready", True)
+    return ("loading", False)
+
+
+def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
+    """Verify configured classifier snapshots exist locally without downloading."""
+    if snapshot_download is None:
+        from huggingface_hub import snapshot_download
+
+    configured = (
+        (
+            settings.ml.paper_classifier_model_id,
+            settings.ml.paper_classifier_revision,
+        ),
+        (
+            settings.ml.section_classifier_model_id,
+            settings.ml.section_classifier_revision,
+        ),
+    )
+    try:
+        for model_id, revision in configured:
+            if model_id:
+                snapshot_download(model_id, revision=revision, local_files_only=True)
+    except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
+        if settings.ml.classifiers_required:
+            return ("failed_required", False)
+        return ("degraded", True)
+    return ("ok", True)
+
+
+def readiness_payload(
+    status: str, checks: dict[str, str], settings, *, include_detail: bool = True
+) -> dict[str, object]:
+    """Build the readiness body.
+
+    ``/ready`` is unauthenticated (probes carry no credentials), so per-service
+    health and the deployment ``build_sha`` are disclosed only to authenticated
+    callers — anonymous callers get just the overall status (audit L1). Probes
+    rely on the HTTP status code, not the body, so nothing operational is lost.
+    """
+    if not include_detail:
+        return {"status": status}
+    return {
+        "status": status,
+        "checks": checks,
+        "build_sha": settings.BIBR_BUILD_SHA,
+    }
+
+
+# Dedicated logger for per-request / per-extraction usage metering (D2). One
+# JSON line per record; formatting is done at the call site with json.dumps.
+metering_logger = logging.getLogger("bibr.serve.metering")
+
+
+def _configure_metering_logging(settings) -> None:
+    """Ensure metering records are emitted, and (idempotently) attach a file sink.
+
+    Sets the metering logger to INFO so records aren't dropped at source, and —
+    when ``METER_LOG_PATH`` is set — attaches a single size-capped JSONL
+    ``RotatingFileHandler``. Rotation is what bounds disk use: the metering
+    middleware runs outside the auth gate (it deliberately logs 401s), so
+    unauthenticated request spam would otherwise grow the log without bound and
+    exhaust disk (audit M5). Idempotent across repeated ``build_server`` calls
+    (tests) so handlers don't accumulate.
+    """
+    from logging.handlers import RotatingFileHandler
+
+    metering_logger.setLevel(logging.INFO)
+    log_path = settings.metering.log_path
+    if not log_path:
+        return
+    for handler in metering_logger.handlers:
+        if getattr(handler, "_bibr_metering_sink", None) == log_path:
+            return
+    file_handler = RotatingFileHandler(
+        log_path,
+        maxBytes=settings.metering.log_max_bytes,
+        backupCount=settings.metering.log_backup_count,
+    )
+    file_handler.setFormatter(logging.Formatter("%(message)s"))
+    file_handler._bibr_metering_sink = log_path  # type: ignore[attr-defined]
+    metering_logger.addHandler(file_handler)
+
+
+def _safe_cors_credentials(origins: list[str], allow_credentials: bool) -> bool:
+    """Never combine wildcard origins with credentials.
+
+    Starlette's CORSMiddleware, given ``allow_origins=["*"]`` and
+    ``allow_credentials=True``, reflects the request ``Origin`` back — letting
+    *any* site make credentialed cross-origin requests. Production already rejects
+    ``*`` outright; this closes the same hole in dev mode (audit L3).
+    """
+    if allow_credentials and "*" in origins:
+        logger.warning(
+            "CORS: allow_credentials with wildcard origins would reflect any origin; "
+            "disabling credentials. Set CORS_ORIGINS to explicit origins to allow them."
+        )
+        return False
+    return allow_credentials
+
+
+def _compose_lifespan_cleanup(app, cleanup) -> None:
+    """Run router and bibr cleanup inside LitServe's custom app lifespan."""
+    from contextlib import asynccontextmanager
+
+    litserve_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def _lifespan(lifespan_app):
+        async with litserve_lifespan(lifespan_app):
+            try:
+                await lifespan_app.router._startup()
+                yield
+            finally:
+                try:
+                    await lifespan_app.router._shutdown()
+                finally:
+                    await cleanup()
+
+    app.router.lifespan_context = _lifespan
+
+
+def build_server():
+    """Construct the configured LitServer and clean partial build resources."""
+    upload_stores = []
+    try:
+        return _build_server(upload_stores)
+    except BaseException:
+        for upload_store in upload_stores:
+            try:
+                upload_store.close_sync()
+            except OSError:
+                logger.exception("Failed to clean upload root after server construction error")
+        raise
+
+
+def _build_server(upload_stores):
+    """Construct the configured LitServer instance."""
+    import litserve as ls
+    import litserve.server as litserve_server
+    from fastapi.middleware.cors import CORSMiddleware
+
+    from bibr.config import Settings, validate_production_settings
+
+    # LitServe 0.2.17 gates its own MCP connector on the official `mcp` package
+    # being importable (litserve.server._MCP_AVAILABLE) but builds that
+    # connector from the third-party `fastmcp` package: litserve/mcp.py binds
+    # `MCPServer` only when fastmcp is installed, so with bibr's `mcp` extra
+    # alone `server.run()` dies with `NameError: name 'MCPServer' is not
+    # defined` before uvicorn starts. bibr mounts its own endpoint
+    # (bibr.serve.mcp) and never wants LitServe's, so switch the detection off
+    # for this process regardless of what is installed. Must happen before the
+    # LitServer is constructed and before run(): both read the module flag.
+    litserve_server._MCP_AVAILABLE = False
+    from bibr.serve.auth import PUBLIC_PATHS, check_bearer
+    from bibr.serve.deployments.pipeline import BibrPipelineAPI
+    from bibr.serve.ingress import (
+        INTERNAL_INFERENCE_PATH,
+        InferenceDispatchTracker,
+        UploadStore,
+        configure_multipart_spooling,
+        register_extract_route,
+        resolve_litserve_dispatch,
+    )
+
+    # Fail fast on misconfigured production deployments (missing Redis
+    # password / API key, wildcard CORS) before any model loads.
+    validate_production_settings(Settings)
+
+    upload_store = UploadStore.create(
+        max_size=Settings.pipeline.max_file_size,
+        spool_memory_bytes=Settings.pipeline.upload_spool_memory_bytes,
+        stale_after_seconds=max(Settings.pipeline.timeout + 60, 120),
+    )
+    upload_stores.append(upload_store)
+    api = BibrPipelineAPI(
+        api_path=INTERNAL_INFERENCE_PATH,
+        enable_async=True,
+        upload_root=upload_store.root,
+        settings=Settings,
+    )
+    server = ls.LitServer(
+        api,
+        accelerator="auto",
+        devices=1,
+        # Exactly one inference worker, by design and not by default. One worker
+        # already serves many requests concurrently on the async loop, and the
+        # layout/segmenter GpuBatcher coalesces their GPU work into single
+        # forward passes — a second worker would duplicate the models (~1.5 GB
+        # RSS each), give each its own batcher (so batches shrink as workers
+        # rise), and parallelize only GIL-bound Python, since torch/ONNX
+        # intra-op threads already use every core from one process. Scale with
+        # PIPELINE_MAX_INFLIGHT_REQUESTS and the batch-timeout knobs instead.
+        workers_per_device=1,
+        max_payload_size=(
+            Settings.pipeline.max_file_size + Settings.pipeline.multipart_overhead_bytes
+        ),
+        timeout=Settings.pipeline.timeout,
+        restart_workers=Settings.pipeline.restart_workers,
+    )
+
+    configure_multipart_spooling(Settings.pipeline.upload_spool_memory_bytes)
+    inference_tracker = InferenceDispatchTracker(
+        dispatch=resolve_litserve_dispatch(server.app),
+        store=upload_store,
+    )
+    server.app.state.upload_store = upload_store
+    server.app.state.inference_tracker = inference_tracker
+    register_extract_route(server.app, upload_store, inference_tracker)
+    from bibr.serve.enrichment import register_enrichment_route
+
+    export_enricher = register_enrichment_route(server.app, Settings)
+
+    # Gate every other route too (/info, /openapi.json, /docs, …) — LitServe
+    # and FastAPI metadata endpoints leak deployment details. Middleware so
+    # future routes are covered by default; only the probe paths stay public.
+    # Exceptions raised in middleware bypass FastAPI's handlers, so respond
+    # directly instead of raising HTTPException.
+    from fastapi.responses import JSONResponse
+
+    # This gate is registered before the auth middleware so auth remains
+    # outside it in the request stack. Authenticated upload floods are rejected
+    # before Starlette parses multipart bodies or LitServe buffers file bytes.
+    from bibr.serve.admission import add_upload_admission
+
+    upload_admission = add_upload_admission(server.app, Settings.pipeline.max_active_uploads)
+
+    @server.app.middleware("http")
+    async def _auth_gate(request, call_next):  # pyright: ignore[reportUnusedFunction]
+        if request.url.path == INTERNAL_INFERENCE_PATH:
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        if request.url.path not in PUBLIC_PATHS:
+            detail = check_bearer(request.headers.get("authorization"))
+            if detail is not None:
+                return JSONResponse(
+                    {"detail": detail},
+                    status_code=401,
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
+
+    # Per-request usage metering (D2). Registered AFTER the auth gate so it is
+    # the OUTER of the two — 401s from the gate are still timed and logged —
+    # but BEFORE CORS, which stays outermost. Skips /health and /ready (noise).
+    from bibr.serve.jobs import _sanitize_request_id
+
+    _configure_metering_logging(Settings)
+
+    @server.app.middleware("http")
+    async def _metering(request, call_next):  # pyright: ignore[reportUnusedFunction]
+        if not Settings.metering.enabled or request.url.path in ("/health", "/ready"):
+            return await call_next(request)
+        request_id = _sanitize_request_id(request.headers.get("x-request-id")) or uuid.uuid4().hex
+        request.state.request_id = request_id
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        response.headers["x-request-id"] = request_id
+        response.headers["x-bibr-duration-ms"] = str(duration_ms)
+        metering_logger.info(
+            json.dumps(
+                {
+                    "request_id": request_id,
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": response.status_code,
+                    "duration_ms": duration_ms,
+                    "inference_outstanding": getattr(
+                        request.state,
+                        "inference_outstanding",
+                        server.app.state.inference_tracker.outstanding,
+                    ),
+                }
+            )
+        )
+        return response
+
+    # Async job API (D1). In-process store lives on the single API-server
+    # process pinned in main(); routes are auth-gated by the middleware above
+    # (not in PUBLIC_PATHS).
+    if Settings.jobs.enabled:
+        from bibr.serve.jobs import JobStore, register_job_routes
+
+        job_store = JobStore()
+        server.app.state.job_store = job_store
+        register_job_routes(
+            server.app,
+            store=job_store,
+            upload_store=upload_store,
+            tracker=inference_tracker,
+        )
+
+    # MCP endpoint (opt-in): streamable-HTTP Model Context Protocol tools at
+    # /mcp, riding the same upload store and inference dispatch as
+    # /papers/extract. Covered by the auth-gate middleware above (/mcp is not
+    # in PUBLIC_PATHS); its session manager is composed into the app lifespan.
+    if Settings.mcp.enabled:
+        try:
+            from bibr.serve.mcp import mount_mcp
+        except ModuleNotFoundError as e:
+            if e.name and e.name.split(".")[0] == "mcp":
+                from bibr.exceptions import ConfigurationError
+
+                raise ConfigurationError(
+                    "MCP_ENABLED=true requires the optional 'mcp' dependency — install "
+                    "it with 'uv sync --extra mcp' (source checkout) or "
+                    "pip install 'bibr[mcp]'."
+                ) from e
+            raise
+        mount_mcp(
+            server.app,
+            Settings,
+            upload_store=upload_store,
+            tracker=inference_tracker,
+            admission_gate=upload_admission,
+        )
+
+    # CORS added last so it wraps the auth gate — 401s from it still get
+    # Access-Control-Allow-Origin, and preflights short-circuit before auth.
+    if Settings.cors.origins:
+        server.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=Settings.cors.origins,
+            allow_credentials=_safe_cors_credentials(
+                Settings.cors.origins, Settings.cors.allow_credentials
+            ),
+            allow_methods=Settings.cors.allow_methods,
+            allow_headers=Settings.cors.allow_headers,
+        )
+
+    # Scrub credential-shaped substrings from server logs, including SDK
+    # tracebacks logged with exc_info that can embed ?key=… URLs (audit L12).
+    from bibr.utils.redact import install_secret_scrubbing
+
+    log_targets: list = list(logging.getLogger().handlers)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "litserve"):
+        log_targets.extend(logging.getLogger(name).handlers)
+    log_targets.extend(metering_logger.handlers)
+    if log_targets:
+        install_secret_scrubbing(*log_targets)
+
+    _register_readiness_route(server, Settings)
+
+    async def _close_ingress_resources() -> None:
+        try:
+            await inference_tracker.close()
+        finally:
+            try:
+                await upload_store.close()
+            finally:
+                await export_enricher.close()
+
+    _compose_lifespan_cleanup(server.app, _close_ingress_resources)
+    return server
+
+
+def _register_readiness_route(server, Settings) -> None:
+    """Mount a /ready probe that checks downstream services from the master.
+
+    Layout/segmenter readiness is covered by LitServe's own worker lifecycle
+    (requests simply queue until workers are ready), so this only probes
+    external dependencies: the SGLang OCR server and Redis (when enabled).
+    """
+    import asyncio
+    import json
+
+    import httpx
+    from fastapi import Request, Response
+
+    from bibr.ocr.http_security import normalize_ocr_base_url, ocr_request_headers
+    from bibr.serve.auth import check_bearer
+
+    ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
+
+    ocr_headers = ocr_request_headers(
+        ocr_base_url,
+        Settings.ocr.api_key,
+        allow_insecure_http=Settings.ocr.allow_insecure_http,
+    )
+    state: dict[str, object] = {}
+
+    async def _get_http_client() -> httpx.AsyncClient:
+        client = state.get("http_client")
+        if not isinstance(client, httpx.AsyncClient) or client.is_closed:
+            client = httpx.AsyncClient(timeout=5.0, headers=ocr_headers)
+            state["http_client"] = client
+        return client
+
+    async def _get_cache():
+        if "cache_inited" in state:
+            return state.get("cache")
+        state["cache_inited"] = True
+        try:
+            from bibr.cache import ResponseCache
+
+            if Settings.cache.enabled and Settings.redis.url:
+                state["cache"] = ResponseCache(
+                    redis_url=Settings.redis.url,
+                    ttl_seconds=Settings.cache.ttl_seconds,
+                    connect_timeout=Settings.redis.connect_timeout_seconds,
+                    socket_timeout=Settings.redis.socket_timeout_seconds,
+                    prefix=f"bibr:{Settings.cache.version}",
+                )
+        except Exception as e:
+            logger.warning("Readiness cache init failed: %s", e)
+        return state.get("cache")
+
+    @server.app.get("/ready")
+    async def ready(request: Request):
+        # Disclose per-service health + build_sha only to authenticated callers.
+        # check_bearer returns None both when auth is disabled (dev, single-tenant)
+        # and when a valid bearer is presented; a non-None detail string means the
+        # anonymous caller gets status-only (audit L1).
+        include_detail = check_bearer(request.headers.get("authorization")) is None
+        checks: dict[str, str] = {}
+        check_results: list[bool] = []
+        client = await _get_http_client()
+        try:
+            resp = await client.get(f"{ocr_base_url}/health")
+            checks["ocr"] = "ok" if resp.status_code == 200 else f"unhealthy ({resp.status_code})"
+            check_results.append(resp.status_code == 200)
+        except Exception:
+            logger.warning("Readiness OCR check failed", exc_info=True)
+            checks["ocr"] = "unreachable"
+            check_results.append(False)
+
+        classifier_check = state.get("classifier_check")
+        if not isinstance(classifier_check, tuple):
+            classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
+            state["classifier_check"] = classifier_check
+        classifier_status, classifier_ok = classifier_check
+        checks["classifiers"] = classifier_status
+        check_results.append(classifier_ok)
+
+        cache = await _get_cache()
+        if cache is not None:
+            try:
+                # Bound the ping so an unresponsive (vs unreachable) Redis
+                # can't hang the readiness probe indefinitely.
+                await asyncio.wait_for(cache._redis.ping(), timeout=3.0)
+                checks["redis"] = "ok"
+                check_results.append(True)
+            except Exception:
+                logger.warning("Readiness Redis check failed", exc_info=True)
+                checks["redis"] = "error"
+                check_results.append(False)
+
+        all_ok = all(check_results)
+        status = "ready" if all_ok else "not_ready"
+        return Response(
+            content=json.dumps(
+                readiness_payload(status, checks, Settings, include_detail=include_detail)
+            ),
+            media_type="application/json",
+            status_code=200 if all_ok else 503,
+        )
+
+
+def main():
+    """CLI entry point for ``bibr serve``."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="bibr serve",
+        description="bibr HTTP API — scientific paper extraction pipeline (LitServe)",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to")
+
+    args = parser.parse_args()
+
+    from bibr.config import Settings
+    from bibr.serve.auth import validate_bind_auth
+
+    validate_bind_auth(args.host, Settings.auth.api_key)
+
+    server = build_server()
+    logger.info("bibr serving on %s:%d", args.host, args.port)
+
+    # Upload-root ownership, dispatch tracking, admission, readiness state, and
+    # optional jobs are process-local. LitServe otherwise defaults this count to
+    # the inference-worker count, making API processes race over shared cleanup.
+    server.run(
+        host=args.host,
+        port=args.port,
+        generate_client_file=False,
+        num_api_servers=1,
+    )

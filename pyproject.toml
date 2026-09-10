@@ -1,0 +1,324 @@
+[project]
+name = "bibr"
+version = "0.5.0"
+description = "Scientific paper processing pipeline, extracts comprehensive metadata from PDF/DOCX. Designed as a preprocessing backend for scienceverse/metacheck"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+license = "AGPL-3.0-or-later"
+authors = [
+    { name = "Scienceverse", email = "jakub@jakubwerner.com" }
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "html5lib>=1.1",
+    "httpx[http2]>=0.28.1",
+    "google-genai>=1.0.0",
+    "instructor>=1.7.0",
+    "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
+    "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)
+    "pandas>=2.3.3",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.14.2", # fixes GHSA-4xgf-cpjx-pc3j secrets-dir symlink escape
+    "python-magic>=0.4.27; sys_platform != 'win32'",
+    "python-magic-bin>=0.4.14; sys_platform == 'win32'",
+    "python-multipart>=0.0.31", # fixes CVE-2026-53538/53539/53540 parser smuggling/DoS
+    "rapidfuzz>=3.6.0",
+    "rich>=13.0.0",
+    "questionary>=2.1.0",
+    "pillow>=11.1.1",
+    "wtpsplit-lite>=0.2.0",
+    "pypdfium2>=4.30.0",
+    "wordfreq>=3.0.0",
+    "python-dotenv>=0.21.0",
+    "litserve>=0.2.16,<0.3",
+    "uvicorn[standard]>=0.30.0",
+    "python-docx>=1.1.0",
+    "numind>=0.3,<0.4",
+]
+
+[project.urls]
+Homepage = "https://bibr.org"
+Documentation = "https://bibr.org"
+Repository = "https://github.com/scienceverse/bibr"
+Issues = "https://github.com/scienceverse/bibr/issues"
+Changelog = "https://github.com/scienceverse/bibr/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.sdist]
+# Root-anchor includes so nested README files cannot enter the distribution
+# through an ignore-file exception. The contents guard checks the built archive.
+include = ["/bibr", "/README.md", "/LICENSE.md", "/pyproject.toml"]
+# Leading "/" root-anchors the patterns (gitignore semantics): a bare
+# "data" would also swallow bibr/data/, which ships in the package.
+exclude = [
+    "/benchmarks",
+    "/ci",
+    "/data",
+    "/docs",
+    "/evaluation",
+    "/examples",
+    "/notebooks",
+    "/scripts",
+    "/tests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["bibr"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+    "pytest-cov>=7.0.0",
+    "pytest-asyncio>=1.3.0",
+    "ruff>=0.8.0",
+    "mypy>=1.15.0",
+    "pandas-stubs>=2.0.0",
+    "pre-commit>=4.0.0",
+    "pip-audit>=2.7.0",
+    "pyarrow>=23.0.1", # evaluation scripts only; >=23.0.1 fixes PYSEC-2026-113
+    "requests>=2.28.0", # evaluation scripts only
+    "scikit-learn>=1.9.0",
+    "sklearn-crfsuite>=0.5.0",
+]
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5.0",
+    # Pinned below 0.6.1: that release adds a mandatory dependency on
+    # "properdocs" (a competing fork) which installs a sys.meta_path hook
+    # capable of silently redirecting all `mkdocs.*` imports to itself and
+    # prints unsolicited FUD nagware urging migration off mkdocs. 0.6.0 has
+    # no such dependency. Re-evaluate before lifting this cap.
+    "mkdocs-gen-files>=0.5,<0.6.1",
+    "mkdocs-macros-plugin>=1.0",
+]
+
+[project.optional-dependencies]
+cache = ["redis>=5.0.0"]
+# Managed local vLLM server for `--llm local` on Linux/CUDA (`bibr setup` local path).
+vllm = ["vllm==0.25.1; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version < '3.14'"]
+# Local ML inference: layout detection, NER seg/parse, section classifier,
+# transformers OCR, opencv post-processing. Core installs run the cloud
+# OCR/LLM paths without these. (Replaces the old empty "ocr" extra.)
+ml = [
+    "transformers>=5.0.0",
+    # torch>=2.10 fixes CVE-2025-3001 (torch.lstm_cell memory corruption);
+    # >=2.6 had fixed CVE-2025-32434 (torch.load RCE). torchvision floor is
+    # the torch-2.6 pairing; the resolver picks the 2.10-matching release.
+    "torch>=2.10.0",
+    "torchvision>=0.21.0",
+    "pytorch-crf>=0.7.2",
+    "onnxruntime>=1.19.0",  # also pulled into core transitively by wtpsplit-lite
+    "opencv-python-headless>=4.8.0",
+    "sentencepiece>=0.1.99",
+    "accelerate>=0.20.0",
+    "scikit-learn>=1.9.0",  # geom segmenter (HistGradientBoostingClassifier + DictVectorizer)
+    "joblib>=1.3.0",  # geom segmenter model bundle loading
+]
+demo = ["gradio>=6.15.0"]  # fixes CVE-2026-48545 shared-client cookie injection
+# Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
+# Message Batches is not exposed by Instructor, so we use the official SDK directly.
+batch = ["anthropic>=0.40.0"]
+# NOTE: onnxruntime-gpu shares the same import namespace as the core onnxruntime
+# dep but is a separate PyPI package. After `uv sync --extra gpu`, you must also run
+# `uv pip install 'onnxruntime-gpu[cuda,cudnn]'` to override the CPU-only version.
+gpu = ["onnxruntime-gpu[cuda,cudnn]; sys_platform == 'linux' or sys_platform == 'win32'"]
+# vllm-mlx 0.4.x is the first release line bibr has validated for both local
+# NuExtract-style LLM serving and GLM-OCR MLLM serving on Apple Silicon.
+# On CUDA the local-LLM runtime is the `vllm` extra; GPU OCR is `paddle-vllm`.
+local-mlx = ["vllm-mlx>=0.4,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+local = [
+    "vllm-mlx>=0.4,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# MCP server (`bibr mcp`) — agent-facing extraction tools over stdio.
+# Floor matches the constraint-dependencies security floor below.
+mcp = ["mcp>=1.28.1"]
+all = ["bibr[batch,cache,demo,mcp,ml]"]
+
+[project.scripts]
+bibr = "bibr.local.cli:main"
+
+[tool.uv]
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
+# Floors on transitive deps to clear known CVEs without adding them as direct
+# deps. idna>=3.15: CVE-2026-45409 (idna.encode DoS). urllib3>=2.7.0:
+# PYSEC-2026-141/142 (redirect header leak / decompression DoS).
+# click>=8.3.3: PYSEC-2026-2132. pyasn1>=0.6.4: PYSEC-2026-3455/3456/3457.
+# mcp>=1.28.1: task-isolation plus HTTP/WebSocket transport advisories.
+# pymdown-extensions>=11.0.0: path traversal in the b64 extension.
+# h2>=4.4.1: PYSEC-2026-3628 (duplicate Host headers forwarded to the consuming
+# application — a request-smuggling primitive when HTTP/2 is downgraded to
+# HTTP/1.1). Reached through httpx[http2], which bibr uses for the OCR and
+# Crossref clients, so this one is genuine runtime exposure rather than a
+# build-time finding.
+# pip>=26.2: PYSEC-2026-3721 (doubly-encoded package URLs from an index can
+# install files to arbitrary paths). pip only builds trusted environments here,
+# never runtime input, but a fixed release exists so a floor beats an exception.
+# aiohttp>=3.14.3: CVE-2026-59881 (undesired permessage-deflate), CVE-2026-69243
+# (WebSocket-upgrade request smuggling), CVE-2026-69244 (OOB read in the C
+# response parser). cryptography>=50.0.0: CVE-2026-69247 (PKCS#7 Bleichenbacher
+# oracle).
+# setuptools>=80.10.2 is a floor on what setuptools *vendors*, not on setuptools
+# itself: 79.0.1 ships setuptools/_vendor/jaraco.context-5.3.0 (CVE-2026-23949,
+# HIGH) and wheel-0.45.1 (CVE-2026-24049, HIGH), which Trivy finds in the serve
+# image via their dist-info METADATA. 80.10.2 vendors jaraco.context 6.1.0 and
+# wheel 0.46.3 — both fixed — and stays under vllm's setuptools<81.0.0 pin, so
+# the linux/x86_64 branch of the lock still resolves. Do not raise this floor
+# past 81 without checking that pin.
+# (setuptools' own PYSEC-2026-3447 can't be floored — the fix is 83.0.0, above
+# that same vllm pin; tracked in ci/vulnerability-exceptions.toml instead.)
+constraint-dependencies = [
+    "aiohttp>=3.14.3",
+    "click>=8.3.3",
+    "cryptography>=50.0.0",
+    "h2>=4.4.1",
+    "idna>=3.15",
+    "mcp>=1.28.1",
+    "msgpack>=1.2.1",
+    "pip>=26.2",
+    "pyasn1>=0.6.4",
+    "pymdown-extensions>=11.0.0",
+    "setuptools>=80.10.2",
+    "starlette>=0.40.0",
+    "urllib3>=2.7.0",
+]
+# No `conflicts` block: since sglang[all] was dropped, the `local` extra is
+# vllm-mlx (Apple Silicon) and the `vllm` extra is CUDA-only, so they are
+# platform-disjoint and every extra can be installed together again.
+
+[tool.ruff]
+# Target Python 3.11+
+target-version = "py311"
+line-length = 100
+exclude = ["notebooks", "data"]
+# Honor `exclude` even when files are passed explicitly (pre-commit does this)
+force-exclude = true
+
+[tool.ruff.lint]
+# Enable common rules
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+    "S",      # flake8-bandit (security)
+    "LOG",    # flake8-logging
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # assert statements (allowed in tests)
+    "B008",   # function calls in default arguments (FastAPI uses this pattern)
+    "SIM105", # contextlib.suppress is less readable than try-except-pass for simple cases
+    "SIM108", # ternary operators reduce readability for complex conditions
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "S105", "S108", "S301", "S314", "S603", "ARG", "E402", "SIM117"]  # Allow asserts, hardcoded passwords, /tmp paths, pickle round-trip tests, xml.etree parsing of literal fixtures, subprocess calls, unused args, import order, nested with in tests
+"bibr/serve/**/*.py" = ["ARG002"]  # API-compatibility params in ingress routes
+"bibr/local/**/*.py" = ["ARG002"]  # Interface-compatibility params
+"evaluation/**/*.py" = ["S101", "ARG", "S301", "S108"]  # Evaluation scripts: asserts, unused args, pickle example-cache round-trip, /tmp cache paths
+"scripts/**" = ["S101", "S113", "S311", "ARG", "F841", "E402"]  # Dev/debug scripts
+"notebooks/**" = ["S101", "S113", "ARG", "F841", "E402"]  # Notebooks
+
+[tool.ruff.format]
+# Use double quotes for strings
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["bibr"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+check_untyped_defs = true
+disallow_untyped_defs = false  # gradual adoption — tighten later
+no_implicit_optional = true
+strict_equality = true
+extra_checks = true
+exclude = [
+    "evaluation/",
+    "scripts/",
+    "notebooks/",
+]
+
+[[tool.mypy.overrides]]
+module = [
+    "bibr.models",
+    "bibr.exceptions",
+    "bibr.paper_contents",
+    "bibr.paper",
+]
+disallow_untyped_defs = true
+
+# `bibr.schemas` deliberately relaxes some `PaperAuthor` / `PaperReference` fields
+# from `str` to `str | None` so LLM nulls flow through validators that coerce
+# them to `""` before downstream code sees them. Pydantic enforces the runtime
+# invariant, but the redeclaration is a Liskov violation mypy flags.
+[[tool.mypy.overrides]]
+module = ["bibr.schemas"]
+disable_error_code = ["assignment"]
+
+[[tool.mypy.overrides]]
+module = [
+    "wtpsplit.*",
+    "litserve.*",
+    "instructor.*",
+    "cv2.*",
+    "magic",
+    "pypdfium2.*",
+    "pypdfium2_raw.*",
+    "gradio.*",
+    "wordfreq.*",
+    "sentencepiece.*",
+    "accelerate.*",
+    "html5lib.*",
+    "bs4.*",
+    "rapidfuzz.*",
+    "redis",
+    "redis.*",
+    "redis.asyncio",
+    "onnxruntime.*",
+    "lxml.*",
+]
+ignore_missing_imports = true

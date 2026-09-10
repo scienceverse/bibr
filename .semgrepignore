@@ -1,0 +1,3 @@
+# Research-only segmentation feature probes use trusted local pickle caches
+# under /tmp; they are not runtime or packaged code.
+evaluation/seg_geom/

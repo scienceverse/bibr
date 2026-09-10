@@ -1,0 +1,415 @@
+"""Shared PP-DocLayoutV3 layout-detector core.
+
+``BaseLayoutDetector`` owns everything the local and serve variants have in
+common: model loading, device resolution, the fixed-size padded PyTorch
+forward pass, and detection postprocessing (threshold → NMS → large-image
+filter → containment → read order). Variants layer lifecycle on top —
+``bibr.local.layout`` adds explicit ``unload()`` for sequential GPU phases,
+``bibr.serve.deployments.layout`` adds torch.compile + the GpuBatcher.
+"""
+
+import logging
+import time
+
+import numpy as np
+
+from bibr.config import GlobalSettings, snapshot_settings
+from bibr.layout_utils import (
+    _CORRECT_ID2LABEL,
+    _LABEL_TO_TASK,
+    _compute_read_order,
+    _compute_read_order_rb,
+    _filter_containment,
+    _nms,
+    _resolve_overlaps_rulebook,
+)
+
+logger = logging.getLogger(__name__)
+
+_IMAGE_LABEL = "image"
+
+# Heading labels whose silent loss in overlap resolution costs a section
+# downstream — worth an INFO trace (see the lead-reference containment RCA:
+# a coincident pair once annihilated a real region with no log to show for it).
+_HEADING_BOX_LABELS = frozenset({"doc_title", "paragraph_title"})
+
+
+def _log_dropped_heading_boxes(
+    boxes: "np.ndarray", keep_mask: "np.ndarray", id2label: dict[int, str]
+) -> None:
+    """Log heading boxes about to be dropped by overlap resolution.
+
+    ``boxes`` rows are ``[label_id, score, x1, y1, x2, y2, ...]`` and
+    ``keep_mask`` indexes them; body-text drops are routine dedup and stay
+    silent.
+    """
+    for i in np.where(~keep_mask)[0]:
+        label = id2label.get(int(boxes[i, 0]), "")
+        if label in _HEADING_BOX_LABELS:
+            x1, y1, x2, y2 = (int(v) for v in boxes[i, 2:6])
+            logger.info(
+                "Overlap resolution dropped a %s box at [%d, %d, %d, %d] — "
+                "heading text may be lost",
+                label,
+                x1,
+                y1,
+                x2,
+                y2,
+            )
+
+
+# Throttle window for handing VRAM back to a co-located OCR server.
+_EMPTY_CACHE_MIN_INTERVAL_SECONDS = 30.0
+_last_empty_cache_time = 0.0
+
+
+def _maybe_empty_cache() -> None:
+    """Throttled ``torch.cuda.empty_cache()`` (at most once per 30s).
+
+    With ``expandable_segments`` the caching allocator returns freed physical
+    pages to the driver, so this hands VRAM back to a sibling GPU process (the
+    co-located OCR server). But a per-forward-batch sweep held the GIL — stalling
+    the async event loop under concurrency — and defeated the CUDA caching
+    allocator (every ≤4-page batch re-freed and re-mmapped segments). Throttling
+    keeps the handback while amortizing the cost, mirroring
+    ``ExportStage._maybe_gc_collect``.
+    """
+    global _last_empty_cache_time
+    now = time.monotonic()
+    if now - _last_empty_cache_time < _EMPTY_CACHE_MIN_INTERVAL_SECONDS:
+        return
+    _last_empty_cache_time = now
+    import torch
+
+    torch.cuda.empty_cache()
+
+
+class BaseLayoutDetector:
+    """PP-DocLayoutV3 wrapper: loading, inference, and postprocessing.
+
+    Subclasses set ``_variant`` (used in device reporting) and implement
+    ``_install_model(model)`` to take ownership of the loaded model (compile
+    it, stash it, build batchers, ...), plus their own ``detect_batch``.
+    """
+
+    _variant = "base"
+
+    def __init__(
+        self,
+        model_id: str = "PaddlePaddle/PP-DocLayoutV3_safetensors",
+        threshold: float | None = None,
+        device: str | None = None,
+        settings: GlobalSettings | None = None,
+    ):
+        import os
+
+        # Must be set before importing torch / first CUDA allocation.
+        # With expandable_segments, the caching allocator uses virtual memory
+        # mappings (cuMemMap/cuMemUnmap) instead of cudaMalloc, so
+        # empty_cache() truly returns physical pages to the driver — making
+        # them available to sibling GPU processes (e.g. the OCR server).
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+        try:
+            import torch
+            from transformers import AutoImageProcessor, AutoModelForObjectDetection
+        except ImportError as e:
+            raise ImportError(
+                "PDF processing, including cloud OCR, requires the 'ml' extra for local layout "
+                "detection: pip install 'bibr[ml]' (or uv sync --extra ml). The core install "
+                "remains sufficient for native DOCX, JATS, HTML, and ePub inputs."
+            ) from e
+
+        from bibr.utils.hf_cache import disable_hf_cache_symlinks_on_windows
+
+        disable_hf_cache_symlinks_on_windows()
+        self._settings = settings if settings is not None else snapshot_settings()
+        self.threshold = (
+            threshold if threshold is not None else self._settings.layout.detection_threshold
+        )
+        # Override the broken HF config id2label with the correct mapping.
+        self._id2label = _CORRECT_ID2LABEL
+        # Set True by variants that wrap the model in torch.compile — gates the
+        # fixed-size batch padding (only compiled graphs recompile on new shapes).
+        self._compiled: bool = False
+
+        if device is None:
+            from bibr.utils.device import detect_torch_device
+
+            device = detect_torch_device()
+        self._device = torch.device(device)
+
+        self._image_processor = AutoImageProcessor.from_pretrained(model_id)
+        model = AutoModelForObjectDetection.from_pretrained(model_id)
+        if self._device.type != "cpu":
+            model = model.to(self._device)
+        if self._device.type == "cuda":
+            # Callers may hand us an explicit "cuda" device, bypassing
+            # detect_torch_device() — so enable the perf knobs here too.
+            from bibr.utils.device import configure_cuda_perf
+
+            configure_cuda_perf()
+        model.eval()
+
+        # Pre-allocate a dummy image for batch padding (avoids per-call PIL
+        # allocation).
+        from PIL import Image
+
+        self._pad_image = Image.new("RGB", (640, 480))
+
+        self._install_model(model)
+
+        logger.info("LayoutDetector ready (device=%s)", self._device)
+        from bibr.utils.device import report_device
+
+        report_device(f"LayoutDetector ({self._variant})", self._device.type, gpu_capable=True)
+
+    def _install_model(self, model) -> None:
+        """Take ownership of the loaded, eval-mode model."""
+        raise NotImplementedError
+
+    def _detect_images(self, images: list) -> list[list[dict]]:
+        """Run detection on a batch of PIL images (orig sizes from image dims)."""
+        orig_sizes = [(img.height, img.width) for img in images]  # (h, w) for post_process
+        try:
+            return self._detect_pytorch(images, orig_sizes)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            if ("out of memory" not in message and "bfcarena" not in message) or len(images) <= 1:
+                raise
+
+            # Compiled inference pads every call back to the configured maximum.
+            # Disable that padding before retrying or the smaller logical batch
+            # would consume exactly the same memory and OOM again.
+            if self._compiled:
+                self._compiled = False
+                logger.warning("Layout OOM disabled fixed-size compiled padding for retries")
+            half = max(1, len(images) // 2)
+            logger.warning(
+                "Layout OOM with batch size %d, retrying as %d + %d",
+                len(images),
+                half,
+                len(images) - half,
+            )
+
+        # Retry after leaving the exception handler: Python then clears the
+        # traceback (which may retain failed-forward tensors and their VRAM).
+        return self._detect_images(images[:half]) + self._detect_images(images[half:])
+
+    def _detect_pytorch(
+        self, pil_images: list, orig_sizes: list[tuple[int, int]]
+    ) -> list[list[dict]]:
+        """PyTorch inference path for layout detection."""
+        import torch
+
+        real_count = len(pil_images)
+        # Pad to a fixed batch size ONLY under torch.compile, so the compiled
+        # graph never recompiles for a new batch shape. In the default eager
+        # path padding would waste up to (_MAX_BATCH_SIZE - 1) forward passes on
+        # dummy images.
+        if self._compiled:
+            pad_count = self._settings.layout.batch_size - real_count
+            if pad_count > 0:
+                pil_images = pil_images + [self._pad_image] * pad_count
+
+        inputs = self._image_processor(images=pil_images, return_tensors="pt")
+        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+
+        with (
+            torch.inference_mode(),
+            torch.autocast(
+                device_type=self._device.type,
+                dtype=torch.float16,
+                enabled=self._device.type in ("cuda", "mps"),
+            ),
+        ):
+            outputs = self._model(**inputs)
+
+        # Free input tensors immediately
+        del inputs
+
+        # Post-process only real images — slice model outputs to real_count
+        # before HF post-processing to avoid decoding boxes for dummy padding.
+        real_outputs = type(outputs)(**{k: v[:real_count] for k, v in outputs.items()})
+        del outputs
+
+        target_sizes = torch.tensor(orig_sizes[:real_count], dtype=torch.float32)
+        results = self._image_processor.post_process_object_detection(
+            real_outputs, threshold=self.threshold, target_sizes=target_sizes
+        )
+        del real_outputs, target_sizes
+
+        all_results = []
+        for result, (orig_h, orig_w) in zip(results, orig_sizes[:real_count], strict=True):
+            regions = self._postprocess(result, orig_w, orig_h)
+            all_results.append(regions)
+
+        # Break reference cycles between HF post-process result tensors and
+        # model output graph, then (throttled) release CUDA blocks to the driver.
+        del results
+        if self._device.type == "cuda":
+            _maybe_empty_cache()
+
+        return all_results
+
+    def _postprocess(self, result: dict, orig_width: int, orig_height: int) -> list[dict]:
+        """Convert post_process_object_detection output to region dicts.
+
+        ``result`` has keys ``scores``, ``labels``, ``boxes`` ([x1,y1,x2,y2]
+        in original pixel coords), and optionally ``order_seq`` (model-
+        predicted reading order). After thresholding and normalisation to the
+        0-1000 scale, cross-class NMS, the full-page-image filter, and
+        overlap resolution suppress duplicate detections. Overlap resolution
+        is selected by ``LAYOUT_OVERLAP_RESOLVER``: "legacy" (default) is the
+        containment filter ported from the vendored SDK
+        ``apply_layout_postprocess``; "rulebook" is the Docling-derived
+        union-find resolver. Reading order uses the model's ``order_seq``
+        when available (Global Pointer Mechanism), falling back to the
+        spatial ordering selected by ``LAYOUT_READ_ORDER_FALLBACK``: "xy"
+        (default, y-then-x lexsort) or "rb" (column-aware Docling-derived
+        dilation + adjacency ordering).
+        """
+        raw_scores = result["scores"]
+        scores = raw_scores.cpu().numpy() if hasattr(raw_scores, "cpu") else np.asarray(raw_scores)
+        raw_labels = result["labels"]
+        labels = raw_labels.cpu().numpy() if hasattr(raw_labels, "cpu") else np.asarray(raw_labels)
+        raw_boxes = result["boxes"]
+        boxes_px = raw_boxes.cpu().numpy() if hasattr(raw_boxes, "cpu") else np.asarray(raw_boxes)
+
+        raw_order = result.get("order_seq")
+        if raw_order is not None:
+            order_seq = (
+                raw_order.cpu().numpy() if hasattr(raw_order, "cpu") else np.asarray(raw_order)
+            )
+        else:
+            order_seq = None
+
+        # -- Pass 1: threshold and normalise coordinates --
+        valid_rows = []
+        valid_order = []  # parallel: model order for each valid row
+        for i in range(len(scores)):
+            score = float(scores[i])
+            if score < self.threshold:
+                continue
+            label_id = int(labels[i])
+            if label_id not in self._id2label:
+                continue
+
+            # Normalise from original pixel space to 0-1000 scale
+            x1 = max(0, min(int(float(boxes_px[i, 0]) * 1000.0 / orig_width), 1000))
+            y1 = max(0, min(int(float(boxes_px[i, 1]) * 1000.0 / orig_height), 1000))
+            x2 = max(0, min(int(float(boxes_px[i, 2]) * 1000.0 / orig_width), 1000))
+            y2 = max(0, min(int(float(boxes_px[i, 3]) * 1000.0 / orig_height), 1000))
+
+            # Skip degenerate boxes
+            if x1 >= x2 or y1 >= y2:
+                continue
+
+            valid_rows.append([label_id, score, x1, y1, x2, y2])
+            valid_order.append(int(order_seq[i]) if order_seq is not None else -1)
+
+        if not valid_rows:
+            return []
+
+        boxes = np.array(valid_rows, dtype=np.float64)
+        model_order = np.array(valid_order, dtype=np.int64)
+
+        # -- Pass 2: NMS (cross-class + same-class) --
+        kept_indices = _nms(
+            boxes,
+            iou_same=self._settings.layout.nms_iou_same,
+            iou_diff=self._settings.layout.nms_iou_diff,
+        )
+        boxes = boxes[kept_indices]
+        model_order = model_order[kept_indices]
+
+        n_before_nms = len(valid_rows)
+        n_after_nms = len(boxes)
+
+        # -- Pass 2b: filter spurious full-page "image" detections --
+        # A page-spanning "image" box is almost always a false positive.
+        if len(boxes) > 1:
+            is_landscape = orig_width > orig_height
+            area_thresh = (
+                self._settings.layout.large_image_area_landscape
+                if is_landscape
+                else self._settings.layout.large_image_area_portrait
+            )
+            # Coordinates are 0-1000 normalised; total area = 1_000_000.
+            total_area = 1_000_000.0
+            keep = []
+            for i in range(len(boxes)):
+                label_name = self._id2label.get(int(boxes[i, 0]), "")
+                if label_name == _IMAGE_LABEL:
+                    bx1, by1, bx2, by2 = boxes[i, 2], boxes[i, 3], boxes[i, 4], boxes[i, 5]
+                    box_area = max(0, bx2 - bx1) * max(0, by2 - by1)
+                    if box_area > area_thresh * total_area:
+                        continue  # drop this oversized image box
+                keep.append(i)
+            if len(keep) < len(boxes):
+                boxes = boxes[keep]
+                model_order = model_order[keep]
+
+        # -- Pass 3: overlap resolution --
+        # "rulebook" = Docling-derived union-find resolver (keep-best, absorb
+        # losers' bboxes); "legacy" (default) = per-category containment filter.
+        if len(boxes) > 1:
+            if self._settings.layout.overlap_resolver == "rulebook":
+                keep_mask, boxes = _resolve_overlaps_rulebook(boxes, self._id2label)
+                _log_dropped_heading_boxes(boxes, keep_mask, self._id2label)
+                boxes = boxes[keep_mask]
+                model_order = model_order[keep_mask]
+            else:
+                keep_mask = _filter_containment(boxes, self._id2label)
+                if not keep_mask.all():
+                    _log_dropped_heading_boxes(boxes, keep_mask, self._id2label)
+                    boxes = boxes[keep_mask]
+                    model_order = model_order[keep_mask]
+
+        n_after_contain = len(boxes)
+        if n_before_nms != n_after_contain:
+            logger.debug(
+                "NMS/containment: %d -> %d -> %d regions (threshold/NMS/containment)",
+                n_before_nms,
+                n_after_nms,
+                n_after_contain,
+            )
+
+        # -- Determine read order --
+        has_model_order = model_order[0] >= 0 if len(model_order) > 0 else False
+        if has_model_order:
+            read_orders = list(model_order)
+        elif self._settings.layout.read_order_fallback == "rb":
+            read_orders = _compute_read_order_rb(boxes)
+        else:
+            read_orders = _compute_read_order(boxes)
+
+        # -- Build region dicts --
+        regions = []
+        for idx in range(len(boxes)):
+            label_id = int(boxes[idx, 0])
+            label = self._id2label.get(label_id, f"unknown_{label_id}")
+            task_type = _LABEL_TO_TASK.get(label, "text")
+            regions.append(
+                {
+                    "index": idx,
+                    "label": label,
+                    "task_type": task_type,
+                    "score": float(boxes[idx, 1]),
+                    "bbox_2d": [
+                        int(boxes[idx, 2]),
+                        int(boxes[idx, 3]),
+                        int(boxes[idx, 4]),
+                        int(boxes[idx, 5]),
+                    ],
+                    "read_order": int(read_orders[idx]),
+                }
+            )
+
+        regions.sort(key=lambda r: r["read_order"])  # type: ignore[arg-type,return-value]
+
+        # Re-index after sorting
+        for idx, r in enumerate(regions):
+            r["index"] = idx
+
+        return regions

@@ -1,0 +1,68 @@
+{
+  "detected_footers": [],
+  "detected_headers": [],
+  "detected_title": "Tabled Paper",
+  "figures": [
+    {
+      "caption": "Figure 1: Plot",
+      "figure_id": 1,
+      "section_id": 3
+    }
+  ],
+  "sections": [
+    {
+      "header": "Root",
+      "level": 0,
+      "parent_section_id": null,
+      "section_id": 0,
+      "section_type": "unknown"
+    },
+    {
+      "header": "Tabled Paper",
+      "level": 1,
+      "parent_section_id": 0,
+      "section_id": 1,
+      "section_type": "unknown"
+    },
+    {
+      "header": "Results",
+      "level": 2,
+      "parent_section_id": 1,
+      "section_id": 2,
+      "section_type": "unknown"
+    },
+    {
+      "header": "Figure 1",
+      "level": 1,
+      "parent_section_id": 0,
+      "section_id": 3,
+      "section_type": "figure"
+    },
+    {
+      "header": "Table 1",
+      "level": 1,
+      "parent_section_id": 0,
+      "section_id": 4,
+      "section_type": "table"
+    }
+  ],
+  "sentences": [
+    {
+      "section_id": 3,
+      "text": "Figure 1: Plot",
+      "text_id": 1
+    },
+    {
+      "section_id": 4,
+      "text": "Table 1: Demographics",
+      "text_id": 2
+    }
+  ],
+  "tables": [
+    {
+      "caption": "Table 1: Demographics",
+      "section_id": 4,
+      "table_id": 1
+    }
+  ]
+}

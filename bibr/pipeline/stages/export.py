@@ -1,0 +1,290 @@
+"""ExportStage — serialize Paper to JSON, free state."""
+
+from __future__ import annotations
+
+import copy
+import gc
+import logging
+import time
+from dataclasses import asdict, is_dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bibr.pipeline.context import PipelineContext
+
+logger = logging.getLogger(__name__)
+
+# gc.collect() holds the GIL for the whole pass, stalling the event loop —
+# in serve mode every request is one chunk, so an unconditional collect per
+# chunk stacks loop stalls under load. Throttle to one full collect per
+# window; refcounting already frees the big DataFrames immediately, the
+# collect only mops up cycles.
+_GC_MIN_INTERVAL_SECONDS = 30.0
+
+
+def _build_ocr_config(ctx: PipelineContext) -> dict:
+    from bibr.ocr.profiles import resolve_ocr_runtime_identity
+
+    scratch = getattr(ctx, "scratch", None) or {}
+    identity = scratch.get("ocr_runtime_identity")
+    if identity is None:
+        identity = resolve_ocr_runtime_identity(ctx.config, ctx.settings)
+
+    return {
+        "ocr_backend": identity.backend,
+        "ocr_model": identity.model,
+        "ocr_profile": identity.profile,
+        "llm_provider": ctx.settings.llm.provider,
+        "llm_model": ctx.settings.llm.model,
+        "no_llm": ctx.config.no_llm,
+    }
+
+
+def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
+    """Extraction provenance for the v10.3 ``extraction`` export block.
+
+    Records the bibr package version, the resolved reference seg/parse
+    strategies, whether the CRF seg-fallback fired, the *effective*
+    Crossref-enrich/consolidate modes, and per-stage wall-clock timings.
+
+    Timings come from the file's own ``fs.stage_times`` — in a multi-file
+    chunk the chunk wall clock must not be attributed to every paper. The
+    chunk-level ``ctx.scratch["stage_timings"]`` is only a fallback for
+    callers without per-file times.
+    """
+    import bibr
+    from bibr.extract.extractor import (
+        GEOM_CASCADE_WARNING_PREFIX,
+        SEG_FALLBACK_WARNING_PREFIX,
+        _resolve_ref_strategies,
+    )
+
+    seg_strategy, parse_strategy = _resolve_ref_strategies(
+        getattr(ctx.config, "ref_seg_strategy", None),
+        getattr(ctx.config, "ref_parse_strategy", None),
+        settings=ctx.settings,
+    )
+    # True when the configured segmenter did NOT produce the final segmentation:
+    # a CRF fall-back OR a geom->LLM cascade. (Merge-split is a correction layered
+    # on top of the segmenter, not a fall-back from it, so it does not count here.)
+    fallback_prefixes = (SEG_FALLBACK_WARNING_PREFIX, GEOM_CASCADE_WARNING_PREFIX)
+    fallback_used = any(
+        str(w).startswith(fallback_prefixes) for w in (paper.processing_warnings or [])
+    )
+    raw_timings = (getattr(fs, "stage_times", None) or {}) or (
+        (getattr(ctx, "scratch", None) or {}).get("stage_timings") or {}
+    )
+    timings = {k: round(float(v), 3) for k, v in raw_timings.items()} or None
+    total_seconds = round(sum(raw_timings.values()), 3) if raw_timings else None
+
+    extraction = {
+        "bibr_version": bibr.__version__,
+        "build_sha": ctx.settings.BIBR_BUILD_SHA,
+        "ref_seg_strategy": seg_strategy,
+        "ref_parse_strategy": parse_strategy,
+        "references_complete": not bool(
+            getattr(getattr(paper, "metadata", None), "references_incomplete", False)
+        ),
+        "ref_seg_fallback_used": fallback_used,
+        "crossref_enrich": bool(ctx.config.crossref and ctx.settings.crossref.enrich),
+        "consolidate": ctx.config.consolidate or ctx.settings.crossref.consolidate,
+        "timings": timings,
+        "total_seconds": total_seconds,
+    }
+    expected_identity = getattr(paper, "expected_identity", None)
+    if is_dataclass(expected_identity):
+        extraction["expected_identity"] = asdict(expected_identity)
+    doi_selection = getattr(paper, "doi_selection", None)
+    if is_dataclass(doi_selection):
+        extraction["identity_receipt"] = {
+            "selected": asdict(doi_selection.selected)
+            if doi_selection.selected is not None
+            else None,
+            "candidates": [asdict(candidate) for candidate in doi_selection.candidates],
+            "issue_codes": [issue.code for issue in doi_selection.issues],
+        }
+    return extraction
+
+
+async def build_result_payload(ctx: PipelineContext, fs) -> dict:
+    """Prepare and serialize one paper identically for checkpoint and export."""
+
+    import asyncio
+
+    if fs.paper is None:
+        raise RuntimeError("Paper not built before export stage")
+    fs.paper.ocr_config = _build_ocr_config(ctx)
+    fs.paper.extraction = _build_extraction(ctx, fs.paper, fs)
+    if fs.warnings:
+        fs.paper.processing_warnings = list(
+            dict.fromkeys([*fs.paper.processing_warnings, *fs.warnings])
+        )
+    return await asyncio.to_thread(
+        fs.paper.export_to_json,
+        include_regions=ctx.config.include_regions,
+        include_region_meta=ctx.config.include_region_meta,
+    )
+
+
+async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> None:
+    import asyncio
+
+    mode = ctx.config.consolidate or ctx.settings.crossref.consolidate
+    if mode == "off":
+        return
+    from bibr.enrich.consolidate import consolidate_bibs
+
+    await asyncio.to_thread(consolidate_bibs, payload, mode=mode)
+    crossref_on = ctx.config.crossref and ctx.settings.crossref.enrich
+    if not crossref_on and not payload.get("bib_match"):
+        payload["processing_warnings"] = list(
+            dict.fromkeys(
+                [
+                    *payload.get("processing_warnings", []),
+                    "consolidate enabled but Crossref enrichment is off — no matches to merge",
+                ]
+            )
+        )
+
+
+def _load_checkpoint_core(sink, fs) -> dict:
+    """Read the immutable local core, with protocol-only sink compatibility."""
+
+    read_core = getattr(sink, "read_core", None)
+    if callable(read_core):
+        return read_core(fs)
+    if isinstance(fs.result_json, dict):
+        return fs.result_json
+    raise RuntimeError("Checkpoint core is unavailable for enrichment replay")
+
+
+class ExportStage:
+    name = "export"
+    # FileState fields consumed / populated (see validate_stage_contracts).
+    requires = ("paper",)
+    produces = ("result_json",)
+
+    def __init__(self) -> None:
+        self._last_gc_time = 0.0
+
+    async def _maybe_gc_collect(self) -> None:
+        now = time.monotonic()
+        if now - self._last_gc_time < _GC_MIN_INTERVAL_SECONDS:
+            return
+        self._last_gc_time = now
+        # gc.collect() holds the GIL for the whole sweep; run it in a thread so
+        # the event loop keeps servicing other in-flight requests meanwhile.
+        import asyncio
+
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, gc.collect)
+
+    async def run(self, ctx: PipelineContext) -> None:
+        ctx.progress.stage_start(self.name)
+        for fs in ctx.alive():
+            try:
+                sink = getattr(fs, "artifact_sink", None)
+                core_hash = getattr(fs, "core_sha256", None)
+                enrichment_state = getattr(fs, "enrichment_state", None)
+                if sink is not None and core_hash is not None and enrichment_state is None:
+                    # Enrichment was not requested (including refs=off). The
+                    # checkpoint stage already serialized and materialized the
+                    # authoritative core, so do not serialize Paper a second
+                    # time merely to discard that result.
+                    if not isinstance(fs.result_json, dict):
+                        raise RuntimeError("Verified in-memory core checkpoint is unavailable")
+                    continue
+
+                enriched_payload = await build_result_payload(ctx, fs)
+                if sink is not None and core_hash is not None and enrichment_state is not None:
+                    from bibr.pipeline.artifacts import (
+                        EnrichmentSidecar,
+                        RunState,
+                        enrichment_settings_digest,
+                        make_enrichment_sidecar,
+                        replay_enrichment_sidecar,
+                    )
+
+                    settings_digest = enrichment_settings_digest(ctx)
+                    completeness = (
+                        "complete"
+                        if enrichment_state == RunState.ENRICHMENT_COMPLETE
+                        else "partial"
+                    )
+                    sidecar = make_enrichment_sidecar(
+                        enriched_payload,
+                        core_sha256=core_hash,
+                        settings_digest=settings_digest,
+                        completeness=completeness,
+                        warnings=tuple(getattr(fs, "enrichment_warnings", ())),
+                        detail=getattr(fs, "enrichment_detail", None),
+                    )
+                    checkpoint = (
+                        copy.deepcopy(fs.result_json) if isinstance(fs.result_json, dict) else None
+                    )
+                    if checkpoint is None:
+                        raise RuntimeError("Verified in-memory core checkpoint is unavailable")
+                    materialized = False
+                    try:
+                        sink.write_enrichment(fs, sidecar)
+                        durable_sidecar = sink.read_enrichment(fs)
+                        if isinstance(durable_sidecar, dict):
+                            durable_sidecar = EnrichmentSidecar.from_dict(durable_sidecar)
+                        core_payload = _load_checkpoint_core(sink, fs)
+                        replayed_payload = replay_enrichment_sidecar(
+                            core_payload,
+                            durable_sidecar,
+                            expected_settings_digest=settings_digest,
+                        )
+                        await _consolidate_payload(ctx, replayed_payload)
+                        sink.materialize(fs, replayed_payload)
+                        materialized = True
+                        fs.result_json = replayed_payload
+                        sink.record(fs, enrichment_state)
+                    except Exception as exc:  # noqa: BLE001 - enrichment is optional
+                        logger.warning(
+                            "Enrichment sidecar/replay failed for %s: %s",
+                            fs.path.name,
+                            exc,
+                            exc_info=True,
+                        )
+                        # Never replace a verified checkpoint with bytes that
+                        # just failed replay validation. Atomic materialization
+                        # also leaves the prior public checkpoint untouched.
+                        fs.result_json = checkpoint
+                        if materialized:
+                            try:
+                                sink.materialize(fs, checkpoint)
+                            except Exception:  # noqa: BLE001 - retain original replay failure
+                                logger.warning(
+                                    "Failed to restore public checkpoint for %s",
+                                    fs.path.name,
+                                    exc_info=True,
+                                )
+                        try:
+                            sink.record(fs, RunState.ENRICHMENT_PARTIAL, detail=str(exc))
+                        except Exception:  # noqa: BLE001 - immutable core remains authoritative
+                            logger.warning(
+                                "Failed to persist enrichment failure receipt for %s",
+                                fs.path.name,
+                                exc_info=True,
+                            )
+                else:
+                    fs.result_json = enriched_payload
+                    await _consolidate_payload(ctx, fs.result_json)
+            except Exception as e:  # noqa: BLE001
+                fs.set_error(f"Export failed: {e}", code="export_failed", stage=self.name, exc=e)
+                logger.warning("Export failed for %s", fs.path.name, exc_info=True)
+                artifact_sink = getattr(fs, "artifact_sink", None)
+                if artifact_sink is not None and getattr(fs, "core_sha256", None) is not None:
+                    from bibr.pipeline.artifacts import RunState
+
+                    try:
+                        artifact_sink.record(fs, RunState.FAILED, detail=str(e))
+                    except Exception:  # noqa: BLE001 - preserve originating export failure
+                        logger.warning("Failed to persist export failure receipt", exc_info=True)
+            finally:
+                fs.free_all()
+        ctx.progress.stage_end(self.name)
+
+        await self._maybe_gc_collect()

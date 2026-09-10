@@ -1,0 +1,160 @@
+---
+title: "bibr — R API Client Demo"
+format:
+  html:
+    df-print: kable
+engine: knitr
+page-layout: full
+toc: true
+---
+
+This notebook demonstrates how to call the bibr REST API from R.
+
+**Prerequisites:**
+
+- bibr API server running (`uv run bibr serve` or via Docker)
+- R packages: `httr2`, `jsonlite`
+
+## Configuration
+
+```{r}
+library(httr2)
+library(jsonlite)
+
+`%||%` <- function(x, fallback) if (is.null(x)) fallback else x
+
+# API base URL — change if your server is running elsewhere
+BASE_URL <- Sys.getenv("BIBR_API_URL", "http://localhost:8000")
+API_KEY <- Sys.getenv("BIBR_API_KEY")  # Match the server's AUTH_API_KEY
+FILE_PATH <- Sys.getenv("PAPER_PATH", "paper.pdf")
+
+# Helper to add auth if credentials are set
+add_auth <- function(req) {
+  if (nzchar(API_KEY)) req_auth_bearer_token(req, API_KEY) else req
+}
+```
+
+## 1. Health check
+
+Verify the server is running and ready.
+
+```{r}
+health <- request(BASE_URL) |>
+  req_url_path_append("health") |>
+  add_auth() |>
+  req_perform() |>
+  resp_body_json()
+
+cat("Health:", health$status, "\n")
+
+ready <- request(BASE_URL) |>
+  req_url_path_append("ready") |>
+  add_auth() |>
+  req_perform() |>
+  resp_body_json()
+
+cat("Ready: ", ready$status, "\n")
+cat("Checks:", paste(names(ready$checks), ready$checks, sep = "=", collapse = ", "), "\n")
+```
+
+## 2. Extract metadata (JSON)
+
+The `/papers/extract` endpoint returns structured metadata as JSON.
+
+```{r}
+if (!file.exists(FILE_PATH)) {
+  stop("File not found: ", FILE_PATH)
+}
+
+cat("Sending", basename(FILE_PATH), "to", BASE_URL, "...\n")
+
+req <- request(BASE_URL) |>
+  req_url_path_append("papers", "extract") |>
+  add_auth() |>
+  req_body_multipart(
+    file = curl::form_file(FILE_PATH)
+  ) |>
+  req_timeout(300)
+
+resp <- req |> req_perform()
+data <- resp |> resp_body_json()
+
+cat("Status:", resp_status(resp), "\n")
+```
+
+### Paper metadata
+
+```{r}
+info <- data$info
+cat("Title:      ", info$title, "\n")
+cat("DOI:        ", info$doi, "\n")
+cat("Keywords:   ", paste(info$keywords, collapse = ", "), "\n")
+cat("Paper type: ", info$paper_type %||% "(unknown)", "\n")
+cat("OECD L1:    ", info$oecd_l1 %||% "(unclassified)", "\n")
+cat("OECD L2:    ", info$oecd_l2 %||% "(unclassified)", "\n")
+cat("Authors:    ", length(data$author), "\n")
+cat("References: ", length(data$bib), "\n")
+cat("Sections:   ", length(data$section), "\n")
+cat("Xrefs:      ", length(data$xref), "\n")
+```
+
+### Authors
+
+```{r}
+authors <- do.call(rbind, lapply(data$author, function(a) {
+  data.frame(
+    given = a$given %||% "",
+    family = a$family %||% "",
+    affiliation = a$affiliation %||% "",
+    email = a$email %||% NA_character_,
+    orcid = a$orcid %||% NA_character_,
+    corresponding = a$corresponding %||% FALSE,
+    stringsAsFactors = FALSE
+  )
+}))
+authors
+```
+
+### Sections (IMRaD classification)
+
+```{r}
+sections <- do.call(rbind, lapply(data$section, function(s) {
+  data.frame(
+    section_id = s$section_id,
+    header = s$header %||% "",
+    section_type = s$section_type %||% "unknown",
+    score = round(s$classification_score %||% 0, 2),
+    stringsAsFactors = FALSE
+  )
+}))
+sections
+```
+
+### References (first 10)
+
+```{r}
+refs <- do.call(rbind, lapply(data$bib, function(r) {
+  data.frame(
+    bib_id = r$bib_id,
+    authors = r$authors %||% "",
+    year = r$year %||% NA,
+    title = r$title %||% "",
+    stringsAsFactors = FALSE
+  )
+}))
+head(refs, 10)
+```
+
+## 3. Save extraction result to disk
+
+```{r}
+output_path <- tempfile(fileext = ".json")
+write_json(data, output_path, auto_unbox = TRUE, pretty = TRUE)
+cat("Saved JSON to:", output_path, "\n")
+```
+
+## 4. Async batch processing via the platform
+
+For processing many papers concurrently, see the [Scienceverse platform integration](../examples/platform/r_platform_demo.qmd).
+That separate service has its own `/jobs` API and credentials. bibr also has
+[its own async REST endpoints](../docs/reference/rest-api.md).

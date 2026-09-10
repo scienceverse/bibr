@@ -1,0 +1,62 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+build/
+dist/
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Testing & coverage
+tests/
+.pytest_cache/
+.coverage
+htmlcov/
+.python-version
+
+# CI & tooling
+.github/
+.pre-commit-config.yaml
+.secrets.baseline
+
+# Documentation & markdown (keep README.md for pyproject.toml)
+docs/
+*.md
+!README.md
+!**/MODEL_CARD.md
+
+# Dev scripts & notebooks (the serve image uses the shared segmenter prefetch script)
+scripts/*
+!scripts/prefetch_segmenter.py
+notebooks/
+evaluation/
+benchmarks/
+examples/
+.worktrees/
+.claude/
+.codex/
+monitoring/
+data/
+
+# Environment files (secrets — must not bake into image)
+.env
+.env.*
+
+# IDE & editor
+.vscode/
+.idea/
+
+# Docker (prevent recursive context)
+Dockerfile
+docker-compose.yml
+.dockerignore

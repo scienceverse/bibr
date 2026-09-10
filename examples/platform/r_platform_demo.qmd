@@ -1,0 +1,248 @@
+---
+title: "Scienceverse Platform — R API Client Demo"
+format:
+  html:
+    df-print: kable
+engine: knitr
+page-layout: full
+toc: true
+---
+
+This notebook demonstrates how to use the Scienceverse platform API from R.
+This is a separate Scienceverse deployment with its own `/jobs` API and
+credentials. It is not required to run bibr locally or host `bibr serve`.
+
+For direct bibr API access (synchronous, no queue), see [the bibr API notebook](../../notebooks/r_api_demo.qmd).
+
+**Prerequisites:**
+
+- Platform API running (or deployed at `platform.metacheck.app`)
+- A platform API key (`sv_...`) — create one via SSO at the platform dashboard
+- R packages: `httr2`, `jsonlite`
+
+## Configuration
+
+```{r}
+library(httr2)
+library(jsonlite)
+
+`%||%` <- function(x, fallback) if (is.null(x)) fallback else x
+
+# Platform API base URL
+API_URL <- Sys.getenv("PLATFORM_API_URL", "https://platform.metacheck.app")
+
+# API key — required environment variable
+API_KEY <- Sys.getenv("PLATFORM_API_KEY")
+
+# File to process
+FILE_PATH <- Sys.getenv("PAPER_PATH", "paper.pdf")
+
+# Polling settings
+POLL_INTERVAL <- 2   # seconds between polls
+TIMEOUT       <- 600 # max seconds to wait
+
+stopifnot(
+  "Set PLATFORM_API_KEY env var" = nchar(API_KEY) > 0,
+  "File must exist" = file.exists(FILE_PATH)
+)
+```
+
+## 1. Health check
+
+Verify the platform API is running and can reach its backends (Postgres, Redis,
+bibr API).
+
+```{r}
+health <- request(API_URL) |>
+  req_url_path_append("health") |>
+  req_auth_bearer_token(API_KEY) |>
+  req_perform() |>
+  resp_body_json()
+
+cat("Health:", health$status, "\n")
+
+ready <- request(API_URL) |>
+  req_url_path_append("ready") |>
+  req_auth_bearer_token(API_KEY) |>
+  req_perform() |>
+  resp_body_json()
+
+cat("Ready: ", ready$status, "\n")
+cat("Checks:", paste(names(ready$checks), ready$checks, sep = "=", collapse = ", "), "\n")
+```
+
+## 2. Submit a job
+
+Upload a file to the platform queue. The response returns immediately with a
+`job_id` — the file is processed asynchronously by Arq workers.
+
+```{r}
+cat("Submitting", basename(FILE_PATH), "...\n")
+
+submit_resp <- request(API_URL) |>
+  req_url_path_append("jobs") |>
+  req_auth_bearer_token(API_KEY) |>
+  req_body_multipart(file = curl::form_file(FILE_PATH)) |>
+  req_timeout(60) |>
+  req_perform()
+
+job <- resp_body_json(submit_resp)
+job_id <- job$job_id
+
+cat("Job ID:", job_id, "\n")
+cat("Status:", job$status, "\n")
+```
+
+## 3. Poll for completion
+
+The platform tracks job progress through stages: `reading_upload` →
+`processing` → `complete` (or `error:*` on failure).
+
+```{r}
+elapsed <- 0
+
+repeat {
+  Sys.sleep(POLL_INTERVAL)
+  elapsed <- elapsed + POLL_INTERVAL
+
+  status_resp <- request(API_URL) |>
+    req_url_path_append("jobs", job_id) |>
+    req_auth_bearer_token(API_KEY) |>
+    req_timeout(30) |>
+    req_perform()
+
+  status <- resp_body_json(status_resp)
+  stage <- status$stage %||% ""
+
+  cat(sprintf("[%5.1fs] %s %s\n", elapsed, status$status, stage))
+
+  if (identical(status$status, "complete")) break
+  if (identical(status$status, "failed")) stop("Job failed: ", stage)
+  if (elapsed >= TIMEOUT) stop("Timed out after ", TIMEOUT, "s")
+}
+```
+
+## 4. Download the result
+
+Results are returned as structured JSON.
+
+```{r}
+result_resp <- request(API_URL) |>
+  req_url_path_append("jobs", job_id, "result") |>
+  req_url_query(format = "json") |>
+  req_auth_bearer_token(API_KEY) |>
+  req_timeout(120) |>
+  req_perform()
+
+data <- resp_body_json(result_resp)
+cat("Downloaded JSON result\n")
+```
+
+### Helper: read JSON into named list
+
+```{r}
+source("../../scripts/read_json_response.R")
+```
+
+### Parse the result
+
+```{r}
+result <- parse_bibr_json(resp_body_string(result_resp))
+cat("bibr version:", result$info$bibr_version, "\n")
+```
+
+## 5. Explore the extracted data
+
+### Paper info
+
+```{r}
+result$info
+```
+
+### Authors
+
+```{r}
+result$author
+```
+
+### Sections
+
+```{r}
+result$section
+```
+
+### Text (sentences)
+
+```{r}
+cat("Total sentences:", nrow(result$text), "\n\n")
+head(result$text, 10)
+```
+
+### References
+
+```{r}
+cat("Total references:", nrow(result$bib), "\n\n")
+head(result$bib, 10)
+```
+
+### URLs
+
+```{r}
+result$url
+```
+
+### Cross-references
+
+```{r}
+cat("Total cross-references:", nrow(result$xref), "\n\n")
+if (nrow(result$xref) > 0) head(result$xref, 10)
+```
+
+### Figures
+
+```{r}
+cat("Total figures:", nrow(result$figure), "\n\n")
+if (nrow(result$figure) > 0) result$figure
+```
+
+## 6. List your recent jobs
+
+The platform stores job history — you can list previous jobs for your account.
+
+```{r}
+jobs_resp <- request(API_URL) |>
+  req_url_path_append("jobs") |>
+  req_url_query(limit = 10) |>
+  req_auth_bearer_token(API_KEY) |>
+  req_perform() |>
+  resp_body_json()
+
+jobs_df <- do.call(rbind, lapply(jobs_resp, function(j) {
+  data.frame(
+    job_id = j$job_id,
+    filename = j$filename %||% NA,
+    status = j$status,
+    created = j$created_at %||% NA,
+    stringsAsFactors = FALSE
+  )
+}))
+jobs_df
+```
+
+## 7. Summary
+
+```{r}
+cat("File:           ", basename(FILE_PATH), "\n")
+cat("Job ID:         ", job_id, "\n")
+cat("Processing time:", elapsed, "seconds\n")
+cat("Title:          ", result$info$title, "\n")
+cat("DOI:            ", result$info$doi, "\n")
+cat("Sentences:      ", nrow(result$text), "\n")
+cat("Sections:       ", nrow(result$section), "\n")
+cat("Authors:        ", nrow(result$author), "\n")
+cat("References:     ", nrow(result$bib), "\n")
+cat("URLs:           ", nrow(result$url), "\n")
+cat("Cross-refs:     ", nrow(result$xref), "\n")
+cat("Figures:        ", nrow(result$figure), "\n")
+cat("Tables:         ", nrow(result$table), "\n")
+```

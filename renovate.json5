@@ -1,0 +1,62 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+  timezone: "Europe/Amsterdam",
+  schedule: ["before 6am on monday"],
+  labels: ["dependencies"],
+  prConcurrentLimit: 6,
+  prHourlyLimit: 2,
+
+  // Renovate owns only the root uv project. GitHub Actions, Docker, and the
+  // /ci/tools uv project remain outside its scope to avoid lockfile conflicts.
+  enabledManagers: ["pep621"],
+  ignorePaths: ["ci/tools/**"],
+
+  minimumReleaseAge: "7 days",
+
+  // Keep intentionally-low pyproject floors intact; update only uv.lock.
+  rangeStrategy: "update-lockfile",
+
+  // Was disabled because full-lock regeneration pulled the flash-attn-4
+  // pre-release transitively required by sglang. sglang was dropped in 0.4.0
+  // and `uv lock --upgrade` now resolves cleanly, so this can be re-enabled
+  // whenever the recurring maintenance PRs are wanted.
+  lockFileMaintenance: { enabled: false },
+
+  // Dependabot alerts remain enabled for detection, while Renovate owns root
+  // uv security fixes and Dependabot security-update PRs stay disabled.
+  vulnerabilityAlerts: {
+    labels: ["security"],
+  },
+
+  packageRules: [
+    {
+      description: "Roll all non-major uv updates into one reviewable weekly PR.",
+      matchManagers: ["pep621"],
+      matchUpdateTypes: ["minor", "patch", "digest"],
+      groupName: "uv deps (non-major)",
+    },
+    {
+      description: "ML / runtime majors change extraction behaviour — isolate each for eval-harness validation; never auto-merge.",
+      matchManagers: ["pep621"],
+      matchUpdateTypes: ["major"],
+      addLabels: ["needs-eval"],
+      automerge: false,
+    },
+    {
+      description: "vLLM pin is coupled across code + docs + tests (tests/test_docs_sync.py + test_dependency_metadata.py enforce it). Bump manually across every site.",
+      matchPackageNames: ["vllm"],
+      enabled: false,
+    },
+    {
+      description: "mkdocs-gen-files is capped <0.6.1 in pyproject (the properdocs supply-chain hijack). Do not propose lifting the cap.",
+      matchPackageNames: ["mkdocs-gen-files"],
+      enabled: false,
+    },
+    {
+      description: "vllm-mlx is capped <0.5 in pyproject (only the 0.4.x line is validated on Apple Silicon).",
+      matchPackageNames: ["vllm-mlx"],
+      enabled: false,
+    },
+  ],
+}

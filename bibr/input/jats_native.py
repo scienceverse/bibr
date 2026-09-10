@@ -1,0 +1,874 @@
+"""Native JATS-XML parser: ``<article>`` XML → PaperContents.
+
+Accepts a JATS (Journal Article Tag Suite) XML document and produces the same
+:class:`~bibr.paper_contents.PaperContents` shape the PDF and DOCX paths build,
+so the pipeline can dispatch on file type without further branching. Because
+JATS carries the full front matter and a structured reference list, this parser
+also pre-populates a :class:`~bibr.models.PaperMetadata` (stashed on
+``contents.preparsed_metadata``) and ingests the ref-list natively — so
+post-parse can skip the core LLM extraction and, for structured
+``element-citation`` refs, the reference extractor entirely.
+
+Mirrors :class:`bibr.input.docx_native.DocxParser`'s public surface
+(``parse``, ``_deferred_texts``, ``apply_segmentation``,
+``create_content_sections``) and reuses the shared
+:class:`~bibr.structure.assembler.DocumentAssembler`. Sentence segmentation is
+deferred exactly like the DOCX path — every entry has ``page_number=None``.
+
+JATS files may or may not declare namespaces (default JATS namespace, the
+``xlink`` namespace for hrefs, ``mml`` for math). All element/attribute lookups
+match on the local name so both namespaced and bare documents parse.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import pandas as pd
+from lxml import etree
+
+from bibr.models import (
+    PaperAuthor,
+    PaperMetadata,
+    PaperReference,
+    canonicalize_orcid,
+    migrate_bib_type,
+)
+from bibr.paper_contents import (
+    CanonicalSection,
+    PaperContents,
+    PaperFigure,
+    PaperFigurePart,
+    PaperSection,
+    PaperSentence,
+    PaperTable,
+    PaperTablePart,
+    PaperURLLink,
+)
+from bibr.structure.assembler import DocumentAssembler
+from bibr.structure.xref_utils import URL_RE, detect_xrefs
+from bibr.utils.text import clean_extracted_url, collapse_ws
+
+logger = logging.getLogger(__name__)
+
+# JATS ``@publication-type`` values → BibType strings. Falls back to
+# ``migrate_bib_type`` (which knows the BibTeX/Crossref spellings) for anything
+# not listed here, e.g. "book-chapter".
+_JATS_PUB_TYPE: dict[str, str] = {
+    "journal": "journal_article",
+    "book": "book",
+    "chapter": "book_chapter",
+    "confproc": "conference_paper",
+    "conf-proc": "conference_paper",
+    "conference": "conference_paper",
+    "data": "dataset",
+    "database": "dataset",
+    "software": "software",
+    "preprint": "preprint",
+    "report": "report",
+    "web": "other",
+    "webpage": "other",
+    "other": "other",
+}
+
+
+# ----------------------------------------------------------------------------
+# Namespace-agnostic element helpers
+# ----------------------------------------------------------------------------
+
+
+def _ln(el) -> str:
+    """Local name of an element's tag (namespace stripped)."""
+    tag = el.tag
+    if not isinstance(tag, str):  # comments / PIs
+        return ""
+    return tag.rsplit("}", 1)[-1]
+
+
+def _iter_children(el, name: str):
+    """Yield direct children whose local name is *name*."""
+    for child in el:
+        if _ln(child) == name:
+            yield child
+
+
+def _first_child(el, name: str):
+    """First direct child with local name *name*, or ``None``."""
+    return next(_iter_children(el, name), None)
+
+
+def _first_desc(el, name: str):
+    """First descendant (any depth) with local name *name*, or ``None``."""
+    for desc in el.iter():
+        if desc is not el and _ln(desc) == name:
+            return desc
+    return None
+
+
+def _attr(el, name: str) -> str | None:
+    """Attribute value matched by local name (handles ``xlink:href`` etc.)."""
+    for key, value in el.attrib.items():
+        if key.rsplit("}", 1)[-1] == name:
+            return value
+    return None
+
+
+def _text(el) -> str:
+    """Flatten all descendant text to a whitespace-collapsed string."""
+    if el is None:
+        return ""
+    return collapse_ws("".join(el.itertext())).strip()
+
+
+def _flatten_excluding(el, exclude: set[str]) -> str:
+    """Concatenate text of *el* skipping subtrees whose local name is in *exclude*."""
+    parts: list[str] = []
+    if el.text:
+        parts.append(el.text)
+    for child in el:
+        if _ln(child) not in exclude:
+            parts.append(_flatten_excluding(child, exclude))
+        if child.tail:
+            parts.append(child.tail)
+    return "".join(parts)
+
+
+class JatsParser:
+    """Parses JATS-XML bytes directly into a :class:`PaperContents`.
+
+    Sentence segmentation is deferred — call :meth:`apply_segmentation` after
+    :meth:`parse` with externally-produced segments, identical to the PDF and
+    DOCX parsers.
+    """
+
+    def __init__(self, xml_bytes: bytes) -> None:
+        self.xml_bytes = xml_bytes
+        # page_number is None for XML — pages are a render-time concept.
+        self.assembler = DocumentAssembler()
+
+        self.sections: list[PaperSection] = []
+        self.sentences: list[PaperSentence] = []
+        self.links: list[PaperURLLink] = []
+        self.tables: list[PaperTable] = []
+        self.figures: list[PaperFigure] = []
+
+        self._section_counter = 0
+        self._sentence_counter = 1
+        self._paragraph_counter = 0
+        self._table_counter = 1
+        self._figure_counter = 1
+        self._detected_title: str | None = None
+
+        self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
+        self._native_references: list[PaperReference] | None = None
+        self._native_ref_strings: list[str] | None = None
+        self._footnotes: list[str] = []
+        self._aff_map: dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Public API (mirrors DocxParser / PDFParser)
+    # ------------------------------------------------------------------
+
+    @property
+    def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
+        """Legacy 5-tuple view of the deferred-text buffer (read-only)."""
+        return [
+            (e.text, e.page_number, e.section_id, e.needs_segmentation, e.is_formula)
+            for e in self.assembler.entries
+        ]
+
+    def parse(self) -> PaperContents:
+        """Parse the JATS document and populate sections/tables/deferred texts."""
+        # Root section (section_id=0) — matches the DOCX/PDF contract.
+        self.sections.append(
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None)
+        )
+
+        parser = etree.XMLParser(resolve_entities=False, no_network=True, huge_tree=False)
+        try:
+            root = etree.fromstring(self.xml_bytes, parser=parser)
+        except Exception as exc:
+            from bibr.exceptions import ProcessingError
+
+            raise ProcessingError(f"Failed to parse JATS XML: {exc}") from exc
+
+        if _ln(root) != "article":
+            from bibr.exceptions import ProcessingError
+
+            raise ProcessingError(f"Expected <article> root, got <{_ln(root)}>")
+
+        front = _first_child(root, "front")
+        body = _first_child(root, "body")
+        back = _first_child(root, "back")
+
+        if front is not None:
+            self._metadata = self._parse_front(front)
+        if body is not None:
+            self._process_container(body, section_id=0, depth=0)
+        if back is not None:
+            self._parse_back(back)
+
+        return PaperContents(
+            sentences=[],
+            sections=self.sections,
+            tables=self.tables,
+            links=self.links,
+            sections_text={},
+            figures=self.figures,
+            xrefs=[],
+            detected_title=self._detected_title,
+            preparsed_metadata=self._metadata,
+            native_references=self._native_references,
+            native_ref_strings=self._native_ref_strings,
+        )
+
+    def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:
+        """Build a sentence — no provenance/region_meta side-channels (like DOCX)."""
+        return PaperSentence(
+            text_id=text_id,
+            text=text,
+            section_id=entry.section_id,
+            paragraph_id=paragraph_id,
+            page_number=entry.page_number,
+        )
+
+    def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
+        """Populate sentences from externally-segmented results (mirrors DOCX)."""
+        self.sentences, self._sentence_counter, self._paragraph_counter = self.assembler.emit(
+            all_segments,
+            sentence_factory=self._make_sentence,
+            sentence_counter=self._sentence_counter,
+            paragraph_counter=self._paragraph_counter,
+        )
+
+        for sent in self.sentences:
+            self._detect_urls(sent)
+
+        contents.sentences = self.sentences
+        contents.links = self.links
+        contents.sections_text = DocumentAssembler.build_sections_text(self.sentences)
+        contents.xrefs = detect_xrefs(self.sentences, self.tables, self.figures)
+
+    def create_content_sections(self, contents: PaperContents) -> None:
+        """Create dedicated sections for figures, tables, and footnotes (mirrors DOCX)."""
+        for fig in self.figures:
+            fig._body_section_id = fig.section_id
+            self._section_counter += 1
+            contents.sections.append(
+                PaperSection(
+                    section_id=self._section_counter,
+                    header=f"Figure {fig.figure_id}",
+                    level=1,
+                    parent_section_id=0,
+                    section_type=CanonicalSection.FIGURE,
+                )
+            )
+            fig.section_id = self._section_counter
+            if fig.caption:
+                self._paragraph_counter += 1
+                contents.sentences.append(
+                    PaperSentence(
+                        text_id=self._sentence_counter,
+                        text=fig.caption,
+                        section_id=self._section_counter,
+                        paragraph_id=self._paragraph_counter,
+                        page_number=None,
+                    )
+                )
+                self._sentence_counter += 1
+
+        for tbl in self.tables:
+            tbl._body_section_id = tbl.section_id
+            self._section_counter += 1
+            contents.sections.append(
+                PaperSection(
+                    section_id=self._section_counter,
+                    header=f"Table {tbl.table_id}",
+                    level=1,
+                    parent_section_id=0,
+                    section_type=CanonicalSection.TABLE,
+                )
+            )
+            tbl.section_id = self._section_counter
+            if tbl.caption:
+                self._paragraph_counter += 1
+                contents.sentences.append(
+                    PaperSentence(
+                        text_id=self._sentence_counter,
+                        text=tbl.caption,
+                        section_id=self._section_counter,
+                        paragraph_id=self._paragraph_counter,
+                        page_number=None,
+                    )
+                )
+                self._sentence_counter += 1
+
+        for footnote_num, fn_text in enumerate(self._footnotes, start=1):
+            self._section_counter += 1
+            footnote_section_id = self._section_counter
+            contents.sections.append(
+                PaperSection(
+                    section_id=footnote_section_id,
+                    header=f"Footnote {footnote_num}",
+                    level=1,
+                    parent_section_id=0,
+                    section_type=CanonicalSection.FOOTNOTE,
+                )
+            )
+            self._paragraph_counter += 1
+            contents.sentences.append(
+                PaperSentence(
+                    text_id=self._sentence_counter,
+                    text=fn_text,
+                    section_id=footnote_section_id,
+                    paragraph_id=self._paragraph_counter,
+                    page_number=None,
+                )
+            )
+            self._sentence_counter += 1
+
+    # ------------------------------------------------------------------
+    # Front matter → PaperMetadata
+    # ------------------------------------------------------------------
+
+    def _parse_front(self, front) -> PaperMetadata:
+        journal_meta = _first_desc(front, "journal-meta")
+        article_meta = _first_desc(front, "article-meta")
+
+        meta = PaperMetadata(doi="", title="")
+
+        if journal_meta is not None:
+            meta.journal = _text(_first_desc(journal_meta, "journal-title")) or None
+            meta.issn = self._issn(journal_meta)
+            pub = _first_desc(journal_meta, "publisher-name")
+            meta.publisher = _text(pub) or None
+
+        if article_meta is None:
+            return meta
+
+        # DOI
+        for aid in _iter_children(article_meta, "article-id"):
+            if _attr(aid, "pub-id-type") == "doi":
+                meta.doi = _text(aid)
+                break
+
+        # Title
+        title_group = _first_desc(article_meta, "title-group")
+        if title_group is not None:
+            title_el = _first_desc(title_group, "article-title")
+            title = _text(title_el)
+            if title:
+                meta.title = title
+                self._detected_title = title
+
+        # Abstract (first <abstract>, excluding its heading title)
+        abstract_el = _first_desc(article_meta, "abstract")
+        if abstract_el is not None:
+            meta.abstract = collapse_ws(_flatten_excluding(abstract_el, {"title"})).strip()
+
+        # Keywords
+        keywords: list[str] = []
+        for kwd_group in _iter_children(article_meta, "kwd-group"):
+            for kwd in kwd_group.iter():
+                if _ln(kwd) == "kwd":
+                    kw = _text(kwd)
+                    if kw:
+                        keywords.append(kw)
+        meta.keywords = keywords
+
+        # Authors + affiliations
+        self._aff_map = self._collect_affs(article_meta)
+        meta.authors = self._parse_authors(article_meta)
+
+        # Bibliographic self-identity
+        meta.volume = _text(_first_desc(article_meta, "volume")) or None
+        meta.issue = _text(_first_desc(article_meta, "issue")) or None
+        meta.first_page = _text(_first_desc(article_meta, "fpage")) or None
+        meta.last_page = _text(_first_desc(article_meta, "lpage")) or None
+        meta.published = self._pub_date(article_meta)
+        meta.license = self._license(article_meta)
+
+        return meta
+
+    def _issn(self, journal_meta) -> str | None:
+        """Prefer the print ISSN, else the first electronic one."""
+        electronic: str | None = None
+        for issn in _iter_children(journal_meta, "issn"):
+            fmt = (_attr(issn, "pub-type") or _attr(issn, "publication-format") or "").lower()
+            value = _text(issn)
+            if not value:
+                continue
+            if fmt in ("ppub", "print"):
+                return value
+            if electronic is None:
+                electronic = value
+        return electronic
+
+    def _pub_date(self, article_meta) -> str | None:
+        """Format the preferred publication date as YYYY[-MM[-DD]]."""
+        dates = list(_iter_children(article_meta, "pub-date"))
+        if not dates:
+            return None
+        chosen = None
+        for d in dates:
+            kind = (_attr(d, "pub-type") or _attr(d, "date-type") or "").lower()
+            if kind in ("epub", "pub"):
+                chosen = d
+                break
+        if chosen is None:
+            chosen = dates[0]
+        year = _text(_first_child(chosen, "year"))
+        if not year:
+            return None
+        month = _text(_first_child(chosen, "month"))
+        day = _text(_first_child(chosen, "day"))
+
+        def _num(s: str) -> str | None:
+            try:
+                return f"{int(s):02d}"
+            except (ValueError, TypeError):
+                return None
+
+        mm = _num(month) if month else None
+        dd = _num(day) if day else None
+        if mm and dd:
+            return f"{year}-{mm}-{dd}"
+        if mm:
+            return f"{year}-{mm}"
+        return year
+
+    def _license(self, article_meta) -> str | None:
+        """License href (preferred) or the license-p text."""
+        permissions = _first_desc(article_meta, "permissions")
+        scope = permissions if permissions is not None else article_meta
+        lic = _first_desc(scope, "license")
+        if lic is None:
+            return None
+        href = _attr(lic, "href")
+        if href:
+            return href
+        lic_p = _first_desc(lic, "license-p")
+        text = _text(lic_p) if lic_p is not None else _text(lic)
+        return text or None
+
+    def _collect_affs(self, scope) -> dict[str, str]:
+        """Map every ``<aff>`` id to its flattened text (label excluded)."""
+        affs: dict[str, str] = {}
+        for aff in scope.iter():
+            if _ln(aff) != "aff":
+                continue
+            aid = _attr(aff, "id")
+            if aid:
+                affs[aid] = collapse_ws(_flatten_excluding(aff, {"label"})).strip()
+        return affs
+
+    def _parse_authors(self, article_meta) -> list[PaperAuthor]:
+        authors: list[PaperAuthor] = []
+        idx = 0
+        for contrib in article_meta.iter():
+            if _ln(contrib) != "contrib":
+                continue
+            if (_attr(contrib, "contrib-type") or "author") != "author":
+                continue
+            idx += 1
+            name = _first_desc(contrib, "name")
+            if name is None:
+                name = _first_desc(contrib, "string-name")
+            given = family = ""
+            if name is not None:
+                if _ln(name) == "string-name":
+                    family = _text(name)
+                else:
+                    given = _text(_first_child(name, "given-names"))
+                    family = _text(_first_child(name, "surname"))
+
+            email = _text(_first_desc(contrib, "email")) or None
+
+            orcid = None
+            for cid in contrib.iter():
+                if _ln(cid) == "contrib-id" and _attr(cid, "contrib-id-type") == "orcid":
+                    orcid = canonicalize_orcid(_text(cid))
+                    break
+
+            corresponding = (_attr(contrib, "corresp") or "").lower() == "yes"
+            aff_texts: list[str] = []
+            for child in contrib.iter():
+                ln = _ln(child)
+                if ln == "aff":
+                    aff_texts.append(collapse_ws(_flatten_excluding(child, {"label"})).strip())
+                elif ln == "xref":
+                    ref_type = (_attr(child, "ref-type") or "").lower()
+                    if ref_type == "corresp":
+                        corresponding = True
+                    elif ref_type == "aff":
+                        rid = _attr(child, "rid")
+                        if rid and rid in self._aff_map:
+                            aff_texts.append(self._aff_map[rid])
+
+            affiliation = "; ".join(t for t in aff_texts if t)
+            authors.append(
+                PaperAuthor(
+                    author_id=idx,
+                    given=given,
+                    family=family,
+                    affiliation=affiliation,
+                    email=email,
+                    corresponding=corresponding,
+                    orcid=orcid,
+                )
+            )
+        return authors
+
+    # ------------------------------------------------------------------
+    # Body → sections / paragraphs / tables / figures
+    # ------------------------------------------------------------------
+
+    def _process_container(self, el, section_id: int, depth: int) -> None:
+        """Walk a container's children in document order into the current section."""
+        for child in el:
+            ln = _ln(child)
+            if ln == "sec":
+                self._handle_sec(child, depth + 1, section_id)
+            elif ln == "p":
+                self._handle_paragraph(child, section_id)
+            elif ln == "disp-formula":
+                self._handle_formula(child, section_id)
+            elif ln == "table-wrap":
+                self._handle_table_wrap(child, section_id)
+            elif ln == "fig":
+                self._handle_fig(child, section_id)
+            elif ln in ("list", "list-item"):
+                # Flatten list structure — list items carry <p> children.
+                self._process_container(child, section_id, depth)
+            # title (handled by the parent sec), label, and unknown wrappers
+            # are intentionally ignored.
+
+    def _handle_sec(self, sec, depth: int, parent_id: int) -> None:
+        title_el = _first_child(sec, "title")
+        header = _text(title_el) if title_el is not None else ""
+        self._section_counter += 1
+        sid = self._section_counter
+        self.sections.append(
+            PaperSection(
+                section_id=sid,
+                header=header,
+                level=depth,
+                parent_section_id=parent_id,
+                section_type=self._map_sec_type(sec),
+            )
+        )
+        self._process_container(sec, sid, depth)
+
+    @staticmethod
+    def _map_sec_type(sec) -> CanonicalSection:
+        """Map a slam-dunk ``@sec-type`` to a canonical section; else UNKNOWN.
+
+        Only unambiguous IMRaD types are set — the shared section classifier
+        (which keys on header text) handles everything else and will re-type
+        these anyway; setting them is a defensive no-cost hint.
+        """
+        st = (_attr(sec, "sec-type") or "").lower().replace("|", " ")
+        mapping = {
+            "intro": CanonicalSection.INTRODUCTION,
+            "introduction": CanonicalSection.INTRODUCTION,
+            "methods": CanonicalSection.METHODS,
+            "materials methods": CanonicalSection.METHODS,
+            "materials and methods": CanonicalSection.METHODS,
+            "results": CanonicalSection.RESULTS,
+            "discussion": CanonicalSection.DISCUSSION,
+        }
+        return mapping.get(st, CanonicalSection.UNKNOWN)
+
+    def _handle_paragraph(self, p, section_id: int) -> None:
+        # itertext() flattens inline markup (italic/bold/ext-link) AND inline
+        # citation text (xref → "[1]", "(Smith, 2020)") so detect_xrefs finds them.
+        txt = _text(p)
+        if txt:
+            self.assembler.append(txt, None, section_id, True, False)
+
+    def _handle_formula(self, formula, section_id: int) -> None:
+        math = _text(formula)
+        if not math:
+            return
+        self.assembler.append(math, None, section_id, needs_segmentation=False, is_formula=True)
+
+    def _handle_table_wrap(self, table_wrap, section_id: int) -> None:
+        caption = self._caption_text(table_wrap)
+        table_el = _first_desc(table_wrap, "table")
+        df = self._table_to_df(table_el)
+        if df is None:
+            logger.warning("JATS table-wrap produced no parseable table; skipping")
+            return
+        try:
+            html = df.to_html(index=False)
+        except Exception:  # noqa: BLE001 — degrade gracefully, never crash
+            html = ""
+        self.tables.append(
+            PaperTable(
+                table_id=self._table_counter,
+                df=df,
+                tbl_html=html,
+                section_id=section_id,
+                caption=caption or None,
+                page_number=None,
+                parts=[
+                    PaperTablePart(
+                        page_number=None,
+                        bbox=None,
+                        tbl_html=html,
+                        df=df,
+                    )
+                ],
+            )
+        )
+        self._table_counter += 1
+
+    @staticmethod
+    def _table_to_df(table_el) -> pd.DataFrame | None:
+        """Convert a JATS/XHTML ``<table>`` to a DataFrame; ``None`` on failure."""
+        if table_el is None:
+            return None
+        try:
+            trs = [tr for tr in table_el.iter() if _ln(tr) == "tr"]
+            if not trs:
+                return None
+
+            def cells(tr) -> list[str]:
+                return [_text(c) for c in tr if _ln(c) in ("td", "th")]
+
+            thead = _first_desc(table_el, "thead")
+            header_tr = None
+            if thead is not None:
+                header_tr = next((tr for tr in thead.iter() if _ln(tr) == "tr"), None)
+            if header_tr is None:
+                header_tr = trs[0]
+                body_trs = trs[1:]
+            else:
+                body_trs = [tr for tr in trs if tr is not header_tr]
+
+            header = cells(header_tr) if header_tr is not None else []
+            data = [cells(tr) for tr in body_trs]
+            width = max([len(header), *[len(r) for r in data]], default=0)
+            if width == 0:
+                return None
+            header = header + [""] * (width - len(header))
+            data = [r + [""] * (width - len(r)) for r in data]
+            return pd.DataFrame(data, columns=header)
+        except Exception:  # noqa: BLE001 — any malformed table degrades to skip
+            return None
+
+    def _handle_fig(self, fig, section_id: int) -> None:
+        caption = self._caption_text(fig)
+        # <graphic> hrefs are unresolvable in a bare XML file — image stays None.
+        self.figures.append(
+            PaperFigure(
+                figure_id=self._figure_counter,
+                section_id=section_id,
+                image_b64=None,
+                caption=caption or None,
+                page_number=None,
+                parts=[
+                    PaperFigurePart(
+                        page_number=None,
+                        bbox=None,
+                        image_b64=None,
+                    )
+                ],
+            )
+        )
+        self._figure_counter += 1
+
+    @staticmethod
+    def _caption_text(el) -> str:
+        """Label + caption text for a fig/table-wrap."""
+        label = _text(_first_child(el, "label"))
+        caption_el = _first_child(el, "caption")
+        caption = _text(caption_el) if caption_el is not None else ""
+        return " ".join(x for x in (label, caption) if x)
+
+    # ------------------------------------------------------------------
+    # Back matter → acknowledgments / footnotes / references
+    # ------------------------------------------------------------------
+
+    def _parse_back(self, back) -> None:
+        ref_lists = list(_iter_children(back, "ref-list"))
+        for child in back:
+            ln = _ln(child)
+            if ln == "ack":
+                self._section_counter += 1
+                sid = self._section_counter
+                self.sections.append(
+                    PaperSection(
+                        section_id=sid,
+                        header="Acknowledgments",
+                        level=1,
+                        parent_section_id=0,
+                        section_type=CanonicalSection.ACKNOWLEDGMENT,
+                    )
+                )
+                self._process_container(child, sid, 1)
+            elif ln == "sec":
+                self._handle_sec(child, 1, 0)
+            elif ln == "ref-list":
+                self._handle_ref_list(child)
+            elif ln == "fn-group":
+                for fn in _iter_children(child, "fn"):
+                    fn_text = _text(fn)
+                    if fn_text:
+                        self._footnotes.append(fn_text)
+
+        # Some producers nest the ref-list inside a back <sec>; recover it.
+        if not ref_lists:
+            nested = _first_desc(back, "ref-list")
+            if nested is not None:
+                self._handle_ref_list(nested)
+
+    def _handle_ref_list(self, ref_list) -> None:
+        self._section_counter += 1
+        ref_sid = self._section_counter
+        header = _text(_first_child(ref_list, "title")) or "References"
+        self.sections.append(
+            PaperSection(
+                section_id=ref_sid,
+                header=header,
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.REFERENCES,
+            )
+        )
+
+        refs = list(_iter_children(ref_list, "ref"))
+        if not refs:
+            return
+
+        structured: list[PaperReference] = []
+        strings: list[str] = []
+        all_structured = True
+
+        for pos, ref in enumerate(refs, start=1):
+            element_citation = _first_desc(ref, "element-citation")
+            text = _text(ref)
+            if not text and element_citation is not None:
+                text = _text(element_citation)
+            # One atomic sentence per ref (needs_segmentation=False) so each ref
+            # stays a single row in the REFERENCES section for RefLocator.
+            self.assembler.append(text, None, ref_sid, needs_segmentation=False, is_formula=False)
+            strings.append(text)
+            if element_citation is not None:
+                structured.append(self._build_reference(element_citation, pos))
+            else:
+                all_structured = False
+
+        # Invariant: either full structured coverage, or ref strings for ALL.
+        if all_structured and structured:
+            self._native_references = structured
+        else:
+            self._native_ref_strings = strings
+
+    def _build_reference(self, ec, pos: int) -> PaperReference:
+        authors = self._person_names(ec, "author")
+        editors = self._person_names(ec, "editor")
+
+        year_text = _text(_first_desc(ec, "year"))
+        year: int | None = None
+        if year_text:
+            digits = "".join(c for c in year_text if c.isdigit())
+            if len(digits) >= 4:
+                try:
+                    year = int(digits[:4])
+                except ValueError:
+                    year = None
+
+        title = _text(_first_desc(ec, "article-title")) or _text(_first_desc(ec, "chapter-title"))
+        container = _text(_first_desc(ec, "source")) or None
+
+        doi = None
+        for pid in ec.iter():
+            if _ln(pid) == "pub-id" and _attr(pid, "pub-id-type") == "doi":
+                doi = _text(pid) or None
+                break
+
+        url = None
+        ext = _first_desc(ec, "ext-link")
+        if ext is not None:
+            url = _attr(ext, "href") or _text(ext) or None
+        if url is None:
+            uri = _first_desc(ec, "uri")
+            if uri is not None:
+                url = _attr(uri, "href") or _text(uri) or None
+
+        pub_type = _attr(ec, "publication-type")
+        bib_type: str | None = None
+        if pub_type:
+            key = pub_type.lower().strip()
+            bib_type = _JATS_PUB_TYPE.get(key) or migrate_bib_type(key)
+
+        return PaperReference(
+            bib_id=pos,
+            title=title or "",
+            first_page=_text(_first_desc(ec, "fpage")) or None,
+            volume=_text(_first_desc(ec, "volume")) or None,
+            authors=authors or None,
+            year=year,
+            container=container,
+            doi=doi,
+            bib_type=bib_type,
+            last_page=_text(_first_desc(ec, "lpage")) or None,
+            issue=_text(_first_desc(ec, "issue")) or None,
+            editors=editors or None,
+            publisher=_text(_first_desc(ec, "publisher-name")) or None,
+            url=url,
+        )
+
+    @staticmethod
+    def _person_names(ec, group_type: str) -> str:
+        """Join a person-group's names as 'Family, G.; Family, G.'."""
+        target = None
+        for group in ec.iter():
+            if _ln(group) != "person-group":
+                continue
+            gtype = (_attr(group, "person-group-type") or "author").lower()
+            if gtype == group_type:
+                target = group
+                break
+        # Authors may appear without an explicit person-group wrapper — but
+        # only fall back to the whole citation when NO person-group exists at
+        # all, else an editor group's names would be swept up as authors.
+        if target is None and group_type == "author":
+            has_any_group = any(_ln(el) == "person-group" for el in ec.iter())
+            if not has_any_group:
+                target = ec
+        if target is None:
+            return ""
+
+        names: list[str] = []
+        for name in target.iter():
+            ln = _ln(name)
+            if ln == "name":
+                surname = _text(_first_child(name, "surname"))
+                given = _text(_first_child(name, "given-names"))
+                if surname:
+                    names.append(f"{surname}, {given}" if given else surname)
+            elif ln == "string-name":
+                value = _text(name)
+                if value:
+                    names.append(value)
+        return "; ".join(names)
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _detect_urls(self, sent: PaperSentence) -> None:
+        """Match URL_RE on the sentence and append PaperURLLink entries."""
+        for m in URL_RE.finditer(sent.text):
+            url = clean_extracted_url(m.group(0))
+            self.links.append(
+                PaperURLLink(
+                    url=url,
+                    section_id=sent.section_id,
+                    paragraph_id=sent.paragraph_id,
+                    text_id=sent.text_id,
+                    link_text=None,
+                )
+            )

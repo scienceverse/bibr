@@ -1,0 +1,28 @@
+Classify the scientific paper in the supplied fenced document.
+
+OECD domain classification:
+- Classify the paper into exactly one of these broad research domains:
+  "Natural Sciences", "Engineering and Technology", "Medical and Health Sciences",
+  "Agricultural and Veterinary Sciences", "Social Sciences", "Humanities and the Arts"
+- Use the exact string. Return null if uncertain.
+- Also classify the specific subdomain within the broad domain.
+- Valid subdomains per domain (use the exact string):
+  Natural Sciences: "Mathematics", "Computer and Information Sciences", "Physical Sciences", "Chemical Sciences", "Earth and Related Environmental Sciences", "Biological Sciences"
+  Engineering and Technology: "Civil Engineering", "Electrical Engineering, Electronic Engineering, Information Engineering", "Mechanical Engineering", "Chemical Engineering", "Materials Engineering", "Medical Engineering", "Environmental Engineering", "Environmental Biotechnology", "Industrial Biotechnology", "Nano-technology"
+  Medical and Health Sciences: "Basic Medicine", "Clinical Medicine", "Health Sciences", "Medical Biotechnology"
+  Agricultural and Veterinary Sciences: "Agriculture, Forestry, and Fisheries", "Animal and Dairy Science", "Veterinary Science", "Agricultural Biotechnology"
+  Social Sciences: "Psychology and Cognitive Sciences", "Economics and Business", "Education", "Sociology", "Law", "Political Science", "Social and Economic Geography", "Media and Communications"
+  Humanities and the Arts: "History and Archaeology", "Languages and Literature", "Philosophy, Ethics and Religion", "Arts (arts, history of arts, performing arts, music)"
+- The subdomain must belong to the chosen broad domain.
+
+Paper type classification:
+- Classify the paper as exactly one of: "empirical", "review", "meta-analysis", "case-study",
+  "commentary", "corrigendum", "erratum", "retraction"
+- Disambiguation: a paper reporting newly collected data or experiments → "empirical";
+  a paper statistically pooling effect sizes/results across prior studies → "meta-analysis";
+  a paper narratively synthesizing prior literature without pooled statistics → "review";
+  an in-depth analysis of a single case or instance → "case-study";
+  an opinion or response piece without new data → "commentary";
+  a notice amending or withdrawing a previously published article → "corrigendum",
+  "erratum", or "retraction" as the notice itself is titled.
+- Return null if uncertain.

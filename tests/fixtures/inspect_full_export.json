@@ -1,0 +1,87 @@
+{
+  "paper_id": "10.1234/example.5678",
+  "info": {
+    "title": "Deep Learning for Something Great",
+    "abstract": "This is an abstract.",
+    "keywords": ["deep learning", "nlp"],
+    "doi": "10.1234/example.5678",
+    "file_hash": "abc123",
+    "input_format": "pdf",
+    "file_name": "example.pdf",
+    "schema_version": "10.6",
+    "bibr_version": "0.3.0",
+    "paper_type": "empirical",
+    "paper_type_confidence": 0.92,
+    "oecd_l1": null,
+    "oecd_l2": null,
+    "oecd_confidence": null,
+    "journal": "Journal of Examples",
+    "volume": "12",
+    "issue": "3",
+    "first_page": "100",
+    "last_page": "110",
+    "issn": "1234-5678",
+    "publisher": "Example Press",
+    "published": "2026",
+    "license": "CC-BY",
+    "funding_statement": null,
+    "coi_statement": null,
+    "ethics_statement": null,
+    "data_availability": null
+  },
+  "author": [
+    {"author_id": 1, "given": "Jane", "family": "Doe", "affiliation": "Uni A", "email": null, "corresponding": true, "orcid": "0000-0001-2345-6789", "role": ["conceptualization"]},
+    {"author_id": 2, "given": "John", "family": "Smith", "affiliation": "Uni B", "email": null, "corresponding": false, "orcid": null, "role": []},
+    {"author_id": 3, "given": "Alice", "family": "Wong", "affiliation": "Uni C", "email": null, "corresponding": false, "orcid": null, "role": []},
+    {"author_id": 4, "given": "Bob", "family": "Lee", "affiliation": "Uni D", "email": null, "corresponding": false, "orcid": null, "role": []}
+  ],
+  "text": [
+    {"text": "This is sentence one.", "text_id": 1, "paragraph_id": 1, "section_id": 1, "page_number": 1, "formatted": null},
+    {"text": "This is sentence two.", "text_id": 2, "paragraph_id": 1, "section_id": 1, "page_number": 1, "formatted": null},
+    {"text": "This is sentence three.", "text_id": 3, "paragraph_id": 2, "section_id": 2, "page_number": 1, "formatted": null},
+    {"text": "This is sentence four.", "text_id": 4, "paragraph_id": 3, "section_id": 3, "page_number": 2, "formatted": null},
+    {"text": "This is sentence five.", "text_id": 5, "paragraph_id": 3, "section_id": 3, "page_number": 2, "formatted": null}
+  ],
+  "section": [
+    {"section_id": 1, "header": "Introduction", "level": 1, "parent_section_id": null, "section_type": "introduction", "classification_score": 0.95, "classification_source": "alias"},
+    {"section_id": 2, "header": "Methods", "level": 1, "parent_section_id": null, "section_type": "methods", "classification_score": 0.9, "classification_source": "alias"},
+    {"section_id": 3, "header": "Discussion", "level": 1, "parent_section_id": null, "section_type": "discussion", "classification_score": 0.88, "classification_source": "alias"}
+  ],
+  "url": [],
+  "bib": [
+    {"bib_id": 1, "text_id": 3, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "authors": "Smith, J.", "editors": null, "publisher": null, "year": 2020, "year_suffix": null, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null, "is_in_press": false},
+    {"bib_id": 2, "text_id": 4, "bib_type": "article-journal", "doi": null, "title": "Ref Two", "authors": "Lee, B.", "editors": null, "publisher": null, "year": 2021, "year_suffix": null, "date": null, "container": "Journal Y", "volume": "2", "issue": "2", "first_page": "20", "last_page": "30", "edition": null, "version": null, "url": null, "is_in_press": false}
+  ],
+  "xref": [
+    {"xref_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 3},
+    {"xref_id": 1, "xref_type": "bib", "contents": "(Smith, 2020)", "text_id": 4},
+    {"xref_id": 1, "xref_type": "table", "contents": "Table 1", "text_id": 5}
+  ],
+  "figure": [
+    {"figure_id": 1, "section_id": 2, "image": null, "caption": "Figure 1 caption", "page_number": 1}
+  ],
+  "table": [
+    {"table_id": 1, "section_id": 2, "html": "<table></table>", "contents": [], "caption": "Table 1 caption", "page_number": 1}
+  ],
+  "eq": [
+    {"text_id": 4, "grp_id": 1, "lhs": "t", "df": "28", "comp": "=", "rhs": "2.3"}
+  ],
+  "bib_match": [
+    {"bib_id": 1, "service": "crossref", "service_id": "10.1/aaa", "score": 0.99, "bib_type": "article-journal", "doi": "10.1/aaa", "title": "Ref One", "authors": [{"given": "J.", "family": "Smith"}], "editors": null, "publisher": null, "year": 2020, "date": null, "container": "Journal X", "volume": "1", "issue": "1", "first_page": "1", "last_page": "10", "edition": null, "version": null, "url": null}
+  ],
+  "info_match": [],
+  "funding": [],
+  "affiliations": [],
+  "ocr_config": {"ocr_backend": "glm-sglang", "ocr_model": null, "llm_provider": "google", "llm_model": "gemini-2.5-flash", "no_llm": false},
+  "enrichment": {"complete": true, "refs_enriched": 1, "refs_total": 2},
+  "processing_warnings": ["VALIDATION:warning:VAL_XREF_ZERO: low xref count", "STATEMENT_LEXICAL_FALLBACK: funding_statement"],
+  "llm_usage": {"gemini-2.5-flash": {"input_tokens": 12345, "output_tokens": 678, "total_tokens": 13023}},
+  "extraction": {"bibr_version": "0.3.0", "ref_seg_strategy": "geom", "ref_parse_strategy": "ner", "ref_seg_fallback_used": false, "crossref_enrich": true, "consolidate": "off", "timings": {"ocr": 1.2}, "total_seconds": 3.4},
+  "validation": {
+    "errors": 0,
+    "warnings": 1,
+    "issues": [
+      {"code": "VAL_XREF_ZERO", "severity": "warning", "message": "low xref count", "count": 1}
+    ]
+  }
+}

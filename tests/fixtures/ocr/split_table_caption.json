@@ -1,0 +1,26 @@
+[
+  [],
+  [],
+  [],
+  [],
+  [
+    {
+      "index": 39,
+      "label": "paragraph_title",
+      "content": "Table 1",
+      "bbox_2d": [82, 118, 178, 145]
+    },
+    {
+      "index": 40,
+      "label": "text",
+      "content": "Descriptive statistics for the study variables",
+      "bbox_2d": [82, 148, 612, 178]
+    },
+    {
+      "index": 41,
+      "label": "table",
+      "content": "| Variable | Mean | SD |\n|---|---:|---:|\n| Outcome | 3.42 | 0.81 |",
+      "bbox_2d": [82, 184, 612, 342]
+    }
+  ]
+]

@@ -1,0 +1,119 @@
+# docker-compose.yml — bibr deployment stack
+#
+# Usage:
+#   docker compose up                              # Redis only (for local dev)
+#   docker compose --profile serve --profile ocr up  # All-in-one (single host)
+#
+# Split deployment (bibr on one host, OCR on another):
+#   GPU host:  docker compose --profile ocr up
+#   CPU host:  OCR_BASE_URL=http://<gpu-host>:8080 docker compose --profile serve up
+#
+# Note: Redis has no profile → it always starts. bibr-serve depends on it.
+
+services:
+  # ---------- Redis cache ----------
+  redis:
+    image: redis:7-alpine
+    command: >
+      sh -c '
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes
+        else
+          redis-server --appendonly yes
+        fi
+      '
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      # $$REDIS_PASSWORD defers expansion to the container shell at runtime
+      # (single $ would expand at compose-parse time on the host).
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$REDIS_PASSWORD redis-cli ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ---------- bibr OCR server (SGLang + GLM-OCR) ----------
+  bibr-ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+    shm_size: 16g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      - SGLANG_GPUS=${OCR_LOCAL_GPUS:-1}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${OCR_LOCAL_GPUS:-1}
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
+    profiles:
+      - ocr
+    restart: unless-stopped
+
+  # ---------- bibr serve node ----------
+  # LitServe HTTP API + pipeline orchestrator + GPU models (layout, segmenter)
+  bibr-serve:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve
+      args:
+        WITH_GPU: ${WITH_GPU:-false}
+    # Layout + segmenter only; the OCR server's 16g is overkill for serve.
+    shm_size: 4g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-}@redis:6379/0
+      - OCR_BASE_URL=${OCR_BASE_URL:-http://bibr-ocr:8080}
+      # The bundled OCR hop stays on Docker's private bridge network.
+      - OCR_ALLOW_INSECURE_HTTP=${OCR_ALLOW_INSECURE_HTTP:-true}
+      # Compose is a network deployment: force fail-closed production checks.
+      - ENVIRONMENT=production
+      - AUTH_API_KEY=${AUTH_API_KEY:-}
+      # Optional bibr-resolver (OpenAlex + Crossref/DataCite) enrichment tier,
+      # tried before Crossref. Unset = disabled → bare Crossref. Passed through
+      # from the deploy host's environment (or the interpolation .env) so the
+      # resolver can be enabled without editing this file. Use a host the
+      # container can resolve and reach.
+      - BIBR_RESOLVER_URL=${BIBR_RESOLVER_URL:-}
+      - BIBR_RESOLVER_ENRICH=${BIBR_RESOLVER_ENRICH:-true}
+      - BIBR_RESOLVER_AUTHORITATIVE=${BIBR_RESOLVER_AUTHORITATIVE:-false}
+    # No volume mount on /app/.hf_cache — the Dockerfile bakes models into
+    # that path, and an empty named volume would mask the baked content and
+    # force a multi-GB re-download on first start.
+    healthcheck:
+      # /ready probes OCR + Redis upstream; /health is just LitServe liveness.
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 600s
+    profiles:
+      - serve
+    restart: unless-stopped
+
+
+volumes:
+  redis-data:

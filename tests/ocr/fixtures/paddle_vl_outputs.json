@@ -1,0 +1,5 @@
+{
+  "formula_simple": "\\[(a)_{n}=(a;q)_{n}=\\prod_{k=0}^{n-1}(1-aq^{k}),\\]",
+  "formula_align": "\\[\\begin{align*}&\\sum_{k=0}^{n-1}(-q^2)_{2k}\\\\&\\quad=\\frac{(-q)_{n-1}}{(q^2)_{n-1}}.\\end{align*}\\]",
+  "table_merged": "<fcel>Access this article online<lcel><nl><fcel>Quick Response Code:<fcel>Website:www.ijem.in<nl><ecel><fcel>DOI:\\n10.4103/2230-8210.152787<nl>"
+}

@@ -1,0 +1,59 @@
+{
+  "detected_footers": [],
+  "detected_headers": [],
+  "detected_title": "My Paper",
+  "figures": [],
+  "sections": [
+    {
+      "header": "Root",
+      "level": 0,
+      "parent_section_id": null,
+      "section_id": 0,
+      "section_type": "unknown"
+    },
+    {
+      "header": "My Paper",
+      "level": 1,
+      "parent_section_id": 0,
+      "section_id": 1,
+      "section_type": "unknown"
+    },
+    {
+      "header": "Introduction",
+      "level": 2,
+      "parent_section_id": 1,
+      "section_id": 2,
+      "section_type": "unknown"
+    },
+    {
+      "header": "Methods",
+      "level": 2,
+      "parent_section_id": 1,
+      "section_id": 3,
+      "section_type": "unknown"
+    }
+  ],
+  "sentences": [
+    {
+      "section_id": 2,
+      "text": "First sentence.",
+      "text_id": 1
+    },
+    {
+      "section_id": 2,
+      "text": "Second sentence.",
+      "text_id": 2
+    },
+    {
+      "section_id": 3,
+      "text": "Method sentence one.",
+      "text_id": 3
+    },
+    {
+      "section_id": 3,
+      "text": "Method sentence two.",
+      "text_id": 4
+    }
+  ],
+  "tables": []
+}

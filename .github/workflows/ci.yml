@@ -1,0 +1,816 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  UV_VERSION: "0.9.8"
+  PRIMARY_PYTHON: "3.12"
+
+jobs:
+  changes:
+    name: Classify changed surfaces
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+      package: ${{ steps.classify.outputs.package }}
+      docs: ${{ steps.classify.outputs.docs }}
+      container: ${{ steps.classify.outputs.container }}
+      workflow: ${{ steps.classify.outputs.workflow }}
+    steps:
+      - name: Checkout full history for the explicit event diff
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Classify paths
+        id: classify
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$BEFORE_SHA" =~ ^0+$ ]]; then
+            python scripts/ci/changed_surfaces.py --all >> "$GITHUB_OUTPUT"
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            python scripts/ci/changed_surfaces.py \
+              --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          else
+            python scripts/ci/changed_surfaces.py \
+              --base "$BEFORE_SHA" --head "$PUSH_HEAD_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+  quality:
+    name: Quality and workflow policy
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install quality tools
+        run: uv sync --locked
+
+      - name: Install isolated workflow policy tools
+        run: uv sync --project ci/tools --locked
+
+      - name: Verify lockfile
+        run: uv lock --check
+
+      - name: Lint
+        run: uv run --locked ruff check .
+
+      - name: Check public source boundary
+        run: python scripts/check_public_tree.py
+
+      - name: Check formatting
+        run: uv run --locked ruff format --check .
+
+      - name: Type check strict core
+        run: >-
+          uv run --locked mypy
+          bibr/models.py bibr/exceptions.py bibr/paper_contents.py bibr/paper.py
+
+      - name: Validate general repository files
+        run: |
+          for hook in \
+            check-yaml check-json check-toml check-added-large-files \
+            check-merge-conflict detect-private-key; do
+            uv run --locked pre-commit run "$hook" --all-files
+          done
+
+      - name: Validate GitHub Actions syntax
+        run: uv run --project ci/tools --locked actionlint
+
+      - name: Audit GitHub Actions security
+        run: >-
+          uv run --project ci/tools --locked zizmor --offline --strict-collection
+          --collect=all .
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  test-primary:
+    name: Primary suite (Ubuntu, Python 3.12)
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the canonical full environment
+        run: uv sync --locked --extra all
+
+      - name: Run the non-slow suite once with coverage
+        run: >-
+          uv run --locked --extra all pytest -m "not slow"
+          --cov=bibr --cov-report=xml --cov-fail-under=75
+
+      - name: Upload coverage
+        if: >-
+          github.event_name != 'pull_request' ||
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.2
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          slug: scienceverse/bibr
+          fail_ci_if_error: true
+
+      # Reuse this report in the SonarQube job instead of re-running the suite.
+      # Kept to main pushes,
+      # which is the only ref SonarQube Community Build analyses.
+      - name: Hand coverage to the SonarQube job
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-${{ github.sha }}
+          path: coverage.xml
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  core-compat:
+    name: Core compatibility (Ubuntu, Python ${{ matrix.python-version }})
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.14"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install core development environment
+        run: uv sync --locked
+
+      - name: Run core-compatible tests
+        run: uv run --locked pytest -m "not slow" -q
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  core-install:
+    name: Core install without ML dependencies
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install only the core project and default development group
+        run: uv sync --locked
+
+      - name: Prove the public API imports without torch
+        run: |
+          uv run --locked python -c \
+            "import bibr; from bibr import LocalPipeline, Pipeline, Settings"
+          if uv run --locked python -c "import torch" >/dev/null 2>&1; then
+            echo "torch leaked into the core environment" >&2
+            exit 1
+          fi
+
+      - name: Run the core-compatible suite
+        run: uv run --locked pytest -m "not slow" -q
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  package:
+    name: Build and smoke distribution artifacts
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Build sdist and wheel once
+        run: uv build
+
+      - name: Gate distribution contents
+        run: uv run --locked python scripts/check_dist_contents.py
+
+      - name: Install the wheel into a clean environment
+        working-directory: /tmp
+        run: |
+          uv venv /tmp/bibr-wheel-smoke
+          uv pip install --python /tmp/bibr-wheel-smoke/bin/python \
+            "${{ github.workspace }}"/dist/*.whl
+          /tmp/bibr-wheel-smoke/bin/bibr --help
+          /tmp/bibr-wheel-smoke/bin/python -c \
+            "import bibr; from bibr import LocalPipeline, Pipeline, Settings"
+          if /tmp/bibr-wheel-smoke/bin/python -c "import torch" >/dev/null 2>&1; then
+            echo "torch leaked into the core wheel" >&2
+            exit 1
+          fi
+
+      - name: Upload verified distributions
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: distributions-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  contract-smokes:
+    name: Deterministic extraction contract smokes
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install full contract environment
+        run: uv sync --locked --extra all
+
+      - name: Prove public export and evaluation contracts
+        run: >-
+          uv run --locked pytest -q
+          tests/test_export_validation.py tests/test_evaluation.py
+          tests/evaluation/test_section_metrics.py
+          tests/evaluation/test_validation_metrics.py
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  security:
+    name: Dependency and source security
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install auditable environment
+        run: uv sync --locked --extra all
+
+      - name: Validate exceptions and audit installed dependencies
+        run: uv run --locked python scripts/ci/audit_dependencies.py
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  semgrep:
+    name: Semgrep source security
+    needs: changes
+    if: >-
+      needs.changes.outputs.python == 'true' ||
+      needs.changes.outputs.package == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: semgrep/semgrep@sha256:58889e4ef89e779e33dfd3f90c87dd1c568670584a2fee5ad376e5451e9a64e4
+      options: --user 0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Scan source and committed configuration
+        run: >-
+          semgrep scan
+          --config=p/security-audit --config=p/secrets --config=p/python
+          --error --quiet
+
+  docs-build:
+    name: Build strict MkDocs artifact
+    needs: changes
+    if: >-
+      needs.changes.outputs.docs == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PRIMARY_PYTHON }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install docs environment
+        run: uv sync --locked --group docs
+
+      - name: Build docs strictly
+        run: uv run --locked mkdocs build --strict
+
+      - name: Mark the exact source revision
+        run: |
+          mkdir -p site/.well-known
+          printf '%s\n' "$GITHUB_SHA" > site/.well-known/bibr-build
+
+      - name: Upload commit-marked site
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mkdocs-site-${{ github.sha }}
+          path: site/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  container-build-scan:
+    name: Build and scan serve container
+    needs: changes
+    if: >-
+      needs.changes.outputs.container == 'true' ||
+      needs.changes.outputs.workflow == 'true'
+    # Only pushes to the branches allowed above may use the persistent runner.
+    # PRs and manual runs use disposable hosted machines. Runner-group access
+    # must also restrict untrusted workflows; a PR can edit this routing rule.
+    # Clear CONTAINER_RUNNER to use hosted machines for trusted pushes as well.
+    runs-on: ${{ github.event_name == 'push' && vars.CONTAINER_RUNNER || 'ubuntu-latest' }}
+    # A cold-cache build of this image takes ~45 min on its own, which left the
+    # Trivy step boxed into the remainder of a 50-minute budget and killed it
+    # mid-layer. Build and scan each need their own room.
+    timeout-minutes: 80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      # Reclaim unused preinstalled toolchains on disposable hosted runners
+      # to make room for the CUDA image, build cache, and exported archive.
+      # Persistent self-hosted runners manage their own storage.
+      - name: Free runner disk space
+        if: runner.environment == 'github-hosted'
+        run: |
+          df -h /
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /usr/local/.ghcup \
+            /opt/hostedtoolcache \
+            /usr/share/swift \
+            /usr/share/miniconda \
+            /usr/local/share/powershell \
+            /usr/local/share/boost
+          sudo docker image prune --all --force
+          sudo apt-get clean
+          df -h /
+
+      # Local buildx cache exports retain unused blobs. Export to a fresh
+      # directory and swap it in below to bound the retained cache. Check free
+      # space before building because the archive and new cache coexist at
+      # export time and other jobs may share the storage.
+      - name: Ensure DATA has room for the build
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          CACHE_DIR: /mnt/data/ci/buildx-cache
+          MIN_FREE_GB: "45"
+        run: |
+          mkdir -p "$CACHE_DIR"
+          # A cancelled or killed job can leave a half-written export behind.
+          rm -rf "${CACHE_DIR:?}.new"
+          free_gb=$(df -BG --output=avail "$CACHE_DIR" | tail -1 | tr -dc '0-9')
+          cache_gb=$(du -sBG "$CACHE_DIR" 2>/dev/null | cut -f1 | tr -d 'G')
+          echo "DATA free ${free_gb}G, layer cache ${cache_gb:-0}G, floor ${MIN_FREE_GB}G"
+          if (( free_gb < MIN_FREE_GB )); then
+            echo "::warning::DATA below ${MIN_FREE_GB}G free - dropping the layer cache; this build runs cold"
+            rm -rf "${CACHE_DIR:?}"/*
+            df -h "$CACHE_DIR" | tail -1
+          fi
+
+      # Docker builds run outside the runner service's resource limits.
+      # Limit the buildkit container directly on shared self-hosted runners.
+      # Verify any limit changes with the container's cgroup cpu.max value.
+      - name: Choose buildx resource limits
+        id: buildx-limits
+        shell: bash
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+        run: |
+          if [[ "$RUNNER_ENV" == "self-hosted" ]]; then
+            {
+              echo 'opts<<LIMITS'
+              printf 'memory=48g\ncpu-quota=1200000\ncpu-period=100000\n'
+              echo 'LIMITS'
+            } >> "$GITHUB_OUTPUT"
+          else
+            # Hosted runners are a disposable 4-core VM that is entirely ours.
+            echo 'opts=' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.0.0
+        with:
+          driver-opts: ${{ steps.buildx-limits.outputs.opts }}
+
+      - name: Build unprivileged validation image
+        id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.0.0
+        with:
+          context: .
+          file: Dockerfile.serve
+          push: false
+          # Export a docker-archive instead of `load: true`. Loading unpacks a
+          # second full copy of the image into /var/lib/docker purely so Trivy
+          # can address it by tag; Trivy reads the tar directly instead.
+          #
+          # Use runner-managed scratch storage for the image archive. /tmp
+          # may be memory-backed on a self-hosted runner.
+          outputs: type=docker,dest=${{ runner.temp }}/bibr-ci-image.tar
+          tags: bibr-ci:${{ github.sha }}
+          build-args: |
+            WITH_GPU=true
+            BIBR_BUILD_SHA=${{ github.sha }}
+          # Self-hosted runners reuse local layers; hosted runners use the
+          # GitHub Actions cache. Read the live directory and write a fresh
+          # one, then swap after a successful export.
+          cache-from: ${{ runner.environment == 'self-hosted' && 'type=local,src=/mnt/data/ci/buildx-cache' || 'type=gha' }}
+          cache-to: ${{ runner.environment == 'self-hosted' && 'type=local,dest=/mnt/data/ci/buildx-cache.new,mode=max' || 'type=gha,mode=max' }}
+
+      # This is what actually bounds the cache. `type=local` cannot prune itself,
+      # so exporting in place accumulates every layer every build has ever
+      # produced. Each export is complete on its own, though — so exporting to a
+      # new directory and swapping it in holds the cache at one build's worth
+      # (~12G) forever, with no GC to schedule and nothing to chase with a timer.
+      #
+      # `mv` within one filesystem is a rename, so the swap is atomic and cannot
+      # leave a half-replaced cache behind.
+      - name: Swap in the freshly exported layer cache
+        if: always() && runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          CACHE_DIR: /mnt/data/ci/buildx-cache
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          if [[ "$BUILD_OUTCOME" == "success" && -d "${CACHE_DIR}.new" ]]; then
+            rm -rf "${CACHE_DIR:?}"
+            mv "${CACHE_DIR}.new" "$CACHE_DIR"
+            echo "layer cache now $(du -sh "$CACHE_DIR" | cut -f1)"
+          else
+            # A failed or cancelled build leaves a partial export; discarding it
+            # keeps the next run reading the last cache known to be complete.
+            echo "build outcome '${BUILD_OUTCOME:-none}' - discarding the partial export"
+            rm -rf "${CACHE_DIR:?}.new"
+          fi
+          df -h "$CACHE_DIR" | tail -1
+
+      - name: Block HIGH and CRITICAL image vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          input: ${{ runner.temp }}/bibr-ci-image.tar
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+          # Trivy's own default is 5 minutes, which this image (multi-GB, CUDA
+          # runtime + baked HF models) blows through on a cold vuln DB — the
+          # scan then dies with "failed to analyze layer" and the step fails as
+          # if it had found something.
+          timeout: 20m
+
+  sonar:
+    name: SonarQube analysis (main only)
+    needs: [test-primary]
+    # Two gates, for two different reasons.
+    #
+    # Main only: SonarQube Community Build analyses a single branch. Branch and
+    # PR analysis are Developer Edition, so running this on a PR would push the
+    # PR's numbers onto main's project. This is a post-merge trend, not a gate.
+    #
+    # Runner required: the configured SonarQube service needs a self-hosted
+    # runner with network access. With no self-hosted runner configured the
+    # job is skipped rather than failing — analysis is a nice-to-have, and it
+    # must never be the reason a green main goes red. `|| 'ubuntu-latest'` below
+    # exists only to keep `runs-on` non-empty for the parser; when the variable
+    # is unset the `if` has already skipped the job.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.test-primary.result == 'success' &&
+      vars.CONTAINER_RUNNER != ''
+    runs-on: ${{ vars.CONTAINER_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          # Sonar attributes every issue to the commit that introduced it. A
+          # shallow clone blames the whole tree on the checkout commit, which
+          # makes "new code" meaningless — the one axis this analysis is for.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Reuse the coverage report CI already produced
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
+        with:
+          name: coverage-${{ github.sha }}
+
+      - name: Analyse and publish to SonarQube
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          # Use a scanner-accessible URL that accepts token authentication.
+          SONAR_HOST_URL: ${{ vars.SONAR_HOST_URL }}
+
+  required:
+    name: CI / required
+    if: always()
+    needs:
+      - changes
+      - quality
+      - test-primary
+      - core-compat
+      - core-install
+      - package
+      - contract-smokes
+      - security
+      - semgrep
+      - docs-build
+      - container-build-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every applicable gate
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          QUALITY: ${{ needs.quality.result }}
+          TEST_PRIMARY: ${{ needs.test-primary.result }}
+          CORE_COMPAT: ${{ needs.core-compat.result }}
+          CORE_INSTALL: ${{ needs.core-install.result }}
+          PACKAGE: ${{ needs.package.result }}
+          CONTRACT_SMOKES: ${{ needs.contract-smokes.result }}
+          SECURITY: ${{ needs.security.result }}
+          SEMGREP: ${{ needs.semgrep.result }}
+          DOCS_BUILD: ${{ needs.docs-build.result }}
+          CONTAINER_BUILD_SCAN: ${{ needs.container-build-scan.result }}
+        run: |
+          for result in \
+            "$CHANGES" "$QUALITY" "$TEST_PRIMARY" "$CORE_COMPAT" "$CORE_INSTALL" \
+            "$PACKAGE" "$CONTRACT_SMOKES" "$SECURITY" "$SEMGREP" "$DOCS_BUILD" \
+            "$CONTAINER_BUILD_SCAN"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "required dependency ended with: $result" >&2; exit 1 ;;
+            esac
+          done
+
+  deploy-preview:
+    name: Deploy protected docs preview
+    needs: [required, docs-build]
+    if: >-
+      always() &&
+      needs.required.result == 'success' &&
+      needs.docs-build.result == 'success' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: bibr-site-preview
+      url: ${{ steps.deploy.outputs.deployment-url }}
+    steps:
+      - name: Checkout deployment smoke helper
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the exact CI-built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
+        with:
+          name: mkdocs-site-${{ github.sha }}
+          path: site/
+
+      - name: Deploy protected preview
+        id: deploy
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: 4.110.0
+          command: >-
+            pages deploy site --project-name=bibr-site
+            --branch=pr-${{ github.event.pull_request.number }}
+            --commit-hash=${{ github.sha }}
+
+      - name: Prove preview Access enforcement and revision
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          SITE_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: >-
+          python scripts/ci/smoke_site.py --access=protected
+          --url="$SITE_URL" --expected-sha=${{ github.sha }}
+
+  deploy-production:
+    name: Deploy public bibr.org site
+    needs: [required, docs-build]
+    if: >-
+      always() &&
+      needs.required.result == 'success' &&
+      needs.docs-build.result == 'success' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: bibr-site-production
+      url: https://bibr.org
+    steps:
+      - name: Checkout deployment smoke helper
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download the exact CI-built site
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
+        with:
+          name: mkdocs-site-${{ github.sha }}
+          path: site/
+
+      - name: Deploy production
+        id: deploy
+        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: 4.110.0
+          command: >-
+            pages deploy site --project-name=bibr-site --branch=main
+            --commit-hash=${{ github.sha }}
+
+      - name: Prove public production availability and revision
+        env:
+          SITE_URL: https://bibr.org
+        run: >-
+          python scripts/ci/smoke_site.py --access=public
+          --url="$SITE_URL" --expected-sha=${{ github.sha }}
+
+      - name: Summarize deployment
+        env:
+          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
+        run: |
+          {
+            echo "## Public bibr.org deployment"
+            echo
+            echo "- Source: \`$GITHUB_SHA\`"
+            echo "- Cloudflare deployment: $DEPLOYMENT_URL"
+            echo "- Canonical URL: https://bibr.org"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish-edge:
+    name: Promote verified serve image to edge
+    needs: [changes, required]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.changes.outputs.container == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      channel: edge
+      source_sha: ${{ github.sha }}

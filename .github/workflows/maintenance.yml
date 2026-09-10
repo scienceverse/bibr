@@ -1,0 +1,126 @@
+name: Maintenance
+
+on:
+  schedule:
+    - cron: "17 3 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maintenance-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.9.8"
+
+jobs:
+  cross-platform-core:
+    name: Core suite (${{ matrix.os }}, Python 3.12)
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install core development environment
+        run: uv sync --locked
+
+      - name: Run core-compatible tests
+        run: uv run --locked pytest -m "not slow" -q
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  full-mypy-advisory:
+    name: Advisory / full mypy debt
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install development environment
+        run: uv sync --locked
+
+      - name: Record full mypy debt
+        run: |
+          set +e
+          uv run --locked mypy bibr/ --exclude 'bibr/_vendor/' 2>&1 | tee full-mypy.log
+          status=${PIPESTATUS[0]}
+          {
+            echo "## Advisory full-repository mypy"
+            echo
+            echo "Exit status: $status"
+            echo
+            echo "This job is intentionally advisory; strict core typing remains blocking in CI."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Upload advisory report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: full-mypy-${{ github.sha }}
+          path: full-mypy.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci
+
+  security:
+    name: Scheduled dependency and source audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install locked uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install full auditable environment
+        run: uv sync --locked --extra all --group dev
+
+      - name: Audit dependencies through expiring policy
+        run: uv run --locked python scripts/ci/audit_dependencies.py
+
+      - name: Prune uv cache
+        if: always()
+        run: uv cache prune --ci

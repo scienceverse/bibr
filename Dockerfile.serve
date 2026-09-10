@@ -1,0 +1,227 @@
+# syntax=docker/dockerfile:1.7
+
+# ---------------------------------------------------------------------------
+# bibr serve container — multi-stage build
+# API + pipeline orchestrator + GPU models (layout, segmenter).
+# OCR runs in a separate container (bibr-ocr).
+#
+# cuDNN is supplied by the nvidia-cudnn-cu12 pip wheel (pulled in by
+# onnxruntime-gpu / torch), so we use the cuda-runtime base instead of
+# cuda-cudnn-runtime to avoid duplicating ~600MB of system cuDNN libs.
+# ---------------------------------------------------------------------------
+
+ARG WITH_GPU=true
+
+# ===========================================================================
+# Stage 1: builder — install Python, build venv, populate model wheels
+# ===========================================================================
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv && \
+    apt-get purge -y --auto-remove software-properties-common && \
+    ln -sf /usr/bin/python3.13 /usr/local/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# UV_LINK_MODE=copy ensures the venv is copy-safe across build stages.
+# UV_NO_CACHE=1 keeps uv's package cache out of the layer.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PYTHON=/usr/local/bin/python \
+    PATH="/app/.venv/bin:$PATH"
+
+ARG WITH_GPU
+
+# Resolve deps first (layer-cached across code changes).
+# --extra ml is load-bearing: the runtime stage bakes the PP-DocLayoutV3 layout
+# model (transformers) and the CRF segmenter (torch). Those live in the optional
+# `ml` extra (pyproject.toml); without it the model-cache steps below fail at
+# build time with ModuleNotFoundError.
+# --extra mcp ships the optional MCP server so an operator can flip
+# MCP_ENABLED=true on the Compose stack without a custom image; it is a small
+# pure-Python dependency and stays inert unless enabled.
+COPY pyproject.toml uv.lock README.md ./
+RUN if [ "$WITH_GPU" = "true" ]; then \
+      uv sync --no-install-project --extra cache --extra gpu --extra ml --extra mcp --no-dev; \
+    else \
+      uv sync --no-install-project --extra cache --extra ml --extra mcp --no-dev; \
+    fi
+
+# Install the project, then swap onnxruntime → onnxruntime-gpu on GPU builds.
+COPY bibr ./bibr
+RUN if [ "$WITH_GPU" = "true" ]; then \
+      uv sync --extra cache --extra gpu --extra ml --extra mcp --no-dev && \
+      # onnxruntime (CPU) and onnxruntime-gpu share an `onnxruntime/` import
+      # namespace, so installing both leaves a broken venv where the CPU
+      # pybind11_state.so shadows the GPU one. Uninstall both and reinstall just
+      # the GPU variant to land a clean GPU binary + nvidia libs.
+      #
+      # --python is load-bearing: UV_PYTHON (set above) points `uv pip` at the
+      # *system* interpreter, so bare `uv pip uninstall` silently no-ops
+      # ("Skipping ... not installed", exit 0) and the reinstall lands outside
+      # /app/.venv — which is the only thing the runtime stage copies.
+      uv pip uninstall --python /app/.venv/bin/python onnxruntime && \
+      uv pip uninstall --python /app/.venv/bin/python onnxruntime-gpu && \
+      # Pinned: this install is outside the lock, so unpinned it silently drifts
+      # to whatever is newest on PyPI and two builds of the same commit can ship
+      # different ORT binaries (and different bundled CUDA/cuDNN wheels). Bump
+      # deliberately, and rebuild the serve image to pick it up.
+      uv pip install --python /app/.venv/bin/python 'onnxruntime-gpu[cuda,cudnn]==1.28.0' && \
+      # Assert the swap actually took. get_available_providers() can't be used
+      # here (registering the CUDA EP needs a driver; build containers have no
+      # /dev/nvidia*) and get_all_providers() is a static list that never fails,
+      # so check the package state instead — that is exactly what broke.
+      python -c "import importlib.metadata as md; \
+        got = sorted(n for n in (d.metadata['Name'] for d in md.distributions()) \
+          if n in {'onnxruntime', 'onnxruntime-gpu'}); \
+        assert got == ['onnxruntime-gpu'], \
+        f'GPU build must ship onnxruntime-gpu alone — got {got}.'"; \
+    else \
+      uv sync --extra cache --extra ml --extra mcp --no-dev; \
+    fi
+
+# ===========================================================================
+# Stage 2: runtime — slim image with venv + system libs + baked models
+# ===========================================================================
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
+# The CUDA base image ships jammy packages frozen at its build date, so this
+# layer inherits whatever was current then: openssl/libssl3 3.0.2-0ubuntu1.15
+# (CVE-2026-45447, PKCS7_verify use-after-free) and the gnupg2 set at
+# 2.2.27-3ubuntu2.1 (CVE-2025-68973, out-of-bounds write) — together the 14 HIGH
+# findings that block the image scan. Both are fixed in jammy-security.
+#
+# Named explicitly rather than a blanket `apt-get upgrade`: this base also has
+# NVIDIA's apt repo enabled, and a blanket upgrade would drift the CUDA runtime
+# packages out from under the pinned nvidia/* pip wheels. When Trivy flags a new
+# base package, add it to this list.
+RUN apt-get update && \
+    apt-get install -y --only-upgrade \
+        openssl libssl3 \
+        dirmngr gnupg gnupg-l10n gnupg-utils gnupg2 \
+        gpg gpg-agent gpg-wks-client gpg-wks-server gpgconf gpgsm gpgv && \
+    apt-get install -y --no-install-recommends software-properties-common && \
+    add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        python3.13 python3.13-venv \
+        libmagic1 libnuma1 curl && \
+    apt-get purge -y --auto-remove software-properties-common && \
+    ln -sf /usr/bin/python3.13 /usr/local/bin/python && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -ms /bin/bash bibr
+WORKDIR /app
+
+ENV PATH="/app/.venv/bin:$PATH" \
+    HF_HOME=/app/.hf_cache
+
+# Pre-create cache dirs owned by bibr so model downloads land here without
+# requiring a multi-GB chown layer afterwards.
+RUN mkdir -p /app/.hf_cache /app/.onnx_models && \
+    chown -R bibr:bibr /app
+
+COPY --from=builder --chown=bibr:bibr /app/.venv /app/.venv
+COPY --chown=bibr:bibr bibr ./bibr
+COPY --chown=bibr:bibr scripts/prefetch_segmenter.py ./scripts/prefetch_segmenter.py
+
+ARG WITH_GPU
+
+# Wire pip-installed nvidia/* libs into the dynamic linker (needs root).
+# GPU builds only: onnxruntime-gpu dlopen()s cuDNN/cuBLAS by soname and won't
+# find the wheel-provided copies without this. CPU builds have no consumer, and
+# `nvidia` may not be importable there at all.
+#
+# `nvidia` is a PEP 420 namespace package in current wheels, so __file__ is None
+# and only __path__ (possibly multi-entry) locates the component dirs.
+RUN if [ "$WITH_GPU" = "true" ]; then \
+      python -c "import os, nvidia; \
+        dirs = list(dict.fromkeys( \
+          os.path.join(base, d, 'lib') for base in list(nvidia.__path__) \
+          for d in sorted(os.listdir(base)) \
+          if os.path.isdir(os.path.join(base, d, 'lib')))); \
+        assert dirs, 'no nvidia/*/lib dirs found in the venv'; \
+        print('\n'.join(dirs))" > /etc/ld.so.conf.d/nvidia-pip.conf && \
+      ldconfig; \
+    fi
+
+RUN if [ "$WITH_GPU" = "true" ]; then \
+      # See builder note: verify the venv that actually shipped holds exactly
+      # one onnxruntime distribution, and that the CUDA EP binary came with it.
+      python -c "import importlib.metadata as md; \
+        got = sorted(n for n in (d.metadata['Name'] for d in md.distributions()) \
+          if n in {'onnxruntime', 'onnxruntime-gpu'}); \
+        assert got == ['onnxruntime-gpu'], \
+        f'GPU image must ship onnxruntime-gpu alone — got {got}.'" && \
+      python -c "import os.path, onnxruntime; \
+        so = os.path.join(os.path.dirname(onnxruntime.__file__), 'capi', \
+          'libonnxruntime_providers_cuda.so'); \
+        assert os.path.exists(so), f'missing CUDA execution provider: {so}'"; \
+    fi
+
+USER bibr
+
+# Pre-download models as bibr — files land owned by bibr so no chown is
+# needed (which would otherwise duplicate the multi-GB cache layer).
+RUN python -c "\
+from transformers import AutoModelForObjectDetection, AutoImageProcessor; \
+AutoModelForObjectDetection.from_pretrained('PaddlePaddle/PP-DocLayoutV3_safetensors'); \
+AutoImageProcessor.from_pretrained('PaddlePaddle/PP-DocLayoutV3_safetensors'); \
+print('PP-DocLayoutV3 safetensors cached')"
+
+ARG PAPER_CLASSIFIER_MODEL=scienceverse/bibr-paper-classifier
+ARG PAPER_CLASSIFIER_REVISION=main
+ARG SECTION_CLASSIFIER_MODEL=scienceverse/bibr-section-classifier
+ARG SECTION_CLASSIFIER_REVISION=main
+ENV ML_PAPER_CLASSIFIER_MODEL_ID=${PAPER_CLASSIFIER_MODEL} \
+    ML_PAPER_CLASSIFIER_REVISION=${PAPER_CLASSIFIER_REVISION} \
+    ML_SECTION_CLASSIFIER_MODEL_ID=${SECTION_CLASSIFIER_MODEL} \
+    ML_SECTION_CLASSIFIER_REVISION=${SECTION_CLASSIFIER_REVISION}
+RUN python -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('${PAPER_CLASSIFIER_MODEL}', revision='${PAPER_CLASSIFIER_REVISION}'); \
+snapshot_download('${SECTION_CLASSIFIER_MODEL}', revision='${SECTION_CLASSIFIER_REVISION}'); \
+print('paper and section classifiers cached')"
+
+ARG WTPSPLIT_MODEL=sat-6l-sm
+ARG WTPSPLIT_LOCAL_BUNDLE
+ENV WTPSPLIT_MODEL=${WTPSPLIT_MODEL}
+RUN --mount=type=bind,source=.,target=/build-context,ro \
+    if [ -n "$WTPSPLIT_LOCAL_BUNDLE" ]; then \
+      if [ ! -d "/build-context/$WTPSPLIT_LOCAL_BUNDLE" ]; then \
+        echo "WTPSPLIT_LOCAL_BUNDLE is not a build-context directory" >&2; exit 1; \
+      fi; \
+      if [ "$WTPSPLIT_MODEL" != "/app/segmenter_bundle" ]; then \
+        echo "Set WTPSPLIT_MODEL=/app/segmenter_bundle for a local build bundle" >&2; exit 1; \
+      fi; \
+      cp -R "/build-context/$WTPSPLIT_LOCAL_BUNDLE" /app/segmenter_bundle; \
+    fi && \
+    python scripts/prefetch_segmenter.py "$WTPSPLIT_MODEL"
+
+COPY --chmod=755 entrypoint.sh /app/entrypoint.sh
+
+# Stamped last on purpose: an ENV earlier in this stage is part of every later
+# layer's cache key, so a per-commit sha forced the apt + model-bake layers to
+# rebuild on every build. Here only this final layer changes. Must be the full
+# 40-hex commit sha (or empty) — bibr validates the pattern at startup.
+ARG BIBR_BUILD_SHA
+ENV BIBR_BUILD_SHA=${BIBR_BUILD_SHA}
+
+EXPOSE 8000
+
+# /ready probes OCR + Redis upstream; /health is just LitServe liveness.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=600s --retries=5 \
+    CMD curl -sf http://localhost:8000/ready || exit 1
+
+CMD ["/app/entrypoint.sh"]

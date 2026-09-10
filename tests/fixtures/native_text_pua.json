@@ -1,0 +1,29 @@
+{
+  "provenance": "Synthetic text and geometry for native-text fallback regression.",
+  "source_page": 3,
+  "regions": [
+    {
+      "index": 1,
+      "label": "text",
+      "bbox_2d": [
+        100,
+        80,
+        820,
+        120
+      ],
+      "native_text": "The clean paragraph contains readable words\r\nand preserves its original line break."
+    },
+    {
+      "index": 2,
+      "label": "text",
+      "bbox_2d": [
+        100,
+        130,
+        820,
+        880
+      ],
+      "native_text": "The example report () compares two fictional classroom schedules and explains how the groups recorded their weekly reading sessions.",
+      "ocr_response": "The example report (2024) compares two fictional classroom schedules and explains how the groups recorded their weekly reading sessions."
+    }
+  ]
+}

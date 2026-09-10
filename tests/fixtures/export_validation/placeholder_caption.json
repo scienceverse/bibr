@@ -1,0 +1,18 @@
+{
+  "paper_id": "validation-placeholder-caption",
+  "info": {"title": "STRING"},
+  "author": [{"given": "Ann", "family": "Lee"}],
+  "text": [{"text_id": 1, "section_id": 1, "text": "Body text."}],
+  "section": [
+    {
+      "section_id": 1,
+      "header": "Introduction",
+      "section_type": "intro",
+      "parent_section_id": null
+    }
+  ],
+  "figure": [],
+  "table": [{"table_id": 1, "caption": "", "contents": []}],
+  "bib": [],
+  "xref": []
+}

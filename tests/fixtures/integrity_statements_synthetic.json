@@ -1,0 +1,449 @@
+{
+  "provenance": {
+    "kind": "synthetic",
+    "note": "Invented prose and metadata exercise statement ownership, bounded diagnostics, and provenance preservation."
+  },
+  "topical_ethics": {
+    "sections": [
+      {
+        "section_id": 1,
+        "header": "Ethical Choices in Shared Spaces",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "ethics",
+        "classification_score": 0.98,
+        "classification_source": "model"
+      },
+      {
+        "section_id": 2,
+        "header": "Values in Collective Decisions",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "ethics",
+        "classification_score": 0.97,
+        "classification_source": "model"
+      },
+      {
+        "section_id": 3,
+        "header": "The Relation Between Facts and Values",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "ethics",
+        "classification_score": 0.96,
+        "classification_source": "model"
+      }
+    ],
+    "sentences": [
+      {
+        "text": "Example 1: Ethical arguments can assign different priorities to the same outcome.",
+        "text_id": 10,
+        "paragraph_id": 101,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: A policy model may describe preferences without settling which preference is fair.",
+        "text_id": 11,
+        "paragraph_id": 101,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: The example distinguishes factual assumptions from moral evaluations.",
+        "text_id": 12,
+        "paragraph_id": 101,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: Different definitions of fairness produce different rankings of these choices.",
+        "text_id": 13,
+        "paragraph_id": 102,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: A numerical comparison does not remove the underlying value judgement.",
+        "text_id": 14,
+        "paragraph_id": 102,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: The discussion concerns an abstract decision rather than a research protocol.",
+        "text_id": 15,
+        "paragraph_id": 102,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: This distinction remains useful when two communities prefer different outcomes.",
+        "text_id": 16,
+        "paragraph_id": 103,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: The hypothetical cases illustrate why a single ranking need not be universal.",
+        "text_id": 17,
+        "paragraph_id": 103,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: One interpretation values equal outcomes while another values equal opportunities.",
+        "text_id": 18,
+        "paragraph_id": 103,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: Neither interpretation follows from the observations alone.",
+        "text_id": 19,
+        "paragraph_id": 104,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: The argument identifies a conceptual disagreement about public responsibility.",
+        "text_id": 20,
+        "paragraph_id": 104,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 1: Further philosophical analysis could clarify the assumptions behind each position.",
+        "text_id": 21,
+        "paragraph_id": 104,
+        "section_id": 1,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: Ethical arguments can assign different priorities to the same outcome.",
+        "text_id": 30,
+        "paragraph_id": 111,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: A policy model may describe preferences without settling which preference is fair.",
+        "text_id": 31,
+        "paragraph_id": 111,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: The example distinguishes factual assumptions from moral evaluations.",
+        "text_id": 32,
+        "paragraph_id": 111,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: Different definitions of fairness produce different rankings of these choices.",
+        "text_id": 33,
+        "paragraph_id": 112,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: A numerical comparison does not remove the underlying value judgement.",
+        "text_id": 34,
+        "paragraph_id": 112,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: The discussion concerns an abstract decision rather than a research protocol.",
+        "text_id": 35,
+        "paragraph_id": 112,
+        "section_id": 2,
+        "page_number": 3,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: This distinction remains useful when two communities prefer different outcomes.",
+        "text_id": 36,
+        "paragraph_id": 113,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: The hypothetical cases illustrate why a single ranking need not be universal.",
+        "text_id": 37,
+        "paragraph_id": 113,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: One interpretation values equal outcomes while another values equal opportunities.",
+        "text_id": 38,
+        "paragraph_id": 113,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: Neither interpretation follows from the observations alone.",
+        "text_id": 39,
+        "paragraph_id": 114,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: The argument identifies a conceptual disagreement about public responsibility.",
+        "text_id": 40,
+        "paragraph_id": 114,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 2: Further philosophical analysis could clarify the assumptions behind each position.",
+        "text_id": 41,
+        "paragraph_id": 114,
+        "section_id": 2,
+        "page_number": 4,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: Ethical arguments can assign different priorities to the same outcome.",
+        "text_id": 50,
+        "paragraph_id": 121,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: A policy model may describe preferences without settling which preference is fair.",
+        "text_id": 51,
+        "paragraph_id": 121,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: The example distinguishes factual assumptions from moral evaluations.",
+        "text_id": 52,
+        "paragraph_id": 121,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: Different definitions of fairness produce different rankings of these choices.",
+        "text_id": 53,
+        "paragraph_id": 122,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: A numerical comparison does not remove the underlying value judgement.",
+        "text_id": 54,
+        "paragraph_id": 122,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: The discussion concerns an abstract decision rather than a research protocol.",
+        "text_id": 55,
+        "paragraph_id": 122,
+        "section_id": 3,
+        "page_number": 5,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: This distinction remains useful when two communities prefer different outcomes.",
+        "text_id": 56,
+        "paragraph_id": 123,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: The hypothetical cases illustrate why a single ranking need not be universal.",
+        "text_id": 57,
+        "paragraph_id": 123,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: One interpretation values equal outcomes while another values equal opportunities.",
+        "text_id": 58,
+        "paragraph_id": 123,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: Neither interpretation follows from the observations alone.",
+        "text_id": 59,
+        "paragraph_id": 124,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: The argument identifies a conceptual disagreement about public responsibility.",
+        "text_id": 60,
+        "paragraph_id": 124,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      },
+      {
+        "text": "Example 3: Further philosophical analysis could clarify the assumptions behind each position.",
+        "text_id": 61,
+        "paragraph_id": 124,
+        "section_id": 3,
+        "page_number": 6,
+        "formatted": null
+      }
+    ]
+  },
+  "topical_support": {
+    "sections": [
+      {
+        "section_id": 2,
+        "header": "Classroom discussion",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "intro",
+        "classification_score": 0.85,
+        "classification_source": "llm"
+      }
+    ],
+    "sentences": [
+      {
+        "text": "Successful classroom discussion needs to be supported by clear instructions and time for reflection.",
+        "text_id": 5,
+        "paragraph_id": 2,
+        "section_id": 2,
+        "page_number": 1,
+        "formatted": null
+      }
+    ]
+  },
+  "publication_consent_decoy": {
+    "sections": [
+      {
+        "section_id": 1,
+        "header": "Funding",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "funding",
+        "classification_score": 1.0,
+        "classification_source": "exact_alias"
+      },
+      {
+        "section_id": 2,
+        "header": "Data availability",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "open_data",
+        "classification_score": 1.0,
+        "classification_source": "exact_alias"
+      },
+      {
+        "section_id": 3,
+        "header": "Ethics approval and consent to participate",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "endnote",
+        "classification_score": 0.55,
+        "classification_source": "model"
+      },
+      {
+        "section_id": 4,
+        "header": "Consent for publication",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "ethics",
+        "classification_score": 0.95,
+        "classification_source": "model"
+      },
+      {
+        "section_id": 5,
+        "header": "Conflict of interest",
+        "level": 1,
+        "parent_section_id": null,
+        "section_type": "coi",
+        "classification_score": 1.0,
+        "classification_source": "exact_alias"
+      }
+    ],
+    "sentences": [
+      {
+        "text": "This research was supported by the Example Research Council under grant TEST-001.",
+        "text_id": 1,
+        "paragraph_id": 1,
+        "section_id": 1,
+        "page_number": 1,
+        "formatted": null
+      },
+      {
+        "text": "The datasets generated during this study are available from the authors on reasonable request.",
+        "text_id": 2,
+        "paragraph_id": 2,
+        "section_id": 2,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "This study was approved by the institutional review board at Example University.",
+        "text_id": 3,
+        "paragraph_id": 3,
+        "section_id": 3,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "All participants gave informed consent before the interview.",
+        "text_id": 4,
+        "paragraph_id": 3,
+        "section_id": 3,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "Not applicable.",
+        "text_id": 5,
+        "paragraph_id": 4,
+        "section_id": 4,
+        "page_number": 2,
+        "formatted": null
+      },
+      {
+        "text": "The authors report no competing interests related to this research.",
+        "text_id": 6,
+        "paragraph_id": 5,
+        "section_id": 5,
+        "page_number": 2,
+        "formatted": null
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+coverage:
+  status:
+    project:
+      default:
+        target: 75%
+        threshold: 2%
+        base: auto
+        if_no_uploads: success
+        informational: false
+    patch:
+      default:
+        target: 70%
+        threshold: 5%
+        base: auto
+        informational: false
+
+comment:
+  layout: "header, diff"
+  behavior: default
+  # Only comment if there are changes to coverage (optional, prevents noise on purely cosmetic PRs)
+  require_changes: false

@@ -1,0 +1,205 @@
+---
+title: "bibr — R Library Demo"
+format:
+  html:
+    df-print: kable
+engine: knitr
+page-layout: full
+toc: true
+---
+
+This notebook demonstrates how to read and work with bibr's v10 JSON exports
+in R. bibr outputs structured JSON — this is the integration format for
+downstream R tools like [Metacheck](https://github.com/scienceverse/metacheck).
+
+**Prerequisites:**
+
+- A JSON export from bibr (a `.json` file)
+- R packages: `jsonlite`, `dplyr`
+
+To generate an export, run bibr from the command line:
+
+```bash
+uv run bibr chew paper.pdf -o result.json
+```
+
+…or use the Python library or REST API (see companion notebooks).
+
+## Setup
+
+```{r}
+library(jsonlite)
+library(dplyr)
+
+`%||%` <- function(x, fallback) if (is.null(x)) fallback else x
+```
+
+## 1. Generate an export with bibr (via reticulate)
+
+If you have bibr installed in a Python environment, you can call it directly
+from R using reticulate. Otherwise, skip to Section 2 and provide your own
+`.json` file.
+
+```{r}
+library(reticulate)
+
+# Use the project's virtual environment (created by `uv sync`)
+use_virtualenv("../.venv", required = TRUE)
+
+bibr <- import("bibr")
+FILE_PATH <- Sys.getenv("PAPER_PATH", "paper.pdf")
+if (!file.exists(FILE_PATH)) stop("File not found: ", FILE_PATH)
+
+# chew_file manages its event loop and releases pipeline resources.
+extraction <- bibr$chew_file(FILE_PATH)
+data <- extraction$data
+
+cat("Title:", data$info$title, "\n")
+cat("DOI:  ", data$info$doi, "\n")
+
+# Persist the JSON for the rest of this notebook
+export_path <- tempfile(fileext = ".json")
+write_json(data, export_path, auto_unbox = TRUE, pretty = TRUE)
+cat("Saved JSON export to:", export_path, "\n")
+```
+
+## 2. Read the JSON file
+
+```{r}
+# Path to the JSON file — either from Section 1 or your own file
+JSON_PATH <- if (exists("export_path")) export_path else Sys.getenv("BIBR_JSON_PATH", "result.json")
+```
+
+### Helper function
+
+```{r}
+# Shared helper preserves metadata and converts record arrays to data.frames.
+source("../scripts/read_json_response.R")
+read_bibr <- read_bibr_json
+```
+
+### Read the file
+
+```{r}
+result <- read_bibr(JSON_PATH)
+cat("bibr version:", result$info$bibr_version, "\n")
+cat("Tables:      ", paste(names(result), collapse = ", "), "\n")
+```
+
+## 3. Explore the data
+
+### Paper info
+
+```{r}
+result$info
+```
+
+### Sections
+
+```{r}
+result$section
+```
+
+### Authors
+
+```{r}
+result$author
+```
+
+### Text (sentences)
+
+```{r}
+cat("Total sentences:", nrow(result$text), "\n\n")
+head(result$text, 10)
+```
+
+### Join sentences with section names
+
+```{r}
+text_with_sections <- result$text |>
+  left_join(
+    result$section |> select(section_id, header, section_type),
+    by = "section_id"
+  )
+
+head(text_with_sections, 10)
+```
+
+### Filter by section type
+
+```{r}
+# Get all sentences from the Methods section(s)
+# Note: CanonicalSection.METHODS = "method" (singular)
+methods <- text_with_sections |>
+  filter(section_type == "method")
+
+cat("Sentences in Methods:", nrow(methods), "\n\n")
+head(methods$text, 5)
+```
+
+### References
+
+```{r}
+cat("Total references:", nrow(result$bib), "\n\n")
+result$bib |> select(bib_id, authors, year, title) |> head(10)
+```
+
+### Reference matches (Crossref)
+
+```{r}
+if (nrow(result$bib_match) > 0) {
+  result$bib_match |>
+    select(bib_id, service, score, title, doi) |>
+    head(10)
+} else {
+  cat("No reference matches (enrichment may be disabled)\n")
+}
+```
+
+### URLs
+
+```{r}
+result$url
+```
+
+### Tables
+
+```{r}
+cat("Total tables:", nrow(result$table), "\n\n")
+if (nrow(result$table) > 0) {
+  result$table
+}
+```
+
+### Figures
+
+```{r}
+cat("Total figures:", nrow(result$figure), "\n\n")
+if (nrow(result$figure) > 0) {
+  result$figure
+}
+```
+
+### Cross-references
+
+```{r}
+cat("Total cross-references:", nrow(result$xref), "\n\n")
+if (nrow(result$xref) > 0) {
+  head(result$xref, 10)
+}
+```
+
+## 4. Quick summary
+
+```{r}
+cat("Paper:          ", result$info$title %||% "(no title)", "\n")
+cat("DOI:            ", result$info$doi %||% "(no DOI)", "\n")
+cat("Sentences:      ", nrow(result$text), "\n")
+cat("Sections:       ", nrow(result$section), "\n")
+cat("Authors:        ", nrow(result$author), "\n")
+cat("References:     ", nrow(result$bib), "\n")
+cat("URLs:           ", nrow(result$url), "\n")
+cat("Tables:         ", nrow(result$table), "\n")
+cat("Figures:        ", nrow(result$figure), "\n")
+cat("Cross-refs:     ", nrow(result$xref), "\n")
+```
