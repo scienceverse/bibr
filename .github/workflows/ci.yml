@@ -313,13 +313,13 @@ jobs:
       - name: Install the wheel into a clean environment
         working-directory: /tmp
         run: |
-          uv venv ${RUNNER_TEMP}/bibr-wheel-smoke
-          uv pip install --python ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python \
+          uv venv "${RUNNER_TEMP}/bibr-wheel-smoke"
+          uv pip install --python "${RUNNER_TEMP}/bibr-wheel-smoke/bin/python" \
             "${{ github.workspace }}"/dist/*.whl
-          ${RUNNER_TEMP}/bibr-wheel-smoke/bin/bibr --help
-          ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python -c \
+          "${RUNNER_TEMP}/bibr-wheel-smoke/bin/bibr" --help
+          "${RUNNER_TEMP}/bibr-wheel-smoke/bin/python" -c \
             "import bibr; from bibr import LocalPipeline, Pipeline, Settings"
-          if ${RUNNER_TEMP}/bibr-wheel-smoke/bin/python -c "import torch" >/dev/null 2>&1; then
+          if "${RUNNER_TEMP}/bibr-wheel-smoke/bin/python" -c "import torch" >/dev/null 2>&1; then
             echo "torch leaked into the core wheel" >&2
             exit 1
           fi

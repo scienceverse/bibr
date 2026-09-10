@@ -47,6 +47,8 @@ def test_platform_notebook_requires_key_before_client(monkeypatch):
     monkeypatch.delenv("PLATFORM_API_KEY", raising=False)
     monkeypatch.setattr(httpx, "Client", _no_request)
     with pytest.raises(ValueError, match="Set PLATFORM_API_KEY"):
+        # Run only the committed example, with HTTP construction blocked above.
+        # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
         exec(_notebook_code("examples/platform/python_platform_demo.ipynb")[0], {})  # noqa: S102 - repository notebook under test
 
 
@@ -76,6 +78,8 @@ def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, t
     monkeypatch.setattr(httpx, "post", fake_request)
     namespace = {}
     for code in _notebook_code("notebooks/python_api_demo.ipynb"):
+        # Run only the committed example against the mocked HTTP client above.
+        # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
         exec(code, namespace)  # noqa: S102 - repository notebook with mocked HTTP
     assert namespace["data"] == export
     assert len(requests) == 3
@@ -140,6 +144,8 @@ async def test_library_notebook_uses_public_async_api(monkeypatch, tmp_path, use
     namespace = {"display": displayed.append}
     for code in _notebook_code("notebooks/python_library_demo.ipynb"):
         cell = compile(code, "python_library_demo.ipynb", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        # Evaluate the committed example to support its top-level await; extraction is mocked.
+        # nosemgrep: python.lang.security.audit.eval-detected.eval-detected
         outcome = eval(cell, namespace)  # noqa: S307 - repository notebook with mocked extraction
         if inspect.isawaitable(outcome):
             await outcome

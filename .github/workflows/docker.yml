@@ -192,7 +192,7 @@ jobs:
           # A previous receipt is immutable; never overwrite it on a retry.
           [[ ! -e "$destination" ]]
           mv -T "$staging" "$destination"
-          printf 'Verified local image archive: `%s`\n' "$destination" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Verified local image archive: %s\n' "$destination" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Promote the verified digest without rebuilding
         id: promote

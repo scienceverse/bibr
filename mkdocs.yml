@@ -73,6 +73,7 @@ nav:
       - Development setup: contributing/setup.md
       - Evaluating extraction quality: contributing/evaluation.md
   - About:
+      - Project history and contributors: about/history.md
       - Known limitations: limitations.md
       - LLM use: llm-use.md
   - Scienceverse ↗: https://scienceverse.org/
