@@ -523,17 +523,13 @@ jobs:
 
       - name: Mark the exact source revision
         run: |
-          mkdir -p site/.well-known
-          printf '%s\n' "$GITHUB_SHA" > site/.well-known/bibr-build
+          printf '%s\n' "$GITHUB_SHA" > site/bibr-build.txt
 
       - name: Upload commit-marked site
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: mkdocs-site-${{ github.sha }}
           path: site/
-          # The generated site includes .well-known/bibr-build. Without this,
-          # the upload silently drops the revision marker needed by deployment.
-          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
 
@@ -808,67 +804,8 @@ jobs:
             esac
           done
 
-  deploy-preview:
-    name: Deploy protected docs preview
-    needs: [required, docs-build]
-    if: >-
-      always() &&
-      needs.required.result == 'success' &&
-      needs.docs-build.result == 'success' &&
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: >-
-      ${{ github.event.repository.private &&
-      (github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
-      && vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    environment:
-      name: bibr-site-preview
-      url: ${{ steps.deploy.outputs.deployment-url }}
-    steps:
-      - name: Checkout deployment smoke helper
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Download the exact CI-built site
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.0
-        with:
-          name: mkdocs-site-${{ github.sha }}
-          path: site/
-
-      - name: Install Node and npm for Wrangler
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: "24"
-          package-manager-cache: false
-
-      - name: Deploy protected preview
-        id: deploy
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: 4.110.0
-          command: >-
-            pages deploy site --project-name=bibr-site
-            --branch=pr-${{ github.event.pull_request.number }}
-            --commit-hash=${{ github.sha }}
-
-      - name: Prove preview Access enforcement and revision
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          SITE_URL: ${{ steps.deploy.outputs.deployment-url }}
-        run: >-
-          python scripts/ci/smoke_site.py --access=protected
-          --url="$SITE_URL" --expected-sha=${{ github.sha }}
-
   deploy-production:
-    name: Deploy public bibr.org site
+    name: Deploy bibr.org with GitHub Pages
     needs: [required, docs-build]
     if: >-
       always() &&
@@ -876,17 +813,18 @@ jobs:
       needs.docs-build.result == 'success' &&
       github.event_name == 'push' &&
       github.ref == 'refs/heads/main'
-    runs-on: >-
-      ${{ github.event.repository.private &&
-      (github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository)
-      && vars.CI_RUNNER || 'ubuntu-latest' }}
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
     permissions:
       contents: read
+      pages: write
+      id-token: write
     environment:
-      name: bibr-site-production
-      url: https://bibr.org
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout deployment smoke helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
@@ -899,41 +837,24 @@ jobs:
           name: mkdocs-site-${{ github.sha }}
           path: site/
 
-      - name: Install Node and npm for Wrangler
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Package the verified site for GitHub Pages
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
         with:
-          node-version: "24"
-          package-manager-cache: false
+          path: site/
 
       - name: Deploy production
         id: deploy
-        uses: cloudflare/wrangler-action@ebbaa1584979971c8614a24965b4405ff95890e0 # v4.0.0
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: 4.110.0
-          command: >-
-            pages deploy site --project-name=bibr-site --branch=main
-            --commit-hash=${{ github.sha }}
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
       - name: Prove public production availability and revision
         env:
-          SITE_URL: https://bibr.org
+          SITE_URL: ${{ steps.deploy.outputs.page_url }}
         run: >-
           python scripts/ci/smoke_site.py --access=public
           --url="$SITE_URL" --expected-sha=${{ github.sha }}
-
-      - name: Summarize deployment
-        env:
-          DEPLOYMENT_URL: ${{ steps.deploy.outputs.deployment-url }}
-        run: |
-          {
-            echo "## Public bibr.org deployment"
-            echo
-            echo "- Source: \`$GITHUB_SHA\`"
-            echo "- Cloudflare deployment: $DEPLOYMENT_URL"
-            echo "- Canonical URL: https://bibr.org"
-          } >> "$GITHUB_STEP_SUMMARY"
 
   publish-edge:
     name: Promote verified serve image to edge

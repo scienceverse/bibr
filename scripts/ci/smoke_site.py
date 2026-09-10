@@ -77,7 +77,7 @@ def smoke(
         raise ValueError("access must be public or protected")
     if access == "protected" and (not client_id or not client_secret):
         raise ValueError("CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET are required")
-    marker_url = urljoin(url.rstrip("/") + "/", ".well-known/bibr-build")
+    marker_url = urljoin(url.rstrip("/") + "/", "bibr-build.txt")
 
     status, location, body = _fetch(marker_url, follow_redirects=False)
     if access == "public":

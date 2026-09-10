@@ -89,7 +89,7 @@ def test_public_deployment_checks_revision_without_credentials(monkeypatch) -> N
     monkeypatch.setattr(smoke, "_fetch", fetch)
     smoke.smoke("https://bibr.org", SHA, access="public")
 
-    assert calls == [("https://bibr.org/.well-known/bibr-build", None, False)]
+    assert calls == [("https://bibr.org/bibr-build.txt", None, False)]
 
 
 @pytest.mark.parametrize("status", [301, 302, 401, 403, 404, 500])
@@ -127,9 +127,9 @@ def test_protected_deployment_checks_access_before_authorized_revision(monkeypat
     )
 
     assert calls == [
-        ("https://preview.example.org/.well-known/bibr-build", None, False),
+        ("https://preview.example.org/bibr-build.txt", None, False),
         (
-            "https://preview.example.org/.well-known/bibr-build",
+            "https://preview.example.org/bibr-build.txt",
             {"CF-Access-Client-Id": "test-id", "CF-Access-Client-Secret": TEST_SECRET},
             True,
         ),
@@ -172,7 +172,7 @@ def test_http_probe_identifies_the_client_and_preserves_auth_headers(
     monkeypatch, authorized
 ) -> None:
     smoke = load_smoke_site()
-    url = "https://preview.example.pages.dev/.well-known/bibr-build"
+    url = "https://preview.example.pages.dev/bibr-build.txt"
     headers = (
         {"CF-Access-Client-Id": "id", "CF-Access-Client-Secret": TEST_SECRET} if authorized else {}
     )
@@ -198,7 +198,7 @@ def test_browser_signature_block_is_not_reported_as_access_authentication(
     monkeypatch, follow_redirects
 ) -> None:
     smoke = load_smoke_site()
-    url = "https://preview.example.pages.dev/.well-known/bibr-build"
+    url = "https://preview.example.pages.dev/bibr-build.txt"
 
     def open_request(request, timeout):
         raise HTTPError(url, 403, "Forbidden", {}, BytesIO(b"error code: 1010\n"))

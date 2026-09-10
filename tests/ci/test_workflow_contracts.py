@@ -76,8 +76,11 @@ def test_linux_runner_routing_guards_public_repositories_and_forks() -> None:
             runner = job.get("runs-on", "")
             if "matrix.os" in runner or "uses" in job:
                 continue
-            if path.name == "release.yml" and job_id == "publish-pypi":
-                # PyPA's publishing action does not support self-hosted runners.
+            if (path.name, job_id) in {
+                ("release.yml", "publish-pypi"),
+                ("ci.yml", "deploy-production"),
+            }:
+                # Publishing jobs use disposable GitHub-hosted runners.
                 assert runner == "ubuntu-latest"
                 continue
             assert "vars.CI_RUNNER" in runner, (path.name, job_id)
@@ -215,16 +218,14 @@ def test_ci_builds_one_commit_marked_docs_artifact() -> None:
     docs = yaml.dump(job)
 
     assert "mkdocs build --strict" in docs
-    assert ".well-known/bibr-build" in docs
+    assert "bibr-build.txt" in docs
     assert "mkdocs-site-${{ github.sha }}" in docs
     assert "retention-days: 7" in docs
     upload = next(
         step for step in job["steps"] if step.get("uses", "").startswith("actions/upload-artifact@")
     )["with"]
-    # GitHub otherwise strips .well-known/bibr-build from the archive even
-    # though the marking step succeeded. Include hidden files only in the site.
-    assert upload["path"] == "site/"
-    assert upload["include-hidden-files"] == "true"
+    assert upload["if-no-files-found"] == "error"
+    assert "mkdir -p site/.well-known" not in docs
 
 
 def test_semgrep_is_isolated_in_an_immutable_root_container() -> None:
@@ -536,66 +537,43 @@ def test_reusable_container_calls_do_not_inherit_caller_secrets() -> None:
         assert "secrets" not in job
 
 
-def test_site_deployments_consume_the_ci_artifact_without_rebuilding() -> None:
+def test_pages_deployment_consumes_the_verified_ci_artifact() -> None:
+    job = workflow("ci.yml")["jobs"]["deploy-production"]
+    deployment = yaml.dump(job)
+
+    assert set(job["needs"]) == {"required", "docs-build"}
+    assert "needs.required.result == 'success'" in job["if"]
+    assert "needs.docs-build.result == 'success'" in job["if"]
+    assert "mkdocs-site-${{ github.sha }}" in deployment
+    assert "mkdocs build" not in deployment
+    assert job["environment"]["name"] == "github-pages"
+    assert job["permissions"] == {"contents": "read", "pages": "write", "id-token": "write"}
+    actions = [step.get("uses", "").split("@")[0] for step in job["steps"]]
+    assert actions.index("actions/download-artifact") < actions.index(
+        "actions/upload-pages-artifact"
+    )
+    assert actions.index("actions/upload-pages-artifact") < actions.index("actions/deploy-pages")
+
+
+def test_pages_deployment_is_main_only_and_needs_no_cloudflare_secrets() -> None:
     jobs = workflow("ci.yml")["jobs"]
-    preview = yaml.dump(jobs["deploy-preview"])
-    production = yaml.dump(jobs["deploy-production"])
-
-    assert jobs["deploy-preview"]["environment"]["name"] == "bibr-site-preview"
-    assert jobs["deploy-production"]["environment"]["name"] == "bibr-site-production"
-    assert set(jobs["deploy-preview"]["needs"]) == {"required", "docs-build"}
-    assert set(jobs["deploy-production"]["needs"]) == {"required", "docs-build"}
-    for deployment in (preview, production):
-        assert "mkdocs-site-${{ github.sha }}" in deployment
-        assert "wranglerVersion: 4.110.0" in deployment
-        assert "mkdocs build" not in deployment
-
-    for job_id in ("deploy-preview", "deploy-production"):
-        steps = jobs[job_id]["steps"]
-        setup_index = next(
-            i
-            for i, step in enumerate(steps)
-            if step.get("uses", "").startswith("actions/setup-node@")
-        )
-        deploy_index = next(i for i, step in enumerate(steps) if step.get("id") == "deploy")
-        assert setup_index < deploy_index
-        assert steps[setup_index]["with"]["node-version"] == "24"
-        assert steps[setup_index]["with"]["package-manager-cache"] == "false"
-
-
-def test_site_preview_is_same_repo_only_and_production_is_main_only() -> None:
-    jobs = workflow("ci.yml")["jobs"]
-    preview = jobs["deploy-preview"]
     production = jobs["deploy-production"]
     text = workflow_text("ci.yml")
-    preview_command = next(step for step in preview["steps"] if step.get("id") == "deploy")["with"][
-        "command"
-    ]
-    production_command = next(step for step in production["steps"] if step.get("id") == "deploy")[
-        "with"
-    ]["command"]
 
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in preview["if"]
-    assert "--branch=pr-${{ github.event.pull_request.number }}" in preview_command
     assert "github.event_name == 'push'" in production["if"]
     assert "github.ref == 'refs/heads/main'" in production["if"]
-    assert "--branch=main" in production_command
     assert "pull_request_target" not in text
+    assert "deploy-preview" not in jobs
+    assert "cloudflare/" not in text
+    assert "CLOUDFLARE_" not in text
+    assert "CF_ACCESS_" not in text
     assert not (WORKFLOWS / "docs.yml").exists()
 
 
-def test_site_deployments_verify_their_access_policy_and_exact_revision() -> None:
-    jobs = workflow("ci.yml")["jobs"]
+def test_pages_deployment_verifies_public_access_and_exact_revision() -> None:
+    job = workflow("ci.yml")["jobs"]["deploy-production"]
+    smoke = next(step for step in job["steps"] if "smoke_site.py" in step.get("run", ""))
 
-    for job_id in ("deploy-preview", "deploy-production"):
-        job = jobs[job_id]
-        smoke = next(step for step in job["steps"] if "smoke_site.py" in step.get("run", ""))
-        assert "--expected-sha=${{ github.sha }}" in smoke["run"]
-        if job_id == "deploy-preview":
-            assert "--access=protected" in smoke["run"]
-            assert "CF_ACCESS_CLIENT_ID" in smoke["env"]
-            assert "CF_ACCESS_CLIENT_SECRET" in smoke["env"]
-            assert smoke["env"]["SITE_URL"] == "${{ steps.deploy.outputs.deployment-url }}"
-        else:
-            assert "--access=public" in smoke["run"]
-            assert smoke["env"] == {"SITE_URL": "https://bibr.org"}
+    assert "--expected-sha=${{ github.sha }}" in smoke["run"]
+    assert "--access=public" in smoke["run"]
+    assert smoke["env"] == {"SITE_URL": "${{ steps.deploy.outputs.page_url }}"}

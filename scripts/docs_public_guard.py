@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 # Adding a downloadable document or dataset requires an explicit review here.
 PUBLIC_ASSETS = frozenset(
     {
-        "_headers",
         "robots.txt",
         "assets/logo.svg",
         "assets/readme-banner.png",

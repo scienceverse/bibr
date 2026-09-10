@@ -17,15 +17,8 @@ def test_public_site_allows_crawlers() -> None:
     assert robots == "User-agent: *\nAllow: /\n"
 
 
-def test_public_site_preserves_security_headers_without_blocking_indexing() -> None:
-    headers = (ROOT / "docs" / "_headers").read_text(encoding="utf-8")
-
-    assert headers.startswith("/*\n")
-    assert "noindex" not in headers
-    assert "nofollow" not in headers
-    assert "X-Content-Type-Options: nosniff" in headers
-    assert "Referrer-Policy: strict-origin-when-cross-origin" in headers
-    assert "Permissions-Policy: camera=(), microphone=(), geolocation=()" in headers
+def test_public_site_has_no_inactive_cloudflare_header_configuration() -> None:
+    assert not (ROOT / "docs" / "_headers").exists()
 
 
 def test_mkdocs_copies_site_policy_assets(tmp_path: Path) -> None:
@@ -57,9 +50,7 @@ def test_mkdocs_copies_site_policy_assets(tmp_path: Path) -> None:
     assert (site_dir / "robots.txt").read_text(encoding="utf-8") == (
         ROOT / "docs" / "robots.txt"
     ).read_text(encoding="utf-8")
-    assert (site_dir / "_headers").read_text(encoding="utf-8") == (
-        ROOT / "docs" / "_headers"
-    ).read_text(encoding="utf-8")
+    assert not (site_dir / "_headers").exists()
 
     # Root docs are published from their canonical sources, and private
     # engineering records remain excluded even though the nav is broader.
