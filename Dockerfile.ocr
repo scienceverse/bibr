@@ -11,7 +11,7 @@
 # path); plain decoding is stable. Re-enable once upstream fixes GLM-OCR + NEXTN.
 # ---------------------------------------------------------------------------
 
-FROM lmsysorg/sglang:v0.5.13.post1@sha256:74084d80c3b7e5649f4b3433b1169db3da26c9b1e31752a43045a34cc26ba5d5
+FROM lmsysorg/sglang:v0.5.19@sha256:d6e7288627be8b02be88e4bba38e73f6d50e2826869f753c13a4c4385ab3eda9
 
 # transformers >= 5.1 provides glm_ocr natively. Pin the audited runtime so a
 # rebuild cannot silently pull new executable package code.
