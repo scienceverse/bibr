@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Release validation installs macOS's `libmagic` prerequisite and exercises
+  Windows with platform-independent fixtures. Windows accepts sealed segmenter
+  bundles, tolerates unavailable Unix memory metrics, and preserves upload
+  identity and binary bytes. CLI output remains usable with legacy encodings,
+  and disabling circuit-breaker deduplication counts failures even within one
+  clock tick.
 - Use patched vLLM 0.27.0 for the optional CUDA runtime and isolated LLM/OCR
   bootstraps, addressing GHSA-7m6h-x95x-82q5.
 - Restore publication-date precision from an unambiguous printed publication

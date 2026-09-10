@@ -313,6 +313,8 @@ class TestLlmBackendResolution:
     def test_local_alias_resolves_to_vllm_elsewhere(self, monkeypatch):
         import platform
 
+        monkeypatch.setattr("sys.platform", "linux")
+        monkeypatch.setattr("bibr.local.llm_models.detect_hardware", lambda: ("cuda", 24.0))
         monkeypatch.setattr(platform, "system", lambda: "Linux")
         monkeypatch.setattr(platform, "machine", lambda: "x86_64")
         pipe = LocalPipeline(llm_backend="local")

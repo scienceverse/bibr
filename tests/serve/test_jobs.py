@@ -593,7 +593,7 @@ class TestJobRoutes:
     @pytest.mark.parametrize(
         ("field", "value"),
         [
-            ("start_page", "9" * 100_000),
+            pytest.param("start_page", "9" * 100_000, id="oversized-start-page"),
             ("refs", "bogus"),
         ],
     )

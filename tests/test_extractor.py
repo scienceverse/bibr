@@ -2459,12 +2459,11 @@ class TestSaveRefTrainingData:
         assert len(files_after_second) == 1
         assert files_after_second[0].stat().st_mtime == mtime  # not rewritten
 
-    def test_logs_warning_on_failure(self, monkeypatch, caplog):
+    def test_logs_warning_on_failure(self, tmp_path, monkeypatch, caplog):
         """Logs a warning (no exception) when write fails."""
-        monkeypatch.setattr(
-            "bibr.config.Settings.REF_TRAINING_DATA_DIR",
-            "/nonexistent/readonly/path",
-        )
+        blocked = tmp_path / "not-a-directory"
+        blocked.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr("bibr.config.Settings.REF_TRAINING_DATA_DIR", str(blocked / "child"))
 
         with caplog.at_level(logging.WARNING):
             save_ref_training_data("text", [])
@@ -2520,12 +2519,11 @@ class TestSaveSegTrainingData:
         assert len(files_after_second) == 1
         assert files_after_second[0].stat().st_mtime == mtime  # not rewritten
 
-    def test_logs_warning_on_failure(self, monkeypatch, caplog):
+    def test_logs_warning_on_failure(self, tmp_path, monkeypatch, caplog):
         """Logs a warning (no exception) when write fails."""
-        monkeypatch.setattr(
-            "bibr.config.Settings.REF_TRAINING_DATA_DIR",
-            "/nonexistent/readonly/path",
-        )
+        blocked = tmp_path / "not-a-directory"
+        blocked.write_text("occupied", encoding="utf-8")
+        monkeypatch.setattr("bibr.config.Settings.REF_TRAINING_DATA_DIR", str(blocked / "child"))
 
         with caplog.at_level(logging.WARNING):
             save_seg_training_data("text", ["text"])

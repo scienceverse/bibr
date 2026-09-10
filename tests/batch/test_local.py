@@ -122,7 +122,7 @@ def test_local_run_writes_exports_ledger_run_info_and_report(corpus, tmp_path, m
         "good2.json",
         "good3.json",
     ]
-    assert json.loads((out / "good1.json").read_text())["info"]["title"] == "GOOD1"
+    assert json.loads((out / "good1.json").read_text(encoding="utf-8"))["info"]["title"] == "GOOD1"
 
     rows = _ledger(out)
     assert [r["paper_id"] for r in rows] == ["bad1", "good1", "good2", "good3"]
@@ -142,7 +142,7 @@ def test_local_run_writes_exports_ledger_run_info_and_report(corpus, tmp_path, m
     assert "OCR failed" in bad["error"]
     assert len({r["run_id"] for r in rows}) == 1
 
-    info = json.loads((out / RUN_INFO_FILENAME).read_text())
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
     assert info["executor"] == "local"
     assert info["run_id"] == rows[0]["run_id"]
     assert info["n_inputs"] == 4 and info["n_planned"] == 4
@@ -151,7 +151,7 @@ def test_local_run_writes_exports_ledger_run_info_and_report(corpus, tmp_path, m
     assert info["options"] == {"batch_size": 2, "no_llm": True}
     assert info["bibr_version"]
     assert isinstance(info["settings"], dict)
-    assert len((out / RUN_HISTORY_FILENAME).read_text().splitlines()) == 1
+    assert len((out / RUN_HISTORY_FILENAME).read_text(encoding="utf-8").splitlines()) == 1
 
     report = capsys.readouterr().out
     assert "bibr batch" in report
@@ -167,7 +167,7 @@ def test_run_info_redacts_secrets_in_the_settings_snapshot(corpus, tmp_path, mon
 
     run_batch(_options(corpus, out))
 
-    text = (out / RUN_INFO_FILENAME).read_text()
+    text = (out / RUN_INFO_FILENAME).read_text(encoding="utf-8")
     assert secret not in text
     info = json.loads(text)
     assert info["settings"]["LLM_API_KEY"] == "sk-1…cdef"
@@ -217,7 +217,7 @@ def test_keyboard_interrupt_records_interrupted_and_resume_reruns_them(
     assert len(rows) == 2  # only the interrupted chunk
     assert all(r["status"] == "failed" and r["error_code"] == INTERRUPTED for r in rows)
     assert not [p for p in out.glob("*.json") if p.name != RUN_INFO_FILENAME]
-    info = json.loads((out / RUN_INFO_FILENAME).read_text())
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
     assert info["reason"] == "interrupted"
 
     resumed = _FakeChewMany()
@@ -256,7 +256,7 @@ def test_deadline_in_the_past_submits_nothing(corpus, tmp_path, monkeypatch):
 
     assert fake.calls == []
     assert _ledger(out) == []
-    assert json.loads((out / RUN_INFO_FILENAME).read_text())["reason"] == "deadline"
+    assert json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))["reason"] == "deadline"
 
 
 def test_limit_and_seeded_shuffle_are_deterministic_and_recorded(corpus, tmp_path, monkeypatch):
@@ -270,7 +270,7 @@ def test_limit_and_seeded_shuffle_are_deterministic_and_recorded(corpus, tmp_pat
     random.Random(7).shuffle(expected)  # noqa: S311
     ran = [p.stem for paths, _ in fake.calls for p in paths]
     assert ran == expected[:2]
-    info = json.loads((out / RUN_INFO_FILENAME).read_text())
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
     assert info["shuffle_seed"] == 7 and info["n_planned"] == 2
     assert len(_ledger(out)) == 2
 
@@ -292,7 +292,7 @@ def test_stem_collisions_get_sha_suffixed_exports(tmp_path, monkeypatch):
     assert len(ids) == 2 and all(pid.startswith("paper-") for pid in ids)
     for pid in ids:
         assert (out / f"{pid}.json").is_file()
-    info = json.loads((out / RUN_INFO_FILENAME).read_text())
+    info = json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))
     assert set(info["collisions"]) == ids
 
 

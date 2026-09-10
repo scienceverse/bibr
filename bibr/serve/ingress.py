@@ -548,9 +548,10 @@ def _remove_owned_entry(path: Path) -> None:
         path.unlink(missing_ok=True)
     except IsADirectoryError:
         path.rmdir()
-    except PermissionError as exc:
-        # macOS reports EPERM rather than EISDIR for unlinking a directory.
-        if exc.errno != errno.EPERM:
+    except PermissionError:
+        # macOS and Windows report EPERM/EACCES when unlink sees a directory.
+        # Do not mistake a regular file's permission failure for a directory.
+        if not path.is_dir() or path.is_symlink():
             raise
         path.rmdir()
 
@@ -595,10 +596,18 @@ def consume_upload_descriptor(
         ):
             raise UploadIntegrityError("upload handoff validation failed")
 
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        # Windows has no O_NOFOLLOW. Check the entry before opening and compare
+        # its identity with the handle so a replaced entry cannot be consumed.
+        entry_stat = path.lstat()
+        if not stat.S_ISREG(entry_stat.st_mode):
+            raise UploadIntegrityError("upload handoff validation failed")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
         fd = os.open(path, flags)
         with os.fdopen(fd, "rb") as handle:
-            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            handle_stat = os.fstat(handle.fileno())
+            if not stat.S_ISREG(handle_stat.st_mode) or not os.path.samestat(
+                entry_stat, handle_stat
+            ):
                 raise UploadIntegrityError("upload handoff validation failed")
             digest = hashlib.sha256()
             content = bytearray()

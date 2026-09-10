@@ -262,14 +262,14 @@ class VllmLlmServer:
         try:
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
+            except (AttributeError, OSError):
                 proc.terminate()
             try:
                 proc.wait(timeout=_TERM_GRACE_S)
             except subprocess.TimeoutExpired:
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError, OSError):
+                except (AttributeError, OSError):
                     proc.kill()
                 proc.wait(timeout=5)
         finally:

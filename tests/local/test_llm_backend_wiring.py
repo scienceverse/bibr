@@ -9,7 +9,11 @@ from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
 
 
 def test_local_resolves_to_vllm_on_linux():
-    with patch("platform.system", return_value="Linux"):
+    with (
+        patch("platform.system", return_value="Linux"),
+        patch("sys.platform", "linux"),
+        patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 24.0)),
+    ):
         assert resolve_llm_backend("local") == "vllm"
 
 

@@ -1034,6 +1034,7 @@ def test_print_done_demo_hint_when_install_declined(monkeypatch):
 
 def test_local_provider_writes_registry_selection(monkeypatch):
     """Picking local + the recommended model writes backend, model id, quirk env."""
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
     _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])
@@ -1044,6 +1045,7 @@ def test_local_provider_writes_registry_selection(monkeypatch):
 
 
 def test_local_provider_cuda_can_select_nuextract_llama_variant(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
     _feed_prompts(monkeypatch, ["local", "nuextract3", "2"])
@@ -1053,6 +1055,7 @@ def test_local_provider_cuda_can_select_nuextract_llama_variant(monkeypatch):
 
 
 def test_local_provider_custom_hf_id(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
     _feed_prompts(monkeypatch, ["local", "custom", "my-org/my-model"])
@@ -1064,6 +1067,7 @@ def test_local_provider_custom_hf_id(monkeypatch):
 
 def test_local_provider_writes_quirk_env(monkeypatch):
     """gemma-4-e4b carries LLM_INSTRUCTOR_MODE=json into the written env."""
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: ("cuda", 24.0))
     _feed_prompts(monkeypatch, ["local", "gemma-4-e4b", "1"])
@@ -1089,6 +1093,7 @@ def test_local_provider_mac_uses_vllm_mlx_and_warns_experimental(monkeypatch):
 
 
 def test_local_provider_no_hardware_shows_all_variants(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.sys.platform", "linux")
     wizard = _recording_wizard()
     monkeypatch.setattr("bibr.setup_wizard.detect_hardware", lambda: (None, None))
     _feed_prompts(monkeypatch, ["local", "nuextract3", "1"])

@@ -8,7 +8,6 @@ performing no resource probes or allocations beyond short-lived context objects.
 from __future__ import annotations
 
 import contextvars
-import resource
 import sys
 import time
 from collections import defaultdict
@@ -134,8 +133,10 @@ def _max_optional(a: int | None, b: int | None) -> int | None:
 
 def _peak_rss_bytes() -> int | None:
     try:
+        import resource
+
         value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-    except (OSError, ValueError):
+    except (ImportError, OSError, ValueError):
         return None
     # macOS reports bytes; Linux and the BSDs exposed by Python report KiB.
     return value if sys.platform == "darwin" else value * 1024

@@ -275,7 +275,11 @@ class AsyncCircuitBreaker:
                 # last recorded failure; otherwise treat it as part of the same
                 # incident.
                 now = self._clock()
-                if now - self._last_failure_time > self._failure_dedup_window:
+                if (
+                    self._failure_count == 0
+                    or self._failure_dedup_window <= 0
+                    or now - self._last_failure_time > self._failure_dedup_window
+                ):
                     self._failure_count += 1
                     # Anchor deduplication to the last *counted* failure.
                     # Updating this for every rapid failure indefinitely

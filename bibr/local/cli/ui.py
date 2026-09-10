@@ -48,6 +48,14 @@ _COMMAND_ORDER = (
 )
 
 
+def configure_output_streams() -> None:
+    """Keep status glyphs from aborting commands on legacy output encodings."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(errors="backslashreplace")
+
+
 def brand_header(console: Console, title: str, *, subtitle: str | None = None) -> None:
     """Print the brand line used by full-screen commands (doctor, setup, help).
 

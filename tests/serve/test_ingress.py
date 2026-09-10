@@ -140,6 +140,7 @@ async def test_store_uses_canonical_uuid_hex_for_owned_entry_name():
         await store.close()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows uses ACLs, not POSIX permission bits")
 async def test_store_root_is_owner_accessible_only():
     """Catches upload files being placed in a root readable by other users."""
     from bibr.serve.ingress import UploadStore
@@ -197,11 +198,12 @@ async def test_sweep_stale_preserves_leased_upload_and_fresh_entries(tmp_path):
         stale_link = store.root / ("3" * 32)
         stale_link.symlink_to(outside)
 
-        now = time.time()
+        # Advance the sweep clock instead of changing a symlink's timestamp;
+        # Windows does not support utime(..., follow_symlinks=False).
+        now = time.time() + 11
         old = now - 11
         os.utime(leased_path, (old, old))
         os.utime(stale_path, (old, old))
-        os.utime(stale_link, (old, old), follow_symlinks=False)
         os.utime(fresh_path, (now, now))
 
         store.sweep_stale(now=now)
@@ -262,25 +264,25 @@ def test_consumer_rejects_noncanonical_upload_ids(tmp_path, upload_id):
         )
 
 
-def test_consumer_reads_verifies_and_unlinks(tmp_path):
+@pytest.mark.parametrize("content", [b"%PDF-1.4", b"%PDF-1.4\r\n\x1a\x00\xff"])
+def test_consumer_reads_verifies_and_unlinks(tmp_path, content):
     """Catches retaining a valid descriptor file after successful consumption."""
     from bibr.serve.ingress import consume_upload_descriptor
 
     upload_id = "0" * 32
-    content = b"%PDF-1.4"
     path = tmp_path / upload_id
     path.write_bytes(content)
     descriptor = {
         "upload_id": upload_id,
         "filename": "a.pdf",
-        "size": 8,
-        "sha256": "e16fa5d9b51928755db85b917f0297babaf22c7a47e97d9212adab56e61ba04e",
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
     }
 
     actual, digest = consume_upload_descriptor(tmp_path, descriptor, max_size=100)
 
-    assert actual == b"%PDF-1.4"
-    assert digest == "e16fa5d9b51928755db85b917f0297babaf22c7a47e97d9212adab56e61ba04e"
+    assert actual == content
+    assert digest == descriptor["sha256"]
     assert not path.exists()
 
 
@@ -310,10 +312,13 @@ def test_consumer_sanitizes_cleanup_failure_after_verified_content(tmp_path, mon
         )
 
 
-def test_consumer_rejects_symlink_and_unlinks_owned_link(tmp_path):
+@pytest.mark.parametrize("without_nofollow", [False, True])
+def test_consumer_rejects_symlink_and_unlinks_owned_link(tmp_path, monkeypatch, without_nofollow):
     """Catches following a substituted symlink outside the private upload root."""
     from bibr.serve.ingress import UploadIntegrityError, consume_upload_descriptor
 
+    if without_nofollow:
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     upload_id = "1" * 32
     path = tmp_path / upload_id
     target = tmp_path / "outside.pdf"
@@ -334,6 +339,35 @@ def test_consumer_rejects_symlink_and_unlinks_owned_link(tmp_path):
 
     assert not path.is_symlink()
     assert target.read_bytes() == b"%PDF-1.4"
+
+
+def test_consumer_rejects_entry_replaced_while_opening(tmp_path, monkeypatch):
+    from bibr.serve.ingress import UploadIntegrityError, consume_upload_descriptor
+
+    upload_id = "1" * 32
+    path = tmp_path / upload_id
+    path.write_bytes(b"%PDF-1.4")
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(b"%PDF-1.4")
+    original_open = os.open
+
+    def replace_then_open(filename, flags):
+        replacement.replace(path)
+        return original_open(filename, flags)
+
+    monkeypatch.setattr(os, "open", replace_then_open)
+    with pytest.raises(UploadIntegrityError):
+        consume_upload_descriptor(
+            tmp_path,
+            {
+                "upload_id": upload_id,
+                "filename": "a.pdf",
+                "size": 8,
+                "sha256": "e16fa5d9b51928755db85b917f0297babaf22c7a47e97d9212adab56e61ba04e",
+            },
+            max_size=100,
+        )
+    assert not path.exists()
 
 
 def test_consumer_rejects_directory_replacement_and_removes_empty_owned_directory(tmp_path):
@@ -910,7 +944,7 @@ def test_incomplete_file_part_successful_parse_closes_private_spool(monkeypatch)
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("start_page", "9" * 100_000),
+        pytest.param("start_page", "9" * 100_000, id="oversized-start-page"),
         ("refs", "bogus"),
     ],
 )

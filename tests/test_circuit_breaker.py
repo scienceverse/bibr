@@ -7,6 +7,15 @@ import pytest
 from bibr.utils.circuit_breaker import AsyncCircuitBreaker, CircuitOpenError, CircuitState
 
 
+async def test_disabled_dedup_counts_failures_at_the_same_clock_tick():
+    cb = AsyncCircuitBreaker(failure_threshold=3, failure_dedup_window=0, clock=lambda: 0.0)
+    for _ in range(3):
+        with pytest.raises(ValueError):
+            async with cb:
+                raise ValueError("fail")
+    assert cb.state == CircuitState.OPEN
+
+
 class TestCircuitBreakerStateTransitions:
     """Test CLOSED → OPEN → HALF_OPEN → CLOSED transitions."""
 

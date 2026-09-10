@@ -155,6 +155,7 @@ def _suppress_progress_bars_if_not_tty() -> None:
 
 def main():
     """Entry point for ``bibr`` CLI command."""
+    ui.configure_output_streams()
     _suppress_progress_bars_if_not_tty()
     parser = _build_parser()
 

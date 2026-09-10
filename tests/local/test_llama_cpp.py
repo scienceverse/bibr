@@ -37,7 +37,7 @@ def test_find_llama_server_supports_unified_cli(monkeypatch):
     monkeypatch.setattr(
         llama_cpp.shutil,
         "which",
-        lambda name: "C:\\llama.exe" if name == "llama" else None,
+        lambda name, **_kwargs: "C:\\llama.exe" if name == "llama" else None,
     )
     assert llama_cpp.find_llama_server() == ["C:\\llama.exe", "serve"]
 

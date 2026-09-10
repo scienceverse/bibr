@@ -36,7 +36,7 @@ def render_pinned_template(**kwargs) -> str:
     pytest.importorskip("transformers")
     from transformers.utils.chat_template_utils import _compile_jinja_template
 
-    return _compile_jinja_template(JINJA_PATH.read_text()).render(**kwargs)
+    return _compile_jinja_template(JINJA_PATH.read_text(encoding="utf-8")).render(**kwargs)
 
 
 def _minimal_render_kwargs() -> dict:
@@ -53,13 +53,13 @@ def _minimal_render_kwargs() -> dict:
 
 
 def test_pinned_fp8_jinja_rendering_contract():
-    source = JINJA_PATH.read_text()
+    source = JINJA_PATH.read_text(encoding="utf-8")
     assert NUEXTRACT3_FP8_EXPECTED_REVISION == "d88964bad5ba47333cb721b351e19045ee6a6fc0"
     assert hashlib.sha256(source.encode()).hexdigest() == NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256
 
     rendered = render_pinned_template(**_minimal_render_kwargs())
 
-    assert rendered == GOLDEN_PATH.read_text()
+    assert rendered == GOLDEN_PATH.read_text(encoding="utf-8")
     assert "【task】structured" in rendered
     assert rendered.index("【template_start】") < rendered.index("【instructions_start】")
     assert rendered.index("【instructions_start】") < rendered.index("【document_start】")

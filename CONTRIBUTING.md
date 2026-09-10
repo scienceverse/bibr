@@ -150,6 +150,9 @@ experiments, or local filesystem paths to the documentation. See the [developmen
 for details and the [evaluation guide](https://bibr.org/contributing/evaluation/)
 for extraction-quality measurements.
 
+Maintainers can follow the [release publication guide](https://bibr.org/contributing/setup/#publishing-a-release)
+for rehearsals, Trusted Publishing, and recovery from a partial release.
+
 ## Testing conventions
 
 - Use `pytest.importorskip()` for optional dependencies (`fastapi`, `redis`)

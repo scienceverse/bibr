@@ -1,4 +1,12 @@
 import asyncio
+import sys
+
+
+def test_peak_rss_is_optional_when_resource_is_unavailable(monkeypatch):
+    from bibr.metrics.performance import _peak_rss_bytes
+
+    monkeypatch.setitem(sys.modules, "resource", None)
+    assert _peak_rss_bytes() is None
 
 
 async def test_recorder_keeps_concurrent_request_metrics_separate():

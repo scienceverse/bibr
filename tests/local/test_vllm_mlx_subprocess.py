@@ -70,7 +70,8 @@ def test_vllm_mlx_routes_stderr_to_file_not_pipe(monkeypatch):
     expected_dir = pathlib.Path(tempfile.gettempdir()).resolve()
     assert log_path.parent == expected_dir
     assert "vllm-mlx" in log_path.name and "8766" in log_path.name
-    assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+    if sys.platform != "win32":  # Windows uses ACLs, not POSIX mode bits.
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,50 @@ uv run --locked pytest tests/test_docs_sync.py
   also be passed explicitly to pipeline instances. Read environment variables
   and `.env` through this configuration layer
 
+## Publishing a release
+
+The release workflow builds the wheel and source archive once, checks their
+contents and PyPI metadata, and installs the wheel in a clean environment. It
+publishes those same files through PyPI Trusted Publishing with attestations.
+The package description comes from `pyproject.toml`; the PyPI project page
+comes from `README.md`. Update both before releasing, including installation
+instructions and links that work outside GitHub.
+
+The registered PyPI publisher must match these values:
+
+| Setting | Value |
+| --- | --- |
+| PyPI project | `bibr` |
+| GitHub owner/repository | `scienceverse/bibr` |
+| Workflow filename | `release.yml` |
+| GitHub environment | `pypi` |
+
+The `pypi` environment allows `v*` tags. No PyPI API token is needed. Keep the
+repository variable `PUBLISH_PYPI=false` between releases; a release owner enables
+it after approving publication.
+
+1. Update the package version, lockfile, changelog, and public documentation on
+   `main`. Wait for `CI / required` to pass on the exact commit to be released.
+2. Rehearse the release from `main` with
+   `gh workflow run release.yml --repo scienceverse/bibr --ref main`. Wait for
+   the Ubuntu, macOS, Windows, and distribution checks to pass. A manual rehearsal
+   cannot publish to PyPI, GHCR, or GitHub Releases.
+3. After release approval, set
+   `gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body true`.
+   Create and push an annotated `vX.Y.Z` tag on the verified commit, with `X.Y.Z`
+   matching `project.version`. The workflow rejects mismatched tags and commits
+   that are not reachable from `main`.
+4. Watch the tag-triggered Release workflow to completion. PyPI receives the
+   verified distributions, the release container is scanned before its version
+   tags are promoted, and GitHub Release assets are attached after both succeed.
+5. Verify the live PyPI description and install that exact version from PyPI in
+   a fresh environment. Then reset
+   `gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body false`.
+
+If publication partially succeeds, rerun only the failed jobs of that same run.
+Do not rerun a successful PyPI upload or move a published release tag. PyPI files
+are immutable; package or description corrections require a new version.
+
 ## Submitting a pull request
 
 - Branch from `main`, keep PRs focused on a single concern, and use descriptive

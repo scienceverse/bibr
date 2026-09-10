@@ -406,7 +406,11 @@ async def test_disposition_comes_from_serialized_output_validation_before_pendin
     await CoreCheckpointStage(enrichment_requested=True).run(_ctx(fs))
 
     assert fs.artifact_disposition is ArtifactDisposition.BLOCKED
-    assert "/_quarantine/blocked/" in str(fs.artifact_sink.destination_path(fs))
+    assert fs.artifact_sink.destination_path(fs).parts[-3:] == (
+        "_quarantine",
+        "blocked",
+        "paper.json",
+    )
 
 
 async def test_corrupt_durable_core_never_becomes_publishable_result(tmp_path):

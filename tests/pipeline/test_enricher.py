@@ -251,18 +251,25 @@ async def test_enricher_consumes_a_completed_prefetch():
 
 @pytest.mark.asyncio
 async def test_enricher_waits_for_a_still_running_prefetch():
+    release = asyncio.Event()
+
     async def slow(references, *, settings=None, **_):  # noqa: ARG001
-        await asyncio.sleep(0.05)
+        await release.wait()
         return "LATE"
 
     handle = await _handle(slow)
     fs = _fs_with_handle(handle)
     fake = AsyncMock()
     with patch("bibr.enrich.references.enrich_references", fake):
-        await CrossrefEnricher().enrich(fs)
+        task = asyncio.create_task(CrossrefEnricher().enrich(fs))
+        await asyncio.sleep(0)
+        assert not task.done()
+        fake.assert_not_awaited()
+        release.set()
+        await task
 
     assert fake.await_args.kwargs["prefetch"] == "LATE"
-    assert fs.stage_times["enrich_prefetch"] >= 0.05
+    assert fs.stage_times["enrich_prefetch"] >= 0
     assert _pending() == []
 
 

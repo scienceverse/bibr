@@ -58,7 +58,7 @@ PROCESS_BOUNDARY_SETTINGS_MODULES = {
 
 @pytest.mark.parametrize("path", RUNTIME_STAGE_MODULES)
 def test_runtime_stages_do_not_read_global_settings(path):
-    tree = ast.parse(Path(path).read_text())
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     reads = [
         node
         for node in ast.walk(tree)
@@ -71,7 +71,7 @@ def test_runtime_stages_do_not_read_global_settings(path):
 
 @pytest.mark.parametrize("path", RUNTIME_HELPER_MODULES)
 def test_runtime_helpers_do_not_read_global_settings(path):
-    tree = ast.parse(Path(path).read_text())
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
     reads = [
         node
         for node in ast.walk(tree)
@@ -88,7 +88,7 @@ def test_only_process_boundaries_import_global_settings():
         relative = path.as_posix()
         if relative in PROCESS_BOUNDARY_SETTINGS_MODULES:
             continue
-        tree = ast.parse(path.read_text())
+        tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.ImportFrom)

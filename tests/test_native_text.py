@@ -488,7 +488,7 @@ def test_fill_rejects_source_backed_private_use_critical_region_only(monkeypatch
     clean sibling remains on the native path with its exact source geometry."""
     import bibr.ocr.native_text as native_mod
 
-    source = json.loads(PUA_SOURCE_FIXTURE.read_text())
+    source = json.loads(PUA_SOURCE_FIXTURE.read_text(encoding="utf-8"))
     clean, corrupt = source["regions"]
     by_bbox = {
         tuple(clean["bbox_2d"]): clean["native_text"],

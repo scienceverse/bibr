@@ -13,7 +13,7 @@ _GOLDEN = Path(__file__).parent / "data" / "classification_prompt.golden.txt"
 
 def test_classification_prompt_unchanged_byte_for_byte():
     # The taxonomy extraction must NOT alter the production prompt.
-    assert _GOLDEN.read_text() == _CLASSIFICATION_PROMPT
+    assert _GOLDEN.read_text(encoding="utf-8") == _CLASSIFICATION_PROMPT
 
 
 def test_shared_taxonomy_is_substring_of_both_prompts():

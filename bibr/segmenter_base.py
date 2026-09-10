@@ -155,10 +155,12 @@ def _validate_sealed_manifest(
 
     bundle_paths = list(model_dir.rglob("*"))
     if symlinks := sorted(
-        str(path.relative_to(model_dir)) for path in bundle_paths if path.is_symlink()
+        path.relative_to(model_dir).as_posix() for path in bundle_paths if path.is_symlink()
     ):
         raise ValueError("Sentence-segmenter bundle contains symlink files: " + ", ".join(symlinks))
-    actual_files = {str(path.relative_to(model_dir)) for path in bundle_paths if path.is_file()}
+    actual_files = {
+        path.relative_to(model_dir).as_posix() for path in bundle_paths if path.is_file()
+    }
     expected_files = _SEALED_RUNTIME_FILES | set(declared.values()) | {_SEGMENTER_MANIFEST}
     if unexpected_files := sorted(actual_files - expected_files):
         raise ValueError(
