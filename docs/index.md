@@ -9,14 +9,14 @@ hide:
 JSON. Read PDF, DOCX, JATS XML, HTML, and ePub; extract metadata, references,
 sections, sentences, tables, figures, and equations.
 
-These docs describe the current source checkout. Install from source to use the
-features documented here. See [installation](getting-started/install.md) for
-Python and system requirements.
+Install bibr from PyPI to use the features documented here. See
+[installation](getting-started/install.md) for Python and system requirements,
+optional extras, and contributor source installs.
 
 ```bash
-git clone https://github.com/scienceverse/bibr.git
-cd bibr
-uv sync --extra all
+uv init --python 3.12 paper-extraction
+cd paper-extraction
+uv add bibr
 uv run bibr setup
 uv run bibr chew paper.pdf -o paper.json
 ```

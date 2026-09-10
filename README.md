@@ -1,4 +1,4 @@
-# [![bibr 🦫 — bibr chew paper.pdf | bibr.org](docs/assets/readme-banner.png)](https://bibr.org)
+# [![bibr 🦫 — bibr chew paper.pdf | bibr.org](https://raw.githubusercontent.com/scienceverse/bibr/main/docs/assets/readme-banner.png)](https://bibr.org)
 
 <!-- badges: start -->
 [![PyPI version](https://img.shields.io/pypi/v/bibr.svg)](https://pypi.org/project/bibr/)
@@ -18,26 +18,34 @@
 - Works through the CLI, Python, an HTTP API, a web demo, or MCP.
 - Lets you choose local or cloud models, limit page ranges, and skip extraction stages.
 
-> [!WARNING]
-> **Alpha:** Expect bugs and uneven extraction quality. See [known limitations](LIMITATIONS.md).
+> **Alpha:** Expect bugs and uneven extraction quality. Current evaluation is strongest
+> for English-language social science papers. See [known limitations](https://bibr.org/limitations/).
 
 ## Get started
 
-Requires Python 3.11–3.14, [uv](https://docs.astral.sh/uv/), and the
-[system prerequisites](docs/getting-started/install.md#system-prerequisites).
-Install from source for now; the PyPI package is a placeholder.
+Requires Python 3.11–3.14 and the
+[system prerequisites](https://bibr.org/getting-started/install/#system-prerequisites).
+Install from PyPI in a project managed by [uv](https://docs.astral.sh/uv/):
 
 ```bash
-git clone https://github.com/scienceverse/bibr.git
-cd bibr
-uv sync --extra all
+uv init --python 3.12 paper-extraction
+cd paper-extraction
+uv add bibr
 uv run bibr setup
 uv run bibr chew paper.pdf -o result.json
 ```
 
+In an existing Python environment, you can also install with
+`python -m pip install bibr` and run `bibr setup` / `bibr chew` directly.
+
 The setup wizard detects your hardware, configures OCR and the LLM, and offers to
-install any additional dependencies. See the [tester guide](docs/tester-guide.md)
-for platform-specific instructions.
+install any additional dependencies. Core installs run bibr's trained models through
+ONNX Runtime; PyTorch, the demo, MCP, and hardware-specific serving runtimes are
+[optional extras](https://bibr.org/getting-started/install/#extras). The first run may
+download models and runtimes. See the [tester guide](https://bibr.org/tester-guide/)
+for platform-specific instructions and the
+[source installation guide](https://bibr.org/getting-started/install/#installing-from-source-contributors)
+for development setup.
 
 ## Usage
 
@@ -46,7 +54,8 @@ for platform-specific instructions.
 ```bash
 uv run bibr chew papers/ -o results/   # Process a directory
 uv run bibr chew paper.pdf --dry-run   # Preview the processing plan
-uv run bibr demo                      # Open the local web demo
+uv add 'bibr[demo]'                    # Add the optional web demo
+uv run bibr demo                       # Open it locally
 ```
 
 References are parsed locally by default. Use `--refs llm` to parse them with the
@@ -71,7 +80,7 @@ reusing loaded models with `bibr.Chewer`.
 bibr uses LLMs selectively for tasks such as front-page metadata, with support
 for small models tuned for extraction. You can disable downstream LLM extraction
 with `--no-llm`, which returns structural output; PDF OCR may still use a
-vision-language model. The [LLM use note](LLM_POLICY.md) covers these choices
+vision-language model. The [LLM use note](https://bibr.org/llm-use/) covers these choices
 and how agentic LLMs helped develop bibr. It is a work in progress.
 
 ## Documentation
@@ -80,19 +89,28 @@ and how agentic LLMs helped develop bibr. It is a work in progress.
 - [Deployment](https://bibr.org/guides/deployment/) — HTTP API (`bibr serve`), Docker, hardware, and authentication.
 - [MCP server](https://bibr.org/guides/mcp/) — extraction tools for agents (`bibr mcp`).
 - [JSON schema](https://bibr.org/reference/schema/) and [pipeline architecture](https://bibr.org/guides/architecture/).
-- [Evaluating extraction quality](docs/contributing/evaluation.md) on papers from your workflow.
+- [Evaluating extraction quality](https://bibr.org/contributing/evaluation/) on papers from your workflow.
 
 ## Contributing
 
 Bug reports, test papers, and contributions are welcome. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for development setup, tests, and pull requests.
+[CONTRIBUTING.md](https://github.com/scienceverse/bibr/blob/main/CONTRIBUTING.md)
+for development setup, tests, and pull requests.
+
+Development began privately in December 2025. This public repository starts with
+a clean source snapshot for the 0.5.0 launch; the earlier development history
+remains private. Selected early design documents and their original contributions
+are preserved in the [project history](https://github.com/scienceverse/bibr/tree/main/history).
 
 ---
 
 ## Acknowledgments
 
-Special thanks to **Daniël Lakens** and **Lisa DeBruine**, for putting faith and patience in the project, and being generous with their time
+Special thanks to **Daniël Lakens** and **[Lisa DeBruine (@debruine)](https://github.com/debruine)**, for putting faith and patience in the project, and being generous with their time
  to help make bibr 🦫 better for everyone.
+
+Lisa also contributed to the early paper-structure and metadata design documentation
+preserved in the project history.
 
 Also, to the whole [Metacheck](https://www.scienceverse.org/metacheck/) team, and **TU Eindhoven**.
 
@@ -110,4 +128,4 @@ We are grateful to the open-source projects that bibr builds on:
 
 ## License
 
-[AGPL-3.0-or-later](LICENSE.md).
+[AGPL-3.0-or-later](https://github.com/scienceverse/bibr/blob/main/LICENSE.md).

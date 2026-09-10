@@ -1,19 +1,19 @@
 # Quickstart
 
-Install the current source, configure your backends, and extract a first paper.
+Install bibr from PyPI, configure your backends, and extract a first paper.
 The first run may download several GB of models.
 
 ## 1. Install
 
 ```bash
-git clone https://github.com/scienceverse/bibr.git
-cd bibr
-uv sync --extra all
+uv init --python 3.12 paper-extraction
+cd paper-extraction
+uv add bibr
 ```
 
-This includes the local layout/reference models' dependencies and the optional
-demo. The setup wizard offers any additional runtime extras your hardware needs;
-see [Installation](install.md) for prerequisites and smaller installs.
+This installs core bibr, including the ONNX runtime for its trained models.
+The setup wizard offers any additional runtime extras your hardware needs;
+see [Installation](install.md) for prerequisites, the optional demo, and source installs.
 
 ## 2. Configure once
 

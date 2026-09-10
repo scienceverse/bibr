@@ -1,7 +1,7 @@
 [project]
 name = "bibr"
 version = "0.5.0"
-description = "Structured, auditable JSON from scientific papers (PDF, DOCX, JATS, HTML, ePub): metadata, sections, references, tables, figures. Preprocessing backend for scienceverse/metacheck."
+description = "Scientific paper extraction to structured JSON: metadata, text, references, tables, figures, and equations from PDF, DOCX, JATS XML, HTML, and ePub."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
 license = "AGPL-3.0-or-later"

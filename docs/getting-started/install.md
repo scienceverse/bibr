@@ -19,18 +19,23 @@ libmagic itself has to be installed separately, or the first file bibr reads fai
 `bibr doctor` reports this as its own check, so run it if an extraction fails on a fresh
 machine.
 
-## Install the current source
+## Install from PyPI
 
 ```bash
-git clone https://github.com/scienceverse/bibr.git
-cd bibr
-uv sync --extra all
+uv init --python 3.12 paper-extraction
+cd paper-extraction
+uv add bibr
 uv run bibr setup
 uv run bibr doctor
 ```
 
-The command above installs the `all` extras. For the smaller core install,
-use `uv sync --no-default-groups`. Core includes the `bibr` CLI, cloud-backed LLM extraction, native
+For an existing uv project, run `uv add bibr` in that project. In an existing
+Python environment, `python -m pip install bibr` installs the same package; use
+`bibr setup` and `bibr doctor` directly.
+
+The commands above install core bibr. Add `bibr[all]` for the full cloud + ML
+dependency set, or choose the extras below for your use case. Core includes the
+`bibr` CLI, cloud-backed LLM extraction, native
 DOCX, JATS, HTML, and ePub processing, and bibr's own trained models — layout
 detection, the section and paper classifiers, the NER reference parser — served
 through **ONNX Runtime**. It is deliberately light: no `torch`, no `transformers`,
