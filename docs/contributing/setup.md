@@ -105,8 +105,17 @@ The registered PyPI publisher must match these values:
 | GitHub environment | `pypi` |
 
 The `pypi` environment allows `v*` tags. No PyPI API token is needed. Keep the
-repository variable `PUBLISH_PYPI=false` between releases; a release owner enables
-it after approving publication.
+repository variable `PUBLISH_PYPI=true` for normal publishing. A maintainer's
+version tag starts the release workflow, which publishes only after its tests
+and distribution checks pass. Enable this once during publishing setup:
+
+```bash
+gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body true
+```
+
+Leave publishing enabled after a successful release. Set the variable to `false`
+only when deliberately suspending PyPI delivery; tags created while it is
+disabled skip the PyPI upload. Manual release rehearsals never publish.
 
 Container registry delivery is a separate opt-in: `PUBLISH_GHCR=true` enables
 edge and release uploads, including manual container workflow runs. It is
@@ -125,10 +134,9 @@ See [Docker deployment](../guides/deployment.md#docker-deployment).
    `gh workflow run release.yml --repo scienceverse/bibr --ref main`. Wait for
    the Ubuntu, macOS, Windows, and distribution checks to pass. A manual rehearsal
    cannot publish to PyPI, GHCR, or GitHub Releases.
-3. After release approval, set
-   `gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body true`.
-   Create and push an annotated `vX.Y.Z` tag on the verified commit, with `X.Y.Z`
-   matching `project.version`. The workflow rejects mismatched tags and commits
+3. After release approval, create and push an annotated `vX.Y.Z` tag on the
+   verified commit, with `X.Y.Z` matching `project.version`. The workflow rejects
+   mismatched tags and commits
    that are not reachable from `main`.
 4. Watch the tag-triggered Release workflow to completion. PyPI receives the
    verified distributions and GitHub Release assets are attached after each
@@ -137,8 +145,7 @@ See [Docker deployment](../guides/deployment.md#docker-deployment).
    enabled channel blocks finalization; only deliberately disabled channels may
    be skipped.
 5. Verify the live PyPI description and install that exact version from PyPI in
-   a fresh environment. Then reset
-   `gh variable set PUBLISH_PYPI --repo scienceverse/bibr --body false`.
+   a fresh environment.
 
 If publication partially succeeds, rerun only the failed jobs of that same run.
 Do not rerun a successful PyPI upload or move a published release tag. PyPI files
