@@ -591,4 +591,5 @@ def test_pages_deployment_verifies_public_access_and_exact_revision() -> None:
 
     assert "--expected-sha=${{ github.sha }}" in smoke["run"]
     assert "--access=public" in smoke["run"]
-    assert smoke["env"] == {"SITE_URL": "${{ steps.deploy.outputs.page_url }}"}
+    assert smoke["env"] == {"SITE_URL": "https://bibr.org/"}
+    assert job["environment"]["url"] == smoke["env"]["SITE_URL"]

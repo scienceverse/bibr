@@ -824,7 +824,7 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: https://bibr.org/
     steps:
       - name: Checkout deployment smoke helper
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.2
@@ -851,7 +851,9 @@ jobs:
 
       - name: Prove public production availability and revision
         env:
-          SITE_URL: ${{ steps.deploy.outputs.page_url }}
+          # Pages reports HTTP while redirect enforcement is pending, even when
+          # the canonical HTTPS endpoint already serves a valid certificate.
+          SITE_URL: https://bibr.org/
         run: >-
           python scripts/ci/smoke_site.py --access=public
           --url="$SITE_URL" --expected-sha=${{ github.sha }}
