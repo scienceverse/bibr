@@ -1,6 +1,6 @@
 [project]
 name = "bibr"
-version = "0.5.0"
+version = "0.5.1"
 description = "Scientific paper extraction to structured JSON: metadata, text, references, tables, figures, and equations from PDF, DOCX, JATS XML, HTML, and ePub."
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
