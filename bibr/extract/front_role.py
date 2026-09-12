@@ -226,6 +226,13 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
     return clf
 
 
+def release_front_role_classifier(classifier: FrontRoleClassifier) -> None:
+    """Drop the cache's ownership without unloading another pipeline's model."""
+    with _CACHE_LOCK:
+        for key in [key for key, value in _CACHE.items() if value is classifier]:
+            del _CACHE[key]
+
+
 def reset_front_role_cache() -> None:
     """Test hook: forget cached classifiers (and cached failures)."""
     with _CACHE_LOCK:

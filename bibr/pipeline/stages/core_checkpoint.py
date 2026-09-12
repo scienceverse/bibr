@@ -41,7 +41,7 @@ class CoreCheckpointStage:
                 enrichment_requested = (
                     self._enrichment_requested
                     and ctx.config.enrichment_enabled(ctx.settings)
-                    and ctx.config.ref_parse_strategy != "off"
+                    and (ctx.config.ref_parse_strategy or ctx.settings.REF_PARSE_STRATEGY) != "off"
                 )
                 if enrichment_requested:
                     payload = mark_enrichment_pending(payload)

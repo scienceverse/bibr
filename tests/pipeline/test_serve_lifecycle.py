@@ -214,3 +214,52 @@ async def test_process_file_chains_original_exception():
     assert exc_info.value.__cause__ is not None, "expected chained __cause__"
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert "real cause" in str(exc_info.value.__cause__)
+
+
+async def test_pipeline_close_releases_models_and_front_role_cache(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import bibr.extract.front_role as front_role
+
+    layout = SimpleNamespace(loaded=True, unload=MagicMock())
+    segmenter = SimpleNamespace(loaded=True, aclose=AsyncMock())
+    classifier = object()
+    monkeypatch.setattr(front_role, "_CACHE", {("owned", None): classifier})
+    rm = ResourceManager(layout=layout, segmenter=segmenter)
+    rm._front_role = classifier
+    pipeline = Pipeline(stages=[], resources=rm, config=RunConfig(), settings=GlobalSettings())
+    await pipeline.aclose()
+    await pipeline.aclose()
+    layout.unload.assert_called_once()
+    segmenter.aclose.assert_awaited_once()
+    assert rm.layout is None and rm.segmenter is None and rm.front_role is None
+    assert not front_role._CACHE
+
+
+async def test_model_close_detaches_borrowed_models_without_unloading():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    layout = SimpleNamespace(loaded=True, unload=MagicMock())
+    segmenter = SimpleNamespace(loaded=True, unload=MagicMock())
+    rm = ResourceManager(layout=layout, segmenter=segmenter, owns_models=False)
+    await rm.close_models()
+    layout.unload.assert_not_called()
+    segmenter.unload.assert_not_called()
+    assert rm.layout is None and rm.segmenter is None
+
+
+async def test_failed_model_unload_does_not_skip_remaining_models():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    layout = SimpleNamespace(
+        loaded=True, unload=MagicMock(side_effect=RuntimeError("unload failed"))
+    )
+    segmenter = SimpleNamespace(loaded=True, unload=MagicMock())
+    rm = ResourceManager(layout=layout, segmenter=segmenter)
+    await rm.close_models()
+    layout.unload.assert_called_once()
+    segmenter.unload.assert_called_once()
+    assert rm.layout is None and rm.segmenter is None

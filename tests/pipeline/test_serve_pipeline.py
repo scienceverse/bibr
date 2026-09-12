@@ -150,14 +150,40 @@ def test_enricher_is_built_even_when_crossref_enrich_setting_is_off():
     assert pl._config.crossref is None
 
 
-def test_refs_off_setting_still_drops_the_enricher():
+async def test_refs_off_default_allows_a_request_to_enable_parsing_and_enrichment():
+    from dataclasses import replace
+    from pathlib import Path
+    from unittest.mock import AsyncMock
+
     from bibr.config import GlobalSettings
+    from bibr.pipeline.artifacts import RunState
+    from bibr.pipeline.context import PipelineContext
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.state import FileState
 
     settings = GlobalSettings()
     settings.crossref.enrich = True
     settings.REF_PARSE_STRATEGY = "off"
 
-    assert _enrichment_stage(_build_with(settings))._enrichers == []
+    pl = _build_with(settings)
+    stage = _enrichment_stage(pl)
+    (enricher,) = stage._enrichers
+    enricher.enrich = AsyncMock(return_value=None)
+    fs = FileState(path=Path("paper.xml"), paper=MagicMock())
+    ctx = PipelineContext([fs], NullProgress(), pl._resources, pl._config, settings)
+    await stage.run(ctx)
+    enricher.enrich.assert_not_awaited()
+    assert fs.enrichment_state is None
+
+    ctx.config = replace(pl._config, ref_parse_strategy="ner", crossref=True)
+    await stage.run(ctx)
+    enricher.enrich.assert_awaited_once_with(fs)
+    assert fs.enrichment_state == RunState.ENRICHMENT_COMPLETE
+
+    enricher.enrich.reset_mock()
+    ctx.config = replace(pl._config, ref_parse_strategy="off", crossref=True)
+    await stage.run(ctx)
+    enricher.enrich.assert_not_awaited()
 
 
 async def _run_enrichment(pl, *, crossref, setting):

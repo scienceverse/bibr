@@ -788,6 +788,10 @@ class OcrStage:
                 cached = ocr_cache.load(fs, cfg, identity, settings)
                 if cached is not None:
                     fs.ocr_regions = cached
+            self._check_ocr_success(ctx)
+            alive = ctx.alive()
+            if not alive:
+                return
         pending = [fs for fs in alive if fs.contents is None and fs.ocr_regions is None]
         if alive and not pending:
             logger.debug("OCR stage: all files served from disk cache")

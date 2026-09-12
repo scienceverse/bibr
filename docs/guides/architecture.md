@@ -25,6 +25,12 @@ Two runtime options are available:
   multipart ingress and one spawned inference worker hosting the pipeline GPU
   models (layout, segmenter).
 
+Pipeline shutdown releases owned models, servers, and clients. Cancellation
+during local server startup or sentence segmentation waits for the underlying
+worker to finish before disposing its result or releasing the model lock.
+Cancellation can therefore take as long as the blocking operation; server
+startup still relies on the selected backend's own timeout.
+
 ## Pipeline stages
 
 ### 1. Validate (`bibr/input/validate.py`)
@@ -89,6 +95,9 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Bibliographic search as fallback (fuzzy title matching)
 - Matches stay in `bib_match` and `metadata_match`; explicit `fill`/`replace` consolidation can merge accepted reference fields into `bib`
 - Off by default. `CROSSREF_ENRICH=true` enables it for a deployment; per run, `bibr chew --crossref` / `--no-crossref`, `chew(crossref=True|False)` and the serve API's `crossref` form field override the setting either way (`extraction.settings.crossref_enrich` in the output records the effective value)
+- A served request can enable both reference parsing and Crossref even when
+  `REF_PARSE_STRATEGY=off` is the deployment default. Enrichment is skipped when
+  the effective reference parsing strategy remains off.
 - When enabled, the up-front network work (resolver health probe and title searches, Crossref bulk DOI lookup) starts as soon as the references are parsed and overlaps the rest of the extract stage (citation linking, structured integrity), so it no longer adds serial wall time after extraction; the core checkpoint still sees unenriched references
 
 ### 6. Export (`bibr/export/`)
@@ -121,6 +130,11 @@ The selected backend/model/profile becomes the OCR runtime identity used in
 the OCR-cache key and export `extraction.ocr`, so cache entries and
 provenance cannot be confused across recognizers or normalizers. There is no
 silent per-request GLM fallback after a concrete runtime has passed startup.
+
+OCR cache entries retain page-attempt and page-failure counts with extraction
+warnings. Cache hits apply the current `OCR_MIN_SUCCESS_RATE`, so tightening
+the threshold also rejects cached OCR that falls below it. Cache format 9
+invalidates older entries that lack this completion evidence.
 
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one

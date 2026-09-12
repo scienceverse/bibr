@@ -715,3 +715,29 @@ async def test_pending_gate_follows_effective_enrichment_switch(tmp_path, settin
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     detail = receipt["events"][-1].get("detail")
     assert (detail == "enrichment_not_requested") is (not pending)
+
+
+@pytest.mark.parametrize(("refs", "pending"), [(None, False), ("ner", True), ("off", False)])
+async def test_checkpoint_pending_gate_obeys_request_override_of_refs_off(tmp_path, refs, pending):
+    from bibr.config import GlobalSettings
+    from bibr.local.artifacts import LocalArtifactSink
+    from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
+
+    settings = GlobalSettings()
+    settings.REF_PARSE_STRATEGY = "off"
+    fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
+    fs.paper.export_to_json.return_value = _payload(promotable=True)
+    fs.artifact_sink = LocalArtifactSink(tmp_path / "paper.json")
+    ctx = PipelineContext(
+        [fs],
+        NullProgress(),
+        MagicMock(),
+        RunConfig(crossref=True, ref_parse_strategy=refs),
+        settings,
+    )
+    await CoreCheckpointStage(enrichment_requested=True).run(ctx)
+    core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
+    assert (
+        any(issue["code"] == "VAL_ENRICHMENT_PENDING" for issue in core["validation"]["issues"])
+        is pending
+    )
