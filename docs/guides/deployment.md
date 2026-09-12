@@ -312,12 +312,12 @@ fallback for a configured Paddle endpoint.
 
 ## Docker deployment
 
-The 0.5.0 public release provides Dockerfiles and Compose configuration for
+The 0.5.1 public release provides Dockerfiles and Compose configuration for
 building locally. Prebuilt GHCR images are not part of this release.
 Start from the public release source:
 
 ```bash
-git clone --branch v0.5.0 --depth 1 https://github.com/scienceverse/bibr.git
+git clone --branch v0.5.1 --depth 1 https://github.com/scienceverse/bibr.git
 cd bibr
 ```
 
