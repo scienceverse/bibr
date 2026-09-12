@@ -201,3 +201,64 @@ class TestMaxPagesClamping:
 
         # max_pages=0 means unlimited — end_page must not be clamped.
         assert captured["end_page"] == 99
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_layout_startup_failure_spares_native_sibling(streaming):
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.pipeline import Pipeline
+    from bibr.pipeline.stages.render_ocr import InterleavedRenderOcrStage, StreamingRenderOcrStage
+
+    native = FileState(path=Path("paper.xml"), contents=object())
+    pdf = FileState(path=Path("paper.pdf"), pdf_bytes=b"%PDF")
+    rm = MagicMock()
+    failure = RuntimeError("layout model unavailable")
+    rm.ensure_layout.side_effect = failure
+
+    async def export(ctx):
+        for fs in ctx.alive():
+            fs.result_json = {"file": fs.path.name}
+
+    exporter = SimpleNamespace(name="export", run=export)
+    if streaming:
+
+        def noop(name):
+            return SimpleNamespace(name=name, run=AsyncMock())
+
+        stages = [
+            StreamingRenderOcrStage(
+                parse=noop("parse"),
+                post_parse=noop("extract"),
+                enrich=noop("enrich"),
+                export=exporter,
+            )
+        ]
+    else:
+        stages = [InterleavedRenderOcrStage(), exporter]
+    pipeline = Pipeline(
+        stages=stages,
+        resources=rm,
+        settings=GlobalSettings(),
+        config=RunConfig(ocr_backend="glm-http"),
+    )
+    await pipeline.process_chunk([pdf, native])
+    assert native.error is None
+    assert native.result_json == {"file": "paper.xml"}
+    assert pdf.error_code == "layout_failed"
+    assert pdf.original_error is failure
+
+
+async def test_optional_preload_failure_defers_to_ocr_without_aborting_layout():
+    fs = FileState(path=Path("paper.pdf"), pdf_bytes=b"%PDF")
+    rm = MagicMock()
+    rm.ocr = None
+    rm.start_ocr_preload.side_effect = RuntimeError("preload unavailable")
+    rm.layout.detect_batch = AsyncMock(return_value=[[]])
+    context = _ctx([fs], resources=rm, config=RunConfig(ocr_backend="glm-llama"))
+    with patch("bibr.pipeline.stages.layout._iter_pdf_pages", return_value=[(0, MagicMock())]):
+        await LayoutStage().run(context)
+    assert fs.error is None
+    assert fs.layout_results == [[]]
+    assert context.signals.preloading_ocr is False

@@ -40,6 +40,7 @@ class _ExportStage:
 def _make_pipeline(stages):
     resources = MagicMock()
     resources.shutdown_llm_server = MagicMock()
+    resources.close_llm_server = AsyncMock()
     resources.close_llm_client = AsyncMock()
     return Pipeline(
         stages=stages,
@@ -213,11 +214,12 @@ async def test_aclose_continues_after_a_teardown_failure():
     """aclose must be best-effort: a raised LLM-server shutdown must NOT skip
     the OCR-engine and LLM-client teardown (otherwise they leak)."""
     pl = _make_pipeline([_NoopStage()])
-    pl._resources.shutdown_llm_server = MagicMock(side_effect=RuntimeError("boom"))
+    pl._resources.close_llm_server = AsyncMock(side_effect=RuntimeError("boom"))
     pl._resources.shutdown_ocr = AsyncMock(return_value=None)
     pl._resources.close_llm_client = AsyncMock(return_value=None)
 
     await pl.aclose()  # must not raise despite the LLM-server shutdown failing
 
+    pl._resources.close_llm_server.assert_awaited_once()
     pl._resources.shutdown_ocr.assert_awaited_once()
     pl._resources.close_llm_client.assert_awaited_once()

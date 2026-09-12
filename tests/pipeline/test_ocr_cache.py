@@ -395,6 +395,69 @@ def test_format_six_payload_is_rejected_after_layout_key_removal(enabled_cache):
     assert not path.exists()
 
 
+@pytest.mark.parametrize("bundle", [False, True])
+def test_cache_restores_partial_page_evidence_and_warnings(enabled_cache, bundle):
+    fs, cfg, identity = _fs(), RunConfig(ocr_backend="glm-http"), _identity()
+    fs.ocr_pages_attempted = 10
+    fs.ocr_pages_failed = 4
+    fs.warnings = ["OCR failed for page index 6: temporary failure"]
+    ocr_cache.store(fs, cfg, identity, _regions())
+
+    incoming = _fs()
+    incoming.warnings = ["a warning from this run"]
+    loader = ocr_cache.load_bundle if bundle else ocr_cache.load
+    assert loader(incoming, cfg, identity)
+    assert incoming.ocr_pages_attempted == 10
+    assert incoming.ocr_pages_failed == 4
+    assert incoming.warnings == ["a warning from this run", *fs.warnings]
+    assert loader(incoming, cfg, identity)
+    assert incoming.warnings.count(fs.warnings[0]) == 1
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+def test_bad_completion_evidence_is_a_miss_without_partial_restore(enabled_cache, bundle):
+    fs, cfg, identity = _fs(), RunConfig(), _identity()
+    ocr_cache.store(fs, cfg, identity, _regions())
+    path = ocr_cache._path(fs, cfg, identity)
+    payload = json.loads(path.read_text())
+    payload["ocr_quality"]["pages_failed"] = -1
+    path.write_text(json.dumps(payload))
+    loader = ocr_cache.load_bundle if bundle else ocr_cache.load
+    assert not loader(fs, cfg, identity)
+    assert fs.ocr_regions is None and not fs.warnings
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("threshold", [0.5, 0.9])
+async def test_cache_hits_obey_current_ocr_success_threshold(
+    enabled_cache, monkeypatch, fused, threshold
+):
+    from bibr.ocr.profiles import resolve_ocr_runtime_identity
+
+    cfg = RunConfig(ocr_backend="glm-http")
+    identity = resolve_ocr_runtime_identity(cfg, Settings)
+    source = _fs()
+    source.ocr_pages_attempted = 10
+    source.ocr_pages_failed = 4
+    source.warnings = ["OCR failed for page index 6: temporary failure"]
+    regions = [_regions()[0] for _ in range(6)] + [[] for _ in range(4)]
+    ocr_cache.store(source, cfg, identity, regions)
+    monkeypatch.setattr(Settings.ocr, "min_success_rate", threshold)
+
+    incoming = _fs()
+    context = _ctx([incoming], resources=_ocr_rm(), config=cfg)
+    with patch("bibr.pipeline.stages.ocr.ocr_page_regions", AsyncMock()) as recognize:
+        if fused:
+            assert await InterleavedRenderOcrStage()._probe_cache(context) == []
+        else:
+            await OcrStage().run(context)
+    recognize.assert_not_called()
+    assert incoming.warnings == source.warnings
+    assert incoming.ocr_pages_failed == 4
+    assert incoming.error_code == ("ocr_mostly_failed" if threshold == 0.9 else None)
+
+
 # --- stage integration: cache hit skips OCR ----------------------------------
 
 

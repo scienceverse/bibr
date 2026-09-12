@@ -116,17 +116,12 @@ class ServePipeline(Pipeline):
         # switch it on for a deployment whose CROSSREF_ENRICH is off, and off
         # for one where it is on), so the enricher is built whenever some
         # request could need it and ``EnrichmentStage`` gates each run on
-        # ``RunConfig.enrichment_enabled``. The one construction-time
-        # exclusion mirrors LocalPipeline: ``REF_PARSE_STRATEGY=off`` produces
-        # an empty bib table, so Crossref would have nothing to enrich and the
-        # stage would only idle on every request.
-        refs_off = (settings_snapshot.REF_PARSE_STRATEGY or "").lower() == "off"
+        # ``RunConfig.enrichment_enabled``. A request can also override a
+        # deployment whose reference parser defaults to off, so that default
+        # must not permanently remove the enricher.
+        from bibr.pipeline.enricher import CrossrefEnricher
 
-        enrichers: list = []
-        if not refs_off:
-            from bibr.pipeline.enricher import CrossrefEnricher
-
-            enrichers.append(CrossrefEnricher(settings=settings_snapshot))
+        enrichers = [CrossrefEnricher(settings=settings_snapshot)]
 
         # NOTE: ServePipeline omits LlmServerStage (which LocalPipeline includes
         # at bibr/local/pipeline.py). The serve worker manages its own

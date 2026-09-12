@@ -228,7 +228,7 @@ async def test_aclose_shuts_down_llm_server_and_ocr():
     """``Pipeline.aclose`` is the explicit teardown the owner calls once."""
     pipe = LocalPipeline(llm_backend="cloud")
     pipe._resources = MagicMock()
-    pipe._resources.shutdown_llm_server = MagicMock()
+    pipe._resources.close_llm_server = AsyncMock()
     pipe._resources.close_llm_client = AsyncMock()
 
     async def _fake_shutdown_ocr():
@@ -238,7 +238,7 @@ async def test_aclose_shuts_down_llm_server_and_ocr():
 
     await pipe.aclose()
 
-    pipe._resources.shutdown_llm_server.assert_called_once()
+    pipe._resources.close_llm_server.assert_awaited_once()
     pipe._resources.shutdown_ocr.assert_called_once()
     pipe._resources.close_llm_client.assert_awaited_once()
 

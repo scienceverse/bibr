@@ -196,19 +196,24 @@ class Pipeline:
             cancel_leftover_prefetches(file_states)
 
     async def aclose(self) -> None:
-        """Release pipeline-lifetime resources (LLM server, OCR engine).
+        """Release pipeline-lifetime models, servers and clients.
 
         Idempotent — safe to call more than once; underlying shutdowns no-op
         when their resource is already None. Best-effort: a failure tearing
         down one resource is logged and never skips the others (otherwise a
         raised LLM-server shutdown would leak the OCR engine and LLM client).
         """
+        from bibr.utils.async_tasks import await_owned
+
+        await await_owned(self._close_resources())
+
+    async def _close_resources(self) -> None:
         try:
             await self._resources.close_classifiers()
         except Exception:  # noqa: BLE001 — best-effort teardown
             logger.warning("Classifier shutdown failed during aclose", exc_info=True)
         try:
-            self._resources.shutdown_llm_server()
+            await self._resources.close_llm_server()
         except Exception:  # noqa: BLE001 — best-effort teardown
             logger.warning("LLM server shutdown failed during aclose", exc_info=True)
         try:
@@ -219,3 +224,7 @@ class Pipeline:
             await self._resources.close_llm_client()
         except Exception:  # noqa: BLE001 — best-effort teardown
             logger.warning("LLM client close failed during aclose", exc_info=True)
+        try:
+            await self._resources.close_models()
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            logger.warning("Resident model shutdown failed during aclose", exc_info=True)

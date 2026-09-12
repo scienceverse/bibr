@@ -11,6 +11,7 @@ import logging
 
 from bibr.segmenter.registry import register
 from bibr.segmenter_base import BaseSentenceSegmenter
+from bibr.utils.async_tasks import await_owned
 
 logger = logging.getLogger(__name__)
 
@@ -89,4 +90,6 @@ class SentenceSegmenter(BaseSentenceSegmenter):
 
         loop = asyncio.get_running_loop()
         async with self._inference_lock():
-            return await loop.run_in_executor(None, self._split_many, texts)
+            # Cancellation must not release the lock (or let the parse stage
+            # unload the model) until the executor's inference actually ends.
+            return await await_owned(loop.run_in_executor(None, self._split_many, texts))

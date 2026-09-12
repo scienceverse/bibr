@@ -37,10 +37,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Version 8 adds the layout and PaddleOCR-VL model pins to the key. Entries
-# written before it were produced by unrecorded model revisions, so they cannot
-# be matched against the current ones and are invalidated wholesale.
-_CACHE_FORMAT_VERSION = 8
+# Version 9 preserves OCR completion evidence and warnings. Earlier bundles
+# cannot distinguish failed pages from empty pages, so invalidate them.
+_CACHE_FORMAT_VERSION = 9
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -189,23 +188,42 @@ def _decode_regions(payload: dict) -> list[list[OcrRegionResult]]:
     return [[OcrRegionResult.from_dict(d) for d in page] for page in payload["regions"]]
 
 
+def _decode_quality(payload: dict) -> tuple[int, int, list[str]]:
+    evidence = payload["ocr_quality"]
+    attempted, failed = evidence["pages_attempted"], evidence["pages_failed"]
+    warnings = evidence["warnings"]
+    if type(attempted) is not int or type(failed) is not int or not 0 <= failed <= attempted:
+        raise ValueError("invalid OCR page completion evidence")
+    if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
+        raise ValueError("invalid OCR warnings")
+    return attempted, failed, warnings
+
+
+def _restore_quality(fs: FileState, quality: tuple[int, int, list[str]]) -> None:
+    fs.ocr_pages_attempted, fs.ocr_pages_failed, warnings = quality
+    fs.warnings = list(dict.fromkeys([*fs.warnings, *warnings]))
+
+
 def load(
     fs: FileState,
     cfg: RunConfig,
     identity: OcrRuntimeIdentity,
     settings: GlobalSettings | None = None,
 ) -> list[list[OcrRegionResult]] | None:
-    """Return cached OCR regions for *fs*, or ``None`` on a miss."""
+    """Return cached regions and restore completion evidence, or miss with None."""
     effective = _effective_settings(settings)
     payload = _read_payload(fs, cfg, identity, effective)
     if payload is None:
         return None
     try:
-        return _decode_regions(payload)
+        regions = _decode_regions(payload)
+        quality = _decode_quality(payload)
     except Exception as e:  # noqa: BLE001 — any bad entry is a miss, not an error
         logger.info("OCR cache entry unreadable (%s); treating as miss", e)
         _path(fs, cfg, identity, effective).unlink(missing_ok=True)
         return None
+    _restore_quality(fs, quality)
+    return regions
 
 
 def load_bundle(
@@ -232,6 +250,7 @@ def load_bundle(
 
             pdf_outline = [OutlineItem(**item) for item in outline_data]
         regions = _decode_regions(payload)
+        quality = _decode_quality(payload)
         from bibr.ocr.pdf_inspection import inspection_from_dict
 
         pdf_inspection = inspection_from_dict(
@@ -252,6 +271,7 @@ def load_bundle(
     fs.ref_line_geometry = ref_line_geometry
     fs.pdf_outline = pdf_outline
     fs.pdf_inspection = pdf_inspection
+    _restore_quality(fs, quality)
     return True
 
 
@@ -269,6 +289,11 @@ def store(
     payload = {
         "version": _CACHE_FORMAT_VERSION,
         "regions": [[r.to_dict() for r in page] for page in regions],
+        "ocr_quality": {
+            "pages_attempted": fs.ocr_pages_attempted,
+            "pages_failed": fs.ocr_pages_failed,
+            "warnings": list(fs.warnings),
+        },
         "artifacts": {
             "native_metadata": fs.native_metadata,
             "ref_line_geometry": fs.ref_line_geometry,

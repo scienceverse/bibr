@@ -53,14 +53,31 @@ class LayoutStage:
             and not ctx.signals.ocr_init_error
         )
         if can_preload:
-            rm.start_ocr_preload()
-            preloading_ocr = True
+            try:
+                rm.start_ocr_preload()
+                preloading_ocr = True
+            except Exception:  # preload is optional; OCR owns required startup
+                logger.warning("OCR preload failed; deferring startup to OCR", exc_info=True)
         ctx.signals.preloading_ocr = preloading_ocr
 
         ctx.progress.stage_start(self.name)
         t0 = time.monotonic()
         if any_needs_ocr:
-            rm.ensure_layout()
+            try:
+                rm.ensure_layout()
+            except Exception as exc:  # shared failure applies only to PDF files
+                for fs in ctx.alive():
+                    if _needs_ocr(fs):
+                        fs.set_error(
+                            f"Layout initialization failed: {exc}",
+                            code="layout_failed",
+                            stage=self.name,
+                            exc=exc,
+                        )
+                ctx.signals.any_needs_ocr = False
+                logger.warning("Layout initialization failed", exc_info=True)
+                ctx.progress.stage_end(self.name)
+                return
         loop = asyncio.get_running_loop()
 
         start_page = cfg.start_page

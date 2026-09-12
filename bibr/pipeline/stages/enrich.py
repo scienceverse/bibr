@@ -63,7 +63,7 @@ class EnrichmentStage:
         # represented by removing the stage at construction: gate per run.
         if (
             not self._enrichers
-            or ctx.config.ref_parse_strategy == "off"
+            or (ctx.config.ref_parse_strategy or ctx.settings.REF_PARSE_STRATEGY) == "off"
             or not ctx.config.enrichment_enabled(ctx.settings)
         ):
             # Nothing will consume an enrichment prefetch on this path (e.g. a

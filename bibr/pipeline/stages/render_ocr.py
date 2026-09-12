@@ -165,6 +165,9 @@ class InterleavedRenderOcrStage:
             for fs in pending:
                 if ocr_cache.load_bundle(fs, ctx.config, identity, ctx.settings):
                     fs.free_pre_ocr()
+            # Cached output must satisfy this run's quality policy too. In
+            # particular, failed pages cannot become invisible on a cache hit.
+            OcrStage._check_ocr_success(ctx)
         return [fs for fs in pending if fs.contents is None and fs.ocr_regions is None]
 
     def _fail_ocr_init(self, targets: list, exc: BaseException, *, log: bool = True) -> None:

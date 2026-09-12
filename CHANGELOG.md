@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Cancelled OCR and local LLM startup reclaim servers that finish starting after
+  cancellation. Shutdown waits for startup and completes resource cleanup even
+  when interrupted repeatedly.
+- Cancelled local sentence segmentation retains its inference lock until the
+  worker finishes, preventing concurrent inference or premature model unloading.
+- OCR cache hits preserve page-failure counts and warnings, and recheck the
+  current minimum success ratio. Older entries without this evidence are rebuilt.
+- Served requests can enable reference parsing and Crossref enrichment when the
+  deployment defaults reference parsing to off.
+- Layout initialization failures affect only PDFs in mixed batches; native
+  documents continue through the pipeline, including streaming runs.
+- Closing a pipeline releases resident layout and segmentation models and its
+  cached front-matter classifier reference.
+
 ## [0.5.0] - 2026-09-11
 
 ### Fixed

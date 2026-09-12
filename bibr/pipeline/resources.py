@@ -17,6 +17,8 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from bibr.utils.async_tasks import await_owned
+
 if TYPE_CHECKING:
     from bibr.clients.llm import LLMClient
     from bibr.config import GlobalSettings
@@ -96,6 +98,7 @@ class ResourceManager:
         layout_factory: Callable | None = None,
         segmenter_factory: Callable | None = None,
         classifier_resources=None,
+        owns_models: bool = True,
     ) -> None:
         from bibr.config import snapshot_settings
 
@@ -122,6 +125,9 @@ class ResourceManager:
         self._managed_vllm_fraction = managed_vllm_fraction
         self._layout_factory = layout_factory
         self._segmenter_factory = segmenter_factory
+        # Injected models transfer ownership by default. Embedders sharing
+        # models across pipelines can retain their lifecycle explicitly.
+        self._owns_models = owns_models
 
         self._layout: LayoutDetector | None = layout
         self._segmenter: SentenceSegmenter | None = segmenter
@@ -211,6 +217,30 @@ class ResourceManager:
     @property
     def segmenter(self):
         return self._segmenter
+
+    async def close_models(self) -> None:
+        """Release resident models even when the closed manager stays reachable."""
+        models = (self._layout, self._segmenter)
+        self._layout = None
+        self._segmenter = None
+        if self._front_role is not None:
+            from bibr.extract.front_role import release_front_role_classifier
+
+            release_front_role_classifier(self._front_role)
+        self._front_role = None
+        self._front_role_resolved = False
+        if not self._owns_models:
+            return
+        for model in models:
+            if model is None:
+                continue
+            try:
+                if hasattr(model, "unload"):
+                    await await_owned(asyncio.to_thread(model.unload))
+                elif hasattr(model, "aclose"):
+                    await await_owned(model.aclose())
+            except Exception:  # best-effort: one failure cannot retain the other model
+                logger.warning("Resident model shutdown failed", exc_info=True)
 
     # -- Front-role classifier (optional prior for front-matter ownership) --
 
@@ -411,12 +441,33 @@ class ResourceManager:
         self._ocr_executor = concurrent.futures.ThreadPoolExecutor(1)
         self._ocr_future = self._ocr_executor.submit(self._create_ocr_client_for, candidates[0])
 
-    async def _shutdown_failed_ocr_candidate(self, client) -> None:
+    async def _shutdown_client(self, client) -> None:
         if client is None or not hasattr(client, "shutdown"):
             return
-        result = client.shutdown()
+        result = await asyncio.to_thread(client.shutdown)
         if inspect.isawaitable(result):
             await result
+
+    async def _construct_ocr_candidate(self, candidate):
+        """Collect a constructor without losing a late result to cancellation."""
+        loop = asyncio.get_running_loop()
+        if self._ocr_future is None:
+            return await await_owned(
+                loop.run_in_executor(None, self._create_ocr_client_for, candidate),
+                on_cancel=self._shutdown_client,
+            )
+        try:
+            return await await_owned(
+                asyncio.wrap_future(self._ocr_future),
+                on_cancel=self._shutdown_client,
+            )
+        finally:
+            # await_owned has settled the constructor, including cancellation
+            # cleanup, before we forget the preload handle.
+            self._ocr_future = None
+            if self._ocr_executor is not None:
+                self._ocr_executor.shutdown(wait=False)
+                self._ocr_executor = None
 
     async def _await_ocr_client_ready(self, client) -> None:
         if not hasattr(client, "wait_for_server"):
@@ -463,44 +514,36 @@ class ResourceManager:
         Always runs the (blocking) OCR constructor off the event loop, so
         nothing in the async pipeline can stall on engine startup.
         """
-        if self._ocr is not None and getattr(self._ocr, "loaded", False):
-            return
         async with self._ocr_init_lock:
             if self._ocr is not None and getattr(self._ocr, "loaded", False):
                 return
             from bibr.exceptions import UpstreamServiceError
 
             candidates = self._resolve_ocr_candidates()
-            loop = asyncio.get_running_loop()
             if self._ocr_future is not None:
-                try:
-                    self._ocr = await loop.run_in_executor(None, self._ocr_future.result)
-                finally:
-                    self._ocr_future = None
-                    if self._ocr_executor is not None:
-                        self._ocr_executor.shutdown(wait=False)
-                        self._ocr_executor = None
-                candidate = candidates[0]
-                if self._ocr is None:
-                    raise RuntimeError(
-                        f"OCR backend factory for {candidate.backend!r} returned no client"
-                    )
-                await self._await_ocr_client_ready(self._ocr)
-                self._set_ocr_runtime_identity(candidate)
-                return
-
+                # Preload is only supported for one concrete candidate. Keep
+                # that contract for embedders that supply their own future.
+                candidates = candidates[:1]
             failures: list[str] = []
             for candidate in candidates:
                 client = None
                 try:
-                    client = await loop.run_in_executor(
-                        None, self._create_ocr_client_for, candidate
-                    )
+                    client = await self._construct_ocr_candidate(candidate)
                     if client is None:
                         raise RuntimeError("factory returned no client")
                     await self._await_ocr_client_ready(client)
-                except Exception as exc:  # noqa: BLE001 - candidate boundary
-                    await self._shutdown_failed_ocr_candidate(client)
+                except BaseException as exc:  # dispose unpublished clients on cancellation too
+                    try:
+                        await await_owned(self._shutdown_client(client))
+                    except Exception:
+                        if not isinstance(exc, Exception):
+                            logger.warning(
+                                "Server cleanup failed after cancellation", exc_info=True
+                            )
+                            raise exc from None
+                        raise
+                    if not isinstance(exc, Exception):
+                        raise
                     if len(candidates) == 1:
                         if client is None and isinstance(exc, RuntimeError):
                             raise RuntimeError(
@@ -544,26 +587,33 @@ class ResourceManager:
             future.cancel()
             client = None
             try:
-                client = await asyncio.to_thread(future.result)
-            except concurrent.futures.CancelledError:
+                client = await asyncio.wrap_future(future)
+            except (concurrent.futures.CancelledError, asyncio.CancelledError):
                 return
             except Exception as exc:  # noqa: BLE001 - a failed preload has nothing to reclaim
                 logger.debug("OCR preload failed before it was collected: %r", exc)
                 return
             if client is not None and client is not self._ocr:
                 logger.info("Shutting down an OCR engine preloaded but never claimed")
-                await self._shutdown_failed_ocr_candidate(client)
+                await self._shutdown_client(client)
         finally:
             if executor is not None:
                 executor.shutdown(wait=False)
 
     async def shutdown_ocr(self) -> None:
         """Shutdown OCR client to free GPU memory."""
+        await await_owned(self._shutdown_ocr())
+
+    async def _shutdown_ocr(self) -> None:
+        async with self._ocr_init_lock:
+            await self._shutdown_ocr_locked()
+
+    async def _shutdown_ocr_locked(self) -> None:
         await self._drain_ocr_preload()
         client = self._ocr
         try:
             if client is not None and hasattr(client, "shutdown"):
-                result = client.shutdown()
+                result = await asyncio.to_thread(client.shutdown)
                 if asyncio.iscoroutine(result):
                     await result
         finally:
@@ -580,6 +630,12 @@ class ResourceManager:
 
     # -- LLM server (vllm-mlx on Apple Silicon, vllm on Linux/CUDA) --
 
+    async def _construct_llm_server(self, factory):
+        return await await_owned(
+            asyncio.get_running_loop().run_in_executor(None, factory),
+            on_cancel=self._shutdown_client,
+        )
+
     async def start_llm_server(self, backend: str) -> None:
         """Start local LLM server if backend requires one (idempotent).
 
@@ -589,33 +645,27 @@ class ResourceManager:
         that fails to bind the port — hard-failing every file in later chunks —
         so no-op when a server is already up.
         """
-        if self._llm_server is not None:
-            return
         async with self._llm_init_lock:
             if self._llm_server is not None:
                 return
-            loop = asyncio.get_running_loop()
             server = None
             if backend == "vllm-mlx":
                 from bibr.local.llm import VllmMlxLlmServer
 
-                server = await loop.run_in_executor(
-                    None,
+                server = await self._construct_llm_server(
                     lambda: _make_settings_aware(VllmMlxLlmServer, self._settings),
                 )
             elif backend == "rapid-mlx":
                 import bibr.local.rapid_mlx as rapid_mlx
 
-                server = await loop.run_in_executor(
-                    None,
+                server = await self._construct_llm_server(
                     lambda: _make_settings_aware(rapid_mlx.RapidMlxLlmServer, self._settings),
                 )
             elif backend == "vllm":
                 # Module (not class) import so tests can monkeypatch the symbol.
                 import bibr.local.vllm_llm as vllm_llm
 
-                server = await loop.run_in_executor(
-                    None,
+                server = await self._construct_llm_server(
                     lambda: _make_settings_aware(
                         vllm_llm.VllmLlmServer,
                         self._settings,
@@ -625,15 +675,13 @@ class ResourceManager:
             elif backend == "llama-cpp":
                 from bibr.local.llama_cpp import LlamaCppLlmServer
 
-                server = await loop.run_in_executor(
-                    None,
+                server = await self._construct_llm_server(
                     lambda: _make_settings_aware(LlamaCppLlmServer, self._settings),
                 )
             elif backend == "llmster":
                 from bibr.local.llmster import LlmsterLlmServer
 
-                server = await loop.run_in_executor(
-                    None,
+                server = await self._construct_llm_server(
                     lambda: _make_settings_aware(LlmsterLlmServer, self._settings),
                 )
 
@@ -647,11 +695,20 @@ class ResourceManager:
             self._llm_server = server
 
     def shutdown_llm_server(self) -> None:
-        """Shutdown local LLM server if running."""
+        """Synchronous finalizer; async owners should use close_llm_server."""
         if self._llm_server is None:
             return
-        self._llm_server.shutdown()
-        self._llm_server = None
+        server, self._llm_server = self._llm_server, None
+        server.shutdown()
+
+    async def close_llm_server(self) -> None:
+        """Wait for startup before shutdown so close cannot miss a late server."""
+
+        async def close() -> None:
+            async with self._llm_init_lock:
+                await asyncio.to_thread(self.shutdown_llm_server)
+
+        await await_owned(close())
 
     @property
     def llm_client(self):
