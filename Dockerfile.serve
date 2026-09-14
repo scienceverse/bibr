@@ -15,7 +15,7 @@ ARG WITH_GPU=true
 # ===========================================================================
 # Stage 1: builder — install Python, build venv, populate model wheels
 # ===========================================================================
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS builder
+FROM nvidia/cuda:13.3.1-runtime-ubuntu22.04 AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -93,7 +93,7 @@ RUN if [ "$WITH_GPU" = "true" ]; then \
 # ===========================================================================
 # Stage 2: runtime — slim image with venv + system libs + baked models
 # ===========================================================================
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
+FROM nvidia/cuda:13.3.1-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive TZ=UTC
 # The CUDA base image ships jammy packages frozen at its build date, so this
