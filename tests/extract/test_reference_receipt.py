@@ -56,8 +56,10 @@ def test_reference_yield_receipt_has_required_frozen_contract():
         "duplicate_rate",
         "reason_flags",
         "losses",
+        "recovery",
     ]
     receipt = ReferenceYieldReceipt(None, (), (), None, 0, 0, 0.0, ())
+    assert receipt.recovery is None
     with pytest.raises(FrozenInstanceError):
         receipt.parsed_count = 1  # type: ignore[misc]
 

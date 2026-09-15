@@ -753,6 +753,32 @@ class ReferenceYieldLossesExport(BaseModel):
     unresolved: list[ReferenceSourceLossExport] = Field(default_factory=list)
 
 
+class ReferenceRecoveryAttemptExport(BaseModel):
+    model_config = _STRICT
+
+    segment_index: int = Field(ge=0, description="Zero-based index in the retained segment list.")
+    source_span: tuple[int, int]
+    outcome: Literal[
+        "started",
+        "invalid_response",
+        "upstream_unavailable",
+        "ambiguous_alignment",
+        "unsupported_fields",
+        "recovered",
+        "timeout",
+    ]
+
+
+class ReferenceRecoveryExport(BaseModel):
+    model_config = _STRICT
+
+    max_segments: int
+    timeout_seconds: float
+    attempts: list[ReferenceRecoveryAttemptExport]
+    recovered_count: int
+    stop_reason: Literal["complete", "segment_budget", "timeout", "upstream_unavailable"]
+
+
 class ReferenceYieldExport(BaseModel):
     model_config = _STRICT
 
@@ -765,6 +791,14 @@ class ReferenceYieldExport(BaseModel):
     duplicate_rate: float
     reason_flags: list[str]
     losses: ReferenceYieldLossesExport | None = None
+    recovery: ReferenceRecoveryExport | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_disabled_recovery(self, handler):
+        data = handler(self)
+        if data.get("recovery") is None:
+            data.pop("recovery", None)
+        return data
 
 
 class OcrEngineExport(BaseModel):
@@ -938,6 +972,38 @@ class FrontMatterBlockExport(BaseModel):
     merge_reasons: list[str] = Field(default_factory=list)
 
 
+class PrintedPresentationExport(BaseModel):
+    """A complete source-supported presentation within one article."""
+
+    model_config = _STRICT
+
+    presentation_id: str
+    record_id: str
+    title_variant_id: str
+    abstract_variant_id: str
+    byline_candidate_ids: list[str]
+    byline_source_text_ids: list[int]
+    byline_source_section_ids: list[int]
+    original_marker_ids: list[str]
+
+
+class PresentationSelectionExport(BaseModel):
+    model_config = _STRICT
+
+    presentations: list[PrintedPresentationExport]
+    selected_presentation_id: str | None
+    reason: str
+
+    @model_validator(mode="after")
+    def _selected_member(self) -> PresentationSelectionExport:
+        ids = [row.presentation_id for row in self.presentations]
+        if len(ids) != len(set(ids)):
+            raise ValueError("presentation selection IDs must be unique")
+        if self.selected_presentation_id is not None and self.selected_presentation_id not in ids:
+            raise ValueError("selected presentation must exist in the inventory")
+        return self
+
+
 class FrontMatterResolutionExport(BaseModel):
     model_config = _STRICT
 
@@ -946,6 +1012,7 @@ class FrontMatterResolutionExport(BaseModel):
     reason_flags: list[str]
     blocks: list[FrontMatterBlockExport]
     candidates: list[FrontMatterCandidateExport]
+    presentation_selection: PresentationSelectionExport | None = None
 
 
 class DiagnosticsExport(BaseModel):
@@ -1176,6 +1243,43 @@ class PaperExport(BaseModel):
             )
             if not shared_byline:
                 raise ValueError("linked versions must share printed byline evidence")
+        front = (
+            self.extraction.diagnostics.front_matter
+            if self.extraction is not None and self.extraction.diagnostics is not None
+            else None
+        )
+        if front is not None and front.presentation_selection is not None:
+            candidates = {row.candidate_id: row for row in front.candidates}
+            blocks = {row.block_id: row for row in front.blocks}
+            for presentation in front.presentation_selection.presentations:
+                versions = linked.get(presentation.presentation_id, [])
+                expected = {
+                    ("title", presentation.title_variant_id),
+                    ("abstract", presentation.abstract_variant_id),
+                }
+                if (
+                    {(row.field, row.variant_id) for row in versions} != expected
+                    or any(row.record_id != presentation.record_id for row in versions)
+                    or presentation.record_id != front.selected_block_id
+                ):
+                    raise ValueError("presentation selection must reference its owned variants")
+                block = blocks.get(presentation.record_id)
+                evidence = presentation.byline_candidate_ids + presentation.original_marker_ids
+                if block is None or any(
+                    key not in candidates or key not in block.candidate_ids for key in evidence
+                ):
+                    raise ValueError("presentation evidence must belong to its source record")
+                bylines = [candidates[key] for key in presentation.byline_candidate_ids]
+                text_ids = {key for row in bylines for key in row.text_ids}
+                sections = {row.section_id for row in bylines if row.section_id is not None}
+                if (
+                    not bylines
+                    or any("byline" not in row.roles for row in bylines)
+                    or text_ids != set(presentation.byline_source_text_ids)
+                    or sections != set(presentation.byline_source_section_ids)
+                    or any(not text_ids.issubset(row.byline_source_text_ids) for row in versions)
+                ):
+                    raise ValueError("presentation selection requires matching byline evidence")
         return self
 
     @model_serializer(mode="wrap")

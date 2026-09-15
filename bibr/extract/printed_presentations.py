@@ -49,6 +49,17 @@ def link_printed_presentations(
         if len(titles) != 1 or len(abstracts) != 1 or len(bylines) != 1:
             continue
         byline = bylines[0]
+        # An unclassified parallel title can sit between a native title and
+        # their shared byline. Local ordering alone cannot pair either language
+        # with the following abstract in that layout.
+        if any(
+            row.source_kind == "paragraph"
+            and row.reading_order < byline.reading_order
+            and len(row.raw_text.split()) >= 6
+            and not row.roles.issubset({"metadata", "doi"})
+            for row in local
+        ):
+            continue
         if not byline.roles.isdisjoint(
             {"title", "abstract", "affiliation", "doi", "byline_probation"}
         ):

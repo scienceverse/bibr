@@ -26,6 +26,10 @@ from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, Author
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.metadata_variants import has_explicit_original_label
+from bibr.extract.primary_presentation import (
+    presentation_author_context,
+    select_printed_presentation,
+)
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
 from bibr.extract.title_text import _is_ordinary_body_heading
 from bibr.input.consolidate_text import strip_affiliation_markers
@@ -1472,6 +1476,20 @@ class CoreMetadataExtractor:
             if table_text and authors_text is not None and table_text not in authors_text:
                 authors_text += "\n" + table_text
 
+            variants = getattr(self.contents, "metadata_variants", [])
+            selection = select_printed_presentation(variants, resolution)
+            self.contents.presentation_selection = selection
+            presentation = next(
+                (
+                    row
+                    for row in selection.presentations
+                    if row.presentation_id == selection.selected_presentation_id
+                ),
+                None,
+            )
+            if presentation is not None and resolution is not None:
+                authors_text = presentation_author_context(presentation, resolution)
+
             llm_metadata = await self._call_core_llm(
                 full_text,
                 authors_text=authors_text,
@@ -1498,7 +1516,10 @@ class CoreMetadataExtractor:
             # usable names. Prefer the selected byline over repeating the same wide context.
             if not authors:
                 recovered = await self._recover_empty_authors(
-                    context=byline_recovery_context(resolution) or authors_text or full_text,
+                    context=(authors_text if presentation is not None else None)
+                    or byline_recovery_context(resolution)
+                    or authors_text
+                    or full_text,
                 )
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
@@ -1529,25 +1550,39 @@ class CoreMetadataExtractor:
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
             abstract = (llm_metadata.abstract or "").strip()
-            # Explicit, fully owned printed variants establish the source-order
-            # preference without asking the model to translate or concatenate.
-            # Capture happened before section normalization; never rebuild it
-            # from the normalized abstract tree here.
+            # Select the complete presentation together. Independent first-title
+            # and first-abstract preferences can combine different languages.
+            # Variant capture predates semantic section normalization.
             primary_variants = {}
-            if resolution is not None:
-                for field in ("title", "abstract"):
-                    variants = [
-                        variant
-                        for variant in getattr(self.contents, "metadata_variants", ())
-                        if variant.field == field
-                        and variant.record_id == resolution.selected_block_id
-                    ]
-                    primaries = [variant for variant in variants if variant.is_primary]
-                    explicit_original_label = has_explicit_original_label(resolution, field)
-                    if len(variants) >= 2 and len(primaries) == 1 and not explicit_original_label:
-                        primary_variants[field] = primaries[0].text
+            has_alternatives = resolution is not None and any(
+                sum(
+                    row.field == field and row.record_id == resolution.selected_block_id
+                    for row in variants
+                )
+                > 1
+                for field in ("title", "abstract")
+            )
+            if presentation is not None:
+                selected_ids = {presentation.title_variant_id, presentation.abstract_variant_id}
+                primary_variants = {
+                    variant.field: variant.text
+                    for variant in variants
+                    if variant.variant_id in selected_ids
+                    and variant.record_id == presentation.record_id
+                }
+            elif has_alternatives:
+                self.validation_issues.append(
+                    ValidationIssue(
+                        code="VAL_PRIMARY_PRESENTATION_UNRESOLVED",
+                        severity=IssueSeverity.WARNING,
+                        message="Printed versions were retained, but a complete primary title/byline/abstract pairing could not be established",
+                        origin_stage="extract",
+                        evidence_ids=(f"reason:{selection.reason}",),
+                        blocking=False,
+                    )
+                )
             title = primary_variants.get("title", title)
-            if "title" not in primary_variants:
+            if "title" not in primary_variants and not has_alternatives:
                 title, preference_issue = prefer_first_printed_native_title(
                     title, self.contents, resolution
                 )

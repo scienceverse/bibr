@@ -127,14 +127,14 @@ def _with_original_label(contents, resolution, field):
 
 
 @pytest.mark.parametrize("field", ["title", "abstract"])
-async def test_explicit_original_label_defers_that_field_to_model_choice(field, monkeypatch):
+async def test_explicit_original_label_selects_the_entire_presentation(field, monkeypatch):
     contents, resolution = _with_original_label(*_printed_pair(), field)
     extractor, _, classifier = _extractor(contents, resolution, monkeypatch)
 
     metadata = await extractor.extract()
 
-    expected_title = ENGLISH_TITLE if field == "title" else ORIGINAL_TITLE
-    expected_abstract = ENGLISH_ABSTRACT if field == "abstract" else ORIGINAL_ABSTRACT
+    expected_title = ENGLISH_TITLE
+    expected_abstract = ENGLISH_ABSTRACT
     assert metadata.title == expected_title
     assert metadata.abstract == expected_abstract
     assert classifier.await_args.args[:2] == (expected_title, expected_abstract)
@@ -163,7 +163,7 @@ async def test_byline_preference_preserves_explicit_original_title_selection(mon
 @pytest.mark.parametrize(
     "gate", ["single", "unmarked", "two-primaries", "other-record", "split-records"]
 )
-async def test_scalar_override_requires_two_owned_variants_and_exactly_one_primary(
+async def test_complete_source_pair_is_authoritative_over_individual_primary_flags(
     gate, monkeypatch
 ):
     contents, resolution = _printed_pair()
@@ -186,9 +186,13 @@ async def test_scalar_override_requires_two_owned_variants_and_exactly_one_prima
 
     metadata = await extractor.extract()
 
-    assert metadata.title == ENGLISH_TITLE
-    assert metadata.abstract == ENGLISH_ABSTRACT
-    assert classifier.await_args.args[:2] == (ENGLISH_TITLE, ENGLISH_ABSTRACT)
+    expected = (
+        (ENGLISH_TITLE, ENGLISH_ABSTRACT)
+        if gate == "other-record"
+        else (ORIGINAL_TITLE, ORIGINAL_ABSTRACT)
+    )
+    assert (metadata.title, metadata.abstract) == expected
+    assert classifier.await_args.args[:2] == expected
 
 
 async def test_other_record_primary_cannot_replace_selected_record_primary(monkeypatch):

@@ -10,6 +10,7 @@ from bibr.export.json_export import _export_paper_payload, validate_export
 from bibr.export.models import _SCHEMA_VERSION, PaperExport
 from bibr.export.schema_artifact import build_export_schema
 from bibr.extract.metadata_variants import collect_metadata_variants
+from bibr.extract.primary_presentation import select_printed_presentation
 from tests.extract.test_metadata_variants import _fixture
 
 
@@ -96,4 +97,30 @@ def test_presentation_requires_compatible_byline_evidence_on_both_versions(demo_
     payload = _export_paper_payload(demo_paper)
     payload["metadata_variant"][1]["byline_source_text_ids"] = [999]
     with pytest.raises(ValidationError, match="share printed byline"):
+        PaperExport.model_validate(payload)
+
+
+@pytest.mark.parametrize("fault", [None, "selected_id", "variant", "byline", "record"])
+def test_primary_selection_preserves_and_validates_source_links(demo_paper, fault):
+    resolution = _attach_variants(demo_paper)
+    demo_paper.contents.presentation_selection = select_printed_presentation(
+        demo_paper.contents.metadata_variants, resolution
+    )
+    payload = _export_paper_payload(demo_paper)
+    choice = payload["extraction"]["diagnostics"]["front_matter"]["presentation_selection"]
+    assert choice["selected_presentation_id"] == choice["presentations"][0]["presentation_id"]
+    assert choice["reason"] == "first_complete_printed"
+    if fault is None:
+        assert PaperExport.model_validate(payload)
+        return
+    row = choice["presentations"][0]
+    if fault == "selected_id":
+        choice["selected_presentation_id"] = "missing"
+    elif fault == "variant":
+        row["abstract_variant_id"] = "missing"
+    elif fault == "byline":
+        row["byline_source_text_ids"] = [999]
+    else:
+        row["record_id"] = "foreign-record"
+    with pytest.raises(ValidationError, match="presentation"):
         PaperExport.model_validate(payload)

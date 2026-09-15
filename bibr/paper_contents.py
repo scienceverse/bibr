@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
     from bibr.extract.metadata_variants import PrintedMetadataVariant
+    from bibr.extract.primary_presentation import PresentationSelection
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
 
@@ -689,6 +690,22 @@ class ReferenceYieldLosses:
 
 
 @dataclass(frozen=True)
+class ReferenceRecoveryAttempt:
+    segment_index: int
+    source_span: tuple[int, int]
+    outcome: str
+
+
+@dataclass(frozen=True)
+class ReferenceRecoveryReceipt:
+    max_segments: int
+    timeout_seconds: float
+    attempts: tuple[ReferenceRecoveryAttempt, ...]
+    recovered_count: int
+    stop_reason: str
+
+
+@dataclass(frozen=True)
 class ReferenceYieldReceipt:
     """Internal diagnostic record for reference segmentation and parse yield."""
 
@@ -701,6 +718,7 @@ class ReferenceYieldReceipt:
     duplicate_rate: float
     reason_flags: tuple[str, ...]
     losses: ReferenceYieldLosses | None = None
+    recovery: ReferenceRecoveryReceipt | None = None
 
 
 @dataclass
@@ -767,6 +785,7 @@ class PaperContents:
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
     # Capture printed versions before normalization changes section ownership.
     metadata_variants: list["PrintedMetadataVariant"] = field(default_factory=list)
+    presentation_selection: "PresentationSelection | None" = None
 
     def invalidate_text_caches(self) -> None:
         """Drop cached DataFrames whose contents derive from sentence text or links.

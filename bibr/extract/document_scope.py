@@ -102,6 +102,7 @@ def _resolution_for(
 def _reset_derived(contents: PaperContents) -> None:
     contents.front_role_predictions = None
     contents.metadata_variants = []
+    contents.presentation_selection = None
     contents.citation_receipt = None
     contents.caption_assignment_receipt = None
     contents.reference_yield_receipt = None

@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Opt-in NER reference recovery retries only missing source-aligned entries with
+  the configured LLM, under per-paper entry and time limits. Accepted fields must
+  occur in that entry's source; diagnostics retain attempts and unresolved losses.
 - Opt-in `chew_document()` / `achew_document()` and
   `LocalPipeline.process_document()` return a document envelope containing every
   detected article, with explicit unresolved/failed records. Extraction scopes
@@ -23,8 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- Prefer an explicitly identified original title/abstract, otherwise the first
-  complete printed version, while preserving supported alternatives separately.
+- Select a complete printed title/byline/abstract presentation together: an
+  explicitly identified original, otherwise the first complete presentation.
+  Preserve supported alternatives and report unresolved pairings in diagnostics.
+- Retain explicitly labelled OCR abstract regions when exact source ownership
+  survives a synthetic section heading or affiliation vocabulary in the prose.
 - Corroborated repeated front matter can belong to one article; numbered body
   headings no longer create false records when they lack independent article
   anatomy. Genuine multi-article ambiguity remains a blocking finding.

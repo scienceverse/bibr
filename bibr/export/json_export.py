@@ -40,7 +40,9 @@ from bibr.export.models import (
     MetadataVariantExport,
     OcrEngineExport,  # noqa: F401 - re-exported for existing importers
     PaperExport,
+    PresentationSelectionExport,
     ProvenanceExport,
+    ReferenceRecoveryExport,
     ReferenceSegmentationAttemptExport,
     ReferenceYieldExport,
     ReferenceYieldLossesExport,
@@ -573,7 +575,7 @@ def _export_paper_payload(
 
     reference_yield: ReferenceYieldExport | None = None
     if paper.contents.reference_yield_receipt is not None:
-        from bibr.paper_contents import ReferenceYieldLosses
+        from bibr.paper_contents import ReferenceRecoveryReceipt, ReferenceYieldLosses
 
         receipt = paper.contents.reference_yield_receipt
         losses = getattr(receipt, "losses", None)
@@ -600,16 +602,28 @@ def _export_paper_payload(
                 if isinstance(losses, ReferenceYieldLosses)
                 else None
             ),
+            recovery=ReferenceRecoveryExport.model_validate(asdict(receipt.recovery))
+            if isinstance(getattr(receipt, "recovery", None), ReferenceRecoveryReceipt)
+            else None,
         )
 
     resolution = paper.contents.front_matter_resolution
     front_matter = None
     if resolution is not None:
+        from bibr.extract.primary_presentation import PresentationSelection
+
         candidates_by_id = {row.candidate_id: row for row in resolution.candidates}
         front_matter = FrontMatterResolutionExport(
             selected_block_id=resolution.selected_block_id,
             selection_method=resolution.selection_method,
             reason_flags=list(resolution.reason_flags),
+            presentation_selection=PresentationSelectionExport.model_validate(
+                asdict(paper.contents.presentation_selection)
+            )
+            if isinstance(
+                getattr(paper.contents, "presentation_selection", None), PresentationSelection
+            )
+            else None,
             blocks=[
                 FrontMatterBlockExport(
                     block_id=block.block_id,

@@ -25,12 +25,14 @@ from pydantic import ValidationError
 
 from bibr.clients.llm import LLMClient, incomplete_output_text
 from bibr.clients.llm_protocol import LlmClient
+from bibr.clients.structured import StructuredResponseError
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
 from bibr.extract.merge_split import split_merged_refs
 from bibr.extract.ref_locator import _ENTRY_NUMBERING_RE
 from bibr.extract.reference_losses import reference_losses
+from bibr.extract.reference_recovery import ungrounded_fields
 from bibr.extract.region_seg import (
     _CHUNK_TARGET_CHARS,
     region_anchor_texts,
@@ -43,6 +45,8 @@ from bibr.paper import BibType, PaperReference, migrate_bib_type
 from bibr.paper_contents import (
     CanonicalSection,
     PaperContents,
+    ReferenceRecoveryAttempt,
+    ReferenceRecoveryReceipt,
     ReferenceSegmentationAttempt,
     ReferenceYieldLosses,
     ReferenceYieldReceipt,
@@ -1190,13 +1194,14 @@ def _chunk_ner_members(chunk: str, ref_strings: list[str]) -> list[str]:
 
 async def _parse_refs_via_ner(
     ext: "ReferenceExtractor",
-    ref_text: str,  # noqa: ARG001 — uniform strategy signature
+    ref_text: str,
     ref_strings: list[str],
 ) -> list[PaperReference]:
     # Offload the synchronous ModernBERT-CRF forward pass to a worker thread so
     # it does not block the shared serve event loop (BibrPipelineAPI runs
     # enable_async=True, one loop for many concurrent requests).
-    return await asyncio.to_thread(ext._parse_references_ner, ref_strings)
+    refs = await asyncio.to_thread(ext._parse_references_ner, ref_strings)
+    return await ext._recover_ner_losses(ref_text, ref_strings, refs)
 
 
 async def _parse_refs_via_llm(
@@ -1251,6 +1256,7 @@ class ReferenceExtractor:
         self._source_record_count: int | None = None
         self._parse_unresolved: dict[int, str] = {}
         self._parse_alignment_available = False
+        self._recovery_receipt: ReferenceRecoveryReceipt | None = None
 
     # Class-attribute seams so tests can patch capture without touching the
     # module functions other callers share.
@@ -1273,6 +1279,7 @@ class ReferenceExtractor:
         self._source_record_count = None
         self._parse_unresolved.clear()
         self._parse_alignment_available = False
+        self._recovery_receipt = None
 
         seg_strategy, parse_strategy = _resolve_ref_strategies(
             self._ref_seg_strategy,
@@ -1474,6 +1481,7 @@ class ReferenceExtractor:
             duplicate_rate=duplicate_rate,
             reason_flags=ordered_reasons,
             losses=losses,
+            recovery=self._recovery_receipt,
         )
         self.contents.reference_yield_receipt = receipt
         if {
@@ -2409,6 +2417,90 @@ class ReferenceExtractor:
         self._parse_unresolved.clear()
         self._parse_alignment_available = False
         return _sequence_references(ordered_refs)
+
+    async def _recover_ner_losses(
+        self, source: str, segments: list[str], refs: list[PaperReference]
+    ) -> list[PaperReference]:
+        """Opt-in LLM recovery only for NER's missing, exact-source slots.
+
+        Keep successful local parses. One logical request addresses one missing
+        segment, so a partial response cannot shift a later entry's source. The
+        whole pass has both an entry limit and a wall-clock deadline. Provider
+        retries inside a request retain the client's configured limits.
+        """
+        budget = self._settings.REF_NER_RECOVERY_MAX_SEGMENTS
+        if not budget or not self._parse_alignment_available or not self._parse_unresolved:
+            return refs
+        missing = set(self._parse_unresolved)
+        if len(refs) != len(segments) - len(missing):
+            return refs
+        survivors = iter(refs)
+        positioned = {
+            index: next(survivors) for index in range(len(segments)) if index not in missing
+        }
+        spans = []
+        cursor = 0
+        for segment in segments:
+            start = source.find(segment, cursor) if segment else -1
+            span = (start, start + len(segment)) if start >= 0 else None
+            spans.append(span)
+            if span is not None:
+                cursor = span[1]
+        eligible = [
+            index
+            for index in sorted(missing)
+            if spans[index] is not None and 0 < len(segments[index]) <= 4000
+        ]
+        attempts: list[ReferenceRecoveryAttempt] = []
+        timeout = self._settings.REF_NER_RECOVERY_TIMEOUT
+        recovered = 0
+        stop = "segment_budget" if len(eligible) > budget else "complete"
+        try:
+            async with asyncio.timeout(timeout):
+                for index in eligible[:budget]:
+                    span = spans[index]
+                    assert span is not None  # noqa: S101 — eligibility requires an exact source span
+                    attempts.append(ReferenceRecoveryAttempt(index, span, "started"))
+                    try:
+                        result = await self.llm_client.extract_references(
+                            f"1. {segments[index]}",
+                            file_hash=self.file_hash,
+                            start_index=1,
+                            expected_count=1,
+                        )
+                    except (StructuredResponseError, ValueError):
+                        attempts[-1] = ReferenceRecoveryAttempt(index, span, "invalid_response")
+                        continue
+                    except UpstreamServiceError:
+                        attempts[-1] = ReferenceRecoveryAttempt(index, span, "upstream_unavailable")
+                        stop = "upstream_unavailable"
+                        break
+                    if len(result) != 1 or not result[0].index_trusted or result[0].index != 1:
+                        attempts[-1] = ReferenceRecoveryAttempt(index, span, "ambiguous_alignment")
+                        continue
+                    candidate = result[0]
+                    fields = _finalize_reference_fields(
+                        {**candidate.model_dump(), "bib_id": index + 1}, segments[index]
+                    )
+                    if _is_stub_reference(candidate) or ungrounded_fields(fields, segments[index]):
+                        attempts[-1] = ReferenceRecoveryAttempt(index, span, "unsupported_fields")
+                        continue
+                    positioned[index] = PaperReference.model_validate(fields)
+                    self._parse_unresolved.pop(index, None)
+                    recovered += 1
+                    attempts[-1] = ReferenceRecoveryAttempt(index, span, "recovered")
+        except TimeoutError:
+            stop = "timeout"
+            if attempts and attempts[-1].outcome == "started":
+                last = attempts[-1]
+                attempts[-1] = ReferenceRecoveryAttempt(
+                    last.segment_index, last.source_span, "timeout"
+                )
+        finally:
+            self._recovery_receipt = ReferenceRecoveryReceipt(
+                budget, timeout, tuple(attempts), recovered, stop
+            )
+        return _sequence_references([ref for _, ref in sorted(positioned.items())])
 
     def _parse_references_ner(self, ref_strings: list[str]) -> list[PaperReference]:
         """Parse pre-segmented reference strings with the NER parser (batched).

@@ -1809,6 +1809,17 @@
           "title": "Candidates",
           "type": "array"
         },
+        "presentation_selection": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresentationSelectionExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "reason_flags": {
           "items": {
             "type": "string"
@@ -2780,6 +2791,102 @@
       "title": "PersonNameExport",
       "type": "object"
     },
+    "PresentationSelectionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "presentations": {
+          "items": {
+            "$ref": "#/$defs/PrintedPresentationExport"
+          },
+          "title": "Presentations",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "selected_presentation_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selected Presentation Id"
+        }
+      },
+      "required": [
+        "presentations",
+        "selected_presentation_id",
+        "reason"
+      ],
+      "title": "PresentationSelectionExport",
+      "type": "object"
+    },
+    "PrintedPresentationExport": {
+      "additionalProperties": false,
+      "description": "A complete source-supported presentation within one article.",
+      "properties": {
+        "abstract_variant_id": {
+          "title": "Abstract Variant Id",
+          "type": "string"
+        },
+        "byline_candidate_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Byline Candidate Ids",
+          "type": "array"
+        },
+        "byline_source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Section Ids",
+          "type": "array"
+        },
+        "byline_source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Text Ids",
+          "type": "array"
+        },
+        "original_marker_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Original Marker Ids",
+          "type": "array"
+        },
+        "presentation_id": {
+          "title": "Presentation Id",
+          "type": "string"
+        },
+        "record_id": {
+          "title": "Record Id",
+          "type": "string"
+        },
+        "title_variant_id": {
+          "title": "Title Variant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "presentation_id",
+        "record_id",
+        "title_variant_id",
+        "abstract_variant_id",
+        "byline_candidate_ids",
+        "byline_source_text_ids",
+        "byline_source_section_ids",
+        "original_marker_ids"
+      ],
+      "title": "PrintedPresentationExport",
+      "type": "object"
+    },
     "ProvenanceExport": {
       "additionalProperties": false,
       "properties": {
@@ -2807,6 +2914,94 @@
         "page"
       ],
       "title": "ProvenanceExport",
+      "type": "object"
+    },
+    "ReferenceRecoveryAttemptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": [
+            "started",
+            "invalid_response",
+            "upstream_unavailable",
+            "ambiguous_alignment",
+            "unsupported_fields",
+            "recovered",
+            "timeout"
+          ],
+          "title": "Outcome",
+          "type": "string"
+        },
+        "segment_index": {
+          "description": "Zero-based index in the retained segment list.",
+          "minimum": 0,
+          "title": "Segment Index",
+          "type": "integer"
+        },
+        "source_span": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Source Span",
+          "type": "array"
+        }
+      },
+      "required": [
+        "segment_index",
+        "source_span",
+        "outcome"
+      ],
+      "title": "ReferenceRecoveryAttemptExport",
+      "type": "object"
+    },
+    "ReferenceRecoveryExport": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/ReferenceRecoveryAttemptExport"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "max_segments": {
+          "title": "Max Segments",
+          "type": "integer"
+        },
+        "recovered_count": {
+          "title": "Recovered Count",
+          "type": "integer"
+        },
+        "stop_reason": {
+          "enum": [
+            "complete",
+            "segment_budget",
+            "timeout",
+            "upstream_unavailable"
+          ],
+          "title": "Stop Reason",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "title": "Timeout Seconds",
+          "type": "number"
+        }
+      },
+      "required": [
+        "max_segments",
+        "timeout_seconds",
+        "attempts",
+        "recovered_count",
+        "stop_reason"
+      ],
+      "title": "ReferenceRecoveryExport",
       "type": "object"
     },
     "ReferenceSegmentationAttemptExport": {
@@ -2957,6 +3152,17 @@
           },
           "title": "Reason Flags",
           "type": "array"
+        },
+        "recovery": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReferenceRecoveryExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "selected_spans": {
           "items": {

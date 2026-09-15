@@ -212,17 +212,78 @@ def _abstract_variants(contents, selected, resolution):
     return variants
 
 
+def _region_abstract_variants(contents, selected, resolution):
+    """Retain explicitly labelled OCR abstracts even in a synthetic section.
+
+    Scientific prose can contain affiliation vocabulary. An exact abstract
+    region, printed label, and complete source-text match establish the field
+    independently of that semantic role. Shared or partial provenance fails
+    closed; the section classifier cannot expand the captured text.
+    """
+    prefix = re.compile(
+        r"^\s*(?:"
+        + "|".join(re.escape(label) for label in sorted(_ABSTRACT_LABELS))
+        + r")(?:\s*[:：]\s*|\s*\n\s*)(\S[\s\S]*)$",
+        re.IGNORECASE,
+    )
+    variants = []
+    seen = set()
+    for region in sorted(contents.region_summaries, key=lambda row: (row.page, row.index)):
+        if region.label != "abstract" or region.bbox is None:
+            continue
+        printed_text = region.canonical_ocr_content or region.content or ""
+        match = prefix.match(printed_text)
+        if match is None:
+            continue
+        sentences = [
+            row
+            for row in contents.sentences
+            if any(
+                point.page_no == region.page and point.bbox == region.bbox
+                for point in row.provenance
+            )
+        ]
+        ids = {row.text_id for row in sentences}
+        sources = [row for row in selected if ids & set(row.text_ids)]
+        if not sources:
+            continue  # An abstract owned by another article is not selected evidence.
+        if (
+            not ids
+            or not ids.issubset(resolution.allowed_text_ids)
+            or ids != {key for row in sources for key in row.text_ids}
+            or ids & seen
+            or _normalized(" ".join(row.text for row in sentences)) != _normalized(printed_text)
+        ):
+            return []
+        text = match.group(1).strip()
+        # An internal body/bibliography heading reveals a contaminated region.
+        if re.search(
+            r"(?im)^\s*(?:(?:introduction|references|bibliography)\s*[:：]?\s*$|"
+            r"(?:keywords|key words|palavras[- ]chave|palabras clave)\s*[:：])",
+            text,
+        ):
+            return []
+        seen.update(ids)
+        variants.append(
+            (
+                min(row.reading_order for row in sources),
+                _variant(resolution.selected_block_id, "abstract", text, sources),
+            )
+        )
+    return variants
+
+
 def collect_metadata_variants(
     contents: PaperContents,
     resolution: FrontMatterResolution | None,
 ) -> list[PrintedMetadataVariant]:
     """Capture safe variants of the selected record, in printed source order.
 
-    ``is_primary`` means first printed among a complete supported inventory of that
-    field. Callers should change an existing scalar only when at least two
-    distinct trustworthy variants of that field were captured. Unknown or
-    incomplete ownership returns no variant rather than filling gaps from a
-    model or concatenating unsupported section text.
+    ``is_primary`` initially marks the first printed variant of each field; the
+    exporter reconciles it with the final scalar. Selecting scalar fields requires
+    a complete linked presentation, not two independent first-field choices.
+    Unknown or incomplete ownership returns no variant rather than filling gaps
+    from a model or concatenating unsupported section text.
     """
     if resolution is None or resolution.selected_block_id is None:
         return []
@@ -265,7 +326,10 @@ def collect_metadata_variants(
                     _variant(block.block_id, "title", candidate.raw_text, [candidate]),
                 )
             )
-    candidates.extend(_abstract_variants(contents, selected, resolution))
+    candidates.extend(
+        _abstract_variants(contents, selected, resolution)
+        or _region_abstract_variants(contents, selected, resolution)
+    )
     from bibr.extract.printed_presentations import link_printed_presentations
 
     candidates = link_printed_presentations(candidates, selected, block.block_id)

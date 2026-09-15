@@ -149,28 +149,38 @@ It does not establish that two separate article records are translations.
 
 Deterministic capture currently requires a complete, unambiguous field inventory:
 titles with their own local article anatomy, or printed abstract headings with
-fully owned paragraphs originally labelled as abstract. With two or more such
-versions, the first printed version supplies the scalar unless an explicit
-original-version label defers the choice to the model. Otherwise the model
-applies the main-field preference above. Capture happens before implicit section
-normalization and never rebuilds abstracts from a later, possibly enlarged tree.
+fully owned paragraphs originally labelled as abstract. An OCR abstract region
+with an explicit inline abstract label can also supply a version when its entire
+text matches owned source sentences exactly. Capture happens before implicit
+section normalization and never rebuilds abstracts from a later, possibly
+enlarged tree.
 
-This initial support deliberately declines ambiguous stacked title fragments,
-synthetic abstract headings, partly owned sections, and text whose only abstract
+This support declines ambiguous stacked title fragments,
+partly owned sections, and text whose only abstract
 evidence is a section classifier label. The table may therefore be empty or cover
 only one field. If a later guard clears a scalar, the preserved versions remain
 available with no matching primary row.
 
-When a complete linked presentation cannot be established, the main title and
-abstract are still selected independently. They can therefore come from different
-printed language versions. A source-backed title correction alone does not prove
-that the abstract belongs to the same presentation; inspect the field variants
-and their presentation links when that distinction matters.
+A complete linked presentation supplies the main title and abstract together,
+and its physical byline supplies the author extraction context. Deduplicating
+repeated text does not discard the individual byline ownership. An original
+marker anchored to exactly one presentation selects that whole presentation;
+otherwise the first complete presentation wins. Ambiguous original markers
+leave the deterministic choice unresolved.
+
+When alternatives exist without a complete pairing, the model receives the same
+joint-selection rule, and independent first-title/first-abstract overrides are
+disabled. `VAL_PRIMARY_PRESENTATION_UNRESOLVED` reports that the pairing is still
+unverified. A model-selected pair is not evidence of a source-supported link.
 
 `extraction.diagnostics.front_matter` retains selected record ID, selection method,
 reason flags, block membership, merge evidence, and candidate source IDs and roles.
 It is also present on unresolved pipeline exports, so a failed decision can be
 inspected without rerunning model extraction.
+Its `presentation_selection` receipt records the complete presentation inventory,
+selected ID and decision reason, with variant, byline and original-marker source
+links. The receipt records the choice before later validation guards; each
+variant's `is_primary` flag still describes the final exported scalar.
 
 ## Remaining structural work
 
@@ -180,11 +190,6 @@ presentation links preserve proven local pairings; they do not guess cross-scrip
 name correspondences. Author identifiers, explicit printed aliases and document
 layout can supply corroboration. Shared contact details or a document-wide DOI
 alone must not merge distinct abstracts in a proceedings volume.
-
-An explicitly labelled original appearing after a translation also needs a
-source-backed priority marker in that presentation layer for deterministic
-selection. The collector currently implements the first-printed fallback;
-explicit original-title/abstract labels defer selection to the model prompt.
 
 Measure ownership, version completeness, and primary-field accuracy separately
 from paper-level pass rate. Improving pass rate alone can hide a missing alternate

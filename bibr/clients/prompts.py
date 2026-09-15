@@ -104,10 +104,14 @@ An abstract may be unheaded or use structured subheadings, but must be a distinc
 summary of the paper. Return null when no such summary is present; do not write
 a summary yourself. Stop at the end of the abstract, before body text, keywords,
 funding, disclosures, or a separate plain-language or significance statement.
-If parallel language abstracts are printed, use the explicitly identified
-original version; otherwise use the first complete printed version in source
-reading order. Do not prefer English over an earlier printed version. Copy it
-verbatim; do not concatenate or translate the versions. Repeated or translated
+Select title, byline, and abstract together as one printed presentation. Prefer
+the explicitly identified original presentation; otherwise choose the complete
+presentation whose title appears first in source reading order. Its matching
+abstract may appear after another language's abstract. Use printed language and
+layout evidence to associate them, never their positions in parallel lists.
+If an abstract cannot be associated with the selected title, return null for
+the abstract. Do not prefer English automatically. Copy each field verbatim;
+do not concatenate or translate the versions. Repeated or translated
 front matter can describe the same article; it is not itself a second paper.
 """
 
