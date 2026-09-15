@@ -877,7 +877,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 font_bold=region.font_bold,
                 content=content[:200] if content else None,
                 canonical_ocr_content=(
-                    content if region.native_text_rejection_reason is not None else None
+                    content
+                    if region.native_text_rejection_reason is not None
+                    or (native_label or label) == "abstract"
+                    else None
                 ),
                 raw_ocr_content=region.raw_content,
                 native_text_candidate=region.native_text_candidate,

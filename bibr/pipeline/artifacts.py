@@ -17,10 +17,10 @@ if TYPE_CHECKING:
 # ``info_match`` -> ``metadata_match``. A v1 sidecar now fails its own version
 # check with an accurate message instead of the misleading core-version one.
 ENRICHMENT_SIDECAR_SCHEMA_VERSION = "2"
-CORE_SCHEMA_VERSION = "11.0"
-# v11 is a clean break: a v10 core cannot be replayed into a v11 payload, so
-# the gate accepts exactly one version.
-SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})
+CORE_SCHEMA_VERSION = "11.1"
+# v11.1 adds optional evidence tables; existing v11.0 cores remain replayable.
+# A v10 core still cannot be replayed into the v11 shape.
+SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({"11.0", CORE_SCHEMA_VERSION})
 CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v1"
 
 

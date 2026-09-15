@@ -59,7 +59,8 @@ def test_required_caption_models_are_frozen_and_trailing_receipt_is_typed():
     assert assignment.__dataclass_params__.frozen is True
     assert candidate.__dataclass_params__.frozen is True
     assert receipt.__dataclass_params__.frozen is True
-    assert fields(PaperContents)[-1].name == "caption_assignment_receipt"
+    content_fields = {field.name: field for field in fields(PaperContents)}
+    assert content_fields["caption_assignment_receipt"].default is None
 
 
 def test_crossing_reading_order_uses_global_geometry_not_fifo():

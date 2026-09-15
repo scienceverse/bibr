@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
+    from bibr.extract.front_matter import FrontMatterResolution
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -82,6 +83,9 @@ class FileState:
     # Reusable HTML DOM or parsed ePub package produced during validation.
     native_validation_artifact: object | None = None
     contents: "PaperContents | None" = None
+    # Document mode supplies an already classified, independently scoped record.
+    # Keep its original candidate IDs rather than detecting the record a second time.
+    prepared_front_matter: "FrontMatterResolution | None" = None
     paper: "Paper | None" = None
     result_json: dict[str, Any] | None = None
     # Native parser (DOCX, JATS-XML, HTML, or ePub) held across the handling stage →
@@ -153,6 +157,7 @@ class FileState:
         self.pdf_outline = None
         self.native_validation_artifact = None
         self.contents = None
+        self.prepared_front_matter = None
         self.paper = None
 
 

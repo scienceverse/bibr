@@ -12,6 +12,8 @@ import re
 from collections import Counter
 from typing import Any
 
+from bibr.utils.text import DOI_BODY
+
 # ---------------------------------------------------------------------------
 # OCR content cleaning (ported from vendored ResultFormatter._clean_content
 # and result_postprocess_utils)
@@ -21,6 +23,9 @@ from typing import Any
 _NUMBERED_PAREN_RE = re.compile(r"^(\(|\uff08)(\d+|[A-Za-z])(\)|\uff09)(.+)$")
 # "1.text" or "1)text" or "A)text" → "1. text" etc.
 _NUMBERED_DOT_RE = re.compile(r"^(\d+|[A-Za-z])(\.|\)|\uff09)(.+)$")
+# A leading DOI is not list item 10. Preserve its existing registrant/slash
+# and suffix; downstream DOI validation and source ownership remain unchanged.
+_LEADING_DOI_RE = re.compile(r"^" + DOI_BODY + r"\S+")
 
 
 def _has_repeated_ngram(s: str, unit_len: int, min_repeats: int) -> bool:
@@ -167,7 +172,7 @@ def clean_ocr_content(content: str) -> str:
         result = f"({symbol}) {rest.lstrip()}"
     else:
         m = _NUMBERED_DOT_RE.match(result)
-        if m:
+        if m and not _LEADING_DOI_RE.match(result):
             symbol, sep, rest = m.groups()
             sep = ")" if sep == "\uff09" else sep
             result = f"{symbol}{sep} {rest.lstrip()}"

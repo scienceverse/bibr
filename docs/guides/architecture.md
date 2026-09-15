@@ -105,7 +105,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 **JSON** (`bibr/export/json_export.py`):
 
 - JSON-serializable dict matching the bibr v{{ schema_version }} paper schema
-- Top-level keys include: `paper_id`, `schema_version`, `source`, `metadata`, `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match`, `funding`, `affiliation`, `qualification_provenance`, `extraction`, `validation`. All telemetry (engines, timings, LLM usage, enrichment, warnings, diagnostics receipts, opt-in regions) lives under `extraction`. Figure/table rows retain legacy primary fields and add ordered physical `parts` with provenance.
+- Top-level keys include: `paper_id`, `schema_version`, `source`, `metadata`, `metadata_variant`, `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match`, `funding`, `affiliation`, `qualification_provenance`, `extraction`, `validation`. All telemetry (engines, timings, LLM usage, enrichment, warnings, diagnostics receipts, opt-in regions) lives under `extraction`. Figure/table rows retain legacy primary fields and add ordered physical `parts` with provenance.
 - Schema version: `{{ schema_version }}`
 - `metadata` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(metadata)`. Pipeline telemetry lives under `extraction`; the input file's identity under `source`.
 - All positional IDs are 1-based; `section_id=0` is the Root sentinel (excluded from export)
@@ -117,6 +117,18 @@ any `11.x` release and readers must ignore keys they don't recognize. Dispatch
 on the *presence* of a root `schema_version` key, never on parsing its value —
 pre-v11 payloads have no such key at all. See `CHANGELOG.md` for the full v11
 break and forward-versioning policy.
+
+Printed title and abstract versions live in the `metadata_variant` table;
+record-selection evidence lives in `extraction.diagnostics.front_matter`.
+See [printed versions and multiple articles](printed-versions.md) for ownership,
+primary-language selection, targeting, and current capture limits.
+
+`LocalPipeline.process_document()` provides a separate document envelope
+(`document_schema_version: "1.0"`) containing all detected article outcomes.
+Document parsing runs once; downstream metadata, DOI validation, bibliography
+extraction and export run on independently owned article contents. Ambiguous
+scopes and failed records remain in the inventory. Dispatch this envelope by
+its document key before applying the single-paper reader described above.
 
 ### OCR selection and evidence
 

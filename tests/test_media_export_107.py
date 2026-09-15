@@ -115,7 +115,7 @@ def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
     output = export_paper_to_json(paper, validate=False)
     diagnostics = output["extraction"]["diagnostics"]
 
-    assert output["schema_version"] == "11.0"
+    assert output["schema_version"] == "11.1"
     assert output["figure"][0]["parts"] == [
         {
             "part_index": 1,
@@ -199,7 +199,7 @@ def test_durable_replay_accepts_a_v11_core_and_rejects_a_v10_one():
         completeness="complete",
     )
     replayed = replay_enrichment_sidecar(current, sidecar, expected_settings_digest="settings")
-    assert replayed["schema_version"] == "11.0"
+    assert replayed["schema_version"] == "11.1"
     assert canonical_json_sha256(current) == sidecar.core_sha256
 
     legacy_sidecar = make_enrichment_sidecar(

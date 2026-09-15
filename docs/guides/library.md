@@ -35,6 +35,16 @@ schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
 remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
 too.
 
+## Several papers in one document
+
+Use `bibr.chew_document("proceedings.pdf")` (or `await bibr.achew_document(...)`)
+to return every detected article in a `DocumentResult`. Its `records` list retains
+successful, unresolved and failed candidates; each successful `record.paper` is
+a regular `Result`. `document.save("proceedings.json")` writes the document
+envelope. The same operation is available as `LocalPipeline.process_document()`.
+See [printed versions and multiple articles](printed-versions.md) for article
+boundaries, alternate abstracts, status meanings and the document schema.
+
 ## Batch
 
 Directories and lists of paths run as a batch on a single pipeline,

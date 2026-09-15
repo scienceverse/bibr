@@ -25,7 +25,7 @@ def _contents(predictions):
     sections = [
         PaperSection(0, "Root", 0, None, CanonicalSection.UNKNOWN, []),
         PaperSection(1, "Введение", 1, None, CanonicalSection.INTRODUCTION, []),
-        PaperSection(2, "Список литературы", 1, None, CanonicalSection.UNKNOWN, []),
+        PaperSection(2, "Источники исследования", 1, None, CanonicalSection.UNKNOWN, []),
     ]
     sentences = [
         PaperSentence(

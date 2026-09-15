@@ -8,11 +8,11 @@ import logging
 import os
 import re
 import time
-import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
+from bibr.extract.title_text import _is_ordinary_body_heading
 from bibr.utils.text import NAME_CHAR_CLS
 
 if TYPE_CHECKING:
@@ -360,6 +360,7 @@ def _attach_front_matter_resolution(
     """Build record ownership before normalization mutates section boundaries."""
 
     from bibr.extract.front_matter import resolve_front_matter
+    from bibr.extract.metadata_variants import collect_metadata_variants
 
     target_required = bool(
         expected_identity is not None
@@ -379,6 +380,7 @@ def _attach_front_matter_resolution(
         settings=settings,
     )
     contents.front_matter_resolution = resolution
+    contents.metadata_variants = collect_metadata_variants(contents, resolution)
     return issues
 
 
@@ -508,6 +510,7 @@ async def _extract_metadata_and_equations(
     direct callers may pass raw names or ``None`` — only the ``== "off"`` test
     matters here, and both ``None`` and ``"ner"`` read as "not off".
     """
+    from bibr.clients.structured import StructuredResponseError
     from bibr.config import snapshot_settings
     from bibr.extract.extractor import MetadataExtractor
     from bibr.models import PaperMetadata
@@ -588,14 +591,51 @@ async def _extract_metadata_and_equations(
         return metadata
 
     results = await asyncio.gather(meta_coro, eq_coro, return_exceptions=True)
-    for result in results:
+    equation_error = results[1]
+    equation_response_diagnostics = (
+        equation_error.safe_diagnostics
+        if isinstance(equation_error, StructuredResponseError)
+        else None
+    )
+    for index, result in enumerate(results):
         if isinstance(result, ProcessingError):
+            if index == 1 and equation_response_diagnostics is not None:
+                continue
             raise result
     if isinstance(results[0], BaseException):
         raise results[0]
+    if isinstance(equation_error, asyncio.CancelledError):
+        raise equation_error
     if isinstance(results[1], BaseException):
         timed_out = isinstance(results[1], (TimeoutError, asyncio.TimeoutError))
-        if timed_out:
+        if equation_response_diagnostics is not None:
+            from bibr.validation import IssueSeverity, ValidationIssue
+
+            category = equation_response_diagnostics.invalid_category
+            logger.warning(
+                "Equation LLM response invalid (%s); keeping %d source equation(s)",
+                category,
+                len(regex_equations),
+            )
+            contents.processing_warnings.append(
+                f"EQUATION_LLM_RESPONSE_INVALID:{category}: kept regex-only equation extraction"
+            )
+            if validation_issue_sink is not None:
+                validation_issue_sink.append(
+                    ValidationIssue(
+                        code="VAL_EQUATION_LLM_RESPONSE_INVALID",
+                        severity=IssueSeverity.WARNING,
+                        message="Optional LLM equation extraction returned invalid structured "
+                        "output; retained equations extracted directly from source",
+                        origin_stage="post_parse",
+                        evidence_ids=(
+                            "field:equations",
+                            f"reason:llm_response_invalid:{category}",
+                        ),
+                        blocking=False,
+                    )
+                )
+        elif timed_out:
             logger.warning(
                 "Equation LLM fallback timed out after %ss; keeping %d regex equation(s)",
                 effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS,
@@ -684,6 +724,7 @@ def _finalize_abstract_and_keywords(
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.implicit_sections import select_abstract_span
+    from bibr.utils.metadata import is_printed_abstract_heading
 
     selection = select_abstract_span(contents, resolution) if resolution is not None else None
 
@@ -702,10 +743,19 @@ def _finalize_abstract_and_keywords(
         if selection is not None
         else {section.section_id for section in contents.sections}
     )
+    if selection is not None:
+        # A printed heading can open a span whose paragraphs were assigned to
+        # a separate synthetic section by the layout hint. Its evidence still
+        # establishes a printed abstract; the semantic container does not.
+        selected_section_ids.update(
+            candidate.section_id
+            for candidate in resolution.candidates
+            if candidate.source_kind == "heading"
+            and candidate.candidate_id in selection.evidence_ids
+        )
     printed_abstract = any(
         section.section_id in selected_section_ids
-        and section.section_type == CanonicalSection.ABSTRACT
-        and section.header.strip()
+        and is_printed_abstract_heading(section.header)
         and not section.header_is_synthetic
         for section in contents.sections
     )
@@ -812,225 +862,6 @@ def _detected_title_is_masthead(detected: str, journal: str | None, publisher: s
     return bool(_MASTHEAD_MARKER_RE.search(detected))
 
 
-# Reject a composite heading only when every content token belongs to the heading vocabulary,
-# using accent-insensitive matching.
-_BODY_HEADING_WORDS = frozenset(
-    {
-        # presentation / introduction
-        "apresentacao",
-        "presentacion",
-        "presentazione",
-        "presentation",
-        "introducao",
-        "introduccion",
-        "introduzione",
-        "introduction",
-        # method / materials
-        "metodologia",
-        "metodologias",
-        "metodologie",
-        "methodologie",
-        "metodo",
-        "metodos",
-        "metodi",
-        "methode",
-        "methodes",
-        "materiais",
-        "materiales",
-        "materiali",
-        "materiel",
-        "materiels",
-        "procedimentos",
-        "procedimientos",
-        # results / analysis
-        "resultado",
-        "resultados",
-        "resultat",
-        "resultats",
-        "risultati",
-        "risultato",
-        "analise",
-        "analises",
-        "analisis",
-        "analisi",
-        "analyse",
-        "analyses",
-        "dados",
-        "datos",
-        "dati",
-        "donnees",
-        # discussion / conclusion
-        "discussao",
-        "discussoes",
-        "discusion",
-        "discusiones",
-        "discussione",
-        "discussioni",
-        "discussion",
-        "conclusao",
-        "conclusoes",
-        "conclusion",
-        "conclusiones",
-        "conclusione",
-        "conclusioni",
-        "conclusions",
-        "consideracoes",
-        "consideraciones",
-        "considerazioni",
-        "considerations",
-        "sintese",
-        "sintesi",
-        "synthese",
-        "limitacoes",
-        "limitaciones",
-        "limitazioni",
-        "recomendacoes",
-        "recomendaciones",
-        "raccomandazioni",
-        "recommandations",
-        "final",
-        "finais",
-        "finales",
-        "finali",
-        # framing / literature
-        "revisao",
-        "revision",
-        "revisione",
-        "revue",
-        "literatura",
-        "letteratura",
-        "litterature",
-        "fundamentacao",
-        "fundamentacion",
-        "fundamentos",
-        "teorica",
-        "teorico",
-        "teoricos",
-        "theorique",
-        "objetivo",
-        "objetivos",
-        "obiettivi",
-        "obiettivo",
-        "objectif",
-        "objectifs",
-        "hipotese",
-        "hipoteses",
-        "hipotesis",
-        "ipotesi",
-        "hypothese",
-        "hypotheses",
-        # front/back matter
-        "resumo",
-        "resumen",
-        "riassunto",
-        "resume",
-        "palavras",
-        "palabras",
-        "parole",
-        "chave",
-        "clave",
-        "chiave",
-        "cle",
-        "cles",
-        "agradecimentos",
-        "agradecimientos",
-        "ringraziamenti",
-        "remerciements",
-        "referencias",
-        "riferimenti",
-        "bibliografia",
-        "bibliografias",
-    }
-)
-# Function words and articles that carry no heading/title signal on their own.
-_HEADING_FILLER_WORDS = frozenset(
-    {
-        "a",
-        "ai",
-        "al",
-        "alla",
-        "and",
-        "as",
-        "com",
-        "con",
-        "da",
-        "das",
-        "de",
-        "degli",
-        "dei",
-        "del",
-        "della",
-        "delle",
-        "dello",
-        "des",
-        "di",
-        "do",
-        "dos",
-        "du",
-        "e",
-        "ed",
-        "el",
-        "em",
-        "en",
-        "et",
-        "gli",
-        "i",
-        "il",
-        "in",
-        "la",
-        "las",
-        "le",
-        "les",
-        "lo",
-        "los",
-        "na",
-        "nas",
-        "no",
-        "nos",
-        "o",
-        "of",
-        "os",
-        "para",
-        "per",
-        "pour",
-        "the",
-        "u",
-        "um",
-        "uma",
-        "un",
-        "una",
-        "unas",
-        "uno",
-        "unos",
-        "y",
-    }
-)
-_HEADING_TOKEN_RE = re.compile(r"[^\W\d_]+")
-# A printed heading is short; beyond this the row is prose, not a heading.
-_MAX_HEADING_TOKENS = 8
-
-
-def _strip_accents(value: str) -> str:
-    return "".join(
-        char for char in unicodedata.normalize("NFD", value) if not unicodedata.combining(char)
-    )
-
-
-def _is_ordinary_body_heading(normalized: str) -> bool:
-    """Whether a normalized row is a bare body heading rather than a title.
-
-    Complements ``_ORDINARY_HEADING_TEXT``'s exact-membership test: numbering
-    and function words are dropped, and the row is a heading only when every
-    remaining token is heading vocabulary.
-    """
-
-    tokens = _HEADING_TOKEN_RE.findall(_strip_accents(normalized))
-    if not tokens or len(tokens) > _MAX_HEADING_TOKENS:
-        return False
-    content = [token for token in tokens if token not in _HEADING_FILLER_WORDS]
-    return bool(content) and all(token in _BODY_HEADING_WORDS for token in content)
-
-
 def _title_text_is_unsafe(text: str, normalized: str, region_label: str, paper_metadata) -> bool:
     """Shared text-level filters for any printed row proposed as the title.
 
@@ -1085,6 +916,14 @@ def _safe_title_candidate(candidate, paper_metadata) -> bool:
     )
 
 
+def _title_recovery_abstained(issues: list[ValidationIssue]) -> bool:
+    markers = {"reason:title_recovery_ambiguous", "reason:title_recovery_unverified"}
+    return any(
+        issue.code == "VAL_TITLE_UNGROUNDED" and markers.intersection(issue.evidence_ids)
+        for issue in issues
+    )
+
+
 def _resolve_selected_title(
     contents,
     paper_metadata,
@@ -1102,6 +941,8 @@ def _resolve_selected_title(
 
     from bibr.validation import IssueSeverity, ValidationIssue
 
+    if not paper_metadata.title and _title_recovery_abstained(validation_issue_sink):
+        return False
     selected_block = _selected_front_matter_block(contents)
     if selected_block is None:
         return False
@@ -1155,6 +996,8 @@ def _resolve_detected_title_fallback(
 
     if paper_metadata.title:
         return False
+    if _title_recovery_abstained(validation_issue_sink):
+        return False
     detected = (getattr(contents, "detected_title", None) or "").strip()
     if _title_text_is_unsafe(detected, _normalize_text(detected), "doc_title", paper_metadata):
         return False
@@ -1185,6 +1028,7 @@ def _prefer_byline_adjacent_title(
     Multilingual front matter may print the original title above the byline and a translation above another abstract. This path can replace an asserted title, so it is gated by PIPELINE_TITLE_PREFER_BYLINE_ADJACENT and defaults off pending broader validation.
     """
 
+    from bibr.extract.metadata_variants import has_explicit_original_label
     from bibr.validation import IssueSeverity, ValidationIssue
 
     if not getattr(getattr(settings, "pipeline", None), "title_prefer_byline_adjacent", False):
@@ -1194,6 +1038,19 @@ def _prefer_byline_adjacent_title(
         return False
     selected_block = _selected_front_matter_block(contents)
     if selected_block is None:
+        return False
+
+    # Core extraction already applied the printed-version preference. This
+    # optional geometric heuristic must not undo an original-version choice
+    # or a complete source-order inventory.
+    title_variants = [
+        variant
+        for variant in getattr(contents, "metadata_variants", ())
+        if variant.field == "title" and variant.record_id == selected_block.block_id
+    ]
+    if has_explicit_original_label(contents.front_matter_resolution, "title") or (
+        len(title_variants) >= 2 and sum(variant.is_primary for variant in title_variants) == 1
+    ):
         return False
 
     owned = set(selected_block.candidate_ids) | set(selected_block.title_candidate_ids)
@@ -1342,6 +1199,42 @@ async def _link_citations(
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
     if validation_issue_sink is not None:
+        if contents.citation_receipt is not None:
+            affected = [
+                candidate
+                for candidate in contents.citation_receipt.candidates
+                if not candidate.accepted
+                and any(
+                    reason.startswith("llm_response_invalid:")
+                    for reason in candidate.rejection_reasons
+                )
+            ]
+            if affected:
+                from bibr.validation import IssueSeverity, ValidationIssue
+
+                reasons = sorted(
+                    {
+                        reason
+                        for candidate in affected
+                        for reason in candidate.rejection_reasons
+                        if reason.startswith("llm_response_invalid:")
+                    }
+                )
+                validation_issue_sink.append(
+                    ValidationIssue(
+                        code="VAL_XREF_LLM_RESPONSE_INVALID",
+                        severity=IssueSeverity.WARNING,
+                        message="Some inline citations remain unresolved because the optional "
+                        "LLM linking response was invalid",
+                        origin_stage="post_parse",
+                        evidence_ids=tuple(f"reason:{reason}" for reason in reasons)
+                        + tuple(
+                            f"text:{text_id}" for text_id in sorted({c.text_id for c in affected})
+                        ),
+                        count=len(affected),
+                        blocking=False,
+                    )
+                )
         issue = xref_low_coverage_issue(
             {reference.bib_id for reference in paper_metadata.references},
             {xref.xref_id for xref in bib_xrefs if xref.xref_type == "bib"},
@@ -1471,6 +1364,7 @@ async def post_parse(
     classifier_resources: ClassifierResources | None = None,
     expected_identity: ExpectedIdentity | None = None,
     enrichment_prefetch: bool = False,
+    prepared_front_matter: FrontMatterResolution | None = None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
@@ -1492,6 +1386,7 @@ async def post_parse(
     ML-training-data preprocessing where metadata will be re-labeled later.
     """
     from bibr.clients.llm import LLMClient, new_usage_context_key, usage_file_context
+    from bibr.clients.structured import StructuredResponseError
     from bibr.config import snapshot_settings
     from bibr.extract.ref_extractor import _resolve_ref_strategies
     from bibr.paper import _merge_ocr_metadata
@@ -1544,20 +1439,57 @@ async def post_parse(
     with usage_file_context(usage_key):
         try:
             # --- Sections: classify then normalize (implicit + enforce) ---
-            await _classify_sections(
-                contents,
-                layout_hints,
-                no_llm,
-                llm_client,
-                classifier_resources=classifier_resources,
-                settings=effective_settings,
-            )
-            front_matter_issues = _attach_front_matter_resolution(
-                contents,
-                expected_identity,
-                metadata_llm_active=not no_llm,
-                settings=effective_settings,
-            )
+            if prepared_front_matter is None:
+                await _classify_sections(
+                    contents,
+                    layout_hints,
+                    no_llm,
+                    llm_client,
+                    classifier_resources=classifier_resources,
+                    settings=effective_settings,
+                )
+                front_matter_issues = _attach_front_matter_resolution(
+                    contents,
+                    expected_identity,
+                    metadata_llm_active=not no_llm,
+                    settings=effective_settings,
+                )
+            else:
+                from bibr.extract.metadata_variants import collect_metadata_variants
+
+                candidate_ids = [row.candidate_id for row in prepared_front_matter.candidates]
+                source_text_ids = {row.text_id for row in contents.sentences}
+                source_section_ids = {section.section_id for section in contents.sections}
+                if (
+                    len(prepared_front_matter.blocks) != 1
+                    or prepared_front_matter.selected_block_id
+                    != prepared_front_matter.blocks[0].block_id
+                    or len(candidate_ids) != len(set(candidate_ids))
+                    or set(prepared_front_matter.blocks[0].candidate_ids) != set(candidate_ids)
+                    or not set(prepared_front_matter.blocks[0].title_candidate_ids).issubset(
+                        candidate_ids
+                    )
+                    or not prepared_front_matter.allowed_text_ids.issubset(source_text_ids)
+                    or not prepared_front_matter.allowed_section_ids.issubset(source_section_ids)
+                    or any(
+                        row.section_id not in source_section_ids
+                        or not set(row.text_ids).issubset(source_text_ids)
+                        for row in prepared_front_matter.candidates
+                    )
+                    or prepared_front_matter.allowed_text_ids
+                    != frozenset(
+                        text_id
+                        for row in prepared_front_matter.candidates
+                        for text_id in row.text_ids
+                    )
+                    or prepared_front_matter.allowed_section_ids
+                    != frozenset(row.section_id for row in prepared_front_matter.candidates)
+                ):
+                    raise ValueError("Prepared record ownership does not match scoped contents")
+                contents.front_matter_resolution = prepared_front_matter
+                contents.metadata_variants = collect_metadata_variants(
+                    contents, prepared_front_matter
+                )
             await _normalize_section_structure(
                 contents,
                 no_llm,
@@ -1592,13 +1524,22 @@ async def post_parse(
             )
             from bibr.utils.metadata import is_exact_generic_article_label
 
+            title_recovery_abstained = not paper_metadata.title and _title_recovery_abstained(
+                metadata_issues
+            )
+
             # Ownership-scoped null-title safety net: one safe selected-record
             # candidate may replace a null LLM title, then — still only when the
             # title is otherwise absent — the layout detected title, under the
             # same filters. `_resolve_title`'s unknown-header scan stays skipped
             # under ownership scope. With a title in hand the only (default-off)
             # policy is byline adjacency for multilingual front matter.
-            if metadata_ownership_scoped and not metadata_abstained and not paper_metadata.title:
+            if (
+                metadata_ownership_scoped
+                and not metadata_abstained
+                and not paper_metadata.title
+                and not title_recovery_abstained
+            ):
                 if not _resolve_selected_title(
                     contents,
                     paper_metadata,
@@ -1609,15 +1550,20 @@ async def post_parse(
                         paper_metadata,
                         validation_issue_sink=metadata_issues,
                     )
-            elif metadata_ownership_scoped and not metadata_abstained:
+            elif (
+                metadata_ownership_scoped
+                and not metadata_abstained
+                and not title_recovery_abstained
+            ):
                 _prefer_byline_adjacent_title(
                     contents,
                     paper_metadata,
                     validation_issue_sink=metadata_issues,
                     settings=effective_settings,
                 )
-            if not metadata_ownership_scoped or is_exact_generic_article_label(
-                contents.detected_title
+            if not title_recovery_abstained and (
+                not metadata_ownership_scoped
+                or is_exact_generic_article_label(contents.detected_title)
             ):
                 _resolve_title(contents, paper_metadata)
 
@@ -1696,13 +1642,44 @@ async def post_parse(
             metadata_issues.extend(integrity_resolution.issues)
 
             if not no_llm:
-                await extract_structured_integrity(
-                    contents,
-                    paper_metadata,
-                    llm_client,
-                    file_hash,
-                    integrity_resolution=integrity_resolution,
-                )
+                try:
+                    await extract_structured_integrity(
+                        contents,
+                        paper_metadata,
+                        llm_client,
+                        file_hash,
+                        integrity_resolution=integrity_resolution,
+                    )
+                except StructuredResponseError as exc:
+                    from bibr.validation import IssueSeverity, ValidationIssue
+
+                    diagnostics = exc.safe_diagnostics
+                    if diagnostics is None:
+                        raise
+                    category = diagnostics.invalid_category
+                    logger.warning(
+                        "Research-integrity response invalid (%s); retaining source statements "
+                        "and independently extracted metadata",
+                        category,
+                    )
+                    contents.processing_warnings.append(
+                        f"INTEGRITY_LLM_RESPONSE_INVALID:{category}: retained source statements"
+                    )
+                    metadata_issues.append(
+                        ValidationIssue(
+                            code="VAL_INTEGRITY_LLM_RESPONSE_INVALID",
+                            severity=IssueSeverity.WARNING,
+                            message="Optional funding, author-role and affiliation parsing "
+                            "returned invalid structured output; retained source statements "
+                            "and independently extracted metadata",
+                            origin_stage="post_parse",
+                            evidence_ids=(
+                                "field:research_integrity",
+                                f"reason:llm_response_invalid:{category}",
+                            ),
+                            blocking=False,
+                        )
+                    )
             extraction_completed = True
 
         except ProcessingError as exc:
@@ -1856,6 +1833,7 @@ class PostParseStage:
                     classifier_resources=ctx.resources.classifiers,
                     expected_identity=fs.expected_identity,
                     enrichment_prefetch=enrichment_prefetch,
+                    prepared_front_matter=fs.prepared_front_matter,
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result

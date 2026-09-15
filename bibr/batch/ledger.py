@@ -110,7 +110,7 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
     )
     total_seconds = extraction.get("total_seconds") if isinstance(extraction, Mapping) else None
 
-    if data.get("schema_version") == "11.0":
+    if "schema_version" in data:
         extraction = extraction if isinstance(extraction, Mapping) else {}
         total_seconds = timings.get("total_seconds") if isinstance(timings, Mapping) else None
         usage = extraction.get("usage") or {}

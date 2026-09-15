@@ -98,6 +98,20 @@ async def test_merged_ignores_selective_fanout_flag(monkeypatch):
     assert result.paper_type == "empirical"
 
 
+async def test_merged_retains_the_selected_byline_context(monkeypatch):
+    monkeypatch.setattr(Settings.llm, "merged_core_metadata", True, raising=False)
+    client = LLMClient()
+    invoke = mock.AsyncMock(return_value=_result_for(CoreMetadataLLM))
+    monkeypatch.setattr(client, "_invoke_structured", invoke)
+    await client.extract_core_metadata(_TEXT, authors_text="Jane Doe\nExample University")
+    invoke.assert_awaited_once()
+    content = invoke.await_args.args[1][0]["content"]
+    assert _TEXT in content[0]["text"]
+    assert "use only the selected printed" in content[-2]["text"]
+    assert "Jane Doe\nExample University" in content[-1]["text"]
+    assert content[-1]["nuextract_role"] == "document"
+
+
 async def test_merged_failure_raises_upstream_error(monkeypatch):
     monkeypatch.setattr(Settings.llm, "merged_core_metadata", True, raising=False)
     client = LLMClient()

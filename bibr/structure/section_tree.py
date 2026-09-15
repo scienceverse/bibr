@@ -232,6 +232,11 @@ _TOC_HEADERS: frozenset[str] = frozenset({"contents", "table of contents"})
 _APPENDIX_MARKER_RE = re.compile(r"^\s*appendi(?:x|ces)\b\s*([A-Za-z0-9]{1,3})?", re.IGNORECASE)
 _LETTER_DOTTED_HEAD_RE = re.compile(r"^\s*([A-Z])(?:\.\d+)+")
 _LETTER_ROOT_HEAD_RE = re.compile(r"^\s*([A-Z])(?:[\s.:]|$)")
+_SELF_CITATION_HEADER_RE = re.compile(
+    r"^\s*(?:citation|how\s+to\s+cite(?:\s+(?:this\s+)?(?:article|paper))?|"
+    r"cite\s+(?:(?:this|the)\s+)?(?:article|paper))\s*[:.]?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _appendix_head_info(header: str) -> tuple[str | None, str | None]:
@@ -338,9 +343,9 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
     or after the References section) and re-pins the roots as top-level siblings
     (parent=0), nesting each dotted "X.n" child under its root "X".
 
-    Conservative by construction: a lone early "A Framework for X" with no
-    sibling run and no Appendix/References anchor never qualifies. Mutates
-    ``sections`` in place (level/parent only).
+    Printed title anchors before the body are preserved. A self-citation box
+    is not a bibliography anchor, even if its classifier label says REFERENCES.
+    Mutates ``sections`` in place (level/parent and repaired appendix types).
     """
     handled: set[int] = set()
     n = len(sections)
@@ -349,14 +354,48 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
 
     zone_start = int(n * 0.6)
     references_idx: int | None = None
+    body_seen = False
+    protected_titles: set[int] = set()
+    explicit_appendix_seen = False
     for i, s in enumerate(sections):
-        if s.section_type == CanonicalSection.REFERENCES:
-            references_idx = i
-            break
+        kind, _ = _appendix_head_info(s.header)
+        if (
+            s.section_type == CanonicalSection.TITLE
+            and not body_seen
+            and not explicit_appendix_seen
+            and (i < zone_start or s.classification_source == "title")
+            and kind != "appendix_marker"
+        ):
+            protected_titles.add(s.section_id)
+        explicit_appendix_seen |= kind == "appendix_marker"
+        if (
+            references_idx is None
+            and s.section_type == CanonicalSection.REFERENCES
+            and not _SELF_CITATION_HEADER_RE.fullmatch(s.header)
+        ):
+            # A classifier can call front-page furniture "references". Before
+            # body/back matter, require a printed bibliography alias as well.
+            from bibr.structure.section_classifier import _classify_lookup
+
+            canonical, score = _classify_lookup(normalize_text(s.header))
+            genuine_anchor = (
+                body_seen
+                or i >= zone_start
+                or (canonical == CanonicalSection.REFERENCES and score == 1.0)
+            )
+            if genuine_anchor:
+                references_idx = i
+        if s.section_type in IMRAD_ANCHORS:
+            body_seen = True
 
     # Level-0 sections (title/root) never participate; treat them as gaps that
     # break an appendix block.
-    infos = [_appendix_head_info(s.header) if s.level > 0 else (None, None) for s in sections]
+    infos = [
+        _appendix_head_info(s.header)
+        if s.level > 0 and s.section_id not in protected_titles
+        else (None, None)
+        for s in sections
+    ]
 
     def in_zone(i: int) -> bool:
         return i >= zone_start or (references_idx is not None and i > references_idx)

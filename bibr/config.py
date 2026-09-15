@@ -1934,6 +1934,21 @@ class GlobalSettings(_BibrSettings):
         description="References per LLM parse call. Larger batches cut per-paper token cost "
         "near-proportionally (each call carries ~1.7k fixed schema/instruction tokens).",
     )
+    REF_NER_RECOVERY_MAX_SEGMENTS: int = Field(
+        0,
+        ge=0,
+        le=64,
+        description="Maximum source-aligned entries per paper to retry with the metadata LLM "
+        "when NER returns neither title nor authors. Opt-in; 0 keeps NER entirely local. "
+        "Each entry gets one logical request, with the client's configured transport retries.",
+    )
+    REF_NER_RECOVERY_TIMEOUT: float = Field(
+        60.0,
+        gt=0,
+        le=600,
+        description="Total wall-clock budget in seconds for optional NER reference recovery "
+        "per paper. Unrecovered source spans remain in the diagnostic receipt.",
+    )
     # Output-token cap for a single ref-parse batch (overrides the global
     # LLM_MAX_TOKENS, which also sizes the much larger metadata calls). A
     # 15-ref batch emits ~1.5-4k JSON tokens, so 8192 is ample headroom — its

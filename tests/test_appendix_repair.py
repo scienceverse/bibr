@@ -7,6 +7,8 @@ Covers the numbered-prefix space collapse for letters, and
 
 from __future__ import annotations
 
+import pytest
+
 from bibr.paper_contents import CanonicalSection, PaperSection
 from bibr.structure.section_tree import (
     assign_hierarchy_from_top_level,
@@ -152,6 +154,68 @@ class TestRepairAppendixHierarchy:
         ]
         handled = repair_appendix_hierarchy(secs)
         assert 1 not in handled
+
+    @pytest.mark.parametrize("title_type", [CanonicalSection.TITLE, CanonicalSection.UNKNOWN])
+    @pytest.mark.parametrize("sidebar", ["CITATION", "How to cite this article", "Cite this paper"])
+    def test_early_article_title_after_citation_sidebar_is_not_an_appendix(
+        self, title_type, sidebar
+    ):
+        secs = [
+            _sec(1, sidebar, CanonicalSection.REFERENCES),
+            _sec(2, "A protocol for studying seasonal bird migration", title_type, level=1),
+            _sec(3, "Abstract", CanonicalSection.ABSTRACT),
+            _sec(4, "Introduction", CanonicalSection.INTRODUCTION),
+            _sec(5, "Method", CanonicalSection.METHODS),
+            _sec(6, "References", CanonicalSection.REFERENCES),
+            _sec(7, "A Additional analyses"),
+        ]
+
+        handled = repair_appendix_hierarchy(secs)
+
+        assert 2 not in handled
+        assert secs[1].section_type == title_type
+        assert secs[1].classification_source != "appendix_repair"
+        assert secs[-1].section_type == CanonicalSection.APPENDIX
+
+    def test_early_title_survives_a_nonstandard_false_reference_anchor(self):
+        secs = [
+            _sec(1, "Article information", CanonicalSection.REFERENCES),
+            _sec(2, "A protocol for studying seasonal bird migration", CanonicalSection.TITLE),
+            _sec(3, "Abstract", CanonicalSection.ABSTRACT),
+            _sec(4, "Introduction", CanonicalSection.INTRODUCTION),
+            _sec(5, "Method", CanonicalSection.METHODS),
+        ]
+
+        assert 2 not in repair_appendix_hierarchy(secs)
+        assert secs[1].section_type == CanonicalSection.TITLE
+
+    @pytest.mark.parametrize("heading", ["Appendix A", "A Additional analyses"])
+    def test_late_appendix_mistyped_title_still_gets_repaired(self, heading):
+        secs = [
+            _sec(1, "Introduction", CanonicalSection.INTRODUCTION),
+            _sec(2, "Method", CanonicalSection.METHODS),
+            _sec(3, "References", CanonicalSection.REFERENCES),
+            _sec(4, heading, CanonicalSection.TITLE),
+            _sec(5, "A.1 Details"),
+        ]
+
+        handled = repair_appendix_hierarchy(secs)
+
+        assert {4, 5}.issubset(handled)
+        assert secs[3].section_type == CanonicalSection.APPENDIX
+        assert secs[4].parent_section_id == 4
+
+    def test_late_lettered_appendix_after_unclassified_body_still_repairs(self):
+        secs = [
+            _sec(1, "Study context"),
+            _sec(2, "Sampling strategy"),
+            _sec(3, "Statistical assessment"),
+            _sec(4, "References", CanonicalSection.REFERENCES),
+            _sec(5, "A Additional analyses", CanonicalSection.TITLE),
+        ]
+
+        assert 5 in repair_appendix_hierarchy(secs)
+        assert secs[-1].section_type == CanonicalSection.APPENDIX
 
     def test_no_appendices_is_noop(self):
         secs = [
