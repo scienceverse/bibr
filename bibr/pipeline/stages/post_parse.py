@@ -724,6 +724,7 @@ def _finalize_abstract_and_keywords(
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.implicit_sections import select_abstract_span
+    from bibr.utils.metadata import is_printed_abstract_heading
 
     selection = select_abstract_span(contents, resolution) if resolution is not None else None
 
@@ -742,10 +743,19 @@ def _finalize_abstract_and_keywords(
         if selection is not None
         else {section.section_id for section in contents.sections}
     )
+    if selection is not None:
+        # A printed heading can open a span whose paragraphs were assigned to
+        # a separate synthetic section by the layout hint. Its evidence still
+        # establishes a printed abstract; the semantic container does not.
+        selected_section_ids.update(
+            candidate.section_id
+            for candidate in resolution.candidates
+            if candidate.source_kind == "heading"
+            and candidate.candidate_id in selection.evidence_ids
+        )
     printed_abstract = any(
         section.section_id in selected_section_ids
-        and section.section_type == CanonicalSection.ABSTRACT
-        and section.header.strip()
+        and is_printed_abstract_heading(section.header)
         and not section.header_is_synthetic
         for section in contents.sections
     )

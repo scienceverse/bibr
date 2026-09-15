@@ -292,6 +292,82 @@ def _candidate(
 
 
 class TestSelectedAbstractFinalize:
+    @pytest.mark.parametrize("heading", ["SUMMARY", "Resumo", "Abstrak", "Résumé:"])
+    @pytest.mark.parametrize("explicit_absence", [False, True])
+    def test_printed_heading_recovers_abstract_in_separate_synthetic_section(
+        self, heading, explicit_absence
+    ):
+        contents = _abstract_contents(["The experiment measured seedling growth."])
+        contents.sections[1].section_type = CanonicalSection.UNKNOWN
+        contents.sections[1].header_is_synthetic = True
+        contents.sections.insert(1, PaperSection(3, heading, 1, 0, CanonicalSection.ABSTRACT))
+        contents.sentences.append(
+            PaperSentence(2, "Keywords: seedlings; shade.", 4, 2, page_number=1)
+        )
+        opening = _candidate(
+            "printed-heading",
+            0,
+            (),
+            heading,
+            roles={"abstract", "heading"},
+            section_id=3,
+            source_kind="heading",
+            region_label="paragraph_title",
+        )
+        paragraph = _candidate(
+            "summary-body",
+            1,
+            (1,),
+            contents.sentences[0].text,
+            roles={"abstract"},
+            section_id=2,
+        )
+        keywords = _candidate(
+            "keywords",
+            2,
+            (2,),
+            contents.sentences[1].text,
+            roles={"keywords"},
+            section_id=4,
+        )
+        resolution = _selected_resolution(opening, paragraph, keywords, allowed_text_ids={1, 2})
+        meta = PaperMetadata(doi="", title="Shade and seedlings")
+        meta._abstract_explicitly_absent = explicit_absence
+
+        _finalize_abstract_and_keywords(contents, meta, resolution=resolution)
+
+        assert meta.abstract == "The experiment measured seedling growth."
+
+    @pytest.mark.parametrize(
+        "heading", ["Summary of the findings", "Significance statement", "Research highlights"]
+    )
+    def test_related_section_names_do_not_open_an_abstract(self, heading):
+        contents = _abstract_contents(["Related statement that is not an abstract."])
+        opening = _candidate(
+            "heading",
+            0,
+            (),
+            heading,
+            roles={"abstract", "heading"},
+            section_id=2,
+            source_kind="heading",
+            region_label="paragraph_title",
+        )
+        paragraph = _candidate(
+            "body",
+            1,
+            (1,),
+            contents.sentences[0].text,
+            roles={"abstract"},
+            section_id=2,
+        )
+        resolution = _selected_resolution(opening, paragraph, allowed_text_ids={1})
+        meta = PaperMetadata(doi="", title="Shade and seedlings")
+
+        _finalize_abstract_and_keywords(contents, meta, resolution=resolution)
+
+        assert meta.abstract == ""
+
     @staticmethod
     def _bounded_contents():
         sections = [

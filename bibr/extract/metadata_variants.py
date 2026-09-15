@@ -15,6 +15,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from bibr.extract.front_matter import _record_title_indices
+from bibr.utils.metadata import PRINTED_ABSTRACT_LABELS
 
 if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterCandidate, FrontMatterResolution
@@ -39,24 +40,7 @@ class PrintedMetadataVariant:
 
 # Printed labels are boundary evidence, not proof of the prose's language.
 # Language remains unknown until the source supplies explicit language metadata.
-_ABSTRACT_LABELS = frozenset(
-    {
-        "abstract",
-        "resumen",
-        "resumo",
-        "résumé",
-        "resume",
-        "zusammenfassung",
-        "samenvatting",
-        "аннотация",
-        "анотація",
-        "abstrak",
-        "摘要",
-        "要旨",
-        "초록",
-        "ملخص",
-    }
-)
+_ABSTRACT_LABELS = PRINTED_ABSTRACT_LABELS
 _UNSAFE_ROLES = frozenset(
     {
         "title",

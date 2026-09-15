@@ -43,6 +43,36 @@ def mock_wtpsplit():
     yield None
 
 
+@pytest.mark.parametrize("label", ["Review (Narrative)", "Research Article", "Original Article"])
+def test_title_recovery_excludes_a_separate_article_type_line(label):
+    printed_title = "Shade and seedling growth\r\nAcross three forest habitats"
+    contents = _parse_and_segment(
+        [[{"index": 0, "label": "doc_title", "content": f"{label}\r\n{printed_title}"}]]
+    )
+
+    expected = "Shade and seedling growth Across three forest habitats"
+    assert contents.detected_title == expected
+    assert contents.sections[-1].header == expected
+    # Preserve the unedited source region for provenance and inspection.
+    assert contents.region_summaries[0].content.startswith(label)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Review (Narrative): Shade and seedling growth",
+        "Research Article: Shade and seedling growth",
+        "Review\nOf three forest habitats",
+        "Systematic review\nOf three forest habitats",
+        "Review (Narrative)",
+    ],
+)
+def test_title_article_label_filter_preserves_inline_mentions_and_ambiguous_wraps(title):
+    contents = _parse_and_segment([[{"index": 0, "label": "doc_title", "content": title}]])
+
+    assert contents.detected_title == " ".join(title.split())
+
+
 def _region(index, label, content, bbox=None, native_label=None):
     """Helper to create a region dict matching glmocr's json_result format."""
     d = {

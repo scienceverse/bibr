@@ -339,14 +339,21 @@ def test_unsupported_original_abstract_cannot_promote_two_later_translations():
     assert len(_field(variants, "title")) == 3
 
 
-def test_unrecognized_original_abstract_heading_cannot_promote_later_languages():
+@pytest.mark.parametrize("heading", ["Synopsis", "Summary"])
+def test_original_abstract_heading_controls_complete_variant_inventory(heading):
     contents, resolution = _fixture()
     resolution = _append_third_variant(contents, resolution)
-    contents.sections[1].header = "Summary"
+    contents.sections[1].header = heading
     candidates = list(resolution.candidates)
-    candidates[3] = replace(candidates[3], raw_text="Summary")
+    candidates[3] = replace(candidates[3], raw_text=heading)
     resolution = replace(resolution, candidates=tuple(candidates))
 
     variants = collect_metadata_variants(contents, resolution)
 
-    assert _field(variants, "abstract") == []
+    abstracts = _field(variants, "abstract")
+    if heading == "Summary":
+        assert len(abstracts) == 3
+        assert abstracts[0].is_primary
+        assert abstracts[0].source_section_ids == (2,)
+    else:
+        assert abstracts == []

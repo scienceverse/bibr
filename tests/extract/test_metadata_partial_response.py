@@ -13,11 +13,15 @@ from bibr.extract.extractor import MetadataExtractor
 from bibr.extract.front_matter import FrontMatterBlock, FrontMatterCandidate, FrontMatterResolution
 from bibr.models import PaperReference
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
-from bibr.pipeline.stages.post_parse import _build_paper
+from bibr.pipeline.stages.post_parse import (
+    _build_paper,
+    _finalize_abstract_and_keywords,
+    _resolve_selected_title,
+)
 from bibr.schemas import AuthorLLM, AuthorsLLM, PaperClassificationLLM
 
 
-def _contents():
+def _contents(abstract_heading="Abstract"):
     contents = PaperContents(
         sentences=[
             PaperSentence(1, "Mara Quill", 1, 1, page_number=1),
@@ -32,7 +36,7 @@ def _contents():
         ],
         sections=[
             PaperSection(1, "SHADE AND SEEDLING GROWTH", 1, None, CanonicalSection.TITLE),
-            PaperSection(2, "Abstract", 2, 1, CanonicalSection.ABSTRACT),
+            PaperSection(2, abstract_heading, 2, 1, CanonicalSection.ABSTRACT),
             PaperSection(3, "Introduction", 2, 1, CanonicalSection.INTRODUCTION),
             PaperSection(4, "References", 2, 1, CanonicalSection.REFERENCES),
         ],
@@ -46,7 +50,7 @@ def _contents():
             ("heading", contents.sections[0].header, 1, (), {"title", "heading"}),
             ("paragraph", contents.sentences[0].text, 1, (1,), {"byline"}),
             ("paragraph", contents.sentences[1].text, 1, (2,), {"doi"}),
-            ("heading", "Abstract", 2, (), {"abstract", "heading"}),
+            ("heading", abstract_heading, 2, (), {"abstract", "heading"}),
             ("paragraph", contents.sentences[2].text, 2, (3,), {"abstract"}),
         ]
     ):
@@ -82,10 +86,11 @@ def _contents():
 
 
 @pytest.mark.parametrize("category", ["non_json", "truncated", "schema_invalid"])
+@pytest.mark.parametrize("abstract_heading", ["Abstract", "SUMMARY", "Resumo"])
 async def test_field_failure_keeps_authors_and_concurrent_references_but_blocks_export(
-    monkeypatch, category
+    monkeypatch, category, abstract_heading
 ):
-    contents, resolution = _contents()
+    contents, resolution = _contents(abstract_heading)
     settings = GlobalSettings()
     client = LLMClient(settings=settings)
     forbidden_service = AsyncMock(side_effect=AssertionError("Unexpected service call"))
@@ -158,6 +163,16 @@ async def test_field_failure_keeps_authors_and_concurrent_references_but_blocks_
     client.extract_title_keywords.assert_awaited_once()
     client.extract_authors.assert_awaited_once()
     forbidden_service.assert_not_awaited()
+
+    _resolve_selected_title(contents, metadata, validation_issue_sink=extractor.validation_issues)
+    _finalize_abstract_and_keywords(
+        contents,
+        metadata,
+        resolution=resolution,
+        validation_issue_sink=extractor.validation_issues,
+    )
+    assert metadata.title == "SHADE AND SEEDLING GROWTH"
+    assert metadata.abstract == "Shade improved seedling growth in a controlled experiment."
 
     paper = _build_paper(contents, metadata, "synthetic.pdf", "a" * 64, "record-1")
     paper.validation_issues = extractor.validation_issues
