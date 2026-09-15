@@ -59,6 +59,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Preserve source statements and extracted metadata when optional funding,
   author-role or affiliation parsing returns invalid structured output; record
   a warning for the incomplete structured fields.
+- Keep extracted metadata and available trained labels when optional paper-type
+  escalation or broad classification returns invalid structured output, with
+  explicit diagnostics for the failed fallback.
 - Preserve intact leading DOIs during fresh OCR text cleanup instead of treating
   their `10.` prefix as a numbered list item.
 - Preserve document-title evidence through appendix repair and recover invented

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from bibr.clients.structured import PartialCoreMetadataError
+from bibr.clients.structured import PartialCoreMetadataError, StructuredResponseError
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
@@ -2349,6 +2349,9 @@ class CoreMetadataExtractor:
                         classification_text,
                         file_hash=self.file_hash,
                     )
+                except StructuredResponseError as exc:
+                    self._record_classification_response_failure(exc)
+                    fallback = PaperClassificationLLM()
                 except ProcessingError:
                     raise
                 except Exception as exc:
@@ -2400,6 +2403,9 @@ class CoreMetadataExtractor:
                 label = await self.llm_client.label_paper_type(
                     title, abstract, file_hash=self.file_hash
                 )
+            except StructuredResponseError as exc:
+                self._record_classification_response_failure(exc)
+                label = None
             except ProcessingError:
                 raise
             except Exception as e:  # noqa: BLE001 — escalation is best-effort
@@ -2410,6 +2416,17 @@ class CoreMetadataExtractor:
                 paper_type_confidence = label.confidence
 
         return paper_type, oecd_l1, oecd_l2, paper_type_confidence, oecd_confidence
+
+    def _record_classification_response_failure(self, error: StructuredResponseError) -> None:
+        diagnostics = error.safe_diagnostics
+        if diagnostics is None:
+            raise error
+        self._record_degraded(
+            "VAL_PAPER_CLASSIFICATION_LLM_RESPONSE_INVALID",
+            f"llm_response_invalid:{diagnostics.invalid_category}",
+            "Optional paper classification returned invalid output; independent metadata "
+            "and any available trained classification were retained",
+        )
 
     @staticmethod
     def _validate_classification(

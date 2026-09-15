@@ -408,3 +408,88 @@ class TestDegradedClassifierIsVisibleInTheExport:
         )
         assert "RuntimeError" in warning
         assert "private document text" not in warning
+
+
+@pytest.mark.parametrize("path", ["paper_type", "broad"])
+@pytest.mark.parametrize(
+    "category",
+    ["empty", "non_json", "non_object", "truncated", "trailing_content", "schema_invalid"],
+)
+async def test_invalid_optional_classification_preserves_core_and_local_evidence(
+    monkeypatch, path, category
+):
+    from bibr.clients.structured import StructuredResponseError
+
+    trained = ("Social Sciences", 0.93, "Sociology", 0.77, "empirical", 0.20)
+    monkeypatch.setattr(
+        paper_classifier,
+        "classify_paper_async",
+        mock.AsyncMock(return_value=trained if path == "paper_type" else None),
+    )
+    source = _base_llm_result()
+    ext = _build_extractor(source)
+    error = StructuredResponseError(category, last_completion="PRIVATE-COMPLETION")
+    error.category = "MUTATED-UNTRUSTED-CATEGORY"
+    call = (
+        ext.llm_client.label_paper_type
+        if path == "paper_type"
+        else ext.llm_client.extract_paper_classification
+    )
+    call.side_effect = error
+    await ext.extract_core_metadata()
+    call.assert_awaited_once()
+    assert ext.metadata.title == source.title
+    assert ext.metadata.abstract == source.abstract
+    assert ext.metadata.keywords == source.keywords
+    assert [(row.given, row.family) for row in ext.metadata.authors] == [("A.", "Researcher")]
+    if path == "paper_type":
+        assert ext.metadata.paper_type == "empirical"
+        assert ext.metadata.paper_type_confidence == pytest.approx(0.20)
+        assert ext.metadata.oecd_l1 == "Social Sciences"
+        assert ext.metadata.oecd_l2 == "Sociology"
+    else:
+        assert ext.metadata.paper_type == ext.metadata.oecd_l1 == ext.metadata.oecd_l2 == ""
+        assert ext.metadata.paper_type_confidence is None
+    issue = next(
+        row
+        for row in ext.validation_issues
+        if row.code == "VAL_PAPER_CLASSIFICATION_LLM_RESPONSE_INVALID"
+    )
+    assert not issue.blocking and issue.severity == "warning"
+    assert issue.evidence_ids == (f"reason:llm_response_invalid:{category}",)
+    assert "PRIVATE-COMPLETION" not in repr(issue)
+    assert "MUTATED-UNTRUSTED-CATEGORY" not in repr(issue)
+
+
+@pytest.mark.parametrize("path", ["paper_type", "broad"])
+@pytest.mark.parametrize("kind", ["processing", "cancellation"])
+async def test_optional_classification_operational_failures_still_propagate(
+    monkeypatch, path, kind
+):
+    from bibr.exceptions import ProcessingError
+
+    trained = ("Social Sciences", 0.93, "Sociology", 0.77, "empirical", 0.20)
+    monkeypatch.setattr(
+        paper_classifier,
+        "classify_paper_async",
+        mock.AsyncMock(return_value=trained if path == "paper_type" else None),
+    )
+    ext = _build_extractor(_base_llm_result())
+    error = (
+        ProcessingError("operational", error_code="llm_invalid_output")
+        if kind == "processing"
+        else asyncio.CancelledError()
+    )
+    call = (
+        ext.llm_client.label_paper_type
+        if path == "paper_type"
+        else ext.llm_client.extract_paper_classification
+    )
+    call.side_effect = error
+    with pytest.raises(type(error)) as raised:
+        await ext.extract_core_metadata()
+    assert raised.value is error
+    assert not any(
+        row.code == "VAL_PAPER_CLASSIFICATION_LLM_RESPONSE_INVALID"
+        for row in ext.core.validation_issues
+    )
