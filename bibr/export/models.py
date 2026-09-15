@@ -13,11 +13,15 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 
-_SCHEMA_VERSION = "11.0"
+_SCHEMA_VERSION = "11.1"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v11.0 export schema — single source of truth for validation
+# Pydantic v11.x export schema — single source of truth for validation
+#
+# v11.1 (vs 11.0) — additive: metadata_variant preserves separately owned
+# printed title/abstract versions. front_matter diagnostics retain record
+# selection/merge evidence. Scalar metadata fields keep their existing types.
 #
 # v11.0 (vs 10.9) — BREAKING:
 #   - ``schema_version`` moved to the ROOT. Its presence there is how readers
@@ -242,6 +246,30 @@ class MetadataExport(BaseModel):
     coi_statement: str | None = None
     ethics_statement: str | None = None
     data_availability: str | None = None
+
+
+class MetadataVariantExport(BaseModel):
+    """One printed field version belonging to the selected article record."""
+
+    model_config = _STRICT
+
+    variant_id: str
+    record_id: str
+    field: Literal["title", "abstract"]
+    text: str
+    language: str | None = None
+    is_primary: bool = Field(description="Whether this version matches the exported scalar field.")
+    source_text_ids: list[int] = Field(default_factory=list)
+    source_section_ids: list[int] = Field(default_factory=list)
+    pages: list[int] = Field(default_factory=list)
+    presentation_ids: list[str] = Field(
+        default_factory=list,
+        description="Source-supported title/byline/abstract presentation links within this record. "
+        "Empty means pairing is unestablished; order in the variant table never implies a pair. "
+        "Repeated field text can belong to several presentations.",
+    )
+    byline_source_text_ids: list[int] = Field(default_factory=list)
+    byline_source_section_ids: list[int] = Field(default_factory=list)
 
 
 class AuthorExport(BaseModel):
@@ -697,6 +725,34 @@ class ReferenceSegmentationAttemptExport(BaseModel):
     reason_flags: list[str]
 
 
+class ReferenceSourceLossExport(BaseModel):
+    model_config = _STRICT
+
+    stage: Literal["segmentation", "filtering", "parsing"]
+    reason: str
+    source_text: str
+    source_span: tuple[int, int] = Field(
+        description="Half-open character offsets in the normalized selected reference source."
+    )
+    source_text_ids: list[int] = Field(default_factory=list)
+
+
+class ReferenceYieldLossesExport(BaseModel):
+    model_config = _STRICT
+
+    selected_source_row_count: int = Field(
+        description="Rows supplied by the reference locator; not whole-document bibliography coverage."
+    )
+    segmented_count: int
+    retained_segment_count: int
+    filtered_segment_count: int
+    parse_alignment_available: bool
+    source_alignment_available: bool
+    unlocated_unresolved_count: int
+    selected_section_ids: list[int] = Field(default_factory=list)
+    unresolved: list[ReferenceSourceLossExport] = Field(default_factory=list)
+
+
 class ReferenceYieldExport(BaseModel):
     model_config = _STRICT
 
@@ -708,6 +764,7 @@ class ReferenceYieldExport(BaseModel):
     valid_count: int
     duplicate_rate: float
     reason_flags: list[str]
+    losses: ReferenceYieldLossesExport | None = None
 
 
 class OcrEngineExport(BaseModel):
@@ -852,6 +909,45 @@ class LlmTraceExport(BaseModel):
     error: str | None = None
 
 
+class FrontMatterCandidateExport(BaseModel):
+    """Candidate ownership and roles, referencing source rows without copying prose."""
+
+    model_config = _STRICT
+
+    candidate_id: str
+    source_kind: str
+    reading_order: int
+    page: int | None = None
+    section_id: int | None = None
+    text_ids: list[int]
+    roles: list[str]
+
+
+class FrontMatterBlockExport(BaseModel):
+    """Source-addressable record candidate; no duplicated document payload."""
+
+    model_config = _STRICT
+
+    block_id: str
+    candidate_ids: list[str]
+    title_candidate_ids: list[str]
+    source_text_ids: list[int]
+    source_section_ids: list[int]
+    pages: list[int]
+    source_block_ids: list[str] = Field(default_factory=list)
+    merge_reasons: list[str] = Field(default_factory=list)
+
+
+class FrontMatterResolutionExport(BaseModel):
+    model_config = _STRICT
+
+    selected_block_id: str | None
+    selection_method: str
+    reason_flags: list[str]
+    blocks: list[FrontMatterBlockExport]
+    candidates: list[FrontMatterCandidateExport]
+
+
 class DiagnosticsExport(BaseModel):
     """Outcome flags and stage receipts — never raw payloads.
 
@@ -868,11 +964,12 @@ class DiagnosticsExport(BaseModel):
     citation_linking: CitationLinkingExport | None = None
     caption_assignment: CaptionAssignmentReceiptExport | None = None
     reference_yield: ReferenceYieldExport | None = None
+    front_matter: FrontMatterResolutionExport | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_receipts(self, handler):
         data = handler(self)
-        for key in ("citation_linking", "caption_assignment", "reference_yield"):
+        for key in ("citation_linking", "caption_assignment", "reference_yield", "front_matter"):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -938,7 +1035,7 @@ OMITTABLE_ROOT_KEYS: tuple[str, ...] = ("validation", "extraction")
 
 
 class PaperExport(BaseModel):
-    """Pydantic model for the bibr v11.0 JSON export schema.
+    """Pydantic model for the bibr v11.x JSON export schema.
 
     v11 is a clean break: no v10 payload validates against this model, and none
     is meant to. Readers dispatch on the presence of the root ``schema_version``.
@@ -950,7 +1047,7 @@ class PaperExport(BaseModel):
         description="Paper identifier: user-supplied --paper-id, else the DOI, else the source "
         "file name."
     )
-    schema_version: Literal["11.0"] = Field(
+    schema_version: Literal["11.0", "11.1"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 from all earlier versions."
     )
@@ -961,6 +1058,12 @@ class PaperExport(BaseModel):
         description="Scalar paper-level metadata: title, abstract, keywords, DOI, paper-type "
         "and OECD classification, the paper's own journal/venue identity, and "
         "research-integrity statement text."
+    )
+    metadata_variant: list[MetadataVariantExport] = Field(
+        default_factory=list,
+        description="Separately preserved printed title and abstract versions for the selected "
+        "article, with primary selection and source identifiers. Empty when explicit variant "
+        "boundaries cannot be established safely. Language is null unless source-supported.",
     )
     author: list[AuthorExport] = Field(
         description="Extracted authors, with name, affiliation, email, corresponding-author flag, "
@@ -1045,6 +1148,35 @@ class PaperExport(BaseModel):
         description="Output validation gate result: counts of errors/warnings and the structured "
         "issue list; absent when the gate was skipped.",
     )
+
+    @model_validator(mode="after")
+    def _presentation_links(self) -> PaperExport:
+        linked: dict[str, list[MetadataVariantExport]] = {}
+        for variant in self.metadata_variant:
+            if len(variant.presentation_ids) != len(set(variant.presentation_ids)):
+                raise ValueError("presentation IDs must be unique within a variant")
+            for key in variant.presentation_ids:
+                if not key or not (
+                    variant.byline_source_text_ids or variant.byline_source_section_ids
+                ):
+                    raise ValueError("presentation links require an ID and printed byline evidence")
+                linked.setdefault(key, []).append(variant)
+        for versions in linked.values():
+            if (
+                len(versions) != 2
+                or {version.field for version in versions} != {"title", "abstract"}
+                or len({version.record_id for version in versions}) != 1
+            ):
+                raise ValueError("each presentation must link one title and abstract in one record")
+            left, right = versions
+            shared_byline = (
+                set(left.byline_source_text_ids) & set(right.byline_source_text_ids)
+                if left.byline_source_text_ids and right.byline_source_text_ids
+                else set(left.byline_source_section_ids) & set(right.byline_source_section_ids)
+            )
+            if not shared_byline:
+                raise ValueError("linked versions must share printed byline evidence")
+        return self
 
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):

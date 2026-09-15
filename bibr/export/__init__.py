@@ -7,6 +7,11 @@ from ``models`` like everyone else, so it is not in the import path for a
 caller that only wants a type.
 """
 
+from bibr.export.document_models import (
+    DocumentDiagnosticsExport,
+    DocumentExport,
+    DocumentRecordExport,
+)
 from bibr.export.json_export import (
     build_paper_export,
     export_paper_to_json,
@@ -25,6 +30,7 @@ from bibr.export.models import (
     FigurePartExport,
     MetadataExport,
     MetadataMatchExport,
+    MetadataVariantExport,
     PaperExport,
     PersonNameExport,
     ProvenanceExport,
@@ -46,6 +52,9 @@ from bibr.export.qualification_provenance import (
 )
 
 __all__ = [
+    "DocumentDiagnosticsExport",
+    "DocumentExport",
+    "DocumentRecordExport",
     "DeploymentIdentity",
     "AffiliationExport",
     "AuthorExport",
@@ -59,6 +68,7 @@ __all__ = [
     "FigurePartExport",
     "MetadataExport",
     "MetadataMatchExport",
+    "MetadataVariantExport",
     "PaperExport",
     "PersonNameExport",
     "ProvenanceExport",

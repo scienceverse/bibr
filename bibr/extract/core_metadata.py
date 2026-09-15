@@ -19,12 +19,15 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from bibr.clients.structured import PartialCoreMetadataError
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
+from bibr.extract.metadata_variants import has_explicit_original_label
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
+from bibr.extract.title_text import _is_ordinary_body_heading
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -781,8 +784,7 @@ def _anchored_title_missing_count(
 
 
 # A rewrite worth repairing is a near-copy: same title, a word or two altered.
-# Below this the two strings are different titles and the printed one must not
-# be substituted.
+# Below this, similarity alone cannot choose the printed replacement.
 _TITLE_GROUNDING_MIN_RATIO = 0.90
 # The printed form must not be materially shorter than what was extracted. A
 # correct title assembled from a title + subtitle region pair can score well
@@ -823,43 +825,117 @@ def _grounding_sources(
     return sources
 
 
+def _unique_printed_title(
+    candidates: tuple[FrontMatterCandidate, ...],
+    *,
+    printed_rows: Mapping[int, str] | None,
+    printed_sections: Mapping[int, str] | None,
+) -> tuple[FrontMatterCandidate | None, str]:
+    """A complete, unambiguous selected title inventory can recover a rewrite.
+
+    A title-shaped row carrying authors, affiliations or body-heading evidence
+    is not a complete title. Do not drop such a row and then promote a later
+    translation merely because the remaining inventory has one safe entry.
+    """
+    from bibr.extract.front_matter import (
+        _ORDINARY_HEADING_TEXT,
+        _looks_like_masthead,
+        is_exact_front_matter_furniture,
+    )
+    from bibr.utils.metadata import is_exact_generic_article_label
+
+    title_candidates = [row for row in candidates if "title" in row.roles]
+    distinct: dict[str, FrontMatterCandidate] = {}
+    for row in title_candidates:
+        text = row.raw_text.strip()
+        normalized = _normalize_for_grounding(text)
+        if (
+            not row.roles.isdisjoint(
+                {
+                    "abstract",
+                    "byline",
+                    "affiliation",
+                    "doi",
+                    "metadata",
+                    "correspondence",
+                    "structural",
+                    "body_heading",
+                    "byline_probation",
+                }
+            )
+            or len(normalized) < _TITLE_GROUNDING_MIN_LENGTH
+            or is_exact_generic_article_label(text)
+            or is_exact_front_matter_furniture(text)
+            or row.normalized_text in _ORDINARY_HEADING_TEXT
+            or _is_ordinary_body_heading(row.normalized_text)
+            or _looks_like_masthead(text, (row.region_label or "").casefold())
+        ):
+            return None, "title_recovery_unverified"
+        if row.source_kind == "heading":
+            if printed_sections is not None and (
+                row.section_id is None
+                or row.section_id not in printed_sections
+                or normalized != _normalize_for_grounding(printed_sections[row.section_id])
+            ):
+                return None, "title_recovery_unverified"
+        elif row.source_kind == "paragraph":
+            if (
+                not row.text_ids
+                or not printed_rows
+                or any(key not in printed_rows for key in row.text_ids)
+            ):
+                return None, "title_recovery_unverified"
+            if normalized != _normalize_for_grounding(
+                " ".join(printed_rows[key] for key in row.text_ids)
+            ):
+                return None, "title_recovery_unverified"
+        else:
+            return None, "title_recovery_unverified"
+        distinct.setdefault(normalized, row)
+    if len(distinct) == 1:
+        return next(iter(distinct.values())), ""
+    return None, "title_recovery_ambiguous" if distinct else "title_recovery_unverified"
+
+
 def ground_title_to_printed_text(
     title: str,
     resolution: FrontMatterResolution | None,
     printed_text: str,
     *,
     printed_rows: Mapping[int, str] | None = None,
+    printed_sections: Mapping[int, str] | None = None,
 ) -> tuple[str, ValidationIssue | None]:
     """Prefer the printed title over a model's silent rewrite of it.
 
     The source of truth is the printed title, including grammatical errors. A model may silently correct a word to one absent from the page; grounding checks the extracted title against the actual front-matter text.
 
-    Returns the title to use and an optional issue. The substitution is
-    deliberately narrow — it fires only on a near-copy of a single printed row —
-    because the model legitimately joins a title split across regions, and a
-    loose rule would truncate those. Everything ungrounded that is not a
-    near-copy is reported and left alone.
+    Near-copy repair preserves legitimate title/subtitle joins. A wholly
+    invented title can be recovered only from one verified selected-record
+    title; ambiguous evidence leaves that field empty with a diagnostic.
     """
 
     normalized = _normalize_for_grounding(title)
-    if len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
+    if not normalized:
         return title, None
 
     candidates: tuple[FrontMatterCandidate, ...] = (
-        resolution.candidates if resolution is not None else ()
+        _selected_block_candidates(resolution) if resolution is not None else ()
     )
+    title_candidates = tuple(candidate for candidate in candidates if "title" in candidate.roles)
     haystack = _normalize_for_grounding(
-        " ".join((printed_text, *(candidate.raw_text for candidate in candidates)))
+        " ".join(candidate.raw_text for candidate in candidates)
+        if resolution is not None
+        else printed_text
     )
     if normalized in haystack:
         return title, None
 
     low, high = _TITLE_GROUNDING_LENGTH_BAND
     best: tuple[float, str] | None = None
-    for source in _grounding_sources(candidates, printed_rows):
+    for source in _grounding_sources(title_candidates, printed_rows):
         printed = source.strip()
         candidate_normalized = _normalize_for_grounding(printed)
-        if not candidate_normalized:
+        if not candidate_normalized or len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
             continue
         if not low <= len(candidate_normalized) / len(normalized) <= high:
             continue
@@ -886,13 +962,70 @@ def ground_title_to_printed_text(
             count=1,
         )
 
+    reason = None
+    if resolution is not None:
+        recovered, reason = _unique_printed_title(
+            candidates, printed_rows=printed_rows, printed_sections=printed_sections
+        )
+        if recovered is not None:
+            return recovered.raw_text.strip(), ValidationIssue(
+                code="VAL_TITLE_RECOVERED",
+                severity=IssueSeverity.WARNING,
+                message="Replaced an ungrounded model title with the unique printed title in the selected record",
+                origin_stage="extract",
+                evidence_ids=(recovered.candidate_id, "reason:title_not_printed_verbatim"),
+            )
+        title = ""
+    elif len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
+        return title, None
+
     return title, ValidationIssue(
         code="VAL_TITLE_UNGROUNDED",
         severity=IssueSeverity.WARNING,
-        message="Extracted title does not occur verbatim in the printed page text",
+        message=(
+            "Extracted title does not occur verbatim in the selected record; title recovery abstained"
+            if reason
+            else "Extracted title does not occur verbatim in the printed page text"
+        ),
         origin_stage="extract",
-        evidence_ids=("reason:title_not_printed_verbatim",),
+        evidence_ids=("reason:title_not_printed_verbatim",)
+        + ((f"reason:{reason}",) if reason else ()),
         count=1,
+    )
+
+
+def prefer_first_printed_native_title(
+    title: str, contents: PaperContents, resolution: FrontMatterResolution | None
+) -> tuple[str, ValidationIssue | None]:
+    """Prefer a proven native title over one separately printed pre-byline row.
+
+    This does not invent a translation relation or a field variant. Complete
+    title/subtitle joins and explicit original-language choices remain intact.
+    """
+    from bibr.extract.title_source import SOURCE_QUALIFIED_TITLE_ROLE, native_title_evidence
+
+    if resolution is None or not title or has_explicit_original_label(resolution, "title"):
+        return title, None
+    selected = _selected_block_candidates(resolution)
+    titles = [row for row in selected if "title" in row.roles]
+    if len(titles) != 1 or SOURCE_QUALIFIED_TITLE_ROLE not in titles[0].roles:
+        return title, None
+    evidence = native_title_evidence(contents, selected)
+    if len(evidence) != 1 or len(evidence[0].pre_byline_rows) != 1:
+        return title, None
+    source = evidence[0]
+    if _normalize_for_grounding(title) != _normalize_for_grounding(source.pre_byline_rows[0]):
+        return title, None
+    return source.title, ValidationIssue(
+        code="VAL_TITLE_SOURCE_PREFERRED",
+        severity=IssueSeverity.WARNING,
+        message="Preferred the first printed native title over a separately printed pre-byline row",
+        origin_stage="extract",
+        evidence_ids=(
+            source.candidate_id,
+            *source.byline_candidate_ids,
+            "reason:first_printed_native_title",
+        ),
     )
 
 
@@ -1385,11 +1518,42 @@ class CoreMetadataExtractor:
             # the LLM-validation path (which ignores title/abstract).
             title = strip_affiliation_markers(llm_metadata.title or "")
             title, title_issue = ground_title_to_printed_text(
-                title, resolution, full_text, printed_rows=self._printed_rows()
+                title,
+                resolution,
+                full_text,
+                printed_rows=self._printed_rows(),
+                printed_sections={
+                    section.section_id: section.header for section in self.contents.sections
+                },
             )
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
             abstract = (llm_metadata.abstract or "").strip()
+            # Explicit, fully owned printed variants establish the source-order
+            # preference without asking the model to translate or concatenate.
+            # Capture happened before section normalization; never rebuild it
+            # from the normalized abstract tree here.
+            primary_variants = {}
+            if resolution is not None:
+                for field in ("title", "abstract"):
+                    variants = [
+                        variant
+                        for variant in getattr(self.contents, "metadata_variants", ())
+                        if variant.field == field
+                        and variant.record_id == resolution.selected_block_id
+                    ]
+                    primaries = [variant for variant in variants if variant.is_primary]
+                    explicit_original_label = has_explicit_original_label(resolution, field)
+                    if len(variants) >= 2 and len(primaries) == 1 and not explicit_original_label:
+                        primary_variants[field] = primaries[0].text
+            title = primary_variants.get("title", title)
+            if "title" not in primary_variants:
+                title, preference_issue = prefer_first_printed_native_title(
+                    title, self.contents, resolution
+                )
+                if preference_issue is not None:
+                    self.validation_issues.append(preference_issue)
+            abstract = primary_variants.get("abstract", abstract)
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
 
@@ -1453,7 +1617,9 @@ class CoreMetadataExtractor:
                 published=published,
                 license=llm_metadata.license,
             )
-            metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
+            metadata._abstract_explicitly_absent = (
+                llm_metadata._abstract_explicitly_absent and "abstract" not in primary_variants
+            )
 
             self._email_harvester.harvest(metadata.authors)
             self.validation_issues.extend(
@@ -1794,6 +1960,19 @@ class CoreMetadataExtractor:
                 classification_text=classification_text,
                 include_classification=not bool(self._settings.ml.paper_classifier_model_id),
             )
+        except PartialCoreMetadataError as exc:
+            self.validation_issues.append(
+                ValidationIssue(
+                    code="VAL_METADATA_FIELD_FAILED",
+                    severity=IssueSeverity.ERROR,
+                    message="A metadata field response failed validation; independent results were retained",
+                    origin_stage="extract",
+                    evidence_ids=(f"reason:{exc.category}",)
+                    + tuple(f"field:{field}" for field in exc.failed_fields),
+                    blocking=True,
+                )
+            )
+            return exc.partial_metadata
         except (ProcessingError, UpstreamServiceError):
             raise
         except Exception as e:  # noqa: BLE001 — LLM exceptions are heterogeneous

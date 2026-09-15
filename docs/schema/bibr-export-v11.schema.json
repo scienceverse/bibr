@@ -1010,6 +1010,17 @@
           ],
           "default": null
         },
+        "front_matter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrontMatterResolutionExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "ref_seg_fallback_used": {
           "default": false,
           "title": "Ref Seg Fallback Used",
@@ -1645,6 +1656,190 @@
         "part_index"
       ],
       "title": "FigurePartExport",
+      "type": "object"
+    },
+    "FrontMatterBlockExport": {
+      "additionalProperties": false,
+      "description": "Source-addressable record candidate; no duplicated document payload.",
+      "properties": {
+        "block_id": {
+          "title": "Block Id",
+          "type": "string"
+        },
+        "candidate_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Candidate Ids",
+          "type": "array"
+        },
+        "merge_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Merge Reasons",
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "source_block_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Block Ids",
+          "type": "array"
+        },
+        "source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Section Ids",
+          "type": "array"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "title_candidate_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Title Candidate Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "block_id",
+        "candidate_ids",
+        "title_candidate_ids",
+        "source_text_ids",
+        "source_section_ids",
+        "pages"
+      ],
+      "title": "FrontMatterBlockExport",
+      "type": "object"
+    },
+    "FrontMatterCandidateExport": {
+      "additionalProperties": false,
+      "description": "Candidate ownership and roles, referencing source rows without copying prose.",
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "reading_order": {
+          "title": "Reading Order",
+          "type": "integer"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "source_kind": {
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Text Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "source_kind",
+        "reading_order",
+        "text_ids",
+        "roles"
+      ],
+      "title": "FrontMatterCandidateExport",
+      "type": "object"
+    },
+    "FrontMatterResolutionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/FrontMatterBlockExport"
+          },
+          "title": "Blocks",
+          "type": "array"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/FrontMatterCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected_block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selected Block Id"
+        },
+        "selection_method": {
+          "title": "Selection Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selected_block_id",
+        "selection_method",
+        "reason_flags",
+        "blocks",
+        "candidates"
+      ],
+      "title": "FrontMatterResolutionExport",
       "type": "object"
     },
     "FundingExport": {
@@ -2386,6 +2581,101 @@
       "title": "MetadataMatchExport",
       "type": "object"
     },
+    "MetadataVariantExport": {
+      "additionalProperties": false,
+      "description": "One printed field version belonging to the selected article record.",
+      "properties": {
+        "byline_source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Section Ids",
+          "type": "array"
+        },
+        "byline_source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Text Ids",
+          "type": "array"
+        },
+        "field": {
+          "enum": [
+            "title",
+            "abstract"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "is_primary": {
+          "description": "Whether this version matches the exported scalar field.",
+          "title": "Is Primary",
+          "type": "boolean"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "presentation_ids": {
+          "description": "Source-supported title/byline/abstract presentation links within this record. Empty means pairing is unestablished; order in the variant table never implies a pair. Repeated field text can belong to several presentations.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Presentation Ids",
+          "type": "array"
+        },
+        "record_id": {
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Section Ids",
+          "type": "array"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "variant_id": {
+          "title": "Variant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "variant_id",
+        "record_id",
+        "field",
+        "text",
+        "is_primary"
+      ],
+      "title": "MetadataVariantExport",
+      "type": "object"
+    },
     "OcrEngineExport": {
       "additionalProperties": false,
       "description": "Which OCR engine produced this output. ``null`` on the DOCX-native path.",
@@ -2569,6 +2859,58 @@
       "title": "ReferenceSegmentationAttemptExport",
       "type": "object"
     },
+    "ReferenceSourceLossExport": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_span": {
+          "description": "Half-open character offsets in the normalized selected reference source.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Source Span",
+          "type": "array"
+        },
+        "source_text": {
+          "title": "Source Text",
+          "type": "string"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "stage": {
+          "enum": [
+            "segmentation",
+            "filtering",
+            "parsing"
+          ],
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "reason",
+        "source_text",
+        "source_span"
+      ],
+      "title": "ReferenceSourceLossExport",
+      "type": "object"
+    },
     "ReferenceYieldExport": {
       "additionalProperties": false,
       "properties": {
@@ -2593,6 +2935,17 @@
         "duplicate_rate": {
           "title": "Duplicate Rate",
           "type": "number"
+        },
+        "losses": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReferenceYieldLossesExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "parsed_count": {
           "title": "Parsed Count",
@@ -2642,6 +2995,65 @@
         "reason_flags"
       ],
       "title": "ReferenceYieldExport",
+      "type": "object"
+    },
+    "ReferenceYieldLossesExport": {
+      "additionalProperties": false,
+      "properties": {
+        "filtered_segment_count": {
+          "title": "Filtered Segment Count",
+          "type": "integer"
+        },
+        "parse_alignment_available": {
+          "title": "Parse Alignment Available",
+          "type": "boolean"
+        },
+        "retained_segment_count": {
+          "title": "Retained Segment Count",
+          "type": "integer"
+        },
+        "segmented_count": {
+          "title": "Segmented Count",
+          "type": "integer"
+        },
+        "selected_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Selected Section Ids",
+          "type": "array"
+        },
+        "selected_source_row_count": {
+          "description": "Rows supplied by the reference locator; not whole-document bibliography coverage.",
+          "title": "Selected Source Row Count",
+          "type": "integer"
+        },
+        "source_alignment_available": {
+          "title": "Source Alignment Available",
+          "type": "boolean"
+        },
+        "unlocated_unresolved_count": {
+          "title": "Unlocated Unresolved Count",
+          "type": "integer"
+        },
+        "unresolved": {
+          "items": {
+            "$ref": "#/$defs/ReferenceSourceLossExport"
+          },
+          "title": "Unresolved",
+          "type": "array"
+        }
+      },
+      "required": [
+        "selected_source_row_count",
+        "segmented_count",
+        "retained_segment_count",
+        "filtered_segment_count",
+        "parse_alignment_available",
+        "source_alignment_available",
+        "unlocated_unresolved_count"
+      ],
+      "title": "ReferenceYieldLossesExport",
       "type": "object"
     },
     "RegionExport": {
@@ -3545,7 +3957,7 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Pydantic model for the bibr v11.0 JSON export schema.\n\nv11 is a clean break: no v10 payload validates against this model, and none\nis meant to. Readers dispatch on the presence of the root ``schema_version``.",
+  "description": "Pydantic model for the bibr v11.x JSON export schema.\n\nv11 is a clean break: no v10 payload validates against this model, and none\nis meant to. Readers dispatch on the presence of the root ``schema_version``.",
   "properties": {
     "affiliation": {
       "default": [],
@@ -3631,6 +4043,14 @@
       "title": "Metadata Match",
       "type": "array"
     },
+    "metadata_variant": {
+      "description": "Separately preserved printed title and abstract versions for the selected article, with primary selection and source identifiers. Empty when explicit variant boundaries cannot be established safely. Language is null unless source-supported.",
+      "items": {
+        "$ref": "#/$defs/MetadataVariantExport"
+      },
+      "title": "Metadata Variant",
+      "type": "array"
+    },
     "paper_id": {
       "anyOf": [
         {
@@ -3658,7 +4078,7 @@
       "title": "Qualification Provenance"
     },
     "schema_version": {
-      "const": "11.0",
+      "const": "11.1",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 from all earlier versions.",
       "title": "Schema Version",
       "type": "string"
@@ -3725,6 +4145,7 @@
     "schema_version",
     "source",
     "metadata",
+    "metadata_variant",
     "author",
     "text",
     "section",

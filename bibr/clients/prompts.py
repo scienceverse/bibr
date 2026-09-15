@@ -104,16 +104,20 @@ An abstract may be unheaded or use structured subheadings, but must be a distinc
 summary of the paper. Return null when no such summary is present; do not write
 a summary yourself. Stop at the end of the abstract, before body text, keywords,
 funding, disclosures, or a separate plain-language or significance statement.
-If parallel language abstracts are printed, prefer the printed English version
-when available; otherwise use the first complete printed version. Copy it
-verbatim; do not concatenate or translate the versions.
+If parallel language abstracts are printed, use the explicitly identified
+original version; otherwise use the first complete printed version in source
+reading order. Do not prefer English over an earlier printed version. Copy it
+verbatim; do not concatenate or translate the versions. Repeated or translated
+front matter can describe the same article; it is not itself a second paper.
 """
 
 _TITLE_KEYWORDS_PROMPT = (
     """The supplied fenced text is front matter from a scientific paper.
 Extract the title, abstract, and keywords.
 
-Title: the paper's title as written.
+Title: the paper's title as written. When parallel titles are printed, use the
+explicitly identified original, otherwise the first complete printed title in
+source reading order. Do not translate it or prefer English automatically.
 
 Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
 and sentence boundaries. Exclude everything that is not abstract content:
@@ -227,7 +231,9 @@ _CORE_METADATA_PROMPT = (
     """The supplied fenced text is the first page of a scientific paper.
 Extract the core metadata: title, abstract, keywords, authors, and classification.
 
-Title: the paper's title as written.
+Title: the paper's title as written. When parallel titles are printed, use the
+explicitly identified original version; otherwise use the first complete title in
+source reading order. Do not translate it or prefer English automatically.
 
 Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
 and sentence boundaries. Exclude everything that is not abstract content:

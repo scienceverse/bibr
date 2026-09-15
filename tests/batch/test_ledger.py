@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from bibr.batch.ledger import (
     ERROR_TEXT_LIMIT,
     INTERRUPTED,
@@ -55,11 +57,12 @@ def _export(**overrides) -> dict:
 # --- append / read -------------------------------------------------------------
 
 
-def test_v11_summary_preserves_timings_usage_and_warnings():
+@pytest.mark.parametrize("schema_version", ["11.0", "11.1", "11.2"])
+def test_v11_summary_preserves_timings_usage_and_warnings(schema_version):
     legacy = _export()
     current = {
         **legacy,
-        "schema_version": "11.0",
+        "schema_version": schema_version,
         "metadata": legacy["info"],
         "extraction": {
             "timings": {

@@ -1,0 +1,4549 @@
+{
+  "$defs": {
+    "AffiliationExport": {
+      "additionalProperties": false,
+      "description": "Structured affiliation parsed from the author byline. ``text`` is our own\nverbatim byline string; the parsed components are best-effort (LLM).",
+      "properties": {
+        "affiliation_id": {
+          "title": "Affiliation Id",
+          "type": "integer"
+        },
+        "author_ids": {
+          "default": [],
+          "items": {
+            "type": "integer"
+          },
+          "title": "Author Ids",
+          "type": "array"
+        },
+        "city": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "City"
+        },
+        "country": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Country"
+        },
+        "department": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Department"
+        },
+        "institution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Institution"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "affiliation_id",
+        "text"
+      ],
+      "title": "AffiliationExport",
+      "type": "object"
+    },
+    "AuthorExport": {
+      "additionalProperties": false,
+      "properties": {
+        "affiliation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Affiliation"
+        },
+        "author_id": {
+          "title": "Author Id",
+          "type": "integer"
+        },
+        "corresponding": {
+          "title": "Corresponding",
+          "type": "boolean"
+        },
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email"
+        },
+        "family": {
+          "title": "Family",
+          "type": "string"
+        },
+        "given": {
+          "title": "Given",
+          "type": "string"
+        },
+        "orcid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Orcid"
+        },
+        "role": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Role",
+          "type": "array"
+        },
+        "suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suffix"
+        }
+      },
+      "required": [
+        "author_id",
+        "given",
+        "family",
+        "corresponding"
+      ],
+      "title": "AuthorExport",
+      "type": "object"
+    },
+    "BibExport": {
+      "additionalProperties": false,
+      "properties": {
+        "access_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Access Date"
+        },
+        "arxiv": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Arxiv"
+        },
+        "author": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "authors": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Authors"
+        },
+        "bib_id": {
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "consolidated_fields": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Consolidated Fields"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editor"
+        },
+        "editors": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editors"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "is_in_press": {
+          "default": false,
+          "title": "Is In Press",
+          "type": "boolean"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "pmid": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pmid"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "series": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Series"
+        },
+        "text_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        },
+        "year_suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year Suffix"
+        }
+      },
+      "required": [
+        "bib_id"
+      ],
+      "title": "BibExport",
+      "type": "object"
+    },
+    "BibMatchExport": {
+      "additionalProperties": false,
+      "description": "Flat enrichment match from an external service.",
+      "properties": {
+        "author": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "bib_id": {
+          "title": "Bib Id",
+          "type": "integer"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editor"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "service_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        }
+      },
+      "required": [
+        "bib_id",
+        "service"
+      ],
+      "title": "BibMatchExport",
+      "type": "object"
+    },
+    "CaptionAssignmentExport": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguous": {
+          "default": false,
+          "title": "Ambiguous",
+          "type": "boolean"
+        },
+        "caption_id": {
+          "title": "Caption Id",
+          "type": "string"
+        },
+        "object_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Object Id"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "caption_id",
+        "object_id",
+        "score",
+        "reasons"
+      ],
+      "title": "CaptionAssignmentExport",
+      "type": "object"
+    },
+    "CaptionAssignmentReceiptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "assignments": {
+          "items": {
+            "$ref": "#/$defs/CaptionAssignmentExport"
+          },
+          "title": "Assignments",
+          "type": "array"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CaptionCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidates",
+        "assignments"
+      ],
+      "title": "CaptionAssignmentReceiptExport",
+      "type": "object"
+    },
+    "CaptionCandidateExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Bbox"
+        },
+        "caption_id": {
+          "title": "Caption Id",
+          "type": "string"
+        },
+        "object_type": {
+          "title": "Object Type",
+          "type": "string"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "source_index": {
+          "title": "Source Index",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "caption_id",
+        "text",
+        "object_type",
+        "page_number",
+        "bbox",
+        "source_index"
+      ],
+      "title": "CaptionCandidateExport",
+      "type": "object"
+    },
+    "CitationCandidateExport": {
+      "additionalProperties": false,
+      "description": "Lossless JSON representation of one citation detector candidate.",
+      "properties": {
+        "accepted": {
+          "title": "Accepted",
+          "type": "boolean"
+        },
+        "bib_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Bib Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "title": "Confidence",
+          "type": "number"
+        },
+        "end": {
+          "title": "End",
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence",
+          "type": "array"
+        },
+        "raw": {
+          "title": "Raw",
+          "type": "string"
+        },
+        "rejection_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rejection Reasons",
+          "type": "array"
+        },
+        "start": {
+          "title": "Start",
+          "type": "integer"
+        },
+        "style": {
+          "title": "Style",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text_id",
+        "start",
+        "end",
+        "raw",
+        "style",
+        "bib_ids",
+        "evidence",
+        "confidence",
+        "accepted",
+        "rejection_reasons"
+      ],
+      "title": "CitationCandidateExport",
+      "type": "object"
+    },
+    "CitationLinkingExport": {
+      "additionalProperties": false,
+      "description": "Evidence-bearing diagnostic receipt for inline citation linking.",
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/CitationCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "resolved_candidate_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Resolved Candidate Fraction"
+        },
+        "style_scores": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Style Scores",
+          "type": "object"
+        },
+        "unique_linked_bib_fraction": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Unique Linked Bib Fraction"
+        }
+      },
+      "required": [
+        "style_scores",
+        "candidates",
+        "resolved_candidate_fraction",
+        "unique_linked_bib_fraction"
+      ],
+      "title": "CitationLinkingExport",
+      "type": "object"
+    },
+    "DiagnosticsExport": {
+      "additionalProperties": false,
+      "description": "Outcome flags and stage receipts \u2014 never raw payloads.\n\n``regions`` and ``trace`` are deliberately NOT here: they are megabyte-scale\nintermediate data, and bundling them would force every diagnostics consumer\nto reason about size.",
+      "properties": {
+        "caption_assignment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptionAssignmentReceiptExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "citation_linking": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CitationLinkingExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "front_matter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FrontMatterResolutionExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ref_seg_fallback_used": {
+          "default": false,
+          "title": "Ref Seg Fallback Used",
+          "type": "boolean"
+        },
+        "reference_yield": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReferenceYieldExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "references_complete": {
+          "default": true,
+          "title": "References Complete",
+          "type": "boolean"
+        },
+        "text_quality": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text Quality"
+        }
+      },
+      "title": "DiagnosticsExport",
+      "type": "object"
+    },
+    "DocumentDiagnosticsExport": {
+      "additionalProperties": false,
+      "description": "Detector inventory retained independently of per-record extraction success.",
+      "properties": {
+        "detected_record_ids": {
+          "description": "Every detected candidate record ID, including failed and unresolved records.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Detected Record Ids",
+          "type": "array"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "unassigned_source_text_ids": {
+          "description": "Parsed source text not assigned to any record scope, including leading fragments or unresolved areas; not proof of another article.",
+          "items": {
+            "type": "integer"
+          },
+          "title": "Unassigned Source Text Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "detected_record_ids"
+      ],
+      "title": "DocumentDiagnosticsExport",
+      "type": "object"
+    },
+    "DocumentRecordExport": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "properties": {
+              "paper": {
+                "type": "null"
+              }
+            }
+          },
+          "if": {
+            "properties": {
+              "status": {
+                "const": "extracted"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "error": {
+                "type": "null"
+              },
+              "paper": {
+                "properties": {
+                  "validation": {
+                    "anyOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "properties": {
+                          "blocking": {
+                            "maximum": 0
+                          },
+                          "issues": {
+                            "items": {
+                              "properties": {
+                                "blocking": {
+                                  "const": false
+                                }
+                              }
+                            }
+                          },
+                          "promotable": {
+                            "const": true
+                          }
+                        },
+                        "type": "object"
+                      }
+                    ]
+                  }
+                },
+                "type": "object"
+              },
+              "partial_paper": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "partial_paper": {
+                "type": "object"
+              }
+            },
+            "required": [
+              "partial_paper"
+            ]
+          },
+          "then": {
+            "properties": {
+              "partial_paper": {
+                "properties": {
+                  "validation": {
+                    "properties": {
+                      "blocking": {
+                        "minimum": 1
+                      },
+                      "issues": {
+                        "contains": {
+                          "properties": {
+                            "blocking": {
+                              "const": true
+                            }
+                          },
+                          "required": [
+                            "blocking"
+                          ]
+                        }
+                      },
+                      "promotable": {
+                        "const": false
+                      }
+                    },
+                    "required": [
+                      "blocking",
+                      "promotable",
+                      "issues"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "validation"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "unresolved",
+                  "failed"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "One document-local candidate and its extraction outcome.\n\nSource identifiers refer to the original document before per-record\nnormalization. Author, bibliography and cross-reference IDs inside ``paper``\nbelong only to that record, even when another record reuses their numbers.",
+      "properties": {
+        "error": {
+          "anyOf": [
+            {
+              "maxLength": 500,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional caller-sanitized failure summary, excluding source text and secrets.",
+          "title": "Error"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "paper": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaperExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "A scoped paper export exactly when status is extracted; otherwise null."
+        },
+        "partial_paper": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaperExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Independently retained scoped fields for an unresolved or failed record, with explicit blocking validation. Never an extraction success or a promotable paper."
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "record_id": {
+          "description": "Document-local record key.",
+          "minLength": 1,
+          "pattern": "\\S",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Section Ids",
+          "type": "array"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "extracted",
+            "unresolved",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "status",
+        "paper"
+      ],
+      "title": "DocumentRecordExport",
+      "type": "object"
+    },
+    "DoiCandidateExport": {
+      "additionalProperties": false,
+      "properties": {
+        "marker_kind": {
+          "title": "Marker Kind",
+          "type": "string"
+        },
+        "normalized": {
+          "title": "Normalized",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page"
+        },
+        "raw": {
+          "title": "Raw",
+          "type": "string"
+        },
+        "region_index": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Region Index"
+        },
+        "region_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Region Type"
+        },
+        "rejection_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rejection Reason"
+        },
+        "repeated_header_footer_count": {
+          "title": "Repeated Header Footer Count",
+          "type": "integer"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Id"
+        },
+        "section_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Type"
+        },
+        "selection_tier": {
+          "title": "Selection Tier",
+          "type": "integer"
+        },
+        "semantic_context": {
+          "title": "Semantic Context",
+          "type": "string"
+        },
+        "source_kind": {
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "text_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Text Id"
+        }
+      },
+      "required": [
+        "raw",
+        "normalized",
+        "source_kind",
+        "page",
+        "section_id",
+        "section_type",
+        "region_index",
+        "region_type",
+        "text_id",
+        "marker_kind",
+        "repeated_header_footer_count",
+        "semantic_context",
+        "selection_tier"
+      ],
+      "title": "DoiCandidateExport",
+      "type": "object"
+    },
+    "EnrichmentExport": {
+      "additionalProperties": false,
+      "description": "Reference-enrichment completeness \u2014 lets a consumer distinguish a\npartial (timed-out) Crossref enrichment from a complete one without\ngrepping ``extraction.warnings``. ``null`` when enrichment never ran.",
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "refs_enriched": {
+          "title": "Refs Enriched",
+          "type": "integer"
+        },
+        "refs_total": {
+          "title": "Refs Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "refs_enriched",
+        "refs_total"
+      ],
+      "title": "EnrichmentExport",
+      "type": "object"
+    },
+    "EqExport": {
+      "additionalProperties": false,
+      "properties": {
+        "comp": {
+          "title": "Comp",
+          "type": "string"
+        },
+        "df": {
+          "title": "Df",
+          "type": "string"
+        },
+        "eq_id": {
+          "title": "Eq Id",
+          "type": "integer"
+        },
+        "grp_id": {
+          "title": "Grp Id",
+          "type": "integer"
+        },
+        "lhs": {
+          "title": "Lhs",
+          "type": "string"
+        },
+        "rhs": {
+          "title": "Rhs",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        },
+        "verbatim": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verbatim"
+        }
+      },
+      "required": [
+        "eq_id",
+        "text_id",
+        "grp_id",
+        "lhs",
+        "df",
+        "comp",
+        "rhs"
+      ],
+      "title": "EqExport",
+      "type": "object"
+    },
+    "ExpectedIdentityExport": {
+      "additionalProperties": false,
+      "properties": {
+        "doi_required": {
+          "default": false,
+          "title": "Doi Required",
+          "type": "boolean"
+        },
+        "expected_doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Doi"
+        },
+        "expected_doi_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Doi Sha256"
+        },
+        "expected_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Title"
+        },
+        "queue_record_id": {
+          "title": "Queue Record Id",
+          "type": "string"
+        },
+        "source_sha256": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Sha256"
+        },
+        "target_block_hint": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Target Block Hint"
+        }
+      },
+      "required": [
+        "queue_record_id"
+      ],
+      "title": "ExpectedIdentityExport",
+      "type": "object"
+    },
+    "ExtractionExport": {
+      "additionalProperties": false,
+      "description": "Extraction provenance \u2014 how this output was produced.\n\nBuilt by ``ExportStage._build_extraction`` from the pipeline context; the\nexport function passes it through verbatim. Omitted entirely when a Paper is\nexported outside the pipeline.",
+      "properties": {
+        "bibr_version": {
+          "title": "Bibr Version",
+          "type": "string"
+        },
+        "build_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Build Sha"
+        },
+        "completed_at": {
+          "title": "Completed At",
+          "type": "string"
+        },
+        "diagnostics": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DiagnosticsExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "enrichment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnrichmentExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "identity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "llm": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LlmEngineExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "ocr": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OcrEngineExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "regions": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/RegionExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Regions"
+        },
+        "settings": {
+          "$ref": "#/$defs/ExtractionSettingsExport"
+        },
+        "timings": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TimingsExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "trace": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/LlmTraceExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trace"
+        },
+        "usage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UsageExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "warnings": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "bibr_version",
+        "completed_at",
+        "settings"
+      ],
+      "title": "ExtractionExport",
+      "type": "object"
+    },
+    "ExtractionSettingsExport": {
+      "additionalProperties": false,
+      "description": "Per-run resolutions of the reference/enrichment knobs.",
+      "properties": {
+        "consolidate": {
+          "title": "Consolidate",
+          "type": "string"
+        },
+        "crossref_enrich": {
+          "title": "Crossref Enrich",
+          "type": "boolean"
+        },
+        "ref_parse": {
+          "title": "Ref Parse",
+          "type": "string"
+        },
+        "ref_seg": {
+          "title": "Ref Seg",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref_seg",
+        "ref_parse",
+        "crossref_enrich",
+        "consolidate"
+      ],
+      "title": "ExtractionSettingsExport",
+      "type": "object"
+    },
+    "FigureExport": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "figure_id": {
+          "title": "Figure Id",
+          "type": "integer"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/FigurePartExport"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        }
+      },
+      "required": [
+        "figure_id",
+        "page_number"
+      ],
+      "title": "FigureExport",
+      "type": "object"
+    },
+    "FigurePartExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "image": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Image"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "part_index": {
+          "title": "Part Index",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProvenanceExport"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "part_index"
+      ],
+      "title": "FigurePartExport",
+      "type": "object"
+    },
+    "FrontMatterBlockExport": {
+      "additionalProperties": false,
+      "description": "Source-addressable record candidate; no duplicated document payload.",
+      "properties": {
+        "block_id": {
+          "title": "Block Id",
+          "type": "string"
+        },
+        "candidate_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Candidate Ids",
+          "type": "array"
+        },
+        "merge_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Merge Reasons",
+          "type": "array"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "source_block_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Block Ids",
+          "type": "array"
+        },
+        "source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Section Ids",
+          "type": "array"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "title_candidate_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Title Candidate Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "block_id",
+        "candidate_ids",
+        "title_candidate_ids",
+        "source_text_ids",
+        "source_section_ids",
+        "pages"
+      ],
+      "title": "FrontMatterBlockExport",
+      "type": "object"
+    },
+    "FrontMatterCandidateExport": {
+      "additionalProperties": false,
+      "description": "Candidate ownership and roles, referencing source rows without copying prose.",
+      "properties": {
+        "candidate_id": {
+          "title": "Candidate Id",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        },
+        "reading_order": {
+          "title": "Reading Order",
+          "type": "integer"
+        },
+        "roles": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Roles",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "source_kind": {
+          "title": "Source Kind",
+          "type": "string"
+        },
+        "text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Text Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "candidate_id",
+        "source_kind",
+        "reading_order",
+        "text_ids",
+        "roles"
+      ],
+      "title": "FrontMatterCandidateExport",
+      "type": "object"
+    },
+    "FrontMatterResolutionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "blocks": {
+          "items": {
+            "$ref": "#/$defs/FrontMatterBlockExport"
+          },
+          "title": "Blocks",
+          "type": "array"
+        },
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/FrontMatterCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected_block_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Selected Block Id"
+        },
+        "selection_method": {
+          "title": "Selection Method",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selected_block_id",
+        "selection_method",
+        "reason_flags",
+        "blocks",
+        "candidates"
+      ],
+      "title": "FrontMatterResolutionExport",
+      "type": "object"
+    },
+    "FundingExport": {
+      "additionalProperties": false,
+      "description": "Structured funding entry parsed from the funding statement.",
+      "properties": {
+        "award_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Award Ids",
+          "type": "array"
+        },
+        "funder": {
+          "title": "Funder",
+          "type": "string"
+        },
+        "funding_id": {
+          "title": "Funding Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "funding_id",
+        "funder"
+      ],
+      "title": "FundingExport",
+      "type": "object"
+    },
+    "IdentityExport": {
+      "additionalProperties": false,
+      "description": "Caller-supplied expectations and the DOI-selection receipt.",
+      "properties": {
+        "expected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExpectedIdentityExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IdentityReceiptExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "IdentityExport",
+      "type": "object"
+    },
+    "IdentityReceiptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "candidates": {
+          "items": {
+            "$ref": "#/$defs/DoiCandidateExport"
+          },
+          "title": "Candidates",
+          "type": "array"
+        },
+        "issue_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Issue Codes",
+          "type": "array"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoiCandidateExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "title": "IdentityReceiptExport",
+      "type": "object"
+    },
+    "LlmEngineExport": {
+      "additionalProperties": false,
+      "description": "The CORE extraction LLM. ``null`` when the run deliberately had none.\n\n``usage.breakdown`` is authoritative for every engine that actually ran;\nwhen the two disagree (multi-engine run), breakdown wins.",
+      "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backend"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        }
+      },
+      "title": "LlmEngineExport",
+      "type": "object"
+    },
+    "LlmTraceExport": {
+      "additionalProperties": false,
+      "description": "One LLM call's captured prompt and raw response.\n\nCapture is opt-in via ``LLM_CAPTURE_TRACE`` (default off). Traces are joined\nto the extraction by paper ID and to usage breakdowns by label, provider,\nand model. Credential-shaped tokens are scrubbed before export; document\ntext is still present, so callers control where trace-bearing exports go.\n\nOnly the Instructor backend currently captures traces. The NuExtract-native\nbackend logs a warning when tracing is requested and emits no trace rows.\nOnly successful physical attempts are captured: validation re-asks inside\nInstructor and transient failures in the outer retry loop are absent.\nConsequently ``attempt`` is currently always 1; failure fields do not\nconstitute a complete retry history.",
+      "properties": {
+        "attempt": {
+          "default": 1,
+          "title": "Attempt",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error"
+        },
+        "finish_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finish Reason"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "messages": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Messages",
+          "type": "array"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        },
+        "parsed_ok": {
+          "title": "Parsed Ok",
+          "type": "boolean"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "raw_completion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Completion"
+        }
+      },
+      "required": [
+        "label",
+        "parsed_ok"
+      ],
+      "title": "LlmTraceExport",
+      "type": "object"
+    },
+    "MetadataExport": {
+      "additionalProperties": false,
+      "description": "Scalar paper-level metadata.\n\nScalars only: nested objects/lists here break R consumers that call\n``as.data.frame(metadata)`` (metacheck's ``.read_bibr``). Processing\nmetadata lives under ``extraction`` instead; file identity under ``source``.",
+      "properties": {
+        "abstract": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Abstract"
+        },
+        "coi_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Coi Statement"
+        },
+        "data_availability": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Data Availability"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Doi"
+        },
+        "ethics_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ethics Statement"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "funding_statement": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Funding Statement"
+        },
+        "issn": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issn"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "journal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Journal"
+        },
+        "keywords": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "License"
+        },
+        "oecd_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd Confidence"
+        },
+        "oecd_l1": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd L1"
+        },
+        "oecd_l2": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Oecd L2"
+        },
+        "paper_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Type"
+        },
+        "paper_type_confidence": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Paper Type Confidence"
+        },
+        "published": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Published"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Title"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        }
+      },
+      "required": [
+        "title",
+        "keywords",
+        "doi"
+      ],
+      "title": "MetadataExport",
+      "type": "object"
+    },
+    "MetadataMatchExport": {
+      "additionalProperties": false,
+      "description": "Flat enrichment match for the paper's OWN bibliographic identity.\n\nMirrors :class:`BibMatchExport` (same external-service shape) but keyed to\nthe paper rather than a reference, so it carries no ``bib_id``.",
+      "properties": {
+        "author": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author"
+        },
+        "bib_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bib Type"
+        },
+        "container": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Container"
+        },
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date"
+        },
+        "doi": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doi"
+        },
+        "edition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edition"
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/PersonNameExport"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Editor"
+        },
+        "first_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "First Page"
+        },
+        "issue": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Issue"
+        },
+        "last_page": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Last Page"
+        },
+        "publisher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Publisher"
+        },
+        "score": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Score"
+        },
+        "service": {
+          "title": "Service",
+          "type": "string"
+        },
+        "service_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service Id"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Version"
+        },
+        "volume": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Volume"
+        },
+        "year": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Year"
+        }
+      },
+      "required": [
+        "service"
+      ],
+      "title": "MetadataMatchExport",
+      "type": "object"
+    },
+    "MetadataVariantExport": {
+      "additionalProperties": false,
+      "description": "One printed field version belonging to the selected article record.",
+      "properties": {
+        "byline_source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Section Ids",
+          "type": "array"
+        },
+        "byline_source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Byline Source Text Ids",
+          "type": "array"
+        },
+        "field": {
+          "enum": [
+            "title",
+            "abstract"
+          ],
+          "title": "Field",
+          "type": "string"
+        },
+        "is_primary": {
+          "description": "Whether this version matches the exported scalar field.",
+          "title": "Is Primary",
+          "type": "boolean"
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Language"
+        },
+        "pages": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Pages",
+          "type": "array"
+        },
+        "presentation_ids": {
+          "description": "Source-supported title/byline/abstract presentation links within this record. Empty means pairing is unestablished; order in the variant table never implies a pair. Repeated field text can belong to several presentations.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Presentation Ids",
+          "type": "array"
+        },
+        "record_id": {
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Section Ids",
+          "type": "array"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "variant_id": {
+          "title": "Variant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "variant_id",
+        "record_id",
+        "field",
+        "text",
+        "is_primary"
+      ],
+      "title": "MetadataVariantExport",
+      "type": "object"
+    },
+    "OcrEngineExport": {
+      "additionalProperties": false,
+      "description": "Which OCR engine produced this output. ``null`` on the DOCX-native path.",
+      "properties": {
+        "backend": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Backend"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "profile": {
+          "anyOf": [
+            {
+              "enum": [
+                "paddle",
+                "glm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Profile"
+        }
+      },
+      "title": "OcrEngineExport",
+      "type": "object"
+    },
+    "PaperExport": {
+      "additionalProperties": false,
+      "description": "Pydantic model for the bibr v11.x JSON export schema.\n\nv11 is a clean break: no v10 payload validates against this model, and none\nis meant to. Readers dispatch on the presence of the root ``schema_version``.",
+      "properties": {
+        "affiliation": {
+          "default": [],
+          "description": "Structured author affiliations parsed from the byline: verbatim text plus best-effort institution/department/city/country and linked author IDs.",
+          "items": {
+            "$ref": "#/$defs/AffiliationExport"
+          },
+          "title": "Affiliation",
+          "type": "array"
+        },
+        "author": {
+          "description": "Extracted authors, with name, affiliation, email, corresponding-author flag, ORCID, and contribution roles.",
+          "items": {
+            "$ref": "#/$defs/AuthorExport"
+          },
+          "title": "Author",
+          "type": "array"
+        },
+        "bib": {
+          "description": "Parsed bibliography entries, verbatim from the printed reference list \u2014 never backfilled from external enrichment.",
+          "items": {
+            "$ref": "#/$defs/BibExport"
+          },
+          "title": "Bib",
+          "type": "array"
+        },
+        "bib_match": {
+          "default": [],
+          "description": "Flattened enrichment matches (e.g. Crossref) for bibliography entries, one row per external-service hit.",
+          "items": {
+            "$ref": "#/$defs/BibMatchExport"
+          },
+          "title": "Bib Match",
+          "type": "array"
+        },
+        "eq": {
+          "description": "Parsed statistical/mathematical expressions split into left-hand side, degrees of freedom, comparator, and right-hand side.",
+          "items": {
+            "$ref": "#/$defs/EqExport"
+          },
+          "title": "Eq",
+          "type": "array"
+        },
+        "extraction": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExtractionExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Extraction provenance: how this output was produced \u2014 engines, per-run settings, timings, LLM usage, enrichment, identity receipts, diagnostics and warnings; omitted when exported outside the pipeline."
+        },
+        "figure": {
+          "description": "Extracted figures with caption, page number, and (optionally) base64-encoded image data.",
+          "items": {
+            "$ref": "#/$defs/FigureExport"
+          },
+          "title": "Figure",
+          "type": "array"
+        },
+        "funding": {
+          "default": [],
+          "description": "Structured funder names and award IDs parsed from the funding statement.",
+          "items": {
+            "$ref": "#/$defs/FundingExport"
+          },
+          "title": "Funding",
+          "type": "array"
+        },
+        "metadata": {
+          "$ref": "#/$defs/MetadataExport",
+          "description": "Scalar paper-level metadata: title, abstract, keywords, DOI, paper-type and OECD classification, the paper's own journal/venue identity, and research-integrity statement text."
+        },
+        "metadata_match": {
+          "default": [],
+          "description": "Enrichment matches for the paper's own bibliographic identity (self-DOI lookup), shaped like bib_match minus bib_id.",
+          "items": {
+            "$ref": "#/$defs/MetadataMatchExport"
+          },
+          "title": "Metadata Match",
+          "type": "array"
+        },
+        "metadata_variant": {
+          "description": "Separately preserved printed title and abstract versions for the selected article, with primary selection and source identifiers. Empty when explicit variant boundaries cannot be established safely. Language is null unless source-supported.",
+          "items": {
+            "$ref": "#/$defs/MetadataVariantExport"
+          },
+          "title": "Metadata Variant",
+          "type": "array"
+        },
+        "paper_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Paper identifier: user-supplied --paper-id, else the DOI, else the source file name.",
+          "title": "Paper Id"
+        },
+        "qualification_provenance": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deployment-qualification provenance: identity SHAs, per-task protocol hashes, native-validity + fallback outcome, and request counts. Always present; null (never omitted) when no LLM ran or usage tracking is disabled.",
+          "title": "Qualification Provenance"
+        },
+        "schema_version": {
+          "const": "11.1",
+          "description": "Export schema version. Its presence at the root is how readers distinguish v11 from all earlier versions.",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "section": {
+          "description": "Document section headers with hierarchy (level, parent) and IMRaD classification.",
+          "items": {
+            "$ref": "#/$defs/SectionExport"
+          },
+          "title": "Section",
+          "type": "array"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceExport",
+          "description": "Identity of the input artifact: file name, content hash, and format."
+        },
+        "table": {
+          "description": "Extracted tables with HTML markup, structured cell contents, caption, and page number.",
+          "items": {
+            "$ref": "#/$defs/TableExport"
+          },
+          "title": "Table",
+          "type": "array"
+        },
+        "text": {
+          "description": "Full body text as an ordered array of sentence-level spans, each linked to its paragraph, section, and page.",
+          "items": {
+            "$ref": "#/$defs/TextExport"
+          },
+          "title": "Text",
+          "type": "array"
+        },
+        "url": {
+          "description": "Hyperlinks found in the body text, with their link text and source sentence.",
+          "items": {
+            "$ref": "#/$defs/UrlExport"
+          },
+          "title": "Url",
+          "type": "array"
+        },
+        "validation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ValidationExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Output validation gate result: counts of errors/warnings and the structured issue list; absent when the gate was skipped."
+        },
+        "xref": {
+          "description": "In-text citation/cross-reference markers linking a sentence to a bibliography entry, table, figure, footnote, equation, or section.",
+          "items": {
+            "$ref": "#/$defs/XrefExport"
+          },
+          "title": "Xref",
+          "type": "array"
+        }
+      },
+      "required": [
+        "paper_id",
+        "schema_version",
+        "source",
+        "metadata",
+        "metadata_variant",
+        "author",
+        "text",
+        "section",
+        "url",
+        "bib",
+        "xref",
+        "figure",
+        "table",
+        "eq",
+        "bib_match",
+        "metadata_match",
+        "funding",
+        "affiliation",
+        "qualification_provenance"
+      ],
+      "title": "PaperExport",
+      "type": "object"
+    },
+    "PersonNameExport": {
+      "additionalProperties": false,
+      "description": "One structured person name.\n\n``literal`` holds corporate/unsplittable names whole (the JATS\n``string-name`` analog); when it is set, ``family``/``given`` are absent.",
+      "properties": {
+        "family": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Family"
+        },
+        "given": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Given"
+        },
+        "literal": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Literal"
+        },
+        "suffix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Suffix"
+        }
+      },
+      "title": "PersonNameExport",
+      "type": "object"
+    },
+    "ProvenanceExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "page": {
+          "title": "Page",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page"
+      ],
+      "title": "ProvenanceExport",
+      "type": "object"
+    },
+    "ReferenceSegmentationAttemptExport": {
+      "additionalProperties": false,
+      "properties": {
+        "credible_starts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Credible Starts"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected": {
+          "title": "Selected",
+          "type": "boolean"
+        },
+        "spans": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Spans",
+          "type": "array"
+        },
+        "strategy": {
+          "title": "Strategy",
+          "type": "string"
+        }
+      },
+      "required": [
+        "strategy",
+        "spans",
+        "credible_starts",
+        "selected",
+        "reason_flags"
+      ],
+      "title": "ReferenceSegmentationAttemptExport",
+      "type": "object"
+    },
+    "ReferenceSourceLossExport": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "source_span": {
+          "description": "Half-open character offsets in the normalized selected reference source.",
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Source Span",
+          "type": "array"
+        },
+        "source_text": {
+          "title": "Source Text",
+          "type": "string"
+        },
+        "source_text_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Source Text Ids",
+          "type": "array"
+        },
+        "stage": {
+          "enum": [
+            "segmentation",
+            "filtering",
+            "parsing"
+          ],
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "required": [
+        "stage",
+        "reason",
+        "source_text",
+        "source_span"
+      ],
+      "title": "ReferenceSourceLossExport",
+      "type": "object"
+    },
+    "ReferenceYieldExport": {
+      "additionalProperties": false,
+      "properties": {
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/ReferenceSegmentationAttemptExport"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "credible_source_starts": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Credible Source Starts"
+        },
+        "duplicate_rate": {
+          "title": "Duplicate Rate",
+          "type": "number"
+        },
+        "losses": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReferenceYieldLossesExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "parsed_count": {
+          "title": "Parsed Count",
+          "type": "integer"
+        },
+        "reason_flags": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reason Flags",
+          "type": "array"
+        },
+        "selected_spans": {
+          "items": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Selected Spans",
+          "type": "array"
+        },
+        "source_character_coverage": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Character Coverage"
+        },
+        "valid_count": {
+          "title": "Valid Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "credible_source_starts",
+        "attempts",
+        "selected_spans",
+        "source_character_coverage",
+        "parsed_count",
+        "valid_count",
+        "duplicate_rate",
+        "reason_flags"
+      ],
+      "title": "ReferenceYieldExport",
+      "type": "object"
+    },
+    "ReferenceYieldLossesExport": {
+      "additionalProperties": false,
+      "properties": {
+        "filtered_segment_count": {
+          "title": "Filtered Segment Count",
+          "type": "integer"
+        },
+        "parse_alignment_available": {
+          "title": "Parse Alignment Available",
+          "type": "boolean"
+        },
+        "retained_segment_count": {
+          "title": "Retained Segment Count",
+          "type": "integer"
+        },
+        "segmented_count": {
+          "title": "Segmented Count",
+          "type": "integer"
+        },
+        "selected_section_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Selected Section Ids",
+          "type": "array"
+        },
+        "selected_source_row_count": {
+          "description": "Rows supplied by the reference locator; not whole-document bibliography coverage.",
+          "title": "Selected Source Row Count",
+          "type": "integer"
+        },
+        "source_alignment_available": {
+          "title": "Source Alignment Available",
+          "type": "boolean"
+        },
+        "unlocated_unresolved_count": {
+          "title": "Unlocated Unresolved Count",
+          "type": "integer"
+        },
+        "unresolved": {
+          "items": {
+            "$ref": "#/$defs/ReferenceSourceLossExport"
+          },
+          "title": "Unresolved",
+          "type": "array"
+        }
+      },
+      "required": [
+        "selected_source_row_count",
+        "segmented_count",
+        "retained_segment_count",
+        "filtered_segment_count",
+        "parse_alignment_available",
+        "source_alignment_available",
+        "unlocated_unresolved_count"
+      ],
+      "title": "ReferenceYieldLossesExport",
+      "type": "object"
+    },
+    "RegionExport": {
+      "additionalProperties": false,
+      "description": "Per-region layout debug payload (``include_regions=True``).",
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Bbox"
+        },
+        "bbox_height": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox Height"
+        },
+        "bbox_width": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox Width"
+        },
+        "char_density": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Char Density"
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content"
+        },
+        "estimated_line_height": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Line Height"
+        },
+        "font_bold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Bold"
+        },
+        "font_size": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "font_weight": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Weight"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Label"
+        },
+        "page": {
+          "title": "Page",
+          "type": "integer"
+        },
+        "raw_ocr_content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Ocr Content"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        }
+      },
+      "required": [
+        "page",
+        "index",
+        "label",
+        "bbox"
+      ],
+      "title": "RegionExport",
+      "type": "object"
+    },
+    "SectionExport": {
+      "additionalProperties": false,
+      "properties": {
+        "classification_score": {
+          "title": "Classification Score",
+          "type": "number"
+        },
+        "classification_source": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Classification Source"
+        },
+        "header": {
+          "title": "Header",
+          "type": "string"
+        },
+        "level": {
+          "title": "Level",
+          "type": "integer"
+        },
+        "parent_section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Parent Section Id"
+        },
+        "section_id": {
+          "title": "Section Id",
+          "type": "integer"
+        },
+        "section_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Type"
+        }
+      },
+      "required": [
+        "section_id",
+        "header",
+        "level",
+        "parent_section_id",
+        "section_type",
+        "classification_score"
+      ],
+      "title": "SectionExport",
+      "type": "object"
+    },
+    "SourceExport": {
+      "additionalProperties": false,
+      "description": "Identity of the input artifact \u2014 not of the paper.",
+      "properties": {
+        "file_hash": {
+          "title": "File Hash",
+          "type": "string"
+        },
+        "file_name": {
+          "title": "File Name",
+          "type": "string"
+        },
+        "input_format": {
+          "title": "Input Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "file_name",
+        "file_hash",
+        "input_format"
+      ],
+      "title": "SourceExport",
+      "type": "object"
+    },
+    "TableExport": {
+      "additionalProperties": false,
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "contents": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Contents",
+          "type": "array"
+        },
+        "html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Html"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/TablePartExport"
+          },
+          "title": "Parts",
+          "type": "array"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section Id"
+        },
+        "table_id": {
+          "title": "Table Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "table_id",
+        "contents",
+        "page_number"
+      ],
+      "title": "TableExport",
+      "type": "object"
+    },
+    "TablePartExport": {
+      "additionalProperties": false,
+      "properties": {
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "contents": {
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Contents",
+          "type": "array"
+        },
+        "html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Html"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page Number"
+        },
+        "part_index": {
+          "title": "Part Index",
+          "type": "integer"
+        },
+        "provenance": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProvenanceExport"
+          },
+          "title": "Provenance",
+          "type": "array"
+        }
+      },
+      "required": [
+        "part_index",
+        "contents"
+      ],
+      "title": "TablePartExport",
+      "type": "object"
+    },
+    "TextExport": {
+      "additionalProperties": false,
+      "properties": {
+        "_bbox_2d": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox 2D"
+        },
+        "_font_bold": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Bold"
+        },
+        "_font_size": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Font Size"
+        },
+        "_is_italic": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Is Italic"
+        },
+        "_page_h": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page H"
+        },
+        "_page_w": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page W"
+        },
+        "_region_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region Type"
+        },
+        "formatted": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Formatted"
+        },
+        "page_number": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Number"
+        },
+        "paragraph_id": {
+          "title": "Paragraph Id",
+          "type": "integer"
+        },
+        "section_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Section Id"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "text",
+        "text_id",
+        "paragraph_id",
+        "section_id",
+        "page_number"
+      ],
+      "title": "TextExport",
+      "type": "object"
+    },
+    "TimingsExport": {
+      "additionalProperties": false,
+      "description": "Per-stage wall-clock seconds (the export stage's own time is excluded \u2014\nit is still running when this is built).\n\nBoth fields are always populated when this object exists: an untimed run\nomits the whole ``extraction.timings`` object rather than emitting one with\nnull fields (``ExportStage._build_extraction`` passes ``None``, which\n``ExtractionExport._omit_absent`` then drops). The ``| None`` types are\nstructural only.",
+      "properties": {
+        "stages": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "number"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Stages"
+        },
+        "total_seconds": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Total Seconds"
+        }
+      },
+      "title": "TimingsExport",
+      "type": "object"
+    },
+    "UrlExport": {
+      "additionalProperties": false,
+      "properties": {
+        "href": {
+          "title": "Href",
+          "type": "string"
+        },
+        "link_text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Link Text"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "href",
+        "link_text",
+        "text_id"
+      ],
+      "title": "UrlExport",
+      "type": "object"
+    },
+    "UsageExport": {
+      "additionalProperties": false,
+      "properties": {
+        "breakdown": {
+          "items": {
+            "$ref": "#/$defs/UsageRowExport"
+          },
+          "title": "Breakdown",
+          "type": "array"
+        },
+        "totals": {
+          "$ref": "#/$defs/UsageTotalsExport"
+        }
+      },
+      "required": [
+        "totals"
+      ],
+      "title": "UsageExport",
+      "type": "object"
+    },
+    "UsageRowExport": {
+      "additionalProperties": false,
+      "description": "One ``(label, provider, model)`` LLM usage row.",
+      "properties": {
+        "cached_input_tokens": {
+          "title": "Cached Input Tokens",
+          "type": "integer"
+        },
+        "calls": {
+          "title": "Calls",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
+        "output_tokens": {
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "provider": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Provider"
+        },
+        "total_tokens": {
+          "title": "Total Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "label",
+        "calls",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "total_tokens"
+      ],
+      "title": "UsageRowExport",
+      "type": "object"
+    },
+    "UsageTotalsExport": {
+      "additionalProperties": false,
+      "description": "Aggregate of every ``breakdown`` row \u2014 denormalized deliberately.",
+      "properties": {
+        "cached_input_tokens": {
+          "title": "Cached Input Tokens",
+          "type": "integer"
+        },
+        "calls": {
+          "title": "Calls",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "title": "Input Tokens",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "title": "Output Tokens",
+          "type": "integer"
+        },
+        "total_tokens": {
+          "title": "Total Tokens",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "calls",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "total_tokens"
+      ],
+      "title": "UsageTotalsExport",
+      "type": "object"
+    },
+    "ValidationExport": {
+      "additionalProperties": false,
+      "description": "Promotion disposition derived from typed validation issues.",
+      "properties": {
+        "blocking": {
+          "default": 0,
+          "title": "Blocking",
+          "type": "integer"
+        },
+        "errors": {
+          "title": "Errors",
+          "type": "integer"
+        },
+        "issues": {
+          "items": {
+            "$ref": "#/$defs/ValidationIssueExport"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "promotable": {
+          "default": true,
+          "title": "Promotable",
+          "type": "boolean"
+        },
+        "warnings": {
+          "title": "Warnings",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "errors",
+        "warnings",
+        "issues"
+      ],
+      "title": "ValidationExport",
+      "type": "object"
+    },
+    "ValidationIssueExport": {
+      "additionalProperties": false,
+      "description": "JSON-safe representation of a shared pipeline validation issue.",
+      "properties": {
+        "blocking": {
+          "default": false,
+          "title": "Blocking",
+          "type": "boolean"
+        },
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "origin_stage": {
+          "default": "export",
+          "title": "Origin Stage",
+          "type": "string"
+        },
+        "severity": {
+          "title": "Severity",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "severity",
+        "message",
+        "count"
+      ],
+      "title": "ValidationIssueExport",
+      "type": "object"
+    },
+    "XrefExport": {
+      "additionalProperties": false,
+      "properties": {
+        "contents": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Contents"
+        },
+        "target_id": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Target Id"
+        },
+        "text_id": {
+          "title": "Text Id",
+          "type": "integer"
+        },
+        "tier": {
+          "anyOf": [
+            {
+              "enum": [
+                "numeric",
+                "paren-numeric",
+                "flattened-superscript",
+                "author-year",
+                "llm"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tier"
+        },
+        "xref_type": {
+          "enum": [
+            "bib",
+            "table",
+            "figure",
+            "foot",
+            "supplementary",
+            "equation",
+            "section"
+          ],
+          "title": "Xref Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "xref_type",
+        "contents",
+        "text_id"
+      ],
+      "title": "XrefExport",
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "complete"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "records": {
+            "items": {
+              "properties": {
+                "status": {
+                  "const": "extracted"
+                }
+              }
+            },
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "records": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "status": {
+                      "const": "extracted"
+                    }
+                  }
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "status": {
+                      "enum": [
+                        "unresolved",
+                        "failed"
+                      ]
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "unresolved"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "records": {
+            "items": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "unresolved",
+                    "failed"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "description": "An input document and every detected article candidate.\n\nComplete means all detected candidates were extracted, not that the detector\nis guaranteed to have found every article. Runtime validation additionally\nchecks unique record IDs, exact detector-inventory coverage, and identical\nsource identity on nested papers; JSON Schema cannot compare those values.",
+  "properties": {
+    "diagnostics": {
+      "$ref": "#/$defs/DocumentDiagnosticsExport"
+    },
+    "document_id": {
+      "description": "Content-based document identity supplied by the producer, independent of DOI.",
+      "minLength": 1,
+      "pattern": "\\S",
+      "title": "Document Id",
+      "type": "string"
+    },
+    "document_schema_version": {
+      "const": "1.0",
+      "title": "Document Schema Version",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/DocumentRecordExport"
+      },
+      "title": "Records",
+      "type": "array"
+    },
+    "source": {
+      "$ref": "#/$defs/SourceExport"
+    },
+    "status": {
+      "enum": [
+        "complete",
+        "partial",
+        "unresolved"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "document_schema_version",
+    "document_id",
+    "source",
+    "records",
+    "status",
+    "diagnostics"
+  ],
+  "title": "DocumentExport",
+  "type": "object"
+}

@@ -70,7 +70,8 @@ if TYPE_CHECKING:
         chew_many,
     )
     from bibr.config import GlobalSettings, Settings
-    from bibr.export import PaperExport
+    from bibr.document_api import DocumentRecord, DocumentResult, achew_document, chew_document
+    from bibr.export import DocumentExport, PaperExport
     from bibr.local.pipeline import LocalPipeline
     from bibr.pipeline.pipeline import Pipeline
 
@@ -82,6 +83,9 @@ except PackageNotFoundError:
 __all__ = [
     "ChewFailure",
     "Chewer",
+    "DocumentExport",
+    "DocumentRecord",
+    "DocumentResult",
     "GlobalSettings",
     "LocalPipeline",
     "PaperExport",
@@ -91,15 +95,28 @@ __all__ = [
     "Settings",
     "__version__",
     "achew",
+    "achew_document",
     "achew_file",
     "achew_many",
     "chew",
+    "chew_document",
     "chew_file",
     "chew_many",
 ]
 
 
 def __getattr__(name: str) -> Any:
+    if name in ("DocumentRecord", "DocumentResult", "achew_document", "chew_document"):
+        from bibr import document_api
+
+        value = getattr(document_api, name)
+        globals()[name] = value
+        return value
+    if name == "DocumentExport":
+        from bibr.export import DocumentExport
+
+        globals()[name] = DocumentExport
+        return DocumentExport
     if name in (
         "chew",
         "achew",

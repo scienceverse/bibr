@@ -19,5 +19,16 @@ def test_export_models_are_public():
 def test_typed_chew_entry_points_are_public():
     import bibr
 
-    for name in ("chew_file", "achew_file", "chew_many", "achew_many", "PaperExport"):
+    for name in (
+        "chew_file",
+        "achew_file",
+        "chew_many",
+        "achew_many",
+        "PaperExport",
+        "chew_document",
+        "achew_document",
+        "DocumentExport",
+        "DocumentResult",
+        "DocumentRecord",
+    ):
         assert getattr(bibr, name) is not None

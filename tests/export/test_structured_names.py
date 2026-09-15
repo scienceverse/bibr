@@ -123,5 +123,5 @@ def test_export_with_structured_names_validates_as_schema_10_9():
     metadata = PaperMetadata(doi="10.1234/test", title="T", references=[_reference()])
     payload = export_paper_to_json(_minimal_paper(metadata=metadata))
 
-    assert payload["schema_version"] == "11.0"
+    assert payload["schema_version"] == "11.1"
     assert validate_export(payload) == []

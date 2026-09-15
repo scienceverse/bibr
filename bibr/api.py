@@ -57,6 +57,7 @@ __all__ = [
 
 # Table-shaped top-level keys of the v11.0 export schema.
 _TABLE_KEYS = (
+    "metadata_variant",
     "author",
     "text",
     "section",
