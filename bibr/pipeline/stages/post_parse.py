@@ -1376,6 +1376,7 @@ async def post_parse(
     ML-training-data preprocessing where metadata will be re-labeled later.
     """
     from bibr.clients.llm import LLMClient, new_usage_context_key, usage_file_context
+    from bibr.clients.structured import StructuredResponseError
     from bibr.config import snapshot_settings
     from bibr.extract.ref_extractor import _resolve_ref_strategies
     from bibr.paper import _merge_ocr_metadata
@@ -1631,13 +1632,44 @@ async def post_parse(
             metadata_issues.extend(integrity_resolution.issues)
 
             if not no_llm:
-                await extract_structured_integrity(
-                    contents,
-                    paper_metadata,
-                    llm_client,
-                    file_hash,
-                    integrity_resolution=integrity_resolution,
-                )
+                try:
+                    await extract_structured_integrity(
+                        contents,
+                        paper_metadata,
+                        llm_client,
+                        file_hash,
+                        integrity_resolution=integrity_resolution,
+                    )
+                except StructuredResponseError as exc:
+                    from bibr.validation import IssueSeverity, ValidationIssue
+
+                    diagnostics = exc.safe_diagnostics
+                    if diagnostics is None:
+                        raise
+                    category = diagnostics.invalid_category
+                    logger.warning(
+                        "Research-integrity response invalid (%s); retaining source statements "
+                        "and independently extracted metadata",
+                        category,
+                    )
+                    contents.processing_warnings.append(
+                        f"INTEGRITY_LLM_RESPONSE_INVALID:{category}: retained source statements"
+                    )
+                    metadata_issues.append(
+                        ValidationIssue(
+                            code="VAL_INTEGRITY_LLM_RESPONSE_INVALID",
+                            severity=IssueSeverity.WARNING,
+                            message="Optional funding, author-role and affiliation parsing "
+                            "returned invalid structured output; retained source statements "
+                            "and independently extracted metadata",
+                            origin_stage="post_parse",
+                            evidence_ids=(
+                                "field:research_integrity",
+                                f"reason:llm_response_invalid:{category}",
+                            ),
+                            blocking=False,
+                        )
+                    )
             extraction_completed = True
 
         except ProcessingError as exc:
