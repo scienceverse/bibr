@@ -24,6 +24,7 @@ from bibr.extract.extractor import (
     _parse_refs_via_ner,
     _strip_enum_markers,
 )
+from bibr.extract.ref_extractor import ReferenceExtractor
 from bibr.extract.training_capture import save_ref_training_data, save_seg_training_data
 from bibr.paper import PaperMetadata
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
@@ -3550,7 +3551,8 @@ class TestRefParseStrategyRegistry:
         """The synchronous ModernBERT-CRF parse must not block the event loop:
         the NER adapter offloads ``_parse_references_ner`` via
         ``asyncio.to_thread``, so it runs on a worker thread (a different ident
-        than the loop thread) and its result flows through unchanged."""
+        than the loop thread) and its result flows through unchanged when
+        optional reference recovery is disabled."""
         loop_ident = threading.get_ident()
         recorded: dict[str, object] = {}
         sentinel = ["parsed-ref"]
@@ -3560,8 +3562,9 @@ class TestRefParseStrategyRegistry:
             recorded["arg"] = ref_strings
             return sentinel
 
-        ext = mock.Mock()
-        ext._parse_references_ner.side_effect = fake_parse
+        ext = ReferenceExtractor(mock.Mock(spec=PaperContents))
+        ext._settings.REF_NER_RECOVERY_MAX_SEGMENTS = 0
+        ext._parse_references_ner = mock.Mock(side_effect=fake_parse)
         out = await _parse_refs_via_ner(ext, "full text", ["r1", "r2"])
         assert out is sentinel
         assert recorded["arg"] == ["r1", "r2"]
