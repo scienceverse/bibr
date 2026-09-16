@@ -1,0 +1,27 @@
+cff-version: 1.2.0
+message: >-
+  If you use bibr in research, please cite the software and report the version
+  you used. When available, cite the DOI of that version's Zenodo archive.
+type: software
+title: "bibr: Scientific paper extraction to structured JSON"
+authors:
+  - family-names: Werner
+    given-names: Jakub
+version: 0.5.1
+date-released: 2026-09-12
+license: AGPL-3.0-or-later
+repository-code: "https://github.com/scienceverse/bibr"
+url: "https://bibr.org"
+abstract: >-
+  bibr extracts metadata, full text, references, tables, figures, and equations
+  from scientific papers into structured JSON. It supports PDF, DOCX, JATS XML,
+  HTML, and ePub, with native parsing, layout detection, selective OCR, and local
+  or cloud extraction models. Sentence and page references help researchers
+  check extractions against the source. Interfaces include Python, a command-line
+  tool, an HTTP API, a web demo, and MCP.
+keywords:
+  - scientific document processing
+  - metadata extraction
+  - reference extraction
+  - metascience
+  - research software

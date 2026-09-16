@@ -129,7 +129,9 @@ Do not expose a legacy private package's old versions as part of that setup.
 See [Docker deployment](../guides/deployment.md#docker-deployment).
 
 1. Update the package version, lockfile, changelog, and public documentation on
-   `main`. Wait for `CI / required` to pass on the exact commit to be released.
+   `main`. Update `version` and `date-released` in `CITATION.cff` for the release,
+   and check its authors and license. Wait for `CI / required` to pass on the
+   exact commit to be released.
 2. Rehearse the release from `main` with
    `gh workflow run release.yml --repo scienceverse/bibr --ref main`. Wait for
    the Ubuntu, macOS, Windows, and distribution checks to pass. A manual rehearsal
@@ -146,10 +148,36 @@ See [Docker deployment](../guides/deployment.md#docker-deployment).
    be skipped.
 5. Verify the live PyPI description and install that exact version from PyPI in
    a fresh environment.
+6. If Zenodo integration is enabled, verify that the GitHub release was archived
+   successfully and that its version, authors, license, and DOI are correct.
 
 If publication partially succeeds, rerun only the failed jobs of that same run.
 Do not rerun a successful PyPI upload or move a published release tag. PyPI files
 are immutable; package or description corrections require a new version.
+
+### Zenodo archiving and citation metadata
+
+The root [CITATION.cff](https://github.com/scienceverse/bibr/blob/main/CITATION.cff)
+provides citation metadata for GitHub and Zenodo. Keep it as the single metadata
+source; a `.zenodo.json` file would override it in Zenodo.
+
+To enable automatic archiving, connect the maintainer's GitHub account to
+[Zenodo](https://zenodo.org), open the profile menu's **GitHub** page, select
+**Sync now**, and enable `scienceverse/bibr`. This is a one-time account setup;
+it does not require a Zenodo token in GitHub Actions. Subsequent GitHub releases
+are archived automatically. See Zenodo's
+[repository setup guide](https://help.zenodo.org/docs/github/enable-repository/).
+
+Enabling integration does not create a DOI for releases that already exist.
+For an earlier release, use Zenodo's
+[manual software upload](https://help.zenodo.org/docs/github/archive-software/)
+workflow with that release's source archive, or wait for the next normal release.
+
+After the first archive is published, add its project-wide **concept DOI** badge
+to the README. Research using a particular release should cite that release's
+**version DOI**. Only add a top-level `doi` to `CITATION.cff` if it identifies the
+listed version; remove or update it when preparing a different release. See
+[Zenodo's DOI versioning guidance](https://zenodo.org/help/versioning).
 
 ## Submitting a pull request
 

@@ -91,6 +91,15 @@ and how agentic LLMs helped develop bibr. It is a work in progress.
 - [JSON schema](https://bibr.org/reference/schema/) and [pipeline architecture](https://bibr.org/guides/architecture/).
 - [Evaluating extraction quality](https://bibr.org/contributing/evaluation/) on papers from your workflow.
 
+## Citation
+
+If you use bibr in research, please cite the software and report the version you
+used. Use GitHub's **Cite this repository** button or the
+[citation metadata](https://github.com/scienceverse/bibr/blob/main/CITATION.cff)
+to generate a citation. When a Zenodo archive is available for your release,
+cite its version-specific DOI so readers can identify the exact software used.
+Otherwise, cite the repository URL together with the version or commit.
+
 ## Contributing
 
 Bug reports, test papers, and contributions are welcome. See
