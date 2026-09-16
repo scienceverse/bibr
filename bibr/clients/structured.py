@@ -15,7 +15,54 @@ so backends render the same task definitions instead of drifting copies.
 """
 
 from collections.abc import Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from bibr.exceptions import ProcessingError, SafeLlmDiagnostics
+
+if TYPE_CHECKING:
+    from bibr.schemas import CoreMetadataLLM
+
+
+class StructuredResponseError(ProcessingError):
+    """A completed response failed bounded, schema-aware local parsing.
+
+    This is deliberately distinct from transport, authentication and arbitrary
+    processing failures. The raw provider completion stays on the internal
+    exception for usage/opt-in trace accounting, not in the public message.
+    """
+
+    def __init__(self, category: str, *, last_completion: Any = None):
+        super().__init__(
+            "LLM returned invalid structured output",
+            error_code="llm_invalid_output",
+            safe_diagnostics=SafeLlmDiagnostics(invalid_category=category),
+        )
+        self.category = category
+        self.last_completion = last_completion
+
+
+class PartialCoreMetadataError(ProcessingError):
+    """Validated independent metadata surviving an explicit field failure.
+
+    The extraction layer may retain this data only with a blocking validation
+    issue. Failed fields are absent, never fabricated from another response.
+    """
+
+    def __init__(
+        self,
+        partial_metadata: "CoreMetadataLLM",
+        *,
+        failed_fields: tuple[str, ...],
+        category: str,
+    ):
+        super().__init__(
+            "Some core metadata fields had invalid structured output",
+            error_code="llm_invalid_output",
+            safe_diagnostics=SafeLlmDiagnostics(invalid_category=category),
+        )
+        self.partial_metadata = partial_metadata
+        self.failed_fields = failed_fields
+        self.category = category
 
 
 @runtime_checkable

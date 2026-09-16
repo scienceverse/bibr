@@ -17,6 +17,7 @@ from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
 from bibr.schemas import FrontMatterResult
+from bibr.utils.metadata import is_printed_abstract_heading
 
 if TYPE_CHECKING:
     from bibr.clients.llm_protocol import LlmClient
@@ -193,7 +194,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
     def _is_abstract_heading(candidate) -> bool:
         return bool(
             candidate.source_kind == "heading"
-            and normalize_text(candidate.raw_text) == "abstract"
+            and is_printed_abstract_heading(candidate.raw_text)
             and candidate.roles.isdisjoint(unsafe_roles)
         )
 

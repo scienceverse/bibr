@@ -15,6 +15,7 @@ PUBLIC_ASSETS = frozenset(
         "assets/readme-banner.png",
         "reference/paper.schema.json",
         "schema/bibr-export-v11.schema.json",
+        "schema/bibr-document-v1.schema.json",
         "schema/bibr-export-v10.schema.json",
     }
 )

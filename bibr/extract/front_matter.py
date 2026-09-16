@@ -190,6 +190,8 @@ _NAME_PARTICLES = frozenset(
 CLASSIFIED_BYLINE_TITLE_ROLE = "classified_byline_title"
 BYLINE_PROBATION_ROLE = "byline_probation"
 MODEL_NON_TITLE_SEED_ROLE = "model_non_title_seed"
+BODY_HEADING_ROLE = "body_heading"
+_NUMBERED_BODY_HEADING_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*[.)]?|[IVX]+[.)])\s+", re.I)
 _NAME_LIST_SEPARATOR_RE = re.compile(r"\s*[;·•‣⁃∙⋅]\s*")
 _CONTRIBUTION_ROLE_RE = re.compile(
     r"\b(?:conceptuali[sz]ation|data\s+curation|formal\s+analysis|funding\s+acquisition|"
@@ -237,6 +239,8 @@ class FrontMatterBlock:
     pages: tuple[int, ...] = ()
     bbox: tuple[float, float, float, float] | None = None
     normalized_text: str = ""
+    source_block_ids: tuple[str, ...] = ()
+    merge_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1100,7 +1104,49 @@ def _collect_candidates(
                 ),
             )
         )
-    return tuple(candidates)
+    # Numbering alone cannot distinguish a body heading from a proceedings
+    # title. Require actual descendant hierarchy and no independently owned
+    # byline/abstract before demoting a classifier-UNKNOWN heading. Root (0)
+    # is a sentinel, not evidence of an article/body ancestor.
+    sections = {section.section_id: section for section in contents.sections}
+    title_indices = [index for index, row in enumerate(candidates) if "title" in row.roles]
+    for position, index in enumerate(title_indices):
+        row = candidates[index]
+        section = sections.get(row.section_id)
+        parent = sections.get(section.parent_section_id) if section is not None else None
+        next_index = (
+            title_indices[position + 1] if position + 1 < len(title_indices) else len(candidates)
+        )
+        if (
+            row.source_kind == "heading"
+            and section is not None
+            and section.section_type == CanonicalSection.UNKNOWN
+            and section.parent_section_id not in (None, 0)
+            and parent is not None
+            and section.level > parent.level
+            and _NUMBERED_BODY_HEADING_RE.match(row.raw_text)
+            and row.region_label != "doc_title"
+            and row.raw_text.strip() != (contents.detected_title or "").strip()
+            and not any(
+                "byline" in following.roles or _is_abstract_content(following)
+                for following in candidates[index + 1 : next_index]
+            )
+        ):
+            candidates[index] = replace(
+                row, roles=(row.roles - {"title"}) | frozenset({BODY_HEADING_ROLE})
+            )
+    from bibr.extract.title_source import SOURCE_QUALIFIED_TITLE_ROLE, native_title_evidence
+
+    qualified = {row.candidate_id for row in native_title_evidence(contents, tuple(candidates))}
+    return tuple(
+        replace(
+            row,
+            roles=(row.roles - {"affiliation"}) | {SOURCE_QUALIFIED_TITLE_ROLE},
+        )
+        if row.candidate_id in qualified
+        else row
+        for row in candidates
+    )
 
 
 def _make_block(
@@ -1195,6 +1241,7 @@ def _record_title_indices(
             CLASSIFIED_BYLINE_TITLE_ROLE,
             BYLINE_PROBATION_ROLE,
             MODEL_NON_TITLE_SEED_ROLE,
+            BODY_HEADING_ROLE,
         }:
             developed.add(index)
     return frozenset(developed)
@@ -1224,7 +1271,81 @@ def group_front_matter_blocks(
         current_has_record = current_has_record or begins_record
     if current:
         grouped.append(current)
-    return tuple(_make_block(index, rows) for index, rows in enumerate(grouped, start=1))
+    blocks = tuple(_make_block(index, rows) for index, rows in enumerate(grouped, start=1))
+    return _coalesce_repeated_records(blocks, candidates)
+
+
+def _record_identity_evidence(
+    rows: tuple[FrontMatterCandidate, ...],
+) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+    """Extract conservative printed identifiers, separate from abstract prose."""
+    titles = frozenset(
+        row.normalized_text
+        for row in rows
+        if "title" in row.roles
+        and row.roles.isdisjoint({"byline", "abstract", "affiliation", "doi", BODY_HEADING_ROLE})
+    )
+    bylines = frozenset(
+        " ".join(_WORD_RE.findall(row.normalized_text))
+        for row in rows
+        if "byline" in row.roles
+        and row.roles.isdisjoint({"title", "abstract", "affiliation", BYLINE_PROBATION_ROLE})
+        and row.raw_text.strip()
+    )
+    title_sections = {row.section_id for row in rows if "title" in row.roles}
+    dois = frozenset(
+        doi.casefold()
+        for row in rows
+        if "doi" in row.roles
+        and row.roles.isdisjoint({"title", "abstract", "affiliation", "byline"})
+        and row.section_id in title_sections
+        and (row.region_label or "").casefold() not in {"reference", "reference_content"}
+        and len(row.raw_text) <= 240
+        for match in _DOI_RE.finditer(row.raw_text)
+        if (doi := normalize_doi(match.group(0))) is not None
+    )
+    return titles, bylines, dois
+
+
+def _coalesce_repeated_records(
+    blocks: tuple[FrontMatterBlock, ...],
+    candidates: tuple[FrontMatterCandidate, ...],
+) -> tuple[FrontMatterBlock, ...]:
+    """Join adjacent presentations only with corroborated shared identity.
+
+    Language or proximity alone never establishes that two records are one.
+    Distinct DOI evidence vetoes a merge, even for identical titles/authors.
+    """
+    by_id = {row.candidate_id: row for row in candidates}
+    merged: list[FrontMatterBlock] = []
+    for block in blocks:
+        if not merged:
+            merged.append(block)
+            continue
+        prior = merged[-1]
+        left = _record_identity_evidence(_block_candidates(prior, by_id))
+        right = _record_identity_evidence(_block_candidates(block, by_id))
+        same_byline = bool(left[1] and left[1] == right[1])
+        conflict = len(left[2] | right[2]) > 1
+        same_doi = bool(left[2] and left[2] == right[2])
+        same_title = bool(left[0] & right[0])
+        # Do not join far-apart articles by the same authors in a collection.
+        adjacent_pages = (
+            not prior.pages or not block.pages or 0 <= min(block.pages) - max(prior.pages) <= 1
+        )
+        if not (same_byline and not conflict and adjacent_pages and (same_doi or same_title)):
+            merged.append(block)
+            continue
+        reason = "shared_doi_and_byline" if same_doi else "repeated_title_and_byline"
+        rows = [*_block_candidates(prior, by_id), *_block_candidates(block, by_id)]
+        combined = _make_block(len(merged), rows)
+        merged[-1] = replace(
+            combined,
+            block_id=prior.block_id,
+            source_block_ids=(prior.source_block_ids or (prior.block_id,)) + (block.block_id,),
+            merge_reasons=tuple(dict.fromkeys((*prior.merge_reasons, reason))),
+        )
+    return tuple(merged)
 
 
 def _block_candidates(
@@ -1746,6 +1867,8 @@ def resolve_front_matter(
     selected: FrontMatterBlock | None = None
     method = "no_candidates" if not blocks else "abstained"
     reason_flags: list[str] = []
+    if any(block.merge_reasons for block in blocks):
+        reason_flags.append("shared_identity_presentations_merged")
     if any(candidate.model_roles for candidate in candidates):
         reason_flags.append("front_role_model")
 

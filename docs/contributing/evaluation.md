@@ -181,6 +181,40 @@ This mode emits section recall, coverage, and a drop report. It has a separate
 output shape from metadata scoring, and returns before the metadata
 `--threshold` gate. Per-type section recall is diagnostic.
 
+## Document inventory and abstracts
+
+The document envelope has a separate evaluator. Its inventory gold must describe
+every article, including all printed abstracts and their source ownership:
+
+```bash
+uv run python -m evaluation.document_metrics \
+    --prediction /path/to/document.json \
+    --gold /path/to/document-gold.json \
+    --source-namespace OCR_AND_PARSER_RECEIPT_HASH \
+    --output /path/to/document-metrics.json
+```
+
+Prepare gold using the `DocumentGold` model in `evaluation.document_metrics`.
+Declare the PDF's `source_file_hash`, the frozen OCR/parser `source_namespace`,
+and `annotation_status` (`development` or `independently_reviewed`). Each record
+declares its complete `source_text_ids`, identity `anchor_source_text_ids`, and
+every printed abstract's text, source IDs, language when known and primary flag.
+One abstract must be primary when any exist; an empty list annotates absence.
+The prediction and annotations must use identical parser-local source IDs.
+
+The report separates inventory recall, false merges/splits, extra records and
+source overlap from abstract accuracy. Missing and failed records stay in the
+abstract denominator. Correct abstract text with foreign source ownership does
+not count as an exact owned abstract. Scalar primary-abstract accuracy, printed
+version completeness, abstract absence and known-language accuracy are separate.
+These measures do not change the existing paper floors, which exclude abstracts.
+
+For a legacy single-target comparison, `select_target_record` accepts a declared
+DOI and/or printed title aliases. Resolve that unique target before field scoring;
+an absent or ambiguous target remains missing. Never choose the record with the
+highest resulting paper score. Inventory completeness requires separate gold for
+all articles and cannot be inferred from a successful target-paper score.
+
 ## Interpreting results
 
 Compare runs on the same papers, gold revision, metric version, and extraction

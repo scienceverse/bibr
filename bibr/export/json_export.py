@@ -1,9 +1,11 @@
-"""JSON export for Paper objects — v11.0 schema."""
+"""JSON export for Paper objects — v11.x schema."""
 
 from __future__ import annotations
 
 import logging
 import re
+import unicodedata
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit
 
@@ -28,15 +30,22 @@ from bibr.export.models import (
     EqExport,
     FigureExport,
     FigurePartExport,
+    FrontMatterBlockExport,
+    FrontMatterCandidateExport,
+    FrontMatterResolutionExport,
     FundingExport,
     LlmEngineExport,  # noqa: F401 - re-exported for existing importers
     MetadataExport,
     MetadataMatchExport,
+    MetadataVariantExport,
     OcrEngineExport,  # noqa: F401 - re-exported for existing importers
     PaperExport,
+    PresentationSelectionExport,
     ProvenanceExport,
+    ReferenceRecoveryExport,
     ReferenceSegmentationAttemptExport,
     ReferenceYieldExport,
+    ReferenceYieldLossesExport,
     RegionExport,
     SectionExport,
     SourceExport,
@@ -566,7 +575,10 @@ def _export_paper_payload(
 
     reference_yield: ReferenceYieldExport | None = None
     if paper.contents.reference_yield_receipt is not None:
+        from bibr.paper_contents import ReferenceRecoveryReceipt, ReferenceYieldLosses
+
         receipt = paper.contents.reference_yield_receipt
+        losses = getattr(receipt, "losses", None)
         reference_yield = ReferenceYieldExport(
             credible_source_starts=receipt.credible_source_starts,
             attempts=[
@@ -585,7 +597,95 @@ def _export_paper_payload(
             valid_count=receipt.valid_count,
             duplicate_rate=receipt.duplicate_rate,
             reason_flags=list(receipt.reason_flags),
+            losses=(
+                ReferenceYieldLossesExport.model_validate(asdict(losses))
+                if isinstance(losses, ReferenceYieldLosses)
+                else None
+            ),
+            recovery=ReferenceRecoveryExport.model_validate(asdict(receipt.recovery))
+            if isinstance(getattr(receipt, "recovery", None), ReferenceRecoveryReceipt)
+            else None,
         )
+
+    resolution = paper.contents.front_matter_resolution
+    front_matter = None
+    if resolution is not None:
+        from bibr.extract.primary_presentation import PresentationSelection
+
+        candidates_by_id = {row.candidate_id: row for row in resolution.candidates}
+        front_matter = FrontMatterResolutionExport(
+            selected_block_id=resolution.selected_block_id,
+            selection_method=resolution.selection_method,
+            reason_flags=list(resolution.reason_flags),
+            presentation_selection=PresentationSelectionExport.model_validate(
+                asdict(paper.contents.presentation_selection)
+            )
+            if isinstance(
+                getattr(paper.contents, "presentation_selection", None), PresentationSelection
+            )
+            else None,
+            blocks=[
+                FrontMatterBlockExport(
+                    block_id=block.block_id,
+                    candidate_ids=list(block.candidate_ids),
+                    title_candidate_ids=list(block.title_candidate_ids),
+                    source_text_ids=list(
+                        dict.fromkeys(
+                            text_id
+                            for candidate_id in block.candidate_ids
+                            for text_id in candidates_by_id[candidate_id].text_ids
+                        )
+                    ),
+                    source_section_ids=list(
+                        dict.fromkeys(
+                            section_id
+                            for candidate_id in block.candidate_ids
+                            if (section_id := candidates_by_id[candidate_id].section_id) is not None
+                        )
+                    ),
+                    pages=list(block.pages),
+                    source_block_ids=list(block.source_block_ids or (block.block_id,)),
+                    merge_reasons=list(block.merge_reasons),
+                )
+                for block in resolution.blocks
+            ],
+            candidates=[
+                FrontMatterCandidateExport(
+                    candidate_id=row.candidate_id,
+                    source_kind=row.source_kind,
+                    reading_order=row.reading_order,
+                    page=row.page,
+                    section_id=row.section_id,
+                    text_ids=list(row.text_ids),
+                    roles=sorted(row.roles),
+                )
+                for row in resolution.candidates
+            ],
+        )
+
+    def normalize_variant(text: str | None, field: str) -> str:
+        normalized = " ".join(unicodedata.normalize("NFKC", text or "").split())
+        return normalized.casefold() if field == "title" else normalized
+
+    metadata_variants = [
+        MetadataVariantExport(
+            variant_id=variant.variant_id,
+            record_id=variant.record_id,
+            field=variant.field,
+            text=variant.text,
+            language=variant.language,
+            is_primary=normalize_variant(variant.text, variant.field)
+            == normalize_variant(getattr(paper.metadata, variant.field, None), variant.field),
+            source_text_ids=list(variant.source_text_ids),
+            source_section_ids=list(variant.source_section_ids),
+            pages=list(variant.pages),
+            presentation_ids=list(variant.presentation_ids),
+            byline_source_text_ids=list(variant.byline_source_text_ids),
+            byline_source_section_ids=list(variant.byline_source_section_ids),
+        )
+        for variant in paper.contents.metadata_variants
+        if resolution is not None and variant.record_id == resolution.selected_block_id
+    ]
 
     # v11: every telemetry surface hangs off ``extraction``. The stage builds
     # the provenance skeleton; the receipts/enrichment/regions that only exist
@@ -607,6 +707,8 @@ def _export_paper_payload(
             diagnostics["caption_assignment"] = caption_assignment
         if reference_yield is not None:
             diagnostics["reference_yield"] = reference_yield
+        if front_matter is not None:
+            diagnostics["front_matter"] = front_matter
         extraction_data["diagnostics"] = diagnostics
         if enrichment_export is not None:
             extraction_data["enrichment"] = enrichment_export
@@ -663,6 +765,7 @@ def _export_paper_payload(
                 (paper.metadata.data_availability or None) if paper.metadata else None
             ),
         ),
+        metadata_variant=metadata_variants,
         author=[
             AuthorExport(
                 author_id=a.author_id,

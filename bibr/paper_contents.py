@@ -17,6 +17,8 @@ from bibr.input.consolidate_text import clean_text_content_late
 if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
+    from bibr.extract.metadata_variants import PrintedMetadataVariant
+    from bibr.extract.primary_presentation import PresentationSelection
     from bibr.models import PaperMetadata, PaperReference
     from bibr.validation import ValidationIssue
 
@@ -662,6 +664,48 @@ class ReferenceSegmentationAttempt:
 
 
 @dataclass(frozen=True)
+class ReferenceSourceLoss:
+    """Source evidence retained outside the successfully parsed bibliography."""
+
+    stage: str
+    reason: str
+    source_text: str
+    source_span: tuple[int, int]
+    source_text_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReferenceYieldLosses:
+    """Counts at each lossy boundary; unresolved spans are not parsed records."""
+
+    selected_source_row_count: int
+    segmented_count: int
+    retained_segment_count: int
+    filtered_segment_count: int
+    parse_alignment_available: bool
+    source_alignment_available: bool
+    unlocated_unresolved_count: int
+    selected_section_ids: tuple[int, ...] = ()
+    unresolved: tuple[ReferenceSourceLoss, ...] = ()
+
+
+@dataclass(frozen=True)
+class ReferenceRecoveryAttempt:
+    segment_index: int
+    source_span: tuple[int, int]
+    outcome: str
+
+
+@dataclass(frozen=True)
+class ReferenceRecoveryReceipt:
+    max_segments: int
+    timeout_seconds: float
+    attempts: tuple[ReferenceRecoveryAttempt, ...]
+    recovered_count: int
+    stop_reason: str
+
+
+@dataclass(frozen=True)
 class ReferenceYieldReceipt:
     """Internal diagnostic record for reference segmentation and parse yield."""
 
@@ -673,6 +717,8 @@ class ReferenceYieldReceipt:
     valid_count: int
     duplicate_rate: float
     reason_flags: tuple[str, ...]
+    losses: ReferenceYieldLosses | None = None
+    recovery: ReferenceRecoveryReceipt | None = None
 
 
 @dataclass
@@ -737,6 +783,9 @@ class PaperContents:
     reference_boundary_reason_flags: list[str] = field(default_factory=list)
     structure_validation_issues: list["ValidationIssue"] = field(default_factory=list)
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
+    # Capture printed versions before normalization changes section ownership.
+    metadata_variants: list["PrintedMetadataVariant"] = field(default_factory=list)
+    presentation_selection: "PresentationSelection | None" = None
 
     def invalidate_text_caches(self) -> None:
         """Drop cached DataFrames whose contents derive from sentence text or links.

@@ -55,6 +55,7 @@ docs/superpowers/
 /docs/reports/
 /docs/superpowers/
 /evaluation/*
+!/evaluation/document_metrics.py
 !/evaluation/__init__.py
 !/evaluation/evaluate.py
 !/evaluation/section_metrics.py

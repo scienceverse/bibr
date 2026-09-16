@@ -8,6 +8,7 @@ re-export surface for types.
 from pathlib import Path
 
 import bibr.export as export_pkg
+import bibr.export.document_models as document_models
 import bibr.export.json_export as json_export
 import bibr.export.models as models
 
@@ -27,7 +28,8 @@ def test_package_root_reexports_models_not_json_export():
     names = [n for n in export_pkg.__all__ if n.endswith("Export")]
     assert len(names) > 20
     for name in names:
-        assert getattr(export_pkg, name) is getattr(models, name), name
+        owner = document_models if name.startswith("Document") else models
+        assert getattr(export_pkg, name) is getattr(owner, name), name
 
 
 def test_person_name_export_is_reachable_from_the_package_root():

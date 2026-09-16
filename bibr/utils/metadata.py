@@ -5,7 +5,40 @@ from __future__ import annotations
 import unicodedata
 
 EXACT_GENERIC_ARTICLE_LABELS = frozenset(
-    {"research article", "original article", "original research"}
+    {
+        "research article",
+        "original article",
+        "original research",
+        "review article",
+        "review (narrative)",
+        "review (systematic)",
+    }
+)
+
+# Exact printed headings only: significance statements and research highlights
+# may be classified as ABSTRACT, but do not identify the paper's abstract.
+PRINTED_ABSTRACT_LABELS = frozenset(
+    {
+        "abstract",
+        "summary",
+        "precis",
+        "executive summary",
+        "resumen",
+        "resumo",
+        "résumé",
+        "resume",
+        "zusammenfassung",
+        "samenvatting",
+        "аннотация",
+        "анотація",
+        "abstrak",
+        "özet",
+        "streszczenie",
+        "摘要",
+        "要旨",
+        "초록",
+        "ملخص",
+    }
 )
 
 
@@ -34,7 +67,37 @@ def is_exact_generic_article_label(value: str | None) -> bool:
     Effects of X`` is a real title rather than a generic-label match.
     """
 
-    return bool(value and _normalize_label(value) in EXACT_GENERIC_ARTICLE_LABELS)
+    return bool(
+        value
+        and _normalize_label(value)
+        in {_normalize_label(label) for label in EXACT_GENERIC_ARTICLE_LABELS}
+    )
 
 
-__all__ = ["EXACT_GENERIC_ARTICLE_LABELS", "is_exact_generic_article_label"]
+def strip_leading_article_label(value: str) -> str:
+    """Remove a standalone article-type line preceding a wrapped title.
+
+    Require an actual line boundary in the source. A title that mentions an
+    article type inline, or starts with an unqualified word like "Review",
+    remains verbatim.
+    """
+    lines = value.strip().splitlines()
+    if len(lines) > 1 and is_exact_generic_article_label(lines[0]):
+        remainder = "\n".join(lines[1:]).strip()
+        if remainder:
+            return remainder
+    return value
+
+
+def is_printed_abstract_heading(value: str) -> bool:
+    """Recognize an exact printed abstract label without semantic inference."""
+    return _normalize_label(value) in PRINTED_ABSTRACT_LABELS
+
+
+__all__ = [
+    "EXACT_GENERIC_ARTICLE_LABELS",
+    "PRINTED_ABSTRACT_LABELS",
+    "is_exact_generic_article_label",
+    "is_printed_abstract_heading",
+    "strip_leading_article_label",
+]

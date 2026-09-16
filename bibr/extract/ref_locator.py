@@ -10,27 +10,38 @@ belong to ``bibr.extract.core_metadata`` and ``bibr.extract.ref_extractor``.
 
 import logging
 import re
+from dataclasses import dataclass
 
 import pandas as pd
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE
-from bibr.ocr.ref_patterns import _looks_like_author_date_start
+from bibr.ocr.ref_patterns import _REF_HEADER_RE, _looks_like_author_date_start
 from bibr.paper_contents import CanonicalSection, PaperContents
 from bibr.structure.reference_boundaries import TERMINAL_REFERENCE_BOUNDARY_RE
 from bibr.utils.text import YEARISH_RE
 
 logger = logging.getLogger(__name__)
 
-# A printed section header that literally IS a references heading (optionally
-# numbered). Used to pre-empt the classifier-assigned canonical map in
-# collect_reference_rows — start-anchored so headers merely mentioning
-# references mid-string do not match.
-_REF_HEADER_RE = re.compile(
-    r"^\s*(?:\d{1,2}[.)]?\s+)?"
-    r"(?:references|bibliography|works cited|literature cited|reference list)\b",
+# Page-continuation decoration is not part of an article's reference heading.
+# The heading itself uses the same multilingual grammar as OCR geometry.
+_CONTINUED_SUFFIX_RE = re.compile(
+    r"\s*(?:\(continued\)|[-–—:]\s*continued|\s+continued)\s*$",
     re.IGNORECASE,
 )
+
+
+def _is_reference_heading(header: str) -> bool:
+    return bool(_REF_HEADER_RE.fullmatch(_CONTINUED_SUFFIX_RE.sub("", header).strip()))
+
+
+@dataclass(frozen=True)
+class _SectionRun:
+    start: int
+    stop: int
+    header: str
+    section_id: int | None
+
 
 # Recognize parenthesized, dash-delimited, whitespace-separated, and period-delimited reference
 # numbers, including non-Latin author text.
@@ -275,8 +286,9 @@ class RefLocator:
 
         # Step 0: trust what is printed — a literal references heading wins.
         if has_section_col:
-            for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
-                if not _REF_HEADER_RE.match(str(section_name).strip()):
+            last_headers = self.sentences_df["section_name"].dropna().drop_duplicates(keep="last")
+            for section_name in reversed(last_headers.tolist()):
+                if not _is_reference_heading(str(section_name)):
                     continue
                 mask = self.sentences_df["section_name"] == section_name
                 if not mask.any():
@@ -287,16 +299,13 @@ class RefLocator:
                         f"Header-alias override: using section '{section_name}' over "
                         f"canonical-map REFERENCES section '{mapped}'"
                     )
-                header_df: pd.DataFrame = self.sentences_df[mask].copy()
+                header_df = self._collect_bibliography_run(section_name)
                 self._reclassify_as_references(header_df)
                 reclaimed = self._reclaim_boundary_orphans(header_df, section_name)
                 return self._trim_terminal_boundary(reclaimed)
 
-        # Step 0b: a heading the front-role classifier scores as a reference
-        # header (any language/script) is as good as the printed English one.
-        # The regex above is English-only and misses ~19% of val120 headers
-        # (Literaturverzeichnis, Bibliografía, Список литературы, 参考文献),
-        # which silently disabled the geometry segmenter tier.
+        # Step 0b: model evidence can identify reference headings outside the
+        # explicit multilingual grammar.
         if has_section_col:
             model_header = self._model_reference_header()
             if model_header is not None:
@@ -307,7 +316,7 @@ class RefLocator:
                         "as the reference section"
                     )
                     self.contents.reference_boundary_reason_flags.append("front_role_ref_header")
-                    header_df: pd.DataFrame = self.sentences_df[mask].copy()
+                    header_df = self._collect_bibliography_run(model_header)
                     self._reclassify_as_references(header_df)
                     reclaimed = self._reclaim_boundary_orphans(header_df, model_header)
                     return self._trim_terminal_boundary(reclaimed)
@@ -319,7 +328,8 @@ class RefLocator:
             mask = self.sentences_df["section_name"] == ref_section_name
 
             if mask.any():
-                ref_df: pd.DataFrame = self.sentences_df[mask].copy()
+                ref_df = self._collect_bibliography_run(ref_section_name)
+                self._reclassify_as_references(ref_df)
                 ref_df = self._reclaim_boundary_orphans(ref_df, ref_section_name)
                 return self._trim_terminal_boundary(ref_df)
 
@@ -339,12 +349,13 @@ class RefLocator:
         _ref_patterns = ("reference", "bibliography", "works cited", "literature cited")
         if not has_section_col:
             raise ValueError("No section_name column in sentences_df (OCR may have failed)")
-        for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
+        last_headers = self.sentences_df["section_name"].dropna().drop_duplicates(keep="last")
+        for section_name in reversed(last_headers.tolist()):
             header_lower = section_name.lower().strip()
             if any(pat in header_lower for pat in _ref_patterns):
                 mask = self.sentences_df["section_name"] == section_name
                 if mask.any():
-                    fallback_df: pd.DataFrame = self.sentences_df[mask].copy()
+                    fallback_df = self._collect_bibliography_run(section_name)
                     logger.info(
                         f"Header-text fallback: using section '{section_name}' "
                         f"as reference section ({len(fallback_df)} rows)"
@@ -353,6 +364,128 @@ class RefLocator:
                     return self._trim_terminal_boundary(fallback_df)
 
         raise ValueError("No reference section found.")
+
+    def _collect_bibliography_run(self, ref_section_name: str) -> pd.DataFrame:
+        """Join adjacent sections belonging to the selected bibliography.
+
+        A translated printed heading and a synthetic ``References`` section
+        can split one list. Header equality alone also joins unrelated lists
+        elsewhere in a document, so seed the last section identity and expand
+        only across supported, adjacent bibliography sections. Deferred OCR
+        rows can interrupt that section's text stream; those interruptions do
+        not create a new owner or erase its earlier references.
+
+        Subsections need explicit ancestry under an already selected section
+        and reference-shaped text. A numbering restart is allowed within that
+        ownership; numbering alone never establishes ownership.
+        """
+        df = self.sentences_df
+        runs: list[_SectionRun] = []
+        section_ids = df.get("section_id")
+        for position, name in enumerate(df["section_name"]):
+            header = str(name) if pd.notna(name) else ""
+            value = section_ids.iloc[position] if section_ids is not None else None
+            section_id = int(value) if value is not None and pd.notna(value) else None
+            if runs and (runs[-1].section_id, runs[-1].header) == (section_id, header):
+                previous = runs[-1]
+                runs[-1] = _SectionRun(previous.start, position + 1, header, section_id)
+            else:
+                runs.append(_SectionRun(position, position + 1, header, section_id))
+
+        seed = next(i for i in reversed(range(len(runs))) if runs[i].header == ref_section_name)
+        selected_ids = {runs[seed].section_id} - {None}
+        selected_runs = {
+            index
+            for index, run in enumerate(runs)
+            if index == seed or run.section_id in selected_ids
+        }
+        if len(selected_runs) > 1:
+            self.contents.reference_boundary_reason_flags.append("same_section_disjoint_runs")
+        section_map = {section.section_id: section for section in self.contents.sections}
+
+        def supported_neighbor(run: _SectionRun) -> bool:
+            if TERMINAL_REFERENCE_BOUNDARY_RE.match(run.header):
+                return False
+            explicit_heading = _is_reference_heading(run.header)
+            section = section_map.get(run.section_id)
+            descendant = False
+            seen: set[int] = set()
+            while section is not None and section.parent_section_id not in seen:
+                parent = section.parent_section_id
+                if parent in selected_ids:
+                    descendant = True
+                    break
+                if parent is None:
+                    break
+                seen.add(parent)
+                section = section_map.get(parent)
+            section = section_map.get(run.section_id)
+            if not explicit_heading and not (
+                descendant
+                and section is not None
+                and section.section_type in (CanonicalSection.UNKNOWN, CanonicalSection.REFERENCES)
+            ):
+                return False
+            if explicit_heading and _CONTINUED_SUFFIX_RE.search(run.header):
+                # A final continuation page may hold only a citation's tail,
+                # with its author/year on the preceding page.
+                return True
+            texts = df.iloc[run.start : run.stop]["text"].astype(str)
+            return any(
+                _looks_like_terminal_reference_start(text) and YEARISH_RE.search(text)
+                for text in texts
+            )
+
+        def adjacent(before: _SectionRun, after: _SectionRun) -> bool:
+            # Do not step across a terminal row even if its section label was
+            # never corrected by the parser.
+            if any(
+                TERMINAL_REFERENCE_BOUNDARY_RE.match(str(text))
+                for text in df.iloc[before.start : before.stop]["text"]
+            ) or TERMINAL_REFERENCE_BOUNDARY_RE.match(str(df.iloc[after.start]["text"])):
+                return False
+            if "page_number" in df.columns:
+                end_page = df.iloc[before.stop - 1]["page_number"]
+                start_page = df.iloc[after.start]["page_number"]
+                if pd.notna(end_page) and pd.notna(start_page):
+                    return 0 <= start_page - end_page <= 1
+            return True
+
+        expanded = False
+        pending = list(selected_runs)
+        while pending:
+            current = pending.pop()
+            for neighbor in (current - 1, current + 1):
+                if not 0 <= neighbor < len(runs) or neighbor in selected_runs:
+                    continue
+                before, after = sorted((current, neighbor))
+                if not adjacent(runs[before], runs[after]) or not supported_neighbor(
+                    runs[neighbor]
+                ):
+                    continue
+                expanded = True
+                section_id = runs[neighbor].section_id
+                if section_id is not None:
+                    selected_ids.add(section_id)
+                # A section ID identifies an owner, even when deferred rows
+                # from another section interrupt its physical text stream.
+                # Never include those intervening rows by taking a broad slice.
+                added = {
+                    index
+                    for index, run in enumerate(runs)
+                    if index == neighbor
+                    or (section_id is not None and run.section_id == section_id)
+                } - selected_runs
+                selected_runs.update(added)
+                pending.extend(added)
+        if expanded:
+            self.contents.reference_boundary_reason_flags.append("adjacent_bibliography_sections")
+        positions = [
+            position
+            for index in sorted(selected_runs)
+            for position in range(runs[index].start, runs[index].stop)
+        ]
+        return df.iloc[positions].copy()
 
     def _trim_terminal_boundary(self, ref_df: pd.DataFrame) -> pd.DataFrame:
         """Trim only a strong terminal transition after genuine ref rows.

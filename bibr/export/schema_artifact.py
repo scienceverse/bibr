@@ -12,7 +12,7 @@ compares the on-disk file against.
 
 from __future__ import annotations
 
-from bibr.export.models import OMITTABLE_ROOT_KEYS, PaperExport
+from bibr.export.models import _SCHEMA_VERSION, OMITTABLE_ROOT_KEYS, PaperExport
 
 # Pydantic v2's ``model_json_schema()`` emits JSON Schema draft 2020-12 but
 # does not declare the dialect via ``$schema``. This document is a published
@@ -24,6 +24,11 @@ JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 def build_export_schema() -> dict:
     """Return the full JSON Schema document for :class:`PaperExport`."""
     schema = PaperExport.model_json_schema(by_alias=True)
+    # Publish the current writer contract. The runtime model also accepts older
+    # v11 payloads for replay, which predate newly always-emitted root tables.
+    version = schema["properties"]["schema_version"]
+    version.pop("enum", None)
+    version["const"] = _SCHEMA_VERSION
     schema["required"] = _required_root_keys(schema)
     return {"$schema": JSON_SCHEMA_DIALECT, **schema}
 

@@ -19,6 +19,7 @@ from bibr.structure.text_repair import (
     repair_heading_artifacts,
     strip_markdown_emphasis,
 )
+from bibr.utils.metadata import strip_leading_article_label
 from bibr.utils.text import normalize_text
 
 logger = logging.getLogger(__name__)
@@ -113,6 +114,11 @@ class HeadingHandlersMixin:
         # Strip markdown heading prefix (e.g. "## Methods" → "Methods")
         # glmocr ResultFormatter adds "# " for doc_title and "## " for paragraph_title
         text = re.sub(r"^#{1,6}\s*", "", content.strip()).strip()
+        if label == "doc_title" and self._is_front_page(page_number):
+            # Keep the physical line boundary until the standalone article
+            # label has been separated from the title. Heading cleanup below
+            # collapses it, making that evidence unavailable to recovery.
+            text = strip_leading_article_label(text)
         # Normalize Markdown-wrapped headings emitted by OCR (e.g.
         # "**References**" → "References") before hint-section deduplication.
         text = strip_markdown_emphasis(text)

@@ -58,6 +58,7 @@ nav:
       - Tester guide: tester-guide.md
   - Guides:
       - Python library: guides/library.md
+      - Printed versions and multiple articles: guides/printed-versions.md
       - MCP server: guides/mcp.md
       - Batch runs: guides/batch.md
       - Configuration: guides/configuration.md

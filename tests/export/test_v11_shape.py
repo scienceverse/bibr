@@ -92,7 +92,7 @@ def test_gate_findings_are_not_mirrored_into_warnings():
 
 
 def test_schema_version_is_at_the_root(v11_payload):
-    assert v11_payload["schema_version"] == "11.0"
+    assert v11_payload["schema_version"] == "11.1"
     assert "schema_version" not in v11_payload.get("metadata", {})
 
 
@@ -134,13 +134,12 @@ def test_root_record_arrays_survive_refs_off(v11_payload_refs_off):
 
 def test_core_replay_gate_tracks_the_live_schema_version():
     """``CORE_SCHEMA_VERSION`` is a hand-maintained copy of the exporter's
-    version. Now that the gate accepts exactly one value, drift between the two
-    would reject every freshly written core — so pin them together."""
+    version. Older additive v11 cores remain readable."""
     from bibr.export.json_export import _SCHEMA_VERSION
     from bibr.pipeline.artifacts import CORE_SCHEMA_VERSION, SUPPORTED_CORE_SCHEMA_VERSIONS
 
     assert CORE_SCHEMA_VERSION == _SCHEMA_VERSION
-    assert set(SUPPORTED_CORE_SCHEMA_VERSIONS) == {_SCHEMA_VERSION}
+    assert set(SUPPORTED_CORE_SCHEMA_VERSIONS) == {"11.0", _SCHEMA_VERSION}
 
 
 # ── v11 convention fixes (Task 6) ──────────────────────────────────────

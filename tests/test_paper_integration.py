@@ -7,7 +7,7 @@ from bibr.paper import BibAuthor, Paper, PaperMetadata, ProcessingStatus
 
 @pytest.fixture
 def mock_contents():
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     import pandas as pd
 
     from bibr.paper_contents import (
@@ -114,7 +114,7 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     assert result["paper_id"] == "10.1234/test"
 
     # Check metadata / source / root version
-    assert result["schema_version"] == "11.0"
+    assert result["schema_version"] == "11.1"
     metadata = result["metadata"]
     assert metadata["title"] == "Test Paper"
     assert metadata["doi"] == "10.1234/test"
@@ -190,7 +190,7 @@ def test_paper_export_figure_table_caption_absent(mock_metadata):
     from bibr.input.file import InputFile
     from bibr.paper_contents import PaperFigure, PaperSection, PaperSentence, PaperTable
 
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     contents.sentences = [
         PaperSentence(
             text_id=1, text="Only sentence", section_id=0, paragraph_id=1, page_number=None
@@ -267,7 +267,7 @@ def test_paper_export_empty_tables(mock_metadata):
     from bibr.input.file import InputFile
     from bibr.paper_contents import PaperSection, PaperSentence
 
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     contents.sentences = [
         PaperSentence(
             text_id=1, text="Only sentence", section_id=0, paragraph_id=1, page_number=None
@@ -403,7 +403,7 @@ def test_paper_export_bib_with_populated_references(mock_contents):
     assert cr["bib_type"] == "journal_article"
 
     # Verify version
-    assert result["schema_version"] == "11.0"
+    assert result["schema_version"] == "11.1"
 
 
 def test_paper_export_bib_without_matches(mock_contents):
@@ -455,7 +455,7 @@ def test_paper_export_display_math_formatted():
     from bibr.input.file import InputFile
     from bibr.paper_contents import PaperSection, PaperSentence
 
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     contents.sentences = [
         PaperSentence(text_id=1, text="Normal sentence.", section_id=1, paragraph_id=1),
         PaperSentence(
@@ -505,7 +505,7 @@ def test_paper_export_xref_split_fks():
     from bibr.input.file import InputFile
     from bibr.paper_contents import PaperSection, PaperSentence, PaperXref
 
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     contents.sentences = [
         PaperSentence(text_id=1, text="See [1] and Table 2.", section_id=1, paragraph_id=1),
     ]
@@ -559,7 +559,7 @@ def test_paper_export_orcid_canonicalization():
     from bibr.paper import PaperAuthor
     from bibr.paper_contents import PaperSection, PaperSentence
 
-    contents = MagicMock()
+    contents = MagicMock(front_matter_resolution=None, metadata_variants=[])
     contents.sentences = [
         PaperSentence(text_id=1, text="Test.", section_id=1, paragraph_id=1),
     ]

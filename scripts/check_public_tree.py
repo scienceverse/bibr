@@ -18,6 +18,7 @@ PUBLIC_EVALUATION_FILES = frozenset(
     {
         "evaluation/__init__.py",
         "evaluation/evaluate.py",
+        "evaluation/document_metrics.py",
         "evaluation/section_metrics.py",
         "evaluation/validation_metrics.py",
         "evaluation/README.md",

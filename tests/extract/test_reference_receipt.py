@@ -55,8 +55,11 @@ def test_reference_yield_receipt_has_required_frozen_contract():
         "valid_count",
         "duplicate_rate",
         "reason_flags",
+        "losses",
+        "recovery",
     ]
     receipt = ReferenceYieldReceipt(None, (), (), None, 0, 0, 0.0, ())
+    assert receipt.recovery is None
     with pytest.raises(FrozenInstanceError):
         receipt.parsed_count = 1  # type: ignore[misc]
 
@@ -377,7 +380,7 @@ def test_crf_rejection_is_recorded_before_marker_selection(monkeypatch, crf_resu
     assert marker_attempt.selected is True
 
 
-async def test_failed_reuse_clears_stale_reference_receipt(monkeypatch):
+async def test_failed_reuse_replaces_stale_receipt_with_current_failure_evidence(monkeypatch):
     ref = "1. Smith J. Source reference. 2020. Journal 1:1-5."
     contents = _contents([ref])
     extractor = ReferenceExtractor(contents, parse_strategy="ner")
@@ -387,13 +390,31 @@ async def test_failed_reuse_clears_stale_reference_receipt(monkeypatch):
 
     monkeypatch.setitem(REF_PARSE_STRATEGIES, "ner", parse_ok)
     await extractor.extract(pd.DataFrame({"text": [ref]}))
-    assert contents.reference_yield_receipt is not None
+    successful = contents.reference_yield_receipt
+    assert successful is not None
+    later = "2. Doe A. A different source reference. 2021. Journal 2:6-10."
+    contents.native_ref_strings = [later]
 
     async def parse_failure(_extractor, _ref_text, _segments):
         raise RuntimeError("parse failed")
 
     monkeypatch.setitem(REF_PARSE_STRATEGIES, "ner", parse_failure)
     with pytest.raises(RuntimeError, match="parse failed"):
+        await extractor.extract(pd.DataFrame({"text": [later]}))
+
+    failed = contents.reference_yield_receipt
+    assert failed is not successful
+    assert failed.parsed_count == failed.valid_count == 0
+    assert len(failed.losses.unresolved) == 1
+    assert failed.losses.unresolved[0].reason == "parser_failed"
+    assert failed.losses.unresolved[0].source_text == later
+    assert failed.selected_spans == ((0, len(later)),)
+
+    # An error before source segmentation has no new parse evidence to assert.
+    monkeypatch.setattr(
+        extractor, "_segment_references", mock.AsyncMock(side_effect=RuntimeError("segment failed"))
+    )
+    with pytest.raises(RuntimeError, match="segment failed"):
         await extractor.extract(pd.DataFrame({"text": [ref]}))
 
     assert contents.reference_yield_receipt is None

@@ -1,5 +1,9 @@
 """Title grounding preserves an invented printed grammatical error instead of silently correcting it."""
 
+from dataclasses import replace
+
+import pytest
+
 from bibr.extract.core_metadata import ground_title_to_printed_text
 
 from .test_core_metadata_author_guards import _candidate, _resolution
@@ -42,16 +46,14 @@ def test_rewritten_title_is_replaced_with_the_printed_row():
     assert not issue.blocking
 
 
-def test_ungrounded_title_is_reported_but_not_guessed_at():
-    # Nothing on the page resembles it, so there is no printed row to prefer.
-    # Report it and leave the extraction alone rather than substituting a
-    # different title.
+def test_ungrounded_title_is_recovered_from_unique_printed_title():
     invented = "An Entirely Different Paper About Something Else"
     title, issue = ground_title_to_printed_text(invented, _titles(_PRINTED), _PRINTED)
 
-    assert title == invented
+    assert title == _PRINTED
     assert issue is not None
-    assert issue.code == "VAL_TITLE_UNGROUNDED"
+    assert issue.code == "VAL_TITLE_RECOVERED"
+    assert "reason:title_not_printed_verbatim" in issue.evidence_ids
 
 
 def test_title_assembled_from_two_regions_is_not_truncated():
@@ -72,12 +74,13 @@ def test_title_assembled_from_two_regions_is_not_truncated():
     assert issue is None
 
 
-def test_short_titles_are_left_alone():
-    # Short strings hit high similarity ratios by accident.
+def test_short_ungrounded_notice_title_cannot_override_verified_research_title():
+    # Short strings are not fuzzy-matched, but a unique source title still
+    # outranks an invented notice label that would suppress the real authors.
     title, issue = ground_title_to_printed_text("Erratum", _titles(_PRINTED), _PRINTED)
 
-    assert title == "Erratum"
-    assert issue is None
+    assert title == _PRINTED
+    assert issue.code == "VAL_TITLE_RECOVERED"
 
 
 def test_grounding_is_inert_without_a_resolution():
@@ -125,6 +128,85 @@ def test_printed_rows_outside_the_front_matter_cannot_supply_a_title():
         printed_rows={4: _PRINTED, 99: unrelated},
     )
 
-    assert title == unrelated
+    assert title == _PRINTED
     assert issue is not None
+    assert issue.code == "VAL_TITLE_RECOVERED"
+
+
+def test_ambiguous_printed_titles_abstain_instead_of_keeping_an_invention():
+    title, issue = ground_title_to_printed_text(
+        "A Fabricated Paper About Ocean Temperatures",
+        _titles("The Seasonal Behavior of Forest Birds", "Le comportement saisonnier des oiseaux"),
+        "",
+    )
+
+    assert title == ""
     assert issue.code == "VAL_TITLE_UNGROUNDED"
+    assert "reason:title_recovery_ambiguous" in issue.evidence_ids
+
+
+def test_unselected_record_title_cannot_validate_or_replace_the_selected_title():
+    selected, foreign = _titles(
+        "The Seasonal Behavior of Forest Birds", "Ocean Temperatures"
+    ).candidates
+    resolution = _resolution(selected, foreign, selected_ids=(selected.candidate_id,))
+
+    title, issue = ground_title_to_printed_text(foreign.raw_text, resolution, foreign.raw_text)
+
+    assert title == selected.raw_text
+    assert issue.code == "VAL_TITLE_RECOVERED"
+    assert selected.candidate_id in issue.evidence_ids
+
+
+@pytest.mark.parametrize("source_kind", ["heading", "paragraph"])
+def test_candidate_must_match_the_owned_printed_source_before_recovery(source_kind):
+    candidate = replace(_titles(_PRINTED).candidates[0], source_kind=source_kind, text_ids=(1,))
+    title, issue = ground_title_to_printed_text(
+        "A Fabricated Paper About Ocean Temperatures",
+        _resolution(candidate),
+        _PRINTED,
+        printed_rows={1: "Another source paragraph"},
+        printed_sections={1: "Another source heading"},
+    )
+
+    assert title == ""
+    assert "reason:title_recovery_unverified" in issue.evidence_ids
+
+
+def test_unsafe_first_title_does_not_make_a_later_language_the_unique_original():
+    first, second = _titles(_PRINTED, "The Seasonal Behavior of Forest Birds").candidates
+    first = replace(first, roles=first.roles | {"byline"})
+
+    title, issue = ground_title_to_printed_text(
+        "A Fabricated Paper About Ocean Temperatures", _resolution(first, second), ""
+    )
+
+    assert title == ""
+    assert "reason:title_recovery_unverified" in issue.evidence_ids
+
+
+def test_citation_sidebar_is_not_title_grounding_evidence():
+    printed = "The Seasonal Behavior of Forest Birds"
+    cited = "Ocean Temperatures and Marine Ecosystems"
+    title_candidate = _titles(printed).candidates[0]
+    citation = _candidate("c2", cited, roles=frozenset({"metadata"}))
+
+    title, issue = ground_title_to_printed_text(
+        "Ocean Temperature and Marine Ecosystems", _resolution(title_candidate, citation), cited
+    )
+
+    assert title == printed
+    assert issue.code == "VAL_TITLE_RECOVERED"
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Introduction", "Original Research", "CITATION", "APRESENTAÇÃO E ANÁLISE DOS RESULTADOS"],
+)
+def test_body_and_furniture_labels_cannot_recover_a_title(label):
+    title, issue = ground_title_to_printed_text(
+        "A Fabricated Paper About Ocean Temperatures", _titles(label), label
+    )
+
+    assert title == ""
+    assert "reason:title_recovery_unverified" in issue.evidence_ids

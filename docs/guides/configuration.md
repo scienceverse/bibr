@@ -260,6 +260,23 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 independently of parsing. The full set of strategies and how they cascade is
 covered in [Architecture](architecture.md).
 
+NER parsing can optionally retry missing entries with the configured LLM:
+
+```dotenv
+REF_NER_RECOVERY_MAX_SEGMENTS=8  # Default 0: disabled; maximum 64 per paper
+REF_NER_RECOVERY_TIMEOUT=60     # Total wall-clock seconds per paper (maximum 600)
+```
+
+Each eligible entry must match a retained source span and contain at most 4,000
+characters. Recovery makes one logical request per entry; the client's normal
+transport retry limits still apply. It accepts one aligned citation only when
+every asserted bibliographic field occurs in that entry's text. Existing NER
+results remain in source order. Exhausting the budget or losing the upstream
+service preserves local results and leaves unresolved losses visible under
+`extraction.diagnostics.reference_yield`, alongside the recovery receipt.
+This setting adds LLM cost only when enabled and does not repair segmentation
+boundaries or replace already parsed citations.
+
 ## Local model runtime
 
 Four of bibr's models run locally: the PP-DocLayoutV3 layout detector, the

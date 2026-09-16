@@ -12,6 +12,7 @@ import re
 import unicodedata
 from dataclasses import replace
 
+from bibr.clients.structured import StructuredResponseError
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import (
     CanonicalSection,
@@ -1305,12 +1306,40 @@ async def detect_bib_xrefs_with_receipt(
             unique_cites: dict[str, int] = {}
             for text_id, cite_text, _start, _end in ambiguous:
                 unique_cites.setdefault(_normalize_citation_text(cite_text), text_id)
-            tier3 = await _resolve_with_llm(
-                [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
-                references,
-                llm_client,
-                file_hash,
-            )
+            try:
+                tier3 = await _resolve_with_llm(
+                    [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
+                    references,
+                    llm_client,
+                    file_hash,
+                )
+            except StructuredResponseError as exc:
+                # Optional linking must not discard established links or the
+                # independently extracted metadata/references. Use the validated
+                # diagnostic carrier, never provider text or arbitrary attributes.
+                diagnostics = exc.safe_diagnostics
+                if diagnostics is None:
+                    raise
+                reason = f"llm_response_invalid:{diagnostics.invalid_category}"
+                affected = {(text_id, start, end) for text_id, _, start, end in ambiguous}
+                candidates = [
+                    replace(
+                        candidate,
+                        rejection_reasons=tuple(
+                            dict.fromkeys((*candidate.rejection_reasons, reason))
+                        ),
+                    )
+                    if not candidate.accepted
+                    and (candidate.text_id, candidate.start, candidate.end) in affected
+                    else candidate
+                    for candidate in candidates
+                ]
+                logger.warning(
+                    "Tier 3 citation response invalid (%s); retaining %d established links",
+                    diagnostics.invalid_category,
+                    len(all_xrefs),
+                )
+                tier3 = []
             resolved_map = {_normalize_citation_text(xref.contents): xref.xref_id for xref in tier3}
             resolved_occurrences = [
                 (

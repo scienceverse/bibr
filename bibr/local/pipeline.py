@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from bibr.pipeline.pipeline import Pipeline
@@ -30,7 +31,9 @@ if TYPE_CHECKING:
         MemoryMode,
         RefParseStrategy,
         RefSegStrategy,
+        RunConfig,
     )
+    from bibr.pipeline.progress import ProgressTracker
 
 logger = logging.getLogger(__name__)
 
@@ -361,6 +364,31 @@ class LocalPipeline(Pipeline):
         self.end_page = end_page
         self.llm_backend = llm_backend
         self.no_llm = no_llm
+
+    async def process_document(
+        self,
+        path: str | Path,
+        *,
+        progress: ProgressTracker | None = None,
+        content: bytes | None = None,
+        content_hash: str | None = None,
+        config: RunConfig | None = None,
+    ) -> dict:
+        """Parse once and return an outcome for every detected article record.
+
+        The document envelope is separate from ``process_file``'s single-paper
+        export. Ambiguous boundaries and failed records remain explicit entries.
+        """
+        from bibr.pipeline.document import process_document
+
+        return await process_document(
+            self,
+            path,
+            progress=progress,
+            content=content,
+            content_hash=content_hash,
+            config=config,
+        )
 
     def llm_usage_snapshot(self) -> dict[str, dict[str, int]]:
         """Cumulative LLM token usage by model, captured before pipeline teardown.

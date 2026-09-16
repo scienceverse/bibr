@@ -6,6 +6,68 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in NER reference recovery retries only missing source-aligned entries with
+  the configured LLM, under per-paper entry and time limits. Accepted fields must
+  occur in that entry's source; diagnostics retain attempts and unresolved losses.
+- Opt-in `chew_document()` / `achew_document()` and
+  `LocalPipeline.process_document()` return a document envelope containing every
+  detected article, with explicit unresolved/failed records. Extraction scopes
+  each article's text, references, DOI evidence and linked objects independently.
+  Incomplete records can retain useful fields in a separate `partial_paper`
+  payload with blocking validation.
+- Schema 11.1 preserves supported printed title/abstract versions in
+  `metadata_variant` and exposes front-matter ownership decisions in extraction
+  diagnostics. Existing 11.0 exports and checkpoints remain readable.
+- Printed versions carry explicit presentation links with byline source evidence.
+  A separate document evaluator measures article inventory, abstract ownership,
+  completeness, absence and primary selection without changing paper score floors.
+
+### Fixed
+
+- Select a complete printed title/byline/abstract presentation together: an
+  explicitly identified original, otherwise the first complete presentation.
+  Preserve supported alternatives and report unresolved pairings in diagnostics.
+- Retain explicitly labelled OCR abstract regions when exact source ownership
+  survives a synthetic section heading or affiliation vocabulary in the prose.
+- Corroborated repeated front matter can belong to one article; numbered body
+  headings no longer create false records when they lack independent article
+  anatomy. Genuine multi-article ambiguity remains a blocking finding.
+- Scope sentences sharing one source paragraph across pages or columns without
+  treating repeated provenance as conflicting source order. Preserve each
+  sentence's page and reject paragraphs crossing article boundaries.
+- Let complete local article anatomy resolve a conflicting learned heading
+  prior in document detection, retaining model scores and the decision reason.
+- Keep adjacent translated reference sections and supported bibliography
+  subsections together without joining distant lists across body boundaries.
+- Preserve all rows of an owned bibliography when deferred body or table rows
+  interrupt its stored text order.
+- Reference diagnostics retain source-backed spans lost during segmentation,
+  filtering or parsing, without counting unresolved text as parsed citations.
+- Recover complete structured metadata with narrowly repairable JSON escapes;
+  retain independently validated fields after other field failures, with blocking
+  diagnostics for incomplete metadata.
+- Accept one complete, unambiguous JSON code block surrounded by explanatory
+  prose while continuing to reject competing or incomplete structured data.
+- Preserve deterministic citation links and extracted metadata when the optional
+  model citation resolver returns invalid structured output; unresolved citation
+  candidates retain an explicit warning and diagnostic evidence.
+- Keep equations extracted directly from source and validated metadata when the
+  optional equation model returns invalid structured output, with an explicit
+  warning for the incomplete model fallback.
+- Preserve source statements and extracted metadata when optional funding,
+  author-role or affiliation parsing returns invalid structured output; record
+  a warning for the incomplete structured fields.
+- Keep extracted metadata and available trained labels when optional paper-type
+  escalation or broad classification returns invalid structured output, with
+  explicit diagnostics for the failed fallback.
+- Preserve intact leading DOIs during fresh OCR text cleanup instead of treating
+  their `10.` prefix as a numbered list item.
+- Preserve document-title evidence through appendix repair and recover invented
+  titles only from verified evidence in the selected article. Source evidence
+  remains valid when later normalization changes semantic section IDs.
+
 ## [0.5.1] - 2026-09-12
 
 ### Fixed
