@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import unicodedata
 
 EXACT_GENERIC_ARTICLE_LABELS = frozenset(
@@ -39,6 +40,13 @@ PRINTED_ABSTRACT_LABELS = frozenset(
         "초록",
         "ملخص",
     }
+)
+
+PRINTED_ABSTRACT_PREFIX = re.compile(
+    r"^\s*(?:"
+    + "|".join(re.escape(label) for label in sorted(PRINTED_ABSTRACT_LABELS))
+    + r")(?:\s*[:：]\s*|\s*\n\s*)(\S[\s\S]*)$",
+    re.IGNORECASE,
 )
 
 
