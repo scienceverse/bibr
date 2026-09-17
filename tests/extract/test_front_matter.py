@@ -451,6 +451,168 @@ def test_probation_row_never_roots_a_record():
 
 
 @pytest.mark.parametrize(
+    "citation",
+    [
+        "Learning Together, edited by Alice Green, Bruno Stone, Elm Press, 2025.",
+        "Alice Green, Bruno Stone, Learning Together, 12(3): 45.",
+    ],
+)
+def test_bibliographic_row_does_not_suppress_mistyped_reviewer_byline(citation):
+    module = _front_matter_module()
+    reviewer = "Clara Isabel Moreno"
+    contents = _contents(
+        [_paragraph(1, citation, paragraph_id=1, section_id=1, bbox=(90, 140, 400, 210))],
+        sections=[
+            _section(0, "Root"),
+            _section(1, "A review of Learning Together", section_type=CanonicalSection.TITLE),
+            _section(2, reviewer, section_type=CanonicalSection.ENDNOTE, bbox=(90, 230, 350, 250)),
+        ],
+    )
+
+    resolution, _ = module.resolve_front_matter(contents)
+    candidates = {row.raw_text: row for row in resolution.candidates}
+
+    assert "byline" not in candidates[citation].roles
+    assert {"byline", module.BYLINE_PROBATION_ROLE} <= candidates[reviewer].roles
+    assert resolution.selected_block_id is not None
+    assert 2 in resolution.allowed_section_ids
+
+
+def _self_citation_contents(
+    *,
+    heading="CITATION",
+    main_title="How gardens support urban wildlife",
+    cited_title=None,
+    citation_page=1,
+    heading_label="paragraph_title",
+    with_year=True,
+    with_doi=True,
+):
+    citation = (
+        "Lane A, Green B. "
+        + ("(2025). " if with_year else "")
+        + (cited_title or main_title)
+        + ". Garden Studies. 12(3): 45. "
+        + ("https://doi.org/10.1234/example" if with_doi else "")
+    )
+    contents = _contents(
+        [
+            _paragraph(
+                1,
+                "Alice Lane, Bruno Green",
+                paragraph_id=1,
+                section_id=1,
+                bbox=(90, 140, 400, 160),
+            ),
+            _paragraph(
+                2,
+                citation,
+                paragraph_id=2,
+                section_id=3,
+                page=citation_page,
+                bbox=(30, 230, 180, 320),
+                label="abstract",
+            ),
+            _paragraph(
+                3,
+                "We measured insect visits in planted urban gardens.",
+                paragraph_id=3,
+                section_id=3,
+                bbox=(220, 230, 550, 420),
+                label="abstract",
+            ),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(1, main_title, section_type=CanonicalSection.TITLE, bbox=(90, 80, 500, 120)),
+            _section(2, heading, section_type=CanonicalSection.TITLE, bbox=(30, 205, 180, 225)),
+            _section(3, "Abstract", section_type=CanonicalSection.ABSTRACT),
+        ],
+        detected_title=main_title,
+        region_summaries=[
+            RegionSummary(page=1, index=1, label="doc_title", bbox=(90, 80, 500, 120)),
+            RegionSummary(page=1, index=3, label=heading_label, bbox=(30, 205, 180, 225)),
+        ],
+    )
+    # The adjacent column's abstract region creates a semantic section without
+    # a printed heading; the citation paragraph inherits that section.
+    contents.sections[-1].header_is_synthetic = True
+    return contents, citation
+
+
+@pytest.mark.parametrize("heading", ["CITATION", "How to cite:", "How to cite this article"])
+def test_self_citation_does_not_create_an_article_or_abstract(heading):
+    module = _front_matter_module()
+    contents, citation = _self_citation_contents(heading=heading)
+
+    resolution, issues = module.resolve_front_matter(contents)
+    candidates = {row.raw_text: row for row in resolution.candidates}
+
+    assert not issues
+    assert len(resolution.blocks) == 1
+    assert resolution.selected_block_id is not None
+    assert module.SELF_CITATION_ROLE in candidates[heading].roles
+    assert "title" not in candidates[heading].roles
+    assert candidates[citation].roles == {"doi", module.SELF_CITATION_ROLE}
+    assert candidates[citation].text_ids == (2,)
+    assert candidates[citation].section_id == 3
+    assert "abstract" in candidates[contents.sentences[-1].text].roles
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"heading": "A second article"},
+        {"heading_label": "doc_title"},
+        {"cited_title": "A completely different garden study"},
+        {"cited_title": "How gardens support urban wildlife and human well-being"},
+        {"citation_page": 2},
+        {"with_year": False},
+        {"with_doi": False},
+        {"main_title": "Gardens"},
+    ],
+)
+def test_self_citation_requires_independent_source_evidence(options):
+    module = _front_matter_module()
+    contents, _ = _self_citation_contents(**options)
+
+    candidates = module.collect_front_matter_candidates(contents)
+
+    assert all(module.SELF_CITATION_ROLE not in row.roles for row in candidates)
+    heading = next(row for row in candidates if row.section_id == 2)
+    assert "title" in heading.roles
+
+
+def test_article_named_citation_remains_a_title():
+    module = _front_matter_module()
+    contents = _contents(
+        [_paragraph(1, "Alice Lane, Bruno Green", paragraph_id=1, bbox=(90, 140, 400, 160))],
+        sections=[_section(1, "Citation", section_type=CanonicalSection.TITLE)],
+        detected_title="Citation",
+    )
+
+    resolution, _ = module.resolve_front_matter(contents)
+
+    assert resolution.selected_block_id is not None
+    assert "title" in next(row for row in resolution.candidates if row.raw_text == "Citation").roles
+
+
+def test_intervening_article_title_prevents_self_citation_association():
+    module = _front_matter_module()
+    contents, _ = _self_citation_contents()
+    contents.sections[2].section_id = 3
+    contents.sections[3].section_id = 4
+    for sentence in contents.sentences[1:]:
+        sentence.section_id = 4
+    other = _section(2, "The second garden article", section_type=CanonicalSection.TITLE)
+    contents.sections.insert(2, other)
+
+    candidates = module.collect_front_matter_candidates(contents)
+
+    assert all(module.SELF_CITATION_ROLE not in row.roles for row in candidates)
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "Mahdieh Khorsandifard1 · Kian Jafari1 · Arash Sheikhaleh1",
