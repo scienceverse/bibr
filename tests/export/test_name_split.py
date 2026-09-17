@@ -28,6 +28,96 @@ def test_suffix_is_split_out():
     ]
 
 
+@pytest.mark.parametrize("separator", [", ", ",", ",\n", "; ", " and ", " & "])
+def test_vancouver_people_are_never_paired_as_family_and_given(separator):
+    assert split_person_names(separator.join(["Smith AB", "Jones CD", "Green E"])) == [
+        {"family": "Smith", "given": "AB"},
+        {"family": "Jones", "given": "CD"},
+        {"family": "Green", "given": "E"},
+    ]
+
+
+def test_vancouver_particles_hyphens_and_spaced_initials_remain_verbatim():
+    assert split_person_names("van der Berg P.  A., O’Neill-Smith J.-B.") == [
+        {"family": "van der Berg", "given": "P.  A."},
+        {"family": "O’Neill-Smith", "given": "J.-B."},
+    ]
+
+
+def test_vancouver_incomplete_last_person_does_not_erase_earlier_boundaries():
+    assert split_person_names("Smith AB, Jones C, Green") == [
+        {"family": "Smith", "given": "AB"},
+        {"family": "Jones", "given": "C"},
+        {"literal": "Green"},
+    ]
+
+
+def test_ambiguous_middle_name_does_not_absorb_the_next_complete_person():
+    assert split_person_names("Smith AB, Q XY, Jones CD") == [
+        {"family": "Smith", "given": "AB"},
+        {"literal": "Q XY"},
+        {"family": "Jones", "given": "CD"},
+    ]
+
+
+@pytest.mark.parametrize("marker", ["et al.", "editors"])
+def test_vancouver_list_marker_does_not_become_an_author(marker):
+    assert split_person_names(f"Smith AB, Jones C, {marker}") == [
+        {"family": "Smith", "given": "AB"},
+        {"family": "Jones", "given": "C"},
+    ]
+
+
+@pytest.mark.parametrize("first", ["Smith AB Jr.", "Smith AB, Jr.", "Smith, AB, Jr."])
+def test_suffix_on_an_earlier_person_does_not_shift_later_people(first):
+    assert split_person_names(f"{first}, Jones, C.") == [
+        {"family": "Smith", "given": "AB", "suffix": "Jr."},
+        # A mixed-style continuation still needs its own APA comma pair.
+        {"family": "Jones", "given": "C."},
+    ]
+
+
+@pytest.mark.parametrize("value", ["SMITH AB", "John Smith", "山田太郎", "et al."])
+def test_ambiguous_single_name_stays_literal(value):
+    assert split_person_names(value) == [{"literal": value}]
+
+
+def test_administration_with_and_is_one_corporate_author():
+    assert split_person_names("Food and Drug Administration") == [
+        {"literal": "Food and Drug Administration"}
+    ]
+
+
+@pytest.mark.parametrize("value", ["Smith V", "Smith, V"])
+def test_a_lone_v_initial_is_not_a_generational_suffix(value):
+    assert split_person_names(value) == [{"family": "Smith", "given": "V"}]
+
+
+def test_middle_v_initial_does_not_shift_following_apa_people():
+    assert split_person_names("Smith, A, Jones, V, Green, B") == [
+        {"family": "Smith", "given": "A"},
+        {"family": "Jones", "given": "V"},
+        {"family": "Green", "given": "B"},
+    ]
+
+
+def test_roman_after_family_before_comma_is_not_vancouver_initials():
+    assert split_person_names("Smith III, A. B.") == [{"family": "Smith III", "given": "A. B."}]
+
+
+@pytest.mark.parametrize("given", ["John", "J.", "J. B."])
+@pytest.mark.parametrize("suffix", ["Jr.", "III", "V"])
+def test_apa_suffix_after_given_names_keeps_the_following_person(given, suffix):
+    assert split_person_names(f"Smith, {given}, {suffix}, Jones, Amy") == [
+        {"family": "Smith", "given": given, "suffix": suffix},
+        {"family": "Jones", "given": "Amy"},
+    ]
+
+
+def test_suffix_without_given_name_remains_literal():
+    assert split_person_names("Smith, Jr.") == [{"literal": "Smith, Jr."}]
+
+
 def test_corporate_name_falls_back_to_literal():
     assert split_person_names("World Health Organization") == [
         {"literal": "World Health Organization"},
@@ -179,6 +269,11 @@ def test_mid_string_role_tag_is_not_stripped_and_stays_substring_safe():
         "Roe, R. (Editor)",
         "Smith, J., & Doe, A. (Editors)",
         "Van (Eds) Houten, K.",
+        "Smith AB,Jones CD,Green",
+        "Smith AB, Jr.,\nJones, C.",
+        "van der Berg P.  A., O’Neill-Smith J.-B.",
+        "Smith AB, Jones C, et al.",
+        "Smith,\tJ.,\nJones,K.",
     ],
 )
 def test_every_emitted_part_substring_matches_the_verbatim(verbatim):

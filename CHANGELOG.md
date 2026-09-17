@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Split Vancouver-style reference author and editor lists into separate people,
+  preserving printed initials, surname particles and suffixes. Ambiguous names
+  remain literal, and verbatim author/editor strings remain intact.
 - Select a complete printed title/byline/abstract presentation together: an
   explicitly identified original, otherwise the first complete presentation.
   Preserve supported alternatives and report unresolved pairings in diagnostics.

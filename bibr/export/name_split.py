@@ -18,7 +18,7 @@ _SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
 # carry an organisational keyword; treat them as unsplittable.
 _CORPORATE_RE = re.compile(
     r"\b(organization|organisation|institute|university|association|society|"
-    r"committee|department|ministry|agency|council|foundation|group|"
+    r"committee|department|ministry|agency|administration|council|foundation|group|"
     r"consortium|collaboration|centre|center|laboratory|academy|academies|inc|ltd|llc)\b",
     re.IGNORECASE,
 )
@@ -83,20 +83,116 @@ def _split_comma_pairs(group: str) -> list[str]:
     generational suffix belongs to the preceding person, not to a new one
     ("King, M. L., Jr." is one author), so it gets re-joined before pairing.
     """
-    fields = [f.strip() for f in group.split(",") if f.strip()]
-    if len(fields) >= 3 and fields[-1].casefold() in _SUFFIXES:
-        # Pop the suffix first: assigning to fields[-2] in the same expression
-        # as the pop() call is an evaluation-order hazard (the RHS pop mutates
-        # the list before the LHS index is resolved against it).
-        suffix_field = fields.pop()
-        fields[-1] = f"{fields[-1]}, {suffix_field}"
+    # Retain slices: rebuilding separators would change unusual printed
+    # whitespace in a literal fallback. A suffix can follow any person.
+    spans: list[tuple[int, int]] = []
+    for match in re.finditer(r"[^,]+", group):
+        field = match.group().strip()
+        if not field:
+            continue
+        previous = group[spans[-1][0] : spans[-1][1]].strip() if spans else ""
+        if (
+            spans
+            and field.casefold() in _SUFFIXES
+            and (
+                field.casefold() != "v"
+                or len(spans) % 2 == 0
+                or _parse_family_initials(previous) is not None
+            )
+        ):
+            spans[-1] = (spans[-1][0], match.end())
+        else:
+            spans.append(match.span())
+    fields = [group[start:stop].strip() for start, stop in spans]
+    first = _parse_family_initials(fields[0]) if fields else None
+    roman_before_given = (
+        first is not None
+        and first["given"].casefold() in _SUFFIXES
+        and len(fields) > 1
+        and _is_initials(fields[1])
+    )
+    if first is not None and not roman_before_given:
+        # Vancouver commas separate complete people, unlike APA's alternating
+        # family/given fields. An incomplete later name stays literal; it must
+        # never become the previous person's given name.
+        if fields[-1].casefold() in {"et al", "et al.", "editor", "editors"}:
+            fields.pop()
+        people = []
+        index = 0
+        while index < len(fields):
+            # A later APA-style name may still use its own comma before
+            # initials. Pair only that explicit pattern, never two full names.
+            if (
+                _parse_family_initials(fields[index]) is None
+                and index + 1 < len(fields)
+                and _is_initials(fields[index + 1])
+                and _parse_family_initials(f"{fields[index]} {fields[index + 1]}") is not None
+            ):
+                people.append(group[spans[index][0] : spans[index + 1][1]].strip())
+                index += 2
+            else:
+                people.append(fields[index])
+                index += 1
+        return people
     if len(fields) <= 2:
-        return [", ".join(fields)] if fields else []
-    return [", ".join(fields[i : i + 2]) for i in range(0, len(fields), 2)]
+        return [group[spans[0][0] : spans[-1][1]].strip()] if fields else []
+    return [
+        group[spans[i][0] : spans[min(i + 1, len(spans) - 1)][1]].strip()
+        for i in range(0, len(spans), 2)
+    ]
+
+
+def _is_initials(value: str) -> bool:
+    letters = [char for char in value if char.isalpha()]
+    return (
+        0 < len(letters) <= 6
+        and all(char.isupper() for char in letters)
+        and all(char.isalpha() or char.isspace() or char in ".-‐‑" for char in value)
+    )
+
+
+def _parse_family_initials(chunk: str) -> dict | None:
+    """Recognize a printed family name followed by uppercase initials.
+
+    Full given names and all-uppercase strings remain ambiguous. Offsets keep
+    multiword surnames, spaced initials and suffixes verbatim.
+    """
+    core = chunk.strip()
+    suffix = None
+    tail = re.search(r"(?:,\s*|\s+)(\S+)\s*$", core)
+    if tail and tail[1].casefold() in _SUFFIXES and _is_initials(core[: tail.start()].split()[-1]):
+        suffix = tail[1]
+        core = core[: tail.start()].rstrip()
+    if "," in core:
+        return None
+    tokens = list(re.finditer(r"\S+", core))
+    start = len(tokens)
+    letters = 0
+    for token in reversed(tokens):
+        value = token.group()
+        if not _is_initials(value):
+            break
+        letters += sum(char.isalpha() for char in value)
+        start -= 1
+    if start in {0, len(tokens)} or letters > 6:
+        return None
+    family = core[: tokens[start].start()].rstrip()
+    if not any(char.islower() for char in family) or not all(
+        char.isalpha() or char.isspace() or char in ".'-’‐‑" for char in family
+    ):
+        return None
+    person = {"family": family, "given": core[tokens[start].start() :]}
+    if suffix:
+        person["suffix"] = suffix
+    return person
 
 
 def _parse_one(chunk: str) -> dict:
-    if _CORPORATE_RE.search(chunk) or "," not in chunk:
+    if _CORPORATE_RE.search(chunk):
+        return {"literal": chunk}
+    if person := _parse_family_initials(chunk):
+        return person
+    if "," not in chunk:
         return {"literal": chunk}
 
     family, _, remainder = chunk.partition(",")
@@ -104,10 +200,12 @@ def _parse_one(chunk: str) -> dict:
     given = remainder.strip().strip(",").strip()
     if not family or not given:
         return {"literal": chunk}
+    if given.casefold() in _SUFFIXES and given != "V":
+        return {"literal": chunk}
 
     suffix = None
     tail = given.replace(",", " ").split()
-    if tail and tail[-1].casefold() in _SUFFIXES:
+    if len(tail) > 1 and tail[-1].casefold() in _SUFFIXES:
         suffix = tail[-1]
         given = given[: given.rfind(suffix)].strip().strip(",").strip()
 

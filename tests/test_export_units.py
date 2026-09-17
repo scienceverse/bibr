@@ -1096,6 +1096,31 @@ class TestBibIsolatedFromMatches:
         assert bib["container"] == "Nature"
         assert bib["authors"] == "Smith, J. & Jones, K."
 
+    def test_reference_name_boundaries_preserve_verbatim_authors_and_editors(self):
+        ref = PaperReference(
+            bib_id=1,
+            title="A study of X",
+            authors="Smith AB,Jones CD,Green",
+            editors="van der Berg P. A.; O’Neill-Smith J.-B.",
+            first_page=None,
+            volume=None,
+            year=None,
+            container=None,
+        )
+        meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
+        bib = export_paper_to_json(_minimal_paper(metadata=meta))["bib"][0]
+        assert bib["authors"] == ref.authors
+        assert bib["editors"] == ref.editors
+        assert bib["author"] == [
+            {"family": "Smith", "given": "AB"},
+            {"family": "Jones", "given": "CD"},
+            {"literal": "Green"},
+        ]
+        assert bib["editor"] == [
+            {"family": "van der Berg", "given": "P. A."},
+            {"family": "O’Neill-Smith", "given": "J.-B."},
+        ]
+
 
 # ── JSON export: xref serialization ────────────────────────────────────
 
