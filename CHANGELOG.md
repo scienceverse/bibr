@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Keep source-confirmed self-citation boxes within their article instead of
+  treating them as separate records. Bibliographic years and page locators no
+  longer provide lexical byline evidence that suppresses author recovery.
 - Preserve separately printed abstracts across shared sections and page breaks,
   excluding keyword rows and requiring complete source ownership. Inline abstract
   labels also stop preceding text from merging into the abstract paragraph.

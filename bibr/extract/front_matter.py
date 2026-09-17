@@ -191,6 +191,8 @@ CLASSIFIED_BYLINE_TITLE_ROLE = "classified_byline_title"
 BYLINE_PROBATION_ROLE = "byline_probation"
 MODEL_NON_TITLE_SEED_ROLE = "model_non_title_seed"
 BODY_HEADING_ROLE = "body_heading"
+SELF_CITATION_ROLE = "self_citation"
+_SELF_CITATION_HEADINGS = frozenset({"citation", "how to cite", "how to cite this article"})
 _NUMBERED_BODY_HEADING_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*[.)]?|[IVX]+[.)])\s+", re.I)
 _NAME_LIST_SEPARATOR_RE = re.compile(r"\s*[;·•‣⁃∙⋅]\s*")
 _CONTRIBUTION_ROLE_RE = re.compile(
@@ -625,7 +627,12 @@ def _looks_like_long_name_list(text: str) -> bool:
 
 
 def _looks_like_legacy_byline(text: str, normalized: str, *, source_kind: str) -> bool:
-    if _DOI_RE.search(text) or normalized in _ORDINARY_HEADING_TEXT:
+    if (
+        _DOI_RE.search(text)
+        or normalized in _ORDINARY_HEADING_TEXT
+        or _REFERENCE_YEAR_RE.search(text)
+        or _REFERENCE_LOCATOR_RE.search(text)
+    ):
         return False
     # Ordinary caps, widened to the separator-shape limits for a byline that has
     # already proven itself a long name list.
@@ -1033,6 +1040,53 @@ def _with_byline_probation(
     )
 
 
+def _demote_self_citation_boxes(
+    candidates: list[FrontMatterCandidate], *, detected_title: str | None
+) -> None:
+    """Keep a publisher's citation box inside its source article.
+
+    A label alone is insufficient: require the next paragraph to repeat the
+    preceding trusted title and supply bibliographic year/DOI evidence on the
+    same page. This also corrects an abstract role inherited from the adjacent
+    column without changing the underlying text or section classification.
+    """
+    detected = _normalize_text(detected_title or "")
+    for index, heading in enumerate(candidates[:-1]):
+        if (
+            "heading" not in heading.roles
+            or heading.normalized_text.rstrip(":：") not in _SELF_CITATION_HEADINGS
+            or heading.region_label == "doc_title"
+            or heading.normalized_text == detected
+            or heading.page is None
+        ):
+            continue
+        title = next((row for row in reversed(candidates[:index]) if "title" in row.roles), None)
+        citation = candidates[index + 1]
+        if (
+            title is None
+            or title.page != heading.page
+            or not (title.region_label == "doc_title" or title.normalized_text == detected)
+            or len(_WORD_RE.findall(title.raw_text)) < 3
+            or citation.source_kind != "paragraph"
+            or citation.page != heading.page
+            or citation.region_label == "doc_title"
+            or len(citation.raw_text) > 1_500
+            or not _REFERENCE_YEAR_RE.search(citation.raw_text)
+            or not _DOI_RE.search(citation.raw_text)
+            or not re.search(
+                rf"(?<!\w){re.escape(title.normalized_text.rstrip('.'))}(?:[.!?]\s|$)",
+                citation.normalized_text,
+            )
+        ):
+            continue
+        for position in (index, index + 1):
+            row = candidates[position]
+            candidates[position] = replace(
+                row,
+                roles=(row.roles - {"title", "byline", "abstract"}) | {SELF_CITATION_ROLE},
+            )
+
+
 def _collect_candidates(
     contents: PaperContents,
     *,
@@ -1104,6 +1158,7 @@ def _collect_candidates(
                 ),
             )
         )
+    _demote_self_citation_boxes(candidates, detected_title=contents.detected_title)
     # Numbering alone cannot distinguish a body heading from a proceedings
     # title. Require actual descendant hierarchy and no independently owned
     # byline/abstract before demoting a classifier-UNKNOWN heading. Root (0)
