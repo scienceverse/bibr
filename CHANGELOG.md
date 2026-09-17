@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Preserve separately printed abstracts across shared sections and page breaks,
+  excluding keyword rows and requiring complete source ownership. Inline abstract
+  labels also stop preceding text from merging into the abstract paragraph.
 - Select a complete printed title/byline/abstract presentation together: an
   explicitly identified original, otherwise the first complete presentation.
   Preserve supported alternatives and report unresolved pairings in diagnostics.

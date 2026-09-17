@@ -65,6 +65,7 @@ from bibr.structure.text_repair import (
     strip_markdown_emphasis,
 )
 from bibr.structure.xref_utils import detect_xrefs
+from bibr.utils.metadata import PRINTED_ABSTRACT_PREFIX
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
 
 logger = logging.getLogger(__name__)
@@ -880,6 +881,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     content
                     if region.native_text_rejection_reason is not None
                     or (native_label or label) == "abstract"
+                    or (
+                        (native_label or label) == "text"
+                        and PRINTED_ABSTRACT_PREFIX.match(content or "")
+                    )
                     else None
                 ),
                 raw_ocr_content=region.raw_content,

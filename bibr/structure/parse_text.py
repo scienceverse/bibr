@@ -28,6 +28,7 @@ from bibr.structure.assembler import DeferredText
 from bibr.structure.reference_boundaries import is_publisher_note_boundary
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.structure.xref_utils import URL_RE
+from bibr.utils.metadata import PRINTED_ABSTRACT_PREFIX
 from bibr.utils.text import clean_extracted_url, normalize_text
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,11 @@ class TextHandlersMixin:
         text = clean_text_content(content.strip())
         if not text:
             return
+
+        # A printed inline abstract label starts a new field even when the
+        # preceding keyword line has no terminal punctuation.
+        if PRINTED_ABSTRACT_PREFIX.match(text):
+            self._flush_carry_over()
 
         # Strip affiliation markers (e.g. "Author ^{1,2}") from pre-section
         # content on page 1 (the author byline zone).  These are NOT citation

@@ -15,7 +15,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from bibr.extract.front_matter import _record_title_indices
-from bibr.utils.metadata import PRINTED_ABSTRACT_LABELS
+from bibr.utils.metadata import PRINTED_ABSTRACT_LABELS, PRINTED_ABSTRACT_PREFIX
 
 if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterCandidate, FrontMatterResolution
@@ -196,29 +196,33 @@ def _abstract_variants(contents, selected, resolution):
     return variants
 
 
-def _region_abstract_variants(contents, selected, resolution):
-    """Retain explicitly labelled OCR abstracts even in a synthetic section.
+_KEYWORDS_PREFIX = re.compile(
+    r"^\s*(?:keywords|key words|palavras[- ]chave|palabras clave|kata kunci)\s*[:：]",
+    re.IGNORECASE,
+)
+_CITATION_LABELS = frozenset({"citation", "how to cite", "how to cite this article"})
+_CITATION_PREFIX = re.compile(
+    r"^\s*(?:citation|how to cite(?: this article)?)\s*[:：]", re.IGNORECASE
+)
 
-    Scientific prose can contain affiliation vocabulary. An exact abstract
-    region, printed label, and complete source-text match establish the field
-    independently of that semantic role. Shared or partial provenance fails
-    closed; the section classifier cannot expand the captured text.
+
+def _region_abstract_variants(contents, selected, resolution):
+    """Capture printed abstract boundaries independently of semantic sections.
+
+    Section normalization may place several abstracts and their keywords in one
+    section. Physical headings, inline labels and keyword rows delimit the source
+    instead. Each prose region must have complete, exclusive sentence ownership;
+    only an abstract-labelled region may continue an inline-labelled text region.
     """
-    prefix = re.compile(
-        r"^\s*(?:"
-        + "|".join(re.escape(label) for label in sorted(_ABSTRACT_LABELS))
-        + r")(?:\s*[:：]\s*|\s*\n\s*)(\S[\s\S]*)$",
-        re.IGNORECASE,
-    )
-    variants = []
-    seen = set()
-    for region in sorted(contents.region_summaries, key=lambda row: (row.page, row.index)):
-        if region.label != "abstract" or region.bbox is None:
-            continue
-        printed_text = region.canonical_ocr_content or region.content or ""
-        match = prefix.match(printed_text)
-        if match is None:
-            continue
+    regions = sorted(contents.region_summaries, key=lambda row: (row.page, row.index))
+    keys = [(row.page, row.index) for row in regions]
+    boxes = [(row.page, row.bbox) for row in regions if row.bbox is not None]
+    if len(keys) != len(set(keys)) or len(boxes) != len(set(boxes)):
+        return []
+
+    def paragraph_sources(region, printed_text):
+        if region.bbox is None:
+            return []
         sentences = [
             row
             for row in contents.sentences
@@ -229,31 +233,122 @@ def _region_abstract_variants(contents, selected, resolution):
         ]
         ids = {row.text_id for row in sentences}
         sources = [row for row in selected if ids & set(row.text_ids)]
-        if not sources:
-            continue  # An abstract owned by another article is not selected evidence.
+        owned_ids = [key for row in sources for key in row.text_ids]
         if (
             not ids
             or not ids.issubset(resolution.allowed_text_ids)
-            or ids != {key for row in sources for key in row.text_ids}
-            or ids & seen
+            or ids != set(owned_ids)
+            or len(owned_ids) != len(set(owned_ids))
+            or any(row.source_kind != "paragraph" for row in sources)
             or _normalized(" ".join(row.text for row in sentences)) != _normalized(printed_text)
-        ):
-            return []
-        text = match.group(1).strip()
-        # An internal body/bibliography heading reveals a contaminated region.
-        if re.search(
-            r"(?im)^\s*(?:(?:introduction|references|bibliography)\s*[:：]?\s*$|"
-            r"(?:keywords|key words|palavras[- ]chave|palabras clave)\s*[:：])",
-            text,
-        ):
-            return []
-        seen.update(ids)
-        variants.append(
-            (
-                min(row.reading_order for row in sources),
-                _variant(resolution.selected_block_id, "abstract", text, sources),
+            or _normalized(" ".join(row.raw_text for row in sources)) != _normalized(printed_text)
+            or any(
+                any(
+                    point.page_no != region.page or point.bbox != region.bbox
+                    for point in row.provenance
+                )
+                for row in sentences
             )
-        )
+        ):
+            return []
+        return sources
+
+    variants = []
+    sources = []
+    chunks = []
+    start_page = None
+    citation_box = False
+
+    def finish():
+        if chunks:
+            variants.append(
+                (
+                    min(row.reading_order for row in sources),
+                    _variant(resolution.selected_block_id, "abstract", "\n".join(chunks), sources),
+                )
+            )
+        sources.clear()
+        chunks.clear()
+
+    for region in regions:
+        if region.label in {"header", "footer", "footnote", "vision_footnote"}:
+            continue
+        printed_text = region.canonical_ocr_content or region.content or ""
+        if region.label in {"doc_title", "paragraph_title"}:
+            # A heading is source evidence only if the selected record owns it.
+            headings = [
+                row
+                for row in selected
+                if row.source_kind == "heading"
+                and row.page == region.page
+                and row.bbox is not None
+                and row.bbox == region.bbox
+                and _normalized(row.raw_text) == _normalized(printed_text)
+            ]
+            if sources and not chunks:
+                return []  # Do not skip an empty earlier printed abstract.
+            finish()
+            label = _normalized(printed_text).casefold().rstrip(":.")
+            citation_box = label in _CITATION_LABELS
+            if label in _ABSTRACT_LABELS:
+                if len(headings) == 1:
+                    sources.extend(headings)
+                    start_page = region.page
+                elif headings:
+                    return []
+            continue
+        if _KEYWORDS_PREFIX.match(printed_text) or _CITATION_PREFIX.match(printed_text):
+            if sources and not chunks:
+                return []
+            finish()
+            continue
+        inline = PRINTED_ABSTRACT_PREFIX.match(printed_text)
+        if inline and region.label in {"abstract", "text"}:
+            if sources and not chunks:
+                return []
+            finish()
+            owned = paragraph_sources(region, printed_text)
+            if not owned:
+                # Unselected records must not contribute even a partial field.
+                if any(
+                    row.page == region.page and row.bbox == region.bbox for row in selected
+                ) or any(
+                    row.text_id in resolution.allowed_text_ids
+                    and any(
+                        point.page_no == region.page and point.bbox == region.bbox
+                        for point in row.provenance
+                    )
+                    for row in contents.sentences
+                ):
+                    return []
+                continue
+            sources.extend(owned)
+            chunks.append(inline.group(1).strip())
+            start_page = region.page
+            citation_box = False
+        elif sources:
+            if region.label != "abstract" or region.page > start_page + 1:
+                return []  # An unexplained gap cannot certify a complete abstract.
+            owned = paragraph_sources(region, printed_text)
+            if not owned:
+                return []
+            sources.extend(owned)
+            chunks.append(printed_text.strip())
+        elif (
+            region.label == "abstract"
+            and not citation_box
+            and paragraph_sources(region, printed_text)
+        ):
+            return []  # Never silently promote a later label over an unlabelled abstract.
+        if chunks and re.search(
+            r"(?im)^\s*(?:(?:introduction|references|bibliography)\s*[:：]?\s*$|"
+            r"(?:keywords|key words|palavras[- ]chave|palabras clave|kata kunci)\s*[:：])",
+            chunks[-1],
+        ):
+            return []
+    if sources and not chunks:
+        return []
+    finish()
     return variants
 
 
