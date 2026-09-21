@@ -74,7 +74,7 @@ Post-parse pipeline runs after structure parsing:
 - **Section classification** -- three-tier cascade maps headers to canonical IMRaD categories: alias lookup table, then a trained classifier model, then LLM fallback (`section_classifier.py`; see [Classifiers](classifiers.md))
 - **Study hierarchy** -- regex markers such as Study 1 and Experiment A establish separate section scopes before classification (`section_tree.py`)
 - **Metadata extraction** -- selected front-matter rows ground title, authors, abstract, DOI, and publication fields. JATS and HTML/ePub can supply preparsed metadata, avoiding the core metadata LLM call
-- **Paper classification** -- the default SPECTER2 multitask model predicts paper type and OECD domains from title/abstract; confidence gates and LLM fallback are described in [Classifiers](classifiers.md)
+- **Paper classification** -- the default MiniLM multitask model predicts paper type and OECD domains from title/abstract; confidence gates and LLM fallback are described in [Classifiers](classifiers.md)
 - **Reference extraction** -- segmentation (default `geom`, a local geometry model, cascading through region anchors -> LLM -> CRF when geometry is absent or unconfident) locates each reference; parsing (default `ner`, a local ModernBERT-CRF model, with `llm` for opt-in batched LLM parsing) extracts structured fields
 - **Citation linking** -- 3-tier hybrid approach: numeric bracket/superscript citations, author-year citations, then LLM fallback (`citation_linker.py`)
 - **Equation extraction** -- regex + LLM fallback for statistical reporting decomposition (`equation_extractor.py`)

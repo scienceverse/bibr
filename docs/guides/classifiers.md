@@ -136,10 +136,15 @@ scored.
 
 **Module:** `bibr/structure/paper_classifier.py` (taxonomy constants), `bibr/extract/core_metadata.py` (LLM classification, via `CoreMetadataExtractor`; `bibr/extract/extractor.py` delegates to it)
 
-The default `scienceverse/bibr-paper-classifier` model is a SPECTER2-based
-multitask classifier. It reads the resolved title and abstract and predicts
-paper type together with OECD L1/L2. `ML_PAPER_CLASSIFIER_MODEL_ID` selects
-the model, and `ML_PAPER_CLASSIFIER_REVISION` pins its revision.
+The default `scienceverse/bibr-paper-classifier` model is a multitask
+classifier with a `sentence-transformers/all-MiniLM-L6-v2` encoder. It reads
+the resolved title and abstract and predicts paper type together with OECD
+L1/L2. `ML_PAPER_CLASSIFIER_MODEL_ID` selects the model, and
+`ML_PAPER_CLASSIFIER_REVISION` pins its revision. According to the
+[model card](https://huggingface.co/scienceverse/bibr-paper-classifier/blob/6046171b3198a255acb1f07f81a586a32f399ac4/README.md)
+for the pinned revision, its training supervision is labels from a
+DeepSeek-v4-Flash teacher, which changed 16,220 OECD L1 labels relative to a
+matched OpenAlex baseline.
 
 When the paper-type confidence falls below
 `ML_PAPER_CLASSIFIER_MIN_CONFIDENCE` (default `0.5`), the pipeline can ask the
@@ -162,6 +167,11 @@ guards during core metadata extraction:
 | `corrigendum` | Notice amending a previously published article |
 | `erratum` | Notice amending a previously published article |
 | `retraction` | Notice withdrawing a previously published article |
+
+The default model's paper-type head has no `corrigendum` class. That label
+comes from the title guard, which maps titles such as `Corrigendum: ...` and
+`Correction to ...` to `corrigendum`, or from the LLM paper-type escalation and
+fallback.
 
 Unrecognized or uncertain values are coerced to `null` when the type cannot be determined, rather than an `unknown` sentinel.
 
@@ -191,6 +201,10 @@ L1 confidence.
 ### Level 2: Subdomain
 
 Each L1 domain has 4-10 subcategories. For example, "Social Sciences" includes: Psychology and Cognitive Sciences, Economics and Business, Education, Sociology, Law, Political Science, Social and Economic Geography, Media and Communications.
+
+The default model's L2 head covers 32 of the 36 subdomains. It never predicts
+Environmental Biotechnology, Industrial Biotechnology, Nano-technology, or
+Agricultural Biotechnology; only the LLM fallback can return those.
 
 When the trained classifier is disabled or unavailable, the LLM fallback
 returns both L1 and L2. Its labels are canonicalized against the taxonomy;
