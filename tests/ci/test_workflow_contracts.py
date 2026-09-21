@@ -290,7 +290,7 @@ def test_dependabot_covers_uv_actions_and_docker() -> None:
 
 def test_delivery_policy_files_have_explicit_owners() -> None:
     codeowners = (ROOT / ".github" / "CODEOWNERS").read_text(encoding="utf-8")
-    owners = "@Lakens @DeBruine @thesanogoeffect"
+    owners = "@thesanogoeffect"
 
     assert codeowners.endswith("\n")
     assert f"/.github/workflows/ {owners}" in codeowners
