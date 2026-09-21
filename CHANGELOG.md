@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   blocks the cascade sends to the LLM; set `REF_SEG_STRATEGY=llm` to label
   every block. Records from earlier versions lack `provenance` and may contain
   geometry output; discard them or capture into a fresh directory.
+- Documentation and the `ML_PAPER_CLASSIFIER_MODEL_ID` setting description no
+  longer call the default paper classifier SPECTER2-based; its model card
+  documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
+  the model has no `corrigendum` paper-type class and predicts 32 of the 36 OECD
+  subdomains.
 
 ### Added
 
