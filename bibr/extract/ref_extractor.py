@@ -2399,6 +2399,14 @@ class ReferenceExtractor:
                     "publisher": fields.get("publisher"),
                     "editors": fields.get("editors"),
                     "edition": fields.get("edition"),
+                    # Every field the decoder maps must be passed on here, or
+                    # it is dropped before export (TestNerPathKeepsNerOnlyFields
+                    # guards it). Verbatim: finalize leaves these five alone.
+                    "arxiv": fields.get("arxiv"),
+                    "pmid": fields.get("pmid"),
+                    "series": fields.get("series"),
+                    "access_date": fields.get("access_date"),
+                    "note": fields.get("note"),
                     # The NER tag set has no in-press concept, so the tagger
                     # drops the year *and* leaves the flag false — an
                     # "(in press)" reference exported year: null,
