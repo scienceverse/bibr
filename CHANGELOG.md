@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Sentence DOI candidates in `extraction.identity.receipt` now record the layout
+  region they were read from; `region_index` was previously always `null`. With
+  `page`, it matches the `page` and `index` of an `extraction.regions` row: the
+  region's position on that page after OCR post-processing renumbers merged
+  regions. It stays `null` when no layout region is recorded for the sentence,
+  or when the sentence is printed on a later page than the region that began its
+  paragraph. The v11 export schema changes only by describing these fields.
+
 ## [0.5.1] - 2026-09-12
 
 ### Fixed

@@ -26,6 +26,8 @@ class DoiCandidate:
     page: int | None
     section_id: int | None
     section_type: str | None
+    # With ``page``, the RegionSummary ``(page, index)`` of the layout region
+    # the DOI was read from; the contract is documented on DoiCandidateExport.
     region_index: int | None
     region_type: str | None
     text_id: int | None
