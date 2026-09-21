@@ -504,7 +504,8 @@ class PaperSentence:
     # not derivable from region-level OCR output.  Empty for DOCX-native input.
     provenance: list["Provenance"] = field(default_factory=list)
     # Training-side region metadata sourced from the first contributing layout region.
-    # Keys: font_size, font_bold, is_italic, bbox_2d, region_type, page_w, page_h.
+    # Keys: font_size, font_bold, is_italic, bbox_2d, region_type, page_w, page_h,
+    # plus region_page/region_index: that region's RegionSummary ``(page, index)``.
     # None for DOCX-native input or when font metadata was not extracted.
     region_meta: dict | None = None
 

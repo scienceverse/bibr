@@ -391,6 +391,21 @@ def _publication_table_doi_candidates(contents) -> list[DoiCandidate]:
     return candidates
 
 
+def _sentence_region_index(sentence) -> int | None:
+    """Index of the layout region that began the sentence's paragraph.
+
+    Together with the sentence's page it must name an ``extraction.regions``
+    row. A paragraph joined across a page break assigns its later sentences to
+    the page they were printed on, where that region does not exist, so those
+    sentences get None.
+    """
+    region_meta = sentence.region_meta or {}
+    region_page = region_meta.get("region_page")
+    if region_page is None or region_page != sentence.page_number:
+        return None
+    return region_meta.get("region_index")
+
+
 def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
     """Collect every source-visible DOI with sentence or furniture provenance."""
 
@@ -408,7 +423,7 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
                 section_type=section.section_type.value
                 if section and section.section_type
                 else None,
-                region_index=region_meta.get("region_index"),
+                region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
             )
