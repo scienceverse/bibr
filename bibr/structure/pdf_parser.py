@@ -236,7 +236,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # Each entry carries its own optional provenance (source-region bboxes,
         # inherited by every sentence split from it) and region_meta (font_size,
         # font_bold, bbox_2d, region_type, page_w, page_h, is_italic from the
-        # first contributing layout region — used by the v4 training features)
+        # first contributing layout region — used by the v4 training features —
+        # plus that region's region_page/region_index key)
         # side-channels, so they stay aligned with the text by construction.
         # When needs_segmentation is False the text is emitted as a single
         # sentence (formulas, reference entries) without the sentence segmenter.
@@ -913,9 +914,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             )
             self._prepare_table_caption_state_for_region(dispatch_treatment, content)
 
-            # Region metadata for v4 training feature export.  Built once per
-            # region and threaded through to sentences via _handle_content /
-            # _handle_formula / _handle_section_hint (References path).
+            # Region metadata for v4 training feature export and source-region
+            # provenance.  Built once per region and threaded through to
+            # sentences via _handle_content / _handle_formula /
+            # _handle_section_hint (References path).
             region_meta: dict | None = {
                 "font_size": region.font_size,
                 "font_bold": region.font_bold,
@@ -927,6 +929,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # pass ran (DOCX, scanned pre-v4).
                 "bbox_2d": list(region.bbox_pdf_pts) if region.bbox_pdf_pts else None,
                 "region_type": native_label or label or None,
+                # This region's RegionSummary key, exported as the ``page`` and
+                # ``index`` of its ``extraction.regions`` row. ``index`` is the
+                # region's position on the page after OCR post-processing
+                # renumbered it, which can differ from the layout detector's slot.
+                "region_page": region_summary.page,
+                "region_index": region_summary.index,
                 "page_w": region.page_w,
                 "page_h": region.page_h,
             }

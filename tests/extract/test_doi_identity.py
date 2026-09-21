@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from bibr.paper_contents import (
@@ -28,7 +30,11 @@ def _contents(
                 section_id=index,
                 paragraph_id=index,
                 page_number=page,
-                region_meta={"region_type": "text", "region_index": index + 10},
+                region_meta={
+                    "region_type": "text",
+                    "region_page": page,
+                    "region_index": index + 10,
+                },
             )
         )
     return PaperContents(
@@ -73,6 +79,86 @@ def test_candidate_collection_preserves_sentence_provenance_and_context():
     assert own.selection_tier == 3
     assert ref.semantic_context == "reference"
     assert ref.rejection_reason == "reference_candidate"
+
+
+def _ocr_region(label: str, content: str, top: int, *, native_label: str | None = None) -> dict:
+    return {
+        "native_label": native_label or label,
+        "label": label,
+        "content": content,
+        "bbox_2d": [100, top, 900, top + 40],
+    }
+
+
+def _parse_ocr_pages(pages: list[list[dict]]) -> PaperContents:
+    """OCR-stage post-processing, then the real parser and segmentation handoff."""
+    from bibr.pipeline.stages.ocr import _postprocess_ocr_regions, _to_typed_regions
+    from bibr.structure.pdf_parser import PDFParser
+
+    for page in pages:
+        for slot, region in enumerate(page):
+            region["index"] = slot
+    parser = PDFParser(_to_typed_regions(_postprocess_ocr_regions(pages)))
+    contents = parser.parse()
+    parser.apply_segmentation(
+        contents,
+        [re.split(r"(?<=[.!?])\s+", text) for text in parser.assembler.segmentable_texts],
+    )
+    parser.create_content_sections(contents)
+    return contents
+
+
+def _two_page_ocr_pages() -> list[list[dict]]:
+    return [
+        [
+            _ocr_region("doc_title", "Tracing identifiers to layout regions", 60),
+            _ocr_region("formula", "E = mc^2", 120, native_label="display_formula"),
+            _ocr_region("text", "(1)", 120, native_label="formula_number"),
+            # Layout slot 3; post-processing merges the equation number into
+            # the formula and renumbers this region to index 2.
+            _ocr_region("text", "https://doi.org/10.1234/self.1", 200),
+            _ocr_region("text", "Received 1 January 2024; accepted 2 February 2024.", 260),
+            _ocr_region("text", "The companion paper describes the data and", 900),
+        ],
+        [
+            _ocr_region(
+                "text",
+                "the analysis code. It is cited as https://doi.org/10.5555/companion.2 here.",
+                80,
+            ),
+        ],
+    ]
+
+
+def test_parsed_sentence_candidate_names_its_post_processing_region():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _parse_ocr_pages(_two_page_ocr_pages())
+
+    own = next(c for c in collect_doi_candidates(contents) if c.normalized == "10.1234/self.1")
+    assert (own.source_kind, own.page, own.region_index) == ("sentence", 1, 2)
+    # ``(page, region_index)`` is the RegionSummary key exported as the
+    # ``page``/``index`` of an ``extraction.regions`` row.
+    [region] = [
+        summary
+        for summary in contents.region_summaries
+        if (summary.page, summary.index) == (own.page, own.region_index)
+    ]
+    assert region.content == "https://doi.org/10.1234/self.1"
+    assert region.label == own.region_type == "text"
+
+
+def test_sentence_continued_onto_a_later_page_has_no_region_index():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _parse_ocr_pages(_two_page_ocr_pages())
+
+    continued = next(
+        c for c in collect_doi_candidates(contents) if c.normalized == "10.5555/companion.2"
+    )
+    # The paragraph began in region 4 of page 1; page 2 has no such region.
+    assert continued.page == 2
+    assert continued.region_index is None
 
 
 def test_expected_identity_selects_only_visible_eligible_candidate():

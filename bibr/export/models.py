@@ -567,6 +567,27 @@ class ExpectedIdentityExport(BaseModel):
 
 
 class DoiCandidateExport(BaseModel):
+    """One source-visible DOI and where it was read.
+
+    ``page`` and ``region_index`` name the layout region the DOI was read
+    from: the ``extraction.regions`` row with the same ``page`` and ``index``.
+    That index is the region's 0-based position among its page's regions after
+    OCR post-processing. Post-processing renumbers a page when it drops
+    duplicate regions or merges split ones (a formula and its equation number,
+    a word hyphenated across two blocks), so the index can differ from the
+    layout detector's original slot.
+
+    A ``sentence`` candidate names the region that began the sentence's
+    paragraph (``text[].paragraph_id``), which ``region_type`` labels. If the
+    parser joined following regions into that paragraph, the DOI may be
+    printed in one of those instead.
+
+    ``region_index`` is null when no layout region on ``page`` is recorded:
+    header and footer furniture, structured metadata, captions, footnotes,
+    input parsed without layout analysis, and a sentence printed on a later
+    page than the region that began its paragraph.
+    """
+
     model_config = _STRICT
 
     raw: str

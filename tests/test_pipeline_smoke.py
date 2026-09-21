@@ -348,6 +348,16 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
     assert result["bib"][0]["doi"] == "10.1234/jt.2020.001"
     assert [r["year"] for r in result["bib"]] == [2020, 2021]
 
+    # The identity receipt names the layout region each sentence DOI was read
+    # from, by its ``extraction.regions`` (page, index) key.
+    [reference_doi] = [
+        candidate
+        for candidate in result["extraction"]["identity"]["receipt"]["candidates"]
+        if candidate["normalized"] == "10.1234/jt.2020.001"
+    ]
+    assert (reference_doi["page"], reference_doi["region_index"]) == (1, 7)
+    assert reference_doi["region_type"] == "reference"
+
     # The run had an LLM, so the engine is reported rather than null.
     assert result["extraction"]["llm"]["provider"]
     # Gate findings live only in ``validation.issues`` — never mirrored into
