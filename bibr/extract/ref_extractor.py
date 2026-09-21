@@ -1649,7 +1649,8 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "geom", ref_text, spans=spans, credible_starts=aligned_starts, selected=True
             )
-            self._save_seg_training_data(ref_text, ref_strings, settings=self._settings)
+            # Not captured as seg training data: a model prediction, not an LLM
+            # label (see save_seg_training_data).
             return ref_strings
         self._record_segmentation_attempt(
             "geom",

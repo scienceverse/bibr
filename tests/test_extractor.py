@@ -13,6 +13,8 @@ from unittest import mock
 import pandas as pd
 import pytest
 
+from bibr import __version__ as bibr_version
+from bibr.config import GlobalSettings
 from bibr.exceptions import UpstreamServiceError
 from bibr.extract.author_email_harvester import AuthorEmailHarvester
 from bibr.extract.core_metadata import CoreMetadataExtractor
@@ -2445,6 +2447,29 @@ class TestSaveRefTrainingData:
         assert data["n_references"] == 1
         assert len(data["output"]) == 1
 
+    def test_records_llm_provenance(self, tmp_path):
+        """The record names the provider, model, and prompt that produced it."""
+        import json
+
+        settings = GlobalSettings()
+        settings.REF_TRAINING_DATA_DIR = str(tmp_path)
+        settings.llm.provider = "anthropic"
+        settings.llm.model = "claude-test"
+
+        save_ref_training_data("raw bib text", [], settings=settings)
+
+        data = json.loads(next(tmp_path.glob("*.json")).read_text())
+        provenance = data["provenance"]
+        prompt_sha256 = provenance.pop("prompt_sha256")
+        assert len(prompt_sha256) == 64 and set(prompt_sha256) <= set("0123456789abcdef")
+        assert provenance == {
+            "source": "llm",
+            "provider": "anthropic",
+            "model": "claude-test",
+            "prompt": "references_parse",
+            "bibr_version": bibr_version,
+        }
+
     def test_skips_duplicate(self, tmp_path, monkeypatch):
         """Doesn't overwrite if file already exists (content-hash dedup)."""
         monkeypatch.setattr("bibr.config.Settings.REF_TRAINING_DATA_DIR", str(tmp_path))
@@ -2503,6 +2528,51 @@ class TestSaveSegTrainingData:
         assert data["input"] == "Smith, J. (2020). A.\nDoe, A. (2019). B."
         assert data["segments"] == ["Smith, J. (2020). A.", "Doe, A. (2019). B."]
         assert data["n_segments"] == 2
+
+    def test_records_llm_provenance(self, tmp_path):
+        """The record names the provider, model, and prompt that produced it."""
+        import json
+
+        settings = GlobalSettings()
+        settings.REF_TRAINING_DATA_DIR = str(tmp_path)
+        settings.llm.provider = "anthropic"
+        settings.llm.model = "claude-test"
+
+        save_seg_training_data("A.\nB.", ["A.", "B."], settings=settings)
+
+        data = json.loads(next((tmp_path / "segmentation").glob("*.json")).read_text())
+        provenance = data["provenance"]
+        prompt_sha256 = provenance.pop("prompt_sha256")
+        assert len(prompt_sha256) == 64 and set(prompt_sha256) <= set("0123456789abcdef")
+        assert provenance == {
+            "source": "llm_anchor",
+            "provider": "anthropic",
+            "model": "claude-test",
+            "prompt": "references_segment",
+            "bibr_version": bibr_version,
+        }
+
+    def test_prompt_hash_tracks_the_prompt_not_the_input(self, tmp_path, monkeypatch):
+        """Same prompt → same hash across blocks; an edited prompt → a new hash."""
+        import json
+        from dataclasses import replace
+
+        from bibr.clients.prompts import PROMPTS
+
+        settings = GlobalSettings()
+        settings.REF_TRAINING_DATA_DIR = str(tmp_path)
+        save_seg_training_data("first block", ["first block"], settings=settings)
+        save_seg_training_data("second block", ["second block"], settings=settings)
+        spec = PROMPTS["references_segment"]
+        monkeypatch.setitem(
+            PROMPTS, "references_segment", replace(spec, system=spec.system + " Edited.")
+        )
+        save_seg_training_data("third block", ["third block"], settings=settings)
+
+        records = [json.loads(p.read_text()) for p in (tmp_path / "segmentation").glob("*.json")]
+        hashes = {r["input"]: r["provenance"]["prompt_sha256"] for r in records}
+        assert hashes["first block"] == hashes["second block"]
+        assert hashes["third block"] != hashes["first block"]
 
     def test_skips_duplicate(self, tmp_path, monkeypatch):
         """Doesn't overwrite if file already exists (content-hash dedup)."""
