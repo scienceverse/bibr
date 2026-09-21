@@ -49,10 +49,16 @@ def test_same_request_keys_the_same():
         ("mode", "instructor:override"),
         ("schema_json", '{"properties": {"title": {"type": "string"}}}'),
         ("chat_template_json", '{"enable_thinking": false}'),
+        ("extra_body_json", '{"thinking": {"type": "disabled"}}'),
     ],
 )
 def test_every_answer_changing_field_changes_the_key(field, value):
     assert _key(**{field: value}) != _key()
+
+
+def test_unset_extra_body_keeps_existing_keys():
+    """Entries cached before LLM_EXTRA_BODY existed must still hit."""
+    assert _key(extra_body_json=None) == _key(extra_body_json="") == _key()
 
 
 def test_fence_boundary_is_canonicalised_out_of_the_key():
@@ -142,8 +148,8 @@ class _CountingBackend:
         return self.result, None
 
 
-def _client(tmp_path, backend, *, enabled=True):
-    settings = GlobalSettings(cache={"llm": enabled, "llm_dir": str(tmp_path)})
+def _client(tmp_path, backend, *, enabled=True, llm=None):
+    settings = GlobalSettings(cache={"llm": enabled, "llm_dir": str(tmp_path)}, llm=llm or {})
     client = LLMClient(settings=settings, backend=backend)
     client._limiter = mock.MagicMock()
     client._limiter.acquire = mock.AsyncMock(return_value=None)
@@ -182,6 +188,19 @@ async def test_different_input_still_calls_live(tmp_path):
 
     await client.extract_title_keywords("paper one")
     await client.extract_title_keywords("paper two")
+
+    assert backend.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_extra_body_fields_separate_cache_entries(tmp_path):
+    """A server-side switch such as a thinking mode can change the answer."""
+    backend = _CountingBackend(TitleKeywordsLLM(title="x"))
+    thinking_off = {"extra_body": {"thinking": {"type": "disabled"}}}
+
+    await _client(tmp_path, backend).extract_title_keywords("body text")
+    await _client(tmp_path, backend, llm=thinking_off).extract_title_keywords("body text")
+    await _client(tmp_path, backend, llm=thinking_off).extract_title_keywords("body text")
 
     assert backend.calls == 2
 

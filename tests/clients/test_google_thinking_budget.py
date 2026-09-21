@@ -5,7 +5,19 @@ call in the pipeline, so the cases below are pinned to what the live API
 actually accepted on 2026-07-25 rather than to what the docs imply.
 """
 
-from bibr.clients.providers.google import GoogleProvider, _resolve_thinking_budget
+import json
+
+import httpx
+import instructor
+import pytest
+from pydantic import BaseModel
+
+from bibr.clients.providers.google import (
+    GoogleProvider,
+    _resolve_thinking_budget,
+    _resolve_thinking_level,
+    _uses_thinking_level,
+)
 
 
 class _Llm:
@@ -76,3 +88,137 @@ def test_call_kwargs_emits_a_legal_budget_for_the_default_model():
 def test_call_kwargs_still_disables_thinking_where_the_model_allows_it():
     kwargs = GoogleProvider(_Settings("gemini-3.1-flash-lite", 0)).call_kwargs(None)
     assert kwargs["thinking_config"] == {"thinking_budget": 0}
+
+
+# --- models that take a thinking level ---------------------------------------
+#
+# From the vendor's model documentation (2026-09-21), not the live API: these
+# models take ``thinking_level`` (low/medium/high) instead of a budget, and the
+# sampling parameters are stripped from their requests.
+
+
+def test_thinking_level_models_are_matched_by_family_prefix():
+    for model in ("gemini-3.8-flash", "gemini-3.8-flash-001", " gemini-3.8-flash "):
+        assert _uses_thinking_level(model)
+    for model in (
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash",
+        "gemini-3-flash-preview",
+        "gemini-flash-latest",
+        "gemini-2.5-flash-lite",
+        "",
+    ):
+        assert not _uses_thinking_level(model)
+
+
+def test_budget_maps_to_the_documented_thinking_levels():
+    # 0 ("disabled") becomes the lowest level these models accept.
+    assert _resolve_thinking_level(0) == "low"
+    assert _resolve_thinking_level(1) == "low"
+    assert _resolve_thinking_level(1024) == "low"
+    assert _resolve_thinking_level(1025) == "medium"
+    assert _resolve_thinking_level(8192) == "medium"
+    assert _resolve_thinking_level(8193) == "high"
+    assert _resolve_thinking_level(32768) == "high"
+    # Negative ("let the model decide") sends no level: the model default.
+    assert _resolve_thinking_level(-1) is None
+
+
+def test_request_for_a_budget_model_is_unchanged():
+    kwargs = GoogleProvider(_Settings("gemini-3.5-flash-lite", 0)).call_kwargs(None)
+    assert kwargs == {
+        "generation_config": {"temperature": 0.0, "max_tokens": 4096},
+        "thinking_config": {"thinking_budget": 1},
+    }
+    kwargs = GoogleProvider(_Settings("gemini-3-flash-preview", 0)).call_kwargs(None, 512)
+    assert kwargs == {
+        "generation_config": {"temperature": 0.0, "max_tokens": 512},
+        "thinking_config": {"thinking_budget": 0},
+    }
+
+
+def test_request_for_a_thinking_level_model_sends_a_level_and_no_sampling_params():
+    kwargs = GoogleProvider(_Settings("gemini-3.8-flash", 0)).call_kwargs(None)
+    assert kwargs == {
+        "generation_config": {"max_tokens": 4096},
+        "thinking_config": {"thinking_level": "low"},
+    }
+    kwargs = GoogleProvider(_Settings("gemini-3.8-flash", 16384)).call_kwargs(None, 512)
+    assert kwargs == {
+        "generation_config": {"max_tokens": 512},
+        "thinking_config": {"thinking_level": "high"},
+    }
+
+
+def test_dynamic_budget_leaves_a_thinking_level_model_on_its_default():
+    kwargs = GoogleProvider(_Settings("gemini-3.8-flash", -1)).call_kwargs(None)
+    assert kwargs == {"generation_config": {"max_tokens": 4096}}
+
+
+class _Ping(BaseModel):
+    reply: str
+
+
+def _function_call_response() -> httpx.Response:
+    call = {"name": _Ping.__name__, "args": {"reply": "OK"}}
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {
+                    "content": {"role": "model", "parts": [{"functionCall": call}]},
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 3, "candidatesTokenCount": 2},
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_config", "expected_thinking"),
+    [
+        (
+            "gemini-3.5-flash-lite",
+            {"temperature": 0.0, "maxOutputTokens": 4096},
+            {"thinkingbudget": 1},
+        ),
+        ("gemini-3.8-flash", {"maxOutputTokens": 4096}, {"thinkinglevel": "LOW"}),
+    ],
+)
+async def test_wire_request_through_instructor_and_the_sdk(
+    monkeypatch, model, expected_config, expected_thinking
+):
+    """What the installed instructor + google-genai put on the wire (mocked transport)."""
+    bodies = []
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        return _function_call_response()
+
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    real_from_provider = instructor.from_provider
+
+    def from_provider(*args, **kwargs):
+        return real_from_provider(*args, http_options={"httpx_async_client": transport}, **kwargs)
+
+    monkeypatch.setattr(instructor, "from_provider", from_provider)
+    provider = GoogleProvider(_Settings(model, 0))
+    try:
+        result = await provider.build_client().create(
+            response_model=_Ping,
+            messages=[{"role": "user", "content": "Reply with OK"}],
+            **provider.call_kwargs(None),
+        )
+    finally:
+        await transport.aclose()
+
+    assert result.reply == "OK"
+    assert len(bodies) == 1
+    config = bodies[0]["generationConfig"]
+    thinking = config.pop("thinkingConfig")
+    assert config == expected_config
+    # The locked SDK serialises this nested config's keys in snake_case, as
+    # it always has for the budget; compare spelling-insensitively so an SDK
+    # switch to camelCase is not mistaken for a request change.
+    assert {k.replace("_", "").lower(): v for k, v in thinking.items()} == expected_thinking

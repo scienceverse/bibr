@@ -212,6 +212,59 @@ Validate the fields you need on representative papers before choosing a model
 for a large run. Cloud LLMs or an external OpenAI-compatible server can be used
 with local OCR when local LLM throughput is insufficient.
 
+### OpenAI-compatible endpoints
+
+Servers that speak the OpenAI chat-completions API differ in which
+structured-output modes and extra request fields they accept. These settings
+adapt the request to the server:
+
+- `LLM_INSTRUCTOR_MODE` picks the structured-output mode: empty for strict
+  JSON-schema output (the default), `json` for `response_format` type
+  `json_object` (the prompt then includes the schema and the word "json"),
+  `md_json`, or `tools`.
+- `LLM_CHAT_TEMPLATE_KWARGS` sends `chat_template_kwargs`, which self-hosted
+  servers such as vLLM and SGLang pass to the model's chat template.
+- `LLM_EXTRA_BODY` sends any other request-body fields as given, as a JSON
+  object. `LLM_CHAT_TEMPLATE_KWARGS` is merged into its `chat_template_kwargs`
+  and wins on shared keys.
+- `LLM_REASONING_EFFORT` sets `reasoning_effort` (default `minimal`). An empty
+  value omits the field. The authors and citation-linking calls send their
+  own `LLM_REASONING_EFFORT_AUTHORS` and `LLM_REASONING_EFFORT_CITATIONS`
+  (default `low`); set those empty as well to omit the field from every call.
+
+The two blocks below are configuration examples that show the pattern for
+two servers with thinking disabled. They are not recommendations and make no
+claim about extraction quality; check the settings against your server's
+documentation.
+
+```bash
+# Example: a self-hosted Qwen3.8 model served by vLLM or SGLang
+LLM_PROVIDER=openai
+LLM_BASE_URL=http://localhost:8000/v1
+LLM_MODEL=your-served-model
+LLM_INSTRUCTOR_MODE=
+LLM_CHAT_TEMPLATE_KWARGS='{"enable_thinking": false}'
+LLM_REASONING_EFFORT=
+LLM_REASONING_EFFORT_AUTHORS=
+LLM_REASONING_EFFORT_CITATIONS=
+```
+
+```bash
+# Example: the DeepSeek API, which offers JSON output only as json_object
+LLM_PROVIDER=openai
+LLM_BASE_URL=https://api.deepseek.com
+LLM_MODEL=deepseek-flash
+LLM_API_KEY=your-deepseek-key
+LLM_INSTRUCTOR_MODE=json
+LLM_EXTRA_BODY='{"thinking": {"type": "disabled"}}'
+LLM_REASONING_EFFORT=
+LLM_REASONING_EFFORT_AUTHORS=
+LLM_REASONING_EFFORT_CITATIONS=
+```
+
+`LLM_INSTRUCTOR_MODE`, `LLM_CHAT_TEMPLATE_KWARGS`, and `LLM_EXTRA_BODY` apply
+only when `LLM_BASE_URL` is set; requests to OpenAI's own API do not use them.
+
 ## Presets
 
 If you switch between setups often — cloud vs. local, different models for different

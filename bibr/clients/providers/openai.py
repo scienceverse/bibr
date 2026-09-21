@@ -69,12 +69,30 @@ class OpenAIProvider:
         )
         return client
 
+    def _extra_body(self) -> dict:
+        """Request-body fields beyond the OpenAI schema for a custom endpoint.
+
+        ``LLM_EXTRA_BODY`` passes server-specific fields through as-is (e.g. a
+        hosted API's switch for its thinking mode). ``LLM_CHAT_TEMPLATE_KWARGS``
+        is merged into its ``chat_template_kwargs`` and wins on shared keys, so
+        a configuration that sets only the latter sends exactly what it did
+        before ``LLM_EXTRA_BODY`` existed. Copies, so a caller mutating the
+        returned kwargs never alters the settings.
+        """
+        body = copy.deepcopy(self._settings.llm.extra_body)
+        if self._settings.llm.chat_template_kwargs:
+            nested = body.get("chat_template_kwargs")
+            merged = dict(nested) if isinstance(nested, dict) else {}
+            merged.update(copy.deepcopy(self._settings.llm.chat_template_kwargs))
+            body["chat_template_kwargs"] = merged
+        return body
+
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:
         kwargs: dict = {"temperature": self._settings.llm.temperature}
-        if self._settings.llm.base_url and self._settings.llm.chat_template_kwargs:
-            kwargs["extra_body"] = {
-                "chat_template_kwargs": copy.deepcopy(self._settings.llm.chat_template_kwargs)
-            }
+        if self._settings.llm.base_url:
+            extra_body = self._extra_body()
+            if extra_body:
+                kwargs["extra_body"] = extra_body
         # Self-hosted OpenAI-compatible servers (vLLM/SGLang/vllm-mlx via
         # LLM_BASE_URL) reject caps above their (to us, unknown) max_model_len
         # on tight-context servers. Omit only the implicit global default so
@@ -95,6 +113,8 @@ class OpenAIProvider:
                 kwargs["max_tokens"] = cap
             else:
                 kwargs["max_completion_tokens"] = cap
+        # A per-call override (even an empty one) wins over LLM_REASONING_EFFORT;
+        # an empty result omits the field for servers that reject it.
         effort = (
             reasoning_effort
             if reasoning_effort is not None

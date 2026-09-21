@@ -76,6 +76,7 @@ def request_key(
     mode: str | None = None,
     schema_json: str | None = None,
     chat_template_json: str | None = None,
+    extra_body_json: str | None = None,
 ) -> str:
     """Stable identity for one structured request.
 
@@ -86,7 +87,8 @@ def request_key(
     because the default transport returned something unusable.
 
     Fields are length-prefixed rather than concatenated so no rearrangement of
-    adjacent fields can collide.
+    adjacent fields can collide. ``extra_body_json`` joins the key only when
+    set, so requests without extra body fields keep their existing keys.
     """
     digest = hashlib.sha256()
     fields = (
@@ -100,6 +102,8 @@ def request_key(
         schema_json or "",
         chat_template_json or "",
     )
+    if extra_body_json:
+        fields += (extra_body_json,)
     for field in fields:
         encoded = field.encode("utf-8")
         digest.update(str(len(encoded)).encode("ascii"))
