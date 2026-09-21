@@ -4,6 +4,8 @@ No model/weights required: ``decode_bio_spans`` is a pure function over
 (tags, offsets, text).
 """
 
+import pytest
+
 from bibr.models import PaperReference
 from bibr.ner.decode import _FIELD_TO_PAPER_REF, decode_bio_spans, map_fields_to_paper_ref
 from bibr.ner.tags import BIO_TAGS
@@ -85,6 +87,49 @@ def test_year_strips_surrounding_punctuation():
 
 def test_non_numeric_year_is_dropped():
     assert map_fields_to_paper_ref({"YEAR": "in press"}) == {}
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("2020a", {"year": 2020, "year_suffix": "a"}),
+        ("2020b.", {"year": 2020, "year_suffix": "b"}),
+        ("(2020a)", {"year": 2020, "year_suffix": "a"}),
+        ("(2019c).", {"year": 2019, "year_suffix": "c"}),
+    ],
+)
+def test_year_disambiguation_letter_becomes_year_suffix(value, expected):
+    assert map_fields_to_paper_ref({"YEAR": value}) == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # The year is parsed exactly as before; only the suffix is withheld.
+        ("2020", {"year": 2020}),
+        ("2020-2021", {"year": 2020}),
+        ("1999/2000", {"year": 1999}),
+        ("2020 a", {"year": 2020}),
+        ("2020ab", {"year": 2020}),
+        ("1990s", {"year": 1990}),
+        ("\u0662\u0660\u0662\u0660a", {"year": 2020}),  # Arabic-Indic digits
+        ("in press", {}),
+        ("n.d.", {}),
+        ("n.d.-a", {}),
+    ],
+)
+def test_year_without_a_disambiguation_letter_has_no_year_suffix(value, expected):
+    assert map_fields_to_paper_ref({"YEAR": value}) == expected
+
+
+def test_year_suffix_from_bio_sequence():
+    text = "Smith, J. (2020a). A study."
+    tags = ["B-AUTHOR", "I-AUTHOR", "O", "B-YEAR", "O", "B-TITLE", "I-TITLE", "I-TITLE"]
+    offsets = [(0, 6), (7, 9), (10, 11), (11, 16), (16, 18), (19, 20), (21, 26), (26, 27)]
+    raw = decode_bio_spans(tags, offsets, text)
+    assert raw["YEAR"] == "2020a"
+    fields = map_fields_to_paper_ref(raw)
+    assert (fields["year"], fields["year_suffix"]) == (2020, "a")
 
 
 def test_pages_map_to_first_and_last_page():
@@ -223,7 +268,7 @@ def test_every_tagged_field_reaches_paper_reference():
     tagged = {tag.split("-", 1)[1] for tag in BIO_TAGS if tag != "O"}
     reachable = set(_FIELD_TO_PAPER_REF) | {"YEAR"}
     assert tagged - reachable == set()
-    for target in _FIELD_TO_PAPER_REF.values():
+    for target in [*_FIELD_TO_PAPER_REF.values(), "year", "year_suffix"]:
         assert target in PaperReference.model_fields
 
 

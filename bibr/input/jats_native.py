@@ -47,7 +47,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url, collapse_ws
+from bibr.utils.text import clean_extracted_url, collapse_ws, parse_year_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -885,6 +885,7 @@ class JatsParser:
 
         year_text = _text(_first_desc(ec, "year"))
         year: int | None = None
+        year_suffix: str | None = None
         if year_text:
             digits = "".join(c for c in year_text if c.isdigit())
             if len(digits) >= 4:
@@ -892,6 +893,10 @@ class JatsParser:
                     year = int(digits[:4])
                 except ValueError:
                     year = None
+            # Author-year deposits print the disambiguation letter inside the
+            # element: <year>2020a</year>.
+            if year is not None:
+                year_suffix = parse_year_suffix(year_text)
 
         title = _text(_first_desc(ec, "article-title")) or _text(_first_desc(ec, "chapter-title"))
         container = _text(_first_desc(ec, "source")) or None
@@ -924,6 +929,7 @@ class JatsParser:
             volume=_text(_first_desc(ec, "volume")) or None,
             authors=authors or None,
             year=year,
+            year_suffix=year_suffix,
             container=container,
             doi=doi,
             bib_type=bib_type,

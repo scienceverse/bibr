@@ -12,6 +12,8 @@ from __future__ import annotations
 import logging
 import re
 
+from bibr.utils.text import parse_year_suffix
+
 logger = logging.getLogger(__name__)
 
 # A whole page range the tagger dropped into the PAGE_RANGE_END slot without
@@ -25,7 +27,8 @@ _PAGE_SPAN_RE = re.compile(
 # scheme has a target: the five that used to be dropped here (ARXIV, PMID,
 # SERIES, ACCESS_DATE, NOTE) were trained -- PMID reaches 0.947 F1 on the
 # JATS-supervised corpus -- and then thrown away at decode. YEAR is the one
-# exception, handled below because it is the only field converted to an int.
+# exception, handled below: it becomes an int ``year`` plus its disambiguation
+# letter, ``year_suffix``.
 # ``test_every_tagged_field_reaches_paper_reference`` guards the invariant.
 _FIELD_TO_PAPER_REF: dict[str, str] = {
     "TITLE": "title",
@@ -121,7 +124,9 @@ def map_fields_to_paper_ref(raw: dict[str, str]) -> dict[str, str | int]:
     dict of ``PaperReference`` field names expected by ``RefParser.parse``.
 
     ``YEAR`` is converted to an int from its first four digits; a non-numeric
-    year (e.g. "in press", "n.d.") is dropped. Unmapped fields are skipped.
+    year (e.g. "in press", "n.d.") is dropped. A letter printed directly after
+    the year ("2020a") becomes ``year_suffix`` (see ``parse_year_suffix``).
+    Unmapped fields are skipped.
     Both ``PAGES`` and ``PAGE_RANGE_START`` map to ``first_page``; when both are
     present, the more specific ``PAGE_RANGE_START`` wins. A dashed span left
     whole in the last-page slot is split into ``first_page`` / ``last_page``.
@@ -140,6 +145,9 @@ def map_fields_to_paper_ref(raw: dict[str, str]) -> dict[str, str | int]:
                     out["year"] = int(digits[:4])
                 except ValueError:
                     pass
+            suffix = parse_year_suffix(value)
+            if suffix is not None and "year" in out:
+                out["year_suffix"] = suffix
             continue
         paper_field = _FIELD_TO_PAPER_REF.get(field)
         if paper_field is not None:

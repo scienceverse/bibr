@@ -593,24 +593,39 @@ def _match(
       route this to a Tier 3 disambiguator using ``tied_bib_ids`` as a
       shortlist.
     - ``(None, [])`` — no candidate ref scored > 0; nothing to disambiguate.
-    """
-    pool: list[_RefIdx]
-    if cand.is_in_press:
-        pool = in_press_refs
-    else:
-        pool = []
-        seen: set[int] = set()
-        for key in (
-            (cand.year, cand.year_suffix) if cand.year_suffix else None,
-            (cand.year, None),
-        ):
-            if key is None:
-                continue
-            for r in by_year.get(key, []):
-                if r.bib_id not in seen:
-                    seen.add(r.bib_id)
-                    pool.append(r)
 
+    Refs carrying the citation's own year suffix, plus same-year refs with no
+    suffix, are tried first, so "(Smith, 2020b)" picks the "2020b" entry over
+    "2020a". When they give no unique match, every same-year ref is tried
+    whatever its suffix: a citation printed without the letter still reaches a
+    lone "2020a" entry, and "2020a"/"2020b" pairs still form a shortlist, as
+    they did before reference suffixes were parsed. A shortlist from the first
+    pool is kept over one from the second.
+    """
+    if cand.is_in_press:
+        return _match_in_pool(cand, in_press_refs)
+
+    keyed: list[_RefIdx] = []
+    for key in dict.fromkeys(((cand.year, cand.year_suffix), (cand.year, None))):
+        keyed.extend(by_year.get(key, []))
+    ref, tied = _match_in_pool(cand, keyed)
+    if ref is not None:
+        return ref, tied
+
+    same_year = sorted(
+        (r for (year, _suffix), refs in by_year.items() if year == cand.year for r in refs),
+        key=lambda r: r.bib_id,
+    )
+    if len(same_year) == len(keyed):
+        return ref, tied
+    wide_ref, wide_tied = _match_in_pool(cand, same_year)
+    if wide_ref is not None or not tied:
+        return wide_ref, wide_tied
+    return None, tied
+
+
+def _match_in_pool(cand: _Candidate, pool: list[_RefIdx]) -> tuple[_RefIdx | None, list[int]]:
+    """Score ``pool`` against ``cand``; same return contract as :func:`_match`."""
     if not pool:
         return None, []
 
