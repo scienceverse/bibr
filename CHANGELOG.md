@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Reference-segmentation training capture (`REF_TRAINING_DATA_DIR`) no longer
+  mixes geometry-segmenter predictions in with LLM segmentation labels; only
+  LLM output is captured. Under the default `geom` strategy, that means only
+  blocks the cascade sends to the LLM; set `REF_SEG_STRATEGY=llm` to label
+  every block. Records from earlier versions lack `provenance` and may contain
+  geometry output; discard them or capture into a fresh directory.
 - Documentation and the `ML_PAPER_CLASSIFIER_MODEL_ID` setting description no
   longer call the default paper classifier SPECTER2-based; its model card
   documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
@@ -20,6 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+
+### Added
+
+- Captured reference training records carry a `provenance` object with the
+  label source, LLM provider and model, prompt name and hash, and bibr version.
 
 ## [0.5.1] - 2026-09-12
 

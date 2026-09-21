@@ -52,11 +52,14 @@ async def test_geom_high_confidence_uses_geom_no_llm():
     seg.segment_spans.return_value = (_SPANS_2, 0.95, 2, 2)
     with (
         patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=seg),
-        patch.object(ex, "_save_seg_training_data"),
+        patch.object(ex, "_save_seg_training_data") as saver,
     ):
         out = await ex._segment_references(_REF_TEXT, "geom")
     assert out == [_REF1, _REF2]
     ex.llm_client.segment_references.assert_not_awaited()
+    # Geom output is a model prediction, not an LLM label: never captured as
+    # segmenter training data.
+    saver.assert_not_called()
 
 
 async def test_geom_absent_geometry_cascades_to_llm():
@@ -80,12 +83,14 @@ async def test_geom_low_confidence_cascades_to_llm():
     with (
         patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=seg),
         patch("bibr.extract.ref_extractor.segment_by_anchors", return_value=["Aknin, L. (2013)."]),
-        patch.object(ex, "_save_seg_training_data"),
+        patch.object(ex, "_save_seg_training_data") as saver,
     ):
         ex._settings.REF_GEOM_SEG_CASCADE_THRESHOLD = 0.5
         await ex._segment_references(_REF_TEXT, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
     assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in ex.contents.processing_warnings)
+    # The LLM tier the cascade reached is still captured, once, with its labels.
+    saver.assert_called_once_with(_REF_TEXT, ["Aknin, L. (2013)."], settings=ex._settings)
 
 
 async def test_geom_low_align_yield_cascades_to_llm():
