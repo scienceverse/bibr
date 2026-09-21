@@ -242,6 +242,86 @@ def test_cli_local_run_end_to_end_with_stubbed_pipeline(tmp_path, monkeypatch, c
     assert "1 ok · 1 failed" in capsys.readouterr().out
 
 
+def _simulate_core_install(monkeypatch):
+    """Make torch and cv2 unimportable (and invisible to ``find_spec``)."""
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "cv2", None)
+
+
+def test_cli_local_run_on_a_core_install_does_not_require_opencv(tmp_path, monkeypatch, capsys):
+    """Without torch, layout runs on ONNX Runtime and needs no cv2 — the
+    preflight must not refuse PDFs for it, exactly as ``bibr chew`` does."""
+
+    class _Result:
+        ok = True
+
+        def __init__(self, path):
+            self.data = {"info": {"title": path.stem}, "bib": [], "text": []}
+
+    monkeypatch.setattr(
+        "bibr.batch.runner.open_chew_many",
+        lambda local: lambda paths, batch_size: [_Result(p) for p in paths],
+    )
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: "sha")
+    _simulate_core_install(monkeypatch)
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+    # A cloud OCR backend passes the (unmocked) OCR-runtime preflight anywhere.
+    args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--ocr", "gemini", "--no-llm", "--refs", "off"]
+    )
+
+    assert _run_batch(args) == 0
+
+    captured = capsys.readouterr()
+    assert "opencv" not in captured.err
+    assert (out / "paper.json").is_file()
+
+
+def test_local_preflight_requires_opencv_only_with_torch(tmp_path, monkeypatch):
+    import importlib.util
+
+    from rich.console import Console
+
+    from bibr.local.cli.batch import _local_options
+
+    _simulate_core_install(monkeypatch)
+    pdf = _pdf(tmp_path)
+    args = _build_parser().parse_args(["batch", str(pdf), "--out", "out", "--ocr", "gemini"])
+    preflight = _local_options(args, Console(stderr=True)).preflight
+
+    assert preflight([pdf]) is None
+
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "torch":
+            return object()
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    problem = preflight([pdf])
+    assert problem is not None
+    assert "opencv (cv2) not installed" in problem
+    assert "uv sync --extra torch" in problem
+
+
+def test_local_preflight_checks_the_ocr_runtime_on_a_core_install(tmp_path, monkeypatch):
+    from rich.console import Console
+
+    from bibr.local.cli.batch import _local_options
+
+    _simulate_core_install(monkeypatch)
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: None)
+    pdf = _pdf(tmp_path)
+    args = _build_parser().parse_args(["batch", str(pdf), "--out", "out", "--ocr", "paddle-vllm"])
+    preflight = _local_options(args, Console(stderr=True)).preflight
+
+    problem = preflight([pdf])
+    assert problem is not None
+    assert "paddle-vllm" in problem and "no NVIDIA GPU" in problem
+
+
 def test_form_fields_map_flags_to_the_job_api(tmp_path):
     from rich.console import Console
 

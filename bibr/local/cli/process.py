@@ -425,15 +425,12 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
+    check_pdf_runtimes = not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files)
     # opencv is only on the torch layout path (transformers' image processor
     # imports cv2); a core install runs layout through ONNX Runtime, where the
     # crop and post-processing are Pillow/numpy, so a missing cv2 is not a
     # reason to refuse the PDF.
-    if (
-        not args.dry_run
-        and any(p.suffix.lower() == ".pdf" for p in files)
-        and importlib.util.find_spec("torch") is not None
-    ):
+    if check_pdf_runtimes and importlib.util.find_spec("torch") is not None:
         opencv_reason = _opencv_unavailable_reason()
         if opencv_reason is not None:
             hint = (
@@ -447,10 +444,12 @@ async def _run_process(args) -> None:
                 hint=f"Repair with: [cyan]{hint}[/cyan]",
             )
             sys.exit(1)
+    if check_pdf_runtimes:
         # Fail fast when no local OCR runtime can start here (no suitable GPU
         # for paddle-vllm, no llama-server on PATH) — otherwise the run loads
         # the layout model and, for paddle-vllm, bootstraps vLLM before the
-        # transactional chain reports the same thing.
+        # transactional chain reports the same thing. OCR runtimes do not
+        # depend on the torch extra, so this runs on a core install too.
         ocr_reason = _preflight_ocr_runtime(config)
         if ocr_reason is not None:
             ui.error(console, ocr_reason)

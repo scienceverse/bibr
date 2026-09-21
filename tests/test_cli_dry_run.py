@@ -568,3 +568,91 @@ async def test_dry_run_hf_cache_unknown_without_huggingface_hub(tmp_path, capsys
 
     out = capsys.readouterr().out
     assert "cache state unknown (ml extra not installed)" in out
+
+
+# --- ML runtime ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("runtime", "has_torch", "layout", "classifier_listed"),
+    [
+        ("auto", False, "onnx", True),
+        ("auto", True, "onnx", True),
+        ("onnx", False, "onnx", True),
+        ("torch", True, "torch", True),
+        ("torch", False, "torch", False),
+    ],
+)
+async def test_dry_run_models_follow_the_configured_ml_runtime(
+    tmp_path, capsys, monkeypatch, runtime, has_torch, layout, classifier_listed
+):
+    """The default runtime loads the ONNX layout export and the section
+    classifier's ONNX bundle — the preview must list those, not the torch
+    layout weights, and must not hide the classifier on a torch-free install."""
+    hf_hub = pytest.importorskip("huggingface_hub")
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+
+    class _FakeCacheInfo:
+        repos = []
+
+    monkeypatch.setattr(hf_hub, "scan_cache_dir", lambda: _FakeCacheInfo())
+    monkeypatch.setattr(Settings.ml, "runtime", runtime)
+    monkeypatch.setattr(Settings.layout, "onnx_model_id", "example-org/layout-onnx")
+    monkeypatch.setattr(Settings.ml, "section_classifier_model_id", "example-org/section-clf")
+    monkeypatch.setattr("bibr.utils.ml_runtime.torch_available", lambda: has_torch)
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    if layout == "onnx":
+        assert "layout (PP-DocLayoutV3, onnx): example-org/layout-onnx" in out
+        assert "PP-DocLayoutV3_safetensors" not in out
+    else:
+        assert "layout (PP-DocLayoutV3, torch): PaddlePaddle/PP-DocLayoutV3_safetensors" in out
+        assert "example-org/layout-onnx" not in out
+    assert ("section classifier: example-org/section-clf" in out) is classifier_listed
+
+
+async def test_dry_run_layout_without_an_onnx_repo_lists_the_torch_weights(
+    tmp_path, capsys, monkeypatch
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    monkeypatch.setattr(Settings.ml, "runtime", "auto")
+    monkeypatch.setattr(Settings.layout, "onnx_model_id", None)
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
+    await _run_process(args)
+
+    assert "layout (PP-DocLayoutV3, torch): PaddlePaddle/PP-DocLayoutV3_safetensors" in (
+        capsys.readouterr().out
+    )
+
+
+async def test_dry_run_layout_local_onnx_bundle_is_available_locally(tmp_path, capsys, monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _build_parser, _run_process
+
+    _neutralize_local_rapid_mlx_env(monkeypatch)
+    bundle = tmp_path / "layout-bundle"
+    bundle.mkdir()
+    monkeypatch.setattr(Settings.ml, "runtime", "auto")
+    monkeypatch.setattr(Settings.layout, "onnx_model_id", str(bundle))
+
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_pdf_bytes())
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
+    await _run_process(args)
+
+    out = capsys.readouterr().out
+    assert f"layout (PP-DocLayoutV3, onnx): local bundle: {bundle} — available locally" in out

@@ -9,6 +9,7 @@ subset the serve's job API accepts onto multipart form fields.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from collections.abc import Sequence
 from pathlib import Path
@@ -190,10 +191,14 @@ def _local_options(args: Any, console: Any) -> Any:
     def preflight(files: Sequence[Path]) -> str | None:
         if not any(f.suffix.lower() == ".pdf" for f in files):
             return None
-        reason = _opencv_unavailable_reason()
+        # Same gate as ``bibr chew``: opencv is only on the torch layout path;
+        # a core install runs layout through ONNX Runtime without cv2.
+        reason = None
+        if importlib.util.find_spec("torch") is not None:
+            reason = _opencv_unavailable_reason()
         if reason is not None:
             hint = (
-                "uv sync --extra ml"
+                "uv sync --extra torch"
                 if "not installed" in reason
                 else "uv pip install --reinstall opencv-python-headless"
             )
