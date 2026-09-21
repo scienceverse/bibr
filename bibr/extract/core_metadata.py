@@ -2088,12 +2088,14 @@ class CoreMetadataExtractor:
         """Resolve ``(paper_type, oecd_l1, oecd_l2, paper_type_conf, oecd_conf)``.
 
         When the trained multitask classifier is configured
-        (``ML_PAPER_CLASSIFIER_MODEL_ID``), it predicts OECD L1/L2 + paper_type
-        from title+abstract, with a confidence-gated LLM escalation for
-        paper_type ONLY (OECD labels come from OpenAlex, not an LLM — no LLM
-        fallback for them). Otherwise — the dark default — the existing LLM
-        validation path runs verbatim and confidences stay ``None``, keeping
-        behavior byte-identical to before this classifier existed.
+        (``ML_PAPER_CLASSIFIER_MODEL_ID``, set by default), it predicts OECD
+        L1/L2 + paper_type from title+abstract, with a confidence-gated LLM
+        escalation for paper_type ONLY; OECD predictions are never escalated.
+        Per its published model card, the default checkpoint's training
+        supervision is DeepSeek-v4-Flash teacher labels, which changed 16,220
+        OECD L1 labels relative to a matched OpenAlex baseline. With the model
+        id set to null, the LLM validation path runs verbatim and confidences
+        stay ``None``.
         """
         if not self._settings.ml.paper_classifier_model_id:
             pt, l1, l2 = self._validate_classification(

@@ -1323,16 +1323,15 @@ class MlOptions(_BibrSettings):
         "MPS is opt-in (benchmarked slower than CPU on this model).",
     )
     # Trained OECD L1/L2 + paper_type multitask classifier (title+abstract
-    # input). Mirrors the section_classifier_* fields above. Null (the
-    # default) means no published model repo yet — the pipeline ships DARK,
-    # falling back to CoreMetadataExtractor._validate_classification's
-    # existing per-paper LLM classification call, byte-identical to today.
+    # input). Mirrors the section_classifier_* fields above. Null falls back
+    # to CoreMetadataExtractor._validate_classification's per-paper LLM
+    # classification call.
     # Env: ``ML_PAPER_CLASSIFIER_MODEL_ID``, ``ML_PAPER_CLASSIFIER_REVISION``.
     paper_classifier_model_id: str | None = Field(
         "scienceverse/bibr-paper-classifier",
         description="HF Hub repo id for the trained OECD/paper_type multitask classifier. "
         "Set to null to fall back to the existing LLM classification path. Defaults to the "
-        "published SPECTER2 multitask classifier (OECD L1/L2 + paper_type).",
+        "published multitask classifier (all-MiniLM-L6-v2 encoder; OECD L1/L2 + paper_type).",
     )
     paper_classifier_revision: str = Field(
         "6046171b3198a255acb1f07f81a586a32f399ac4",
@@ -1342,9 +1341,8 @@ class MlOptions(_BibrSettings):
     )
     # paper_type-head softmax probability below which a trained-model
     # prediction is escalated to the LLM fallback (see
-    # ``paper_classifier_llm_escalation``). OECD L1/L2 have no LLM fallback
-    # (ground-truth principle: OECD labels come from OpenAlex, not an LLM) so
-    # this threshold only gates paper_type escalation.
+    # ``paper_classifier_llm_escalation``). OECD L1/L2 predictions are never
+    # escalated to an LLM, so this threshold only gates paper_type escalation.
     paper_classifier_min_confidence: float = Field(
         0.5,
         description="paper_type-head softmax probability below which a paper-classifier "
@@ -1360,9 +1358,9 @@ class MlOptions(_BibrSettings):
     )
     # OECD L2 (subdomain) is the hardest, most ambiguous head; below this
     # softmax probability the subdomain is emitted as null rather than a
-    # low-confidence guess (there is no LLM fallback for OECD — ground-truth
-    # principle). 0.0 disables gating (always emit). L1/paper_type are emitted
-    # unconditionally (paper_type has its own LLM escalation).
+    # low-confidence guess (there is no LLM escalation for OECD). 0.0 disables
+    # gating (always emit). L1/paper_type are emitted unconditionally
+    # (paper_type has its own LLM escalation).
     paper_classifier_l2_min_confidence: float = Field(
         0.5,
         description="OECD L2 (subdomain) head softmax probability below which the subdomain is "
