@@ -682,7 +682,7 @@ class OcrOptions(_BibrSettings):
         return self._user_set_concurrency
 
     local_model: str = Field(
-        "THUDM/GLM-OCR", description="HuggingFace model id for the local GLM OCR backends."
+        "zai-org/GLM-OCR", description="HuggingFace model id for the local GLM OCR backends."
     )
     rapid_mlx_model: str = Field(
         "mlx-community/GLM-OCR-8bit",

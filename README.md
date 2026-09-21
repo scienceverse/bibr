@@ -126,7 +126,7 @@ Also, to the whole [Metacheck](https://www.scienceverse.org/metacheck/) team, an
 We are grateful to the open-source projects that bibr builds on:
 
 - [PaddleOCR-VL-1.6](https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6) (PaddlePaddle) — default OCR recognizer
-- [GLM-OCR](https://huggingface.co/THUDM/GLM-OCR) (THUDM, Tsinghua University) — explicit compatibility backend and fallback
+- [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR) (Z.ai / Tsinghua University) — explicit compatibility backend and fallback
 - [GROBID](https://github.com/kermitt2/grobid) — a major source of inspiration for structured scientific document parsing
 - [LitServe](https://lightning.ai/docs/litserve/home) (Lightning AI) — serving infrastructure
 - [PP-DocLayoutV3](https://github.com/PaddlePaddle/PaddleOCR) (PaddlePaddle) — document layout analysis

@@ -994,8 +994,8 @@ def _assert_glm_chunk_captures(captures, cache_store):
         )
         for capture in captures
     ] == [
-        ("glm-llama", "THUDM/GLM-OCR", "glm"),
-        ("glm-llama", "THUDM/GLM-OCR", "glm"),
+        ("glm-llama", "zai-org/GLM-OCR", "glm"),
+        ("glm-llama", "zai-org/GLM-OCR", "glm"),
     ]
     assert [call.args[2].profile for call in cache_store.call_args_list] == ["glm", "glm"]
 
@@ -1010,7 +1010,7 @@ async def test_automatic_glm_fallback_identity_survives_two_retained_process_chu
 
     candidates = (
         OcrBackendCandidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),
-        OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
+        OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),
     )
     prompts = []
     glm_client = _automatic_fallback_client(prompts)
@@ -1066,7 +1066,7 @@ async def test_automatic_glm_fallback_restarts_chain_after_unloaded_process_chun
 
     candidates = (
         OcrBackendCandidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),
-        OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
+        OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),
     )
     prompts = []
     first_glm = _automatic_fallback_client(prompts)
@@ -1084,7 +1084,7 @@ async def test_automatic_glm_fallback_restarts_chain_after_unloaded_process_chun
         requested_names.append(name)
         if name == "paddle":
             return candidates
-        return (OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),)
+        return (OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),)
 
     monkeypatch.setattr("bibr.ocr.registry.resolve_backend_candidates", resolve)
 
@@ -1136,7 +1136,7 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
 
     candidates = (
         OcrBackendCandidate("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),
-        OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
+        OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),
     )
     prompts = []
     first_glm = _automatic_fallback_client(prompts)
@@ -1207,7 +1207,7 @@ async def test_automatic_selector_refreshes_identity_when_retained_client_dies_b
         )
         for capture in stage.captures
     ] == [
-        ("glm-llama", "THUDM/GLM-OCR", "glm"),
+        ("glm-llama", "zai-org/GLM-OCR", "glm"),
         ("paddle-vllm", "paddle-ocr-vl-1.6", "paddle"),
     ]
     assert [call.args[2].backend for call in cache_store.call_args_list] == [

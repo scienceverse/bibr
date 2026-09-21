@@ -147,7 +147,7 @@ _PROFILES: dict[OcrProfileName, OcrProfile] = {"paddle": PADDLE_PROFILE, "glm": 
 
 #: Served-model alias an externally-managed GLM-OCR server advertises on
 #: ``/v1/models``. This is what an HTTP backend must ASK for — distinct from
-#: ``OCR_LOCAL_MODEL`` (``THUDM/GLM-OCR``), which is the HuggingFace repo id a
+#: ``OCR_LOCAL_MODEL`` (``zai-org/GLM-OCR``), which is the HuggingFace repo id a
 #: *local* runtime loads weights from. Requesting the repo id over HTTP makes
 #: the readiness gate wait out its whole deadline for a model id the server
 #: never advertises. Mirrors ``BaseHttpOcrClient._DEFAULT_MODEL``.

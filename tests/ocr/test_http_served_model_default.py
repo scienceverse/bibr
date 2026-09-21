@@ -1,6 +1,6 @@
 """HTTP OCR backends must request the alias the server advertises.
 
-``OCR_LOCAL_MODEL`` (``THUDM/GLM-OCR``) is the HuggingFace repo a *local*
+``OCR_LOCAL_MODEL`` (``zai-org/GLM-OCR``) is the HuggingFace repo a *local*
 runtime loads weights from; an externally-managed GLM-OCR server advertises
 ``glm-ocr`` on ``/v1/models``. With no ``OCR_MODEL`` set, glm-http asked for
 the repo id, so ``wait_for_server`` polled for a model id the server never

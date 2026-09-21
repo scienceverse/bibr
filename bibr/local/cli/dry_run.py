@@ -57,7 +57,7 @@ _APPROX_MODEL_SIZES: dict[str, str] = {
     # bibr/setup_wizard.py (bf16 ~2.7 GB, llama.cpp Q8_0 GGUF quant smaller).
     # Bare repo id — the ":Q8_0" quant suffix is stripped before lookup (see
     # _hf_cache_status's ``bare_repo_id``).
-    "THUDM/GLM-OCR": "2.7 GB",
+    "zai-org/GLM-OCR": "2.7 GB",
     "PaddlePaddle/PaddleOCR-VL-1.6": "1.8 GB",
     "olragon/PaddleOCR-VL-1.6-8bit": "1.0 GB",
     "mlx-community/GLM-OCR-bf16": "2.7 GB",

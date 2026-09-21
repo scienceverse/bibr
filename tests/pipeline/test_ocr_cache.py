@@ -87,7 +87,7 @@ def test_roundtrip_preserves_all_fields(enabled_cache):
     fs, cfg = _fs(), RunConfig(ocr_backend="glm-llama")
     identity = _identity(
         backend="glm-llama",
-        model="THUDM/GLM-OCR",
+        model="zai-org/GLM-OCR",
         profile="glm",
         normalizer_version="glm-canonical-v1",
     )
@@ -107,7 +107,7 @@ def test_roundtrip_preserves_native_rejection_alternate_sources(enabled_cache):
     fs, cfg = _fs(), RunConfig(ocr_backend="glm-llama")
     identity = _identity(
         backend="glm-llama",
-        model="THUDM/GLM-OCR",
+        model="zai-org/GLM-OCR",
         profile="glm",
         normalizer_version="glm-canonical-v1",
     )
@@ -141,7 +141,7 @@ def test_bundle_roundtrip_restores_all_pre_parse_artifacts(enabled_cache):
     source.pdf_outline = [OutlineItem(title="Methods", level=2, page_no=3, y_top=42.5)]
     identity = _identity(
         backend="glm-llama",
-        model="THUDM/GLM-OCR",
+        model="zai-org/GLM-OCR",
         profile="glm",
         normalizer_version="glm-canonical-v1",
     )
@@ -171,7 +171,7 @@ def test_bundle_roundtrip_restores_detached_pdf_inspection(enabled_cache):
     )
     identity = _identity(
         backend="glm-llama",
-        model="THUDM/GLM-OCR",
+        model="zai-org/GLM-OCR",
         profile="glm",
         normalizer_version="glm-canonical-v1",
     )
@@ -225,7 +225,7 @@ def test_key_uses_all_concrete_runtime_identity_components():
     fs = _fs()
     cfg = RunConfig(ocr_backend="serve-http", ocr_model="paddle-ocr-vl-1.6")
     paddle = _identity()
-    glm = _identity(model="THUDM/GLM-OCR", profile="glm", normalizer_version="glm-canonical-v1")
+    glm = _identity(model="zai-org/GLM-OCR", profile="glm", normalizer_version="glm-canonical-v1")
     same_model_glm_profile = _identity(profile="glm", normalizer_version="glm-canonical-v1")
     newer_normalizer = _identity(normalizer_version="paddle-canonical-v2")
 
