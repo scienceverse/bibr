@@ -4,8 +4,7 @@
 
 Use Python 3.11–3.14 and [uv](https://docs.astral.sh/uv/). Python 3.12 is
 the primary CI environment; some optional model-serving runtimes have narrower
-Python and platform support. Install `libmagic` on Linux/macOS if your system
-does not already provide it (see [Installation](../getting-started/install.md)).
+Python and platform support.
 
 ```bash
 git clone https://github.com/scienceverse/bibr.git

@@ -23,7 +23,6 @@ uv run bibr setup
 - Python 3.11–3.14 (3.12 is the primary CI version; optional serving runtimes
   may require a narrower version range)
 - [uv](https://docs.astral.sh/uv/) package manager
-- `libmagic` on Linux/macOS; see [Installation](https://bibr.org/getting-started/install/)
 - For live extraction: an OCR backend and a configured cloud or local LLM.
   The `local` extra installs Apple Silicon serving dependencies; it is not
   a universal OCR installation. Use the [setup wizard and Quickstart](https://bibr.org/getting-started/quickstart/)
