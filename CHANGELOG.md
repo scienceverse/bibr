@@ -8,6 +8,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Documentation and the `ML_PAPER_CLASSIFIER_MODEL_ID` setting description no
+  longer call the default paper classifier SPECTER2-based; its model card
+  documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
+  the model has no `corrigendum` paper-type class and predicts 32 of the 36 OECD
+  subdomains.
 - Sentence DOI candidates in `extraction.identity.receipt` now record the layout
   region they were read from; `region_index` was previously always `null`. With
   `page`, it matches the `page` and `index` of an `extraction.regions` row: the
