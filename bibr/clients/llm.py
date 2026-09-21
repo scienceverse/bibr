@@ -2489,7 +2489,10 @@ class LLMClient:
             file_hash: file hash for logging
 
         Returns:
-            list of PaperEquation objects. Returns [] on failure.
+            list of PaperEquation objects. Returns [] on failure. Components
+            whose ``sentence_index`` is not one of the indices sent in this
+            batch are dropped; a missing index is accepted only when the batch
+            holds a single sentence.
         """
         from bibr.paper_contents import PaperEquation
 
@@ -2520,16 +2523,25 @@ class LLMClient:
 
             llm_eqs = result.equations
             paper_eqs = []
-            default_text_id = sentences[0][0] if sentences else 0
+            dropped = 0
             for eq in llm_eqs:
-                text_id = (
-                    text_id_map.get(eq.sentence_index, default_text_id)
-                    if eq.sentence_index is not None
-                    else default_text_id
-                )
+                # Only an index this batch sent identifies the source sentence.
+                # Guessing one would attribute the component to the wrong
+                # sentence, where a short value such as ".05" can still ground.
+                # A missing index in a one-sentence batch is unambiguous.
+                index = eq.sentence_index
+                if index is None and len(text_id_map) == 1:
+                    index = 0
+                if type(index) is not int or index not in text_id_map:
+                    dropped += 1
+                    logger.debug(
+                        f"Dropping LLM equation component with invalid sentence_index "
+                        f"{index!r} (hash={file_hash}, lhs={eq.lhs!r}, rhs={eq.rhs!r})"
+                    )
+                    continue
                 paper_eqs.append(
                     PaperEquation(
-                        text_id=text_id,
+                        text_id=text_id_map[index],
                         grp_id=0,  # assigned by caller
                         lhs=eq.lhs,
                         df=eq.df or "",
@@ -2538,7 +2550,11 @@ class LLMClient:
                     )
                 )
 
-            logger.info(f"LLM extracted {len(paper_eqs)} equation components (hash={file_hash})")
+            dropped_note = f"; dropped {dropped} with an invalid sentence_index" if dropped else ""
+            logger.info(
+                f"LLM extracted {len(paper_eqs)} equation components "
+                f"(hash={file_hash}){dropped_note}"
+            )
             return paper_eqs
 
         except ProcessingError:
