@@ -1,4 +1,6 @@
 import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -105,6 +107,64 @@ def _killpg_guard():
     yield
     if _real_killpg is not None and getattr(os, "killpg", None) is not _guarded_killpg:
         os.killpg = _guarded_killpg
+
+
+# ---------------------------------------------------------------------------
+# Guard: never let a test install packages into the environment running it.
+#
+# ``bibr setup`` installs extras for real: in a source checkout
+# ``SetupWizard._install_selected_extras`` runs ``uv sync --inexact
+# --extra=ml`` against the checkout's ``.venv``. Wizard tests that reached it
+# unmocked installed torch partway through any run in a core-only venv —
+# including CI's core-install job, which checks torch is absent only before
+# the suite starts — while a full ``--extra all`` env skipped that branch and
+# hid it. A test exercising an install path must stub ``subprocess.run`` in
+# the module under test.
+# ---------------------------------------------------------------------------
+_real_subprocess_run = subprocess.run
+
+
+def _changes_environment(args) -> bool:
+    """True for the uv/pip commands that install into or remove from an env."""
+    if isinstance(args, str):
+        argv = args.split()
+    elif isinstance(args, (bytes, os.PathLike)):
+        argv = [os.fsdecode(args)]
+    else:
+        argv = [os.fsdecode(arg) for arg in args]
+    if not argv:
+        return False
+    tool = Path(argv[0]).name.lower().removesuffix(".exe")
+    rest = argv[1:]
+    if rest[:2] == ["-m", "pip"]:
+        tool, rest = "pip", rest[2:]
+    words = [arg for arg in rest if not arg.startswith("-")]
+    if tool == "uv":
+        return words[:1] in (["sync"], ["add"], ["remove"]) or words[:2] in (
+            ["pip", "install"],
+            ["pip", "uninstall"],
+            ["pip", "sync"],
+        )
+    return tool in ("pip", "pip3") and words[:1] in (["install"], ["uninstall"])
+
+
+def _guarded_run(*popenargs, **kwargs):
+    args = popenargs[0] if popenargs else kwargs.get("args", ())
+    if _changes_environment(args):
+        # pytest.fail raises a BaseException, so no ``except Exception`` in the
+        # code under test can swallow it and let the test pass.
+        pytest.fail(
+            f"subprocess.run({args!r}) blocked: it would install into the "
+            "environment running the tests. Stub subprocess.run in the module "
+            "under test, or keep the test off the install path."
+        )
+    return _real_subprocess_run(*popenargs, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _package_install_guard(monkeypatch):
+    """Tests that stub ``subprocess.run`` themselves replace this for their duration."""
+    monkeypatch.setattr(subprocess, "run", _guarded_run)
 
 
 @pytest.fixture(autouse=True)
