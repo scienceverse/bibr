@@ -35,6 +35,13 @@ schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
 remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
 too.
 
+`bibr.Result(data)` also wraps a saved export dict, such as
+`json.loads(Path("paper.json").read_text())`. It accepts an export from any
+11.x release, including a newer one that adds fields or bumps the minor
+`schema_version`. Unknown keys are kept in `result.data` and in the model's
+`model_extra`. A `schema_version` with a different major version (`10.x`,
+`12.x`) raises a validation error.
+
 ## Batch
 
 Directories and lists of paths run as a batch on a single pipeline,

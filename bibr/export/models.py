@@ -5,13 +5,22 @@ hand-built dicts in ``bibr.export.json_export`` surfaces as a validation error
 instead of being silently ignored. ``populate_by_name`` lets the
 underscore-prefixed JSON keys (pydantic forbids them as field names) be
 declared via aliases.
+
+Those strict models are the *producer* contract. :data:`PaperExportReader` is
+the matching *reader*: a generated lenient mirror that accepts any 11.x export,
+including fields added by a later 11.x writer.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+import copy
+import functools
+import operator
+from types import UnionType
+from typing import Any, Literal, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
+from pydantic.fields import FieldInfo
 
 _SCHEMA_VERSION = "11.0"
 
@@ -1084,3 +1093,123 @@ class PaperExport(BaseModel):
             if data.get(key) is None:
                 data.pop(key, None)
         return data
+
+
+# ---------------------------------------------------------------------------
+# Lenient 11.x reader
+#
+# The models above pin what THIS bibr writes: unknown keys are forbidden and
+# ``schema_version`` is exactly ``_SCHEMA_VERSION``. A reader needs the
+# opposite, because the forward policy lets any later 11.x writer add fields
+# at any nesting level and bump the minor version.
+#
+# ``PaperExportReader`` is generated rather than hand-written: every model
+# reachable from ``PaperExport`` gets a subclass with ``extra="allow"``, and
+# each field that nests a model is re-pointed at that model's reader. The
+# readers inherit validators, serializers, defaults, aliases and descriptions,
+# stay in lockstep with the producer fields, and are instances of their
+# producer classes, so code typed against ``PaperExport`` keeps working.
+# pydantic's per-call ``extra=`` override also reaches nested models, but it
+# is missing from the older pydantic 2.x releases bibr supports and cannot
+# relax the root ``schema_version``.
+# ---------------------------------------------------------------------------
+
+_LENIENT = ConfigDict(extra="allow", populate_by_name=True)
+
+# Any minor of the major this bibr writes. A different major is a breaking
+# change, so the reader refuses it. ``[0-9]`` rather than ``\d``, which
+# pydantic's regex engine matches against any Unicode digit.
+_READER_SCHEMA_VERSION_PATTERN = rf"^{_SCHEMA_VERSION.split('.')[0]}\.[0-9]+$"
+
+_ModelReaders = dict[type[BaseModel], type[BaseModel]]
+
+
+def _reader_annotation(annotation: Any, readers: _ModelReaders) -> Any:
+    """Return *annotation* with every nested export model swapped for its reader."""
+    origin = get_origin(annotation)
+    if origin is None:
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            return _reader_model(annotation, readers)
+        return annotation
+    args = get_args(annotation)
+    reader_args = tuple(_reader_annotation(arg, readers) for arg in args)
+    if reader_args == args:
+        return annotation
+    if origin in (Union, UnionType):
+        return functools.reduce(operator.or_, reader_args)
+    return origin[reader_args]
+
+
+def _reader_model(
+    model: type[BaseModel],
+    readers: _ModelReaders,
+    overrides: dict[str, tuple[Any, FieldInfo]] | None = None,
+    doc: str | None = None,
+) -> type[BaseModel]:
+    """Return the lenient reader subclass of *model*, building it on first use."""
+    if model in readers:
+        return readers[model]
+    # Models declared before the models they nest hold unresolved forward
+    # references until rebuilt.
+    model.model_rebuild()
+    annotations: dict[str, Any] = {}
+    fields: dict[str, FieldInfo] = {}
+    for field_name, field in model.model_fields.items():
+        annotation = _reader_annotation(field.annotation, readers)
+        if annotation is not field.annotation:
+            annotations[field_name] = annotation
+            fields[field_name] = copy.copy(field)
+    for field_name, (annotation, field) in (overrides or {}).items():
+        annotations[field_name] = annotation
+        fields[field_name] = field
+    name = f"{model.__name__}Reader"
+    metaclass: Any = type(model)  # pydantic's model metaclass, as in a class statement
+    reader: type[BaseModel] = metaclass(
+        name,
+        (model,),
+        {
+            "__module__": __name__,
+            "__qualname__": name,
+            # Reused so the reader's JSON Schema keeps the producer's descriptions.
+            "__doc__": doc or model.__doc__,
+            "__annotations__": annotations,
+            "model_config": _LENIENT,
+            **fields,
+        },
+    )
+    readers[model] = reader
+    return reader
+
+
+_PAPER_EXPORT_READER_DOC = """Lenient reader for any bibr 11.x JSON export.
+
+Accepts every export the strict v11 schema accepts, plus what the 11.x forward
+policy allows: unknown keys at any nesting level, and any ``schema_version`` of
+the form ``11.<minor>``. A different major version (``10.x``, ``12.x``), a
+missing root ``schema_version``, and a known field with the wrong type are still
+rejected.
+
+In Python, unknown keys are kept, not dropped: each model exposes them through
+``model_extra`` and includes them in ``model_dump()``. Every nested reader
+model subclasses its strict counterpart, so ``isinstance`` checks against
+``PaperExport`` and the other strict models still hold.
+"""
+
+PaperExportReader = cast(
+    "type[PaperExport]",
+    _reader_model(
+        PaperExport,
+        {},
+        overrides={
+            "schema_version": (
+                str,
+                Field(
+                    pattern=_READER_SCHEMA_VERSION_PATTERN,
+                    description="Export schema version, any 11.x minor. Its presence at the "
+                    "root is how readers distinguish v11 from all earlier versions.",
+                ),
+            )
+        },
+        doc=_PAPER_EXPORT_READER_DOC,
+    ),
+)

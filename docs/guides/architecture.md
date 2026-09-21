@@ -118,6 +118,15 @@ on the *presence* of a root `schema_version` key, never on parsing its value —
 pre-v11 payloads have no such key at all. See `CHANGELOG.md` for the full v11
 break and forward-versioning policy.
 
+Two JSON Schema documents are generated from the export models.
+[`bibr-export-v11.schema.json`](../schema/bibr-export-v11.schema.json) is exact
+to what the current release writes: unknown keys are rejected and
+`schema_version` is `{{ schema_version }}`.
+[`bibr-export-v11-reader.schema.json`](../schema/bibr-export-v11-reader.schema.json)
+is the reader contract: every object allows unknown keys and `schema_version`
+may be any `11.x`. The `PaperExport` and `PaperExportReader` models in
+`bibr.export` apply the same two rules in Python.
+
 ### OCR selection and evidence
 
 PDF OCR starts with PP-DocLayoutV3 regions. `OCR_BACKEND=paddle` then selects a

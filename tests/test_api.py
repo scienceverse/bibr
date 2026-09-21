@@ -260,6 +260,160 @@ def test_result_save(tmp_path):
     assert "\n" not in compact.read_text()
 
 
+# --- forward compatibility within 11.x -----------------------------------------
+
+
+def _next_minor_export_fixture() -> dict:
+    """A valid export as a later 11.x writer might emit it: the next minor
+    ``schema_version`` plus fields this bibr does not know, at several depths."""
+    data = _export_fixture()
+    data["schema_version"] = "11.1"
+    data["future_block"] = {"enabled": True, "items": [1, 2]}
+    data["metadata"]["language"] = "en"
+    data["section"][0]["numbering"] = "1."
+    data["bib"][0]["raw"] = "Doe J. Ref One. 2020."
+    data["bib"][0]["author"] = [{"family": "Doe", "given": "J.", "particle": "van"}]
+    data["text"] = [
+        {
+            "text": "Some sentence.",
+            "text_id": 1,
+            "paragraph_id": 1,
+            "section_id": 1,
+            "page_number": 1,
+            "language": "en",
+        }
+    ]
+    data["table"] = [
+        {
+            "table_id": 1,
+            "contents": [["a", "b"], ["1", "2"]],
+            "page_number": 2,
+            "cell_count": 4,
+            "parts": [
+                {
+                    "part_index": 0,
+                    "contents": [["a", "b"]],
+                    "rotation": 90,
+                    "provenance": [{"page": 2, "bbox": [0.0, 0.0, 1.0, 1.0], "dpi": 144}],
+                }
+            ],
+        }
+    ]
+    data["extraction"]["settings"]["future_knob"] = "on"
+    data["extraction"]["usage"]["totals"]["reasoning_tokens"] = 0
+    return data
+
+
+def test_result_loads_a_newer_11x_export_with_unknown_fields():
+    from bibr.export import PaperExport
+
+    result = Result(_next_minor_export_fixture())
+
+    assert result.title == "A Paper"
+    assert result.doi == "10.1234/example"
+    assert result.file_hash == "abc123"
+    assert [r["title"] for r in result.references] == ["Ref One", "Ref Two"]
+    assert result.sections[0]["header"] == "Intro"
+
+    model = result.model
+    assert isinstance(model, PaperExport)
+    assert model.schema_version == "11.1"
+    assert model.metadata.title == "A Paper"
+    assert model.section[0].section_type == "intro"
+    assert model.bib[0].title == "Ref One"
+    assert model.bib[0].author is not None
+    assert model.bib[0].author[0].family == "Doe"
+    assert model.text[0].text == "Some sentence."
+    assert model.table[0].contents == [["a", "b"], ["1", "2"]]
+    assert model.table[0].parts[0].provenance[0].page == 2
+    assert model.extraction is not None
+    assert model.extraction.settings.ref_seg == "geom"
+    assert model.extraction.usage is not None
+    assert model.extraction.usage.totals.input_tokens == 10
+
+
+def test_result_keeps_unknown_fields_from_a_newer_11x_export():
+    payload = _next_minor_export_fixture()
+    result = Result(payload)
+
+    # The raw dict is untouched, and unknown top-level/metadata keys resolve
+    # as attributes like known ones.
+    assert result.data is payload
+    assert result.future_block == {"enabled": True, "items": [1, 2]}
+    assert result.language == "en"
+    assert result.references[0]["raw"] == "Doe J. Ref One. 2020."
+
+    model = result.model
+    assert model.model_extra == {"future_block": {"enabled": True, "items": [1, 2]}}
+    assert model.metadata.model_extra == {"language": "en"}
+    assert model.section[0].model_extra == {"numbering": "1."}
+    assert model.bib[0].model_extra == {"raw": "Doe J. Ref One. 2020."}
+    assert model.bib[0].author is not None
+    assert model.bib[0].author[0].model_extra == {"particle": "van"}
+    assert model.table[0].parts[0].provenance[0].model_extra == {"dpi": 144}
+    assert model.extraction is not None
+    assert model.extraction.settings.model_extra == {"future_knob": "on"}
+
+    # Re-wrapping the model keeps the unknown fields in the dumped dict.
+    rewrapped = Result(model)
+    assert rewrapped.future_block == {"enabled": True, "items": [1, 2]}
+    assert rewrapped.data["table"][0]["parts"][0]["rotation"] == 90
+
+
+@pytest.mark.parametrize("version", ["12.0", "12.1", "10.9", "11", "11.1.0", "v11.1"])
+def test_result_rejects_a_schema_version_outside_11x(version):
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    payload["schema_version"] = version
+    with pytest.raises(ValidationError, match="schema_version"):
+        Result(payload)
+
+
+def test_result_rejects_an_export_without_schema_version():
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    del payload["schema_version"]
+    with pytest.raises(ValidationError, match="schema_version"):
+        Result(payload)
+
+
+def test_result_still_rejects_a_known_field_of_the_wrong_type():
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    payload["metadata"]["keywords"] = "not a list"
+    with pytest.raises(ValidationError, match="keywords"):
+        Result(payload)
+
+
+@pytest.mark.parametrize(
+    ("location", "mutate"),
+    [
+        ("root", lambda d: d.update(future_block={})),
+        ("metadata", lambda d: d["metadata"].update(language="en")),
+        ("section", lambda d: d["section"][0].update(numbering="1.")),
+        ("bib", lambda d: d["bib"][0].update(raw="Doe J.")),
+        ("extraction", lambda d: d["extraction"]["settings"].update(future_knob="on")),
+        ("schema_version", lambda d: d.update(schema_version="11.1")),
+    ],
+)
+def test_producer_models_still_reject_fields_they_do_not_define(location, mutate):
+    """Leniency is for reading only: what bibr writes must match its own schema."""
+    from pydantic import ValidationError
+
+    from bibr.export import PaperExport, validate_export
+
+    payload = _export_fixture()
+    PaperExport.model_validate(payload)
+    mutate(payload)
+
+    with pytest.raises(ValidationError):
+        PaperExport.model_validate(payload)
+    assert validate_export(payload), location
+
+
 # --- option mapping ----------------------------------------------------------
 
 

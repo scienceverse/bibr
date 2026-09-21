@@ -1,6 +1,7 @@
-"""Builds the JSON Schema document for the generated export artifact.
+"""Builds the JSON Schema documents for the generated export artifacts.
 
-Single source of truth for ``docs/schema/bibr-export-v11.schema.json``:
+Single source of truth for ``docs/schema/bibr-export-v11.schema.json`` and its
+lenient reader twin ``docs/schema/bibr-export-v11-reader.schema.json``:
 ``scripts/generate_schema.py`` (the writer) and
 ``tests/export/test_schema_artifact.py`` (the snapshot guard) both call
 :func:`build_export_schema` instead of calling
@@ -8,11 +9,16 @@ Single source of truth for ``docs/schema/bibr-export-v11.schema.json``:
 extra keys. That way the two can never diverge — any key this function adds
 on top of pydantic's raw output is automatically part of what the test
 compares the on-disk file against.
+
+The strict artifact describes what this bibr writes: every object forbids
+unknown keys and ``schema_version`` is exactly the current version. The reader
+artifact describes what an 11.x reader must accept: every object allows unknown
+keys and ``schema_version`` may be any ``11.<minor>``.
 """
 
 from __future__ import annotations
 
-from bibr.export.models import OMITTABLE_ROOT_KEYS, PaperExport
+from bibr.export.models import OMITTABLE_ROOT_KEYS, PaperExport, PaperExportReader
 
 # Pydantic v2's ``model_json_schema()`` emits JSON Schema draft 2020-12 but
 # does not declare the dialect via ``$schema``. This document is a published
@@ -21,9 +27,14 @@ from bibr.export.models import OMITTABLE_ROOT_KEYS, PaperExport
 JSON_SCHEMA_DIALECT = "https://json-schema.org/draft/2020-12/schema"
 
 
-def build_export_schema() -> dict:
-    """Return the full JSON Schema document for :class:`PaperExport`."""
-    schema = PaperExport.model_json_schema(by_alias=True)
+def build_export_schema(*, reader: bool = False) -> dict:
+    """Return the full JSON Schema document for :class:`PaperExport`.
+
+    With ``reader=True``, return the document for the lenient
+    :data:`~bibr.export.models.PaperExportReader` instead.
+    """
+    model = PaperExportReader if reader else PaperExport
+    schema = model.model_json_schema(by_alias=True)
     schema["required"] = _required_root_keys(schema)
     return {"$schema": JSON_SCHEMA_DIALECT, **schema}
 

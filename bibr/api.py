@@ -159,7 +159,7 @@ class ChewFailure:
 
 
 class Result:
-    """Read-only view over a bibr v11.0 export dict.
+    """Read-only view over a bibr v11 export dict.
 
     Table keys (``bib``, ``author``, ``text``, ...) and their friendly
     aliases (``references``, ``authors``, ``sections``) come back as
@@ -167,21 +167,36 @@ class Result:
     ``source`` fields (``file_name``, ``file_hash``, ``input_format``) resolve
     as attributes, as do the remaining top-level keys (``paper_id``,
     ``extraction``, ...). The raw dict stays available as :attr:`data`.
+
+    A dict is validated with the lenient
+    :data:`~bibr.export.PaperExportReader`, so an export written by
+    any 11.x bibr loads, including one from a newer 11.x release that adds
+    fields or bumps the minor ``schema_version``. Unknown keys are kept:
+    :attr:`data` is the dict exactly as given, unknown top-level, ``metadata``
+    and ``source`` keys resolve as attributes like known ones, and
+    :attr:`model` carries them as pydantic extras (``model_extra``). A
+    different major ``schema_version`` (``10.x``, ``12.x``) raises
+    :class:`pydantic.ValidationError`, as does a known field of the wrong type.
     """
 
     def __init__(self, data: dict[str, Any] | PaperExport):
-        from bibr.export import PaperExport
+        from bibr.export import PaperExport, PaperExportReader
 
         if isinstance(data, PaperExport):
             self._model = data
             self._data = cast(dict[str, Any], data.model_dump(by_alias=True, exclude_unset=True))
         else:
-            self._model = PaperExport.model_validate(data)
+            self._model = PaperExportReader.model_validate(data)
             self._data = data
 
     @property
     def model(self) -> PaperExport:
-        """Validated v11.0 export model for statically typed consumers."""
+        """Validated v11 export model for statically typed consumers.
+
+        Built from a dict, it is a :data:`~bibr.export.PaperExportReader`
+        instance: a :class:`~bibr.export.PaperExport` subclass whose nested
+        models keep unknown keys in ``model_extra``.
+        """
         return self._model
 
     @property

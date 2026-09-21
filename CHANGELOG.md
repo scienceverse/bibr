@@ -26,11 +26,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- `bibr.Result(data)` loads exports written by newer 11.x releases, as the
+  additive-only 11.x policy promises. It previously rejected any unknown key and
+  any `schema_version` other than `11.0`. Unknown keys at any nesting level are
+  now kept in `result.data` and in the model's `model_extra`. A different major
+  `schema_version` (`10.x`, `12.x`) and known fields of the wrong type are still
+  rejected. What bibr writes is still validated against the strict models.
 
 ### Added
 
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- `bibr.export.PaperExportReader`, a lenient reader model for any 11.x export,
+  generated from the strict `PaperExport` models. `Result.model` is an instance
+  of it when built from a dict, and it remains a `PaperExport` subclass.
+  `docs/schema/bibr-export-v11-reader.schema.json` is its JSON Schema, published
+  alongside the strict `bibr-export-v11.schema.json`.
 
 ## [0.5.1] - 2026-09-12
 
