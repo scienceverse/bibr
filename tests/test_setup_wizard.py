@@ -17,6 +17,18 @@ from bibr.setup_wizard import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _ml_extra_installed(monkeypatch):
+    """Pin the ml-extra probe so wizard tests take the same path in every venv.
+
+    ``_step_external_services`` installs the ml extra for real whenever torch
+    is not importable, so unpinned, the first test to reach that step in a
+    core-only venv ran ``uv sync --inexact --extra=ml`` and installed torch
+    mid-suite. Tests of that auto-install path pin False and stub the install.
+    """
+    monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: True)
+
+
 def test_google_recommended_model_is_current_flash_lite():
     assert LLM_DEFAULTS["google"]["model"] == "gemini-3.5-flash-lite"
 
