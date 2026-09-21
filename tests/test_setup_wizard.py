@@ -12,6 +12,7 @@ from bibr.setup_wizard import (
     _build_test_client,
     _fetch_models,
     _merge_env,
+    _ml_extra_available,
     _select_model,
     _write_env_fresh,
 )
@@ -27,6 +28,17 @@ def _ml_extra_installed(monkeypatch):
     mid-suite. Tests of that auto-install path pin False and stub the install.
     """
     monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: True)
+
+
+@pytest.mark.parametrize("missing", [None, "torch", "cv2"])
+def test_ml_extra_available_requires_every_heavy_module(monkeypatch, missing):
+    """The real probe, which the fixture above pins for every other test."""
+    monkeypatch.setattr(
+        "bibr.setup_wizard.importlib.util.find_spec",
+        lambda name: None if name == missing else object(),
+    )
+
+    assert _ml_extra_available() is (missing is None)
 
 
 def test_google_recommended_model_is_current_flash_lite():
