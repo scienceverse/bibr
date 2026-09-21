@@ -19,6 +19,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
   the model has no `corrigendum` paper-type class and predicts 32 of the 36 OECD
   subdomains.
+- Sentence DOI candidates in `extraction.identity.receipt` now record the layout
+  region they were read from; `region_index` was previously always `null`. With
+  `page`, it matches the `page` and `index` of an `extraction.regions` row: the
+  region's position on that page after OCR post-processing renumbers merged
+  regions. It stays `null` when no layout region is recorded for the sentence,
+  or when the sentence is printed on a later page than the region that began its
+  paragraph. The v11 export schema changes only by describing these fields.
 
 ### Added
 

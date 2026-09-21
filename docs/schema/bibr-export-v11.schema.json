@@ -1049,6 +1049,7 @@
     },
     "DoiCandidateExport": {
       "additionalProperties": false,
+      "description": "One source-visible DOI and where it was read.\n\n``page`` and ``region_index`` name the layout region the DOI was read\nfrom: the ``extraction.regions`` row with the same ``page`` and ``index``.\nThat index is the region's 0-based position among its page's regions after\nOCR post-processing. Post-processing renumbers a page when it drops\nduplicate regions or merges split ones (a formula and its equation number,\na word hyphenated across two blocks), so the index can differ from the\nlayout detector's original slot.\n\nA ``sentence`` candidate names the region that began the sentence's\nparagraph (``text[].paragraph_id``), which ``region_type`` labels. If the\nparser joined following regions into that paragraph, the DOI may be\nprinted in one of those instead.\n\n``region_index`` is null when no layout region on ``page`` is recorded:\nheader and footer furniture, structured metadata, captions, footnotes,\ninput parsed without layout analysis, and a sentence printed on a later\npage than the region that began its paragraph.",
       "properties": {
         "marker_kind": {
           "title": "Marker Kind",
