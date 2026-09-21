@@ -19,6 +19,7 @@ from bibr.extract.ref_extractor import (
     _is_degenerate_ref_failure,
     _normalize_vol_issue,
 )
+from bibr.ner.decode import _FIELD_TO_PAPER_REF
 from bibr.paper_contents import PaperContents
 from bibr.schemas import PaperReference, PaperReferenceLLM
 
@@ -341,6 +342,84 @@ class TestNerPathSetsInPress:
 
         assert aligned[0] is not None
         assert aligned[0].is_in_press is False
+
+
+class TestNerPathKeepsNerOnlyFields:
+    """ARXIV/PMID/SERIES/ACCESS_DATE/NOTE must survive reference assembly.
+
+    The decoder maps all five (``test_every_tagged_field_reaches_paper_reference``
+    guards that), but ``_parse_references_ner_aligned`` rebuilt the field dict
+    key by key without them, so every value was dropped again before export —
+    on the default REF_PARSE_STRATEGY=ner path and on the NER fallbacks of the
+    LLM modes, which reuse it.
+    """
+
+    SEGMENT = (
+        "Smith, J. (2020). A study of recall. Lecture Notes in Computer Science. "
+        "arXiv:1803.04219. PMID: 28919116. Accessed 12 March 2020. In Russian."
+    )
+    NER_ONLY = {
+        "arxiv": "1803.04219",
+        "pmid": "28919116",
+        "series": "Lecture Notes in Computer Science",
+        "access_date": "Accessed 12 March 2020",
+        "note": "In Russian",
+    }
+    PARSED = {"title": "A study of recall", "authors": "Smith, J.", **NER_ONLY}
+
+    @staticmethod
+    def _parser_returning(fields):
+        class _Parser:
+            @staticmethod
+            def parse_batch(segments):
+                return [dict(fields) for _ in segments]
+
+        return patch("bibr.extract.ref_extractor._get_ner_parser", return_value=_Parser())
+
+    def test_they_reach_the_reference(self):
+        with self._parser_returning(self.PARSED):
+            (ref,) = _extractor()._parse_references_ner([self.SEGMENT])
+
+        assert {name: getattr(ref, name) for name in self.NER_ONLY} == self.NER_ONLY
+
+    def test_no_field_the_decoder_emits_is_dropped(self):
+        """Assembly-level twin of the decoder guard: a field added to
+        ``_FIELD_TO_PAPER_REF`` fails here until assembly passes it on."""
+        # Values finalize keeps as they are; every other field takes any string.
+        clean = {
+            "doi": "10.1000/xyz123",
+            "volume": "12",
+            "issue": "3",
+            "first_page": "100",
+            "last_page": "115",
+        }
+        fields = {
+            name: clean.get(name, f"{name} value") for name in set(_FIELD_TO_PAPER_REF.values())
+        }
+        fields["year"] = 2020
+        with self._parser_returning(fields):
+            (ref,) = _extractor()._parse_references_ner([REFS[0]])
+
+        assert sorted(name for name in fields if getattr(ref, name) is None) == []
+
+    @pytest.mark.parametrize(
+        ("parse", "llm_call"),
+        [
+            ("_parse_references_llm", "extract_references"),
+            ("_parse_references_llm_chunked", "extract_references_chunk"),
+        ],
+    )
+    async def test_the_llm_modes_ner_fallback_keeps_them(self, parse, llm_call):
+        ext = _extractor()
+        # No layout regions: the chunked mode groups the segments instead.
+        ext.contents.region_summaries = []
+        setattr(ext.llm_client, llm_call, AsyncMock(side_effect=RuntimeError("503")))
+        with self._parser_returning(self.PARSED):
+            refs = await getattr(ext, parse)("\n".join(REFS), REFS)
+
+        assert len(refs) == len(REFS)
+        for ref in refs:
+            assert {name: getattr(ref, name) for name in self.NER_ONLY} == self.NER_ONLY
 
 
 class TestStubRefsAreNotCountedAsCovered:
