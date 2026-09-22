@@ -1918,3 +1918,69 @@ async def test_numeric_marker_cases_through_active_linker(style, text, expected)
         if xref.text_id == 0 and xref.tier == style:
             matches.setdefault(xref.contents, []).append(xref.xref_id)
     assert list(matches.items()) == expected
+
+
+class TestCitedReferenceNumbers:
+    """Printed numbers the body cites, including ones no parsed reference carries."""
+
+    async def test_reads_numbers_beyond_the_parsed_references(self):
+        # The body cites 1..30, but only references 1..10 were parsed.
+        body = [_sent(i, f"Prior work reported this [{i}].") for i in range(1, 25)]
+        body += [
+            _sent(25, "Two groups disagreed [25-27]."),
+            _sent(26, "Later replications agreed^{28,29} and extended it^{30}."),
+        ]
+        sections = _body_only_sections() + [
+            PaperSection(
+                section_id=2,
+                header="References",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.REFERENCES,
+            )
+        ]
+        refs, ref_sents = _numbered_reference_source(10)
+        _xrefs, receipt = await _detect_with_receipt(body + ref_sents, sections, refs)
+
+        assert citation_linker.cited_reference_numbers(receipt) == set(range(1, 31))
+
+    def test_skips_markers_rejected_for_other_reasons(self):
+        from bibr.paper_contents import CitationCandidate, CitationLinkingReceipt
+
+        def candidate(raw, evidence, reasons, style="numeric"):
+            return CitationCandidate(
+                text_id=1,
+                start=0,
+                end=len(raw),
+                raw=raw,
+                style=style,
+                bib_ids=(),
+                evidence=evidence,
+                confidence=0.0,
+                accepted=not reasons,
+                rejection_reasons=reasons,
+            )
+
+        receipt = CitationLinkingReceipt(
+            style_scores={},
+            candidates=(
+                candidate("[40]", ("bracket_marker",), ("unknown_bib_id",)),
+                candidate("[2, 30]", ("bracket_marker",), ("numeric_interval_guard",)),
+                candidate("^{7}", ("superscript_marker",), ("math_superscript", "unknown_bib_id")),
+                candidate("[0, 1]", ("bracket_marker",), ("unknown_bib_id",)),
+                candidate("[1-50]", ("bracket_marker",), ("unknown_bib_id",)),
+                candidate("(5)", ("paren_marker",), (), style="paren-numeric"),
+                candidate(
+                    "[see 9]", ("bracket_marker", "non_citation_shape"), ("non_citation_bracket",)
+                ),
+            ),
+            resolved_candidate_fraction=None,
+            unique_linked_bib_fraction=None,
+        )
+
+        # Only the out-of-range [40]; a bracket holding 0 is an interval, and
+        # one spanning 50 numbers is a scale, not a citation list.
+        assert citation_linker.cited_reference_numbers(receipt) == {40}
+
+    def test_no_receipt(self):
+        assert citation_linker.cited_reference_numbers(None) == set()
