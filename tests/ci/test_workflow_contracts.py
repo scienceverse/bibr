@@ -267,6 +267,18 @@ def test_secret_scan_covers_the_tree_and_the_event_commit_range() -> None:
     assert "gitleaks dir . --config .gitleaks.toml" in runs
     assert "gitleaks git . --config .gitleaks.toml --log-opts=" in runs
     assert runs.count("--exit-code 1") == 2
+    # gitleaks passes on an unknown range after scanning 0 commits, so a base a
+    # force push removed from the clone must be detected before the range scan.
+    assert runs.index('git cat-file -e "$base^{commit}"') < runs.index("gitleaks git .")
+
+
+def test_force_push_classifies_every_surface() -> None:
+    """A force push's ``before`` commit is not in the fresh clone to diff against."""
+    changes = workflow("ci.yml")["jobs"]["changes"]
+    classify = next(step for step in changes["steps"] if step.get("id") == "classify")
+
+    assert classify["env"]["FORCED_PUSH"] == "${{ github.event.forced }}"
+    assert '"$FORCED_PUSH" == "true"' in classify["run"].split("--all")[0]
 
 
 def test_maintenance_names_full_mypy_as_advisory_and_rechecks_security() -> None:
