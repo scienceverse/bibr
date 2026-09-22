@@ -578,13 +578,13 @@ async def test_sink_backed_consolidation_is_deterministic_by_bib_id_and_service(
 
     core = _payload()
     core["bib"] = [
-        {"bib_id": 2, "doi": "printed"},
+        {"bib_id": 2, "doi": "printed", "volume": "1"},
         {"bib_id": 1, "doi": None},
     ]
     enriched = copy.deepcopy(core)
     enriched["bib_match"] = [
         {"bib_id": 1, "service": "other", "doi": "other"},
-        {"bib_id": 2, "service": "crossref", "doi": "replacement"},
+        {"bib_id": 2, "service": "crossref", "doi": "printed", "volume": "2"},
         {"bib_id": 1, "service": "crossref", "doi": "preferred"},
     ]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
@@ -598,7 +598,8 @@ async def test_sink_backed_consolidation_is_deterministic_by_bib_id_and_service(
 
     by_id = {row["bib_id"]: row for row in fs.result_json["bib"]}
     assert by_id[1]["doi"] == "preferred"
-    assert by_id[2]["doi"] == ("replacement" if mode == "replace" else "printed")
+    assert by_id[2]["doi"] == "printed"
+    assert by_id[2]["volume"] == ("2" if mode == "replace" else "1")
 
 
 def test_sink_bound_chunk_writer_reports_without_rewriting(tmp_path, monkeypatch):

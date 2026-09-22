@@ -245,7 +245,8 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         help=(
             "Merge accepted Crossref match data (bib_match) into the bib table. "
             "Bare flag = 'fill' (only fills missing fields); 'replace' also "
-            "overwrites disagreeing ones. Modified rows get a consolidated_fields "
+            "overwrites disagreeing ones, but only from a match carrying the "
+            "reference's printed DOI. Modified rows get a consolidated_fields "
             "marker. No-op when enrichment is off (the default; see --crossref) "
             "or when no matches were found. "
             "Place after the input path (e.g. `bibr chew paper.pdf "
