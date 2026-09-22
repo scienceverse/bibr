@@ -117,33 +117,42 @@ class CrossrefEnricher:
         )
         enrich_started_at = time.monotonic()
 
-        async def _run() -> list[EnrichmentReport]:
-            reports: list[EnrichmentReport] = []
-            # Self-DOI lookup first (one call), then the reference fan-out.
-            if meta.doi:
-                report = await enrich_paper_identity(meta, settings=self._settings)
-                reports.append(
-                    report
-                    if isinstance(report, EnrichmentReport)
-                    else EnrichmentReport(attempted=1)
-                )
-            if meta.references:
-                kwargs: dict = {"settings": self._settings}
+        async def _identity() -> EnrichmentReport | None:
+            if not meta.doi:
+                return None
+            report = await enrich_paper_identity(meta, settings=self._settings)
+            return report if isinstance(report, EnrichmentReport) else EnrichmentReport(attempted=1)
+
+        async def _references() -> EnrichmentReport | None:
+            if not meta.references:
                 if prefetch_handle is not None:
-                    # Inside the timeout budget: a timed-out wait cancels the
-                    # prefetch along with the rest of the enrichment.
-                    prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
-                    if prefetch is not None:
-                        kwargs["prefetch"] = prefetch
-                report = await enrich_references(meta.references, **kwargs)
-                reports.append(
-                    report
-                    if isinstance(report, EnrichmentReport)
-                    else EnrichmentReport(attempted=len(meta.references))
-                )
-            elif prefetch_handle is not None:
-                await prefetch_handle.discard()
-            return reports
+                    await prefetch_handle.discard()
+                return None
+            kwargs: dict = {"settings": self._settings}
+            if prefetch_handle is not None:
+                # Inside the timeout budget: a timed-out wait cancels the
+                # prefetch along with the rest of the enrichment.
+                prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
+                if prefetch is not None:
+                    kwargs["prefetch"] = prefetch
+            report = await enrich_references(meta.references, **kwargs)
+            return (
+                report
+                if isinstance(report, EnrichmentReport)
+                else EnrichmentReport(attempted=len(meta.references))
+            )
+
+        async def _run() -> list[EnrichmentReport]:
+            # The self-DOI lookup writes only ``meta.match`` and the reference
+            # fan-out only each ``ref.match``; they share nothing but the
+            # Crossref rate limiter, so the paper's own lookup no longer delays
+            # the references by a round-trip. Both finish before a failure is
+            # raised, so neither is left running unowned; a timeout cancels both.
+            results = await asyncio.gather(_identity(), _references(), return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            return [result for result in results if result is not None]
 
         try:
             reports = await asyncio.wait_for(_run(), timeout=timeout)

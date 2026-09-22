@@ -60,6 +60,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
 
+### Changed
+
+- Enrichment looks up the paper's own DOI alongside the reference lookups
+  instead of before them, so a DOI-bearing paper's references no longer wait
+  one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
+  still finish before the enrichment is reported partial.
+
 ## [0.5.1] - 2026-09-12
 
 ### Fixed
