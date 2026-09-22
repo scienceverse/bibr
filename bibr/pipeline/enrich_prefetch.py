@@ -52,9 +52,12 @@ class EnrichmentPrefetchHandle:
         self.n_references = n_references
         task.add_done_callback(self._on_done)
 
-    def _on_done(self, task: asyncio.Task[EnrichmentPrefetch]) -> None:
+    def _mark_finished(self) -> None:
         if self.finished_at is None:
             self.finished_at = time.monotonic()
+
+    def _on_done(self, task: asyncio.Task[EnrichmentPrefetch]) -> None:
+        self._mark_finished()
         _INFLIGHT.discard(task)
         if task.cancelled():
             return
@@ -98,7 +101,12 @@ class EnrichmentPrefetchHandle:
         """Await the prefetch. A failed or independently cancelled prefetch
         raises :class:`PrefetchUnavailable` so the caller can fall back to the
         inline path; the *caller's own* cancellation (an enrich timeout) still
-        propagates as ``CancelledError`` — and cancels the prefetch with it."""
+        propagates as ``CancelledError`` — and cancels the prefetch with it.
+
+        Awaiting a task that already finished returns before its done
+        callbacks have run, so the finish time is recorded here as well:
+        ``seconds`` must be set once this returns.
+        """
         try:
             return await self.task
         except asyncio.CancelledError:
@@ -108,6 +116,9 @@ class EnrichmentPrefetchHandle:
             raise PrefetchUnavailable("enrichment prefetch was cancelled") from None
         except Exception as exc:
             raise PrefetchUnavailable(f"enrichment prefetch failed: {exc}") from exc
+        finally:
+            if self.task.done():
+                self._mark_finished()
 
 
 def start_enrichment_prefetch(
