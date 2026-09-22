@@ -125,6 +125,58 @@ async def test_self_doi_enrichment_runs_without_references():
 
 
 @pytest.mark.asyncio
+async def test_self_doi_lookup_runs_alongside_the_reference_fan_out():
+    # Each side waits for the other to have started: run one after the other,
+    # this deadlocks until the enrichment timeout.
+    fs = _make_fs_with_refs(doi="10.1/self")
+    identity_started = asyncio.Event()
+    refs_started = asyncio.Event()
+
+    async def identity(_meta, **_kwargs):
+        identity_started.set()
+        await refs_started.wait()
+
+    async def refs(_refs, **_kwargs):
+        refs_started.set()
+        await identity_started.wait()
+
+    with (
+        patch("bibr.enrich.references.enrich_paper_identity", identity),
+        patch("bibr.enrich.references.enrich_references", refs),
+    ):
+        outcome = await CrossrefEnricher(timeout=1.0).enrich(fs)
+
+    from bibr.pipeline.enricher import EnrichmentStatus
+
+    assert outcome.status is EnrichmentStatus.COMPLETE
+    assert fs.warnings == []
+
+
+@pytest.mark.asyncio
+async def test_self_doi_failure_lets_the_references_finish():
+    fs = _make_fs_with_refs(doi="10.1/self")
+    refs_done = asyncio.Event()
+
+    async def identity(_meta, **_kwargs):
+        raise RuntimeError("identity down")
+
+    async def refs(_refs, **_kwargs):
+        await asyncio.sleep(0)
+        refs_done.set()
+
+    with (
+        patch("bibr.enrich.references.enrich_paper_identity", identity),
+        patch("bibr.enrich.references.enrich_references", refs),
+    ):
+        await CrossrefEnricher().enrich(fs)
+
+    assert refs_done.is_set()
+    assert any("failed: identity down" in w for w in fs.warnings)
+    assert fs.paper.metadata.enrichment_complete is False
+    assert _pending() == []
+
+
+@pytest.mark.asyncio
 async def test_marks_enrichment_incomplete_on_timeout():
     fs = _make_fs_with_refs()
 
