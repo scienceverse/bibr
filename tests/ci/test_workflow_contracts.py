@@ -268,8 +268,10 @@ def test_secret_scan_covers_the_tree_and_the_event_commit_range() -> None:
     assert "gitleaks git . --config .gitleaks.toml --log-opts=" in runs
     assert runs.count("--exit-code 1") == 2
     # gitleaks passes on an unknown range after scanning 0 commits, so a base a
-    # force push removed from the clone must be detected before the range scan.
+    # force push removed from the clone must be detected before the range scan,
+    # which then widens to the whole history rather than scanning nothing.
     assert runs.index('git cat-file -e "$base^{commit}"') < runs.index("gitleaks git .")
+    assert 'range="$head"' in runs
 
 
 def test_force_push_classifies_every_surface() -> None:

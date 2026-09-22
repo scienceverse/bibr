@@ -482,6 +482,8 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         # gitleaks logs an invalid revision range, scans 0 commits and exits 0, so a
         # base missing from this clone (a force push rewrote it) must be caught here.
+        # The whole history is then scanned instead: it is the only base a rewritten
+        # history leaves, and it costs seconds at this repository's size.
         run: |
           git config --global --add safe.directory "$PWD"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -492,13 +494,14 @@ jobs:
             echo "no commit range for a $EVENT_NAME event; the tree scan covers HEAD"
             exit 0
           fi
-          if ! git cat-file -e "$base^{commit}" 2>/dev/null; then
-            echo "::warning title=Commit-range secret scan skipped::$base is not in" \
-              "this checkout (history rewritten by a force push?); only the tree scan" \
-              "covered HEAD"
-            exit 0
+          if git cat-file -e "$base^{commit}" 2>/dev/null; then
+            range="$base..$head"
+          else
+            echo "::warning title=Commit-range secret scan widened::$base is not in" \
+              "this checkout (history rewritten by a force push?); scanning the full" \
+              "history reachable from $head instead"
+            range="$head"
           fi
-          range="$base..$head"
           echo "scanning $range"
           gitleaks git . --config .gitleaks.toml --log-opts="$range" \
             --redact --no-banner --exit-code 1
