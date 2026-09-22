@@ -49,6 +49,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `CROSSREF_NOT_FOUND_TTL_SECONDS` (default 1 day, `0` disables): the Crossref
+  response caches now remember a DOI lookup's 404 (no record, typically a
+  malformed DOI or one registered elsewhere) for that long. Repeat lookups then
+  skip the rate-limited request, and the DOI is left out of the bulk prefetch. A
+  remembered 404 behaves exactly like a live one: the reference gets no Crossref
+  match and no bibliographic search. With `CROSSREF_REDIS_CACHE` on it survives
+  restarts, so re-running a batch no longer re-spends a request on every known
+  missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
 

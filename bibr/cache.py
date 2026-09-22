@@ -131,10 +131,13 @@ class ResponseCache:
             self._log_get_error(key, e)
             return _REDIS_ERROR
 
-    async def _set_raw(self, key: str, raw) -> None:
-        """Store ``raw`` for ``key`` with TTL. Errors are logged and swallowed."""
+    async def _set_raw(self, key: str, raw, *, ttl_seconds: int | None = None) -> None:
+        """Store ``raw`` for ``key`` with TTL (the cache's own unless *ttl_seconds*).
+
+        Errors are logged and swallowed.
+        """
         try:
-            await self._redis.set(self._full_key(key), raw, ex=self._ttl)
+            await self._redis.set(self._full_key(key), raw, ex=ttl_seconds or self._ttl)
         except Exception as e:
             self._log_set_error(key, e)
 

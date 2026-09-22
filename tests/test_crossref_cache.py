@@ -96,3 +96,39 @@ async def test_ensure_response_cache_disabled_without_url(monkeypatch):
     assert backend is None
     assert client._response_cache_backend is None
     assert client._response_cache_init is True
+
+
+async def test_cached_stores_a_doi_404_in_redis_with_its_own_ttl(monkeypatch):
+    import httpx
+    import pytest
+
+    monkeypatch.setattr(Settings.crossref, "redis_cache", True)
+    monkeypatch.setattr(Settings.crossref, "cache_size", 0)  # isolate tier 2
+    monkeypatch.setattr(Settings.crossref, "not_found_ttl_seconds", 3600)
+    client = _client()
+    client._response_cache_init = True
+    backend = AsyncMock()
+    backend.get = AsyncMock(return_value=None)
+    client._response_cache_backend = backend
+    request = httpx.Request("GET", "https://api.crossref.org/works/10.1/x")
+    fetch = AsyncMock(
+        side_effect=httpx.HTTPStatusError(
+            "404", request=request, response=httpx.Response(404, request=request)
+        )
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client._cached("works:10.1/x", fetch, not_found_path="/works/10.1/x")
+
+    backend.set.assert_awaited_once()
+    (key, entry), kwargs = backend.set.await_args
+    assert key == "works:10.1/x"
+    assert kwargs == {"ttl_seconds": 3600}
+
+    # A later process reads the entry back from Redis and re-raises the 404.
+    backend.get = AsyncMock(return_value=entry)
+    fetch.reset_mock()
+    with pytest.raises(httpx.HTTPStatusError) as excinfo:
+        await client._cached("works:10.1/x", fetch, not_found_path="/works/10.1/x")
+    assert excinfo.value.response.status_code == 404
+    fetch.assert_not_awaited()
