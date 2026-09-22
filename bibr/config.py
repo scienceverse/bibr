@@ -995,6 +995,16 @@ class CrossrefOptions(_BibrSettings):
         2_592_000,
         description="TTL for shared Crossref cache entries, in seconds (default 30 days).",
     )
+    # How long both cache tiers remember a DOI lookup's 404 (no Crossref
+    # record: a malformed DOI or another registry's). Short next to the
+    # positive TTL, since a newly registered DOI starts resolving within days.
+    # 0 = never cached. Env: CROSSREF_NOT_FOUND_TTL_SECONDS
+    not_found_ttl_seconds: int = Field(
+        86_400,
+        ge=0,
+        description="How long a Crossref 404 for a DOI (no record) is remembered in the response "
+        "caches, in seconds (default 1 day), so repeat lookups skip the request. 0 disables.",
+    )
     # Merge accepted bib_match data into bib rows at export:
     # "off" (default) | "fill" (fill empty fields only) | "replace" (also overwrite
     # from a match carrying the reference's printed DOI)
