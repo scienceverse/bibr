@@ -44,7 +44,7 @@ class TestCrossrefCacheKey:
         client = CrossrefClient(mailto="x@y.z")
         seen = []
 
-        async def fake_cached(key, factory):
+        async def fake_cached(key, factory, **_kwargs):
             seen.append(key)
             return {}
 

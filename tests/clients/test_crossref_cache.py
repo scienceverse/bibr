@@ -111,3 +111,109 @@ async def test_cache_evicts_least_recently_used(monkeypatch):
     await client.works("10.1000/a")  # miss again
 
     assert calls["n"] == 3
+
+
+# --- remembered 404s (CROSSREF_NOT_FOUND_TTL_SECONDS) -------------------------
+
+
+def _client_with_status(monkeypatch, status: int, *, not_found_ttl: int | None = None):
+    calls = {"n": 0}
+
+    async def fake_request(self, path, params=None):  # noqa: ARG001
+        calls["n"] += 1
+        request = httpx.Request("GET", f"https://api.crossref.org{path}")
+        response = httpx.Response(status, request=request)
+        raise httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+
+    monkeypatch.setattr(CrossrefClient, "_request", fake_request)
+    settings = GlobalSettings()
+    if not_found_ttl is not None:
+        settings.crossref.not_found_ttl_seconds = not_found_ttl
+    return CrossrefClient(settings=settings), calls
+
+
+async def test_doi_404_is_remembered_and_re_raised(monkeypatch):
+    client, calls = _client_with_status(monkeypatch, 404)
+
+    for _ in range(2):
+        with pytest.raises(httpx.HTTPStatusError) as excinfo:
+            await client.works("10.1000/missing")
+        assert excinfo.value.response.status_code == 404
+
+    assert calls["n"] == 1
+    assert excinfo.value.request.url.path == "/works/10.1000/missing"
+
+
+async def test_remembered_404_expires(monkeypatch):
+    from bibr.clients import crossref
+
+    client, calls = _client_with_status(monkeypatch, 404, not_found_ttl=60)
+    now = 1_000_000.0
+    monkeypatch.setattr(crossref.time, "time", lambda: now)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.works("10.1000/missing")
+
+    now += 61
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.works("10.1000/missing")
+
+    assert calls["n"] == 2
+
+
+async def test_remembered_404_disabled_by_zero_ttl(monkeypatch):
+    client, calls = _client_with_status(monkeypatch, 404, not_found_ttl=0)
+
+    for _ in range(2):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.works("10.1000/missing")
+
+    assert calls["n"] == 2
+
+
+async def test_other_http_errors_are_not_remembered(monkeypatch):
+    client, calls = _client_with_status(monkeypatch, 500)
+
+    for _ in range(2):
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.works("10.1000/flaky")
+
+    assert calls["n"] == 2
+
+
+async def test_remembered_404_keeps_the_doi_miss_semantics(monkeypatch):
+    # A DOI 404 ends the reference's Crossref lookup without a bibliographic
+    # search; the remembered 404 must do the same, not look like an empty
+    # response (which would fall through to the search).
+    from unittest.mock import AsyncMock
+
+    from bibr.enrich.references import _fetch_crossref_item
+    from bibr.paper import PaperReference
+
+    client, calls = _client_with_status(monkeypatch, 404)
+    search = AsyncMock(return_value={"message": {"items": []}})
+    monkeypatch.setattr(client, "search", search)
+    ref = PaperReference(
+        bib_id=1,
+        title="A sufficiently long printed title",
+        doi="10.1000/missing",
+        year=2020,
+        first_page=None,
+        volume=None,
+        authors=None,
+        container=None,
+    )
+
+    assert await _fetch_crossref_item(ref, client) is None
+    assert await _fetch_crossref_item(ref, client) is None
+
+    assert calls["n"] == 1
+    search.assert_not_awaited()
+
+
+async def test_bulk_prefetch_skips_a_remembered_404(monkeypatch):
+    client, calls = _client_with_status(monkeypatch, 404)
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.works("10.1000/missing")
+
+    assert await client.prefetch_works_by_doi(["10.1000/MISSING"]) == 0
+    assert calls["n"] == 1
