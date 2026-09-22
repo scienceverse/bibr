@@ -28,8 +28,9 @@ from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefL
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
-from bibr.paper_contents import CanonicalSection, PaperContents
+from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
 from bibr.schemas import PaperClassificationLLM
+from bibr.utils.metadata import EXACT_GENERIC_ARTICLE_LABELS
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -823,6 +824,73 @@ def _grounding_sources(
     return sources
 
 
+# A parenthetical opening a printed title row: "(Rural) Clinics as layered civic
+# organizations", or fused as in "(Re)thinking ...". Models read it as an
+# annotation and return only the rest, which is still printed verbatim.
+_LEADING_PARENTHETICAL_RE = re.compile(r"\(([^()]{1,40})\)\s*")
+# List or section numbering: "(1)", "(2.1)", "(b)", "(iv)". A bare year is not
+# title text either: a citation line wrapped after its author list starts with
+# "(2020)" and then the title.
+_ENUMERATOR_RE = re.compile(r"\d+(?:\.\d+)*|[a-z]|x{0,3}(?:ix|iv|v?i{0,3})", re.IGNORECASE)
+
+
+def _labels_title_row(parenthetical: str) -> bool:
+    """Whether a leading parenthetical labels the title row instead of belonging to it.
+
+    Numbering and article-type labels ("(Review)", "(Original Article)") are
+    furniture the model is right to drop. Anything else is printed title text.
+    """
+
+    from bibr.structure.paper_classifier import PAPER_TYPE_LABELS
+
+    if _ENUMERATOR_RE.fullmatch(parenthetical.strip()):
+        return True
+    labels = (*PAPER_TYPE_LABELS, *EXACT_GENERIC_ARTICLE_LABELS, *FRONT_MATTER_FURNITURE_LABELS)
+    return _normalize_for_grounding(parenthetical) in {
+        _normalize_for_grounding(label) for label in labels
+    }
+
+
+def _restore_leading_parenthetical(
+    title: str,
+    resolution: FrontMatterResolution,
+    printed_rows: Mapping[int, str] | None,
+) -> tuple[str, str] | None:
+    """Put back a leading parenthetical the model dropped from the printed title.
+
+    The truncated title still occurs verbatim on the page, so the verbatim test
+    alone accepts it. Only the selected record's title rows are eligible, and
+    the model title must start exactly where a row continues after its
+    parenthetical; a subtitle printed on another row may follow. Returns the
+    restored title and the candidate it came from, or None when no row fits or
+    rows disagree on the parenthetical.
+    """
+
+    normalized = _normalize_for_grounding(title)
+    restorations: dict[str, tuple[str, str]] = {}
+    for candidate in _selected_block_candidates(resolution):
+        if "title" not in candidate.roles:
+            continue
+        for source in _grounding_sources((candidate,), printed_rows):
+            printed = source.strip()
+            match = _LEADING_PARENTHETICAL_RE.match(printed)
+            if match is None or _labels_title_row(match.group(1)):
+                continue
+            rest = _normalize_for_grounding(printed[match.end() :])
+            if len(rest) < _TITLE_GROUNDING_MIN_LENGTH or not (
+                normalized == rest or normalized.startswith(f"{rest} ")
+            ):
+                continue
+            parenthetical = match.group(0).strip()
+            # "(Rural) Clinics" keeps its space; "(Re)thinking" stays fused.
+            separator = " " if match.group(0) != parenthetical else ""
+            restorations.setdefault(
+                parenthetical.casefold(),
+                (f"{parenthetical}{separator}{title.strip()}", candidate.candidate_id),
+            )
+    return next(iter(restorations.values())) if len(restorations) == 1 else None
+
+
 def ground_title_to_printed_text(
     title: str,
     resolution: FrontMatterResolution | None,
@@ -838,12 +906,39 @@ def ground_title_to_printed_text(
     deliberately narrow — it fires only on a near-copy of a single printed row —
     because the model legitimately joins a title split across regions, and a
     loose rule would truncate those. Everything ungrounded that is not a
-    near-copy is reported and left alone.
+    near-copy is reported and left alone. The one exception is a leading
+    parenthetical such as "(Rural)", which a model drops as if it were an
+    annotation: the rest still occurs verbatim, so it is restored from the
+    selected title row unless it is numbering or an article-type label.
     """
 
     normalized = _normalize_for_grounding(title)
     if len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
         return title, None
+
+    restored = (
+        _restore_leading_parenthetical(title, resolution, printed_rows)
+        if resolution is not None
+        else None
+    )
+    if restored is not None:
+        restored_title, candidate_id = restored
+        logger.info(
+            "Title regrounded to its printed leading parenthetical: %r -> %r",
+            title[:80],
+            restored_title[:80],
+        )
+        return restored_title, ValidationIssue(
+            code="VAL_TITLE_REGROUNDED",
+            severity=IssueSeverity.WARNING,
+            message=(
+                "Extracted title dropped the leading parenthetical printed in the "
+                "selected title row; restored it"
+            ),
+            origin_stage="extract",
+            evidence_ids=(candidate_id, "reason:title_leading_parenthetical_dropped"),
+            count=1,
+        )
 
     candidates: tuple[FrontMatterCandidate, ...] = (
         resolution.candidates if resolution is not None else ()
