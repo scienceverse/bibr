@@ -10,7 +10,7 @@
     "title": null,
     "abstract": null,
     "keywords": [],
-    "doi": null,
+    "doi": "10.1234/DEMO",
     "pmid": null,
     "pmcid": null,
     "arxiv": null,
@@ -38,25 +38,8 @@
   "author": [],
   "affiliation": [],
   "funding": [],
-  "text": [
-    {
-      "text": "Intro.",
-      "text_id": 1,
-      "paragraph_id": 1,
-      "section_id": 1,
-      "page_number": 1,
-      "formatted": null
-    }
-  ],
-  "section": [
-    {
-      "section_id": 1,
-      "header": "Introduction",
-      "level": 1,
-      "parent_section_id": null,
-      "section_type": "introduction"
-    }
-  ],
+  "text": [],
+  "section": [],
   "url": [],
   "bib": [],
   "xref": [],

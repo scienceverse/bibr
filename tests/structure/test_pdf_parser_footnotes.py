@@ -1,9 +1,10 @@
 """Tests for footnote handling in PDFParser."""
 
 
-def test_footnote_xref_uses_ordinal_not_section_id():
-    """A footnote xref should reference the footnote *number*, not the
-    arbitrary section_id assigned by the parser counter."""
+def test_footnote_xref_targets_the_footnote_text():
+    """A footnote xref points at the footnote's own text row (``text_id``), the
+    key the export's ``target_id`` names, not at its ordinal or the section id
+    the parser counter assigned."""
     from bibr.paper_contents import PaperContents
     from bibr.structure.pdf_parser import PDFParser
 
@@ -29,9 +30,9 @@ def test_footnote_xref_uses_ordinal_not_section_id():
 
     parser.create_content_sections(contents)
     foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
-    assert [x.xref_id for x in foot_xrefs] == [1, 2], (
-        f"expected ordinals [1, 2], got {[x.xref_id for x in foot_xrefs]}"
-    )
+    footnote_text_ids = [s.text_id for s in contents.sentences if "footnote text" in s.text]
+    assert footnote_text_ids == [100, 101]
+    assert [x.xref_id for x in foot_xrefs] == footnote_text_ids
 
 
 def test_footnote_xref_skips_display_formula_anchor():

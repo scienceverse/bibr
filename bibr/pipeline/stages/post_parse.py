@@ -1939,6 +1939,10 @@ class PostParseStage:
                         exc_info=result,
                     )
             else:
+                # The export's ``source.sha256`` is the full digest the validate
+                # stage computed; ``file_hash`` keeps its 16-character prefix for
+                # the caches keyed on it.
+                result.input_file.sha256 = fs.content_sha256
                 fs.paper = result
 
         logger.debug("Post-parse stage: %.1fs", time.monotonic() - t0)

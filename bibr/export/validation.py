@@ -116,7 +116,11 @@ def _check_author_blank(payload: dict) -> list[ValidationIssue]:
     blank = sum(
         1
         for a in _as_list(payload, "author")
-        if isinstance(a, dict) and not _text(a.get("given")) and not _text(a.get("family"))
+        if isinstance(a, dict)
+        and not _text(a.get("given"))
+        and not _text(a.get("family"))
+        # A group author's whole name is ``literal``.
+        and not _text(a.get("literal"))
     )
     if blank:
         return [
@@ -143,9 +147,14 @@ def _check_author_outlier(payload: dict) -> list[ValidationIssue]:
             )
         ]
     pairs = Counter(
-        (_text(a.get("given")).casefold(), _text(a.get("family")).casefold()) for a in authors
+        (
+            _text(a.get("given")).casefold(),
+            _text(a.get("family")).casefold(),
+            _text(a.get("literal")).casefold(),
+        )
+        for a in authors
     )
-    dupes = {p: c for p, c in pairs.items() if c > 2 and (p[0] or p[1])}
+    dupes = {p: c for p, c in pairs.items() if c > 2 and any(p)}
     if dupes:
         worst = max(dupes.values())
         return [
@@ -215,6 +224,7 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
         "bib": {b.get("bib_id") for b in _as_list(payload, "bib") if isinstance(b, dict)},
         "figure": {f.get("figure_id") for f in _as_list(payload, "figure") if isinstance(f, dict)},
         "table": {t.get("table_id") for t in _as_list(payload, "table") if isinstance(t, dict)},
+        "foot": text_ids,
     }
     dangling = 0
     for x in _as_list(payload, "xref"):
@@ -328,7 +338,7 @@ _CANONICAL_METADATA_UNICODE_FIELDS = (
     "publisher",
     "published",
 )
-_CANONICAL_AUTHOR_UNICODE_FIELDS = ("given", "family", "orcid")
+_CANONICAL_AUTHOR_UNICODE_FIELDS = ("given", "family", "literal", "orcid")
 
 
 def _private_use_count(value: object) -> int:

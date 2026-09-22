@@ -1,15 +1,39 @@
 {
-  "paper_id": "example.pdf",
+  "paper_id": "example",
   "schema_version": "12.0",
   "source": {
     "file_name": "example.pdf",
-    "file_hash": "9f86d081884c7d65",
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
     "input_format": "pdf"
   },
   "metadata": {
     "title": null,
+    "abstract": null,
     "keywords": [],
-    "doi": null
+    "doi": null,
+    "pmid": null,
+    "pmcid": null,
+    "arxiv": null,
+    "language": null,
+    "paper_type": null,
+    "oecd_l1": null,
+    "oecd_l2": null,
+    "journal": null,
+    "volume": null,
+    "issue": null,
+    "first_page": null,
+    "last_page": null,
+    "issn": null,
+    "publisher": null,
+    "published": null,
+    "published_date": null,
+    "license": null,
+    "license_url": null,
+    "license_spdx": null,
+    "funding_statement": null,
+    "coi_statement": null,
+    "ethics_statement": null,
+    "data_availability": null
   },
   "author": [],
   "affiliation": [],
@@ -27,8 +51,15 @@
   "funding_match": [],
   "bib_match": [],
   "extraction": {
-    "bibr_version": "0.5.1",
-    "completed_at": "2026-09-22T12:00:00Z"
+    "producer": {
+      "name": "bibr",
+      "version": "0.5.1",
+      "build_sha": null
+    },
+    "completed_at": "2026-09-22T12:00:00Z",
+    "ocr": null,
+    "llm": null,
+    "warnings": []
   },
   "notes": "free text"
 }

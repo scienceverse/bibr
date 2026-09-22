@@ -37,7 +37,7 @@ def test_every_table_is_written_keyed_by_paper_id(payload, tmp_path):
     papers = pq.read_table(tmp_path / "paper.parquet").to_pylist()
     assert [p["paper_id"] for p in papers] == [payload["paper_id"], "second"]
     assert papers[0]["title"] == payload["metadata"]["title"]
-    assert papers[0]["file_hash"] == payload["source"]["file_hash"]
+    assert papers[0]["sha256"] == payload["source"]["sha256"]
 
     bib = pq.read_table(tmp_path / "bib.parquet")
     assert bib.column_names[:2] == ["paper_id", "bib_id"]
@@ -64,6 +64,27 @@ def test_column_types_come_from_the_models_not_the_data(payload, tmp_path):
     match = pq.read_table(tmp_path / "metadata_match.parquet").to_pylist()[0]
     assert match["author"][0]["orcid"] == "https://orcid.org/0000-0002-1825-0097"
     assert match["funder"][0]["funder_doi"] == "10.13039/100000001"
+
+
+def test_constrained_columns_keep_their_type(payload, tmp_path):
+    """A 1-based id or a 4-number box is still an integer or a float list, not
+    the JSON-string fallback of a type the writer does not recognize."""
+    import pyarrow as pa
+
+    write_tables([payload], tmp_path)
+
+    xref = pq.read_schema(tmp_path / "xref.parquet")
+    assert xref.field("xref_id").type == pa.int64()
+    assert xref.field("target_id").type == pa.int64()
+    affiliation = pq.read_schema(tmp_path / "affiliation.parquet")
+    assert affiliation.field("author_ids").type == pa.list_(pa.int64())
+    parts = pq.read_schema(tmp_path / "extraction_float_parts.parquet")
+    assert parts.field("bbox").type == pa.list_(pa.float64())
+    for name, (_, model) in TABLES.items():
+        schema = pq.read_schema(tmp_path / f"{name}.parquet")
+        for field in model.model_fields:
+            if field.endswith("_id") and field != "service_id":
+                assert schema.field(field).type == pa.int64(), (name, field)
 
 
 def test_same_schema_whatever_the_papers(payload, tmp_path):

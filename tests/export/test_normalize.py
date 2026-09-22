@@ -17,6 +17,9 @@ from bibr.export.normalize import CREDIT_BASE_URI, arxiv_id, credit_roles, iso_d
         ("Published: 3rd Feb. 2021", "2021-02-03"),
         ("January 15, 2026", "2026-01-15"),
         ("2026 Jan 15", "2026-01-15"),
+        ("2020, May 3", "2020-05-03"),  # APA reference dates
+        ("(2020, Jan.)", "2020-01"),
+        ("2020, Spring", None),
         ("September 2019", "2019-09"),
         ("2019", "2019"),
         ("Received 2 March 2020; Accepted 9 May 2020; Published online 1 June 2020", "2020-06-01"),

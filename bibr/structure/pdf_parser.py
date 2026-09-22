@@ -647,7 +647,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # when it carries none.
             contents.xrefs.append(
                 PaperXref(
-                    xref_id=footnote_num,
+                    # The footnote's own text row: the xref's target.
+                    xref_id=sent.text_id,
                     xref_type="foot",
                     contents=printed_marker(fn_text) or str(footnote_num),
                     text_id=nearest_text_id,

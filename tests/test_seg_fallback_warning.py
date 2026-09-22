@@ -308,7 +308,7 @@ class TestWarningPropagation:
             no_llm=True,
         )
         paper.extraction = {
-            "bibr_version": "0.0.0-test",
+            "producer": {"name": "bibr", "version": "0.0.0-test"},
             "completed_at": "2026-07-24T10:00:00Z",
             "settings": {
                 "ref_seg": "geom",

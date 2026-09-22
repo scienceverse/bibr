@@ -17,7 +17,7 @@ def _export_fixture() -> dict:
         "schema_version": "12.0",
         "source": {
             "file_name": "paper.pdf",
-            "file_hash": "abc123",
+            "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
             "input_format": "pdf",
         },
         "metadata": {
@@ -39,14 +39,14 @@ def _export_fixture() -> dict:
                 "section_id": 1,
                 "header": "Intro",
                 "level": 1,
-                "parent_section_id": 0,
+                "parent_section_id": None,
                 "section_type": "intro",
             }
         ],
         "url": [],
         "bib": [
-            {"bib_id": 1, "title": "Ref One", "doi": "10.1/1"},
-            {"bib_id": 2, "title": "Ref Two", "doi": "10.1/2"},
+            {"bib_id": 1, "title": "Ref One", "doi": "10.1234/ref1"},
+            {"bib_id": 2, "title": "Ref Two", "doi": "10.1234/ref2"},
         ],
         "bib_match": [],
         "xref": [],
@@ -54,7 +54,7 @@ def _export_fixture() -> dict:
         "table": [],
         "eq": [],
         "extraction": {
-            "bibr_version": "0.3.0",
+            "producer": {"name": "bibr", "version": "0.3.0", "build_sha": None},
             "completed_at": "2026-07-24T10:00:00Z",
             "ocr": {"backend": "glm-mlx"},
             "llm": {"provider": "google", "model": "some-model"},
@@ -204,7 +204,7 @@ def test_result_table_keys_and_aliases():
     assert result.authors == result.author
     assert result.sections == result.section
     assert [r["title"] for r in result.references] == ["Ref One", "Ref Two"]
-    assert list(result.references.df["doi"]) == ["10.1/1", "10.1/2"]
+    assert list(result.references.df["doi"]) == ["10.1234/ref1", "10.1234/ref2"]
 
 
 def test_result_metadata_source_and_toplevel_passthrough():
@@ -214,7 +214,7 @@ def test_result_metadata_source_and_toplevel_passthrough():
     assert result.paper_id == "10.1234/example"
     assert result.extraction["usage"]["totals"]["input_tokens"] == 10
     assert result["metadata"]["title"] == "A Paper"
-    assert result.file_hash == "abc123"
+    assert result.sha256 == "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
     assert result.data is not None
 
 
@@ -318,7 +318,7 @@ def test_result_loads_a_newer_minor_export_with_unknown_fields():
 
     assert result.title == "A Paper"
     assert result.doi == "10.1234/example"
-    assert result.file_hash == "abc123"
+    assert result.sha256 == "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
     assert [r["title"] for r in result.references] == ["Ref One", "Ref Two"]
     assert result.sections[0]["header"] == "Intro"
 

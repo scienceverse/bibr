@@ -616,7 +616,10 @@ class PaperFigure:
 class PaperXref:
     """Cross-reference linking a sentence to a referenced item."""
 
-    xref_id: int  # ID of the referenced item (bib_id, table_id, figure_id, foot ordinal, or 0)
+    # ID of the referenced item: bib_id, table_id, figure_id, or the footnote's
+    # text_id. For equation, section and supplementary references it is the
+    # number they print (0 when none), which the export does not publish.
+    xref_id: int
     xref_type: str  # "bib", "table", "figure", "foot", "supplementary", "equation", "section"
     contents: str  # The reference text as it appears (e.g., "[1]", "Table 2", "Figure 3")
     text_id: int  # The sentence containing this reference

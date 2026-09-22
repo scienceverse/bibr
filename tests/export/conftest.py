@@ -55,7 +55,7 @@ from bibr.paper_contents import (
 def extraction_block(**overrides) -> dict:
     """A minimal ``extraction`` block, as ``ExportStage`` would build it."""
     block = {
-        "bibr_version": "0.0.0-test",
+        "producer": {"name": "bibr", "version": "0.0.0-test", "build_sha": None},
         "completed_at": "2026-07-24T10:00:00Z",
         "settings": {
             "ref_seg": "geom",
@@ -81,7 +81,8 @@ def extraction_export(**overrides) -> ExtractionExport:
 def _input_file() -> InputFile:
     return InputFile(
         path=Path("/tmp/demo.pdf"),
-        file_hash="demo-hash",
+        file_hash="3a6eb0790f39ac87",
+        sha256="3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
         input_format=InputFormat(
             file_extension=".pdf",
             detected_mime_type="application/pdf",
@@ -175,7 +176,8 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
                 match={
                     MatchSource.CROSSREF: ExternalMatch(
                         id="10.1234/prior",
-                        score=0.98,
+                        # Enrichment scores 0-100; the export publishes 0-1.
+                        score=98.0,
                         title="A Prior Study",
                         authors=[BibAuthor(given="Jane", family="Smith")],
                         year=2020,
@@ -235,7 +237,7 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
         match={
             MatchSource.CROSSREF: ExternalMatch(
                 id="10.1234/demo",
-                score=0.99,
+                score=99.0,
                 title="A Demonstration Paper",
                 authors=[
                     BibAuthor(

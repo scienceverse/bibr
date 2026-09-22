@@ -38,27 +38,38 @@
   "author": [],
   "affiliation": [],
   "funding": [],
-  "text": [
-    {
-      "text": "Intro.",
-      "text_id": 1,
-      "paragraph_id": 1,
-      "section_id": 1,
-      "page_number": 1,
-      "formatted": null
-    }
-  ],
-  "section": [
-    {
-      "section_id": 1,
-      "header": "Introduction",
-      "level": 1,
-      "parent_section_id": null,
-      "section_type": "introduction"
-    }
-  ],
+  "text": [],
+  "section": [],
   "url": [],
-  "bib": [],
+  "bib": [
+    {
+      "bib_id": 1,
+      "text_id": null,
+      "bib_type": null,
+      "doi": "10.1234/prior",
+      "authors": null,
+      "editors": null,
+      "publisher": null,
+      "year": 2020,
+      "year_suffix": null,
+      "date": null,
+      "published_date": "2020",
+      "container": null,
+      "volume": null,
+      "issue": null,
+      "first_page": null,
+      "last_page": null,
+      "edition": null,
+      "version": null,
+      "url": null,
+      "is_in_press": false,
+      "arxiv": null,
+      "pmid": null,
+      "series": null,
+      "access_date": null,
+      "note": null
+    }
+  ],
   "xref": [],
   "figure": [],
   "table": [],

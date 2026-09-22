@@ -355,11 +355,11 @@ class TestDocxParserFootnotes:
         # Footnote content present as a sentence
         fn_sentences = [s for s in contents.sentences if s.section_id == fn_sections[0].section_id]
         assert any("This is a footnote." in s.text for s in fn_sentences)
-        # Xref linking footnote section back to the body sentence; xref_id is
-        # the 1-based footnote ordinal (matches PDFParser, see PaperXref docs).
+        # Xref linking the body sentence to the footnote; xref_id is the
+        # footnote's own text row (matches PDFParser, see PaperXref docs).
         xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(xrefs) == 1
-        assert xrefs[0].xref_id == 1
+        assert xrefs[0].xref_id == fn_sentences[0].text_id
 
 
 # ----- Run-level separators (w:br / w:tab / w:cr) -----

@@ -1,9 +1,9 @@
 {
-  "paper_id": "10.1234/demo",
+  "paper_id": "demo",
   "schema_version": "12.0",
   "source": {
     "file_name": "demo.pdf",
-    "file_hash": "demo-hash",
+    "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
     "input_format": "pdf"
   },
   "metadata": {
@@ -44,6 +44,7 @@
       "given": "Jane",
       "family": "Smith",
       "suffix": null,
+      "literal": null,
       "email": "jane@example.org",
       "corresponding": true,
       "orcid": "https://orcid.org/0000-0002-1825-0097",
@@ -134,6 +135,7 @@
       "year": 2020,
       "year_suffix": null,
       "date": null,
+      "published_date": "2020",
       "container": "Journal of Things",
       "volume": "7",
       "issue": null,
@@ -234,7 +236,7 @@
       "editor": null,
       "publisher": null,
       "year": 2026,
-      "date": null,
+      "published_date": null,
       "container": "Journal of Demonstrations",
       "volume": null,
       "issue": null,
@@ -296,7 +298,7 @@
       "editor": null,
       "publisher": null,
       "year": 2020,
-      "date": null,
+      "published_date": null,
       "container": "Journal of Things",
       "volume": null,
       "issue": null,
@@ -311,8 +313,11 @@
     }
   ],
   "extraction": {
-    "bibr_version": "0.0.0-test",
-    "build_sha": null,
+    "producer": {
+      "name": "bibr",
+      "version": "0.0.0-test",
+      "build_sha": null
+    },
     "completed_at": "2026-09-22T12:00:00Z",
     "ocr": null,
     "llm": null,

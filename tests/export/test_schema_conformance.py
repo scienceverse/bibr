@@ -31,7 +31,15 @@ _STRICT_ONLY = {
     "root_validation_block",
     "removed_author_affiliation",
     "section_type_off_vocabulary",
+    # A 12.0 writer always writes every column; the reader leaves keys optional
+    # so it can read a later minor's output, which may add columns.
+    "dropped_column",
 }
+
+# Rules only the published strict schema states. "Required" there means the
+# key is always *present*; the Python models fill a missing key's default, so
+# code can build a row without spelling out every null.
+_SCHEMA_ONLY = {"dropped_column"}
 
 
 def _files(kind: str) -> list[Path]:
@@ -56,8 +64,9 @@ def test_valid_examples_pass_both_schemas(path):
 def test_invalid_examples_fail_both_schemas(path):
     payload = json.loads(path.read_text())
     assert list(_validator(reader=False).iter_errors(payload))
-    with pytest.raises(ValidationError):
-        PaperExport.model_validate(payload)
+    if path.stem not in _SCHEMA_ONLY:
+        with pytest.raises(ValidationError):
+            PaperExport.model_validate(payload)
     # The reader tolerates unknown keys and enum values it does not know yet,
     # so those examples are failures for the strict schema only.
     if path.stem not in _STRICT_ONLY:

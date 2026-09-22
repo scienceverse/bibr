@@ -121,7 +121,8 @@ def test_float_parts_caption_assignment_and_reference_yield_export_losslessly():
     # v12: the figure/table rows are whole objects; each printed piece's page
     # and box ride extraction.float_parts.
     assert "parts" not in output["figure"][0] and "parts" not in output["table"][0]
-    assert output["figure"][0]["image"] == "image"
+    # Not image bytes, so the data URI cannot name an image type.
+    assert output["figure"][0]["image"] == "data:application/octet-stream;base64,image"
     assert output["extraction"]["float_parts"] == [
         {
             "object_type": "figure",

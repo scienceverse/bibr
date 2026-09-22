@@ -190,6 +190,18 @@ def test_author_blank():
     assert "VAL_AUTHOR_BLANK" in _codes(issues)
 
 
+def test_group_author_with_only_a_literal_name_is_not_blank():
+    p = _base()
+    p["author"].append({"given": None, "family": None, "literal": "The Consortium"})
+    assert "VAL_AUTHOR_BLANK" not in _codes(validate_export(p))
+
+
+def test_author_outlier_repeated_group_author():
+    p = _base()
+    p["author"] = [{"given": None, "family": None, "literal": "The Consortium"} for _ in range(3)]
+    assert "VAL_AUTHOR_OUTLIER" in _codes(validate_export(p))
+
+
 def test_author_outlier_count():
     p = _base()
     p["author"] = [{"given": f"A{i}", "family": f"B{i}"} for i in range(65)]

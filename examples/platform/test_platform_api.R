@@ -138,7 +138,8 @@ cat("Saved:   ", json_path, " (", nchar(json_string), " chars)\n\n")
 data <- fromJSON(json_string, simplifyVector = TRUE, flatten = TRUE)
 metadata <- data$metadata %||% data$info
 
-cat("bibr version:", data$extraction$bibr_version %||% metadata$bibr_version, "\n")
+cat("bibr version:", data$extraction$producer$version %||% data$extraction$bibr_version %||%
+  metadata$bibr_version, "\n")
 cat("Paper ID:    ", data$paper_id, "\n\n")
 
 # Helper for safe row count

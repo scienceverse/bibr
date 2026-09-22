@@ -372,3 +372,56 @@ def test_export_hook_warns_when_crossref_disabled():
     data = _exportable(bib_match=[])
     out = _run_export(data, RunConfig(consolidate="fill", crossref=False))
     assert any("consolidate" in w for w in out["extraction"]["warnings"])
+
+
+def test_fill_takes_the_iso_date_and_keeps_the_printed_one():
+    data = _data(
+        bib=[{"bib_id": 1, "date": "Spring 2019", "published_date": None, "year": None}],
+        bib_match=[
+            {"bib_id": 1, "service": "crossref", "published_date": "2019-04-02", "year": 2019}
+        ],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert row["date"] == "Spring 2019"  # printed, never overwritten
+    assert row["published_date"] == "2019-04-02"
+    assert row["year"] == 2019
+    assert _taken(data) == {1: ["year", "published_date"]}
+
+
+def test_a_taken_year_carries_published_date_with_it():
+    # The record dates the work only by year: published_date follows the year
+    # instead of keeping a printed date the year now contradicts.
+    data = _data(
+        bib=[{"bib_id": 1, "doi": "10.1234/x", "year": 2006, "published_date": "2006"}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1234/x", "year": 2007}],
+    )
+    consolidate_bibs(data, mode="replace")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"]) == (2007, "2007")
+    assert _taken(data) == {1: ["year", "published_date"]}
+
+
+def test_fill_never_rewrites_a_printed_date_for_a_taken_year():
+    # The printed entry dates the work May 2019 but lost its year; filling the
+    # year from the match must not overwrite what the entry printed.
+    data = _data(
+        bib=[{"bib_id": 1, "date": "May 2019", "published_date": "2019-05", "year": None}],
+        bib_match=[
+            {"bib_id": 1, "service": "crossref", "year": 2020, "published_date": "2020-01-15"}
+        ],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"], row["date"]) == (2020, "2019-05", "May 2019")
+    assert _taken(data) == {1: ["year"]}
+
+
+def test_fill_gives_a_year_only_record_its_year_as_the_date():
+    data = _data(
+        bib=[{"bib_id": 1, "published_date": None, "year": None}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "year": 2020, "published_date": None}],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"]) == (2020, "2020")

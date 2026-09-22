@@ -88,7 +88,7 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     """
     import datetime as _dt
 
-    import bibr
+    from bibr.export.json_export import bibr_producer, export_section_type
     from bibr.export.usage import build_usage_export
     from bibr.extract.extractor import (
         GEOM_CASCADE_WARNING_PREFIX,
@@ -125,8 +125,7 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     ocr, llm = _build_engines(ctx, paper)
 
     extraction = {
-        "bibr_version": bibr.__version__,
-        "build_sha": ctx.settings.BIBR_BUILD_SHA,
+        "producer": bibr_producer(ctx.settings.BIBR_BUILD_SHA),
         "completed_at": _dt.datetime.now(_dt.UTC)
         .replace(microsecond=0)
         .isoformat()
@@ -161,11 +160,17 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
         identity_block["expected"] = asdict(expected_identity)
     doi_selection = getattr(paper, "doi_selection", None)
     if is_dataclass(doi_selection):
+
+        def _candidate(candidate) -> dict:
+            row = asdict(candidate)
+            row["section_type"] = export_section_type(row.get("section_type"))
+            return row
+
         identity_block["receipt"] = {
-            "selected": asdict(doi_selection.selected)
+            "selected": _candidate(doi_selection.selected)
             if doi_selection.selected is not None
             else None,
-            "candidates": [asdict(candidate) for candidate in doi_selection.candidates],
+            "candidates": [_candidate(candidate) for candidate in doi_selection.candidates],
             "issue_codes": [issue.code for issue in doi_selection.issues],
         }
     if identity_block:

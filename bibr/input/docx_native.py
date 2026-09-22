@@ -403,14 +403,10 @@ class DocxParser:
 
         # --- Footnote / endnote sections + xrefs ---
         # Word numbers footnotes and endnotes independently, so the *printed*
-        # marker is each note's position within its own kind. ``xref_id`` stays
-        # the global sequence so it remains unique; for a footnotes-only
-        # document (the overwhelmingly common case) the two coincide exactly,
-        # leaving that output unchanged.
+        # marker is each note's position within its own kind. ``xref_id`` is the
+        # note's own text row (``text_id``), unique across both kinds.
         printed_counts: dict[str, int] = {}
-        for footnote_num, (fn_text, _orig_section, deferred_idx, kind) in enumerate(
-            self._pending_footnotes, start=1
-        ):
+        for fn_text, _orig_section, deferred_idx, kind in self._pending_footnotes:
             printed_counts[kind] = printed_counts.get(kind, 0) + 1
             printed_num = printed_counts[kind]
             label = "Endnote" if kind == "endnote" else "Footnote"
@@ -427,9 +423,10 @@ class DocxParser:
             )
 
             self._paragraph_counter += 1
+            footnote_text_id = self._sentence_counter
             contents.sentences.append(
                 PaperSentence(
-                    text_id=self._sentence_counter,
+                    text_id=footnote_text_id,
                     text=fn_text,
                     section_id=footnote_section_id,
                     paragraph_id=self._paragraph_counter,
@@ -441,7 +438,7 @@ class DocxParser:
             nearest_text_id = self._find_nearest_text_id(deferred_idx)
             contents.xrefs.append(
                 PaperXref(
-                    xref_id=footnote_num,
+                    xref_id=footnote_text_id,
                     xref_type="foot",
                     contents=str(printed_num),
                     text_id=nearest_text_id,

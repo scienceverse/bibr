@@ -60,30 +60,59 @@ released.
 - Closed vocabularies are enums in the schema: `section[].section_type`,
   `bib_type` in `bib` and both match tables, `metadata.paper_type`,
   `metadata.oecd_l1` and `oecd_l2`, the match tables' `service`,
-  `source.input_format` and `validation.issues[].severity`. Export maps a
-  foreign reference type (`journal-article`, `article`) into the enum and drops
-  an off-vocabulary classifier label with a logged warning instead of failing
-  the paper.
+  `source.input_format`, `eq[].comp` and `validation.issues[].severity`. Export
+  maps a foreign reference type (`journal-article`, `article`) into the enum and
+  drops an off-vocabulary classifier label with a logged warning instead of
+  failing the paper. Every token is snake_case: `paper_type` `meta_analysis` and
+  `case_study`, `section_type` `data_availability` (was `open_data`), and
+  `xref_tier` `paren_numeric`, `flattened_superscript`, `author_year`.
+  `input_format` names the format rather than the file extension: `jats` for
+  bibr's XML input (was `xml`), `html` for `.htm` too, and `tei` for GROBID
+  TEI, which converters into this format write.
+- `xref[].target_id` names a real row or is `null`. A `foot` reference points
+  at the footnote's own `text_id` (it held the footnote's ordinal); `equation`,
+  `section` and `supplementary` references are `null` (they held the number
+  they print, or `0`, which named no row).
+- One scale and one spelling per concept. Every score and confidence is 0–1:
+  `bib_match[]` and `metadata_match[]` `score` was 0–100. The match tables'
+  ISO 8601 `date` is `published_date`, like `metadata.published_date`; `bib[]`
+  gains `published_date` (the printed date or year in ISO form), and
+  consolidation fills it from the match instead of overwriting the printed
+  `bib[].date`. Every DOI is bare and lowercase.
+- A group author (a consortium, a JATS `<collab>`) is `author[].literal`, with
+  `given` and `family` null; it was in `family`.
+- `figure[].image` is a `data:` URI that names its media type
+  (`data:image/jpeg;base64,…`); the format used to vary unannounced (JPEG
+  crops, PNG composites, whatever a DOCX embedded).
 - Every field and model in `docs/schema/bibr-export-v12.schema.json` has a
   description, and a test keeps it that way; the documentation site's JSON
   schema page shows them. Both schema documents carry a stable `$id` under
   `https://bibr.org/schema/`. The v11 and v10 schema files stay published,
-  frozen.
-- `xref[]`, `url[]` and `eq[]` carry `start`/`end`: the character span of the
-  item within its sentence's `text` (0-based, end exclusive), or `null` when it
-  cannot be located unambiguously. `eq[].verbatim` is now filled from it.
+  frozen. In the strict document `required` means *present*: every key bibr
+  always writes is required, nullable or not, so a producer that drops a column
+  fails validation. Nullable fields are spelled `"type": [T, "null"]`, the form
+  R and code generators read, and identifiers (DOI, ORCID, ROR, SHA-256, ISO
+  dates, country codes, CRediT URIs), ids (1-based), offsets and scores carry
+  patterns and bounds.
+- `xref[]`, `url[]` and `eq[]` carry `start`/`end`: the span of the item
+  within its sentence's `text` in Unicode code points (0-based, end exclusive),
+  or `null` when it cannot be located unambiguously. `eq[].verbatim` is now
+  filled from it.
 - Normalized fields sit next to the printed ones: `metadata.published_date`
   (ISO 8601, as precise as printed), `license_url` and `license_spdx`
   (Creative Commons with a known version, CC0), `language`, `pmid`, `pmcid` and
   `arxiv` (declared by JATS/HTML inputs; arXiv also from an arXiv DOI or the
   page-1 arXiv stamp), and `author[].credit_roles` (CRediT term URIs matched
   from the printed roles).
-- `source.file_hash` is documented as the first 16 hex characters of the
-  input's SHA-256.
-- `paper_id` is required and never `null`: `--paper-id`, else the DOI, else
-  the file name. `bibr batch` now writes its own corpus-unique id (the name of
-  the JSON file) into each export instead of the DOI or file name, which could
-  collide.
+- `source.file_hash` (the first 16 hex characters of the input's SHA-256) is
+  replaced by `source.sha256`, the whole digest. `extraction.bibr_version` and
+  `build_sha` are replaced by `extraction.producer` {`name`, `version`,
+  `build_sha`}, so another tool writing this format can say so.
+- `paper_id` is required and never `null`: `--paper-id`, else the input file's
+  stem, as `bibr batch` and metacheck already name papers. It used to be the
+  DOI, which changed whenever a later bibr read the DOI differently. `bibr
+  batch` writes its own corpus-unique id (the name of the JSON file) into each
+  export.
 - One geometry convention for every bounding box: `[x0, y0, x1, y1]` in PDF
   points on the page as displayed, measured from the top-left corner. The new
   `extraction.pages` gives each page's width and height. `float_parts[].bbox`

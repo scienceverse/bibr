@@ -6,8 +6,8 @@ prefixed with ``paper_id``, so a table covers the whole corpus and joins on
 ``(paper_id, <table>_id)``:
 
 - ``paper.parquet``: one row per paper — ``paper_id``, ``schema_version``,
-  the ``source`` fields, the ``metadata`` fields, and ``bibr_version`` /
-  ``completed_at`` from ``extraction``;
+  the ``source`` fields, the ``metadata`` fields, and ``producer`` /
+  ``producer_version`` / ``completed_at`` from ``extraction``;
 - one file per record table (``author``, ``affiliation``, ``funding``,
   ``text``, ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``,
   ``eq`` and the ``*_match`` tables), with the export's columns;
@@ -33,7 +33,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Literal, Union, get_args, get_origin
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel
 
@@ -93,7 +93,8 @@ _PAPER_COLUMNS: list[tuple[str, tuple[str, ...], Any]] = [
         (name, ("metadata", name), info.annotation)
         for name, info in m.MetadataExport.model_fields.items()
     ),
-    ("bibr_version", ("extraction", "bibr_version"), str),
+    ("producer", ("extraction", "producer", "name"), str),
+    ("producer_version", ("extraction", "producer", "version"), str),
     ("completed_at", ("extraction", "completed_at"), str),
 ]
 
@@ -108,6 +109,8 @@ def _column(annotation: Any) -> tuple[pa.DataType, Converter]:
     import pyarrow as pa
 
     origin = get_origin(annotation)
+    if origin is Annotated:  # a constrained type (1-based id, 4-item box)
+        return _column(get_args(annotation)[0])
     if origin in (Union, UnionType):
         args = [a for a in get_args(annotation) if a is not type(None)]
         if len(args) == 1:

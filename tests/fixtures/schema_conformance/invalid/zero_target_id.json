@@ -40,7 +40,7 @@
   "funding": [],
   "text": [
     {
-      "text": "Intro.",
+      "text": "See Table 1.",
       "text_id": 1,
       "paragraph_id": 1,
       "section_id": 1,
@@ -51,15 +51,25 @@
   "section": [
     {
       "section_id": 1,
-      "header": "Introduction",
+      "header": "Results",
       "level": 1,
       "parent_section_id": null,
-      "section_type": "introduction"
+      "section_type": "results"
     }
   ],
   "url": [],
   "bib": [],
-  "xref": [],
+  "xref": [
+    {
+      "xref_id": 1,
+      "target_id": 0,
+      "xref_type": "supplementary",
+      "contents": "Supplementary Material",
+      "text_id": 1,
+      "start": null,
+      "end": null
+    }
+  ],
   "figure": [],
   "table": [],
   "eq": [],

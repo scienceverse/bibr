@@ -3,7 +3,7 @@
 Operates on the export-dict shape so the same function backs the
 pipeline post-export hook, ``Result.consolidate()``, and the serve API.
 ``bib_match`` rows are already threshold-gated by enrichment (DOI lookups
-score 100; bibliographic search is fuzzy-gated with author/year penalties),
+score 1; bibliographic search is fuzzy-gated with author/year penalties),
 so no further score filtering happens here. Overwriting a printed value is
 held to a stricter bar than filling a gap: ``replace`` overwrites only from
 a match that carries the reference's own printed DOI.
@@ -17,14 +17,15 @@ from bibr.utils.text import normalize_doi
 
 # bib columns fillable from a bib_match row. authors/editors are excluded:
 # bib stores the printed string, bib_match stores structured dicts — there is
-# no clean conversion that preserves the printed form.
+# no clean conversion that preserves the printed form. So is the printed
+# ``date``: the registry's date is ISO 8601 and fills ``published_date``.
 CONSOLIDATABLE_FIELDS = (
     "bib_type",
     "doi",
     "title",
     "publisher",
     "year",
-    "date",
+    "published_date",
     "container",
     "volume",
     "issue",
@@ -49,7 +50,7 @@ def _doi_key(value) -> str | None:
 def _is_same_work(bib: dict, match: dict) -> bool:
     """Whether *match* is the work the reference's printed DOI names.
 
-    A score cannot decide this: a fuzzy title match can also score 100, and
+    A score cannot decide this: a fuzzy title match can also score 1, and
     ``bib_match`` rows do not record how they were found.
     """
     printed = _doi_key(bib.get("doi"))
@@ -107,6 +108,16 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
             if bib.get("is_in_press"):
                 bib["is_in_press"] = False
                 taken.append("is_in_press")
+            # ``published_date`` restates the year. The loop above already took
+            # a match's fuller date where the mode allows; when the record dates
+            # the work only by year, the year stands in, filling a gap in either
+            # mode and replacing a stale date only in ``replace``.
+            year, published = bib.get("year"), bib.get("published_date")
+            stale = not (isinstance(published, str) and published.startswith(f"{year:04d}"))
+            if isinstance(year, int) and stale and (mode == "replace" or not published):
+                bib["published_date"] = f"{year:04d}"
+                if "published_date" not in taken:
+                    taken.append("published_date")
         if taken:
             taken_by_bib[bib["bib_id"]] = taken
     _record_consolidation(data, taken_by_bib)

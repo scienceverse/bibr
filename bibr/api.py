@@ -167,7 +167,7 @@ class Result:
     Table keys (``bib``, ``author``, ``text``, ...) and their friendly
     aliases (``references``, ``authors``, ``sections``) come back as
     :class:`Records`; ``metadata`` fields (``title``, ``doi``, ...) and
-    ``source`` fields (``file_name``, ``file_hash``, ``input_format``) resolve
+    ``source`` fields (``file_name``, ``sha256``, ``input_format``) resolve
     as attributes, as do the remaining top-level keys (``paper_id``,
     ``extraction``, ...). The raw dict stays available as :attr:`data`.
 
@@ -224,8 +224,9 @@ class Result:
             return Records(data.get(key) or [])
         if key in data:
             return data[key]
-        # ``source`` is searched alongside ``metadata`` so ``result.file_hash``
-        # keeps resolving after v11 split file identity out of the old ``info``.
+        # ``source`` is searched alongside ``metadata`` so ``result.sha256``
+        # resolves like ``result.title``, though v11 split file identity out of
+        # the old ``info``.
         for container in ("metadata", "source"):
             block = data.get(container) or {}
             if key in block:

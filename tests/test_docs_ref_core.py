@@ -197,7 +197,9 @@ def test_schema_md_explains_nested_records_and_links_schema(core):
     assert "### AuthorExport" in md
     assert "| `author_id` | `int` | Yes | — | Primary key; 1-based position in the byline. |" in md
     assert "### TextExport" in md
-    assert "| `bbox` | `list[float] | None` | No | `None` | Bounding box" in md
+    assert "| `bbox` | `list[float] | None` | Yes | `None` | Bounding box" in md
+    # Keys the exporter leaves out when absent are the ones not always present.
+    assert "| `settings` | `ExtractionSettingsExport | None` | No |" in md
     assert "### PageExport" in md
     assert "### FloatPartExport" in md
     assert "### ValidationIssueExport" in md

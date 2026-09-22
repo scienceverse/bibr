@@ -274,7 +274,8 @@ def _build_authors_data(result: dict) -> list[list]:
     return [
         [
             a.get("given") or "",
-            a.get("family") or "",
+            # A group author's whole name is ``literal``.
+            a.get("family") or a.get("literal") or "",
             a.get("affiliation") or "",
             a.get("orcid", ""),
             a.get("email", ""),
@@ -314,7 +315,7 @@ def _build_references_data(result: dict) -> list[list]:
             r.get("doi", ""),
             r.get("bib_type", ""),
             "Y" if r.get("bib_id") in match_by_bib else "",
-            f"{match_by_bib[r.get('bib_id')]['score']:.1f}"
+            f"{match_by_bib[r.get('bib_id')]['score']:.2f}"
             if r.get("bib_id") in match_by_bib
             and match_by_bib[r.get("bib_id")].get("score") is not None
             else "",
@@ -332,7 +333,7 @@ def _format_bib_authors(authors) -> str:
     parts = []
     for a in authors:
         if isinstance(a, dict):
-            name = " ".join(filter(None, [a.get("given"), a.get("family")]))
+            name = " ".join(filter(None, [a.get("given"), a.get("family")])) or a.get("literal")
             if name:
                 parts.append(name)
         else:
@@ -346,7 +347,7 @@ def _build_bib_matches_data(result: dict) -> list[list]:
         [
             m.get("bib_id", ""),
             m.get("service", "") or m.get("source", ""),
-            round(m.get("score", 0) or 0, 1),
+            round(m.get("score", 0) or 0, 2),
             m.get("title", ""),
             _format_bib_authors(m.get("author")),
             m.get("year", ""),
@@ -482,9 +483,8 @@ def _build_figures_html(result: dict) -> str:
         parts.append(f"<p><strong>Figure {_esc(str(f.get('figure_id', '')))}</strong></p>")
         img = f.get("image")
         if img:
-            parts.append(
-                f'<img src="data:image/jpeg;base64,{img}" style="max-width:100%; height:auto;" />'
-            )
+            # v12 exports the image as a data URI that names its media type.
+            parts.append(f'<img src="{_esc(img)}" style="max-width:100%; height:auto;" />')
         caption = f.get("caption")
         if caption:
             parts.append(f"<p><em>{_esc(caption)}</em></p>")

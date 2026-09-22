@@ -28,6 +28,7 @@ import pandas as pd
 
 from bibr.input.xml_entities import parse_xml
 from bibr.models import (
+    ORGANIZATION_ROLE,
     PaperAuthor,
     PaperMetadata,
     PaperReference,
@@ -551,6 +552,7 @@ class JatsParser:
             if name is None:
                 name = _first_desc(contrib, "string-name")
             given = family = ""
+            roles: list[str] = []
             if name is not None:
                 if _ln(name) == "string-name":
                     family = _text(name)
@@ -559,11 +561,12 @@ class JatsParser:
                     family = _text(_first_child(name, "surname"))
             else:
                 # A consortium/working-group byline carries <collab> instead of
-                # a personal name. Treat it like <string-name>: one unsplit
-                # name in `family`, matching how Crossref models a group author.
+                # a personal name: one unsplit name, marked as an organization
+                # so the export writes it to ``author[].literal``.
                 collab = _first_desc(contrib, "collab")
                 if collab is not None:
                     family = _text(collab)
+                    roles = [ORGANIZATION_ROLE]
 
             if not given and not family:
                 # No name of any kind — emitting the row would only produce a
@@ -604,6 +607,7 @@ class JatsParser:
                     email=email,
                     corresponding=corresponding,
                     orcid=orcid,
+                    role=roles,
                 )
             )
         return authors

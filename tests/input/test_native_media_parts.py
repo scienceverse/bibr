@@ -51,7 +51,10 @@ def _assert_single_parts_match_legacy_payload(contents, output: dict) -> None:
     assert source_figure.parts[0].image_b64 == source_figure.image_b64
     assert source_figure.parts[0].page_number == source_figure.page_number
     assert source_figure.parts[0].provenance == source_figure.provenance
-    assert figure["image"] == source_figure.image_b64
+    # Exported as a data URI that names the embedded image's media type.
+    assert figure["image"] == (
+        "data:image/png;base64," + source_figure.image_b64 if source_figure.image_b64 else None
+    )
     assert "parts" not in figure
 
     assert len(source_table.parts) == 1

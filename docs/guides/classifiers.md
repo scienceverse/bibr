@@ -58,7 +58,7 @@ uses the lookup-only path.
 | Keywords | `keywords` | Keywords |
 | Endnote | `endnote` | Supplementary Materials, Future Work, Outlook |
 | Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
-| Data Availability | `open_data` | Data Availability, Code Availability, Reproducibility Statement |
+| Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
 | Footnote | `footnote` | Footnotes, Notes |
 | Table | `table` | Table (caption/label region) |
 | Figure | `figure` | Figure (caption/label region) |
@@ -161,8 +161,8 @@ guards during core metadata extraction:
 |---|---|
 | `empirical` | Original research with data collection/analysis |
 | `review` | Systematic review, literature review, scoping review |
-| `meta-analysis` | Quantitative synthesis of multiple studies |
-| `case-study` | Case study, case report, case series |
+| `meta_analysis` | Quantitative synthesis of multiple studies |
+| `case_study` | Case study, case report, case series |
 | `commentary` | Commentary, editorial, opinion piece |
 | `corrigendum` | Notice amending a previously published article |
 | `erratum` | Notice amending a previously published article |

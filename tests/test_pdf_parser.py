@@ -847,7 +847,8 @@ class TestFootnotes:
         # Xref should link footnote section to the body sentence
         foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(foot_xrefs) == 1
-        assert foot_xrefs[0].xref_id == fn_section.section_id
+        # The target is the footnote's own text row.
+        assert foot_xrefs[0].xref_id == fn_sentences[0].text_id
         # text_id should point to the body sentence (nearest preceding)
         body_sentences = [s for s in contents.sentences if s.section_id != fn_section.section_id]
         assert foot_xrefs[0].text_id == body_sentences[0].text_id

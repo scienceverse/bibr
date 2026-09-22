@@ -564,6 +564,13 @@ class TestCollabAuthors:
         m = _parse(COLLAB_JATS)._contents.preparsed_metadata
         assert [a.author_id for a in m.authors] == [1, 2]
 
+    def test_collab_is_marked_as_an_organization(self):
+        # The export writes an organization author's name to author[].literal.
+        from bibr.models import ORGANIZATION_ROLE
+
+        m = _parse(COLLAB_JATS)._contents.preparsed_metadata
+        assert [a.role for a in m.authors] == [[], [ORGANIZATION_ROLE]]
+
 
 # ---------------------------------------------------------------------------
 # Text flattening — markup that implies a word boundary

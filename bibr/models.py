@@ -124,6 +124,14 @@ def migrate_bib_type(old: str | None) -> str:
     return _MAP.get(old.lower().strip(), BibType.OTHER.value)
 
 
+# ``PaperAuthor.role`` entry that marks a group or organization author (a
+# consortium, a working group) rather than a person: the LLM author parse emits
+# it, and the JATS reader gives a ``<collab>`` byline the same mark. The export
+# writes such an author's name to ``author[].literal`` and drops the marker
+# from ``role``.
+ORGANIZATION_ROLE = "organization"
+
+
 class PaperAuthor(_Base):
     """CrossRef-like author representation"""
 
@@ -137,9 +145,10 @@ class PaperAuthor(_Base):
     role: list[str] = Field(default_factory=list)
 
 
-_ORCID_BARE_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+# ASCII digits only: ``\d`` also matches other scripts' digits, which no ORCID has.
+_ORCID_BARE_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$")
 # Same identifier with no separators — some JATS deposits carry this form.
-_ORCID_DIGITS_RE = re.compile(r"^\d{15}[\dX]$")
+_ORCID_DIGITS_RE = re.compile(r"^[0-9]{15}[0-9X]$")
 # Optional scheme/host wrapper: "https://orcid.org/", "orcid.org/", "www."
 _ORCID_HOST_RE = re.compile(r"^(?:https?://)?(?:www\.)?orcid\.org/", re.IGNORECASE)
 

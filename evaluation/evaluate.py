@@ -526,7 +526,8 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
         "doi": info.get("doi", ""),
         "authors": [
             {
-                "family": a.get("family") or "",
+                # A group author's whole name is ``literal`` (12.0 and later).
+                "family": a.get("family") or a.get("literal") or "",
                 "given": a.get("given") or "",
                 "affiliation": _author_affiliation(data, a),
                 "email": a.get("email") or "",

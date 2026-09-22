@@ -98,7 +98,8 @@ def test_schema_version_is_at_the_root(export_payload):
 
 def test_source_holds_file_identity(export_payload):
     src = export_payload["source"]
-    assert set(src) == {"file_name", "file_hash", "input_format"}
+    assert set(src) == {"file_name", "sha256", "input_format"}
+    assert len(src["sha256"]) == 64
     assert src["input_format"] == src["input_format"].lower()
 
 
@@ -239,7 +240,8 @@ def test_extraction_is_always_present(demo_paper):
     demo_paper.extraction = None
     payload = _export_paper_payload(demo_paper)
     extraction = payload["extraction"]
-    assert extraction["bibr_version"]
+    assert extraction["producer"]["name"] == "bibr"
+    assert extraction["producer"]["version"]
     assert extraction["completed_at"].endswith("Z")
     assert "settings" not in extraction
     assert "validation" in extraction
@@ -555,3 +557,238 @@ def test_the_export_turns_matches_into_rows(export_payload):
     ]
     (funding,) = export_payload["funding_match"]
     assert funding["funding_id"] == 1 and funding["funder_doi"] == "10.13039/100000001"
+
+
+# ── v12: adoption contract ─────────────────────────────────────────────
+
+
+def test_xref_targets_name_a_row_or_nothing(demo_paper):
+    """``target_id`` is a key of the row ``xref_type`` names, or null: the
+    printed number of an equation, section or supplement names no row, and a
+    footnote reference points at the footnote's text."""
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.paper_contents import PaperXref
+
+    demo_paper.contents.xrefs += [
+        PaperXref(xref_id=5, xref_type="equation", contents="Eq. 5", text_id=2),
+        PaperXref(xref_id=2, xref_type="section", contents="Section 2", text_id=2),
+        PaperXref(xref_id=0, xref_type="supplementary", contents="Supplementary", text_id=2),
+        PaperXref(xref_id=1, xref_type="foot", contents="1", text_id=1),
+    ]
+    rows = {x["xref_type"]: x for x in _export_paper_payload(demo_paper)["xref"]}
+    assert rows["bib"]["target_id"] == 1
+    assert rows["table"]["target_id"] == 1
+    assert rows["equation"]["target_id"] is None
+    assert rows["section"]["target_id"] is None
+    assert rows["supplementary"]["target_id"] is None
+    assert rows["foot"]["target_id"] == 1
+
+
+def test_group_authors_are_literal(demo_paper):
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.models import ORGANIZATION_ROLE, PaperAuthor
+
+    demo_paper.metadata.authors.append(
+        PaperAuthor(
+            author_id=2,
+            given="",
+            family="The Consortium",
+            affiliation="",
+            role=[ORGANIZATION_ROLE, "Investigation"],
+        )
+    )
+    group = _export_paper_payload(demo_paper)["author"][1]
+    assert (group["given"], group["family"], group["literal"]) == (None, None, "The Consortium")
+    # The marker is internal; the printed contribution role stays.
+    assert group["role"] == ["Investigation"]
+    assert group["credit_roles"] == ["https://credit.niso.org/contributor-roles/investigation/"]
+
+
+@pytest.mark.parametrize(
+    ("head", "media_type"),
+    [
+        (b"\xff\xd8\xff\xe0", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"\x01\x00\x00\x00" + b"\x00" * 36 + b" EMF", "image/emf"),
+        (b"not an image", "application/octet-stream"),
+    ],
+)
+def test_figure_images_are_data_uris_naming_their_type(demo_paper, head, media_type):
+    import base64
+
+    from bibr.export.json_export import _export_paper_payload
+
+    encoded = base64.b64encode(head + b"\x00" * 32).decode()
+    demo_paper.contents.figures[0].image_b64 = encoded
+    image = _export_paper_payload(demo_paper)["figure"][0]["image"]
+    assert image == f"data:{media_type};base64,{encoded}"
+
+
+def test_dois_are_lowercase_everywhere(demo_paper):
+    from bibr.export.json_export import _export_paper_payload
+
+    demo_paper.metadata.doi = "10.1234/DEMO"
+    demo_paper.metadata.references[0].doi = "https://doi.org/10.1234/PRIOR"
+    payload = _export_paper_payload(demo_paper)
+    assert payload["metadata"]["doi"] == "10.1234/demo"
+    assert payload["bib"][0]["doi"] == "10.1234/prior"
+    assert payload["bib_match"][0]["doi"] == "10.1234/prior"
+    assert payload["metadata_match"][0]["funder"][0]["funder_doi"] == "10.13039/100000001"
+
+
+def test_a_malformed_identifier_is_dropped_not_fatal(demo_paper, caplog):
+    from bibr.export.json_export import _export_paper_payload
+
+    demo_paper.metadata.references[0].doi = "10.1/too-short-a-prefix"
+    payload = _export_paper_payload(demo_paper)
+    assert payload["bib"][0]["doi"] is None
+    assert "malformed bib.doi" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("date", "year", "published_date"),
+    [
+        ("2020, May 3", 2020, "2020-05-03"),
+        (None, 2020, "2020"),
+        ("in press", None, None),
+        ("1890", 2020, "2020"),  # a date that contradicts the year yields the year
+    ],
+)
+def test_bib_published_date_is_the_printed_date_or_year(demo_paper, date, year, published_date):
+    from bibr.export.json_export import _export_paper_payload
+
+    demo_paper.metadata.references[0].date = date
+    demo_paper.metadata.references[0].year = year
+    row = _export_paper_payload(demo_paper)["bib"][0]
+    assert row["date"] == date
+    assert row["published_date"] == published_date
+
+
+def test_match_rows_carry_published_date_and_a_unit_score(export_payload):
+    for table in ("bib_match", "metadata_match"):
+        for row in export_payload[table]:
+            assert "date" not in row
+            assert "published_date" in row
+            assert 0 <= row["score"] <= 1
+
+
+def test_comparators_are_normalized_and_unknown_ones_dropped(demo_paper, caplog):
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.paper_contents import PaperEquation
+
+    demo_paper.contents.equations = [
+        PaperEquation(text_id=2, grp_id=1, lhs="p", comp="<=", rhs=".05"),
+        PaperEquation(text_id=2, grp_id=1, lhs="d", comp="≅", rhs="0.4"),
+        PaperEquation(text_id=2, grp_id=1, lhs="r", comp="??", rhs="0.1"),
+    ]
+    eq = _export_paper_payload(demo_paper)["eq"]
+    assert [(row["eq_id"], row["comp"]) for row in eq] == [(1, "≤"), (2, "≈")]
+    assert "unknown comparator" in caplog.text
+
+
+def test_vocabulary_tokens_are_snake_case(demo_paper):
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.paper_contents import CanonicalSection
+
+    demo_paper.metadata.paper_type = "meta-analysis"
+    demo_paper.contents.sections[2].section_type = CanonicalSection.OPEN_DATA
+    demo_paper.contents.xrefs[0].tier = "paren-numeric"
+    payload = _export_paper_payload(demo_paper)
+    assert payload["metadata"]["paper_type"] == "meta_analysis"
+    assert payload["section"][1]["section_type"] == "data_availability"
+    assert payload["extraction"]["diagnostics"]["xref_tier"][0]["tier"] == "paren_numeric"
+
+
+def test_paper_id_does_not_follow_the_doi(demo_paper):
+    from bibr.export.json_export import _export_paper_payload
+
+    payload = _export_paper_payload(demo_paper)
+    assert payload["metadata"]["doi"] == "10.1234/demo"
+    assert payload["paper_id"] == "demo"
+
+
+def test_producer_names_the_software(export_payload):
+    producer = export_payload["extraction"]["producer"]
+    assert producer == {"name": "bibr", "version": "0.0.0-test", "build_sha": None}
+    assert "bibr_version" not in export_payload["extraction"]
+
+
+def test_strict_schema_requires_every_emitted_key():
+    """``required`` in the published strict schema means *present*: a nullable
+    field is required too; only keys a model drops when absent are optional."""
+    from bibr.export import models
+    from bibr.export.schema_artifact import build_export_schema
+
+    defs = build_export_schema()["$defs"]
+    assert defs["BibExport"]["required"] == list(models.BibExport.model_fields)
+    extraction = defs["ExtractionExport"]
+    assert set(extraction["required"]) == set(models.ExtractionExport.model_fields) - set(
+        models.ExtractionExport.OMITTED_WHEN_ABSENT
+    )
+    assert "required" not in defs["PersonNameExport"]
+    # The reader keeps keys optional for a later minor's rows.
+    reader = build_export_schema(reader=True)["$defs"]
+    assert reader["BibExportReader"]["required"] == ["bib_id"]
+
+
+def test_nullable_fields_are_type_lists():
+    from bibr.export.schema_artifact import build_export_schema
+
+    defs = build_export_schema()["$defs"]
+    doi = defs["BibExport"]["properties"]["doi"]
+    assert doi["type"] == ["string", "null"]
+    assert "anyOf" not in doi
+    bib_type = defs["BibExport"]["properties"]["bib_type"]
+    assert bib_type["type"] == ["string", "null"] and bib_type["enum"][-1] is None
+    target = defs["XrefExport"]["properties"]["target_id"]
+    assert target["type"] == ["integer", "null"] and target["minimum"] == 1
+    # A nullable model reference keeps its anyOf.
+    diagnostics = defs["ExtractionExport"]["properties"]["diagnostics"]
+    assert diagnostics["anyOf"][1] == {"type": "null"}
+
+
+def test_a_nullable_one_value_literal_accepts_null():
+    from bibr.export.schema_artifact import _collapse_nullable
+
+    node = {"anyOf": [{"const": "x", "type": "string"}, {"type": "null"}], "default": None}
+    assert _collapse_nullable(node) == {
+        "type": ["string", "null"],
+        "enum": ["x", None],
+        "default": None,
+    }
+
+
+def test_an_orcid_in_another_scripts_digits_is_dropped_not_fatal(demo_paper):
+    """``\\d`` matches Arabic-Indic or fullwidth digits; no ORCID has them, and one
+    reaching the export (an LLM byline parse, OCR) must not fail the paper."""
+    from bibr.export.json_export import _export_paper_payload
+
+    demo_paper.metadata.authors[0].orcid = "٠٠٠٠-٠٠٠٢-١٨٢٥-٠٠٩٧"
+    assert _export_paper_payload(demo_paper)["author"][0]["orcid"] is None
+    demo_paper.metadata.authors[0].orcid = "００００-０００２-１８２５-００９７"
+    assert _export_paper_payload(demo_paper)["author"][0]["orcid"] is None
+
+
+def test_identity_receipt_spells_section_types_like_the_section_rows():
+    from dataclasses import dataclass, field
+
+    from bibr.pipeline.stages.export import _build_extraction
+
+    @dataclass
+    class Candidate:
+        raw: str = "10.1234/x"
+        section_type: str | None = "open_data"
+
+    @dataclass
+    class Selection:
+        selected: Candidate | None = None
+        candidates: list = field(default_factory=lambda: [Candidate()])
+        issues: list = field(default_factory=list)
+
+    from tests.test_export_units import TestExtractionProvenance, _minimal_paper
+
+    paper = _minimal_paper()
+    paper.doi_selection = Selection()
+    ctx = TestExtractionProvenance()._ctx(timings={})
+    receipt = _build_extraction(ctx, paper)["identity"]["receipt"]
+    assert receipt["candidates"][0]["section_type"] == "data_availability"

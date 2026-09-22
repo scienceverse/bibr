@@ -38,7 +38,7 @@ def _payload(*, promotable: bool = True) -> dict:
         # replay now rejects a core without it rather than dropping the
         # completeness receipt silently.
         "extraction": {
-            "bibr_version": "0.0.0-test",
+            "producer": {"name": "bibr", "version": "0.0.0-test"},
             "completed_at": "2026-07-24T10:00:00Z",
             "settings": {
                 "ref_seg": "geom",
@@ -97,7 +97,7 @@ def _schema_valid_paper(*, issues=()):
     )
     return Paper(
         input_file=input_file,
-        metadata=PaperMetadata(doi="10.1/test", title="Core"),
+        metadata=PaperMetadata(doi="10.1234/test", title="Core"),
         contents=contents,
         validation_issues=list(issues),
     )
@@ -214,8 +214,8 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
     enriched = copy.deepcopy(core)
     enriched.update(
         {
-            "bib_match": [{"bib_id": 1, "service": "crossref", "doi": "10.1/ref"}],
-            "metadata_match": [{"service": "crossref", "doi": "10.1/self"}],
+            "bib_match": [{"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"}],
+            "metadata_match": [{"service": "crossref", "doi": "10.1234/self"}],
             "enrichment": {"complete": True, "refs_enriched": 1, "refs_total": 1},
         }
     )
@@ -285,7 +285,7 @@ async def test_sidecar_write_failure_keeps_checkpoint_core_valid(tmp_path, monke
     from bibr.pipeline.stages.export import ExportStage
 
     core = _payload(promotable=False)
-    enriched = {**core, "metadata_match": [{"service": "crossref", "doi": "10.1/self"}]}
+    enriched = {**core, "metadata_match": [{"service": "crossref", "doi": "10.1234/self"}]}
     fs = FileState(path=tmp_path / "paper.pdf")
     fs.paper = MagicMock()
     fs.paper.validation_issues = [
@@ -321,7 +321,7 @@ async def test_terminal_receipt_is_recorded_after_public_materialization(tmp_pat
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1234/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -356,7 +356,7 @@ async def test_final_materialization_failure_preserves_checkpoint_and_retryable_
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1234/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -424,7 +424,7 @@ async def test_corrupt_durable_core_never_becomes_publishable_result(tmp_path):
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1234/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -453,7 +453,7 @@ async def test_export_replays_sidecar_read_back_from_disk(tmp_path, monkeypatch)
 
     core = _payload()
     enriched = copy.deepcopy(core)
-    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1/self"}]
+    enriched["metadata_match"] = [{"service": "crossref", "doi": "10.1234/self"}]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
     sink = LocalArtifactSink(tmp_path / "paper.json")
@@ -581,14 +581,14 @@ async def test_sink_backed_consolidation_is_deterministic_by_bib_id_and_service(
 
     core = _payload()
     core["bib"] = [
-        {"bib_id": 2, "doi": "printed", "volume": "1"},
+        {"bib_id": 2, "doi": "10.1234/printed", "volume": "1"},
         {"bib_id": 1, "doi": None},
     ]
     enriched = copy.deepcopy(core)
     enriched["bib_match"] = [
-        {"bib_id": 1, "service": "other", "doi": "other"},
-        {"bib_id": 2, "service": "crossref", "doi": "printed", "volume": "2"},
-        {"bib_id": 1, "service": "crossref", "doi": "preferred"},
+        {"bib_id": 1, "service": "other", "doi": "10.1234/other"},
+        {"bib_id": 2, "service": "crossref", "doi": "10.1234/printed", "volume": "2"},
+        {"bib_id": 1, "service": "crossref", "doi": "10.1234/preferred"},
     ]
     fs = FileState(path=tmp_path / "paper.pdf", paper=MagicMock(validation_issues=[]))
     fs.paper.export_to_json.side_effect = [core, enriched]
@@ -600,8 +600,8 @@ async def test_sink_backed_consolidation_is_deterministic_by_bib_id_and_service(
     await ExportStage().run(ctx)
 
     by_id = {row["bib_id"]: row for row in fs.result_json["bib"]}
-    assert by_id[1]["doi"] == "preferred"
-    assert by_id[2]["doi"] == "printed"
+    assert by_id[1]["doi"] == "10.1234/preferred"
+    assert by_id[2]["doi"] == "10.1234/printed"
     assert by_id[2]["volume"] == ("2" if mode == "replace" else "1")
 
 

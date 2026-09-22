@@ -101,7 +101,8 @@ def _authors_line(data: dict) -> str:
         if isinstance(a, dict):
             given = (a.get("given") or "").strip()
             family = (a.get("family") or "").strip()
-            full = f"{given} {family}".strip() or "?"
+            literal = (a.get("literal") or "").strip()  # a group author
+            full = f"{given} {family}".strip() or literal or "?"
         else:
             full = "?"
         names.append(full)

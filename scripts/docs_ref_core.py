@@ -213,6 +213,10 @@ def _annotation_repr(annotation: object) -> str:
     if annotation is type(None):
         return "None"
     origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        # Constraints (1-based ids, 4-item boxes) show in the JSON Schema;
+        # the table names the type.
+        return _annotation_repr(typing.get_args(annotation)[0])
     if origin is None:
         name = getattr(annotation, "__name__", None)
         return name if name else str(annotation).replace("typing.", "")
@@ -291,7 +295,7 @@ def render_schema_md() -> str:
             "piece locations, layout features and the validation result live under "
             "`extraction`, keyed by the rows' IDs.\n",
             "The root `schema_version` identifies the output schema; "
-            "`extraction.bibr_version` identifies the producing package. Every record "
+            "`extraction.producer` identifies the software that wrote it. Every record "
             "table has an integer primary key named after it (`text_id`, `xref_id`, "
             "…); other `*_id` columns are foreign keys: `text.section_id` points to "
             "`section.section_id`, and `xref.target_id` points to the row named by "
@@ -314,10 +318,11 @@ def render_schema_md() -> str:
             "later from legacy exports. For compatibility, see "
             "[the export overview](../guides/architecture.md).\n",
             "## Nested record fields\n",
-            "These tables describe the models referenced above. Required means "
-            "required by the model constructor; a nullable field may still be "
-            "required. Defaults do not guarantee that a field is emitted: the "
-            "exporter omits selected optional and debug fields.\n",
+            "These tables describe the models referenced above. *Always present* "
+            "is what the published schema's `required` states: the key is in every "
+            "export, though its value may be `null`. A key marked No is left out "
+            "when its stage did not run or its value is absent. The default is the "
+            "model constructor's.\n",
         ]
     )
     for model in nested_models:
@@ -327,14 +332,15 @@ def render_schema_md() -> str:
             parts.append(f"{doc}\n")
         parts.extend(
             [
-                "| Field | Type | Required | Default | Description |",
+                "| Field | Type | Always present | Default | Description |",
                 "|---|---|---|---|---|",
             ]
         )
         for name, field in model.model_fields.items():
             json_name = field.serialization_alias or field.alias or name
             ann, choices = _field_type_and_choices(field.annotation)
-            required = "Yes" if field.is_required() else "No"
+            omitted = getattr(model, "OMITTED_WHEN_ABSENT", ())
+            required = "No" if name in omitted else "Yes"
             if field.is_required():
                 default = "—"
             elif field.default_factory is not None:

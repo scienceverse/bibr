@@ -214,8 +214,8 @@ class TestConsolidatedExportValidates:
             year=2020,
             container=None,
         )
-        ref.match = {MatchSource.CROSSREF: ExternalMatch(doi="10.1/x", score=99.0)}
-        meta = PaperMetadata(doi="10.1/x", title="T", references=[ref])
+        ref.match = {MatchSource.CROSSREF: ExternalMatch(doi="10.1234/x", score=99.0)}
+        meta = PaperMetadata(doi="10.1234/x", title="T", references=[ref])
         paper = _minimal_paper(metadata=meta)
         paper.extraction = _extraction_block()
         out = export_paper_to_json(paper)
@@ -404,24 +404,27 @@ class TestComputePaperId:
         paper = _minimal_paper(paper_id="custom-id")
         assert paper._compute_paper_id() == "custom-id"
 
-    def test_doi_used_when_no_user_id(self):
+    def test_file_stem_used_when_no_user_id(self):
+        # Not the DOI: the id must not change when a later bibr reads the DOI
+        # differently, and it matches ``bibr batch`` and metacheck's stem ids.
         paper = _minimal_paper()
-        assert paper._compute_paper_id() == "10.1234/test"
+        assert paper.metadata.doi == "10.1234/test"
+        assert paper._compute_paper_id() == "test"
 
-    def test_filename_fallback_when_no_doi(self):
+    def test_file_stem_without_doi(self):
         paper = _minimal_paper(
             metadata=PaperMetadata(doi="", title="No DOI Paper"),
         )
-        assert paper._compute_paper_id() == "test.pdf"
+        assert paper._compute_paper_id() == "test"
 
     def test_user_id_beats_doi(self):
         paper = _minimal_paper(paper_id="my-id")
         paper.metadata.doi = "10.9999/should-not-use"
         assert paper._compute_paper_id() == "my-id"
 
-    def test_no_metadata_falls_to_filename(self):
+    def test_no_metadata_falls_to_file_stem(self):
         paper = _minimal_paper(metadata=None)
-        assert paper._compute_paper_id() == "test.pdf"
+        assert paper._compute_paper_id() == "test"
 
 
 # ── _merge_ocr_metadata ───────────────────────────────────────────────
@@ -877,10 +880,10 @@ class TestExportMatchSerialization:
             year=2020,
             container="Nature",
             match={
-                MatchSource.CROSSREF: ExternalMatch(id="10.1/cr", score=0.95, title="Ref"),
+                MatchSource.CROSSREF: ExternalMatch(id="10.1234/CR", score=95.0, title="Ref"),
             },
         )
-        meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
+        meta = PaperMetadata(doi="10.1234/test", title="Test", references=[ref])
         paper = _minimal_paper(metadata=meta)
         result = export_paper_to_json(paper)
 
@@ -888,7 +891,9 @@ class TestExportMatchSerialization:
         assert "match" not in result["bib"][0]
         bib_match = result["bib_match"]
         assert len(bib_match) == 1
-        assert bib_match[0]["service_id"] == "10.1/cr"
+        # A DOI service id is lowercase like every exported DOI, and the
+        # enrichment score (0-100) is published on the 0-1 scale.
+        assert bib_match[0]["service_id"] == "10.1234/cr"
         assert bib_match[0]["score"] == 0.95
         assert bib_match[0]["service"] == "crossref"
         assert bib_match[0]["bib_id"] == 1
@@ -1001,9 +1006,9 @@ class TestBibIsolatedFromMatches:
             url=None,
             match={
                 MatchSource.CROSSREF: ExternalMatch(
-                    id="10.1/cr",
+                    id="10.1234/cr",
                     score=100.0,
-                    doi="10.1/cr",
+                    doi="10.1234/cr",
                     title="A Study of X",
                     year=2020,
                     container="Nature",
@@ -1012,7 +1017,7 @@ class TestBibIsolatedFromMatches:
                     first_page="100",
                     last_page="115",
                     publisher="Nature Publishing",
-                    url="https://doi.org/10.1/cr",
+                    url="https://doi.org/10.1234/cr",
                 ),
             },
         )
@@ -1033,7 +1038,7 @@ class TestBibIsolatedFromMatches:
         assert bib["title"] == "A study of X"
         # The Crossref match is preserved in bib_match[] for traceability.
         assert len(result["bib_match"]) == 1
-        assert result["bib_match"][0]["doi"] == "10.1/cr"
+        assert result["bib_match"][0]["doi"] == "10.1234/cr"
 
     def test_book_reference_not_contaminated_by_journal_match(self):
         """Regression for the v12 corpus pattern: book entries (Cohen 1988,
@@ -1081,7 +1086,7 @@ class TestBibIsolatedFromMatches:
             authors="Smith, J. & Jones, K.",
             year=2020,
             container="Nature",
-            doi="10.999/raw",
+            doi="10.9999/RAW",
             match={
                 MatchSource.CROSSREF: ExternalMatch(
                     id="10.1234/abc",
@@ -1095,7 +1100,8 @@ class TestBibIsolatedFromMatches:
         meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
         result = export_paper_to_json(_minimal_paper(metadata=meta))
         bib = result["bib"][0]
-        assert bib["doi"] == "10.999/raw"
+        # Printed values stay, except that a DOI is lowercased like every DOI.
+        assert bib["doi"] == "10.9999/raw"
         assert bib["title"] == "A study of X"
         assert bib["container"] == "Nature"
         assert bib["authors"] == "Smith, J. & Jones, K."
@@ -1215,10 +1221,10 @@ class TestExportUrlSanity:
 
 
 class TestExportTopLevel:
-    def test_paper_id_from_doi(self):
+    def test_paper_id_from_file_stem(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["paper_id"] == "10.1234/test"
+        assert result["paper_id"] == "test"
 
     def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
@@ -1226,18 +1232,42 @@ class TestExportTopLevel:
         assert result["schema_version"] == "12.0"
         assert result["metadata"]["title"] == "Test Paper"
         assert result["metadata"]["doi"] == "10.1234/test"
-        # v11 split the input artifact's identity out of the paper's metadata.
+        # v11 split the input artifact's identity out of the paper's metadata;
+        # v12 carries the whole SHA-256, null when the bytes were never seen.
         assert result["source"] == {
             "file_name": "test.pdf",
-            "file_hash": "abc123",
+            "sha256": None,
             "input_format": "pdf",
         }
-        assert "file_hash" not in result["metadata"]
+        assert "sha256" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]
+
+    def test_source_sha256_is_the_full_digest(self):
+        paper = _minimal_paper()
+        paper.input_file.sha256 = "ab" * 32
+        result = export_paper_to_json(paper)
+        assert result["source"]["sha256"] == "ab" * 32
+
+    def test_xml_input_is_jats(self):
+        # The vocabulary names the format: bibr reads XML only as JATS, and
+        # ``tei`` is left for GROBID converters.
+        paper = _minimal_paper(
+            input_file=InputFile(
+                path=Path("/tmp/test.xml"),
+                file_hash="abc123",
+                input_format=InputFormat(
+                    file_extension=".xml",
+                    detected_mime_type="application/xml",
+                    file_type="XML",
+                ),
+            )
+        )
+        result = export_paper_to_json(paper)
+        assert result["source"]["input_format"] == "jats"
 
     def test_input_format_lowercased(self):
         # The pipeline stores enum member names ("PDF", "DOCX", "XML"); the
-        # schema contract is lowercase ("pdf", "docx", "xml", "unknown").
+        # schema contract is lowercase ("pdf", "docx", "jats", "unknown").
         paper = _minimal_paper(
             input_file=InputFile(
                 path=Path("/tmp/test.pdf"),
@@ -1730,7 +1760,7 @@ class TestValidationGateWiring:
             references_incomplete=True,
         )
         paper = _minimal_paper(metadata=metadata)
-        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
+        paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
 
         result = export_paper_to_json(paper)
 
@@ -2127,23 +2157,23 @@ class TestExtractionProvenance:
 
     def test_schema_version_is_at_the_root_and_package_version_under_extraction(self):
         # v11 put the schema version at the root (its presence is the reader's
-        # dispatch signal) and left the producing *package* version as the sole
-        # ``extraction.bibr_version``.
+        # dispatch signal); the producing *package* version is only
+        # ``extraction.producer.version`` (``extraction.bibr_version`` before 12).
         paper = _minimal_paper()
-        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
+        paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
         result = export_paper_to_json(paper)
         assert result["schema_version"] == "12.0"
-        assert result["extraction"]["bibr_version"] == "9.9.9-test"
+        assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert "schema_version" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]
 
     def test_minimal_extraction_when_unset_and_validates(self):
         """Outside the pipeline the exporter still emits ``extraction``: the
-        package version and export time, no settings (v12)."""
+        producer and export time, no settings (v12)."""
         from bibr.export.json_export import validate_export
 
         result = export_paper_to_json(_minimal_paper())
-        assert set(result["extraction"]) >= {"bibr_version", "completed_at", "validation"}
+        assert set(result["extraction"]) >= {"producer", "completed_at", "validation"}
         assert "settings" not in result["extraction"]
         assert validate_export(result) == []
 
@@ -2152,7 +2182,7 @@ class TestExtractionProvenance:
 
         paper = _minimal_paper()
         paper.extraction = _extraction_block(
-            bibr_version="9.9.9-test",
+            producer={"name": "bibr", "version": "9.9.9-test"},
             settings={
                 "ref_seg": "llm",
                 "ref_parse": "ner",
@@ -2163,7 +2193,7 @@ class TestExtractionProvenance:
             timings={"stages": {"extract": 1.0}, "total_seconds": 1.0},
         )
         result = export_paper_to_json(paper)
-        assert result["extraction"]["bibr_version"] == "9.9.9-test"
+        assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert result["extraction"]["settings"]["ref_parse"] == "ner"
         assert result["extraction"]["diagnostics"]["ref_seg_fallback_used"] is True
         assert result["extraction"]["timings"]["total_seconds"] == 1.0
@@ -2300,7 +2330,7 @@ class TestExtractionProvenance:
         ctx = self._ctx(timings={"validate": 0.10, "extract": 1.2345})
         ext = _build_extraction(ctx, _minimal_paper())
 
-        assert ext["bibr_version"] == bibr.__version__
+        assert ext["producer"] == {"name": "bibr", "version": bibr.__version__, "build_sha": None}
         assert ext["settings"]["ref_seg"] == "llm"
         assert ext["settings"]["ref_parse"] == "llm"
         assert ext["diagnostics"]["references_complete"] is True
@@ -2318,7 +2348,7 @@ class TestExtractionProvenance:
 
         ext = _build_extraction(ctx, _minimal_paper())
 
-        assert ext["build_sha"] == "a" * 40
+        assert ext["producer"]["build_sha"] == "a" * 40
 
     def test_build_extraction_detects_seg_fallback(self):
         from bibr.extract.extractor import SEG_FALLBACK_WARNING_PREFIX
@@ -2526,7 +2556,7 @@ class TestPaperSelfIdentityExport:
         assert "bib_id" not in entry
         assert entry["service"] == "crossref"
         assert entry["service_id"] == "10.1234/test"
-        assert entry["score"] == 100.0
+        assert entry["score"] == 1.0
         assert entry["container"] == "Psychological Science"
         assert entry["volume"] == "31"
         assert entry["first_page"] == "65"

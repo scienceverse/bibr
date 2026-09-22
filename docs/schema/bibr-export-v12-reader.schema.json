@@ -7,6 +7,7 @@
       "properties": {
         "affiliation_id": {
           "description": "Primary key; 1-based position in first-seen order.",
+          "minimum": 1,
           "title": "Affiliation Id",
           "type": "integer"
         },
@@ -14,62 +15,47 @@
           "default": [],
           "description": "author[].author_id of every author with this affiliation, in byline order.",
           "items": {
+            "minimum": 1,
             "type": "integer"
           },
           "title": "Author Ids",
           "type": "array"
         },
         "city": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Parsed city.",
-          "title": "City"
+          "title": "City",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "country": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Parsed country.",
-          "title": "Country"
+          "title": "Country",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "department": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Parsed department or unit.",
-          "title": "Department"
+          "title": "Department",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "institution": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Parsed institution name.",
-          "title": "Institution"
+          "title": "Institution",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "text": {
           "description": "The affiliation string, verbatim from the byline.",
@@ -90,47 +76,39 @@
       "properties": {
         "affiliation_id": {
           "description": "affiliation[].affiliation_id this record matches.",
+          "minimum": 1,
           "title": "Affiliation Id",
           "type": "integer"
         },
         "country_code": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "ISO 3166-1 alpha-2 country code of the organization.",
-          "title": "Country Code"
+          "pattern": "^[A-Z]{2}$",
+          "title": "Country Code",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The organization's display name at ROR.",
-          "title": "Name"
+          "title": "Name",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "score": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The service's match score, 0\u20131 (for ranking, not selection).",
-          "title": "Score"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "service": {
           "description": "External service that returned the record.",
@@ -149,6 +127,7 @@
         },
         "service_id": {
           "description": "The organization's ROR ID as a URI (https://ror.org/...).",
+          "pattern": "^https://ror\\.org/0[a-z0-9]{6}[0-9]{2}$",
           "title": "Service Id",
           "type": "string"
         }
@@ -167,6 +146,7 @@
       "properties": {
         "author_id": {
           "description": "Primary key; 1-based position in the byline.",
+          "minimum": 1,
           "title": "Author Id",
           "type": "integer"
         },
@@ -179,60 +159,55 @@
           "default": [],
           "description": "CRediT roles matched from role, as NISO term URIs (https://credit.niso.org/contributor-roles/...); empty when none matched.",
           "items": {
+            "pattern": "^https://credit\\.niso\\.org/contributor-roles/[a-z-]+/$",
             "type": "string"
           },
           "title": "Credit Roles",
           "type": "array"
         },
         "email": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Email address, as printed.",
-          "title": "Email"
+          "title": "Email",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "family": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Family name, or the whole name of a group author; null when not found.",
-          "title": "Family"
+          "description": "Family name; null for group authors and when not found.",
+          "title": "Family",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "given": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Given name(s) or initials; null for mononyms and group authors.",
-          "title": "Given"
+          "title": "Given",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "literal": {
+          "default": null,
+          "description": "The whole name of a group or organization author (a consortium, a working group), as printed; given and family are null then. Null for people.",
+          "title": "Literal",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "orcid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "ORCID iD as a canonical URI (https://orcid.org/0000-0000-0000-0000).",
-          "title": "Orcid"
+          "pattern": "^https://orcid\\.org/[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$",
+          "title": "Orcid",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "role": {
           "default": [],
@@ -244,17 +219,13 @@
           "type": "array"
         },
         "suffix": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Name suffix such as 'Jr.' or 'III'.",
-          "title": "Suffix"
+          "title": "Suffix",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -271,58 +242,39 @@
       "description": "One entry of the paper's reference list, parsed from the printed entry.\n\nValues are as printed unless consolidation filled or replaced them from\n``bib_match``; the field names it took are listed per ``bib_id`` in\n``extraction.diagnostics.consolidation``.",
       "properties": {
         "access_date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Accessed/retrieved date of an online source, as printed.",
-          "title": "Access Date"
+          "title": "Access Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "arxiv": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "arXiv identifier.",
-          "title": "Arxiv"
+          "title": "Arxiv",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "authors": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Author list exactly as printed, including punctuation and 'et al.'.",
-          "title": "Authors"
+          "title": "Authors",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "bib_id": {
           "description": "Primary key; 1-based position in the reference list.",
+          "minimum": 1,
           "title": "Bib Id",
           "type": "integer"
         },
         "bib_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Reference type; null when not determined.",
           "examples": [
@@ -337,85 +289,66 @@
             "thesis",
             "other"
           ],
-          "title": "Bib Type"
+          "title": "Bib Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "container": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Journal, book or proceedings the work appeared in.",
-          "title": "Container"
+          "title": "Container",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Fuller publication date, as printed.",
-          "title": "Date"
+          "title": "Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "DOI printed in the entry, in bare form.",
-          "title": "Doi"
+          "description": "DOI printed in the entry, bare and lowercase.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "edition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Edition.",
-          "title": "Edition"
+          "title": "Edition",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "editors": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Editor list exactly as printed.",
-          "title": "Editors"
+          "title": "Editors",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "first_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "First page or article number.",
-          "title": "First Page"
+          "title": "First Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "is_in_press": {
           "default": false,
@@ -424,173 +357,132 @@
           "type": "boolean"
         },
         "issue": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Issue.",
-          "title": "Issue"
+          "title": "Issue",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Last page.",
-          "title": "Last Page"
+          "title": "Last Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "note": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Trailing free-text note.",
-          "title": "Note"
+          "title": "Note",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pmid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "PubMed identifier.",
-          "title": "Pmid"
+          "title": "Pmid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "published_date": {
+          "default": null,
+          "description": "The publication date as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD), as precise as the entry prints it in date or year; consolidation fills it from bib_match[].published_date. Null when neither is known.",
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Published Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "publisher": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publisher.",
-          "title": "Publisher"
+          "title": "Publisher",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "series": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Book or report series.",
-          "title": "Series"
+          "title": "Series",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "text_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "text[].text_id of the reference-section sentence holding this entry; null when it could not be matched.",
-          "title": "Text Id"
+          "minimum": 1,
+          "title": "Text Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Title of the cited work.",
-          "title": "Title"
+          "title": "Title",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "URL as printed, repaired of line-wrap artifacts.",
-          "title": "Url"
+          "title": "Url",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Version (software, datasets).",
-          "title": "Version"
+          "title": "Version",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "volume": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Volume.",
-          "title": "Volume"
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "year": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publication year; null when absent or in press.",
-          "title": "Year"
+          "title": "Year",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "year_suffix": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Disambiguation letter after the year, e.g. 'a' in '2020a'.",
-          "title": "Year Suffix"
+          "title": "Year Suffix",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -604,35 +496,24 @@
       "description": "One external-service record matched to a reference-list entry.",
       "properties": {
         "author": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/PersonNameExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Structured authors of the matched record; null when none.",
-          "title": "Author"
+          "items": {
+            "$ref": "#/$defs/PersonNameExportReader"
+          },
+          "title": "Author",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "bib_id": {
           "description": "bib[].bib_id of the entry this record matches.",
+          "minimum": 1,
           "title": "Bib Id",
           "type": "integer"
         },
         "bib_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Work type at the service.",
           "examples": [
@@ -647,182 +528,138 @@
             "thesis",
             "other"
           ],
-          "title": "Bib Type"
+          "title": "Bib Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "container": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Journal, book or proceedings.",
-          "title": "Container"
-        },
-        "date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Publication date.",
-          "title": "Date"
+          "title": "Container",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "DOI of the matched record.",
-          "title": "Doi"
+          "description": "DOI of the matched record, lowercase.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "edition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Edition.",
-          "title": "Edition"
+          "title": "Edition",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "editor": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/PersonNameExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Structured editors of the matched record; null when none.",
-          "title": "Editor"
+          "items": {
+            "$ref": "#/$defs/PersonNameExportReader"
+          },
+          "title": "Editor",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "first_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "First page or article number.",
-          "title": "First Page"
+          "title": "First Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "funder": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/MatchFunderExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Funders and awards the record lists.",
-          "title": "Funder"
+          "items": {
+            "$ref": "#/$defs/MatchFunderExportReader"
+          },
+          "title": "Funder",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "issue": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Issue.",
-          "title": "Issue"
+          "title": "Issue",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Last page.",
-          "title": "Last Page"
+          "title": "Last Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_spdx": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "SPDX identifier of license_url, for Creative Commons licenses and CC0.",
-          "title": "License Spdx"
+          "title": "License Spdx",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "License URL of the version of record (else of an unspecified version); text-mining licenses are skipped.",
-          "title": "License Url"
+          "title": "License Url",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "published_date": {
+          "default": null,
+          "description": "Publication date as ISO 8601 (YYYY-MM or YYYY-MM-DD, as precise as the record); null when the record gives only a year (see year).",
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Published Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "publisher": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publisher.",
-          "title": "Publisher"
+          "title": "Publisher",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "score": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Match score, 0\u2013100: 100 for a DOI lookup, lower for a bibliographic search hit.",
-          "title": "Score"
+          "description": "Match score, 0\u20131: 1 for a DOI lookup; a bibliographic search hit scores its title similarity after author and year checks.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "service": {
           "description": "External service that returned the record.",
@@ -840,82 +677,58 @@
           "type": "string"
         },
         "service_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The record's identifier at that service.",
-          "title": "Service Id"
+          "title": "Service Id",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Title of the matched record.",
-          "title": "Title"
+          "title": "Title",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "URL of the record.",
-          "title": "Url"
+          "title": "Url",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Version.",
-          "title": "Version"
+          "title": "Version",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "volume": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Volume.",
-          "title": "Volume"
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "year": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publication year.",
-          "title": "Year"
+          "title": "Year",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -941,16 +754,12 @@
           "type": "string"
         },
         "object_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "'figure:<figure_id>' or 'table:<table_id>' it was assigned to; null when unassigned.",
-          "title": "Object Id"
+          "title": "Object Id",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "reasons": {
           "description": "Signals behind the decision.",
@@ -1008,19 +817,17 @@
       "description": "One caption found in the source.",
       "properties": {
         "bbox": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "number"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the displayed page (see extraction.pages).",
-          "title": "Bbox"
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Bbox",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "caption_id": {
           "description": "Receipt-local caption identifier.",
@@ -1033,16 +840,12 @@
           "type": "string"
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page.",
-          "title": "Page Number"
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "source_index": {
           "description": "Position of the caption in the source order.",
@@ -1158,16 +961,12 @@
           "type": "array"
         },
         "resolved_candidate_fraction": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Share of candidates linked to at least one reference.",
-          "title": "Resolved Candidate Fraction"
+          "title": "Resolved Candidate Fraction",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "style_scores": {
           "additionalProperties": {
@@ -1178,16 +977,12 @@
           "type": "object"
         },
         "unique_linked_bib_fraction": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Share of references cited at least once.",
-          "title": "Unique Linked Bib Fraction"
+          "title": "Unique Linked Bib Fraction",
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1205,6 +1000,7 @@
       "properties": {
         "bib_id": {
           "description": "bib[].bib_id of the modified entry.",
+          "minimum": 1,
           "title": "Bib Id",
           "type": "integer"
         },
@@ -1253,20 +1049,16 @@
           "description": "Receipt for inline citation linking."
         },
         "consolidation": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/ConsolidationExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Per modified reference, the bib[] fields consolidation took from bib_match; omitted when consolidation did not run.",
-          "title": "Consolidation"
+          "items": {
+            "$ref": "#/$defs/ConsolidationExportReader"
+          },
+          "title": "Consolidation",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "paper_classification": {
           "anyOf": [
@@ -1305,49 +1097,39 @@
           "type": "boolean"
         },
         "section_classification": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/SectionClassificationExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "One row per section[] row: how its section_type was decided.",
-          "title": "Section Classification"
+          "items": {
+            "$ref": "#/$defs/SectionClassificationExportReader"
+          },
+          "title": "Section Classification",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "text_quality": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Text-layer quality score, 0\u20131; null when not measured.",
-          "title": "Text Quality"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Text Quality",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "xref_tier": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/XrefTierExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Detector tier of each bibliography xref that recorded one.",
-          "title": "Xref Tier"
+          "items": {
+            "$ref": "#/$defs/XrefTierExportReader"
+          },
+          "title": "Xref Tier",
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "title": "DiagnosticsExportReader",
@@ -1368,16 +1150,12 @@
           "type": "string"
         },
         "page": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page, when known.",
-          "title": "Page"
+          "title": "Page",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "raw": {
           "description": "The DOI as printed.",
@@ -1385,41 +1163,29 @@
           "type": "string"
         },
         "region_index": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "0-based region position on the page; see the model description.",
-          "title": "Region Index"
+          "title": "Region Index",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "region_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Layout class of that region.",
-          "title": "Region Type"
+          "title": "Region Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "rejection_reason": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Why the candidate was not selected; null when eligible.",
-          "title": "Rejection Reason"
+          "title": "Rejection Reason",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "repeated_header_footer_count": {
           "description": "On how many pages the same DOI appears as header or footer furniture.",
@@ -1427,28 +1193,20 @@
           "type": "integer"
         },
         "section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "section[].section_id, when known.",
-          "title": "Section Id"
+          "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "section_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "section_type of that section, when known.",
-          "title": "Section Type"
+          "title": "Section Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "selection_tier": {
           "description": "Selection strength: 4 matches the caller's expected DOI, 3 is an explicit self-identification, 2 is front matter or repeated furniture, 1 is uncontested and untyped.",
@@ -1466,16 +1224,12 @@
           "type": "string"
         },
         "text_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "text[].text_id of the sentence, when from text.",
-          "title": "Text Id"
+          "title": "Text Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1529,42 +1283,49 @@
       "description": "One statistical or mathematical expression found in a sentence,\ne.g. ``t(28) = 2.10``.",
       "properties": {
         "comp": {
-          "description": "Comparator: '=', '<', '>', '\u2264', '\u2265' or '\u2248'.",
+          "description": "Comparator, normalized: '<=' is '\u2264', '>=' is '\u2265', '<<' is '\u226a' and '>>' is '\u226b'.",
+          "examples": [
+            "=",
+            "<",
+            ">",
+            "\u2264",
+            "\u2265",
+            "\u2248",
+            "\u2260",
+            "\u226a",
+            "\u226b",
+            "~"
+          ],
           "title": "Comp",
           "type": "string"
         },
         "df": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Degrees of freedom printed with the left-hand side, e.g. '28' for t(28); null when none.",
-          "title": "Df"
+          "title": "Df",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "end": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Character offset where the printed expression ends (exclusive), same units as start.",
-          "title": "End"
+          "description": "Where the printed expression ends (exclusive), in the same units as start.",
+          "minimum": 0,
+          "title": "End",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "eq_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Eq Id",
           "type": "integer"
         },
         "grp_id": {
           "description": "Group of expressions reported together, e.g. the t, p and d of one test.",
+          "minimum": 1,
           "title": "Grp Id",
           "type": "integer"
         },
@@ -1579,35 +1340,29 @@
           "type": "string"
         },
         "start": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "0-based character offset in text[].text of text_id where the printed expression starts; null when it could not be located.",
-          "title": "Start"
+          "description": "Where the printed expression starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located.",
+          "minimum": 0,
+          "title": "Start",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "text_id": {
           "description": "text[].text_id of the sentence containing the expression.",
+          "minimum": 1,
           "title": "Text Id",
           "type": "integer"
         },
         "verbatim": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The expression exactly as printed (text[].text sliced by start and end); null when it could not be located.",
-          "title": "Verbatim"
+          "title": "Verbatim",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1633,43 +1388,31 @@
           "type": "boolean"
         },
         "expected_doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "DOI the caller expected.",
-          "title": "Expected Doi"
+          "title": "Expected Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "expected_doi_sha256": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "sha256 of the case-folded expected DOI.",
-          "title": "Expected Doi Sha256"
+          "title": "Expected Doi Sha256",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "expected_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Title the caller expected.",
-          "title": "Expected Title"
+          "title": "Expected Title",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "queue_record_id": {
           "description": "Caller's record identifier.",
@@ -1677,31 +1420,23 @@
           "type": "string"
         },
         "source_sha256": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "sha256 the caller expected for the input file.",
-          "title": "Source Sha256"
+          "title": "Source Sha256",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "target_block_hint": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "additionalProperties": true,
           "default": null,
           "description": "Caller's hint for locating the target article in the file.",
-          "title": "Target Block Hint"
+          "title": "Target Block Hint",
+          "type": [
+            "object",
+            "null"
+          ]
         }
       },
       "required": [
@@ -1712,28 +1447,12 @@
     },
     "ExtractionExportReader": {
       "additionalProperties": true,
-      "description": "How this output was produced \u2014 everything that is not the paper itself.\n\nBuilt by ``ExportStage._build_extraction`` from the pipeline context; the\nexport function folds in the receipts that exist only at serialization\ntime, and the output validation gate adds ``validation``. Always present:\na Paper exported outside the pipeline gets a minimal block (package\nversion, export time, the diagnostics the Paper carries, validation).",
+      "description": "How this output was produced \u2014 everything that is not the paper itself.\n\nBuilt by ``ExportStage._build_extraction`` from the pipeline context; the\nexport function folds in the receipts that exist only at serialization\ntime, and the output validation gate adds ``validation``. Always present:\na Paper exported outside the pipeline gets a minimal block (producer,\nexport time, the diagnostics the Paper carries, validation).",
       "properties": {
-        "bibr_version": {
-          "description": "bibr package version that produced the output (not the schema version).",
-          "title": "Bibr Version",
-          "type": "string"
-        },
-        "build_sha": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Commit SHA of the bibr build.",
-          "title": "Build Sha"
-        },
         "completed_at": {
-          "description": "UTC ISO-8601 time the export was written.",
+          "description": "Time the export was written, as a UTC ISO 8601 timestamp (2026-01-15T09:30:00Z).",
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
           "title": "Completed At",
           "type": "string"
         },
@@ -1762,20 +1481,16 @@
           "description": "Enrichment completeness; omitted when enrichment did not run."
         },
         "float_parts": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/FloatPartExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Page and bounding box of every printed piece of the figures and tables; omitted when no piece has a location (natively parsed inputs).",
-          "title": "Float Parts"
+          "items": {
+            "$ref": "#/$defs/FloatPartExportReader"
+          },
+          "title": "Float Parts",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "identity": {
           "anyOf": [
@@ -1814,50 +1529,42 @@
           "description": "OCR engine; null when the run used none."
         },
         "pages": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/PageExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Size of every page with layout analysis: the frame of the bounding boxes in extraction. A box is [x0, y0, x1, y1] in PDF points (1/72 inch) on the page as displayed (after its /Rotate, within its CropBox), measured from the top-left corner with y increasing downward. Omitted for inputs without pages (DOCX, XML, HTML, ePub).",
-          "title": "Pages"
+          "items": {
+            "$ref": "#/$defs/PageExportReader"
+          },
+          "title": "Pages",
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "producer": {
+          "$ref": "#/$defs/ProducerExportReader",
+          "description": "The software that wrote this export."
         },
         "qualification": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "additionalProperties": true,
           "default": null,
           "description": "Deployment-qualification provenance read by the external qualification runner: identity SHAs, per-task protocol hashes, native-validity and fallback outcome, request counts. Hashes and counts only, never document text. Omitted when no LLM task ran or usage tracking is off.",
-          "title": "Qualification"
+          "title": "Qualification",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "regions": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/RegionExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Per-region layout debug payload; opt-in (include_regions).",
-          "title": "Regions"
+          "items": {
+            "$ref": "#/$defs/RegionExportReader"
+          },
+          "title": "Regions",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "settings": {
           "anyOf": [
@@ -1872,20 +1579,16 @@
           "description": "Resolved per-run settings; omitted when the export was made outside the pipeline."
         },
         "text_regions": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/TextRegionExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Per-sentence layout features, one row per text[] row that has them; opt-in (include_region_meta).",
-          "title": "Text Regions"
+          "items": {
+            "$ref": "#/$defs/TextRegionExportReader"
+          },
+          "title": "Text Regions",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "timings": {
           "anyOf": [
@@ -1900,20 +1603,16 @@
           "description": "Wall-clock timings; omitted when untimed."
         },
         "trace": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/LlmTraceExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Captured LLM calls; opt-in (LLM_CAPTURE_TRACE).",
-          "title": "Trace"
+          "items": {
+            "$ref": "#/$defs/LlmTraceExportReader"
+          },
+          "title": "Trace",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "usage": {
           "anyOf": [
@@ -1949,7 +1648,7 @@
         }
       },
       "required": [
-        "bibr_version",
+        "producer",
         "completed_at"
       ],
       "title": "ExtractionExportReader",
@@ -1994,60 +1693,48 @@
       "description": "One figure.",
       "properties": {
         "caption": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Caption text, as printed.",
-          "title": "Caption"
+          "title": "Caption",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "figure_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Figure Id",
           "type": "integer"
         },
         "image": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Base64-encoded image of the whole figure; a figure detected as several panel crops is composited from them, with white between panels. Null unless images are requested.",
-          "title": "Image"
+          "description": "The whole figure as a data URI naming its media type (data:image/jpeg;base64,...); a figure detected as several panel crops is composited from them, with white between panels. Null unless images are requested.",
+          "pattern": "^data:[a-z]+/[a-z0-9.+-]+;base64,",
+          "title": "Image",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page the figure starts on.",
-          "title": "Page Number"
+          "minimum": 1,
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "section[].section_id of the enclosing section.",
-          "title": "Section Id"
+          "description": "section[].section_id of the figure's own section (section_type 'figure'), whose text rows are the caption.",
+          "minimum": 1,
+          "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2062,22 +1749,21 @@
       "description": "Where one physical piece of a figure or table was printed: a panel crop,\nor one page of a table continued across pages.",
       "properties": {
         "bbox": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "number"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the displayed page (see extraction.pages).",
-          "title": "Bbox"
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Bbox",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "object_id": {
           "description": "figure[].figure_id or table[].table_id, by object_type.",
+          "minimum": 1,
           "title": "Object Id",
           "type": "integer"
         },
@@ -2091,19 +1777,17 @@
           "type": "string"
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page the piece is printed on.",
-          "title": "Page Number"
+          "minimum": 1,
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "part_index": {
           "description": "1-based position of the piece within its object.",
+          "minimum": 1,
           "title": "Part Index",
           "type": "integer"
         }
@@ -2138,6 +1822,7 @@
         },
         "funding_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Funding Id",
           "type": "integer"
         }
@@ -2154,61 +1839,50 @@
       "description": "The ROR organization matched to one printed funder name.\n\nOnly ROR's own recommended match (``chosen``) is kept; a funder without\none has no row.",
       "properties": {
         "country_code": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "ISO 3166-1 alpha-2 country code of the organization.",
-          "title": "Country Code"
+          "pattern": "^[A-Z]{2}$",
+          "title": "Country Code",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "funder_doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "The organization's Open Funder Registry DOI in bare form (10.13039/...), when ROR records one.",
-          "title": "Funder Doi"
+          "description": "The organization's Open Funder Registry DOI, bare and lowercase (10.13039/...), when ROR records one.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Funder Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "funding_id": {
           "description": "funding[].funding_id this record matches.",
+          "minimum": 1,
           "title": "Funding Id",
           "type": "integer"
         },
         "name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The organization's display name at ROR.",
-          "title": "Name"
+          "title": "Name",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "score": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The service's match score, 0\u20131 (for ranking, not selection).",
-          "title": "Score"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "service": {
           "description": "External service that returned the record.",
@@ -2227,6 +1901,7 @@
         },
         "service_id": {
           "description": "The organization's ROR ID as a URI (https://ror.org/...).",
+          "pattern": "^https://ror\\.org/0[a-z0-9]{6}[0-9]{2}$",
           "title": "Service Id",
           "type": "string"
         }
@@ -2312,43 +1987,31 @@
       "description": "The CORE extraction LLM. ``null`` when the run deliberately had none.\n\n``usage.breakdown`` is authoritative for every engine that actually ran;\nwhen the two disagree (multi-engine run), breakdown wins.",
       "properties": {
         "backend": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Structured-output backend.",
-          "title": "Backend"
+          "title": "Backend",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Model identifier.",
-          "title": "Model"
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "provider": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "LLM provider.",
-          "title": "Provider"
+          "title": "Provider",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "LlmEngineExportReader",
@@ -2365,30 +2028,22 @@
           "type": "integer"
         },
         "error": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Error message of a failed call.",
-          "title": "Error"
+          "title": "Error",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "finish_reason": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Provider finish reason.",
-          "title": "Finish Reason"
+          "title": "Finish Reason",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "label": {
           "description": "Call site.",
@@ -2405,17 +2060,13 @@
           "type": "array"
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Model identifier.",
-          "title": "Model"
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "params": {
           "additionalProperties": true,
@@ -2429,30 +2080,22 @@
           "type": "boolean"
         },
         "provider": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "LLM provider.",
-          "title": "Provider"
+          "title": "Provider",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "raw_completion": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Raw model output.",
-          "title": "Raw Completion"
+          "title": "Raw Completion",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2475,43 +2118,33 @@
           "type": "array"
         },
         "funder_doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Open Funder Registry DOI in bare form (10.13039/...), when recorded.",
-          "title": "Funder Doi"
+          "description": "Open Funder Registry DOI, bare and lowercase (10.13039/...), when recorded.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Funder Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Funder name, as the service gives it.",
-          "title": "Name"
+          "title": "Name",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "ror": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "ROR ID as a URI (https://ror.org/...), when recorded.",
-          "title": "Ror"
+          "pattern": "^https://ror\\.org/0[a-z0-9]{6}[0-9]{2}$",
+          "title": "Ror",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "MatchFunderExportReader",
@@ -2522,30 +2155,23 @@
       "description": "An organization named on an external-service record.",
       "properties": {
         "name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Organization name, as the service gives it.",
-          "title": "Name"
+          "title": "Name",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "ror": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "ROR ID as a URI (https://ror.org/...), when the record has one.",
-          "title": "Ror"
+          "pattern": "^https://ror\\.org/0[a-z0-9]{6}[0-9]{2}$",
+          "title": "Ror",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "MatchOrganizationExportReader",
@@ -2556,146 +2182,103 @@
       "description": "Paper-level metadata, as printed in the paper.\n\nScalars only (``keywords`` is the one list), so R consumers can call\n``as.data.frame(metadata)`` (metacheck's ``.read_bibr``). How the values\nwere produced lives under ``extraction``; the input file under ``source``.",
       "properties": {
         "abstract": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Abstract text; null when the paper has none or it was not found.",
-          "title": "Abstract"
+          "title": "Abstract",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "arxiv": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "arXiv identifier (e.g. 2101.12345), declared by the input, taken from an arXiv DOI, or read from the arXiv stamp on page 1.",
-          "title": "Arxiv"
+          "title": "Arxiv",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "coi_statement": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Conflict-of-interest statement text, as printed.",
-          "title": "Coi Statement"
+          "title": "Coi Statement",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "data_availability": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Data-availability statement text, as printed.",
-          "title": "Data Availability"
+          "title": "Data Availability",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "The paper's own DOI in bare form (10.xxxx/...), without a resolver prefix; null when none was found.",
-          "title": "Doi"
+          "description": "The paper's own DOI, bare (10.xxxx/..., no resolver prefix) and lowercase; null when none was found.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "ethics_statement": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Ethics approval statement text, as printed.",
-          "title": "Ethics Statement"
+          "title": "Ethics Statement",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "first_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The paper's own first page or article number, as printed.",
-          "title": "First Page"
+          "title": "First Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "funding_statement": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Funding statement text from the paper's funding section. The funders and award numbers parsed from it are in funding[].",
-          "title": "Funding Statement"
+          "title": "Funding Statement",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "issn": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The journal ISSN, as printed.",
-          "title": "Issn"
+          "title": "Issn",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "issue": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The paper's own issue, as printed.",
-          "title": "Issue"
+          "title": "Issue",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "journal": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Journal or venue name from the paper's own front matter.",
-          "title": "Journal"
+          "title": "Journal",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "keywords": {
           "description": "Author keywords in printed order; empty when none were found.",
@@ -2706,79 +2289,51 @@
           "type": "array"
         },
         "language": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Language tag the input declares (BCP 47, e.g. 'en'); null for PDFs.",
-          "title": "Language"
+          "title": "Language",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The paper's own last page, as printed.",
-          "title": "Last Page"
+          "title": "Last Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "License statement or name, as printed.",
-          "title": "License"
+          "title": "License",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_spdx": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "SPDX identifier of the license (e.g. 'CC-BY-4.0'), for Creative Commons licenses with a known version and CC0.",
-          "title": "License Spdx"
+          "title": "License Spdx",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "License URL: the one printed in license, else the canonical Creative Commons URL when the license is identified.",
-          "title": "License Url"
+          "title": "License Url",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "oecd_l1": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "OECD Fields of Science domain; null when not classified.",
           "examples": [
@@ -2789,17 +2344,13 @@
             "Social Sciences",
             "Humanities and the Arts"
           ],
-          "title": "Oecd L1"
+          "title": "Oecd L1",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "oecd_l2": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "OECD Fields of Science subdomain, within oecd_l1; null when not classified.",
           "examples": [
@@ -2840,121 +2391,94 @@
             "Philosophy, Ethics and Religion",
             "Arts (arts, history of arts, performing arts, music)"
           ],
-          "title": "Oecd L2"
+          "title": "Oecd L2",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "paper_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Paper type from bibr's classifier; null when not classified. Its confidence is extraction.diagnostics.paper_classification.paper_type_confidence.",
           "examples": [
             "empirical",
             "review",
-            "meta-analysis",
-            "case-study",
+            "meta_analysis",
+            "case_study",
             "commentary",
             "corrigendum",
             "erratum",
             "retraction",
             "unknown"
           ],
-          "title": "Paper Type"
+          "title": "Paper Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pmcid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "PubMed Central ID (PMC\u2026), when the input declares one.",
-          "title": "Pmcid"
+          "title": "Pmcid",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pmid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "PubMed ID, when the input declares one.",
-          "title": "Pmid"
+          "title": "Pmid",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "published": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publication date as printed (free text, not normalized).",
-          "title": "Published"
+          "title": "Published",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "published_date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The publication date in published as ISO 8601: YYYY, YYYY-MM or YYYY-MM-DD, as precise as printed; null when absent or ambiguous.",
-          "title": "Published Date"
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Published Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "publisher": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The publisher, as printed.",
-          "title": "Publisher"
+          "title": "Publisher",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Paper title; null when none was found.",
-          "title": "Title"
+          "title": "Title",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "volume": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The paper's own volume, as printed.",
-          "title": "Volume"
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2970,30 +2494,18 @@
       "description": "One external-service record matched to the paper itself (self-DOI lookup).",
       "properties": {
         "author": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/PersonNameExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Structured authors of the matched record; null when none.",
-          "title": "Author"
+          "items": {
+            "$ref": "#/$defs/PersonNameExportReader"
+          },
+          "title": "Author",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "bib_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Work type at the service.",
           "examples": [
@@ -3008,182 +2520,138 @@
             "thesis",
             "other"
           ],
-          "title": "Bib Type"
+          "title": "Bib Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "container": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Journal, book or proceedings.",
-          "title": "Container"
-        },
-        "date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Publication date.",
-          "title": "Date"
+          "title": "Container",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "doi": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "DOI of the matched record.",
-          "title": "Doi"
+          "description": "DOI of the matched record, lowercase.",
+          "pattern": "^10\\.[0-9]{4,9}/[^\\sA-Z]+$",
+          "title": "Doi",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "edition": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Edition.",
-          "title": "Edition"
+          "title": "Edition",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "editor": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/PersonNameExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Structured editors of the matched record; null when none.",
-          "title": "Editor"
+          "items": {
+            "$ref": "#/$defs/PersonNameExportReader"
+          },
+          "title": "Editor",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "first_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "First page or article number.",
-          "title": "First Page"
+          "title": "First Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "funder": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/MatchFunderExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Funders and awards the record lists.",
-          "title": "Funder"
+          "items": {
+            "$ref": "#/$defs/MatchFunderExportReader"
+          },
+          "title": "Funder",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "issue": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Issue.",
-          "title": "Issue"
+          "title": "Issue",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "last_page": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Last page.",
-          "title": "Last Page"
+          "title": "Last Page",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_spdx": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "SPDX identifier of license_url, for Creative Commons licenses and CC0.",
-          "title": "License Spdx"
+          "title": "License Spdx",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "license_url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "License URL of the version of record (else of an unspecified version); text-mining licenses are skipped.",
-          "title": "License Url"
+          "title": "License Url",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "published_date": {
+          "default": null,
+          "description": "Publication date as ISO 8601 (YYYY-MM or YYYY-MM-DD, as precise as the record); null when the record gives only a year (see year).",
+          "pattern": "^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$",
+          "title": "Published Date",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "publisher": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publisher.",
-          "title": "Publisher"
+          "title": "Publisher",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "score": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Match score, 0\u2013100: 100 for a DOI lookup, lower for a bibliographic search hit.",
-          "title": "Score"
+          "description": "Match score, 0\u20131: 1 for a DOI lookup; a bibliographic search hit scores its title similarity after author and year checks.",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "service": {
           "description": "External service that returned the record.",
@@ -3201,82 +2669,58 @@
           "type": "string"
         },
         "service_id": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The record's identifier at that service.",
-          "title": "Service Id"
+          "title": "Service Id",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Title of the matched record.",
-          "title": "Title"
+          "title": "Title",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "url": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "URL of the record.",
-          "title": "Url"
+          "title": "Url",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "version": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Version.",
-          "title": "Version"
+          "title": "Version",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "volume": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Volume.",
-          "title": "Volume"
+          "title": "Volume",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "year": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Publication year.",
-          "title": "Year"
+          "title": "Year",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3290,47 +2734,35 @@
       "description": "Which OCR engine produced this output. ``null`` on the native-parse path.",
       "properties": {
         "backend": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "OCR backend.",
-          "title": "Backend"
+          "title": "Backend",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "OCR model identifier.",
-          "title": "Model"
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "profile": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "OCR profile.",
           "examples": [
             "paddle",
             "glm"
           ],
-          "title": "Profile"
+          "title": "Profile",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "OcrEngineExportReader",
@@ -3347,6 +2779,7 @@
         },
         "page_number": {
           "description": "1-based page number.",
+          "minimum": 1,
           "title": "Page Number",
           "type": "integer"
         },
@@ -3369,30 +2802,26 @@
       "description": "Confidence of the paper-level classifications in ``metadata``.",
       "properties": {
         "oecd_confidence": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Confidence of metadata.oecd_l1 and oecd_l2, 0\u20131.",
-          "title": "Oecd Confidence"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Oecd Confidence",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "paper_type_confidence": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Confidence of metadata.paper_type, 0\u20131.",
-          "title": "Paper Type Confidence"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Paper Type Confidence",
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "title": "PaperClassificationExportReader",
@@ -3403,88 +2832,98 @@
       "description": "One structured person name from an external service.\n\n``literal`` holds corporate/unsplittable names whole; when it is set,\n``family``/``given`` are absent. Absent parts are omitted.",
       "properties": {
         "affiliation": {
-          "anyOf": [
-            {
-              "items": {
-                "$ref": "#/$defs/MatchOrganizationExportReader"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "The person's affiliations on this record, as the service lists them.",
-          "title": "Affiliation"
+          "items": {
+            "$ref": "#/$defs/MatchOrganizationExportReader"
+          },
+          "title": "Affiliation",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "family": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Family name.",
-          "title": "Family"
+          "title": "Family",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "given": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Given name(s) or initials.",
-          "title": "Given"
+          "title": "Given",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "literal": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Whole name of an organization or an unsplittable name.",
-          "title": "Literal"
+          "title": "Literal",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "orcid": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "ORCID iD as a URI (https://orcid.org/0000-0000-0000-0000), as the service records it.",
-          "title": "Orcid"
+          "description": "ORCID iD as a canonical URI (https://orcid.org/0000-0000-0000-0000), as the service records it.",
+          "pattern": "^https://orcid\\.org/[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$",
+          "title": "Orcid",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "suffix": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Name suffix such as 'Jr.'.",
-          "title": "Suffix"
+          "title": "Suffix",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "PersonNameExportReader",
+      "type": "object"
+    },
+    "ProducerExportReader": {
+      "additionalProperties": true,
+      "description": "The software that wrote the export.",
+      "properties": {
+        "build_sha": {
+          "default": null,
+          "description": "Commit SHA of the producer's build, when known.",
+          "title": "Build Sha",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Name of the producing software: 'bibr', or another tool that writes this format (e.g. a converter from GROBID TEI).",
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "description": "Version of the producing software (not the schema version).",
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ],
+      "title": "ProducerExportReader",
       "type": "object"
     },
     "ReferenceSegmentationAttemptExportReader": {
@@ -3492,16 +2931,12 @@
       "description": "One attempt at splitting the reference section into entries.",
       "properties": {
         "credible_starts": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Entries that start like a reference.",
-          "title": "Credible Starts"
+          "title": "Credible Starts",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "reason_flags": {
           "description": "Why the attempt was or was not selected.",
@@ -3556,16 +2991,12 @@
           "type": "array"
         },
         "credible_source_starts": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Entry starts visible in the source reference section.",
-          "title": "Credible Source Starts"
+          "title": "Credible Source Starts",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "duplicate_rate": {
           "description": "Share of entries that duplicate another.",
@@ -3597,16 +3028,12 @@
           "type": "array"
         },
         "source_character_coverage": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Share of the reference section's characters covered by entries.",
-          "title": "Source Character Coverage"
+          "title": "Source Character Coverage",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "valid_count": {
           "description": "Parsed entries that passed validity checks.",
@@ -3632,97 +3059,71 @@
       "description": "One layout region of a page (opt-in ``include_regions`` debug payload).",
       "properties": {
         "bbox": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "number"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the displayed page (see extraction.pages).",
-          "title": "Bbox"
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Bbox",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "char_density": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Characters per square point of bounding-box area.",
-          "title": "Char Density"
+          "title": "Char Density",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "content": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Region text after post-processing.",
-          "title": "Content"
+          "title": "Content",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "estimated_line_height": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Bounding-box height divided by the region's line count, in points.",
-          "title": "Estimated Line Height"
+          "title": "Estimated Line Height",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "font_bold": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Whether the dominant font is bold.",
-          "title": "Font Bold"
+          "title": "Font Bold",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "font_size": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Dominant font size, in points.",
-          "title": "Font Size"
+          "title": "Font Size",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "font_weight": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Dominant font weight.",
-          "title": "Font Weight"
+          "title": "Font Weight",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "index": {
           "description": "0-based position of the region among its page's regions after OCR post-processing.",
@@ -3730,47 +3131,36 @@
           "type": "integer"
         },
         "label": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Layout class, e.g. 'text', 'title', 'table'.",
-          "title": "Label"
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "page": {
           "description": "1-based page number.",
+          "minimum": 1,
           "title": "Page",
           "type": "integer"
         },
         "raw_ocr_content": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Region text as OCR returned it.",
-          "title": "Raw Ocr Content"
+          "title": "Raw Ocr Content",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "section[].section_id the region was assigned to.",
-          "title": "Section Id"
+          "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3787,33 +3177,28 @@
       "description": "How one section's ``section_type`` was decided.",
       "properties": {
         "score": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Classifier confidence, 0\u20131; null when not scored.",
-          "title": "Score"
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Score",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "section_id": {
           "description": "section[].section_id.",
+          "minimum": 1,
           "title": "Section Id",
           "type": "integer"
         },
         "source": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Which tier decided the type: 'exact_alias', 'substring_alias' or 'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', 'parent_context', 'title', 'implicit', 'positional', 'appendix_repair' or 'imrad_dedup'; null when unclassified.",
-          "title": "Source"
+          "title": "Source",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3826,51 +3211,38 @@
     },
     "SectionExportReader": {
       "additionalProperties": true,
-      "description": "One section of the paper, with its place in the section tree.",
+      "description": "One section of the paper, with its place in the section tree.\n\nBesides the printed sections, the paper's title and every figure, table\nand footnote get a section of their own (``section_type`` ``title``,\n``figure``, ``table``, ``footnote``), so their text rows can be told apart\nfrom the body. The float and footnote sections come after the body\nsections, at level 1, with a label such as 'Figure 2' as their header.",
       "properties": {
         "header": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Heading text as printed; null when the section has no printed heading.",
-          "title": "Header"
+          "description": "Heading text as printed; for a figure, table or footnote section, its label ('Figure 2', 'Footnote 3'); null when the section has no heading.",
+          "title": "Header",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "level": {
           "description": "Heading depth: 1 for top-level sections, 2 for their subsections, and so on.",
+          "minimum": 1,
           "title": "Level",
           "type": "integer"
         },
         "parent_section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "section_id of the parent section; null for top-level sections.",
-          "title": "Parent Section Id"
+          "minimum": 1,
+          "title": "Parent Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "section_id": {
           "description": "Primary key; 1-based document order.",
+          "minimum": 1,
           "title": "Section Id",
           "type": "integer"
         },
         "section_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Section role (IMRaD plus front and back matter). How it was decided is in extraction.diagnostics.section_classification.",
           "examples": [
             "title",
@@ -3885,7 +3257,7 @@
             "keywords",
             "endnote",
             "appendix",
-            "open_data",
+            "data_availability",
             "author_contributions",
             "coi",
             "ethics",
@@ -3894,7 +3266,11 @@
             "figure",
             "unknown"
           ],
-          "title": "Section Type"
+          "title": "Section Type",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3911,34 +3287,38 @@
       "additionalProperties": true,
       "description": "Identity of the input file \u2014 not of the paper.",
       "properties": {
-        "file_hash": {
-          "description": "First 16 hexadecimal characters of the SHA-256 digest of the input file's bytes; identical files give the same hash.",
-          "title": "File Hash",
-          "type": "string"
-        },
         "file_name": {
           "description": "Name of the input file, without directories.",
           "title": "File Name",
           "type": "string"
         },
         "input_format": {
-          "description": "Lowercase input format; 'unknown' when it could not be determined.",
+          "description": "The input's format: 'jats' for JATS XML, 'tei' for TEI XML (GROBID), otherwise 'pdf', 'docx', 'html' or 'epub'; 'unknown' when it could not be determined.",
           "examples": [
             "pdf",
             "docx",
-            "xml",
+            "jats",
+            "tei",
             "html",
-            "htm",
             "epub",
             "unknown"
           ],
           "title": "Input Format",
           "type": "string"
+        },
+        "sha256": {
+          "description": "SHA-256 digest of the input file's bytes, as 64 lowercase hexadecimal characters; identical files give the same digest. Null only when the export was made without the input bytes.",
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
         "file_name",
-        "file_hash",
+        "sha256",
         "input_format"
       ],
       "title": "SourceExportReader",
@@ -3949,17 +3329,13 @@
       "description": "One table.",
       "properties": {
         "caption": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Caption text, as printed.",
-          "title": "Caption"
+          "title": "Caption",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "contents": {
           "description": "Cell text as rows of strings; the first row is the header. A table continued across pages has all its pieces' rows merged.",
@@ -3973,45 +3349,36 @@
           "type": "array"
         },
         "html": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "HTML markup as printed; a table continued across pages has one <table> element per printed piece, joined by newlines.",
-          "title": "Html"
+          "title": "Html",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page the table starts on.",
-          "title": "Page Number"
+          "minimum": 1,
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "section[].section_id of the enclosing section.",
-          "title": "Section Id"
+          "description": "section[].section_id of the table's own section (section_type 'table'), whose text rows are the caption.",
+          "minimum": 1,
+          "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "table_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Table Id",
           "type": "integer"
         }
@@ -4029,46 +3396,37 @@
       "description": "One sentence-level span of the document text, in reading order.",
       "properties": {
         "formatted": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Formatted source of the span when it differs from text, e.g. a display equation's expression; null otherwise.",
-          "title": "Formatted"
+          "description": "Source form of the span when it differs from text: a display equation's expression as the input gives it (LaTeX from OCR); null otherwise.",
+          "title": "Formatted",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "1-based page the sentence starts on; null for inputs without pages.",
-          "title": "Page Number"
+          "minimum": 1,
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "paragraph_id": {
           "description": "Paragraph this sentence belongs to (1-based).",
+          "minimum": 1,
           "title": "Paragraph Id",
           "type": "integer"
         },
         "section_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "section[].section_id of the enclosing section; null before the first section.",
-          "title": "Section Id"
+          "description": "section[].section_id of the enclosing section (for a caption or footnote, its own figure, table or footnote section); null before the first section.",
+          "minimum": 1,
+          "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "text": {
           "description": "The sentence as plain text. A display equation is the placeholder '[equation]', with the expression in formatted.",
@@ -4077,6 +3435,7 @@
         },
         "text_id": {
           "description": "Primary key; 1-based reading-order position.",
+          "minimum": 1,
           "title": "Text Id",
           "type": "integer"
         }
@@ -4096,88 +3455,68 @@
       "description": "Layout features of one text[] row (opt-in ``include_region_meta``;\ntraining and debug payload).",
       "properties": {
         "bbox": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "number"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Bounding box of the source region: [x0, y0, x1, y1] in PDF points from the top-left corner of the displayed page (see extraction.pages).",
-          "title": "Bbox"
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "title": "Bbox",
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "font_bold": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Whether the font is bold.",
-          "title": "Font Bold"
+          "title": "Font Bold",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "font_size": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Font size, in points.",
-          "title": "Font Size"
+          "title": "Font Size",
+          "type": [
+            "number",
+            "null"
+          ]
         },
         "is_italic": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Whether the font is italic.",
-          "title": "Is Italic"
+          "title": "Is Italic",
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "page_number": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "1-based page of the source region.",
-          "title": "Page Number"
+          "minimum": 1,
+          "title": "Page Number",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "region_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Layout class of the source region.",
-          "title": "Region Type"
+          "title": "Region Type",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "text_id": {
           "description": "text[].text_id these features describe.",
+          "minimum": 1,
           "title": "Text Id",
           "type": "integer"
         }
@@ -4193,33 +3532,25 @@
       "description": "Per-stage wall-clock seconds (the export stage's own time is excluded \u2014\nit is still running when this is built).\n\nBoth fields are always populated when this object exists: an untimed run\nomits the whole ``extraction.timings`` object rather than emitting one with\nnull fields. The ``| None`` types are structural only.",
       "properties": {
         "stages": {
-          "anyOf": [
-            {
-              "additionalProperties": {
-                "type": "number"
-              },
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "additionalProperties": {
+            "type": "number"
+          },
           "default": null,
           "description": "Seconds per stage.",
-          "title": "Stages"
+          "title": "Stages",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "total_seconds": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Seconds for the whole run.",
-          "title": "Total Seconds"
+          "title": "Total Seconds",
+          "type": [
+            "number",
+            "null"
+          ]
         }
       },
       "title": "TimingsExportReader",
@@ -4230,17 +3561,14 @@
       "description": "One hyperlink found in the text.",
       "properties": {
         "end": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Character offset where the link's visible text (or the URL) ends (exclusive), same units as start.",
-          "title": "End"
+          "description": "Where the link's visible text (or the URL) ends (exclusive), in the same units as start.",
+          "minimum": 0,
+          "title": "End",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "href": {
           "description": "Link target, repaired of line-wrap whitespace and a trailing sentence period.",
@@ -4248,37 +3576,32 @@
           "type": "string"
         },
         "link_text": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "Visible link text when it differs from the URL; null when the URL itself is the text.",
-          "title": "Link Text"
+          "title": "Link Text",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "start": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "0-based character offset in text[].text of text_id where the link's visible text (or the URL) starts; null when it could not be located.",
-          "title": "Start"
+          "description": "Where the link's visible text (or the URL) starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located.",
+          "minimum": 0,
+          "title": "Start",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "text_id": {
           "description": "text[].text_id of the sentence containing the link.",
+          "minimum": 1,
           "title": "Text Id",
           "type": "integer"
         },
         "url_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Url Id",
           "type": "integer"
         }
@@ -4340,17 +3663,13 @@
           "type": "string"
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "Model identifier.",
-          "title": "Model"
+          "title": "Model",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "output_tokens": {
           "description": "Output tokens.",
@@ -4358,17 +3677,13 @@
           "type": "integer"
         },
         "provider": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
           "description": "LLM provider.",
-          "title": "Provider"
+          "title": "Provider",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "total_tokens": {
           "description": "Input plus output tokens.",
@@ -4530,65 +3845,54 @@
     },
     "XrefExportReader": {
       "additionalProperties": true,
-      "description": "One in-text reference from a sentence to a reference-list entry,\ntable, figure, footnote, equation, supplement or section.",
+      "description": "One in-text reference from a sentence to a reference-list entry,\ntable, figure, footnote, equation, supplement or section.\n\nA reference naming several targets (``[1, 2]``, ``Tables 2-4``) is one row\nper target; the rows share ``contents`` and the span.",
       "properties": {
         "contents": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "description": "The citation or reference as printed, e.g. '(Smith, 2020)' or 'Table 2'.",
-          "title": "Contents"
+          "title": "Contents",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "end": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "Character offset where the printed reference ends (exclusive), same units as start.",
-          "title": "End"
+          "description": "Where the printed reference ends (exclusive), in the same units as start.",
+          "minimum": 0,
+          "title": "End",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "start": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": null,
-          "description": "0-based character offset in text[].text of text_id where the printed reference starts; null when it could not be located.",
-          "title": "Start"
+          "description": "Where the printed reference starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located.",
+          "minimum": 0,
+          "title": "Start",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "target_id": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Primary key of the target row, by xref_type: bib \u2192 bib_id, table \u2192 table_id, figure \u2192 figure_id, equation \u2192 eq_id, section \u2192 section_id, foot \u2192 text_id of the footnote. Null when the reference did not resolve to a target.",
-          "title": "Target Id"
+          "description": "Primary key of the referenced row, by xref_type: bib \u2192 bib_id, table \u2192 table_id, figure \u2192 figure_id (the table or figure whose number the reference prints), foot \u2192 text_id of the footnote's text. Null for equation, section and supplementary references, which name no exported row (the printed label is in contents), and whenever the reference did not resolve.",
+          "minimum": 1,
+          "title": "Target Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "text_id": {
           "description": "text[].text_id of the sentence containing the reference.",
+          "minimum": 1,
           "title": "Text Id",
           "type": "integer"
         },
         "xref_id": {
           "description": "Primary key; 1-based position.",
+          "minimum": 1,
           "title": "Xref Id",
           "type": "integer"
         },
@@ -4625,9 +3929,9 @@
           "description": "Citation detector that produced the link.",
           "examples": [
             "numeric",
-            "paren-numeric",
-            "flattened-superscript",
-            "author-year",
+            "paren_numeric",
+            "flattened_superscript",
+            "author_year",
             "llm"
           ],
           "title": "Tier",
@@ -4635,6 +3939,7 @@
         },
         "xref_id": {
           "description": "xref[].xref_id.",
+          "minimum": 1,
           "title": "Xref Id",
           "type": "integer"
         }
@@ -4747,7 +4052,7 @@
       "type": "array"
     },
     "paper_id": {
-      "description": "Paper identifier and the key that joins this paper's rows across files: user-supplied --paper-id, else the DOI, else the source file name.",
+      "description": "Paper identifier and the key that joins this paper's rows across files: the user-supplied --paper-id, else the input file's name without its extension (bibr batch writes its corpus-unique id, the name of the JSON file).",
       "minLength": 1,
       "title": "Paper Id",
       "type": "string"
@@ -4768,7 +4073,7 @@
     },
     "source": {
       "$ref": "#/$defs/SourceExportReader",
-      "description": "Identity of the input file: name, content hash, and format."
+      "description": "Identity of the input file: name, SHA-256 digest, and format."
     },
     "table": {
       "description": "Tables with HTML markup, cell contents, caption and page.",

@@ -117,11 +117,13 @@ def test_supported_formats_named_in_prose():
 
 
 def test_paper_type_labels_match_doc_table():
+    from bibr.export.json_export import _snake
     from bibr.structure.paper_classifier import PAPER_TYPE_LABELS, PaperTypeLiteral
 
     md = _read("docs/guides/classifiers.md")
     doc_codes = _table_col_codes(md, "| Type | Description |", col=0)
-    assert doc_codes == set(PAPER_TYPE_LABELS)
+    # The docs show the labels as the export spells them (snake_case).
+    assert doc_codes == {_snake(label) for label in PAPER_TYPE_LABELS}
     # PaperTypeLiteral must stay in lock-step with the list too.
     literal_values = set(PaperTypeLiteral.__args__)
     assert literal_values == set(PAPER_TYPE_LABELS)
@@ -133,9 +135,11 @@ def test_paper_type_labels_match_doc_table():
 
 
 def test_canonical_section_tables_match_enum():
+    from bibr.export.json_export import _EXPORT_SECTION_TYPES
     from bibr.paper_contents import CanonicalSection
 
-    values = {m.value for m in CanonicalSection}
+    # As the export spells them (``open_data`` is ``data_availability``).
+    values = {_EXPORT_SECTION_TYPES.get(m.value, m.value) for m in CanonicalSection}
 
     classifiers = _read("docs/guides/classifiers.md")
     arch = _read("docs/guides/architecture.md")

@@ -3,7 +3,7 @@
   "schema_version": "12.0",
   "source": {
     "file_name": "example.pdf",
-    "file_hash": "abc123",
+    "sha256": "6ca13d52ca70c883e0f0bb101e425a89e8624de51db2d2392593af6a84118090",
     "input_format": "pdf"
   },
   "metadata": {
@@ -38,10 +38,11 @@
       "family": "Doe",
       "email": null,
       "corresponding": true,
-      "orcid": "0000-0001-2345-6789",
+      "orcid": "https://orcid.org/0000-0001-2345-6789",
       "role": [
         "conceptualization"
-      ]
+      ],
+      "literal": null
     },
     {
       "author_id": 2,
@@ -50,7 +51,8 @@
       "email": null,
       "corresponding": false,
       "orcid": null,
-      "role": []
+      "role": [],
+      "literal": null
     },
     {
       "author_id": 3,
@@ -59,7 +61,8 @@
       "email": null,
       "corresponding": false,
       "orcid": null,
-      "role": []
+      "role": [],
+      "literal": null
     },
     {
       "author_id": 4,
@@ -68,7 +71,8 @@
       "email": null,
       "corresponding": false,
       "orcid": null,
-      "role": []
+      "role": [],
+      "literal": null
     }
   ],
   "affiliation": [
@@ -189,7 +193,7 @@
       "bib_id": 1,
       "text_id": 3,
       "bib_type": "journal_article",
-      "doi": "10.1/aaa",
+      "doi": "10.1000/aaa",
       "title": "Ref One",
       "authors": "Smith, J.",
       "editors": null,
@@ -197,6 +201,7 @@
       "year": 2020,
       "year_suffix": null,
       "date": null,
+      "published_date": "2020",
       "container": "Journal X",
       "volume": "1",
       "issue": "1",
@@ -219,6 +224,7 @@
       "year": 2021,
       "year_suffix": null,
       "date": null,
+      "published_date": "2021",
       "container": "Journal Y",
       "volume": "2",
       "issue": "2",
@@ -289,10 +295,10 @@
     {
       "bib_id": 1,
       "service": "crossref",
-      "service_id": "10.1/aaa",
+      "service_id": "10.1000/aaa",
       "score": 0.99,
       "bib_type": "journal_article",
-      "doi": "10.1/aaa",
+      "doi": "10.1000/aaa",
       "title": "Ref One",
       "author": [
         {
@@ -303,7 +309,7 @@
       "editor": null,
       "publisher": null,
       "year": 2020,
-      "date": null,
+      "published_date": null,
       "container": "Journal X",
       "volume": "1",
       "issue": "1",
@@ -315,7 +321,11 @@
     }
   ],
   "extraction": {
-    "bibr_version": "0.3.0",
+    "producer": {
+      "name": "bibr",
+      "version": "0.3.0",
+      "build_sha": null
+    },
     "completed_at": "2026-07-24T10:00:00Z",
     "ocr": {
       "backend": "glm-sglang",

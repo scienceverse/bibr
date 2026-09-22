@@ -32,7 +32,7 @@ result.model.metadata.title  # typed Pydantic model access
 
 `references`, `authors`, and `sections` are friendly aliases for the
 schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
-`doi`, …), `source` fields (`file_name`, `file_hash`, `input_format`), and
+`doi`, …), `source` fields (`file_name`, `sha256`, `input_format`), and
 remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
 too.
 
@@ -122,7 +122,7 @@ chew` CLI flags:
 | `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
 | `pages` | `--pages` | Page range to process, 1-based (e.g. `"1-5"`) |
-| `figure_images` | `--figure-images` | Include base64-encoded figure images in the output |
+| `figure_images` | `--figure-images` | Include figure images in the output, as `data:` URIs |
 | `include_regions` | `--regions` | Include the `extraction.regions` debug payload (per-region bbox/font/content) |
 | `include_region_meta` | `--region-meta` | Include `extraction.text_regions`: per-sentence layout features (`bbox`, `font_size`, `region_type`, …) keyed by `text_id` (opt-in v4-training metadata, distinct from `extraction.regions`) |
 | `ocr_url` | `--ocr-url` | URL for an external OCR server |

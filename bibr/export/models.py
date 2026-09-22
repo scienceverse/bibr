@@ -19,7 +19,7 @@ import copy
 import functools
 import operator
 from types import UnionType
-from typing import Any, Literal, Union, cast, get_args, get_origin
+from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
@@ -36,7 +36,8 @@ _SCHEMA_VERSION = "12.0"
 #   - Root keys in order: ``paper_id``, ``schema_version``, ``source``;
 #     ``metadata``, ``author``, ``affiliation``, ``funding``, ``text``,
 #     ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``eq``;
-#     ``metadata_match``, ``bib_match``; ``extraction``.
+#     ``metadata_match``, ``affiliation_match``, ``funding_match``,
+#     ``bib_match``; ``extraction``.
 #   - Processing fields moved out of the content rows:
 #       ``section[].classification_score``/``classification_source``
 #         -> ``extraction.diagnostics.section_classification[]``
@@ -78,8 +79,32 @@ _SCHEMA_VERSION = "12.0"
 #   - Closed vocabularies are enums in the schema: ``section[].section_type``,
 #     ``bib[].bib_type`` (and the match tables'), ``metadata.paper_type``,
 #     ``metadata.oecd_l1``/``oecd_l2``, ``*_match[].service``,
-#     ``source.input_format``, ``validation.issues[].severity``.
+#     ``source.input_format``, ``eq[].comp``, ``validation.issues[].severity``.
+#     Every token is snake_case: ``paper_type`` ``meta_analysis``/
+#     ``case_study``; ``section_type`` ``open_data`` is ``data_availability``;
+#     ``input_format`` names the format, not the file extension (``jats`` and
+#     ``tei`` for XML, no ``htm``).
+#   - ``xref[].target_id`` is a key of a real row or ``null``: ``foot`` points at
+#     the footnote's ``text_id`` (it held the footnote's ordinal), and
+#     ``equation``, ``section`` and ``supplementary`` references are ``null``
+#     (they held the printed number, or ``0``).
+#   - One scale and one name per concept: every ``score`` and confidence is 0–1
+#     (``*_match[].score`` was 0–100); ``published_date`` is ISO 8601
+#     everywhere (``*_match[].date`` is renamed, ``bib[]`` gains it and
+#     consolidation fills it instead of the printed ``bib[].date``); every DOI
+#     is bare and lowercase.
+#   - ``author[].literal`` holds a group author's name (it was in ``family``).
+#   - ``source.file_hash`` (16 hex of the SHA-256) -> ``source.sha256`` (all
+#     64); ``extraction.bibr_version``/``build_sha`` ->
+#     ``extraction.producer`` {name, version, build_sha}, so other producers of
+#     the format can identify themselves.
+#   - ``paper_id`` defaults to the input file's stem, as ``bibr batch`` and
+#     metacheck already do, not to the DOI.
+#   - ``figure[].image`` is a ``data:`` URI that names its media type.
 #   - The published schema has a stable ``$id`` under https://bibr.org/schema/.
+#     In the strict schema every key the exporter always writes is
+#     ``required``; nullable scalars are written ``"type": [T, "null"]``; and
+#     identifiers, dates, ids and scores carry patterns and bounds.
 #   - Forward policy: 12.x is additive-only — new optional fields and new enum
 #     values may appear in any 12.x release, and readers must ignore keys they
 #     don't recognize and accept enum values they don't know
@@ -195,9 +220,12 @@ _STRICT = ConfigDict(extra="forbid", populate_by_name=True)
 # kept here (not imported) so this module stays dependency-free for readers.
 # ``tests/export/test_vocabularies.py`` pins each one to its runtime source:
 # ``CanonicalSection``, ``BibType``, ``PAPER_TYPE_LABELS``, the OECD label
-# lists, ``MatchSource``, ``SupportedFileType`` and ``IssueSeverity``. The
-# exporter normalizes an off-list value (``bibr.export.json_export``) instead
-# of letting one stray label fail a paper's whole export.
+# lists, ``MatchSource``, ``SupportedFileType``, the equation extractor's
+# comparators and ``IssueSeverity``. Where a runtime label is spelled
+# differently (a classifier's ``meta-analysis``, the ``open_data`` section, a
+# ``.htm`` file) the exporter maps it, and it normalizes an off-list value
+# (``bibr.export.json_export``) instead of letting one stray label fail a
+# paper's whole export.
 # ---------------------------------------------------------------------------
 
 SectionTypeLiteral = Literal[
@@ -213,7 +241,7 @@ SectionTypeLiteral = Literal[
     "keywords",
     "endnote",
     "appendix",
-    "open_data",
+    "data_availability",
     "author_contributions",
     "coi",
     "ethics",
@@ -239,8 +267,8 @@ BibTypeLiteral = Literal[
 PaperTypeLiteral = Literal[
     "empirical",
     "review",
-    "meta-analysis",
-    "case-study",
+    "meta_analysis",
+    "case_study",
     "commentary",
     "corrigendum",
     "erratum",
@@ -300,13 +328,47 @@ MatchServiceLiteral = Literal[
     "crossref", "openalex", "datacite", "doi.org", "openlibrary", "ror", "manual", "other"
 ]
 
-InputFormatLiteral = Literal["pdf", "docx", "xml", "html", "htm", "epub", "unknown"]
+# The format of the input, not its file extension: XML is JATS (what bibr
+# reads) or TEI (what GROBID writes, for converters into this format).
+InputFormatLiteral = Literal["pdf", "docx", "jats", "tei", "html", "epub", "unknown"]
+
+# ``bibr.extract.equation_extractor._COMP_PATTERN`` after ``_normalize_comp``.
+EqCompLiteral = Literal["=", "<", ">", "≤", "≥", "≈", "≠", "≪", "≫", "~"]
 
 SeverityLiteral = Literal["error", "warning"]
 
 XrefTypeLiteral = Literal["bib", "table", "figure", "foot", "supplementary", "equation", "section"]
 
-XrefTierLiteral = Literal["numeric", "paren-numeric", "flattened-superscript", "author-year", "llm"]
+# The citation linker's tiers with ``-`` spelled ``_`` (see ``json_export``).
+XrefTierLiteral = Literal["numeric", "paren_numeric", "flattened_superscript", "author_year", "llm"]
+
+
+# ---------------------------------------------------------------------------
+# Value formats
+#
+# Patterns of the values the exporter normalizes, enforced by the models and
+# published in the schema. ``bibr.export.json_export`` conforms a value that
+# comes from outside bibr (a registry record, a publisher's metadata) before
+# building the models, and drops one that still does not fit instead of failing
+# the export. The regexes use only syntax that JSON Schema (ECMA-262) and
+# pydantic's regex engine share.
+# ---------------------------------------------------------------------------
+
+# Bare and lowercase: DOIs are case-insensitive, so one spelling joins.
+DOI_PATTERN = r"^10\.[0-9]{4,9}/[^\sA-Z]+$"
+ORCID_PATTERN = r"^https://orcid\.org/[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$"
+ROR_PATTERN = r"^https://ror\.org/0[a-z0-9]{6}[0-9]{2}$"
+SHA256_PATTERN = r"^[0-9a-f]{64}$"
+# ISO 8601, as precise as the source: YYYY, YYYY-MM or YYYY-MM-DD.
+ISO_DATE_PATTERN = r"^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$"
+UTC_TIMESTAMP_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\.[0-9]+)?Z$"
+COUNTRY_CODE_PATTERN = r"^[A-Z]{2}$"
+CREDIT_ROLE_PATTERN = r"^https://credit\.niso\.org/contributor-roles/[a-z-]+/$"
+DATA_URI_PATTERN = r"^data:[a-z]+/[a-z0-9.+-]+;base64,"
+
+# A 1-based id, and a bounding box of exactly four numbers.
+Id = Annotated[int, Field(ge=1)]
+Box = Annotated[list[float], Field(min_length=4, max_length=4)]
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +382,15 @@ class SourceExport(BaseModel):
     model_config = _STRICT
 
     file_name: str = Field(description="Name of the input file, without directories.")
-    file_hash: str = Field(
-        description="First 16 hexadecimal characters of the SHA-256 digest of the input file's "
-        "bytes; identical files give the same hash."
+    sha256: str | None = Field(
+        pattern=SHA256_PATTERN,
+        description="SHA-256 digest of the input file's bytes, as 64 lowercase hexadecimal "
+        "characters; identical files give the same digest. Null only when the export was "
+        "made without the input bytes.",
     )
     input_format: InputFormatLiteral = Field(
-        description="Lowercase input format; 'unknown' when it could not be determined."
+        description="The input's format: 'jats' for JATS XML, 'tei' for TEI XML (GROBID), "
+        "otherwise 'pdf', 'docx', 'html' or 'epub'; 'unknown' when it could not be determined."
     )
 
 
@@ -352,8 +417,9 @@ class MetadataExport(BaseModel):
         description="Author keywords in printed order; empty when none were found."
     )
     doi: str | None = Field(
-        description="The paper's own DOI in bare form (10.xxxx/...), without a resolver prefix; "
-        "null when none was found."
+        pattern=DOI_PATTERN,
+        description="The paper's own DOI, bare (10.xxxx/..., no resolver prefix) and lowercase; "
+        "null when none was found.",
     )
     pmid: str | None = Field(default=None, description="PubMed ID, when the input declares one.")
     pmcid: str | None = Field(
@@ -398,6 +464,7 @@ class MetadataExport(BaseModel):
     )
     published_date: str | None = Field(
         default=None,
+        pattern=ISO_DATE_PATTERN,
         description="The publication date in published as ISO 8601: YYYY, YYYY-MM or "
         "YYYY-MM-DD, as precise as printed; null when absent or ambiguous.",
     )
@@ -436,20 +503,26 @@ class AuthorExport(BaseModel):
 
     model_config = _STRICT
 
-    author_id: int = Field(description="Primary key; 1-based position in the byline.")
+    author_id: Id = Field(description="Primary key; 1-based position in the byline.")
     given: str | None = Field(
         description="Given name(s) or initials; null for mononyms and group authors."
     )
     family: str | None = Field(
-        description="Family name, or the whole name of a group author; null when not found."
+        description="Family name; null for group authors and when not found."
     )
     suffix: str | None = Field(default=None, description="Name suffix such as 'Jr.' or 'III'.")
+    literal: str | None = Field(
+        default=None,
+        description="The whole name of a group or organization author (a consortium, a "
+        "working group), as printed; given and family are null then. Null for people.",
+    )
     email: str | None = Field(default=None, description="Email address, as printed.")
     corresponding: bool = Field(
         description="True when the paper marks this author as a corresponding author."
     )
     orcid: str | None = Field(
         default=None,
+        pattern=ORCID_PATTERN,
         description="ORCID iD as a canonical URI (https://orcid.org/0000-0000-0000-0000).",
     )
     role: list[str] = Field(
@@ -457,7 +530,7 @@ class AuthorExport(BaseModel):
         description="Contribution roles from the author-contributions statement, as printed; "
         "empty when the paper has none.",
     )
-    credit_roles: list[str] = Field(
+    credit_roles: list[Annotated[str, Field(pattern=CREDIT_ROLE_PATTERN)]] = Field(
         default=[],
         description="CRediT roles matched from role, as NISO term URIs "
         "(https://credit.niso.org/contributor-roles/...); empty when none matched.",
@@ -473,13 +546,13 @@ class AffiliationExport(BaseModel):
 
     model_config = _STRICT
 
-    affiliation_id: int = Field(description="Primary key; 1-based position in first-seen order.")
+    affiliation_id: Id = Field(description="Primary key; 1-based position in first-seen order.")
     text: str = Field(description="The affiliation string, verbatim from the byline.")
     institution: str | None = Field(default=None, description="Parsed institution name.")
     department: str | None = Field(default=None, description="Parsed department or unit.")
     city: str | None = Field(default=None, description="Parsed city.")
     country: str | None = Field(default=None, description="Parsed country.")
-    author_ids: list[int] = Field(
+    author_ids: list[Id] = Field(
         default=[],
         description="author[].author_id of every author with this affiliation, in byline order.",
     )
@@ -490,7 +563,7 @@ class FundingExport(BaseModel):
 
     model_config = _STRICT
 
-    funding_id: int = Field(description="Primary key; 1-based position.")
+    funding_id: Id = Field(description="Primary key; 1-based position.")
     funder: str = Field(description="Funder name, as printed.")
     award_ids: list[str] = Field(
         default=[], description="Grant or award numbers attributed to this funder, as printed."
@@ -509,34 +582,43 @@ class TextExport(BaseModel):
         description="The sentence as plain text. A display equation is the placeholder "
         "'[equation]', with the expression in formatted."
     )
-    text_id: int = Field(description="Primary key; 1-based reading-order position.")
-    paragraph_id: int = Field(description="Paragraph this sentence belongs to (1-based).")
-    section_id: int | None = Field(
-        description="section[].section_id of the enclosing section; null before the first section."
+    text_id: Id = Field(description="Primary key; 1-based reading-order position.")
+    paragraph_id: Id = Field(description="Paragraph this sentence belongs to (1-based).")
+    section_id: Id | None = Field(
+        description="section[].section_id of the enclosing section (for a caption or footnote, "
+        "its own figure, table or footnote section); null before the first section."
     )
-    page_number: int | None = Field(
+    page_number: Id | None = Field(
         description="1-based page the sentence starts on; null for inputs without pages."
     )
     formatted: str | None = Field(
         default=None,
-        description="Formatted source of the span when it differs from text, e.g. a display "
-        "equation's expression; null otherwise.",
+        description="Source form of the span when it differs from text: a display equation's "
+        "expression as the input gives it (LaTeX from OCR); null otherwise.",
     )
 
 
 class SectionExport(BaseModel):
-    """One section of the paper, with its place in the section tree."""
+    """One section of the paper, with its place in the section tree.
+
+    Besides the printed sections, the paper's title and every figure, table
+    and footnote get a section of their own (``section_type`` ``title``,
+    ``figure``, ``table``, ``footnote``), so their text rows can be told apart
+    from the body. The float and footnote sections come after the body
+    sections, at level 1, with a label such as 'Figure 2' as their header.
+    """
 
     model_config = _STRICT
 
-    section_id: int = Field(description="Primary key; 1-based document order.")
+    section_id: Id = Field(description="Primary key; 1-based document order.")
     header: str | None = Field(
-        description="Heading text as printed; null when the section has no printed heading."
+        description="Heading text as printed; for a figure, table or footnote section, its "
+        "label ('Figure 2', 'Footnote 3'); null when the section has no heading."
     )
-    level: int = Field(
+    level: Id = Field(
         description="Heading depth: 1 for top-level sections, 2 for their subsections, and so on."
     )
-    parent_section_id: int | None = Field(
+    parent_section_id: Id | None = Field(
         description="section_id of the parent section; null for top-level sections."
     )
     section_type: SectionTypeLiteral | None = Field(
@@ -550,7 +632,7 @@ class UrlExport(BaseModel):
 
     model_config = _STRICT
 
-    url_id: int = Field(description="Primary key; 1-based position.")
+    url_id: Id = Field(description="Primary key; 1-based position.")
     href: str = Field(
         description="Link target, repaired of line-wrap whitespace and a trailing sentence period."
     )
@@ -558,15 +640,18 @@ class UrlExport(BaseModel):
         description="Visible link text when it differs from the URL; null when the URL itself "
         "is the text."
     )
-    text_id: int = Field(description="text[].text_id of the sentence containing the link.")
+    text_id: Id = Field(description="text[].text_id of the sentence containing the link.")
     start: int | None = Field(
         default=None,
-        description="0-based character offset in text[].text of text_id where the link's visible text (or the URL) starts; "
-        "null when it could not be located.",
+        ge=0,
+        description="Where the link's visible text (or the URL) starts in text[].text of "
+        "text_id: a 0-based offset in Unicode code points; null when it could not be located.",
     )
     end: int | None = Field(
         default=None,
-        description="Character offset where the link's visible text (or the URL) ends (exclusive), same units as start.",
+        ge=0,
+        description="Where the link's visible text (or the URL) ends (exclusive), in the same "
+        "units as start.",
     )
 
 
@@ -580,8 +665,8 @@ class BibExport(BaseModel):
 
     model_config = _STRICT
 
-    bib_id: int = Field(description="Primary key; 1-based position in the reference list.")
-    text_id: int | None = Field(
+    bib_id: Id = Field(description="Primary key; 1-based position in the reference list.")
+    text_id: Id | None = Field(
         default=None,
         description="text[].text_id of the reference-section sentence holding this entry; null "
         "when it could not be matched.",
@@ -589,7 +674,11 @@ class BibExport(BaseModel):
     bib_type: BibTypeLiteral | None = Field(
         default=None, description="Reference type; null when not determined."
     )
-    doi: str | None = Field(default=None, description="DOI printed in the entry, in bare form.")
+    doi: str | None = Field(
+        default=None,
+        pattern=DOI_PATTERN,
+        description="DOI printed in the entry, bare and lowercase.",
+    )
     title: str | None = Field(default=None, description="Title of the cited work.")
     authors: str | None = Field(
         default=None,
@@ -604,6 +693,13 @@ class BibExport(BaseModel):
         default=None, description="Disambiguation letter after the year, e.g. 'a' in '2020a'."
     )
     date: str | None = Field(default=None, description="Fuller publication date, as printed.")
+    published_date: str | None = Field(
+        default=None,
+        pattern=ISO_DATE_PATTERN,
+        description="The publication date as ISO 8601 (YYYY, YYYY-MM or YYYY-MM-DD), as "
+        "precise as the entry prints it in date or year; consolidation fills it from "
+        "bib_match[].published_date. Null when neither is known.",
+    )
     container: str | None = Field(
         default=None, description="Journal, book or proceedings the work appeared in."
     )
@@ -630,29 +726,37 @@ class BibExport(BaseModel):
 
 class XrefExport(BaseModel):
     """One in-text reference from a sentence to a reference-list entry,
-    table, figure, footnote, equation, supplement or section."""
+    table, figure, footnote, equation, supplement or section.
+
+    A reference naming several targets (``[1, 2]``, ``Tables 2-4``) is one row
+    per target; the rows share ``contents`` and the span.
+    """
 
     model_config = _STRICT
 
-    xref_id: int = Field(description="Primary key; 1-based position.")
-    target_id: int | None = Field(
-        description="Primary key of the target row, by xref_type: bib → bib_id, table → "
-        "table_id, figure → figure_id, equation → eq_id, section → section_id, foot → text_id of "
-        "the footnote. Null when the reference did not resolve to a target."
+    xref_id: Id = Field(description="Primary key; 1-based position.")
+    target_id: Id | None = Field(
+        description="Primary key of the referenced row, by xref_type: bib → bib_id, table → "
+        "table_id, figure → figure_id (the table or figure whose number the reference prints), "
+        "foot → text_id of the footnote's text. Null for equation, section and supplementary "
+        "references, which name no exported row (the printed label is in contents), and "
+        "whenever the reference did not resolve."
     )
     xref_type: XrefTypeLiteral = Field(description="What kind of item is referenced.")
     contents: str | None = Field(
         description="The citation or reference as printed, e.g. '(Smith, 2020)' or 'Table 2'."
     )
-    text_id: int = Field(description="text[].text_id of the sentence containing the reference.")
+    text_id: Id = Field(description="text[].text_id of the sentence containing the reference.")
     start: int | None = Field(
         default=None,
-        description="0-based character offset in text[].text of text_id where the printed reference starts; "
-        "null when it could not be located.",
+        ge=0,
+        description="Where the printed reference starts in text[].text of text_id: a 0-based "
+        "offset in Unicode code points; null when it could not be located.",
     )
     end: int | None = Field(
         default=None,
-        description="Character offset where the printed reference ends (exclusive), same units as start.",
+        ge=0,
+        description="Where the printed reference ends (exclusive), in the same units as start.",
     )
 
 
@@ -661,18 +765,21 @@ class FigureExport(BaseModel):
 
     model_config = _STRICT
 
-    figure_id: int = Field(description="Primary key; 1-based position.")
-    section_id: int | None = Field(
-        default=None, description="section[].section_id of the enclosing section."
+    figure_id: Id = Field(description="Primary key; 1-based position.")
+    section_id: Id | None = Field(
+        default=None,
+        description="section[].section_id of the figure's own section (section_type "
+        "'figure'), whose text rows are the caption.",
     )
     image: str | None = Field(
         default=None,
-        description="Base64-encoded image of the whole figure; a figure detected as several "
-        "panel crops is composited from them, with white between panels. Null unless images "
-        "are requested.",
+        pattern=DATA_URI_PATTERN,
+        description="The whole figure as a data URI naming its media type "
+        "(data:image/jpeg;base64,...); a figure detected as several panel crops is composited "
+        "from them, with white between panels. Null unless images are requested.",
     )
     caption: str | None = Field(default=None, description="Caption text, as printed.")
-    page_number: int | None = Field(description="1-based page the figure starts on.")
+    page_number: Id | None = Field(description="1-based page the figure starts on.")
 
 
 class TableExport(BaseModel):
@@ -680,9 +787,11 @@ class TableExport(BaseModel):
 
     model_config = _STRICT
 
-    table_id: int = Field(description="Primary key; 1-based position.")
-    section_id: int | None = Field(
-        default=None, description="section[].section_id of the enclosing section."
+    table_id: Id = Field(description="Primary key; 1-based position.")
+    section_id: Id | None = Field(
+        default=None,
+        description="section[].section_id of the table's own section (section_type 'table'), "
+        "whose text rows are the caption.",
     )
     html: str | None = Field(
         default=None,
@@ -697,7 +806,7 @@ class TableExport(BaseModel):
         "continued across pages has all its pieces' rows merged."
     )
     caption: str | None = Field(default=None, description="Caption text, as printed.")
-    page_number: int | None = Field(description="1-based page the table starts on.")
+    page_number: Id | None = Field(description="1-based page the table starts on.")
 
 
 class EqExport(BaseModel):
@@ -706,18 +815,20 @@ class EqExport(BaseModel):
 
     model_config = _STRICT
 
-    eq_id: int = Field(description="Primary key; 1-based position.")
-    text_id: int = Field(description="text[].text_id of the sentence containing the expression.")
+    eq_id: Id = Field(description="Primary key; 1-based position.")
+    text_id: Id = Field(description="text[].text_id of the sentence containing the expression.")
     start: int | None = Field(
         default=None,
-        description="0-based character offset in text[].text of text_id where the printed expression starts; "
-        "null when it could not be located.",
+        ge=0,
+        description="Where the printed expression starts in text[].text of text_id: a 0-based "
+        "offset in Unicode code points; null when it could not be located.",
     )
     end: int | None = Field(
         default=None,
-        description="Character offset where the printed expression ends (exclusive), same units as start.",
+        ge=0,
+        description="Where the printed expression ends (exclusive), in the same units as start.",
     )
-    grp_id: int = Field(
+    grp_id: Id = Field(
         description="Group of expressions reported together, e.g. the t, p and d of one test."
     )
     verbatim: str | None = Field(
@@ -730,7 +841,9 @@ class EqExport(BaseModel):
         description="Degrees of freedom printed with the left-hand side, e.g. '28' for t(28); "
         "null when none."
     )
-    comp: str = Field(description="Comparator: '=', '<', '>', '≤', '≥' or '≈'.")
+    comp: EqCompLiteral = Field(
+        description="Comparator, normalized: '<=' is '≤', '>=' is '≥', '<<' is '≪' and '>>' is '≫'."
+    )
     rhs: str = Field(description="Right-hand side, e.g. '2.10' or '.003'.")
 
 
@@ -748,7 +861,9 @@ class MatchOrganizationExport(BaseModel):
         default=None, description="Organization name, as the service gives it."
     )
     ror: str | None = Field(
-        default=None, description="ROR ID as a URI (https://ror.org/...), when the record has one."
+        default=None,
+        pattern=ROR_PATTERN,
+        description="ROR ID as a URI (https://ror.org/...), when the record has one.",
     )
 
 
@@ -760,10 +875,13 @@ class MatchFunderExport(BaseModel):
     name: str | None = Field(default=None, description="Funder name, as the service gives it.")
     funder_doi: str | None = Field(
         default=None,
-        description="Open Funder Registry DOI in bare form (10.13039/...), when recorded.",
+        pattern=DOI_PATTERN,
+        description="Open Funder Registry DOI, bare and lowercase (10.13039/...), when recorded.",
     )
     ror: str | None = Field(
-        default=None, description="ROR ID as a URI (https://ror.org/...), when recorded."
+        default=None,
+        pattern=ROR_PATTERN,
+        description="ROR ID as a URI (https://ror.org/...), when recorded.",
     )
     award_ids: list[str] = Field(default_factory=list, description="Award numbers, as recorded.")
 
@@ -785,8 +903,9 @@ class PersonNameExport(BaseModel):
     )
     orcid: str | None = Field(
         default=None,
-        description="ORCID iD as a URI (https://orcid.org/0000-0000-0000-0000), as the "
-        "service records it.",
+        pattern=ORCID_PATTERN,
+        description="ORCID iD as a canonical URI (https://orcid.org/0000-0000-0000-0000), as "
+        "the service records it.",
     )
     affiliation: list[MatchOrganizationExport] | None = Field(
         default=None,
@@ -804,6 +923,16 @@ class PersonNameExport(BaseModel):
             raise ValueError("PersonNameExport requires at least one of family/given/literal")
         return self
 
+    # Every part is written only when it has a value (CSL-JSON style).
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "family",
+        "given",
+        "suffix",
+        "literal",
+        "orcid",
+        "affiliation",
+    )
+
     @model_serializer(mode="wrap")
     def _omit_absent_parts(self, handler):
         data = handler(self)
@@ -815,18 +944,22 @@ class BibMatchExport(BaseModel):
 
     model_config = _STRICT
 
-    bib_id: int = Field(description="bib[].bib_id of the entry this record matches.")
+    bib_id: Id = Field(description="bib[].bib_id of the entry this record matches.")
     service: MatchServiceLiteral = Field(description="External service that returned the record.")
     service_id: str | None = Field(
         default=None, description="The record's identifier at that service."
     )
     score: float | None = Field(
         default=None,
-        description="Match score, 0–100: 100 for a DOI lookup, lower for a bibliographic "
-        "search hit.",
+        ge=0,
+        le=1,
+        description="Match score, 0–1: 1 for a DOI lookup; a bibliographic search hit scores "
+        "its title similarity after author and year checks.",
     )
     bib_type: BibTypeLiteral | None = Field(default=None, description="Work type at the service.")
-    doi: str | None = Field(default=None, description="DOI of the matched record.")
+    doi: str | None = Field(
+        default=None, pattern=DOI_PATTERN, description="DOI of the matched record, lowercase."
+    )
     title: str | None = Field(default=None, description="Title of the matched record.")
     author: list[PersonNameExport] | None = Field(
         default=None, description="Structured authors of the matched record; null when none."
@@ -836,7 +969,12 @@ class BibMatchExport(BaseModel):
     )
     publisher: str | None = Field(default=None, description="Publisher.")
     year: int | None = Field(default=None, description="Publication year.")
-    date: str | None = Field(default=None, description="Publication date.")
+    published_date: str | None = Field(
+        default=None,
+        pattern=ISO_DATE_PATTERN,
+        description="Publication date as ISO 8601 (YYYY-MM or YYYY-MM-DD, as precise as the "
+        "record); null when the record gives only a year (see year).",
+    )
     container: str | None = Field(default=None, description="Journal, book or proceedings.")
     volume: str | None = Field(default=None, description="Volume.")
     issue: str | None = Field(default=None, description="Issue.")
@@ -870,11 +1008,15 @@ class MetadataMatchExport(BaseModel):
     )
     score: float | None = Field(
         default=None,
-        description="Match score, 0–100: 100 for a DOI lookup, lower for a bibliographic "
-        "search hit.",
+        ge=0,
+        le=1,
+        description="Match score, 0–1: 1 for a DOI lookup; a bibliographic search hit scores "
+        "its title similarity after author and year checks.",
     )
     bib_type: BibTypeLiteral | None = Field(default=None, description="Work type at the service.")
-    doi: str | None = Field(default=None, description="DOI of the matched record.")
+    doi: str | None = Field(
+        default=None, pattern=DOI_PATTERN, description="DOI of the matched record, lowercase."
+    )
     title: str | None = Field(default=None, description="Title of the matched record.")
     author: list[PersonNameExport] | None = Field(
         default=None, description="Structured authors of the matched record; null when none."
@@ -884,7 +1026,12 @@ class MetadataMatchExport(BaseModel):
     )
     publisher: str | None = Field(default=None, description="Publisher.")
     year: int | None = Field(default=None, description="Publication year.")
-    date: str | None = Field(default=None, description="Publication date.")
+    published_date: str | None = Field(
+        default=None,
+        pattern=ISO_DATE_PATTERN,
+        description="Publication date as ISO 8601 (YYYY-MM or YYYY-MM-DD, as precise as the "
+        "record); null when the record gives only a year (see year).",
+    )
     container: str | None = Field(default=None, description="Journal, book or proceedings.")
     volume: str | None = Field(default=None, description="Volume.")
     issue: str | None = Field(default=None, description="Issue.")
@@ -916,15 +1063,23 @@ class AffiliationMatchExport(BaseModel):
 
     model_config = _STRICT
 
-    affiliation_id: int = Field(description="affiliation[].affiliation_id this record matches.")
+    affiliation_id: Id = Field(description="affiliation[].affiliation_id this record matches.")
     service: MatchServiceLiteral = Field(description="External service that returned the record.")
-    service_id: str = Field(description="The organization's ROR ID as a URI (https://ror.org/...).")
+    service_id: str = Field(
+        pattern=ROR_PATTERN,
+        description="The organization's ROR ID as a URI (https://ror.org/...).",
+    )
     score: float | None = Field(
-        default=None, description="The service's match score, 0–1 (for ranking, not selection)."
+        default=None,
+        ge=0,
+        le=1,
+        description="The service's match score, 0–1 (for ranking, not selection).",
     )
     name: str | None = Field(default=None, description="The organization's display name at ROR.")
     country_code: str | None = Field(
-        default=None, description="ISO 3166-1 alpha-2 country code of the organization."
+        default=None,
+        pattern=COUNTRY_CODE_PATTERN,
+        description="ISO 3166-1 alpha-2 country code of the organization.",
     )
 
 
@@ -937,20 +1092,29 @@ class FundingMatchExport(BaseModel):
 
     model_config = _STRICT
 
-    funding_id: int = Field(description="funding[].funding_id this record matches.")
+    funding_id: Id = Field(description="funding[].funding_id this record matches.")
     service: MatchServiceLiteral = Field(description="External service that returned the record.")
-    service_id: str = Field(description="The organization's ROR ID as a URI (https://ror.org/...).")
+    service_id: str = Field(
+        pattern=ROR_PATTERN,
+        description="The organization's ROR ID as a URI (https://ror.org/...).",
+    )
     score: float | None = Field(
-        default=None, description="The service's match score, 0–1 (for ranking, not selection)."
+        default=None,
+        ge=0,
+        le=1,
+        description="The service's match score, 0–1 (for ranking, not selection).",
     )
     name: str | None = Field(default=None, description="The organization's display name at ROR.")
     country_code: str | None = Field(
-        default=None, description="ISO 3166-1 alpha-2 country code of the organization."
+        default=None,
+        pattern=COUNTRY_CODE_PATTERN,
+        description="ISO 3166-1 alpha-2 country code of the organization.",
     )
     funder_doi: str | None = Field(
         default=None,
-        description="The organization's Open Funder Registry DOI in bare form (10.13039/...), "
-        "when ROR records one.",
+        pattern=DOI_PATTERN,
+        description="The organization's Open Funder Registry DOI, bare and lowercase "
+        "(10.13039/...), when ROR records one.",
     )
 
 
@@ -964,13 +1128,13 @@ class RegionExport(BaseModel):
 
     model_config = _STRICT
 
-    page: int = Field(description="1-based page number.")
+    page: Id = Field(description="1-based page number.")
     index: int = Field(
         description="0-based position of the region among its page's regions after OCR "
         "post-processing."
     )
     label: str | None = Field(description="Layout class, e.g. 'text', 'title', 'table'.")
-    bbox: list[float] | None = Field(
+    bbox: Box | None = Field(
         description="Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the "
         "displayed page (see extraction.pages)."
     )
@@ -997,12 +1161,12 @@ class TextRegionExport(BaseModel):
 
     model_config = _STRICT
 
-    text_id: int = Field(description="text[].text_id these features describe.")
+    text_id: Id = Field(description="text[].text_id these features describe.")
     font_size: float | None = Field(default=None, description="Font size, in points.")
     font_bold: bool | None = Field(default=None, description="Whether the font is bold.")
     is_italic: bool | None = Field(default=None, description="Whether the font is italic.")
-    page_number: int | None = Field(default=None, description="1-based page of the source region.")
-    bbox: list[float] | None = Field(
+    page_number: Id | None = Field(default=None, description="1-based page of the source region.")
+    bbox: Box | None = Field(
         default=None,
         description="Bounding box of the source region: [x0, y0, x1, y1] in PDF points from the "
         "top-left corner of the displayed page (see extraction.pages).",
@@ -1015,7 +1179,7 @@ class PageExport(BaseModel):
 
     model_config = _STRICT
 
-    page_number: int = Field(description="1-based page number.")
+    page_number: Id = Field(description="1-based page number.")
     width: float = Field(description="Width of the page as displayed, in PDF points (1/72 inch).")
     height: float = Field(description="Height of the page as displayed, in PDF points.")
 
@@ -1027,10 +1191,10 @@ class FloatPartExport(BaseModel):
     model_config = _STRICT
 
     object_type: Literal["figure", "table"] = Field(description="'figure' or 'table'.")
-    object_id: int = Field(description="figure[].figure_id or table[].table_id, by object_type.")
-    part_index: int = Field(description="1-based position of the piece within its object.")
-    page_number: int | None = Field(description="1-based page the piece is printed on.")
-    bbox: list[float] | None = Field(
+    object_id: Id = Field(description="figure[].figure_id or table[].table_id, by object_type.")
+    part_index: Id = Field(description="1-based position of the piece within its object.")
+    page_number: Id | None = Field(description="1-based page the piece is printed on.")
+    bbox: Box | None = Field(
         description="Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the "
         "displayed page (see extraction.pages)."
     )
@@ -1142,10 +1306,12 @@ class IdentityExport(BaseModel):
         default=None, description="The DOI-selection receipt; omitted when selection did not run."
     )
 
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("expected", "receipt")
+
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
         data = handler(self)
-        for key in ("expected", "receipt"):
+        for key in self.OMITTED_WHEN_ABSENT:
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -1207,7 +1373,7 @@ class CaptionCandidateExport(BaseModel):
     text: str = Field(description="Caption text.")
     object_type: str = Field(description="'figure' or 'table'.")
     page_number: int | None = Field(description="1-based page.")
-    bbox: list[float] | None = Field(
+    bbox: Box | None = Field(
         description="Bounding box [x0, y0, x1, y1] in PDF points from the top-left corner of the "
         "displayed page (see extraction.pages)."
     )
@@ -1276,8 +1442,10 @@ class SectionClassificationExport(BaseModel):
 
     model_config = _STRICT
 
-    section_id: int = Field(description="section[].section_id.")
-    score: float | None = Field(description="Classifier confidence, 0–1; null when not scored.")
+    section_id: Id = Field(description="section[].section_id.")
+    score: float | None = Field(
+        ge=0, le=1, description="Classifier confidence, 0–1; null when not scored."
+    )
     source: str | None = Field(
         description="Which tier decided the type: 'exact_alias', 'substring_alias' or "
         "'alias_prior' (heading lookup), 'model' (trained classifier), 'llm', "
@@ -1291,7 +1459,7 @@ class XrefTierExport(BaseModel):
 
     model_config = _STRICT
 
-    xref_id: int = Field(description="xref[].xref_id.")
+    xref_id: Id = Field(description="xref[].xref_id.")
     tier: XrefTierLiteral = Field(description="Citation detector that produced the link.")
 
 
@@ -1301,10 +1469,10 @@ class PaperClassificationExport(BaseModel):
     model_config = _STRICT
 
     paper_type_confidence: float | None = Field(
-        default=None, description="Confidence of metadata.paper_type, 0–1."
+        default=None, ge=0, le=1, description="Confidence of metadata.paper_type, 0–1."
     )
     oecd_confidence: float | None = Field(
-        default=None, description="Confidence of metadata.oecd_l1 and oecd_l2, 0–1."
+        default=None, ge=0, le=1, description="Confidence of metadata.oecd_l1 and oecd_l2, 0–1."
     )
 
 
@@ -1313,7 +1481,7 @@ class ConsolidationExport(BaseModel):
 
     model_config = _STRICT
 
-    bib_id: int = Field(description="bib[].bib_id of the modified entry.")
+    bib_id: Id = Field(description="bib[].bib_id of the modified entry.")
     fields: list[str] = Field(description="bib[] field names filled or replaced, in field order.")
 
 
@@ -1329,7 +1497,10 @@ class DiagnosticsExport(BaseModel):
     model_config = _STRICT
 
     text_quality: float | None = Field(
-        default=None, description="Text-layer quality score, 0–1; null when not measured."
+        default=None,
+        ge=0,
+        le=1,
+        description="Text-layer quality score, 0–1; null when not measured.",
     )
     references_complete: bool = Field(
         default=True, description="False when reference extraction is known to be incomplete."
@@ -1361,18 +1532,20 @@ class DiagnosticsExport(BaseModel):
         "omitted when consolidation did not run.",
     )
 
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "section_classification",
+        "paper_classification",
+        "xref_tier",
+        "citation_linking",
+        "caption_assignment",
+        "reference_yield",
+        "consolidation",
+    )
+
     @model_serializer(mode="wrap")
     def _omit_absent_receipts(self, handler):
         data = handler(self)
-        for key in (
-            "section_classification",
-            "paper_classification",
-            "xref_tier",
-            "citation_linking",
-            "caption_assignment",
-            "reference_yield",
-            "consolidation",
-        ):
+        for key in self.OMITTED_WHEN_ABSENT:
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -1535,25 +1708,46 @@ class ValidationExport(BaseModel):
     issues: list[ValidationIssueExport] = Field(description="Every finding.")
 
 
+class ProducerExport(BaseModel):
+    """The software that wrote the export."""
+
+    model_config = _STRICT
+
+    name: str = Field(
+        min_length=1,
+        description="Name of the producing software: 'bibr', or another tool that writes this "
+        "format (e.g. a converter from GROBID TEI).",
+    )
+    version: str = Field(
+        min_length=1,
+        description="Version of the producing software (not the schema version).",
+    )
+    build_sha: str | None = Field(
+        default=None, description="Commit SHA of the producer's build, when known."
+    )
+
+
 class ExtractionExport(BaseModel):
     """How this output was produced — everything that is not the paper itself.
 
     Built by ``ExportStage._build_extraction`` from the pipeline context; the
     export function folds in the receipts that exist only at serialization
     time, and the output validation gate adds ``validation``. Always present:
-    a Paper exported outside the pipeline gets a minimal block (package
-    version, export time, the diagnostics the Paper carries, validation).
+    a Paper exported outside the pipeline gets a minimal block (producer,
+    export time, the diagnostics the Paper carries, validation).
     """
 
     model_config = _STRICT
 
-    bibr_version: str = Field(
-        description="bibr package version that produced the output (not the schema version)."
-    )
-    build_sha: str | None = Field(default=None, description="Commit SHA of the bibr build.")
+    producer: ProducerExport = Field(description="The software that wrote this export.")
     # UTC ISO-8601 export timestamp — the export's only wall-clock provenance.
     # Excluded from fixture/replay diffs (see tests) so it stays deterministic.
-    completed_at: str = Field(description="UTC ISO-8601 time the export was written.")
+    completed_at: str = Field(
+        pattern=UTC_TIMESTAMP_PATTERN,
+        json_schema_extra={"format": "date-time"},
+        description="Time the export was written, as a UTC ISO 8601 timestamp "
+        "(2026-01-15T09:30:00Z).",
+    )
     ocr: OcrEngineExport | None = Field(
         default=None, description="OCR engine; null when the run used none."
     )
@@ -1620,27 +1814,29 @@ class ExtractionExport(BaseModel):
         default=None, description="Captured LLM calls; opt-in (LLM_CAPTURE_TRACE)."
     )
 
+    # Absence rule: omitted = the subsystem did not run / was not requested.
+    # ``ocr``/``llm`` are NOT in this list — ``null`` there is meaningful (the
+    # run happened, deliberately without that engine).
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = (
+        "settings",
+        "enrichment",
+        "identity",
+        "diagnostics",
+        "validation",
+        "qualification",
+        "timings",
+        "usage",
+        "pages",
+        "regions",
+        "text_regions",
+        "float_parts",
+        "trace",
+    )
+
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
-        # Absence rule: omitted = the subsystem did not run / was not requested.
-        # ``ocr``/``llm`` are NOT in this list — ``null`` there is meaningful
-        # (the run happened, deliberately without that engine).
         data = handler(self)
-        for key in (
-            "settings",
-            "enrichment",
-            "identity",
-            "diagnostics",
-            "validation",
-            "qualification",
-            "timings",
-            "usage",
-            "pages",
-            "regions",
-            "text_regions",
-            "float_parts",
-            "trace",
-        ):
+        for key in self.OMITTED_WHEN_ABSENT:
             if data.get(key) is None:
                 data.pop(key, None)
         return data
@@ -1649,10 +1845,13 @@ class ExtractionExport(BaseModel):
 # The ONLY root keys the exporter may omit (see ``PaperExport._omit_absent``);
 # since v12 there are none. Every root key is always emitted — record arrays
 # because the uniform-tables contract requires them (empty allowed), the
-# object blocks because they are unconditional. This tuple is the single
-# authority: ``bibr.export.schema_artifact`` derives the published schema's
-# ``required`` list from it, so the artifact can never claim a key is optional
-# that the exporter in fact always emits.
+# object blocks because they are unconditional.
+#
+# This tuple, and the ``OMITTED_WHEN_ABSENT`` of the few nested models that
+# drop an absent key, are the single authority on which keys may be missing:
+# ``bibr.export.schema_artifact`` makes every other key ``required`` in the
+# published schema, so the artifact can never claim a key is optional that the
+# exporter in fact always emits.
 OMITTABLE_ROOT_KEYS: tuple[str, ...] = ()
 
 
@@ -1667,11 +1866,14 @@ class PaperExport(BaseModel):
     hold what the paper says; the ``*_match`` tables hold what external
     registries returned for the paper, its affiliations, funders and references.
 
-    Every record table has an integer primary key named ``<table>_id``; the
-    other ``*_id`` columns are foreign keys to the table they name. Absent
-    values are ``null``, never an empty-string or zero sentinel. Every root key
-    is always present; record tables may be empty. Readers dispatch on the
-    presence of the root ``schema_version``. Every bounding box is
+    Every record table has an integer primary key named ``<table>_id``,
+    1-based; the other ``*_id`` columns are foreign keys to the table they name.
+    Absent values are ``null``, never an empty-string or zero sentinel. Every
+    root key is always present; record tables may be empty. Readers dispatch on
+    the presence of the root ``schema_version``. Character offsets count
+    Unicode code points of the exported text. Every score and confidence is
+    0–1. Identifiers use each registry's canonical form: DOIs bare and
+    lowercase, ORCID iDs and ROR IDs as https URIs. Every bounding box is
     ``[x0, y0, x1, y1]`` in PDF points (1/72 inch) on the page as displayed,
     measured from its top-left corner with y increasing downward;
     ``extraction.pages`` gives each page's size in the same units.
@@ -1682,14 +1884,15 @@ class PaperExport(BaseModel):
     paper_id: str = Field(
         min_length=1,
         description="Paper identifier and the key that joins this paper's rows across files: "
-        "user-supplied --paper-id, else the DOI, else the source file name.",
+        "the user-supplied --paper-id, else the input file's name without its extension "
+        "(bibr batch writes its corpus-unique id, the name of the JSON file).",
     )
     schema_version: Literal["12.0"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )
     source: SourceExport = Field(
-        description="Identity of the input file: name, content hash, and format.",
+        description="Identity of the input file: name, SHA-256 digest, and format.",
     )
     metadata: MetadataExport = Field(
         description="Paper-level metadata: title, abstract, keywords, DOI, paper type and OECD "
@@ -1758,13 +1961,15 @@ class PaperExport(BaseModel):
         "qualification provenance, validation and warnings.",
     )
 
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = OMITTABLE_ROOT_KEYS
+
     @model_serializer(mode="wrap")
     def _omit_absent(self, handler):
         # Root record arrays are ALWAYS present (empty allowed) — metacheck's
         # uniform-tables contract needs every table to exist. Only keys listed
         # in OMITTABLE_ROOT_KEYS (none since v12) may be omitted.
         data = handler(self)
-        for key in OMITTABLE_ROOT_KEYS:
+        for key in self.OMITTED_WHEN_ABSENT:
             if data.get(key) is None:
                 data.pop(key, None)
         return data

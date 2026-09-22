@@ -117,7 +117,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - `metadata` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(metadata)`. Pipeline telemetry lives under `extraction`; the input file's identity under `source`.
 - All positional IDs are 1-based; `section_id=0` is the Root sentinel (excluded from export)
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
-- `paper_id` is required: the `--paper-id`, else the DOI, else the file name; `bibr batch` sets it to the corpus-unique id its JSON file is named after.
+- `paper_id` is required: the `--paper-id`, else the input file's stem (its name without the extension); `bibr batch` sets it to the corpus-unique id its JSON file is named after.
 - Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
 
 **Parquet** (`bibr/export/tables.py`): `bibr tables <exports> --out DIR`,
@@ -223,7 +223,7 @@ IMRaD+ section classification enum:
 | `keywords` | Keywords |
 | `endnote` | Supplementary material, future work, outlook |
 | `appendix` | Appendix / Supporting Information |
-| `open_data` | Data availability / code availability |
+| `data_availability` | Data availability / code availability |
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
@@ -335,7 +335,7 @@ Key settings:
 | `OCR_BASE_URL` | Base URL for an external HTTP OCR server | `http://localhost:8080` |
 | `CROSSREF_ENRICH` | Enable Crossref/resolver reference enrichment (per-run override: `--crossref`/`--no-crossref`, `chew(crossref=...)`, serve `crossref` field) | `false` |
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |
-| `FIGURE_IMAGES` | Include base64-encoded figure images in output | `false` |
+| `FIGURE_IMAGES` | Include figure images in output, as `data:` URIs | `false` |
 | `REF_SEG_STRATEGY` | Reference segmentation strategy (`geom`, `region`, `llm`, or `crf`) | `geom` |
 | `REF_PARSE_STRATEGY` | Reference parsing strategy (`ner`, `llm`, `llm-chunked`, or `off`) | `ner` |
 | `REF_TRAINING_DATA_DIR` | Save raw bib text + LLM extracts (parser data); LLM segmentation spans in `segmentation/` subdir (segmenter data) | disabled |

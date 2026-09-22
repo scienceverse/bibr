@@ -97,6 +97,7 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
 
     inp_file = InputFile(path="test.pdf")
     inp_file.file_hash = "hash123"
+    inp_file.sha256 = "0123456789abcdef" * 4
     inp_file.file_name = "test.pdf"
     inp_file.input_format = "pdf"
 
@@ -110,15 +111,15 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     result = paper.export_to_json()
     assert result is not None
 
-    # Check paper_id
-    assert result["paper_id"] == "10.1234/test"
+    # Check paper_id: the input file's stem, not the DOI
+    assert result["paper_id"] == "test"
 
     # Check metadata / source / root version
     assert result["schema_version"] == "12.0"
     metadata = result["metadata"]
     assert metadata["title"] == "Test Paper"
     assert metadata["doi"] == "10.1234/test"
-    assert result["source"]["file_hash"] == "hash123"
+    assert result["source"]["sha256"] == "0123456789abcdef" * 4
     assert result["source"]["file_name"] == "test.pdf"
     assert metadata["paper_type"] is None
     assert metadata["oecd_l1"] is None
@@ -397,7 +398,8 @@ def test_paper_export_bib_with_populated_references(mock_contents):
     assert cr["bib_id"] == 1
     assert cr["service"] == "crossref"
     assert cr["service_id"] == "10.1000/ref1"
-    assert cr["score"] == 100.0
+    # Enrichment's 0-100 score is published on the 0-1 scale.
+    assert cr["score"] == 1.0
     assert cr["title"] == "Referenced Paper"
     assert cr["container"] == "Nature"
     assert cr["doi"] == "10.1000/ref1"

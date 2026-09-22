@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 from typing import TYPE_CHECKING, Any, cast, get_args
@@ -17,6 +18,11 @@ from bibr.export.geometry import PageGeometry
 # are kept only because importers still reach them through this module path.
 from bibr.export.models import (
     _SCHEMA_VERSION,
+    COUNTRY_CODE_PATTERN,
+    DOI_PATTERN,
+    ISO_DATE_PATTERN,
+    ORCID_PATTERN,
+    ROR_PATTERN,
     AffiliationExport,
     AffiliationMatchExport,
     AuthorExport,
@@ -29,6 +35,7 @@ from bibr.export.models import (
     CitationCandidateExport,
     CitationLinkingExport,
     EnrichmentExport,
+    EqCompLiteral,
     EqExport,
     FigureExport,
     FloatPartExport,
@@ -49,6 +56,7 @@ from bibr.export.models import (
     RegionExport,
     SectionClassificationExport,
     SectionExport,
+    SectionTypeLiteral,
     SeverityLiteral,
     SourceExport,
     TableExport,
@@ -59,11 +67,13 @@ from bibr.export.models import (
     ValidationIssueExport,
     XrefExport,
     XrefTierExport,
+    XrefTierLiteral,
 )
 from bibr.export.normalize import arxiv_id, credit_roles, iso_date, license_ids
 from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.extract.research_integrity import collect_affiliations
-from bibr.models import BibType, canonicalize_orcid, migrate_bib_type
+from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
+from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -79,6 +89,41 @@ _PAPER_TYPES = frozenset(get_args(PaperTypeLiteral))
 _OECD_L1 = frozenset(get_args(OecdL1Literal))
 _OECD_L2 = frozenset(get_args(OecdL2Literal))
 _INPUT_FORMATS = frozenset(get_args(InputFormatLiteral))
+_EQ_COMPS = frozenset(get_args(EqCompLiteral))
+_XREF_TIERS = frozenset(get_args(XrefTierLiteral))
+
+# Runtime labels spelled differently in the published vocabularies. The
+# vocabulary names the format, not the file extension; bibr reads XML only as
+# JATS (``SupportedFileType.XML``).
+_EXPORT_INPUT_FORMATS = {"xml": "jats", "htm": "html"}
+_EXPORT_SECTION_TYPES = {"open_data": "data_availability"}
+
+# xref types whose ``target_id`` names an exported row. Equation, section and
+# supplementary references carry the number they print, which is no row's key.
+_RESOLVED_XREF_TYPES = frozenset({"bib", "table", "figure", "foot"})
+
+# Spellings the equation extractor's LLM path may return for a comparator.
+_COMP_SPELLINGS = {
+    "<=": "≤",
+    ">=": "≥",
+    "=<": "≤",
+    "=>": "≥",
+    "⩽": "≤",
+    "⩾": "≥",
+    "<<": "≪",
+    ">>": "≫",
+    "!=": "≠",
+    "==": "=",
+    "∼": "~",
+    "≃": "≈",
+    "≅": "≈",
+}
+
+_DOI_RE = re.compile(DOI_PATTERN)
+_ORCID_RE = re.compile(ORCID_PATTERN)
+_ROR_RE = re.compile(ROR_PATTERN)
+_COUNTRY_CODE_RE = re.compile(COUNTRY_CODE_PATTERN)
+_ISO_DATE_RE = re.compile(ISO_DATE_PATTERN)
 
 
 def _export_bib_type(value: str | None) -> BibTypeLiteral | None:
@@ -110,6 +155,167 @@ def _in_vocabulary(value: str | None, vocabulary: frozenset[str], field: str) ->
 def _or_none(value: str | None) -> str | None:
     """``None`` for an empty or whitespace-only string: absence is ``null``, never ``""``."""
     return value if value and value.strip() else None
+
+
+def _snake(label: str | None) -> str | None:
+    """A runtime label in the published snake_case spelling (``meta-analysis``
+    -> ``meta_analysis``)."""
+    return label.replace("-", "_") if label else label
+
+
+def _conformed(value: str | None, pattern: re.Pattern[str], field: str) -> str | None:
+    """*value* when it has the published format; ``None`` (logged) otherwise.
+
+    For identifiers that reach the export from outside bibr (a registry record,
+    a publisher's metadata): one malformed value must not fail the export.
+    """
+    if value is None:
+        return None
+    # ``fullmatch``: Python's ``$`` also matches before a final newline, which
+    # the models' patterns reject.
+    if pattern.fullmatch(value):
+        return value
+    logger.warning("Dropping malformed %s %r from export", field, value)
+    return None
+
+
+def _export_doi(value: str | None, field: str) -> str | None:
+    """*value* as a bare, lowercase DOI, or ``None``.
+
+    DOIs are case-insensitive; one spelling lets the paper's own DOI, its
+    references' DOIs and the registries' records join.
+    """
+    if not value or not value.strip():
+        return None
+    bare = normalize_doi(value) or value.strip()
+    return _conformed(bare.lower(), _DOI_RE, field)
+
+
+def _export_service_id(value: str | None) -> str | None:
+    """A match row's ``service_id``, with a DOI identifier lowercased like every DOI."""
+    if value and normalize_doi(value) == value.strip():
+        return value.strip().lower()
+    return value
+
+
+def _unit_interval(value: float | None, field: str) -> float | None:
+    """*value* when it lies in [0, 1]; ``None`` (logged) otherwise."""
+    if value is None or 0 <= value <= 1:
+        return value
+    logger.warning("Dropping out-of-range %s %r from export", field, value)
+    return None
+
+
+def _match_score(value: float | None) -> float | None:
+    """A match score on the published 0–1 scale.
+
+    Enrichment scores a match 0–100 (100 for a DOI lookup, a fuzzy title
+    similarity for a search hit); every score in the export is 0–1.
+    """
+    if value is None:
+        return None
+    return round(min(max(float(value) / 100.0, 0.0), 1.0), 4)
+
+
+def _export_comp(value: str) -> EqCompLiteral | None:
+    """The comparator in the published spelling, or ``None`` when it is none of them."""
+    comp = _COMP_SPELLINGS.get(value.strip(), value.strip())
+    return cast(EqCompLiteral, comp) if comp in _EQ_COMPS else None
+
+
+def _data_uri(image_b64: str | None) -> str | None:
+    """A base64 image as a ``data:`` URI naming its media type.
+
+    Figure images are JPEG crops, PNG or JPEG composites, or the image a DOCX
+    embeds (any format Word takes), so the type is read from the bytes.
+    """
+    if not image_b64:
+        return None
+    if image_b64.startswith("data:"):
+        return image_b64
+    try:
+        head = base64.b64decode(image_b64[:64] + "=" * (-len(image_b64[:64]) % 4))
+    except (ValueError, TypeError):
+        head = b""
+    return f"data:{_image_media_type(head)};base64,{image_b64}"
+
+
+def _image_media_type(head: bytes) -> str:
+    """The media type of an image from its first bytes."""
+    signatures = (
+        (b"\xff\xd8\xff", "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n", "image/png"),
+        (b"GIF87a", "image/gif"),
+        (b"GIF89a", "image/gif"),
+        (b"II*\x00", "image/tiff"),
+        (b"MM\x00*", "image/tiff"),
+        (b"BM", "image/bmp"),
+        (b"\xd7\xcd\xc6\x9a", "image/wmf"),
+    )
+    for signature, media_type in signatures:
+        if head.startswith(signature):
+            return media_type
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:4] == b"\x01\x00\x00\x00" and head[40:44] == b" EMF":
+        return "image/emf"
+    if head.lstrip().startswith((b"<svg", b"<?xml")):
+        return "image/svg+xml"
+    return "application/octet-stream"
+
+
+def _export_author(author) -> AuthorExport:
+    """One ``author[]`` row: a person's split name, or a group author's ``literal``."""
+    roles = list(author.role or [])
+    given, family, literal = _or_none(author.given), _or_none(author.family), None
+    if ORGANIZATION_ROLE in roles:
+        roles = [role for role in roles if role != ORGANIZATION_ROLE]
+        literal = " ".join(part for part in (given, family) if part) or None
+        given = family = None
+    return AuthorExport(
+        author_id=author.author_id,
+        given=given,
+        family=family,
+        suffix=getattr(author, "suffix", None),
+        literal=literal,
+        email=author.email,
+        corresponding=author.corresponding,
+        orcid=_conformed(canonicalize_orcid(author.orcid), _ORCID_RE, "orcid"),
+        role=roles,
+        credit_roles=credit_roles(roles),
+    )
+
+
+def _organization_fields(org) -> dict[str, Any]:
+    """The ROR organization fields shared by ``affiliation_match`` and ``funding_match``."""
+    code = org.country_code.upper() if org.country_code else None
+    return {
+        "service_id": org.service_id,
+        "score": _unit_interval(org.score, "ROR score"),
+        "name": org.name,
+        "country_code": _conformed(code, _COUNTRY_CODE_RE, "country_code"),
+    }
+
+
+def export_section_type(value: str | None) -> str | None:
+    """A runtime section type in the published spelling (``open_data`` ->
+    ``data_availability``), wherever the export names one."""
+    return _EXPORT_SECTION_TYPES.get(value, value) if value else value
+
+
+def _export_input_format(fmt: str | None) -> InputFormatLiteral:
+    """The published ``input_format`` for a runtime file type."""
+    exported = _EXPORT_INPUT_FORMATS.get(fmt or "", fmt)
+    return cast(InputFormatLiteral, exported if exported in _INPUT_FORMATS else "unknown")
+
+
+def _bib_published_date(printed_date: str | None, year: int | None) -> str | None:
+    """ISO 8601 date of a reference: its printed date when that agrees with its
+    year ("2020, May 3"), else the year alone."""
+    iso = iso_date(printed_date)
+    if year and 0 < year <= 9999 and (iso is None or not iso.startswith(f"{year:04d}")):
+        return f"{year:04d}"
+    return iso
 
 
 def _export_affiliations(paper: Paper) -> list[AffiliationExport]:
@@ -146,15 +352,20 @@ def _export_affiliations(paper: Paper) -> list[AffiliationExport]:
     return exported
 
 
-def _minimal_extraction() -> dict:
-    """The ``extraction`` skeleton for a Paper exported outside the pipeline:
-    no engines or settings are known, only the package and the export time."""
-    import datetime as _dt
-
+def bibr_producer(build_sha: str | None = None) -> dict[str, Any]:
+    """``extraction.producer`` for an export this bibr writes."""
     import bibr
 
+    return {"name": "bibr", "version": bibr.__version__, "build_sha": build_sha}
+
+
+def _minimal_extraction() -> dict:
+    """The ``extraction`` skeleton for a Paper exported outside the pipeline:
+    no engines or settings are known, only the producer and the export time."""
+    import datetime as _dt
+
     return {
-        "bibr_version": bibr.__version__,
+        "producer": bibr_producer(),
         "completed_at": _dt.datetime.now(_dt.UTC)
         .replace(microsecond=0)
         .isoformat()
@@ -448,10 +659,13 @@ def _export_paper_payload(
         rows = []
         for a in authors:
             row: dict[str, Any] = {"given": a.given, "family": a.family}
-            if getattr(a, "orcid", None):
-                row["orcid"] = a.orcid
+            if orcid := _conformed(getattr(a, "orcid", None), _ORCID_RE, "orcid"):
+                row["orcid"] = orcid
             if getattr(a, "affiliation", None):
-                row["affiliation"] = [org.model_dump() for org in a.affiliation]
+                row["affiliation"] = [
+                    {"name": org.name, "ror": _conformed(org.ror, _ROR_RE, "ror")}
+                    for org in a.affiliation
+                ]
             rows.append(row)
         return rows
 
@@ -462,7 +676,17 @@ def _export_paper_payload(
         return {
             "license_url": license_url,
             "license_spdx": license_ids(license_url)[1] if license_url else None,
-            "funder": [f.model_dump() for f in funders] if funders else None,
+            "funder": [
+                {
+                    "name": f.name,
+                    "funder_doi": _export_doi(f.funder_doi, "funder_doi"),
+                    "ror": _conformed(f.ror, _ROR_RE, "ror"),
+                    "award_ids": list(f.award_ids),
+                }
+                for f in funders
+            ]
+            if funders
+            else None,
         }
 
     # bib (flat, no nested match) and bib_match (top-level)
@@ -483,7 +707,7 @@ def _export_paper_payload(
                 bib_id=r.bib_id,
                 text_id=r.text_id,
                 bib_type=_export_bib_type(r.bib_type),
-                doi=r.doi,
+                doi=_export_doi(r.doi, "bib.doi"),
                 title=r.title or None,
                 authors=r.authors,
                 editors=r.editors,
@@ -491,6 +715,7 @@ def _export_paper_payload(
                 year=export_year,
                 year_suffix=r.year_suffix,
                 date=r.date,
+                published_date=_bib_published_date(r.date, export_year),
                 container=r.container,
                 volume=r.volume,
                 issue=r.issue,
@@ -519,16 +744,18 @@ def _export_paper_payload(
                     BibMatchExport(
                         bib_id=r.bib_id,
                         service=src.value,
-                        service_id=d.get("id"),
-                        score=d.get("score"),
+                        service_id=_export_service_id(d.get("id")),
+                        score=_match_score(d.get("score")),
                         bib_type=_export_bib_type(d.get("bib_type")),
-                        doi=d.get("doi"),
+                        doi=_export_doi(d.get("doi"), "bib_match.doi"),
                         title=d.get("title"),
                         author=_authors_to_dicts(m.authors),
                         editor=_authors_to_dicts(m.editors),
                         publisher=d.get("publisher"),
                         year=d.get("year"),
-                        date=d.get("date"),
+                        published_date=_conformed(
+                            d.get("date"), _ISO_DATE_RE, "bib_match.published_date"
+                        ),
                         container=d.get("container"),
                         volume=d.get("volume"),
                         issue=d.get("issue"),
@@ -552,16 +779,18 @@ def _export_paper_payload(
             metadata_match_data.append(
                 MetadataMatchExport(
                     service=src.value,
-                    service_id=d.get("id"),
-                    score=d.get("score"),
+                    service_id=_export_service_id(d.get("id")),
+                    score=_match_score(d.get("score")),
                     bib_type=_export_bib_type(d.get("bib_type")),
-                    doi=d.get("doi"),
+                    doi=_export_doi(d.get("doi"), "metadata_match.doi"),
                     title=d.get("title"),
                     author=_authors_to_dicts(m.authors),
                     editor=_authors_to_dicts(m.editors),
                     publisher=d.get("publisher"),
                     year=d.get("year"),
-                    date=d.get("date"),
+                    published_date=_conformed(
+                        d.get("date"), _ISO_DATE_RE, "metadata_match.published_date"
+                    ),
                     container=d.get("container"),
                     volume=d.get("volume"),
                     issue=d.get("issue"),
@@ -736,28 +965,39 @@ def _export_paper_payload(
             section_id=s.section_id,
             # ``PaperSection`` defaults an unclassified section's score to 0.0
             # with no source; that is "not scored", not a zero-confidence score.
-            score=(
-                s.classification_score
-                if s.classification_source is not None or s.classification_score
-                else None
+            score=_unit_interval(
+                (
+                    s.classification_score
+                    if s.classification_source is not None or s.classification_score
+                    else None
+                ),
+                "section classification score",
             ),
             source=s.classification_source,
         )
         for s in exported_sections
     ]
     xref_tier = [
-        XrefTierExport(xref_id=xref_id, tier=x.tier) for xref_id, x in exported_xrefs if x.tier
+        XrefTierExport(xref_id=xref_id, tier=cast(XrefTierLiteral, tier))
+        for xref_id, x in exported_xrefs
+        if (tier := _in_vocabulary(_snake(x.tier), _XREF_TIERS, "xref tier"))
     ]
     license_url, license_spdx = license_ids(meta.license if meta else None)
     first_page_texts = [row.text for row in text_data if row.page_number == 1]
-    paper_type = _in_vocabulary(meta.paper_type if meta else None, _PAPER_TYPES, "paper_type")
+    paper_type = _in_vocabulary(
+        _snake(meta.paper_type if meta else None), _PAPER_TYPES, "paper_type"
+    )
     oecd_l1 = _in_vocabulary(meta.oecd_l1 if meta else None, _OECD_L1, "oecd_l1")
     oecd_l2 = _in_vocabulary(meta.oecd_l2 if meta else None, _OECD_L2, "oecd_l2")
     paper_classification: PaperClassificationExport | None = None
     if meta is not None and (paper_type or oecd_l1):
         paper_classification = PaperClassificationExport(
-            paper_type_confidence=meta.paper_type_confidence if paper_type else None,
-            oecd_confidence=meta.oecd_confidence if oecd_l1 else None,
+            paper_type_confidence=_unit_interval(
+                meta.paper_type_confidence if paper_type else None, "paper_type_confidence"
+            ),
+            oecd_confidence=_unit_interval(
+                meta.oecd_confidence if oecd_l1 else None, "oecd_confidence"
+            ),
         )
 
     # Where each printed piece of a figure or table sits: layout provenance,
@@ -793,6 +1033,7 @@ def _export_paper_payload(
         # score, and its value wins. This only covers callers that hand-build an
         # ``extraction`` block without one, so the score is never silently lost.
         diagnostics.setdefault("text_quality", paper.text_quality)
+        diagnostics["text_quality"] = _unit_interval(diagnostics["text_quality"], "text_quality")
         if section_classification:
             diagnostics["section_classification"] = section_classification
         if paper_classification is not None:
@@ -835,32 +1076,51 @@ def _export_paper_payload(
     # in the table gets its match whatever position it ended up at.
     affiliation_match_data = [
         AffiliationMatchExport(
-            affiliation_id=a.affiliation_id,
-            service="ror",
-            **org.model_dump(exclude={"funder_doi"}),
+            affiliation_id=a.affiliation_id, service="ror", **_organization_fields(org)
         )
         for a in affiliation_data
-        if meta and (org := meta.affiliation_match.get(a.text)) is not None
+        if meta
+        and (org := meta.affiliation_match.get(a.text)) is not None
+        and _conformed(org.service_id, _ROR_RE, "affiliation_match.service_id")
     ]
     funding_match_data = [
-        FundingMatchExport(funding_id=f.funding_id, service="ror", **org.model_dump())
+        FundingMatchExport(
+            funding_id=f.funding_id,
+            service="ror",
+            **_organization_fields(org),
+            funder_doi=_export_doi(org.funder_doi, "funding_match.funder_doi"),
+        )
         for f in funding_data
-        if meta and (org := meta.funder_match.get(f.funder)) is not None
+        if meta
+        and (org := meta.funder_match.get(f.funder)) is not None
+        and _conformed(org.service_id, _ROR_RE, "funding_match.service_id")
     ]
+    equations: list[tuple[Any, EqCompLiteral]] = []
+    for eq in paper.contents.equations:
+        comp = _export_comp(eq.comp)
+        if comp is None:
+            logger.warning("Dropping expression with unknown comparator %r from export", eq.comp)
+            continue
+        equations.append((eq, comp))
 
+    sha256 = paper.input_file.sha256
     export = PaperExport(
-        paper_id=paper._compute_paper_id() or paper.input_file.file_hash or "",
+        paper_id=(
+            paper._compute_paper_id()
+            or (sha256 or paper.input_file.file_hash or "")[:16]
+            or "paper"
+        ),
         schema_version=_SCHEMA_VERSION,
         source=SourceExport(
             file_name=paper.input_file.file_name,
-            file_hash=paper.input_file.file_hash,
-            input_format=input_fmt if input_fmt in _INPUT_FORMATS else "unknown",
+            sha256=sha256,
+            input_format=_export_input_format(input_fmt),
         ),
         metadata=MetadataExport(
             title=(meta.title or None) if meta else None,
             abstract=abstract_text,
             keywords=exported_keywords,
-            doi=(meta.doi or None) if meta else None,
+            doi=_export_doi(meta.doi if meta else None, "metadata.doi"),
             pmid=(meta.pmid or None) if meta else None,
             pmcid=(meta.pmcid or None) if meta else None,
             arxiv=(
@@ -888,20 +1148,7 @@ def _export_paper_payload(
             ethics_statement=(meta.ethics_statement or None) if meta else None,
             data_availability=(meta.data_availability or None) if meta else None,
         ),
-        author=[
-            AuthorExport(
-                author_id=a.author_id,
-                given=_or_none(a.given),
-                family=_or_none(a.family),
-                suffix=getattr(a, "suffix", None),
-                email=a.email,
-                corresponding=a.corresponding,
-                orcid=canonicalize_orcid(a.orcid),
-                role=a.role,
-                credit_roles=credit_roles(a.role),
-            )
-            for a in (meta.authors if meta else [])
-        ],
+        author=[_export_author(a) for a in (meta.authors if meta else [])],
         affiliation=affiliation_data,
         funding=funding_data,
         text=text_data,
@@ -911,7 +1158,11 @@ def _export_paper_payload(
                 header=_or_none(s.header),
                 level=s.level,
                 parent_section_id=(s.parent_section_id if s.parent_section_id != 0 else None),
-                section_type=s.section_type.value if s.section_type else None,
+                section_type=(
+                    cast(SectionTypeLiteral, export_section_type(s.section_type.value))
+                    if s.section_type
+                    else None
+                ),
             )
             for s in exported_sections
         ],
@@ -932,7 +1183,9 @@ def _export_paper_payload(
         xref=[
             XrefExport(
                 xref_id=xref_id,
-                target_id=x.xref_id,
+                target_id=(
+                    x.xref_id if x.xref_type in _RESOLVED_XREF_TYPES and x.xref_id else None
+                ),
                 xref_type=x.xref_type,
                 contents=x.contents,
                 text_id=x.text_id,
@@ -946,7 +1199,7 @@ def _export_paper_payload(
             FigureExport(
                 figure_id=f.figure_id,
                 section_id=f.section_id if f.section_id != 0 else None,
-                image=f.image_b64,
+                image=_data_uri(f.image_b64),
                 caption=f.caption,
                 page_number=f.page_number,
             )
@@ -973,10 +1226,10 @@ def _export_paper_payload(
                 verbatim=texts[eq.text_id][span[0] : span[1]] if span else None,
                 lhs=eq.lhs,
                 df=_or_none(eq.df),
-                comp=eq.comp,
+                comp=comp,
                 rhs=eq.rhs,
             )
-            for position, eq in enumerate(paper.contents.equations, start=1)
+            for position, (eq, comp) in enumerate(equations, start=1)
             for span in (equation_span(eq_locator, eq),)
         ],
         metadata_match=metadata_match_data,

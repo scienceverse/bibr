@@ -15,7 +15,7 @@ def _core_payload(*, title: str = "Café") -> dict:
         "bib_match": [],
         "metadata_match": [],
         "extraction": {
-            "bibr_version": "0.0.0-test",
+            "producer": {"name": "bibr", "version": "0.0.0-test"},
             "completed_at": "2026-07-24T10:00:00Z",
             "settings": {
                 "ref_seg": "geom",
@@ -121,8 +121,8 @@ def test_sidecar_replay_requires_core_settings_and_schema_match():
         core_sha256=core_hash,
         settings_digest="settings-v1",
         completeness="complete",
-        bib_match=({"bib_id": 1, "service": "crossref", "doi": "10.1/ref"},),
-        metadata_match=({"service": "crossref", "doi": "10.1/self"},),
+        bib_match=({"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"},),
+        metadata_match=({"service": "crossref", "doi": "10.1234/self"},),
     )
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings-v1")
@@ -343,7 +343,7 @@ def test_sidecar_rejects_duplicate_or_malformed_metadata_service_rows():
     core = _core_payload()
     for rows in (
         ({"service": "crossref"}, {"service": "crossref"}),
-        ({"doi": "10.1/no-service"},),
+        ({"doi": "10.1234/no-service"},),
         ("not-a-row",),
     ):
         sidecar = EnrichmentSidecar(
@@ -392,7 +392,7 @@ def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them()
 
     core = _core_payload()
     enriched = dict(core)
-    enriched["bib_match"] = [{"bib_id": 1, "service": "crossref", "doi": "10.1/ref"}]
+    enriched["bib_match"] = [{"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"}]
     sidecar = make_enrichment_sidecar(
         enriched,
         core_sha256=canonical_json_sha256(core),

@@ -44,6 +44,8 @@ _DATE_PATTERNS = [
     re.compile(rf"\b{_DAY}\s+{_MONTH},?\s+{_YEAR}\b", re.I),  # 15 January 2026
     re.compile(rf"\b{_MONTH}\s+{_DAY},?\s+{_YEAR}\b", re.I),  # January 15, 2026
     re.compile(rf"\b{_YEAR}\s+{_MONTH}\s+{_DAY}\b", re.I),  # 2026 Jan 15
+    re.compile(rf"\b{_YEAR},\s*{_MONTH}\s+{_DAY}\b", re.I),  # 2026, January 15 (APA)
+    re.compile(rf"\b{_YEAR},\s*{_MONTH}(?![\w.])", re.I),  # 2026, January (APA)
     re.compile(rf"\b{_MONTH},?\s+{_YEAR}\b", re.I),  # January 2026
     re.compile(rf"^\s*{_YEAR}\s*$"),  # 2026
 ]

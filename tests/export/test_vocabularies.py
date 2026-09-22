@@ -2,18 +2,21 @@
 
 ``bibr/export/models.py`` spells each enum out as a ``Literal`` (it cannot
 unpack a runtime list and stays import-light for readers), so these tests pin
-every one to the runtime value set bibr actually produces from.
+every one to the runtime value set bibr actually produces from, through the
+exporter's mapping where the published spelling differs (``open_data``,
+``meta-analysis``, ``.htm``).
 """
 
 from typing import get_args
 
-from bibr.export import models
+from bibr.export import json_export, models
 
 
 def test_section_types_match_canonical_section():
     from bibr.paper_contents import CanonicalSection
 
-    assert list(get_args(models.SectionTypeLiteral)) == [m.value for m in CanonicalSection]
+    exported = [json_export._EXPORT_SECTION_TYPES.get(m.value, m.value) for m in CanonicalSection]
+    assert list(get_args(models.SectionTypeLiteral)) == exported
 
 
 def test_bib_types_match_bib_type():
@@ -25,9 +28,8 @@ def test_bib_types_match_bib_type():
 def test_paper_types_cover_the_labels_and_the_unknown_fallback():
     from bibr.structure.paper_classifier import PAPER_TYPE_LABELS, PaperType
 
-    assert set(get_args(models.PaperTypeLiteral)) == set(PAPER_TYPE_LABELS) | {
-        m.value for m in PaperType
-    }
+    labels = set(PAPER_TYPE_LABELS) | {m.value for m in PaperType}
+    assert set(get_args(models.PaperTypeLiteral)) == {json_export._snake(v) for v in labels}
 
 
 def test_oecd_labels_match_the_classifier_taxonomy():
@@ -46,8 +48,34 @@ def test_match_services_match_match_source():
 def test_input_formats_are_the_supported_types_plus_unknown():
     from bibr.input.supported_files import SupportedFileType
 
-    expected = [m.value.lstrip(".") for m in SupportedFileType] + ["unknown"]
-    assert list(get_args(models.InputFormatLiteral)) == expected
+    exported = {json_export._export_input_format(m.value.lstrip(".")) for m in SupportedFileType}
+    # Every file type bibr reads has its format, and ``tei`` is the one format
+    # only a converter from GROBID writes.
+    assert exported | {"tei", "unknown"} == set(get_args(models.InputFormatLiteral))
+    assert "unknown" not in exported
+
+
+def test_xref_tiers_match_the_citation_linker():
+    import re
+    from pathlib import Path
+
+    import bibr.structure.citation_linker as linker
+
+    # A bib xref's tier is its candidate's ``style`` (or ``llm``).
+    source = Path(linker.__file__).read_text()
+    tiers = set(re.findall(r'(?:style|tier)="([a-z-]+)"', source))
+    assert {"numeric", "paren-numeric", "flattened-superscript", "llm"} <= tiers
+    assert {json_export._snake(t) for t in tiers} <= set(get_args(models.XrefTierLiteral))
+
+
+def test_eq_comparators_match_the_equation_extractor():
+    import re
+
+    from bibr.extract.equation_extractor import _COMP_PATTERN, _normalize_comp
+
+    spellings = re.findall(r"[^(?:|)]+", _COMP_PATTERN)
+    produced = {_normalize_comp(spelling) for spelling in spellings}
+    assert produced == set(get_args(models.EqCompLiteral))
 
 
 def test_severities_match_issue_severity():
