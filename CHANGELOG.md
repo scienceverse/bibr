@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The reference under-extraction warning in `processing_warnings` now also
+  covers numeric citation styles. It previously counted only author-year
+  citations, so a numbered paper whose reference region was lost to OCR was
+  never flagged. It now also counts the distinct reference numbers cited by
+  bracket and superscript markers, up to the highest number where at least
+  half of 1..n are cited, and warns when fewer than half that many references
+  were parsed (at least 15 cited).
 - Reference-segmentation training capture (`REF_TRAINING_DATA_DIR`) no longer
   mixes geometry-segmenter predictions in with LLM segmentation labels; only
   LLM output is captured. Under the default `geom` strategy, that means only
