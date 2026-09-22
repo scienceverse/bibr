@@ -44,6 +44,7 @@ from bibr.paper_contents import (
     PaperFigure,
     PaperTable,
 )
+from bibr.structure.float_images import composite_panel_image
 
 logger = logging.getLogger(__name__)
 
@@ -216,8 +217,13 @@ def merge_figure_panels_with_remap(
         target = figures[target_idx]
         panel = figures[i]
         target.provenance.extend(panel.provenance)
+        target.parts.extend(panel.parts)
         if target.image_b64 is None and panel.image_b64 is not None:
             target.image_b64 = panel.image_b64
+    for target_idx in set(absorbed.values()):
+        target = figures[target_idx]
+        # The whole figure, not just one panel's crop.
+        target.image_b64 = composite_panel_image(target.parts) or target.image_b64
     # Snapshot the pre-merge ids before renumbering overwrites them; they are
     # what the caption receipt was frozen against.
     old_object_ids = [f"figure:{fig.figure_id}" for fig in figures]
@@ -374,4 +380,5 @@ def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool
     survivor.df = merged
     survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
     survivor.provenance.extend(continuation.provenance)
+    survivor.parts.extend(continuation.parts)
     return True

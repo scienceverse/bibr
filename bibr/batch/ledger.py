@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from bibr.batch.manifest import BatchItem, sha256_file
+from bibr.validation import payload_validation
 
 logger = logging.getLogger(__name__)
 
@@ -110,7 +111,9 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
     )
     total_seconds = extraction.get("total_seconds") if isinstance(extraction, Mapping) else None
 
-    if data.get("schema_version") == "11.0":
+    # v11 and v12 share the ``extraction.usage``/``timings`` shape; earlier
+    # exports carry root ``llm_usage`` and no ``schema_version``.
+    if str(data.get("schema_version") or "").split(".")[0] in ("11", "12"):
         extraction = extraction if isinstance(extraction, Mapping) else {}
         total_seconds = timings.get("total_seconds") if isinstance(timings, Mapping) else None
         usage = extraction.get("usage") or {}
@@ -139,7 +142,7 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
         key = warning_key(w)
         codes[key] = codes.get(key, 0) + 1
 
-    validation = data.get("validation")
+    validation = payload_validation(data)
     n_val_errors = n_val_warnings = 0
     if isinstance(validation, Mapping):
         n_val_errors = _as_int(validation.get("errors", validation.get("error_count")))

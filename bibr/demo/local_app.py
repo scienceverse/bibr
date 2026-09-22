@@ -134,6 +134,32 @@ def _parse_json_response(paper_json: dict) -> dict:
     tbls = paper_json.get("table", [])
     equations = paper_json.get("eq", [])
 
+    # v12 keeps processing facts under ``extraction.diagnostics`` and the
+    # affiliations in their own table; fold them back into the display rows.
+    diagnostics = (paper_json.get("extraction") or {}).get("diagnostics") or {}
+    metadata = {**metadata, **(diagnostics.get("paper_classification") or {})}
+    scores = {
+        row.get("section_id"): row.get("score")
+        for row in diagnostics.get("section_classification") or []
+    }
+    if scores:
+        sections = [
+            {**s, "classification_score": scores.get(s.get("section_id"))} for s in sections
+        ]
+    affiliations = paper_json.get("affiliation") or []
+    if affiliations:
+        authors = [
+            {
+                **a,
+                "affiliation": "; ".join(
+                    row.get("text") or ""
+                    for row in affiliations
+                    if a.get("author_id") in (row.get("author_ids") or [])
+                ),
+            }
+            for a in authors
+        ]
+
     # Compute section levels from parent_section_id tree
     if sections:
         _compute_section_levels(sections)
@@ -247,9 +273,9 @@ def _build_authors_data(result: dict) -> list[list]:
     """Build authors table rows."""
     return [
         [
-            a.get("given", ""),
-            a.get("family", ""),
-            a.get("affiliation", ""),
+            a.get("given") or "",
+            a.get("family") or "",
+            a.get("affiliation") or "",
             a.get("orcid", ""),
             a.get("email", ""),
             "Yes" if a.get("corresponding") else "",
@@ -262,7 +288,7 @@ def _build_sections_data(result: dict) -> list[list]:
     """Build sections table rows."""
     return [
         [
-            s.get("header", ""),
+            s.get("header") or "",
             s.get("level", 0),
             s.get("section_type", ""),
             round(s.get("classification_score", 0) or 0, 3),
@@ -306,7 +332,7 @@ def _format_bib_authors(authors) -> str:
     parts = []
     for a in authors:
         if isinstance(a, dict):
-            name = " ".join(filter(None, [a.get("given", ""), a.get("family", "")]))
+            name = " ".join(filter(None, [a.get("given"), a.get("family")]))
             if name:
                 parts.append(name)
         else:
@@ -353,7 +379,7 @@ def _build_text_html(result: dict) -> str:
         level = sec.get("level", 0)
         if level > 0:
             tag = f"h{min(level + 2, 6)}"
-            header = _esc(sec.get("header", ""))
+            header = _esc(sec.get("header") or "")
             badge = ""
             sec_type = sec.get("section_type", "")
             if sec_type and sec_type != "unknown":
@@ -424,7 +450,7 @@ def _build_equations_data(result: dict) -> list[list]:
         [
             e.get("grp_id", ""),
             e.get("lhs", ""),
-            e.get("df", ""),
+            e.get("df") or "",
             e.get("comp", ""),
             e.get("rhs", ""),
             e.get("text_id", ""),

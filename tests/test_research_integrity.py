@@ -10,7 +10,7 @@ import pytest
 
 from bibr.export.json_export import export_paper_to_json
 from bibr.extract.research_integrity import (
-    _collect_affiliations,
+    collect_affiliations,
     copy_integrity_statements,
     extract_structured_integrity,
 )
@@ -561,7 +561,7 @@ def test_collect_affiliations_split_dedupe_and_shared_author_ids():
         _author(2, "B", "Two", "Univ X, London, UK"),
         _author(3, "C", "Three", ""),
     ]
-    unique, author_ids = _collect_affiliations(authors)
+    unique, author_ids = collect_affiliations(authors)
     # First-seen order preserved; components split on "; " and stripped.
     assert unique == ["Dept of Psychology, Univ X", "Univ X, London, UK"]
     # Shared affiliation carries both authors that print it, in author order.
@@ -570,7 +570,7 @@ def test_collect_affiliations_split_dedupe_and_shared_author_ids():
 
 def test_collect_affiliations_dedupes_within_single_author():
     authors = [_author(1, "A", "One", "Univ X; Univ X")]
-    unique, author_ids = _collect_affiliations(authors)
+    unique, author_ids = collect_affiliations(authors)
     assert unique == ["Univ X"]
     assert author_ids == [[1]]
 

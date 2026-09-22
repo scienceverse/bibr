@@ -22,6 +22,7 @@ once) and return an order-aligned ``list[Result | ChewFailure]``:
 
     results = bibr.chew("papers/")
     good = [r for r in results if r.ok]
+    bibr.write_tables(good, "tables/")   # one Parquet file per table, keyed by paper_id
 
 For repeated calls over time (notebooks, queue workers), :class:`Chewer`
 keeps models warm across calls:
@@ -48,7 +49,7 @@ For full control, drive :class:`LocalPipeline` directly:
 
     data = asyncio.run(main())
 
-The returned dict matches the bibr v11.0 JSON schema (:func:`chew` wraps it in
+The returned dict matches the bibr v12.0 JSON schema (:func:`chew` wraps it in
 a :class:`Result` view). Imports are lazy so the pipeline stages and ML deps
 don't load at ``import bibr`` time.
 """
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     )
     from bibr.config import GlobalSettings, Settings
     from bibr.export import PaperExport
+    from bibr.export.tables import write_tables
     from bibr.local.pipeline import LocalPipeline
     from bibr.pipeline.pipeline import Pipeline
 
@@ -96,6 +98,7 @@ __all__ = [
     "chew",
     "chew_file",
     "chew_many",
+    "write_tables",
 ]
 
 
@@ -117,6 +120,11 @@ def __getattr__(name: str) -> Any:
         value = getattr(api, name)
         globals()[name] = value
         return value
+    if name == "write_tables":
+        from bibr.export.tables import write_tables
+
+        globals()["write_tables"] = write_tables
+        return write_tables
     if name == "LocalPipeline":
         from bibr.local.pipeline import LocalPipeline
 

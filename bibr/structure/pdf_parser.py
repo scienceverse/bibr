@@ -235,7 +235,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # Deferred-text buffer + sentence-emission driver shared with DocxParser.
         # Each entry carries its own optional provenance (source-region bboxes,
         # inherited by every sentence split from it) and region_meta (font_size,
-        # font_bold, bbox_2d, region_type, page_w, page_h, is_italic from the
+        # font_bold, bbox, region_type, is_italic from the
         # first contributing layout region — used by the v4 training features —
         # plus that region's region_page/region_index key)
         # side-channels, so they stay aligned with the text by construction.
@@ -257,6 +257,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         self.detected_footers: list[str] = []
         self.layout_hints: list[tuple[str, int]] = []
         self.region_summaries: list[RegionSummary] = []
+        # Page size in PDF points (as displayed) by 1-based page number, from
+        # the native pass's ``_page_w``/``_page_h``: the frame the export
+        # converts 0..1000 layout boxes into (bibr.export.geometry).
+        self.page_sizes: dict[int, tuple[float, float]] = {}
         self._clean_region_content: dict[tuple[int, int], str] = {}
         # Regions whose raw text carried corrupted-OCR control chars (counted
         # pre-strip in _process_page); surfaced as one OCR_CONTROL_CHARS
@@ -483,6 +487,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             detected_footers=self.detected_footers,
             layout_hints=self.layout_hints,
             region_summaries=self.region_summaries,
+            page_sizes=self.page_sizes,
             processing_warnings=processing_warnings,
             structure_validation_issues=self._structure_validation_issues,
             caption_assignment_receipt=caption_assignment_receipt,
@@ -836,6 +841,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         if page_idx < 0:
             page_idx = page_number - 1
         for region_idx, region in enumerate(regions):
+            if region.page_w and region.page_h and page_number not in self.page_sizes:
+                self.page_sizes[page_number] = (region.page_w, region.page_h)
             label = region.label
             native_label = region.native_label
             if (
@@ -922,12 +929,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "font_size": region.font_size,
                 "font_bold": region.font_bold,
                 "is_italic": region.is_italic,
-                # Export the containment-correct PDF-point bbox (bottom-left
-                # origin, y-up; matches _page_w/_page_h) rather than the raw
-                # 0..1000 image-space `bbox` — which is preserved untouched for
-                # provenance / cropping / dedup consumers. None when no native
-                # pass ran (DOCX, scanned pre-v4).
-                "bbox_2d": list(region.bbox_pdf_pts) if region.bbox_pdf_pts else None,
+                # The 0..1000 layout-space box; the export converts it to
+                # points on the displayed page (bibr.export.geometry).
+                "bbox": list(bbox_tuple) if bbox_tuple else None,
                 "region_type": native_label or label or None,
                 # This region's RegionSummary key, exported as the ``page`` and
                 # ``index`` of its ``extraction.regions`` row. ``index`` is the
@@ -935,8 +939,6 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # renumbered it, which can differ from the layout detector's slot.
                 "region_page": region_summary.page,
                 "region_index": region_summary.index,
-                "page_w": region.page_w,
-                "page_h": region.page_h,
             }
 
             if treatment == "abandon":

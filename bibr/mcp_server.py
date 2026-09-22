@@ -4,7 +4,7 @@ Exposes the extraction pipeline as MCP tools over stdio so agents (Claude
 Code, Claude Desktop, any MCP client) can chew papers and query the results
 without shelling out to the CLI or parsing whole export files.
 
-A full v11 export is far too large for a single tool result (sentence-level
+A full export is far too large for a single tool result (sentence-level
 text spans, table HTML, optionally base64 figure images), so the surface
 follows a chew-once / query-granularly contract: ``chew_paper`` runs the
 pipeline and returns only a compact summary; the ``get_*`` and
@@ -43,6 +43,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.api import Chewer, ChewOptions
 from bibr.exceptions import BibrError
+from bibr.validation import payload_validation
 
 __all__ = ["build_server", "run_mcp"]
 
@@ -91,7 +92,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
         value = data.get(key)
         return len(value) if isinstance(value, list) else None
 
-    if isinstance(data.get("validation"), dict):
+    if payload_validation(data) is not None:
         line = _format_validation_line(data)
         validation = line.strip() if line else "clean (0 errors, 0 warnings)"
     else:

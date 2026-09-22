@@ -2,7 +2,8 @@
 
 Covers the pure aggregator (``build_qualification_provenance``), the client
 first-writer-wins protocol-hash accumulator, the ``on_protocol_hashes`` backend
-callback, and the end-to-end export surface an external gate reads.
+callback, and the end-to-end export surface an external gate reads
+(``extraction.qualification``).
 """
 
 import re
@@ -12,6 +13,7 @@ from bibr.export.qualification_provenance import (
     DeploymentIdentity,
     build_qualification_provenance,
 )
+from tests.export.conftest import extraction_block as _extraction_block
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 
@@ -322,8 +324,11 @@ class TestExportSurfaceEndToEnd:
         assert prov["model_revision"] == NUEXTRACT3_FP8_EXPECTED_REVISION
         assert prov["jinja_sha256"] == NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256
 
+        # The runner reads pipeline output, where ExportStage has attached the
+        # ``extraction`` block the provenance rides on.
+        paper.extraction = _extraction_block()
         exported = export_paper_to_json(paper, validate=False)
-        gate = exported["qualification_provenance"]
+        gate = exported["extraction"]["qualification"]
         required = [
             "bibr_sha",
             "platform_sha",
@@ -407,7 +412,8 @@ class TestExportSurfaceEndToEnd:
             settings=settings,
         )
 
-        gate = export_paper_to_json(paper, validate=False)["qualification_provenance"]
+        paper.extraction = _extraction_block()
+        gate = export_paper_to_json(paper, validate=False)["extraction"]["qualification"]
         # The gated axis for a non-native arm: temperature and raw_native_valid
         # are None; every common identity/protocol field stays non-None.
         assert gate["temperature"] is None

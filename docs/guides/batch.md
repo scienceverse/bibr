@@ -109,10 +109,17 @@ in-flight much above that only lengthens the queue.
 ```
 <out>/
   <paper_id>.json     the export, one per successful paper
+  tables/*.parquet    every successful paper as one Parquet file per table
   outcomes.jsonl      the ledger — one JSON object per attempt
   run_info.json       the latest run: options, executor, redacted settings, counts
   runs.jsonl          run_info of every run, appended
 ```
+
+Each export's `paper_id` is the batch's own id, the name of its JSON file, so it
+is unique across the corpus even when papers share a DOI. `tables/` is rebuilt
+from every paper whose latest attempt is `ok` at the end of each run
+(`--no-tables` skips it); see the
+[Python guide](library.md#corpus-tables-parquet) for its layout.
 
 `run_info.json` carries the `run_id` that stamps this run's ledger lines,
 `started_at`/`finished_at`, the invocation (`options`, without the token),

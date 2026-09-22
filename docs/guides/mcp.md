@@ -54,7 +54,7 @@ clients configured for the sessionless `2026-07-28` protocol must enable automat
 or legacy negotiation. The stdio server also supports the newer protocol because
 its process already belongs to a single client.
 
-Exports and query results use schema v11. `get_metadata` returns its paper fields
+Exports and query results use schema v12. `get_metadata` returns its paper fields
 under `metadata`; summaries expose LLM `usage` as `totals` and `breakdown` within
 the existing `llm_usage` summary field.
 
@@ -79,7 +79,7 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `get_references(paper_id, offset?, limit?)` | Parsed bibliography entries, paginated, empty fields omitted |
 | `get_reference_citations(paper_id, bib_id)` | Every in-text citation of one reference, with the full source sentence and page |
 | `get_tables(paper_id, table_id?)` | Captions per table; full HTML + cells for one `table_id` |
-| `get_figures(paper_id, figure_id?)` | Captions, pages, and physical parts; the top-level image is replaced by `has_image` |
+| `get_figures(paper_id, figure_id?)` | Captions and pages; the image is replaced by `has_image` |
 | `save_paper(paper_id, path, compact?)` | Writes the complete export JSON to disk |
 
 This maps directly onto bibr's auditability contract: an agent can pull a
@@ -93,10 +93,9 @@ count cap. `save_paper` persists one, and `load_paper` brings saved exports
 
 `get_text` defaults to 200 rows and caps requests at 500; `offset` is
 zero-based and `page` matches the exported 1-based PDF page number.
-`get_tables(table_id=...)` returns the complete table, including physical
-parts. `get_figures` strips the primary image only: with figure images
-enabled, nested `parts` can still contain image data. Keep figure images
-disabled when compact text-only tool responses are needed.
+`get_tables(table_id=...)` returns the complete table, including every
+page's HTML for a table continued across pages. `get_figures` replaces the
+figure image with `has_image`, so no image data reaches a tool response.
 
 ## URL downloads (`chew_url`)
 

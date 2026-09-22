@@ -151,3 +151,24 @@ def test_score_paper_emits_new_keys():
     )
     for k in ("keywords_f1", "affiliation_sim", "email_f1", "orcid_f1", "corresponding_acc"):
         assert k in s
+
+
+def test_v12_affiliations_come_from_the_affiliation_table():
+    """v12 dropped ``author[].affiliation``; evaluation rebuilds the same
+    "; "-joined string from the ``affiliation`` rows linked by ``author_ids``."""
+    data = {
+        "schema_version": "12.0",
+        "metadata": {"title": "T", "doi": "10.1/x", "keywords": []},
+        "author": [
+            {"author_id": 1, "given": "Jane", "family": "Smith", "corresponding": True},
+            {"author_id": 2, "given": None, "family": "Consortium", "corresponding": False},
+        ],
+        "affiliation": [
+            {"affiliation_id": 1, "text": "Uni A", "author_ids": [1]},
+            {"affiliation_id": 2, "text": "Institute B", "author_ids": [1, 2]},
+        ],
+        "bib": [],
+    }
+    authors = extract_comparable_from_json(data)["authors"]
+    assert [a["affiliation"] for a in authors] == ["Uni A; Institute B", "Institute B"]
+    assert authors[1]["given"] == ""

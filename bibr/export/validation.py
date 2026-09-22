@@ -4,7 +4,7 @@ A quality audit found that catastrophic output defects (placeholder tokens,
 exploded author lists, empty equations, dangling references, …) passed
 silently because the processing warnings only ever carried
 reference-segmentation events. This module runs a battery of cheap, defensive
-checks over the finished export dict (schema v11.0 shape) and returns a list
+checks over the finished export dict (schema v12.0 shape) and returns a list
 of :class:`ValidationIssue`; the export wiring surfaces them in the structured
 top-level ``validation`` block, and there only — findings are never mirrored
 into ``extraction.warnings`` as prose.
@@ -161,19 +161,29 @@ def _check_author_outlier(payload: dict) -> list[ValidationIssue]:
 
 def _check_bbox_space(payload: dict) -> list[ValidationIssue]:
     sample = []
-    for t in _as_list(payload, "text"):
-        if not isinstance(t, dict):
-            continue
-        b, pw, ph = t.get("_bbox_2d"), t.get("_page_w"), t.get("_page_h")
-        if (
-            isinstance(b, (list, tuple))
-            and len(b) == 4
-            and _positive_number(pw)
-            and _positive_number(ph)
-        ):
-            sample.append((b, float(pw), float(ph)))
-            if len(sample) >= 500:
-                break
+    # Every box in ``extraction`` is in points on its page; ``extraction.pages``
+    # gives the page sizes they must fall within.
+    extraction = _as_dict(payload, "extraction")
+    sizes = {
+        p.get("page_number"): (p.get("width"), p.get("height"))
+        for p in _as_list(extraction, "pages")
+        if isinstance(p, dict)
+    }
+    for key in ("text_regions", "float_parts"):
+        for t in _as_list(extraction, key):
+            if not isinstance(t, dict):
+                continue
+            b = t.get("bbox")
+            pw, ph = sizes.get(t.get("page_number"), (None, None))
+            if (
+                isinstance(b, (list, tuple))
+                and len(b) == 4
+                and _positive_number(pw)
+                and _positive_number(ph)
+            ):
+                sample.append((b, float(pw), float(ph)))
+                if len(sample) >= 500:
+                    break
     if not sample:
         return []
     viol = 0
@@ -189,7 +199,7 @@ def _check_bbox_space(payload: dict) -> list[ValidationIssue]:
             ValidationIssue(
                 "VAL_BBOX_SPACE",
                 IssueSeverity.ERROR,
-                f"{viol}/{len(sample)} sampled text bboxes violate page-coordinate bounds",
+                f"{viol}/{len(sample)} sampled bboxes violate page-coordinate bounds",
                 count=viol,
             )
         ]

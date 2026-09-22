@@ -9,8 +9,15 @@ def _data(bib=None, bib_match=None):
     return {
         "bib": bib or [],
         "bib_match": bib_match or [],
-        "processing_warnings": [],
+        "extraction": {"warnings": [], "diagnostics": {}},
     }
+
+
+def _taken(data) -> dict[int, list[str]]:
+    """The consolidation receipt, ``{bib_id: fields}``; bib rows never carry it."""
+    assert all("consolidated_fields" not in row for row in data["bib"])
+    diagnostics = (data.get("extraction") or {}).get("diagnostics") or {}
+    return {row["bib_id"]: row["fields"] for row in diagnostics.get("consolidation") or []}
 
 
 def test_fill_fills_empty_fields_only():
@@ -32,7 +39,7 @@ def test_fill_fills_empty_fields_only():
     assert row["doi"] == "10.1/x"  # was None → filled
     assert row["volume"] == "12"  # was "" → filled
     assert row["title"] == "Printed Title"  # printed value kept
-    assert row["consolidated_fields"] == "doi,volume"
+    assert _taken(data) == {1: ["doi", "volume"]}
 
 
 def test_replace_overwrites_disagreeing_fields():
@@ -51,7 +58,7 @@ def test_replace_overwrites_disagreeing_fields():
     assert n == 1
     assert data["bib"][0]["title"] == "Attention is all you need"
     # doi agreed — not listed as consolidated
-    assert data["bib"][0]["consolidated_fields"] == "title"
+    assert _taken(data) == {1: ["title"]}
 
 
 def test_replace_keeps_printed_fields_against_a_search_match():
@@ -76,7 +83,7 @@ def test_replace_keeps_printed_fields_against_a_search_match():
     assert row["doi"] == "10.1/printed"
     assert row["volume"] == "12"
     assert row["issue"] == "2"
-    assert row["consolidated_fields"] == "issue"
+    assert _taken(data) == {1: ["issue"]}
 
 
 def test_replace_only_fills_when_no_doi_was_printed():
@@ -97,7 +104,7 @@ def test_replace_only_fills_when_no_doi_was_printed():
     assert row["doi"] == "10.1/x"
     assert row["title"] == "Printed Title"
     assert row["volume"] == "12"
-    assert row["consolidated_fields"] == "doi"
+    assert _taken(data) == {1: ["doi"]}
 
 
 def test_replace_matches_the_printed_doi_case_and_prefix_insensitively():
@@ -133,7 +140,30 @@ def test_unmatched_rows_untouched_and_unmarked():
     n = consolidate_bibs(data, mode="fill")
     assert n == 1
     assert data["bib"][1]["doi"] is None
-    assert "consolidated_fields" not in data["bib"][1]
+    assert _taken(data) == {1: ["doi"]}
+
+
+def test_repeated_consolidation_unions_the_receipt():
+    data = _data(
+        bib=[{"bib_id": 1, "doi": None, "volume": None}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}],
+    )
+    consolidate_bibs(data, mode="fill")
+    data["bib_match"].append({"bib_id": 1, "service": "crossref", "volume": "4"})
+    consolidate_bibs(data, mode="fill")
+    assert _taken(data) == {1: ["doi", "volume"]}
+
+
+def test_consolidation_without_an_extraction_block_records_nothing():
+    """A Paper exported outside the pipeline has nowhere to keep the receipt;
+    the merge still happens and nothing leaks onto the bib rows."""
+    data = {
+        "bib": [{"bib_id": 1, "doi": None}],
+        "bib_match": [{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}],
+    }
+    assert consolidate_bibs(data, mode="fill") == 1
+    assert data["bib"][0] == {"bib_id": 1, "doi": "10.1/x"}
+    assert "extraction" not in data
 
 
 def test_authors_and_editors_never_consolidated():
@@ -313,7 +343,7 @@ def test_export_hook_consolidates_when_runconfig_set():
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig(consolidate="fill"))
     assert out["bib"][0]["doi"] == "10.1/x"
-    assert out["bib"][0]["consolidated_fields"] == "doi"
+    assert _taken(out) == {1: ["doi"]}
 
 
 def test_export_hook_falls_back_to_settings():
@@ -324,7 +354,7 @@ def test_export_hook_falls_back_to_settings():
     settings.crossref.consolidate = "fill"
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig(), settings=settings)  # consolidate=None → settings
-    assert out["bib"][0]["consolidated_fields"] == "doi"
+    assert _taken(out) == {1: ["doi"]}
 
 
 def test_export_hook_off_by_default():
@@ -333,7 +363,7 @@ def test_export_hook_off_by_default():
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig())
     assert out["bib"][0]["doi"] is None
-    assert "consolidated_fields" not in out["bib"][0]
+    assert _taken(out) == {}
 
 
 def test_export_hook_warns_when_crossref_disabled():

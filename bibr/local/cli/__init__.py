@@ -256,6 +256,10 @@ def main():
             from bibr.local.inspect import run_inspect
 
             sys.exit(run_inspect(args.json_file))
+        elif args.command == "tables":
+            from bibr.local.cli.tables import run_tables
+
+            sys.exit(run_tables(args))
         elif args.command == "mcp":
             try:
                 from bibr.mcp_server import run_mcp

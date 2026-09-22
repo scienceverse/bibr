@@ -2000,27 +2000,26 @@ class TestSentenceProvenance:
             assert sent.provenance[0].bbox == (0.0, 0.0, 100.0, 100.0)
 
 
-class TestRegionMetaBboxPdfPts:
-    """region_meta["bbox_2d"] (exported as _bbox_2d) is populated from the
-    region's containment-correct PDF-point bbox, NOT the raw 0..1000 layout
-    space. Provenance keeps the 0..1000 bbox (its consumers are tuned to it)."""
+class TestRegionMetaLayoutBbox:
+    """region_meta["bbox"] is the region's 0..1000 layout box, which the export
+    converts to points on the displayed page; the page size comes from the
+    native pass's ``_page_w``/``_page_h`` and lands on ``contents.page_sizes``."""
 
-    def test_region_meta_uses_bbox_pdf_pts(self, mock_wtpsplit):
+    def test_region_meta_carries_the_layout_bbox_and_page(self, mock_wtpsplit):
         region = _region(0, "text", "Hello world.", bbox=[100, 200, 900, 250])
-        region["_bbox_pdf_pts"] = [61.2, 594.0, 550.8, 634.0]
+        region["_page_w"] = 612.0
+        region["_page_h"] = 792.0
         contents = _parse_and_segment([[region]])
         sent = contents.sentences[0]
-        assert sent.region_meta["bbox_2d"] == [61.2, 594.0, 550.8, 634.0]
-        # Provenance keeps the raw 0..1000 layout-space bbox.
+        assert sent.region_meta["bbox"] == [100.0, 200.0, 900.0, 250.0]
+        assert sent.region_meta["region_page"] == 1
+        assert contents.page_sizes == {1: (612.0, 792.0)}
         assert sent.provenance[0].bbox == (100.0, 200.0, 900.0, 250.0)
 
-    def test_region_meta_bbox_none_without_pdf_pts(self, mock_wtpsplit):
-        """No _bbox_pdf_pts (e.g. no native pass) → region_meta bbox_2d is None
-        rather than the mis-scaled 0..1000 value."""
+    def test_no_page_size_without_the_native_pass(self, mock_wtpsplit):
         region = _region(0, "text", "Hello world.", bbox=[100, 200, 900, 250])
         contents = _parse_and_segment([[region]])
-        sent = contents.sentences[0]
-        assert sent.region_meta["bbox_2d"] is None
+        assert contents.page_sizes == {}
 
 
 # ---------------------------------------------------------------------------

@@ -292,3 +292,14 @@ def test_html_parser_accepts_input_under_cap(monkeypatch):
     parser = HtmlParser(b"<html><body><p>Small article.</p></body></html>")
     result = parser.parse()
     assert result is not None
+
+
+def test_declared_identifiers_and_language_reach_the_metadata():
+    html = b"""<html lang="de"><head>
+      <meta name="citation_title" content="Identified">
+      <meta name="citation_pmid" content="31234567">
+      <meta name="citation_arxiv_id" content="2101.12345">
+    </head><body><article><h1>Intro</h1><p>Text.</p></article></body></html>"""
+    meta = HtmlParser(html).parse().preparsed_metadata
+    assert meta is not None
+    assert (meta.pmid, meta.arxiv, meta.language) == ("31234567", "2101.12345", "de")

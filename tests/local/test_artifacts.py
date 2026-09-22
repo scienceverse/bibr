@@ -9,7 +9,7 @@ import pytest
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "schema_version": "11.0",
+        "schema_version": "12.0",
         "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
@@ -437,6 +437,9 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings.resolver.limit = limit
         settings.resolver.search_concurrency = 8
         settings.resolver.authoritative = authoritative
+        settings.ror.enrich = True
+        settings.ror.url = "https://api.ror.org/v2"
+        settings.ror.enrich_timeout = 60.0
         return PipelineContext(
             file_states=[],
             progress=NullProgress(),
@@ -457,3 +460,70 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
     assert baseline != enrichment_settings_digest(
         context(url="http://resolver-a", authoritative=False, limit=5)
     )
+
+
+def test_ror_rows_round_trip_through_the_sidecar():
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        EnrichmentSidecar,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = {
+        **_core_payload(),
+        "affiliation": [{"affiliation_id": 1, "text": "Uni"}],
+        "funding": [{"funding_id": 1, "funder": "NSF"}],
+        "affiliation_match": [],
+        "funding_match": [],
+    }
+    affiliation_row = {
+        "affiliation_id": 1,
+        "service": "ror",
+        "service_id": "https://ror.org/0abcde123",
+        "score": 1.0,
+        "name": "Uni",
+        "country_code": "NL",
+    }
+    funding_row = {
+        "funding_id": 1,
+        "service": "ror",
+        "service_id": "https://ror.org/021nxhr62",
+        "score": 1.0,
+        "name": "U.S. National Science Foundation",
+        "country_code": "US",
+        "funder_doi": "10.13039/100000001",
+    }
+    enriched = {**core, "affiliation_match": [affiliation_row], "funding_match": [funding_row]}
+    sidecar = make_enrichment_sidecar(
+        enriched,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="s",
+        completeness="complete",
+    )
+    assert EnrichmentSidecar.from_dict(sidecar.to_dict()) == sidecar
+
+    replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="s")
+    assert replayed["affiliation_match"] == [affiliation_row]
+    assert replayed["funding_match"] == [funding_row]
+
+    dangling = {**enriched, "affiliation_match": [{**affiliation_row, "affiliation_id": 9}]}
+    bad = make_enrichment_sidecar(
+        dangling,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="s",
+        completeness="complete",
+    )
+    with pytest.raises(ArtifactReplayError, match="unknown affiliation_id"):
+        replay_enrichment_sidecar(core, bad, expected_settings_digest="s")
+
+
+def test_a_sidecar_without_ror_rows_stays_compact():
+    from bibr.pipeline.artifacts import make_enrichment_sidecar
+
+    sidecar = make_enrichment_sidecar(
+        _core_payload(), core_sha256="x", settings_digest="s", completeness="complete"
+    )
+    assert "affiliation_match" not in sidecar.to_dict()
+    assert "funding_match" not in sidecar.to_dict()

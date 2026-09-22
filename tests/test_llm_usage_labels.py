@@ -363,7 +363,7 @@ def test_export_breaks_usage_down_by_label_provider_and_model():
         "m",
         1,
     )
-    assert data["schema_version"] == "11.0"
+    assert data["schema_version"] == "12.0"
 
 
 def test_export_omits_usage_when_no_labels_were_tracked():

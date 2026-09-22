@@ -1,0 +1,402 @@
+{
+  "paper_id": "10.1234/demo",
+  "schema_version": "12.0",
+  "source": {
+    "file_name": "demo.pdf",
+    "file_hash": "demo-hash",
+    "input_format": "pdf"
+  },
+  "metadata": {
+    "title": "A Demonstration Paper",
+    "abstract": "We demonstrate the export schema.",
+    "keywords": [
+      "schema",
+      "export"
+    ],
+    "doi": "10.1234/demo",
+    "pmid": null,
+    "pmcid": null,
+    "arxiv": null,
+    "language": null,
+    "paper_type": "empirical",
+    "oecd_l1": "Social Sciences",
+    "oecd_l2": "Psychology and Cognitive Sciences",
+    "journal": "Journal of Demonstrations",
+    "volume": "12",
+    "issue": "3",
+    "first_page": "100",
+    "last_page": "115",
+    "issn": "1234-5678",
+    "publisher": "Example Press",
+    "published": "2026-01-15",
+    "published_date": "2026-01-15",
+    "license": "CC-BY-4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0/",
+    "license_spdx": "CC-BY-4.0",
+    "funding_statement": "Funded by the NSF under award 12345.",
+    "coi_statement": "The authors declare no conflict of interest.",
+    "ethics_statement": "Approved by the IRB.",
+    "data_availability": "Data are available on OSF."
+  },
+  "author": [
+    {
+      "author_id": 1,
+      "given": "Jane",
+      "family": "Smith",
+      "suffix": null,
+      "email": "jane@example.org",
+      "corresponding": true,
+      "orcid": "https://orcid.org/0000-0002-1825-0097",
+      "role": [
+        "conceptualization"
+      ],
+      "credit_roles": [
+        "https://credit.niso.org/contributor-roles/conceptualization/"
+      ]
+    }
+  ],
+  "affiliation": [
+    {
+      "affiliation_id": 1,
+      "text": "Department of Things, Example University",
+      "institution": "Example University",
+      "department": "Department of Things",
+      "city": "Exampleville",
+      "country": "Netherlands",
+      "author_ids": [
+        1
+      ]
+    }
+  ],
+  "funding": [
+    {
+      "funding_id": 1,
+      "funder": "NSF",
+      "award_ids": [
+        "12345"
+      ]
+    }
+  ],
+  "text": [
+    {
+      "text": "We measured the thing.",
+      "text_id": 1,
+      "paragraph_id": 1,
+      "section_id": 1,
+      "page_number": null,
+      "formatted": null
+    },
+    {
+      "text": "It replicated prior work [1], t(28) = 3.42, see Table 1 and data.",
+      "text_id": 2,
+      "paragraph_id": 2,
+      "section_id": 2,
+      "page_number": 2,
+      "formatted": null
+    }
+  ],
+  "section": [
+    {
+      "section_id": 1,
+      "header": "Introduction",
+      "level": 1,
+      "parent_section_id": null,
+      "section_type": "intro"
+    },
+    {
+      "section_id": 2,
+      "header": "Results",
+      "level": 1,
+      "parent_section_id": null,
+      "section_type": "results"
+    }
+  ],
+  "url": [
+    {
+      "url_id": 1,
+      "href": "https://example.org/data",
+      "link_text": "data",
+      "text_id": 2,
+      "start": 60,
+      "end": 64
+    }
+  ],
+  "bib": [
+    {
+      "bib_id": 1,
+      "text_id": null,
+      "bib_type": "journal_article",
+      "doi": "10.1234/prior",
+      "title": "A Prior Study",
+      "authors": "Smith, J., & Doe, A.",
+      "editors": "Roe, R.",
+      "publisher": null,
+      "year": 2020,
+      "year_suffix": null,
+      "date": null,
+      "container": "Journal of Things",
+      "volume": "7",
+      "issue": null,
+      "first_page": "10",
+      "last_page": "20",
+      "edition": null,
+      "version": null,
+      "url": null,
+      "is_in_press": false,
+      "arxiv": null,
+      "pmid": null,
+      "series": null,
+      "access_date": null,
+      "note": null
+    }
+  ],
+  "xref": [
+    {
+      "xref_id": 1,
+      "target_id": 1,
+      "xref_type": "bib",
+      "contents": "[1]",
+      "text_id": 2,
+      "start": 25,
+      "end": 28
+    },
+    {
+      "xref_id": 2,
+      "target_id": 1,
+      "xref_type": "table",
+      "contents": "Table 1",
+      "text_id": 2,
+      "start": 48,
+      "end": 55
+    }
+  ],
+  "figure": [
+    {
+      "figure_id": 1,
+      "section_id": 2,
+      "image": null,
+      "caption": "Figure 1. Plot",
+      "page_number": 2
+    }
+  ],
+  "table": [
+    {
+      "table_id": 1,
+      "section_id": 2,
+      "html": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
+      "contents": [
+        [
+          "A"
+        ],
+        [
+          "1"
+        ]
+      ],
+      "caption": "Table 1. Values",
+      "page_number": 2
+    }
+  ],
+  "eq": [
+    {
+      "eq_id": 1,
+      "text_id": 2,
+      "start": 30,
+      "end": 42,
+      "grp_id": 1,
+      "verbatim": "t(28) = 3.42",
+      "lhs": "t",
+      "df": "28",
+      "comp": "=",
+      "rhs": "3.42"
+    }
+  ],
+  "metadata_match": [
+    {
+      "service": "crossref",
+      "service_id": "10.1234/demo",
+      "score": 0.99,
+      "bib_type": null,
+      "doi": "10.1234/demo",
+      "title": "A Demonstration Paper",
+      "author": [
+        {
+          "family": "Smith",
+          "given": "Jane",
+          "orcid": "https://orcid.org/0000-0002-1825-0097",
+          "affiliation": [
+            {
+              "name": "Example University",
+              "ror": "https://ror.org/0abcde123"
+            }
+          ]
+        }
+      ],
+      "editor": null,
+      "publisher": null,
+      "year": 2026,
+      "date": null,
+      "container": "Journal of Demonstrations",
+      "volume": null,
+      "issue": null,
+      "first_page": null,
+      "last_page": null,
+      "edition": null,
+      "version": null,
+      "url": null,
+      "license_url": "http://creativecommons.org/licenses/by/4.0/",
+      "license_spdx": "CC-BY-4.0",
+      "funder": [
+        {
+          "name": "National Science Foundation",
+          "funder_doi": "10.13039/100000001",
+          "ror": null,
+          "award_ids": [
+            "12345"
+          ]
+        }
+      ]
+    }
+  ],
+  "affiliation_match": [
+    {
+      "affiliation_id": 1,
+      "service": "ror",
+      "service_id": "https://ror.org/0abcde123",
+      "score": 1.0,
+      "name": "Example University",
+      "country_code": "NL"
+    }
+  ],
+  "funding_match": [
+    {
+      "funding_id": 1,
+      "service": "ror",
+      "service_id": "https://ror.org/021nxhr62",
+      "score": 1.0,
+      "name": "U.S. National Science Foundation",
+      "country_code": "US",
+      "funder_doi": "10.13039/100000001"
+    }
+  ],
+  "bib_match": [
+    {
+      "bib_id": 1,
+      "service": "crossref",
+      "service_id": "10.1234/prior",
+      "score": 0.98,
+      "bib_type": null,
+      "doi": "10.1234/prior",
+      "title": "A Prior Study",
+      "author": [
+        {
+          "family": "Smith",
+          "given": "Jane"
+        }
+      ],
+      "editor": null,
+      "publisher": null,
+      "year": 2020,
+      "date": null,
+      "container": "Journal of Things",
+      "volume": null,
+      "issue": null,
+      "first_page": null,
+      "last_page": null,
+      "edition": null,
+      "version": null,
+      "url": null,
+      "license_url": null,
+      "license_spdx": null,
+      "funder": null
+    }
+  ],
+  "extraction": {
+    "bibr_version": "0.0.0-test",
+    "build_sha": null,
+    "completed_at": "2026-09-22T12:00:00Z",
+    "ocr": null,
+    "llm": null,
+    "settings": {
+      "ref_seg": "geom",
+      "ref_parse": "ner",
+      "crossref_enrich": false,
+      "consolidate": "off"
+    },
+    "enrichment": {
+      "complete": true,
+      "refs_enriched": 1,
+      "refs_total": 1
+    },
+    "diagnostics": {
+      "text_quality": 0.87,
+      "references_complete": true,
+      "ref_seg_fallback_used": false,
+      "section_classification": [
+        {
+          "section_id": 1,
+          "score": 0.97,
+          "source": "exact_alias"
+        },
+        {
+          "section_id": 2,
+          "score": null,
+          "source": null
+        }
+      ],
+      "paper_classification": {
+        "paper_type_confidence": 0.91,
+        "oecd_confidence": 0.77
+      },
+      "xref_tier": [
+        {
+          "xref_id": 1,
+          "tier": "numeric"
+        }
+      ]
+    },
+    "warnings": [],
+    "pages": [
+      {
+        "page_number": 1,
+        "width": 612.0,
+        "height": 792.0
+      },
+      {
+        "page_number": 2,
+        "width": 612.0,
+        "height": 792.0
+      }
+    ],
+    "float_parts": [
+      {
+        "object_type": "figure",
+        "object_id": 1,
+        "part_index": 1,
+        "page_number": 2,
+        "bbox": [
+          58.75,
+          324.72,
+          313.34,
+          544.9
+        ]
+      }
+    ],
+    "validation": {
+      "errors": 0,
+      "warnings": 1,
+      "blocking": 0,
+      "promotable": true,
+      "issues": [
+        {
+          "code": "VAL_ABSTRACT_SUSPECT",
+          "severity": "warning",
+          "message": "abstract suspicion: non_reference_share_gt_20pct",
+          "origin_stage": "export",
+          "evidence_ids": [],
+          "count": 1,
+          "blocking": false
+        }
+      ]
+    }
+  }
+}

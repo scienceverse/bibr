@@ -186,7 +186,9 @@ def test_ord121_containment_caption_variants_are_evidence_not_next_ownership():
     )
     assert "VAL_CAPTION_DUPLICATE" in {issue.code for issue in paper.validation_issues}
     exported = export_paper_to_json(paper)
-    assert "VAL_CAPTION_DUPLICATE" in {issue["code"] for issue in exported["validation"]["issues"]}
+    assert "VAL_CAPTION_DUPLICATE" in {
+        issue["code"] for issue in exported["extraction"]["validation"]["issues"]
+    }
 
 
 def test_doi_only_caption_does_not_bridge_different_explicit_figure_numbers():
@@ -336,6 +338,34 @@ def test_ord237_rotated_continued_table_groups_before_caption_contention():
     )
     assert continued.object_id == "table:1"
     assert "continuation_evidence" in continued.reasons
+
+
+def test_continued_html_table_keeps_each_pages_source_markup():
+    """A table continued across pages exports the printed HTML of each piece,
+    not a re-render of the merged frame, which drops rowspans and adds
+    ``class="dataframe"`` noise."""
+    first = (
+        "<table><tr><th>Domain</th><th>Score</th></tr>"
+        '<tr><td rowspan="2">Monitoring</td><td>10</td></tr><tr><td>11</td></tr></table>'
+    )
+    second = (
+        "<table><tr><th>Domain</th><th>Score</th></tr><tr><td>Action</td><td>20</td></tr></table>"
+    )
+    pages = [[] for _ in range(2)]
+    pages[0] = [
+        _region(1, "figure_title", "Table 1 | Scores", bbox=[70, 60, 900, 80]),
+        _region(2, "table", first, bbox=[70, 100, 930, 900]),
+    ]
+    pages[1] = [
+        _region(1, "figure_title", "Table 1 (continued) | Scores", bbox=[70, 60, 900, 80]),
+        _region(2, "table", second, bbox=[70, 100, 930, 600]),
+    ]
+
+    (table,) = _parse(pages).tables
+
+    assert len(table.parts) == 2
+    assert table.tbl_html == f"{first}\n{second}"
+    assert "dataframe" not in table.tbl_html
 
 
 def test_unlabelled_explicit_continuation_groups_only_with_compatible_previous_table():

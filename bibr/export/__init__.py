@@ -1,7 +1,7 @@
 """Typed export models and JSON serialization for Paper objects.
 
 The models come from :mod:`bibr.export.models` — the canonical home for the
-v11 schema types. :mod:`bibr.export.json_export` owns the *serialization*
+v12 schema types. :mod:`bibr.export.json_export` owns the *serialization*
 (building a payload from a :class:`~bibr.paper.Paper`) and imports the models
 from ``models`` like everyone else, so it is not in the import path for a
 caller that only wants a type.
@@ -22,18 +22,17 @@ from bibr.export.models import (
     CaptionCandidateExport,
     EqExport,
     FigureExport,
-    FigurePartExport,
+    FloatPartExport,
     MetadataExport,
     MetadataMatchExport,
     PaperExport,
+    PaperExportReader,
     PersonNameExport,
-    ProvenanceExport,
     ReferenceSegmentationAttemptExport,
     ReferenceYieldExport,
     SectionExport,
     SourceExport,
     TableExport,
-    TablePartExport,
     TextExport,
     UrlExport,
     ValidationExport,
@@ -56,18 +55,17 @@ __all__ = [
     "CaptionAssignmentReceiptExport",
     "CaptionCandidateExport",
     "FigureExport",
-    "FigurePartExport",
+    "FloatPartExport",
     "MetadataExport",
     "MetadataMatchExport",
     "PaperExport",
+    "PaperExportReader",
     "PersonNameExport",
-    "ProvenanceExport",
     "ReferenceSegmentationAttemptExport",
     "ReferenceYieldExport",
     "SectionExport",
     "SourceExport",
     "TableExport",
-    "TablePartExport",
     "TextExport",
     "UrlExport",
     "ValidationExport",

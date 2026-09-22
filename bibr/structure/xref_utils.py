@@ -218,6 +218,8 @@ def detect_xrefs(
                             xref_type="table",
                             contents=_normalize_xref_text(m.group(0)),
                             text_id=sent.text_id,
+                            start=m.start(),
+                            end=m.end(),
                         )
                     )
 
@@ -232,6 +234,8 @@ def detect_xrefs(
                             xref_type="figure",
                             contents=_normalize_xref_text(m.group(0)),
                             text_id=sent.text_id,
+                            start=m.start(),
+                            end=m.end(),
                         )
                     )
 
@@ -245,6 +249,8 @@ def detect_xrefs(
                         xref_type="supplementary",
                         contents=_normalize_xref_text(m.group(0)),
                         text_id=sent.text_id,
+                        start=m.start(),
+                        end=m.end(),
                     )
                 )
 
@@ -258,6 +264,8 @@ def detect_xrefs(
                         xref_type="supplementary",
                         contents=_normalize_xref_text(m.group(0)),
                         text_id=sent.text_id,
+                        start=m.start(),
+                        end=m.end(),
                     )
                 )
 
@@ -272,6 +280,8 @@ def detect_xrefs(
                             xref_type="supplementary",
                             contents=_normalize_xref_text(m.group(0)),
                             text_id=sent.text_id,
+                            start=m.start(),
+                            end=m.end(),
                         )
                     )
             else:
@@ -281,6 +291,8 @@ def detect_xrefs(
                         xref_type="supplementary",
                         contents=_normalize_xref_text(m.group(0)),
                         text_id=sent.text_id,
+                        start=m.start(),
+                        end=m.end(),
                     )
                 )
 
@@ -294,6 +306,8 @@ def detect_xrefs(
                         xref_type="equation",
                         contents=_normalize_xref_text(m.group(0)),
                         text_id=sent.text_id,
+                        start=m.start(),
+                        end=m.end(),
                     )
                 )
 
@@ -308,6 +322,8 @@ def detect_xrefs(
                         xref_type="section",
                         contents=_normalize_xref_text(m.group(0)),
                         text_id=sent.text_id,
+                        start=m.start(),
+                        end=m.end(),
                     )
                 )
 

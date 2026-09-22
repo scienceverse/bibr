@@ -1,11 +1,11 @@
-"""Shared v11 payload fixtures.
+"""Shared export payload fixtures.
 
 ``completed_at`` is stripped from every fixture payload: it is the export's
 only non-deterministic field, and leaving it in would make any full-payload
 comparison flaky. The per-stage timings go the same way — they are wall-clock
 too.
 
-``extraction_block()`` lives here as the single definition of the minimal v11
+``extraction_block()`` lives here as the single definition of the minimal
 ``extraction`` skeleton, with ``extraction_export()`` as its typed twin for
 tests that assert on the serializer rather than on a payload. Papers exported
 outside the pipeline carry no ``extraction`` at all, so every test asserting on
@@ -30,7 +30,10 @@ from bibr.models import (
     BibAuthor,
     ExternalMatch,
     FundingEntry,
+    MatchFunder,
+    MatchOrganization,
     MatchSource,
+    OrganizationMatch,
     PaperAuthor,
     PaperMetadata,
     PaperReference,
@@ -50,7 +53,7 @@ from bibr.paper_contents import (
 
 
 def extraction_block(**overrides) -> dict:
-    """A minimal v11 ``extraction`` block, as ``ExportStage`` would build it."""
+    """A minimal ``extraction`` block, as ``ExportStage`` would build it."""
     block = {
         "bibr_version": "0.0.0-test",
         "completed_at": "2026-07-24T10:00:00Z",
@@ -189,8 +192,8 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
         keywords=["schema", "export"],
         paper_type="empirical",
         paper_type_confidence=0.91,
-        oecd_l1="5. Social Sciences",
-        oecd_l2="5.1 Psychology",
+        oecd_l1="Social Sciences",
+        oecd_l2="Psychology and Cognitive Sciences",
         oecd_confidence=0.77,
         authors=[
             PaperAuthor(
@@ -234,10 +237,46 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
                 id="10.1234/demo",
                 score=0.99,
                 title="A Demonstration Paper",
-                authors=[BibAuthor(given="Jane", family="Smith")],
+                authors=[
+                    BibAuthor(
+                        given="Jane",
+                        family="Smith",
+                        orcid="https://orcid.org/0000-0002-1825-0097",
+                        affiliation=[
+                            MatchOrganization(
+                                name="Example University", ror="https://ror.org/0abcde123"
+                            )
+                        ],
+                    )
+                ],
                 year=2026,
                 container="Journal of Demonstrations",
                 doi="10.1234/demo",
+                license_url="http://creativecommons.org/licenses/by/4.0/",
+                funders=[
+                    MatchFunder(
+                        name="National Science Foundation",
+                        funder_doi="10.13039/100000001",
+                        award_ids=["12345"],
+                    )
+                ],
+            )
+        },
+        affiliation_match={
+            "Department of Things, Example University": OrganizationMatch(
+                service_id="https://ror.org/0abcde123",
+                score=1.0,
+                name="Example University",
+                country_code="NL",
+            )
+        },
+        funder_match={
+            "NSF": OrganizationMatch(
+                service_id="https://ror.org/021nxhr62",
+                score=1.0,
+                name="U.S. National Science Foundation",
+                country_code="US",
+                funder_doi="10.13039/100000001",
             )
         },
         enrichment_complete=True if with_refs else None,
@@ -279,12 +318,12 @@ def demo_paper_refs_off() -> Paper:
 
 
 @pytest.fixture
-def v11_payload(demo_paper) -> dict:
-    """A fully-populated v11 payload from the shared demo paper."""
+def export_payload(demo_paper) -> dict:
+    """A fully-populated payload from the shared demo paper."""
     return _strip_nondeterministic(_export_paper_payload(demo_paper))
 
 
 @pytest.fixture
-def v11_payload_refs_off(demo_paper_refs_off) -> dict:
+def export_payload_refs_off(demo_paper_refs_off) -> dict:
     """A payload from a ``refs="off"`` run — every root table must still exist."""
     return _strip_nondeterministic(_export_paper_payload(demo_paper_refs_off))

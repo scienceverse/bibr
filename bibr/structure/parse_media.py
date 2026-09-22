@@ -22,6 +22,7 @@ from bibr.paper_contents import (
     Provenance,
 )
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
+from bibr.structure.float_images import composite_panel_image
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -915,6 +916,8 @@ class MediaHandlersMixin:
                 primary.parts.extend(member.parts)
                 primary.provenance.extend(member.provenance)
                 grouped_ids.add(id(member))
+            # The whole figure, not just its first panel's crop.
+            primary.image_b64 = composite_panel_image(primary.parts) or primary.image_b64
             self._figure_source_indices[id(primary)] = max(
                 self._figure_source_indices[id(item)] for item in grouped_members
             )
@@ -1093,7 +1096,12 @@ class MediaHandlersMixin:
             previous.parts.extend(table.parts)
             previous.provenance.extend(table.provenance)
             previous.df = pd.concat([previous.df, table.df], ignore_index=True)
-            previous.tbl_html = previous.df.to_html(index=False)
+            # Keep each printed piece's source markup (rowspans, multi-level
+            # headers) rather than re-rendering the merged frame, which is lossy
+            # (see ``_handle_table``); the merged frame still feeds ``contents``.
+            previous.tbl_html = "\n".join(
+                part.tbl_html for part in previous.parts if part.tbl_html
+            ) or previous.df.to_html(index=False)
             self._table_source_indices[id(previous)] = min(
                 self._table_source_indices[id(previous)], self._table_source_indices[id(table)]
             )

@@ -267,6 +267,9 @@ class JatsParser:
 
         if front is not None:
             self._metadata = self._parse_front(front)
+            self._metadata.language = (
+                root.get("{http://www.w3.org/XML/1998/namespace}lang") or root.get("lang") or None
+            )
         if body is not None:
             self._process_container(body, section_id=0, depth=0)
         if back is not None:
@@ -411,11 +414,20 @@ class JatsParser:
         if article_meta is None:
             return meta
 
-        # DOI
+        # DOI and the other identifiers JATS declares
         for aid in _iter_children(article_meta, "article-id"):
-            if _attr(aid, "pub-id-type") == "doi":
-                meta.doi = _text(aid)
-                break
+            id_type = (_attr(aid, "pub-id-type") or "").lower()
+            value = _text(aid) or None
+            if id_type == "doi" and not meta.doi:
+                meta.doi = value or ""
+            elif id_type == "pmid" and meta.pmid is None:
+                meta.pmid = value
+            elif id_type in ("pmc", "pmcid") and meta.pmcid is None:
+                meta.pmcid = (
+                    value if value is None or value.upper().startswith("PMC") else f"PMC{value}"
+                )
+            elif id_type == "arxiv" and meta.arxiv is None:
+                meta.arxiv = value
 
         # Title
         title_group = _first_desc(article_meta, "title-group")

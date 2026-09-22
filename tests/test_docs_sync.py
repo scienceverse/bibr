@@ -153,15 +153,16 @@ def test_canonical_section_tables_match_enum():
 
 def test_export_top_level_keys_documented():
     """Every always-present PaperExport field must appear (as a code span) in
-    both docs' "Top-level keys include:" enumerations. ``regions`` (the opt-in
-    ``_regions`` debug payload) is documented separately, so it is excluded."""
+    both docs' "Top-level keys, grouped by role" enumerations. ``regions`` (the
+    opt-in ``_regions`` debug payload) is documented separately, so it is
+    excluded."""
     from bibr.export.json_export import PaperExport
 
     fields = set(PaperExport.model_fields) - {"regions"}
 
     for rel in ("docs/guides/architecture.md", "docs/reference/rest-api.md"):
         md = _read(rel)
-        line = next(line for line in md.splitlines() if "Top-level keys include" in line)
+        line = next(line for line in md.splitlines() if "Top-level keys, grouped by role" in line)
         missing = [name for name in fields if f"`{name}`" not in line]
         assert not missing, f"{rel}: keys not documented: {missing}"
 

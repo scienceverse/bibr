@@ -6,6 +6,116 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — export schema 12.0 (breaking)
+
+The JSON export moves to schema `12.0`. It separates what the paper says from
+how bibr produced it, and the generated JSON Schema is now a documented
+contract. bibr writes and reads only 12.x; a v11 export or core checkpoint is
+rejected, as v10 was by 11.0. The drafted 11.1 is retired and was never
+released.
+
+- `extraction` now holds everything about how the output was produced, and
+  is always present; everything else is the paper. Root keys are emitted in the
+  order `paper_id`, `schema_version`, `source`; `metadata`, `author`,
+  `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`,
+  `table`, `eq`; `metadata_match`, `affiliation_match`, `funding_match`,
+  `bib_match`; `extraction`. A Paper exported
+  outside the pipeline gets a minimal `extraction` block (package version,
+  export time, diagnostics, validation) with `settings` omitted.
+- The root `validation` block moved to `extraction.validation`. Readers of
+  saved files can use `bibr.validation.payload_validation(payload)`, which
+  finds it in both 12.x and older exports.
+- Figure and table `parts` left the content rows. The whole-object fields are
+  now truly whole: a figure detected as several panel crops gets an `image`
+  composited from them (it used to be the first panel), and a table continued
+  across pages keeps each printed piece's HTML in `html` instead of a lossy
+  re-render of the merged cells. Each piece's page and bounding box moved to
+  `extraction.float_parts`. Merged figures and continued tables no longer lose
+  pieces when a later merge step combines them. With images requested, each
+  figure image is now serialized once, not twice.
+- Processing fields left the content rows and now live under `extraction`,
+  keyed by the rows' IDs: `section[].classification_score` and
+  `classification_source` → `extraction.diagnostics.section_classification`
+  (an unscored section's score is `null`, not `0.0`); `xref[].tier` →
+  `extraction.diagnostics.xref_tier`; `metadata.paper_type_confidence` and
+  `oecd_confidence` → `extraction.diagnostics.paper_classification`;
+  `bib[].consolidated_fields` (a comma-joined string) →
+  `extraction.diagnostics.consolidation` (a list of field names per `bib_id`);
+  the opt-in per-sentence `text[]._bbox_2d`, `_font_size`, `_font_bold`,
+  `_is_italic`, `_region_type`, `_page_w` and `_page_h` →
+  `extraction.text_regions` (same `--region-meta` opt-in); and the root
+  `qualification_provenance` → `extraction.qualification`, omitted rather than
+  `null` when no LLM task ran.
+- Duplicates are gone. `bib[].author` and `editor`, a split derived from the
+  printed strings, are removed; `bib[].authors` and `editors` stay exactly as
+  printed. `author[].affiliation` is removed; the `affiliation[]` table,
+  linked by `author_ids`, is the one source and is now built on every run from
+  the byline, with the parsed components `null` when no LLM ran (it used to be
+  empty then).
+- `xref[].xref_id` and `url[].url_id` are new 1-based primary keys, so every
+  record table has one. The xref's target stays in `target_id`; up to v10,
+  `xref_id` meant the target.
+- Absent values are `null`, never `""`: `author[].given` and `family`,
+  `section[].header` and `eq[].df`.
+- Closed vocabularies are enums in the schema: `section[].section_type`,
+  `bib_type` in `bib` and both match tables, `metadata.paper_type`,
+  `metadata.oecd_l1` and `oecd_l2`, the match tables' `service`,
+  `source.input_format` and `validation.issues[].severity`. Export maps a
+  foreign reference type (`journal-article`, `article`) into the enum and drops
+  an off-vocabulary classifier label with a logged warning instead of failing
+  the paper.
+- Every field and model in `docs/schema/bibr-export-v12.schema.json` has a
+  description, and a test keeps it that way; the documentation site's JSON
+  schema page shows them. Both schema documents carry a stable `$id` under
+  `https://bibr.org/schema/`. The v11 and v10 schema files stay published,
+  frozen.
+- `xref[]`, `url[]` and `eq[]` carry `start`/`end`: the character span of the
+  item within its sentence's `text` (0-based, end exclusive), or `null` when it
+  cannot be located unambiguously. `eq[].verbatim` is now filled from it.
+- Normalized fields sit next to the printed ones: `metadata.published_date`
+  (ISO 8601, as precise as printed), `license_url` and `license_spdx`
+  (Creative Commons with a known version, CC0), `language`, `pmid`, `pmcid` and
+  `arxiv` (declared by JATS/HTML inputs; arXiv also from an arXiv DOI or the
+  page-1 arXiv stamp), and `author[].credit_roles` (CRediT term URIs matched
+  from the printed roles).
+- `source.file_hash` is documented as the first 16 hex characters of the
+  input's SHA-256.
+- `paper_id` is required and never `null`: `--paper-id`, else the DOI, else
+  the file name. `bibr batch` now writes its own corpus-unique id (the name of
+  the JSON file) into each export instead of the DOI or file name, which could
+  collide.
+- One geometry convention for every bounding box: `[x0, y0, x1, y1]` in PDF
+  points on the page as displayed, measured from the top-left corner. The new
+  `extraction.pages` gives each page's width and height. `float_parts[].bbox`
+  and the caption and region boxes were in the layout model's 0–1000 space;
+  `text_regions[].bbox_2d` was in points from the bottom-left and is now `bbox`,
+  with the row's `page_number` replacing the per-row `page_w`/`page_h`.
+  `extraction.regions` drops `bbox_height`/`bbox_width` (derivable from
+  `bbox`), and its `char_density` and `estimated_line_height` are now per point.
+- The match tables carry the identifiers Crossref records hold: `author[]`
+  entries gain `orcid` and `affiliation` (name and ROR ID), and each record
+  gains `funder` (name, Open Funder Registry DOI, ROR ID, award numbers),
+  `license_url` (the version-of-record license; text-mining licenses are
+  skipped) and `license_spdx`.
+- New `affiliation_match` and `funding_match` tables hold the ROR organization
+  matched to each affiliation string and printed funder name (ROR ID, name,
+  country code, and for funders the Open Funder Registry DOI). They are filled
+  when enrichment runs (`--crossref`), with `ROR_ENRICH=false` to skip ROR. Only
+  ROR's own recommended (`chosen`) match is kept; strings without one stay
+  unmatched. `ROR_CLIENT_ID` raises ROR's rate limit from 50 to 2000 requests
+  per 5 minutes; matching is capped per paper by `ROR_ENRICH_TIMEOUT` and never
+  holds an export back.
+- The schema documents in `docs/schema/` are dedicated to the public domain
+  under CC0 1.0; the software stays AGPL. Example valid, invalid and
+  newer-minor exports live in `tests/fixtures/schema_conformance/`, checked
+  against both schema documents.
+- `Result` exposes `affiliation`, `funding` and `metadata_match` as `Records`
+  tables too.
+- 12.x is additive-only: new optional fields and new enum values may appear in
+  any 12.x release, and the reader model and reader schema accept both. Any
+  rename, move, removal, type change, new required key or dropped enum value
+  needs 13.0.
+
 ### Fixed
 
 - The reference under-extraction warning in `processing_warnings` now also
@@ -46,9 +156,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- `bibr.Result(data)` loads exports written by newer releases of the same
+  major version, as the additive-only policy promises. It previously rejected
+  any unknown key and any `schema_version` other than the exact one it writes.
+  Unknown keys at any nesting level are now kept in `result.data` and in the
+  model's `model_extra`, and enum values it does not know yet are accepted. A
+  different major `schema_version` (`11.x`, `13.x`) and known fields of the
+  wrong type are still rejected. What bibr writes is still validated against
+  the strict models.
 
 ### Added
 
+- Parquet corpus tables. `bibr tables <exports> --out DIR`, `bibr.write_tables()`
+  and `bibr batch` (into `<out>/tables/` after every run; `--no-tables` skips
+  it) write any number of exports as one Parquet file per table: `paper` (one
+  row per paper), every record and match table, and `extraction_*` files for
+  the processing lists. Rows start with `paper_id`; column types come from the
+  schema, so every file has the same columns whatever papers it holds, with
+  lists and nested records kept as Arrow lists and structs. `pyarrow` is now a
+  core dependency.
 - `CROSSREF_NOT_FOUND_TTL_SECONDS` (default 1 day, `0` disables): the Crossref
   response caches now remember a DOI lookup's 404 (no record, typically a
   malformed DOI or one registered elsewhere) for that long. Repeat lookups then
@@ -59,6 +185,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
+  generated from the strict `PaperExport` models. `Result.model` is an instance
+  of it when built from a dict, and it remains a `PaperExport` subclass.
+  `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
+  alongside the strict `bibr-export-v12.schema.json`.
 
 ### Changed
 

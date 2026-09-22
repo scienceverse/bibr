@@ -621,3 +621,22 @@ class TestTextBoundaries:
     def test_caption_title_and_body_are_separated(self):
         c = _parse(BOUNDARY_JATS)._contents
         assert c.figures[0].caption == "Figure 1 Overview The design."
+
+
+def test_declared_identifiers_and_language_reach_the_metadata():
+    xml = b"""
+    <article xml:lang="en"><front><article-meta>
+      <article-id pub-id-type="doi">10.1234/x</article-id>
+      <article-id pub-id-type="pmid">31234567</article-id>
+      <article-id pub-id-type="pmc">6543210</article-id>
+      <title-group><article-title>Identified</article-title></title-group>
+    </article-meta></front><body><sec><title>Intro</title><p>Text.</p></sec></body></article>
+    """
+    meta = JatsParser(xml).parse().preparsed_metadata
+    assert meta is not None
+    assert (meta.doi, meta.pmid, meta.pmcid, meta.language) == (
+        "10.1234/x",
+        "31234567",
+        "PMC6543210",
+        "en",
+    )

@@ -34,9 +34,9 @@ requirement instead.
 
 Headers the trained model leaves as `unknown` (when `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, the default) or that skip Tier 2 entirely are sent to the configured LLM provider in a batch. The LLM returns one of the canonical section values for each header (confidence: 0.85). Results are validated against the known section types. Ambiguous headings can include body-text snippets and study-scope context.
 
-Exported section rows include `classification_source` alongside
-`classification_score`, so consumers can distinguish model, lookup, LLM,
-and later hierarchy decisions. With `no_llm=True`, heading classification
+The export records each section's `score` and `source` in
+`extraction.diagnostics.section_classification`, keyed by `section_id`, so
+consumers can distinguish model, lookup, LLM, and later hierarchy decisions. With `no_llm=True`, heading classification
 uses the lookup-only path.
 
 ### Canonical section types

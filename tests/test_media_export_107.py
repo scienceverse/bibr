@@ -1,4 +1,4 @@
-"""Additive v10.7 media provenance and diagnostic receipt export."""
+"""Media provenance and diagnostic receipt export (float parts since v12)."""
 
 from __future__ import annotations
 
@@ -91,6 +91,8 @@ def _paper(*, receipts: bool = True) -> Paper:
         ],
         reference_yield_receipt=reference_receipt,
         caption_assignment_receipt=caption_receipt,
+        # Points per 0..1000 layout unit: 0.5 x 1.0 on page 2, 1.0 x 0.5 on page 3.
+        page_sizes={2: (500.0, 1000.0), 3: (1000.0, 500.0)},
     )
     return Paper(
         input_file=InputFile(
@@ -107,7 +109,7 @@ def _paper(*, receipts: bool = True) -> Paper:
     )
 
 
-def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
+def test_float_parts_caption_assignment_and_reference_yield_export_losslessly():
     from bibr.export import PaperExport, export_paper_to_json
 
     paper = _paper()
@@ -115,19 +117,28 @@ def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
     output = export_paper_to_json(paper, validate=False)
     diagnostics = output["extraction"]["diagnostics"]
 
-    assert output["schema_version"] == "11.0"
-    assert output["figure"][0]["parts"] == [
+    assert output["schema_version"] == "12.0"
+    # v12: the figure/table rows are whole objects; each printed piece's page
+    # and box ride extraction.float_parts.
+    assert "parts" not in output["figure"][0] and "parts" not in output["table"][0]
+    assert output["figure"][0]["image"] == "image"
+    assert output["extraction"]["float_parts"] == [
         {
+            "object_type": "figure",
+            "object_id": 1,
             "part_index": 1,
-            "image": "image",
             "page_number": 2,
-            "bbox": [10.0, 20.0, 30.0, 40.0],
-            "provenance": [{"page": 2, "bbox": [10.0, 20.0, 30.0, 40.0]}],
-        }
+            "bbox": [5.0, 20.0, 15.0, 40.0],
+        },
+        {
+            "object_type": "table",
+            "object_id": 1,
+            "part_index": 1,
+            "page_number": 3,
+            "bbox": [50.0, 30.0, 70.0, 40.0],
+        },
     ]
-    assert output["table"][0]["parts"][0]["part_index"] == 1
-    assert output["table"][0]["parts"][0]["contents"] == [["A"], ["1"]]
-    assert diagnostics["caption_assignment"]["candidates"][0]["bbox"] == [10.0, 42.0, 30.0, 48.0]
+    assert diagnostics["caption_assignment"]["candidates"][0]["bbox"] == [5.0, 42.0, 15.0, 48.0]
     assert diagnostics["caption_assignment"]["assignments"][0]["reasons"] == ["same_page"]
     assert diagnostics["reference_yield"]["attempts"][0]["spans"] == [[0, 10], [10, 20]]
     assert diagnostics["reference_yield"]["attempts"][0]["reason_flags"] == ["credible_starts"]
@@ -138,7 +149,7 @@ def test_v107_exports_parts_caption_assignment_and_reference_yield_losslessly():
     )
 
 
-def test_v107_omits_unavailable_receipts_and_native_empty_parts_are_valid():
+def test_omits_unavailable_receipts_and_float_parts():
     from bibr.export import PaperExport, export_paper_to_json
 
     paper = _paper(receipts=False)
@@ -149,14 +160,13 @@ def test_v107_omits_unavailable_receipts_and_native_empty_parts_are_valid():
 
     assert "caption_assignment" not in output["extraction"]["diagnostics"]
     assert "reference_yield" not in output["extraction"]["diagnostics"]
-    assert output["figure"][0]["parts"] == []
-    assert output["table"][0]["parts"] == []
+    assert "float_parts" not in output["extraction"]
     PaperExport.model_validate(output)
 
 
 def test_typed_model_and_result_reject_a_v10_payload():
-    """v11 is a clean break — there is no dual-read and no compatibility shim,
-    so a v10-shaped payload must fail validation rather than half-load."""
+    """Each major is a clean break — there is no dual-read and no compatibility
+    shim, so a v10-shaped payload must fail validation rather than half-load."""
     import pytest
     from pydantic import ValidationError
 
@@ -173,7 +183,7 @@ def test_typed_model_and_result_reject_a_v10_payload():
         Result(legacy)
 
 
-def test_durable_replay_accepts_a_v11_core_and_rejects_a_v10_one():
+def test_durable_replay_accepts_a_current_core_and_rejects_an_older_major():
     import pytest
 
     from bibr.export import export_paper_to_json
@@ -190,7 +200,7 @@ def test_durable_replay_accepts_a_v11_core_and_rejects_a_v10_one():
     paper.extraction = _extraction_block()
     current = export_paper_to_json(paper, validate=False)
     legacy = deepcopy(current)
-    legacy["schema_version"] = "10.7"
+    legacy["schema_version"] = "11.0"
 
     sidecar = make_enrichment_sidecar(
         current,
@@ -199,7 +209,7 @@ def test_durable_replay_accepts_a_v11_core_and_rejects_a_v10_one():
         completeness="complete",
     )
     replayed = replay_enrichment_sidecar(current, sidecar, expected_settings_digest="settings")
-    assert replayed["schema_version"] == "11.0"
+    assert replayed["schema_version"] == "12.0"
     assert canonical_json_sha256(current) == sidecar.core_sha256
 
     legacy_sidecar = make_enrichment_sidecar(

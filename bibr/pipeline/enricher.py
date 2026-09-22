@@ -192,3 +192,41 @@ class CrossrefEnricher:
                 warnings=(warning,),
                 detail=warning,
             )
+
+
+class RorEnricher:
+    """Matches affiliation strings and funder names to ROR organizations.
+
+    Best-effort by design: a rate limit, timeout or outage leaves strings
+    unmatched with a warning, and never marks enrichment partial (which would
+    hold the export behind the enrichment-pending gate).
+    """
+
+    name = "ror"
+
+    def __init__(self, *, settings: GlobalSettings | None = None) -> None:
+        from bibr.config import snapshot_settings
+
+        self._settings = settings if settings is not None else snapshot_settings()
+
+    async def enrich(self, fs: FileState) -> EnrichmentOutcome:
+        paper = fs.paper
+        if paper is None or paper.metadata is None:
+            return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
+        from bibr.clients.ror import get_client
+        from bibr.enrich.organizations import enrich_organizations
+
+        report = await enrich_organizations(
+            paper.metadata,
+            get_client(self._settings),
+            timeout=self._settings.ror.enrich_timeout,
+        )
+        if not report.attempted:
+            return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
+        warnings: tuple[str, ...] = ()
+        if report.timed_out:
+            warnings = (
+                f"ROR matching stopped after {self._settings.ror.enrich_timeout:.0f}s; "
+                f"{report.matched}/{report.attempted} affiliation/funder strings matched",
+            )
+        return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=warnings)

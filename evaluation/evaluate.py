@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from bibr.validation import payload_validation
 from evaluation.section_metrics import (
     BODY_SECTION_TYPES,
     SCORED_TYPES,
@@ -280,6 +281,24 @@ def load_ground_truth_gold(
     return pd.DataFrame(rows)
 
 
+def _author_affiliation(data: dict, author: dict) -> str:
+    """One author's affiliation string, from any export version.
+
+    Gold records and exports up to v11 carry ``author[].affiliation`` (the
+    byline components joined by "; "). v12 dropped it in favour of the
+    ``affiliation[]`` table; joining the author's rows in table order rebuilds
+    the same string.
+    """
+    if "affiliation" in author:
+        return author.get("affiliation") or ""
+    author_id = author.get("author_id")
+    return "; ".join(
+        row.get("text") or ""
+        for row in data.get("affiliation") or []
+        if isinstance(row, dict) and author_id in (row.get("author_ids") or [])
+    )
+
+
 def _normalize_authors(authors_raw) -> list[dict]:
     """Normalize crossref_authors into list of {family, given} dicts."""
     if authors_raw is None:
@@ -507,9 +526,9 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
         "doi": info.get("doi", ""),
         "authors": [
             {
-                "family": a.get("family", ""),
-                "given": a.get("given", ""),
-                "affiliation": a.get("affiliation") or "",
+                "family": a.get("family") or "",
+                "given": a.get("given") or "",
+                "affiliation": _author_affiliation(data, a),
                 "email": a.get("email") or "",
                 "orcid": a.get("orcid") or "",
                 "corresponding": bool(a.get("corresponding")),
@@ -564,7 +583,7 @@ ABSTENTION_SUPPRESSED_COLS = [
 
 def _front_matter_abstained(data: dict) -> bool:
     """True iff the export carries a blocking front-matter abstention issue."""
-    issues = (data.get("validation") or {}).get("issues") or []
+    issues = (payload_validation(data) or {}).get("issues") or []
     return any(
         issue.get("blocking") and issue.get("code") in FRONT_MATTER_ABSTENTION_CODES
         for issue in issues
@@ -824,9 +843,9 @@ def corresponding_acc(e_authors, g_authors) -> float | None:
 
     def flagged(authors):
         return {
-            a.get("family", "").casefold()
+            (a.get("family") or "").casefold()
             for a in authors
-            if a.get("corresponding") and a.get("family", "").strip()
+            if a.get("corresponding") and (a.get("family") or "").strip()
         }
 
     g_set = flagged(g_authors or [])

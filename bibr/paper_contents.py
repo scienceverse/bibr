@@ -466,8 +466,8 @@ class PaperSection:
     # ``section_type``/``classification_score``: "exact_alias", "substring_alias",
     # "alias_prior", "model", "llm", "parent_context", "title", "implicit",
     # "positional", "appendix_repair", or "imrad_dedup" (type reset because a
-    # higher-trust duplicate kept it). None when unclassified. Serialized
-    # in the JSON export.
+    # higher-trust duplicate kept it). None when unclassified. Exported, with
+    # the score, as ``extraction.diagnostics.section_classification``.
     classification_source: str | None = None
     # Optional signal from the trained section classifier — True/False when the
     # MiniLM head produced a prediction, None when no signal was available
@@ -504,8 +504,9 @@ class PaperSentence:
     # not derivable from region-level OCR output.  Empty for DOCX-native input.
     provenance: list["Provenance"] = field(default_factory=list)
     # Training-side region metadata sourced from the first contributing layout region.
-    # Keys: font_size, font_bold, is_italic, bbox_2d, region_type, page_w, page_h,
-    # plus region_page/region_index: that region's RegionSummary ``(page, index)``.
+    # Keys: font_size, font_bold, is_italic, bbox (0..1000 layout space),
+    # region_type, plus region_page/region_index: that region's RegionSummary
+    # ``(page, index)``.
     # None for DOCX-native input or when font metadata was not extracted.
     region_meta: dict | None = None
 
@@ -621,8 +622,14 @@ class PaperXref:
     text_id: int  # The sentence containing this reference
     # Detection tier for bib xrefs ("numeric", "paren-numeric",
     # "flattened-superscript", "author-year", "llm"); None for non-bib types
-    # and until the citation linker records it. Serialized as ``xref[].tier``.
+    # and until the citation linker records it. Exported as
+    # ``extraction.diagnostics.xref_tier``.
     tier: str | None = None
+    # Character span of the reference in the sentence text, when the detector
+    # matched it there; the exporter verifies it (and locates ``contents``
+    # itself when absent) before emitting ``xref[].start``/``end``.
+    start: int | None = None
+    end: int | None = None
 
 
 @dataclass(frozen=True)
@@ -704,6 +711,9 @@ class PaperContents:
     detected_footers: list[str] = field(default_factory=list)
     layout_hints: list[tuple[str, int]] = field(default_factory=list)
     region_summaries: list[RegionSummary] = field(default_factory=list)
+    # Page size in PDF points (as displayed) by 1-based page number; empty for
+    # inputs without pages. The frame of the exported bounding boxes.
+    page_sizes: dict[int, tuple[float, float]] = field(default_factory=dict)
     # Immutable record-boundary IR built after section classification and
     # before implicit-section normalization mutates the section structure.
     # Internal-only; metadata consumers opt into it incrementally.

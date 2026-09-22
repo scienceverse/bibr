@@ -29,7 +29,7 @@ def _payload(*, promotable: bool = True) -> dict:
             }
         ]
     return {
-        "schema_version": "11.0",
+        "schema_version": "12.0",
         "metadata": {"title": "Core"},
         "bib": [],
         "bib_match": [],
@@ -47,13 +47,13 @@ def _payload(*, promotable: bool = True) -> dict:
                 "consolidate": "off",
             },
             "warnings": [],
-        },
-        "validation": {
-            "errors": len(issues),
-            "warnings": 0,
-            "blocking": len(issues),
-            "promotable": promotable,
-            "issues": issues,
+            "validation": {
+                "errors": len(issues),
+                "warnings": 0,
+                "blocking": len(issues),
+                "promotable": promotable,
+                "issues": issues,
+            },
         },
     }
 
@@ -160,8 +160,8 @@ async def test_checkpoint_interruption_keeps_quarantined_core_readable_and_retry
     from bibr.export.json_export import validate_export
 
     assert validate_export(core) == []
-    assert core["schema_version"] == "11.0"
-    assert core["validation"]["promotable"] is False
+    assert core["schema_version"] == "12.0"
+    assert core["extraction"]["validation"]["promotable"] is False
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert receipt["events"][-1]["state"] == "cutoff_interrupted"
     assert receipt["retryable"] is True
@@ -183,8 +183,11 @@ async def test_requested_enrichment_checkpoint_adds_pending_gate_without_changin
 
     core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
     assert fs.artifact_disposition is ArtifactDisposition.PROMOTABLE
-    assert core["validation"]["promotable"] is False
-    assert any(issue["code"] == "VAL_ENRICHMENT_PENDING" for issue in core["validation"]["issues"])
+    assert core["extraction"]["validation"]["promotable"] is False
+    assert any(
+        issue["code"] == "VAL_ENRICHMENT_PENDING"
+        for issue in core["extraction"]["validation"]["issues"]
+    )
 
 
 def test_local_plans_checkpoint_after_identity_before_enrichment():
@@ -232,10 +235,10 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
     assert fs.error is None
     assert fs.result_json["bib_match"] == enriched["bib_match"]
     assert fs.result_json["metadata_match"] == enriched["metadata_match"]
-    assert fs.result_json["validation"]["promotable"] is True
+    assert fs.result_json["extraction"]["validation"]["promotable"] is True
     assert not any(
         issue["code"] == "VAL_ENRICHMENT_PENDING"
-        for issue in fs.result_json["validation"]["issues"]
+        for issue in fs.result_json["extraction"]["validation"]["issues"]
     )
     sidecar = json.loads(fs.artifact_sink.sidecar_path(fs).read_text(encoding="utf-8"))
     assert sidecar["core_sha256"] == fs.core_sha256
@@ -253,7 +256,7 @@ async def test_export_writes_atomic_sidecar_and_replays_enrichment(tmp_path):
     assert receipt["events"][-1]["state"] == "enrichment_complete"
     immutable = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
     assert immutable["bib_match"] == []
-    assert immutable["validation"]["promotable"] is False
+    assert immutable["extraction"]["validation"]["promotable"] is False
     assert (
         json.loads(fs.artifact_sink.destination_path(fs).read_text(encoding="utf-8"))
         == fs.result_json
@@ -382,7 +385,7 @@ async def test_disposition_comes_from_serialized_output_validation_before_pendin
     from bibr.pipeline.stages.core_checkpoint import CoreCheckpointStage
 
     payload = _payload()
-    payload["validation"] = {
+    payload.setdefault("extraction", {})["validation"] = {
         "errors": 1,
         "warnings": 0,
         "blocking": 1,
@@ -669,10 +672,10 @@ async def test_no_enrichment_or_refs_off_checkpoint_is_not_pending(
         _ctx(fs, config=config)
     )
 
-    assert fs.result_json["validation"]["promotable"] is True
+    assert fs.result_json["extraction"]["validation"]["promotable"] is True
     assert not any(
         issue["code"] == "VAL_ENRICHMENT_PENDING"
-        for issue in fs.result_json["validation"]["issues"]
+        for issue in fs.result_json["extraction"]["validation"]["issues"]
     )
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text())
     assert receipt["retryable"] is False
@@ -710,7 +713,8 @@ async def test_pending_gate_follows_effective_enrichment_switch(tmp_path, settin
 
     core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
     has_gate = any(
-        issue["code"] == "VAL_ENRICHMENT_PENDING" for issue in core["validation"]["issues"]
+        issue["code"] == "VAL_ENRICHMENT_PENDING"
+        for issue in core["extraction"]["validation"]["issues"]
     )
     assert has_gate is pending
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
@@ -739,6 +743,9 @@ async def test_checkpoint_pending_gate_obeys_request_override_of_refs_off(tmp_pa
     await CoreCheckpointStage(enrichment_requested=True).run(ctx)
     core = json.loads(fs.artifact_sink.core_path(fs).read_text(encoding="utf-8"))
     assert (
-        any(issue["code"] == "VAL_ENRICHMENT_PENDING" for issue in core["validation"]["issues"])
+        any(
+            issue["code"] == "VAL_ENRICHMENT_PENDING"
+            for issue in core["extraction"]["validation"]["issues"]
+        )
         is pending
     )

@@ -1,0 +1,34 @@
+{
+  "paper_id": "example.pdf",
+  "schema_version": "12.0",
+  "source": {
+    "file_name": "example.pdf",
+    "file_hash": "9f86d081884c7d65",
+    "input_format": "pdf"
+  },
+  "metadata": {
+    "title": null,
+    "keywords": [],
+    "doi": null
+  },
+  "author": [],
+  "affiliation": [],
+  "funding": [],
+  "text": [],
+  "section": [],
+  "url": [],
+  "bib": [],
+  "xref": [],
+  "figure": [],
+  "table": [],
+  "eq": [],
+  "metadata_match": [],
+  "affiliation_match": [],
+  "funding_match": [],
+  "bib_match": [],
+  "extraction": {
+    "bibr_version": "0.5.1",
+    "completed_at": "2026-09-22T12:00:00Z"
+  },
+  "notes": "free text"
+}

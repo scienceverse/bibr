@@ -63,9 +63,9 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
     also overwrites fields that disagree with a match carrying the
     reference's printed DOI. A match found by bibliographic search (or any
     match for a reference printed without a DOI) only fills, in both modes,
-    so a near-miss search hit never rewrites what the paper printed. Modified
-    rows get a ``consolidated_fields`` column — a comma-joined string of the
-    field names taken from the match (scalar, so R consumers stay happy).
+    so a near-miss search hit never rewrites what the paper printed. The field
+    names taken per row are recorded in ``extraction.diagnostics.consolidation``
+    (see :func:`_record_consolidation`), never on the bib rows themselves.
     Returns the number of modified rows.
     """
     if mode not in ("fill", "replace"):
@@ -76,7 +76,7 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
         matches_by_bib.setdefault(m["bib_id"], []).append(m)
 
     rank = {s: i for i, s in enumerate(SERVICE_PRECEDENCE)}
-    modified = 0
+    taken_by_bib: dict[int, list[str]] = {}
     for bib in data.get("bib") or []:
         matches = matches_by_bib.get(bib.get("bib_id"))
         if not matches:
@@ -108,6 +108,33 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
                 bib["is_in_press"] = False
                 taken.append("is_in_press")
         if taken:
-            bib["consolidated_fields"] = ",".join(taken)
-            modified += 1
-    return modified
+            taken_by_bib[bib["bib_id"]] = taken
+    _record_consolidation(data, taken_by_bib)
+    return len(taken_by_bib)
+
+
+def _record_consolidation(data: dict, taken_by_bib: dict[int, list[str]]) -> None:
+    """Merge *taken_by_bib* into ``extraction.diagnostics.consolidation``.
+
+    The receipt is processing provenance, so it lives under ``extraction``
+    rather than on the content rows. A repeated consolidation (e.g. after an
+    enrichment replay) unions field names per ``bib_id``. A payload without an
+    ``extraction`` block (a Paper exported outside the pipeline) has nowhere to
+    record it; the merged ``bib`` values are then indistinguishable from
+    printed ones except by comparing against ``bib_match``.
+    """
+    extraction = data.get("extraction")
+    if not isinstance(extraction, dict):
+        return
+    diagnostics = extraction.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = extraction["diagnostics"] = {}
+    merged: dict[int, list[str]] = {
+        row["bib_id"]: list(row["fields"]) for row in diagnostics.get("consolidation") or []
+    }
+    for bib_id, fields in taken_by_bib.items():
+        existing = merged.setdefault(bib_id, [])
+        existing.extend(f for f in fields if f not in existing)
+    diagnostics["consolidation"] = [
+        {"bib_id": bib_id, "fields": fields} for bib_id, fields in sorted(merged.items())
+    ]

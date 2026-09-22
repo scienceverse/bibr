@@ -365,3 +365,43 @@ def test_parse_deadline_accepts_epoch_and_iso():
     assert parse_deadline("2026-09-03T06:00:00+02:00") == 1788408000.0
     with pytest.raises(ValueError, match="--deadline"):
         parse_deadline("tomorrow")
+
+
+# --- Parquet tables ----------------------------------------------------------------
+
+
+class _RealExports(_FakeChewMany):
+    """Returns a real v12 export (the shared demo paper) for every good stem."""
+
+    def __call__(self, paths, batch_size):
+        from bibr.export.json_export import _export_paper_payload
+        from tests.export.conftest import _demo_paper
+
+        results = super().__call__(paths, batch_size)
+        return [
+            _Result(_export_paper_payload(_demo_paper(with_refs=True))) if r.ok else r
+            for r in results
+        ]
+
+
+def test_tables_are_written_keyed_by_the_batch_paper_id(corpus, tmp_path, monkeypatch):
+    import pyarrow.parquet as pq
+
+    _install(monkeypatch, _RealExports())
+    out = tmp_path / "out"
+    run_batch(_options(corpus, out))
+
+    # Every export printed the same DOI; the batch id keeps them apart.
+    exported = json.loads((out / "good1.json").read_text(encoding="utf-8"))
+    assert exported["paper_id"] == "good1"
+    papers = pq.read_table(out / "tables" / "paper.parquet").column("paper_id").to_pylist()
+    assert papers == ["good1", "good2", "good3"]
+    bib = pq.read_table(out / "tables" / "bib.parquet")
+    assert set(bib.column("paper_id").to_pylist()) == {"good1", "good2", "good3"}
+
+
+def test_no_tables_option_skips_them(corpus, tmp_path, monkeypatch):
+    _install(monkeypatch, _RealExports())
+    out = tmp_path / "out"
+    run_batch(_options(corpus, out, tables=False))
+    assert not (out / "tables").exists()

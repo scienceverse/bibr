@@ -20,7 +20,7 @@ from rapidfuzz import fuzz
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.enrich.schemas import CrossrefWorkItem
-from bibr.models import BibAuthor
+from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
 from bibr.utils.text import normalize_doi
 
@@ -938,7 +938,17 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
     authors = None
     if cr_item.authors:
         author_list = [
-            BibAuthor(given=a.given, family=a.family) for a in cr_item.authors if a.family
+            BibAuthor(
+                given=a.given,
+                family=a.family,
+                orcid=canonicalize_orcid(a.orcid),
+                affiliation=[
+                    MatchOrganization(name=org.name, ror=org.ror) for org in a.affiliations
+                ]
+                or None,
+            )
+            for a in cr_item.authors
+            if a.family
         ]
         authors = author_list if author_list else None
 
@@ -968,6 +978,12 @@ def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
         bib_type=bib_type,
         url=cr_item.url,
         date=cr_item.date,
+        license_url=cr_item.license_url,
+        funders=[
+            MatchFunder(name=f.name, funder_doi=f.funder_doi, ror=f.ror, award_ids=f.award_ids)
+            for f in cr_item.funders
+        ]
+        or None,
     )
 
 

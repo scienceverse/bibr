@@ -434,7 +434,10 @@ class CrossrefClient:
             The JSON response from CrossRef.
         """
         # select= is only supported on the list/search route, not on /works/{doi}
-        _SELECT = "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,score"
+        _SELECT = (
+            "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,"
+            "score,funder,license"
+        )
         return await self._cached(
             f"search:{limit}:{query}",
             lambda: self._request(

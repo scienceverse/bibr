@@ -114,16 +114,17 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     assert result["paper_id"] == "10.1234/test"
 
     # Check metadata / source / root version
-    assert result["schema_version"] == "11.0"
+    assert result["schema_version"] == "12.0"
     metadata = result["metadata"]
     assert metadata["title"] == "Test Paper"
     assert metadata["doi"] == "10.1234/test"
     assert result["source"]["file_hash"] == "hash123"
     assert result["source"]["file_name"] == "test.pdf"
     assert metadata["paper_type"] is None
-    assert metadata["paper_type_confidence"] is None
     assert metadata["oecd_l1"] is None
-    assert metadata["oecd_confidence"] is None
+    # v12: classifier confidences are processing facts, not paper metadata.
+    assert "paper_type_confidence" not in metadata
+    assert "oecd_confidence" not in metadata
 
     # Check text — footnote text is now in the text table
     text_list = result["text"]
@@ -403,7 +404,7 @@ def test_paper_export_bib_with_populated_references(mock_contents):
     assert cr["bib_type"] == "journal_article"
 
     # Verify version
-    assert result["schema_version"] == "11.0"
+    assert result["schema_version"] == "12.0"
 
 
 def test_paper_export_bib_without_matches(mock_contents):
@@ -612,8 +613,10 @@ def test_paper_export_orcid_canonicalization():
     # Both should be in canonical URI form
     assert author_list[0]["orcid"] == "https://orcid.org/0000-0001-2345-6789"
     assert author_list[1]["orcid"] == "https://orcid.org/0000-0002-3456-789X"
-    # Empty affiliation → null
-    assert author_list[1]["affiliation"] is None
+    # Affiliations live only in the affiliation table; an empty byline string
+    # contributes no row.
+    assert "affiliation" not in author_list[1]
+    assert all(2 not in row["author_ids"] for row in result["affiliation"])
 
 
 class TestEnforceImradOrder:

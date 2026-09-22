@@ -398,6 +398,14 @@ class HtmlParser:
         )
         meta.publisher = first("dc.publisher", "citation_publisher", "publisher") or None
         meta.license = first("dc.rights", "rights") or None
+        meta.pmid = first("citation_pmid") or None
+        meta.arxiv = first("citation_arxiv_id") or None
+        html_tag = soup.find("html")
+        meta.language = (
+            first("citation_language", "dc.language")
+            or (str(html_tag.get("lang") or "") if html_tag else "")
+            or None
+        )
         license_link = soup.find("link", rel=lambda rel: rel and "license" in rel)
         if not meta.license and license_link is not None:
             meta.license = str(license_link.get("href") or "").strip() or None
