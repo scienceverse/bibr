@@ -21,6 +21,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   still cannot see source changes between releases; the `CACHE_OCR` description
   now says to use a fresh `CACHE_OCR_DIR` per revision when comparing such
   changes, and to leave the cache off when timing runs.
+- `replace` consolidation (`CROSSREF_CONSOLIDATE=replace`, `--consolidate=replace`,
+  `Result.consolidate("replace")`) no longer overwrites printed reference fields,
+  the DOI included, from a match found by bibliographic search. That search
+  accepts a title similarity of 80, so a near-miss hit could rewrite a correct
+  printed volume, issue or page range. A printed value is now overwritten only by
+  a match that carries the reference's own printed DOI, compared
+  case-insensitively. Other matches still fill empty fields, as in `fill` mode.
 - Reference-segmentation training capture (`REF_TRAINING_DATA_DIR`) no longer
   mixes geometry-segmenter predictions in with LLM segmentation labels; only
   LLM output is captured. Under the default `geom` strategy, that means only

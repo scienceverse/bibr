@@ -996,11 +996,13 @@ class CrossrefOptions(_BibrSettings):
         description="TTL for shared Crossref cache entries, in seconds (default 30 days).",
     )
     # Merge accepted bib_match data into bib rows at export:
-    # "off" (default) | "fill" (fill empty fields only) | "replace" (overwrite too)
+    # "off" (default) | "fill" (fill empty fields only) | "replace" (also overwrite
+    # from a match carrying the reference's printed DOI)
     consolidate: Literal["off", "fill", "replace"] = Field(
         "off",
         description='Merge accepted bib_match data into bib rows at export: "off" (default), '
-        '"fill" (fill empty fields only), or "replace" (overwrite too).',
+        '"fill" (fill empty fields only), or "replace" (also overwrite printed values, only '
+        "from a match carrying the reference's printed DOI).",
     )
 
     @field_validator("consolidate", mode="before")
