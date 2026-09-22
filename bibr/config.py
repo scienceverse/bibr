@@ -1139,7 +1139,11 @@ class CacheOptions(_BibrSettings):
     ocr: bool = Field(
         False,
         description="Opt-in disk cache for OCR stage output — reuses cached OCR regions for the "
-        "same PDF instead of re-running the OCR backend. Off by default.",
+        "same PDF instead of re-running the OCR backend. A complete entry also skips page "
+        "rendering, layout detection and native-text analysis, so leave it off when timing "
+        "runs. Entries are keyed on the settings, model pins and bibr version, not on source "
+        "changes between releases; use a fresh CACHE_OCR_DIR per source revision when "
+        "comparing revisions that touch those stages. Off by default.",
     )
     # Directory for the OCR disk cache. None → $XDG_CACHE_HOME/bibr/ocr (else
     # ~/.cache/bibr/ocr). Env: CACHE_OCR_DIR.

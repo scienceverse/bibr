@@ -875,3 +875,13 @@ def test_the_served_alias_does_not_hide_a_repin():
 
     assert alias.model == _identity().model
     assert ocr_cache._key(fs, cfg, alias, baseline) != ocr_cache._key(fs, cfg, alias, repinned)
+
+
+def test_key_changes_with_the_bibr_version(monkeypatch):
+    import bibr
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    base = ocr_cache._key(fs, cfg, _identity())
+    monkeypatch.setattr(bibr, "__version__", "99.0.0")
+    assert ocr_cache._key(fs, cfg, _identity()) != base

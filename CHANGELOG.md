@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bracket and superscript markers, up to the highest number where at least
   half of 1..n are cited, and warns when fewer than half that many references
   were parsed (at least 15 cited).
+- The OCR disk cache (`CACHE_OCR`, on by default in the local demo) is now keyed
+  on the bibr version too, so an upgraded bibr no longer reuses rendering,
+  layout, native-text and OCR bundles made by the previous release. The key
+  still cannot see source changes between releases; the `CACHE_OCR` description
+  now says to use a fresh `CACHE_OCR_DIR` per revision when comparing such
+  changes, and to leave the cache off when timing runs.
 - Reference-segmentation training capture (`REF_TRAINING_DATA_DIR`) no longer
   mixes geometry-segmenter predictions in with LLM segmentation labels; only
   LLM output is captured. Under the default `geom` strategy, that means only
