@@ -249,8 +249,9 @@ class Result:
         """Return a new Result with ``bib_match`` data merged into ``bib``.
 
         ``mode="fill"`` only fills empty fields; ``mode="replace"`` also
-        overwrites disagreeing ones. The original Result keeps the
-        PDF-verbatim data untouched.
+        overwrites disagreeing ones, but only from a match carrying the
+        reference's printed DOI. The original Result keeps the PDF-verbatim
+        data untouched.
         """
         import copy
 
