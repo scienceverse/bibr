@@ -37,6 +37,7 @@ from bibr.export.models import (
     UrlExport,
     ValidationExport,
     ValidationIssueExport,
+    WarningExport,
     XrefExport,
 )
 from bibr.export.qualification_provenance import (
@@ -70,6 +71,7 @@ __all__ = [
     "UrlExport",
     "ValidationExport",
     "ValidationIssueExport",
+    "WarningExport",
     "XrefExport",
     "build_paper_export",
     "build_qualification_provenance",

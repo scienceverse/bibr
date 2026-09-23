@@ -296,6 +296,61 @@ def _demo_paper(*, with_refs: bool) -> Paper:
     return paper
 
 
+def as_parsed(paper: Paper) -> None:
+    """Reshape the demo paper the way ``create_content_sections`` leaves one.
+
+    Each caption and footnote is a synthetic section holding its sentence, and
+    a float points at its section while remembering the body section it sits
+    in. The export turns these into caption rows and a ``footnote`` row.
+    """
+    contents = paper.contents
+    contents.sections += [
+        PaperSection(
+            section_id=3,
+            header="Figure 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.FIGURE,
+            synthetic_kind="figure",
+        ),
+        PaperSection(
+            section_id=4,
+            header="Table 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.TABLE,
+            synthetic_kind="table",
+        ),
+        PaperSection(
+            section_id=5,
+            header="Footnote 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.FOOTNOTE,
+            synthetic_kind="footnote",
+            footnote_label="*",
+        ),
+    ]
+    contents.sentences += [
+        PaperSentence(
+            text_id=3, text="Figure 1. Plot", section_id=3, paragraph_id=3, page_number=2
+        ),
+        PaperSentence(
+            text_id=4, text="Table 1. Values", section_id=4, paragraph_id=4, page_number=2
+        ),
+        PaperSentence(
+            text_id=5, text="* Collected in 2020.", section_id=5, paragraph_id=5, page_number=2
+        ),
+    ]
+    for item, own_section in ((contents.figures[0], 3), (contents.tables[0], 4)):
+        item._body_section_id = item.section_id
+        item.section_id = own_section
+    contents.xrefs += [
+        PaperXref(xref_id=1, xref_type="figure", contents="Figure 1", text_id=2),
+        PaperXref(xref_id=5, xref_type="foot", contents="*", text_id=2),
+    ]
+
+
 def _strip_nondeterministic(payload: dict) -> dict:
     extraction = payload.get("extraction")
     if isinstance(extraction, dict):

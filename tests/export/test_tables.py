@@ -101,12 +101,17 @@ def test_same_schema_whatever_the_papers(payload, tmp_path):
 
 
 def test_processing_lists_get_their_own_tables(payload, tmp_path):
+    payload = copy.deepcopy(payload)
+    warning = {"code": "OCR_PAGE_FAILED", "message": "OCR failed for a page (page 2)"}
+    payload["extraction"]["warnings"] = [warning]
     write_tables([payload], tmp_path)
     issues = pq.read_table(tmp_path / "extraction_validation_issues.parquet").to_pylist()
     expected = payload["extraction"]["validation"]["issues"]
     assert [i["code"] for i in issues] == [i["code"] for i in expected]
     sections = pq.read_table(tmp_path / "extraction_section_classification.parquet")
     assert sections.num_rows == len(payload["extraction"]["diagnostics"]["section_classification"])
+    warnings = pq.read_table(tmp_path / "extraction_warnings.parquet").to_pylist()
+    assert warnings == [{"paper_id": payload["paper_id"], **warning}]
 
 
 def test_reads_json_files_and_skips_other_json(payload, tmp_path):

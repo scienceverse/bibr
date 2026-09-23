@@ -188,6 +188,7 @@ def test_enricher_never_reports_partial(monkeypatch):
     from bibr.enrich import organizations
     from bibr.enrich.organizations import OrganizationReport
     from bibr.pipeline.enricher import EnrichmentStatus, RorEnricher
+    from bibr.processing_warnings import WarningCode
 
     async def fake(metadata, client, *, timeout):
         return OrganizationReport(attempted=5, matched=2, timed_out=True)
@@ -196,7 +197,8 @@ def test_enricher_never_reports_partial(monkeypatch):
     fs = SimpleNamespace(paper=SimpleNamespace(metadata=_metadata()))
     outcome = asyncio.run(RorEnricher(settings=_settings()).enrich(fs))
     assert outcome.status is EnrichmentStatus.COMPLETE
-    assert outcome.warnings and "2/5" in outcome.warnings[0]
+    assert [w.code for w in outcome.warnings] == [WarningCode.ROR_MATCHING_TIMEOUT]
+    assert "2/5" in outcome.warnings[0].message
 
 
 @pytest.mark.parametrize(

@@ -49,6 +49,7 @@ from bibr.paper_contents import (
     RegionSummary,
     is_exact_front_matter_furniture,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.carry_over_manager import CarryOverState
 from bibr.structure.floats_normalize import (
@@ -452,24 +453,30 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             caption_assignment_receipt, {**figure_remap, **table_remap}
         )
 
-        processing_warnings: list[str] = []
+        processing_warnings: list[ProcessingWarning] = []
         if self._corrupt_region_count:
             processing_warnings.append(
-                f"OCR:warning:OCR_CONTROL_CHARS: {self._corrupt_region_count} region(s) "
-                "contained control characters — OCR output is corrupted; section headers "
-                "and references may be unreliable"
+                ProcessingWarning(
+                    WarningCode.OCR_CONTROL_CHARS,
+                    f"{self._corrupt_region_count} region(s) contained control characters — "
+                    "OCR output is corrupted; section headers and references may be unreliable",
+                )
             )
         if self._native_text_pua_fallback_count:
             processing_warnings.append(
-                "OCR:warning:OCR_NATIVE_TEXT_PUA_FALLBACK: "
-                f"{self._native_text_pua_fallback_count} region(s) contained private-use "
-                "native text and were recovered with OCR"
+                ProcessingWarning(
+                    WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK,
+                    f"{self._native_text_pua_fallback_count} region(s) contained private-use "
+                    "native text and were recovered with OCR",
+                )
             )
         if self._dropped_table_count:
             processing_warnings.append(
-                f"OCR:warning:OCR_TABLE_DROPPED: {self._dropped_table_count} table region(s) "
-                "could not be parsed and were dropped — table content is missing from the "
-                "output"
+                ProcessingWarning(
+                    WarningCode.OCR_TABLE_DROPPED,
+                    f"{self._dropped_table_count} table region(s) could not be parsed and were "
+                    "dropped — table content is missing from the output",
+                )
             )
 
         # Sentences not yet created — caller must invoke

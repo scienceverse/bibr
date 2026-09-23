@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
@@ -376,7 +378,7 @@ def test_sidecar_replay_rejects_a_core_without_an_extraction_block():
         core_sha256=canonical_json_sha256(core),
         settings_digest="settings",
         completeness="partial",
-        warnings=("transport failure",),
+        warnings=(ProcessingWarning(WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure"),),
     )
 
     with pytest.raises(ArtifactReplayError, match="no extraction block"):
@@ -385,6 +387,7 @@ def test_sidecar_replay_rejects_a_core_without_an_extraction_block():
 
 def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them():
     from bibr.pipeline.artifacts import (
+        EnrichmentSidecar,
         canonical_json_sha256,
         make_enrichment_sidecar,
         replay_enrichment_sidecar,
@@ -398,19 +401,75 @@ def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them()
         core_sha256=canonical_json_sha256(core),
         settings_digest="settings",
         completeness="partial",
-        warnings=("transport failure " + "x" * 2_000,),
+        warnings=(
+            ProcessingWarning(
+                WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure " + "x" * 2_000
+            ),
+        ),
         detail="1 of 1 terminal requests failed " + "y" * 2_000,
     )
 
     encoded = sidecar.to_dict()
-    assert len(encoded["warnings"][0]) <= 512
+    assert encoded["warnings"][0]["code"] == "ENRICHMENT_LOOKUP_FAILED"
+    assert len(encoded["warnings"][0]["message"]) <= 512
     assert len(encoded["detail"]) <= 512
-    assert encoded["warnings"][0].startswith("transport failure")
+    assert encoded["warnings"][0]["message"].startswith("transport failure")
+    assert EnrichmentSidecar.from_dict(json.loads(json.dumps(encoded))) == sidecar
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
     warnings = replayed["extraction"]["warnings"]
-    assert any("transport failure" in warning for warning in warnings)
-    assert any("1 of 1 terminal requests failed" in warning for warning in warnings)
+    assert [w["code"] for w in warnings] == ["ENRICHMENT_LOOKUP_FAILED", "ENRICHMENT_INCOMPLETE"]
+    assert warnings[0]["message"].startswith("transport failure")
+    assert warnings[1]["message"].startswith("1 of 1 terminal requests failed")
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [["transport failure"], [{"code": "lowercase", "message": "m"}], "not-a-list"],
+)
+def test_replay_refuses_a_core_whose_warnings_are_not_coded(warnings):
+    """A 12.0 core written before warnings had codes holds prose strings: replay
+    would append coded warnings to it and mix both shapes in one list."""
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    core["extraction"]["warnings"] = warnings
+    sidecar = make_enrichment_sidecar(
+        core,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="settings",
+        completeness="partial",
+        warnings=(ProcessingWarning(WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure"),),
+    )
+
+    with pytest.raises(ArtifactReplayError, match="invalid warnings"):
+        replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
+
+
+def test_sidecar_warnings_must_be_coded():
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        EnrichmentSidecar,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    sidecar = make_enrichment_sidecar(
+        core, core_sha256=canonical_json_sha256(core), settings_digest="s", completeness="partial"
+    )
+    for warnings in (("prose",), (ProcessingWarning("lowercase", "m"),)):
+        bad = EnrichmentSidecar(**{**sidecar.__dict__, "warnings": warnings})
+        with pytest.raises(ArtifactReplayError):
+            replay_enrichment_sidecar(core, bad, expected_settings_digest="s")
+    with pytest.raises(ValueError, match="processing warning"):
+        EnrichmentSidecar.from_dict({**sidecar.to_dict(), "warnings": ["prose"]})
 
 
 def test_enrichment_settings_digest_includes_resolver_result_settings():

@@ -34,6 +34,7 @@ from bibr.paper_contents import (
     PaperURLLink,
     PaperXref,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.xref_utils import detect_xrefs
 from tests.export.conftest import extraction_block as _extraction_block
 
@@ -1744,13 +1745,13 @@ class TestProcessingWarnings:
         paper = _minimal_paper()
         paper.extraction = _extraction_block()
         paper.processing_warnings = [
-            "OCR failed for page index 3: timeout",
-            "Crossref enrichment timed out",
+            ProcessingWarning(WarningCode.OCR_PAGE_FAILED, "page 4: TimeoutError: timeout"),
+            ProcessingWarning(WarningCode.CROSSREF_ENRICHMENT_TIMEOUT, "timed out after 120s"),
         ]
         result = export_paper_to_json(paper)
         assert result["extraction"]["warnings"] == [
-            "OCR failed for page index 3: timeout",
-            "Crossref enrichment timed out",
+            {"code": "OCR_PAGE_FAILED", "message": "page 4: TimeoutError: timeout"},
+            {"code": "CROSSREF_ENRICHMENT_TIMEOUT", "message": "timed out after 120s"},
         ]
 
     def test_warnings_round_trip_through_schema(self):
@@ -1758,9 +1759,29 @@ class TestProcessingWarnings:
 
         paper = _minimal_paper()
         paper.extraction = _extraction_block()
-        paper.processing_warnings = ["test warning"]
+        paper.processing_warnings = [ProcessingWarning(WarningCode.LOW_TEXT_QUALITY, "0.12")]
         result = export_paper_to_json(paper)
         assert validate_export(result) == []
+
+    def test_block_and_paper_warnings_are_unioned_in_order(self):
+        """The stage snapshots the warnings into the block as objects; the
+        Paper may gain more afterwards. Both reach the export once each."""
+        seen = ProcessingWarning(WarningCode.REF_SEG_CRF_FALLBACK, "LLM seg tier disabled")
+        later = ProcessingWarning(WarningCode.CONSOLIDATE_WITHOUT_ENRICHMENT, "nothing to merge")
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block(warnings=[seen.to_dict()])
+        paper.processing_warnings = [seen, later]
+        result = export_paper_to_json(paper)
+        assert result["extraction"]["warnings"] == [seen.to_dict(), later.to_dict()]
+
+    def test_prose_and_malformed_warnings_fail_the_export(self):
+        import pytest
+
+        for bad in ("OCR failed for page index 3", {"code": "lowercase", "message": "m"}):
+            paper = _minimal_paper()
+            paper.extraction = _extraction_block(warnings=[bad])
+            with pytest.raises(ValueError):
+                export_paper_to_json(paper)
 
 
 # ── output validation gate wiring ──────────────────────────────────────
@@ -1926,7 +1947,8 @@ class TestValidationGateWiring:
         two shapes of one finding made every consumer reconcile them."""
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
         paper.extraction = _extraction_block()
-        paper.processing_warnings = ["ocr retried page 3"]
+        retried = ProcessingWarning(WarningCode.OCR_REGION_FAILED, "ocr retried page 3")
+        paper.processing_warnings = [retried]
 
         result = export_paper_to_json(paper)
 
@@ -1934,7 +1956,7 @@ class TestValidationGateWiring:
         assert block["warnings"] >= 1
         codes = {i["code"] for i in block["issues"]}
         assert "VAL_TITLE_GENERIC" in codes
-        assert result["extraction"]["warnings"] == ["ocr retried page 3"]
+        assert result["extraction"]["warnings"] == [retried.to_dict()]
 
     def test_validate_false_skips_gate(self):
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
@@ -1982,7 +2004,10 @@ class TestMetadataIsScalarOnly:
         paper.extraction = _extraction_block(
             ocr={"backend": "glm-http", "model": None, "profile": "glm"},
         )
-        paper.processing_warnings = ["w1", "w2"]
+        paper.processing_warnings = [
+            ProcessingWarning(WarningCode.OCR_TABLE_DROPPED, "w1"),
+            ProcessingWarning(WarningCode.OCR_CONTROL_CHARS, "w2"),
+        ]
         metadata = export_paper_to_json(paper)["metadata"]
         for k, v in metadata.items():
             if k == "keywords":
@@ -2378,34 +2403,49 @@ class TestExtractionProvenance:
         assert ext["producer"]["build_sha"] == "a" * 40
 
     def test_build_extraction_detects_seg_fallback(self):
-        from bibr.extract.extractor import SEG_FALLBACK_WARNING_PREFIX
-        from bibr.pipeline.stages.export import _build_extraction
-
-        paper = _minimal_paper()
-        paper.processing_warnings = [f"{SEG_FALLBACK_WARNING_PREFIX}: produced 0 spans"]
-        ext = _build_extraction(self._ctx(), paper)
-        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
-
-    def test_build_extraction_detects_geom_cascade(self):
-        # A geom->LLM cascade is a fall-back from the configured (geom) segmenter
-        # and must flip ref_seg_fallback_used, even though it uses a distinct prefix.
-        from bibr.extract.extractor import GEOM_CASCADE_WARNING_PREFIX
         from bibr.pipeline.stages.export import _build_extraction
 
         paper = _minimal_paper()
         paper.processing_warnings = [
-            f"{GEOM_CASCADE_WARNING_PREFIX}: geom low-confidence (0.947 < 0.95) or empty"
+            ProcessingWarning(WarningCode.REF_SEG_CRF_FALLBACK, "produced 0 spans")
+        ]
+        ext = _build_extraction(self._ctx(), paper)
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
+        assert ext["warnings"] == [{"code": "REF_SEG_CRF_FALLBACK", "message": "produced 0 spans"}]
+
+    def test_build_extraction_detects_geom_cascade(self):
+        # A geom->LLM cascade is a fall-back from the configured (geom) segmenter
+        # and must flip ref_seg_fallback_used, even though it has a distinct code.
+        from bibr.pipeline.stages.export import _build_extraction
+
+        paper = _minimal_paper()
+        paper.processing_warnings = [
+            ProcessingWarning(
+                WarningCode.REF_SEG_GEOM_CASCADE, "geom low-confidence (0.947 < 0.95) or empty"
+            )
         ]
         ext = _build_extraction(self._ctx(), paper)
         assert ext["diagnostics"]["ref_seg_fallback_used"] is True
 
+    def test_build_extraction_detects_a_segmenter_error(self):
+        # A region or CRF segmenter that raised did not produce the final
+        # segmentation either (both were filed under the CRF-fallback prefix).
+        from bibr.pipeline.stages.export import _build_extraction
+
+        for code in (WarningCode.REF_SEG_REGION_ERROR, WarningCode.REF_SEG_CRF_ERROR):
+            paper = _minimal_paper()
+            paper.processing_warnings = [ProcessingWarning(code, "error: RuntimeError('x')")]
+            ext = _build_extraction(self._ctx(), paper)
+            assert ext["diagnostics"]["ref_seg_fallback_used"] is True, code
+
     def test_build_extraction_merge_split_is_not_fallback(self):
         # Merge-split is a correction on top of the segmenter, not a fall-back.
-        from bibr.extract.extractor import MERGE_SPLIT_WARNING_PREFIX
         from bibr.pipeline.stages.export import _build_extraction
 
         paper = _minimal_paper()
-        paper.processing_warnings = [f"{MERGE_SPLIT_WARNING_PREFIX}: +1 segment(s)"]
+        paper.processing_warnings = [
+            ProcessingWarning(WarningCode.REF_SEG_MERGE_SPLIT, "split into 1 more segment(s)")
+        ]
         ext = _build_extraction(self._ctx(), paper)
         assert ext["diagnostics"]["ref_seg_fallback_used"] is False
 

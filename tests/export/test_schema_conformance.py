@@ -91,15 +91,19 @@ def test_the_full_example_has_every_root_key_in_order():
     assert example["xref"][0]["start"] is not None
     assert example["extraction"]["pages"] and example["affiliation_match"]
     assert example["funding_match"] and example["metadata_match"][0]["funder"]
+    assert example["extraction"]["warnings"][0]["code"] == "STATEMENT_LEXICAL_FALLBACK"
+    assert example["footnote"] and example["figure"][0]["text_id"] is not None
 
 
 def _regenerate_full_example() -> None:
     """Rewrite ``valid/full.json`` from the shared demo paper (run this module)."""
     from bibr.export.json_export import _export_paper_payload
+    from bibr.extract.statement_scan import lexical_fallback_warning
     from bibr.paper_contents import PaperFigurePart
-    from tests.export.conftest import _demo_paper
+    from tests.export.conftest import _demo_paper, as_parsed
 
     paper = _demo_paper(with_refs=True)
+    as_parsed(paper)
     paper.contents.sentences[
         1
     ].text = "It replicated prior work [1], t(28) = 3.42, see Table 1 and data."
@@ -109,6 +113,7 @@ def _regenerate_full_example() -> None:
     paper.contents.figures[0].parts = [
         PaperFigurePart(page_number=2, bbox=(96.0, 410.0, 512.0, 688.0), image_b64=None)
     ]
+    paper.processing_warnings = [lexical_fallback_warning("data_availability")]
     payload = _export_paper_payload(paper)
     payload["extraction"]["completed_at"] = "2026-09-22T12:00:00Z"
     (ROOT / "valid" / "full.json").write_text(

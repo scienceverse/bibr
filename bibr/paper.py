@@ -28,6 +28,7 @@ from bibr.models import (
     migrate_bib_type,
 )
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
+from bibr.processing_warnings import ProcessingWarning
 from bibr.validation import ValidationIssue, references_incomplete_issue
 
 if TYPE_CHECKING:
@@ -273,7 +274,7 @@ class Paper:
     # Non-fatal warnings collected during processing (Crossref timeouts,
     # per-page OCR failures, etc.) — surfaced in the JSON export so consumers
     # can detect partial failures programmatically.
-    processing_warnings: list[str] = field(default_factory=list)
+    processing_warnings: list[ProcessingWarning] = field(default_factory=list)
     # Per-paper LLM token usage keyed by the ``(label, provider, model)``
     # triple (e.g. ``("extract_authors", "google", "gemini-flash-lite")``),
     # attached by post_parse. One row per engine that ran a label — the source

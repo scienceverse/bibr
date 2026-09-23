@@ -7,7 +7,7 @@ reference-segmentation events. This module runs a battery of cheap, defensive
 checks over the finished export dict (schema v12.0 shape) and returns a list
 of :class:`ValidationIssue`; the export wiring surfaces them in the structured
 top-level ``validation`` block, and there only — findings are never mirrored
-into ``extraction.warnings`` as prose.
+into ``extraction.warnings``.
 
 Every check is defensive: it must never raise on malformed input, degrading to
 skipping itself instead. :func:`validate_export` wraps each check so one broken

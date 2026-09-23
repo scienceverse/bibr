@@ -2,7 +2,8 @@
 
 The export JSON carries a top-level ``validation = {"errors": int,
 "warnings": int, "issues": [...]}`` block (absent when the output-validation
-gate was skipped) plus ``processing_warnings: list[str]``. After each file's
+gate was skipped) plus ``extraction.warnings`` ``{code, message}`` objects
+(``processing_warnings`` strings before v11). After each file's
 ✓ line, ``_write_chunk_results`` should print a dim one-liner summarizing any
 validation errors/warnings — and print nothing extra for a clean payload, so
 existing golden output for clean runs is unaffected. The batch summary
@@ -172,7 +173,14 @@ def test_processing_warnings_folded_into_warnings_count(tmp_path):
                 {"code": "VAL_TITLE_GENERIC", "severity": "warning", "message": "generic title"},
             ],
         },
-        "extraction": {"warnings": ["STATEMENT_LEXICAL_FALLBACK: funding_statement"]},
+        "extraction": {
+            "warnings": [
+                {
+                    "code": "STATEMENT_LEXICAL_FALLBACK",
+                    "message": "funding_statement filled by lexical anchor matching",
+                }
+            ]
+        },
     }
     console = MagicMock()
 

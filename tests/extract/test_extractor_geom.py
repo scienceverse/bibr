@@ -1,11 +1,9 @@
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bibr.extract.ref_extractor import (
-    GEOM_CASCADE_WARNING_PREFIX,
-    ReferenceExtractor,
-)
+from bibr.extract.ref_extractor import ReferenceExtractor
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import WarningCode
 
 
 def _extractor(ref_line_geometry):
@@ -71,7 +69,7 @@ async def test_geom_absent_geometry_cascades_to_llm():
         out = await ex._segment_references("ref blob", "geom")
     assert out == ["Aknin, L. (2013)."]
     ex.llm_client.segment_references.assert_awaited_once()
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in ex.contents.processing_warnings)
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in ex.contents.processing_warnings)
 
 
 async def test_geom_low_confidence_cascades_to_llm():
@@ -88,7 +86,7 @@ async def test_geom_low_confidence_cascades_to_llm():
         ex._settings.REF_GEOM_SEG_CASCADE_THRESHOLD = 0.5
         await ex._segment_references(_REF_TEXT, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in ex.contents.processing_warnings)
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in ex.contents.processing_warnings)
     # The LLM tier the cascade reached is still captured, once, with its labels.
     saver.assert_called_once_with(_REF_TEXT, ["Aknin, L. (2013)."], settings=ex._settings)
 
@@ -109,9 +107,9 @@ async def test_geom_low_align_yield_cascades_to_llm():
         await ex._segment_references(_REF_TEXT, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
     warnings = ex.contents.processing_warnings
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in warnings)
-    assert any("labeled 120" in w and "aligned 10" in w for w in warnings)
-    assert any("0.08" in w for w in warnings)  # 10/120 rounded
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in warnings)
+    assert any("labeled 120" in w.message and "aligned 10" in w.message for w in warnings)
+    assert any("0.08" in w.message for w in warnings)  # 10/120 rounded
 
 
 async def test_geom_healthy_align_yield_uses_geom_no_llm():
@@ -143,8 +141,8 @@ async def test_geom_zero_labeled_cascades_to_llm():
         await ex._segment_references(_REF_TEXT, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
     warnings = ex.contents.processing_warnings
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in warnings)
-    assert any("labeled 0" in w for w in warnings)
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in warnings)
+    assert any("labeled 0" in w.message for w in warnings)
     geom_attempt = next(
         attempt for attempt in ex._segmentation_attempts if attempt.strategy == "geom"
     )
@@ -162,7 +160,7 @@ async def test_geom_segmenter_error_cascades_to_llm():
     ):
         await ex._segment_references(_REF_TEXT, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in ex.contents.processing_warnings)
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in ex.contents.processing_warnings)
 
 
 async def test_geom_segment_runs_off_event_loop():
@@ -224,8 +222,8 @@ async def test_geom_segment_count_below_region_ratio_cascades():
         await ex._segment_references(ref_text, "geom")
     ex.llm_client.segment_references.assert_awaited_once()
     warnings = ex.contents.processing_warnings
-    assert any(GEOM_CASCADE_WARNING_PREFIX in w for w in warnings)
-    assert any("segment count" in w and "region onsets" in w for w in warnings)
+    assert any(w.code == WarningCode.REF_SEG_GEOM_CASCADE for w in warnings)
+    assert any("segment count" in w.message and "region onsets" in w.message for w in warnings)
 
 
 async def test_geom_segment_count_within_region_ratio_kept():

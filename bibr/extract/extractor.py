@@ -32,17 +32,10 @@ from bibr.clients.llm_protocol import LlmClient
 from bibr.exceptions import BibrError, ProcessingError
 from bibr.extract.core_metadata import (  # noqa: F401 — re-exported for back-compat
     _CORRECTION_NOTICE_TITLE_RE,
-    EMPTY_AUTHORS_WARNING_PREFIX,
     CoreMetadataExtractor,
 )
 from bibr.extract.ref_extractor import (  # noqa: F401 — re-exported for back-compat
-    GEOM_CASCADE_WARNING_PREFIX,
-    MARKER_SPLIT_RECOVERY_PREFIX,
-    MERGE_SPLIT_WARNING_PREFIX,
-    REF_EXTRACTION_ERROR_PREFIX,
     REF_PARSE_STRATEGIES,
-    REF_SEG_HARD_FAILURE_PREFIX,
-    SEG_FALLBACK_WARNING_PREFIX,
     IncompleteOutputException,
     ReferenceExtractor,
     _backfill_issue,
@@ -79,6 +72,7 @@ from bibr.extract.ref_locator import (  # noqa: F401 — re-exported for back-co
 )
 from bibr.paper import PaperMetadata, PaperReference
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.validation import ValidationIssue
 
 if TYPE_CHECKING:
@@ -397,12 +391,14 @@ class MetadataExtractor:
         raises a non-BibrError (resilience: partial results beat none). But a
         total reference wipeout — the CUDA OOM the local NER parser hit on a
         VRAM-starved serve is the observed case — must not be invisible: records
-        a stable, greppable HIGH-severity warning naming the exception type so
+        a ``REF_EXTRACTION_ERROR`` warning naming the exception type so
         monitoring/eval catches it instead of only the downstream
         VAL_REF_COUNT_MISMATCH symptom.
         """
         detail = " ".join(str(exc).split())[:200]
-        warning = f"{REF_EXTRACTION_ERROR_PREFIX}: {type(exc).__name__}: {detail}"
+        warning = ProcessingWarning(
+            WarningCode.REF_EXTRACTION_ERROR, f"{type(exc).__name__}: {detail}"
+        )
         # Real PaperContents carries a list; be defensive against test doubles /
         # a cleared attribute so the warning is never lost.
         warnings = getattr(self.contents, "processing_warnings", None)

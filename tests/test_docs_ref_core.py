@@ -224,3 +224,13 @@ def test_schema_md_lists_long_enums_in_the_description(core):
     row = next(line for line in section.splitlines() if line.startswith("| `section_type`"))
     assert "| `enum | None` |" in row
     assert "One of: `title`, `abstract`, `intro`" in row
+
+
+def test_schema_md_lists_every_warning_code(core):
+    from bibr.processing_warnings import DESCRIPTIONS, WarningCode
+
+    md = core.render_schema_md()
+    assert "[the codes are listed below](#warning-codes)" in md
+    section = md.split("## Warning codes\n", 1)[1]
+    for code in WarningCode:
+        assert f"| `{code}` | {DESCRIPTIONS[code]} |" in section

@@ -20,52 +20,11 @@ from bibr.paper_contents import (
     PaperTable,
     PaperXref,
 )
-from tests.export.conftest import extraction_block
-
-
-def _synthetic(section_id: int, kind: str, header: str, **extra) -> PaperSection:
-    section_type = {
-        "figure": CanonicalSection.FIGURE,
-        "table": CanonicalSection.TABLE,
-        "footnote": CanonicalSection.FOOTNOTE,
-    }[kind]
-    return PaperSection(
-        section_id=section_id,
-        header=header,
-        level=1,
-        parent_section_id=0,
-        section_type=section_type,
-        synthetic_kind=kind,
-        **extra,
-    )
-
-
-def _as_parsed(paper) -> None:
-    """Reshape the demo paper the way ``create_content_sections`` leaves one:
-    a caption or footnote is a synthetic section holding one sentence, and the
-    float points at that section, remembering the body section it sits in."""
-    contents = paper.contents
-    contents.sections += [
-        _synthetic(3, "figure", "Figure 1"),
-        _synthetic(4, "table", "Table 1"),
-        _synthetic(5, "footnote", "Footnote 1", footnote_label="*"),
-    ]
-    contents.sentences += [
-        PaperSentence(text_id=3, text="Figure 1. Plot", section_id=3, paragraph_id=3),
-        PaperSentence(text_id=4, text="Table 1. Values", section_id=4, paragraph_id=4),
-        PaperSentence(text_id=5, text="* Collected in 2020.", section_id=5, paragraph_id=5),
-    ]
-    for item, own_section in ((contents.figures[0], 3), (contents.tables[0], 4)):
-        item._body_section_id = item.section_id
-        item.section_id = own_section
-    contents.xrefs += [
-        PaperXref(xref_id=1, xref_type="figure", contents="Figure 1", text_id=2),
-        PaperXref(xref_id=5, xref_type="foot", contents="*", text_id=2),
-    ]
+from tests.export.conftest import as_parsed, extraction_block
 
 
 def test_captions_and_footnotes_are_not_sections(demo_paper):
-    _as_parsed(demo_paper)
+    as_parsed(demo_paper)
     payload = _export_paper_payload(demo_paper)
 
     assert [(s["section_id"], s["header"]) for s in payload["section"]] == [
@@ -182,7 +141,7 @@ def test_section_ids_are_positions_in_document_order(demo_paper):
 def test_doi_candidates_name_export_sections(demo_paper):
     """A DOI read from a caption keeps its section_type but has no section; one
     read from the body names the body section's export id."""
-    _as_parsed(demo_paper)
+    as_parsed(demo_paper)
     # A body section listed after the synthetic ones, as late stages add them.
     demo_paper.contents.sections.append(
         PaperSection(

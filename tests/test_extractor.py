@@ -1431,7 +1431,7 @@ class TestRefExtractionStrategy:
         recorded on processing_warnings, not merely logged. Without this, a total
         reference wipeout is invisible in the export apart from the downstream
         VAL_REF_COUNT_MISMATCH, which flags the symptom but not the cause."""
-        from bibr.extract.ref_extractor import REF_EXTRACTION_ERROR_PREFIX
+        from bibr.processing_warnings import WarningCode
 
         ext = self._make_extractor_with_refs()
         ext.contents.processing_warnings = []
@@ -1450,11 +1450,12 @@ class TestRefExtractionStrategy:
         assert len(ext.metadata.references) == 0
         # New behaviour: the failure is surfaced on processing_warnings.
         hits = [
-            w for w in ext.contents.processing_warnings if w.startswith(REF_EXTRACTION_ERROR_PREFIX)
+            w
+            for w in ext.contents.processing_warnings
+            if w.code == WarningCode.REF_EXTRACTION_ERROR
         ]
-        assert hits, f"expected a {REF_EXTRACTION_ERROR_PREFIX!r} warning"
-        assert "RuntimeError" in hits[0]
-        assert "CUDA out of memory" in hits[0]
+        assert hits, "expected a REF_EXTRACTION_ERROR warning"
+        assert hits[0].message.startswith("RuntimeError: CUDA out of memory")
 
     async def test_systemic_reference_failure_preserves_core_and_marks_incomplete(self):
         ext = self._make_extractor_with_refs()

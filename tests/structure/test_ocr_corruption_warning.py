@@ -7,6 +7,8 @@ a corrupted extraction is visibly suspect instead of silently wrong.
 
 from __future__ import annotations
 
+from bibr.processing_warnings import WarningCode
+
 
 def _region(index, label, content):
     return {
@@ -34,9 +36,9 @@ def test_corrupt_regions_surface_processing_warning():
             ]
         ]
     )
-    warnings = [w for w in contents.processing_warnings if "OCR_CONTROL_CHARS" in w]
+    warnings = [w for w in contents.processing_warnings if w.code == WarningCode.OCR_CONTROL_CHARS]
     assert len(warnings) == 1
-    assert "2 region" in warnings[0]
+    assert warnings[0].message.startswith("2 region(s)")
 
 
 def test_clean_parse_has_no_corruption_warning():
@@ -49,7 +51,7 @@ def test_clean_parse_has_no_corruption_warning():
             ]
         ]
     )
-    assert not [w for w in contents.processing_warnings if "OCR_CONTROL_CHARS" in w]
+    assert not [w for w in contents.processing_warnings if w.code == WarningCode.OCR_CONTROL_CHARS]
 
 
 def test_stx_soft_hyphen_marks_not_flagged():
@@ -62,7 +64,7 @@ def test_stx_soft_hyphen_marks_not_flagged():
             ]
         ]
     )
-    assert not [w for w in contents.processing_warnings if "OCR_CONTROL_CHARS" in w]
+    assert not [w for w in contents.processing_warnings if w.code == WarningCode.OCR_CONTROL_CHARS]
 
 
 def test_single_stray_control_char_not_flagged():
@@ -76,7 +78,7 @@ def test_single_stray_control_char_not_flagged():
             ]
         ]
     )
-    assert not [w for w in contents.processing_warnings if "OCR_CONTROL_CHARS" in w]
+    assert not [w for w in contents.processing_warnings if w.code == WarningCode.OCR_CONTROL_CHARS]
 
 
 def test_private_use_body_fallback_has_full_summary_and_one_ordinary_warning():
@@ -111,7 +113,11 @@ def test_private_use_body_fallback_has_full_summary_and_one_ordinary_warning():
     assert summary.raw_ocr_content == raw
     assert summary.native_text_candidate == native
     assert summary.native_text_rejection_reason == "private_use"
-    warnings = [w for w in contents.processing_warnings if "OCR_NATIVE_TEXT_PUA_FALLBACK" in w]
+    warnings = [
+        w
+        for w in contents.processing_warnings
+        if w.code == WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK
+    ]
     assert len(warnings) == 1
-    assert "2 region" in warnings[0]
-    assert not any("OCR_CONTROL_CHARS" in w for w in contents.processing_warnings)
+    assert warnings[0].message.startswith("2 region(s)")
+    assert not any(w.code == WarningCode.OCR_CONTROL_CHARS for w in contents.processing_warnings)

@@ -112,7 +112,7 @@
       "formatted": null
     },
     {
-      "text": "1 Collected in 2020.",
+      "text": "* Collected in 2020.",
       "text_id": 5,
       "paragraph_id": 5,
       "section_id": null,
@@ -198,8 +198,17 @@
     {
       "xref_id": 3,
       "target_id": 1,
+      "xref_type": "figure",
+      "contents": "Figure 1",
+      "text_id": 2,
+      "start": null,
+      "end": null
+    },
+    {
+      "xref_id": 4,
+      "target_id": 1,
       "xref_type": "foot",
-      "contents": "1",
+      "contents": "*",
       "text_id": 2,
       "start": null,
       "end": null
@@ -236,7 +245,7 @@
   "footnote": [
     {
       "footnote_id": 1,
-      "label": "1",
+      "label": "*",
       "text_id": 5
     }
   ],
@@ -401,7 +410,12 @@
         }
       ]
     },
-    "warnings": [],
+    "warnings": [
+      {
+        "code": "STATEMENT_LEXICAL_FALLBACK",
+        "message": "data_availability filled by lexical anchor matching"
+      }
+    ],
     "pages": [
       {
         "page_number": 1,

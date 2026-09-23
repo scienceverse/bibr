@@ -9,6 +9,7 @@ import pytest
 from bibr.pipeline.enricher import CrossrefEnricher, Enricher
 from bibr.pipeline.stages.enrich import EnrichmentStage
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 
 def _make_fs_with_refs(n: int = 2, doi: str = "") -> FileState:
@@ -70,7 +71,7 @@ async def test_crossref_enricher_warns_on_timeout():
 
     with patch("bibr.enrich.references.enrich_references", slow):
         await CrossrefEnricher(timeout=0.01).enrich(fs)
-    assert any("timed out" in w for w in fs.warnings)
+    assert any(w.code == WarningCode.CROSSREF_ENRICHMENT_TIMEOUT for w in fs.warnings)
 
 
 @pytest.mark.asyncio
@@ -82,7 +83,10 @@ async def test_crossref_enricher_warns_on_exception():
 
     with patch("bibr.enrich.references.enrich_references", boom):
         await CrossrefEnricher().enrich(fs)
-    assert any("failed: nope" in w for w in fs.warnings)
+    assert any(
+        w.code == WarningCode.CROSSREF_ENRICHMENT_FAILED and "RuntimeError: nope" in w.message
+        for w in fs.warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -171,7 +175,10 @@ async def test_self_doi_failure_lets_the_references_finish():
         await CrossrefEnricher().enrich(fs)
 
     assert refs_done.is_set()
-    assert any("failed: identity down" in w for w in fs.warnings)
+    assert any(
+        w.code == WarningCode.CROSSREF_ENRICHMENT_FAILED and "identity down" in w.message
+        for w in fs.warnings
+    )
     assert fs.paper.metadata.enrichment_complete is False
     assert _pending() == []
 
@@ -224,7 +231,11 @@ async def test_crossref_enricher_reports_swallowed_terminal_failure_as_partial()
     report = EnrichmentReport(
         attempted=1,
         failed=1,
-        details=("bib_id=1 DOI lookup failed: transport",),
+        details=(
+            ProcessingWarning(
+                WarningCode.ENRICHMENT_LOOKUP_FAILED, "bib_id=1 DOI lookup failed: transport"
+            ),
+        ),
     )
     with patch("bibr.enrich.references.enrich_references", AsyncMock(return_value=report)):
         outcome = await CrossrefEnricher().enrich(fs)

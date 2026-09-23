@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from bibr.input.consolidate_text import clean_text_content_late
+from bibr.processing_warnings import ProcessingWarning
 
 if TYPE_CHECKING:
     from bibr.extract.front_matter import FrontMatterResolution
@@ -738,7 +739,7 @@ class PaperContents:
     # Warnings recorded during content-level extraction (e.g. reference
     # segmentation falling back to CRF); surfaced onto
     # ``Paper.processing_warnings`` in post_parse.
-    processing_warnings: list[str] = field(default_factory=list)
+    processing_warnings: list[ProcessingWarning] = field(default_factory=list)
     # Per-line reference-section geometry (serialized LineRecords) captured in
     # the OCR-stage native-text pass; consumed by the geom segmenter in extract.
     # None for DOCX / non-native / no-text-layer input (→ LLM cascade).

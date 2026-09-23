@@ -16,6 +16,7 @@ from bibr.paper_contents import (
     PaperSection,
     PaperSentence,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.validation import ValidationIssue
 
 _SYNTHETIC_OUTPUT = json.loads(
@@ -433,7 +434,12 @@ def test_legacy_lexical_fallback_warning_is_preserved_and_idempotent(mode: str):
     module.apply_integrity_resolution(contents, metadata, resolution)
     module.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert contents.processing_warnings == ["STATEMENT_LEXICAL_FALLBACK: funding_statement"]
+    assert contents.processing_warnings == [
+        ProcessingWarning(
+            WarningCode.STATEMENT_LEXICAL_FALLBACK,
+            "funding_statement filled by lexical anchor matching",
+        )
+    ]
 
 
 @pytest.mark.parametrize("canonical_rows", [[], ["   "]])

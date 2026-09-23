@@ -111,6 +111,8 @@ _SCHEMA_VERSION = "12.0"
 #   - ``paper_id`` defaults to the input file's stem, as ``bibr batch`` and
 #     metacheck already do, not to the DOI.
 #   - ``figure[].image`` is a ``data:`` URI that names its media type.
+#   - ``extraction.warnings`` items are ``{code, message}`` objects, not prose:
+#     ``code`` is a stable UPPER_SNAKE code, ``message`` the details.
 #   - The published schema has a stable ``$id`` under https://bibr.org/schema/.
 #     In the strict schema every key the exporter always writes is
 #     ``required``; nullable scalars are written ``"type": [T, "null"]``; and
@@ -1356,7 +1358,7 @@ class IdentityExport(BaseModel):
 
 class EnrichmentExport(BaseModel):
     """Reference-enrichment completeness — lets a consumer distinguish a
-    partial (timed-out) enrichment from a complete one without grepping
+    partial (timed-out) enrichment from a complete one without scanning
     ``extraction.warnings``."""
 
     model_config = _STRICT
@@ -1764,6 +1766,27 @@ class ProducerExport(BaseModel):
     )
 
 
+# UPPER_SNAKE, like the validation issue codes. A pattern, not an enum: another
+# producer of the format may add codes of its own.
+WARNING_CODE_PATTERN = r"^[A-Z][A-Z0-9_]*$"
+
+
+class WarningExport(BaseModel):
+    """One non-fatal processing warning."""
+
+    model_config = _STRICT
+
+    code: str = Field(
+        pattern=WARNING_CODE_PATTERN,
+        description="Stable, machine-readable warning code in UPPER_SNAKE case, e.g. "
+        "'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other "
+        "producers may add their own, so readers must accept a code they do not know.",
+    )
+    message: str = Field(
+        description="Human-readable details, such as the page, counts or exception type."
+    )
+
+
 class ExtractionExport(BaseModel):
     """How this output was produced — everything that is not the paper itself.
 
@@ -1823,8 +1846,9 @@ class ExtractionExport(BaseModel):
         "request counts. Hashes and counts only, never document text. Omitted when no LLM task "
         "ran or usage tracking is off.",
     )
-    warnings: list[str] = Field(
-        default_factory=list, description="Non-fatal processing warnings, as prose."
+    warnings: list[WarningExport] = Field(
+        default_factory=list,
+        description="Non-fatal processing warnings, each a stable code and a message.",
     )
     pages: list[PageExport] | None = Field(
         default=None,

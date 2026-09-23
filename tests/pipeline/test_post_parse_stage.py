@@ -16,6 +16,7 @@ from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.post_parse import PostParseStage, post_parse
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import WarningCode
 
 
 def _ctx(file_states):
@@ -507,7 +508,9 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
     )
     assert issue.origin_stage == "post_parse"
     assert "ethics_statement" in issue.evidence_ids
-    assert not any("VAL_STATEMENT_SUSPECT" in warning for warning in paper.processing_warnings)
+    assert not any(
+        "VAL_STATEMENT_SUSPECT" in f"{w.code}: {w.message}" for w in paper.processing_warnings
+    )
 
 
 @pytest.mark.asyncio
@@ -707,7 +710,7 @@ def test_attach_text_quality_counts_empty_scoreable_regions():
 
     # 10th percentile of all-0.0 scores is 0.0 (< default warn threshold 0.5).
     assert paper.text_quality == 0.0
-    assert any(w.startswith("low_text_quality") for w in paper.processing_warnings)
+    assert any(w.code == WarningCode.LOW_TEXT_QUALITY for w in paper.processing_warnings)
 
 
 def test_attach_text_quality_high_when_regions_populated():

@@ -28,6 +28,7 @@ from bibr.extract.statement_scan import (
     _has_funder_hint,
     _has_funding_negative_declaration,
     _has_unresolved_author_funding_declaration,
+    lexical_fallback_warning,
 )
 from bibr.paper_contents import CanonicalSection
 from bibr.utils.text import normalize_text
@@ -959,6 +960,6 @@ def apply_integrity_resolution(
             continue
         lexical_methods = {resolution.candidates[index].method for index in selected}
         if lexical_methods & {"legacy_lexical_capture", "anchored_paragraph"}:
-            warning = f"STATEMENT_LEXICAL_FALLBACK: {field}"
+            warning = lexical_fallback_warning(field)
             if warning not in contents.processing_warnings:
                 contents.processing_warnings.append(warning)
