@@ -540,7 +540,8 @@ class AuthorExport(BaseModel):
     )
     email: str | None = Field(default=None, description="Email address, as printed.")
     corresponding: bool = Field(
-        description="True when the paper marks this author as a corresponding author."
+        description="True when the paper marks this author as a corresponding author; false "
+        "when it does not, or when that is not known."
     )
     orcid: str | None = Field(
         default=None,
@@ -593,7 +594,8 @@ class FundingExport(BaseModel):
 
 
 class TextExport(BaseModel):
-    """One sentence-level span of the document text, in reading order."""
+    """One row of the document text, in reading order: a sentence of the body,
+    or a whole caption or footnote."""
 
     model_config = _STRICT
 
@@ -601,7 +603,8 @@ class TextExport(BaseModel):
     # section_id, page_number, formatted) so metacheck's R data.frame columns
     # line up.
     text: str = Field(
-        description="The sentence as plain text. A display equation is the placeholder "
+        description="The row as plain text: one sentence of the body, or a whole caption or "
+        "footnote, which can hold several sentences. A display equation is the placeholder "
         "'[equation]', with the expression in formatted."
     )
     text_id: Id = Field(
@@ -640,13 +643,16 @@ class SectionExport(BaseModel):
         description="Heading text as printed; null when the section has no heading."
     )
     level: Id = Field(
-        description="Heading depth: 1 for top-level sections, 2 for their subsections, and so on."
+        description="Heading depth: 1 for top-level sections, 2 for their subsections, and so "
+        "on; 1 when the depth is not known."
     )
     parent_section_id: Id | None = Field(
         description="section_id of the parent section; null for top-level sections."
     )
     section_type: SectionTypeLiteral | None = Field(
-        description="Section role (IMRaD plus front and back matter). How it was decided is in "
+        description="Section role (IMRaD plus front and back matter). 'figure', 'table' and "
+        "'footnote' mark a printed heading over floats or notes, such as 'Footnotes'; the notes "
+        "themselves are footnote[] rows, not this section's text. How the role was decided is in "
         "extraction.diagnostics.section_classification."
     )
 
@@ -737,7 +743,9 @@ class BibExport(BaseModel):
         default=None, description="URL as printed, repaired of line-wrap artifacts."
     )
     is_in_press: bool = Field(
-        default=False, description="True when the entry is marked in press or forthcoming."
+        default=False,
+        description="True when the entry is marked in press or forthcoming; false otherwise, "
+        "including when that is not known.",
     )
     arxiv: str | None = Field(default=None, description="arXiv identifier.")
     pmid: str | None = Field(default=None, description="PubMed identifier.")
@@ -772,17 +780,18 @@ class XrefExport(BaseModel):
         description="The citation or reference as printed, e.g. '(Smith, 2020)' or 'Table 2'."
     )
     text_id: Id = Field(
-        description="text[].text_id of the sentence containing the reference. For a footnote "
-        "reference it is approximate: in a DOCX, the last sentence of the paragraph holding the "
-        "note's mark; in a PDF, where bibr does not find note marks in the text, the sentence "
-        "before the note in reading order. A PDF note printed without a mark has no reference."
+        description="text[].text_id of the sentence containing the reference. A footnote "
+        "reference without start and end was not located in its sentence, so its text_id is "
+        "approximate. bibr locates no footnote marks: it puts a DOCX note's reference on the "
+        "last sentence of the paragraph holding the mark and a PDF note's on the sentence before "
+        "the note, and gives a PDF note printed without a mark no reference."
     )
     start: int | None = Field(
         default=None,
         ge=0,
         description="Where the printed reference starts in text[].text of text_id: a 0-based "
-        "offset in Unicode code points; null when it could not be located, and always for a "
-        "footnote reference.",
+        "offset in Unicode code points; null when it was not located, as for every footnote "
+        "reference bibr writes.",
     )
     end: int | None = Field(
         default=None,
@@ -808,7 +817,8 @@ class FigureExport(BaseModel):
     section_id: Id | None = Field(
         default=None,
         description="section[].section_id of the section the figure is printed in (for PDF, "
-        "the section being read where it appears); null before the first section.",
+        "the section being read where it appears); null when it is printed before the first "
+        "section or its section is not known.",
     )
     text_id: Id | None = Field(
         default=None,
@@ -821,7 +831,11 @@ class FigureExport(BaseModel):
         "(data:image/jpeg;base64,...); a figure detected as several panel crops is composited "
         "from them, with white between panels. Null unless images are requested.",
     )
-    caption: str | None = Field(default=None, description="Caption text, as printed.")
+    caption: str | None = Field(
+        default=None,
+        description="Caption as printed, starting with its label when one is printed "
+        "('Figure 2. Mean ratings…').",
+    )
     page_number: Id | None = Field(description="1-based page the figure starts on.")
 
 
@@ -842,7 +856,8 @@ class TableExport(BaseModel):
     section_id: Id | None = Field(
         default=None,
         description="section[].section_id of the section the table is printed in (for PDF, "
-        "the section being read where it appears); null before the first section.",
+        "the section being read where it appears); null when it is printed before the first "
+        "section or its section is not known.",
     )
     text_id: Id | None = Field(
         default=None,
@@ -860,12 +875,17 @@ class TableExport(BaseModel):
         description="Cell text as rows of strings; the first row is the header. A table "
         "continued across pages has all its pieces' rows merged."
     )
-    caption: str | None = Field(default=None, description="Caption text, as printed.")
+    caption: str | None = Field(
+        default=None,
+        description="Caption as printed, starting with its label when one is printed "
+        "('Figure 2. Mean ratings…').",
+    )
     page_number: Id | None = Field(description="1-based page the table starts on.")
 
 
 class FootnoteExport(BaseModel):
-    """One footnote or endnote. Its text is a row of ``text[]``, after the body."""
+    """One footnote or endnote. Its text is a row of ``text[]``, after the body;
+    the row may start with the printed mark, which ``label`` holds on its own."""
 
     model_config = _STRICT
 
@@ -1820,7 +1840,8 @@ class WarningExport(BaseModel):
         description="Stable, machine-readable warning code in UPPER_SNAKE case, e.g. "
         "'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other "
         "producers and converters may add their own, so readers must accept a code they do "
-        "not know.",
+        "not know. A converter starts its own codes with its name ('METACHECK_…'), so they "
+        "cannot collide with the producer's.",
     )
     message: str = Field(
         description="Human-readable details, such as the page, counts or exception type."
@@ -1853,8 +1874,9 @@ class ExtractionExport(BaseModel):
     completed_at: str = Field(
         pattern=UTC_TIMESTAMP_PATTERN,
         json_schema_extra={"format": "date-time"},
-        description="Time the export was written, as a UTC ISO 8601 timestamp "
-        "(2026-01-15T09:30:00Z).",
+        description="When the producer finished extracting the content, as a UTC ISO 8601 "
+        "timestamp (2026-01-15T09:30:00Z); for bibr, when it wrote the export. A converter keeps "
+        "the producer's time when it has it, else writes its own.",
     )
     ocr: OcrEngineExport | None = Field(
         default=None, description="OCR engine; null when the run used none."
@@ -1971,8 +1993,8 @@ class PaperExport(BaseModel):
     Everything else is the paper: ``paper_id``, ``schema_version`` and
     ``source`` identify the paper and its input file; ``metadata`` and the
     record tables ``author``, ``affiliation``, ``funding``, ``text``,
-    ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table`` and ``eq``
-    hold what the paper says; the ``*_match`` tables hold what external
+    ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``footnote``
+    and ``eq`` hold what the paper says; the ``*_match`` tables hold what external
     registries returned for the paper, its affiliations, funders and references.
 
     Every record table has an integer primary key named ``<table>_id``,
@@ -1986,6 +2008,11 @@ class PaperExport(BaseModel):
     ``[x0, y0, x1, y1]`` in PDF points (1/72 inch) on the page as displayed,
     measured from its top-left corner with y increasing downward;
     ``extraction.pages`` gives each page's size in the same units.
+
+    A tool that writes another extractor's output in this format, or rewrites
+    an export, names itself in ``extraction.converter`` and keeps the
+    producer's ``extraction.producer``. A rewrite keeps ``schema_version`` and
+    every key, including those of a later 12.x that the tool does not know.
     """
 
     model_config = _STRICT
@@ -1994,7 +2021,8 @@ class PaperExport(BaseModel):
         min_length=1,
         description="Paper identifier and the key that joins this paper's rows across files: "
         "the user-supplied --paper-id, else the input file's name without its extension "
-        "(bibr batch writes its corpus-unique id, the name of the JSON file).",
+        "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
+        "the name of source.file_name without its extension.",
     )
     schema_version: Literal["12.0"] = Field(
         description="Export schema version. Its presence at the root is how readers "

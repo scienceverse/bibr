@@ -71,8 +71,9 @@ released.
   TEI, which converters into this format write.
 - `section[]` holds only the paper's sections. Captions and footnotes are no
   longer sections of their own (`section_type` `figure`, `table` or `footnote`,
-  with a made-up header such as "Figure 2" or "Footnote 3"). Their sentences
-  stay in `text[]`, after the body, with a `null` `section_id`, so text search
+  with a made-up header such as "Figure 2" or "Footnote 3"). Their text
+  stays in `text[]`, after the body, one row per whole caption or note (not
+  per sentence), with a `null` `section_id`, so text search
   still finds them and "the text of Results" is the running text of Results.
   `figure[]` and `table[]` gain `text_id`, the caption's row, and their
   `section_id` is now the section they are printed in (it was the caption's
@@ -150,7 +151,12 @@ released.
   format, and is `null` in bibr's own exports. A file converted from GROBID TEI
   has producer `grobid` and the converter, and its `source` is the PDF GROBID
   read when the converter has it, else the TEI (`input_format` `tei`), so
-  `source.sha256` joins it to a bibr export of the same PDF.
+  `source.sha256` joins it to a bibr export of the same PDF. A converter
+  keeps the producer's `completed_at` (now the time the content was
+  extracted) when it has it, takes `paper_id` from `source.file_name`, and
+  starts its own warning codes with its name (`METACHECK_…`); a tool that
+  rewrites an export keeps its `schema_version` and every key, including
+  those of a later 12.x it does not know.
 - `paper_id` is required and never `null`: `--paper-id`, else the input file's
   stem, as `bibr batch` and metacheck already name papers. It used to be the
   DOI, which changed whenever a later bibr read the DOI differently. `bibr

@@ -159,7 +159,7 @@
           "type": "integer"
         },
         "corresponding": {
-          "description": "True when the paper marks this author as a corresponding author.",
+          "description": "True when the paper marks this author as a corresponding author; false when it does not, or when that is not known.",
           "title": "Corresponding",
           "type": "boolean"
         },
@@ -367,7 +367,7 @@
         },
         "is_in_press": {
           "default": false,
-          "description": "True when the entry is marked in press or forthcoming.",
+          "description": "True when the entry is marked in press or forthcoming; false otherwise, including when that is not known.",
           "title": "Is In Press",
           "type": "boolean"
         },
@@ -1528,7 +1528,7 @@
       "description": "How this output was produced \u2014 everything that is not the paper itself.\n\nBuilt by ``ExportStage._build_extraction`` from the pipeline context; the\nexport function folds in the receipts that exist only at serialization\ntime, and the output validation gate adds ``validation``. Always present:\na Paper exported outside the pipeline gets a minimal block (producer,\nexport time, the diagnostics the Paper carries, validation).",
       "properties": {
         "completed_at": {
-          "description": "Time the export was written, as a UTC ISO 8601 timestamp (2026-01-15T09:30:00Z).",
+          "description": "When the producer finished extracting the content, as a UTC ISO 8601 timestamp (2026-01-15T09:30:00Z); for bibr, when it wrote the export. A converter keeps the producer's time when it has it, else writes its own.",
           "format": "date-time",
           "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?Z$",
           "title": "Completed At",
@@ -1788,7 +1788,7 @@
       "properties": {
         "caption": {
           "default": null,
-          "description": "Caption text, as printed.",
+          "description": "Caption as printed, starting with its label when one is printed ('Figure 2. Mean ratings\u2026').",
           "title": "Caption",
           "type": [
             "string",
@@ -1831,7 +1831,7 @@
         },
         "section_id": {
           "default": null,
-          "description": "section[].section_id of the section the figure is printed in (for PDF, the section being read where it appears); null before the first section.",
+          "description": "section[].section_id of the section the figure is printed in (for PDF, the section being read where it appears); null when it is printed before the first section or its section is not known.",
           "minimum": 1,
           "title": "Section Id",
           "type": [
@@ -1922,7 +1922,7 @@
     },
     "FootnoteExport": {
       "additionalProperties": false,
-      "description": "One footnote or endnote. Its text is a row of ``text[]``, after the body.",
+      "description": "One footnote or endnote. Its text is a row of ``text[]``, after the body;\nthe row may start with the printed mark, which ``label`` holds on its own.",
       "properties": {
         "footnote_id": {
           "description": "Primary key; 1-based position in document order.",
@@ -3474,7 +3474,7 @@
           ]
         },
         "level": {
-          "description": "Heading depth: 1 for top-level sections, 2 for their subsections, and so on.",
+          "description": "Heading depth: 1 for top-level sections, 2 for their subsections, and so on; 1 when the depth is not known.",
           "minimum": 1,
           "title": "Level",
           "type": "integer"
@@ -3495,7 +3495,7 @@
           "type": "integer"
         },
         "section_type": {
-          "description": "Section role (IMRaD plus front and back matter). How it was decided is in extraction.diagnostics.section_classification.",
+          "description": "Section role (IMRaD plus front and back matter). 'figure', 'table' and 'footnote' mark a printed heading over floats or notes, such as 'Footnotes'; the notes themselves are footnote[] rows, not this section's text. How the role was decided is in extraction.diagnostics.section_classification.",
           "enum": [
             "title",
             "abstract",
@@ -3583,7 +3583,7 @@
       "properties": {
         "caption": {
           "default": null,
-          "description": "Caption text, as printed.",
+          "description": "Caption as printed, starting with its label when one is printed ('Figure 2. Mean ratings\u2026').",
           "title": "Caption",
           "type": [
             "string",
@@ -3630,7 +3630,7 @@
         },
         "section_id": {
           "default": null,
-          "description": "section[].section_id of the section the table is printed in (for PDF, the section being read where it appears); null before the first section.",
+          "description": "section[].section_id of the section the table is printed in (for PDF, the section being read where it appears); null when it is printed before the first section or its section is not known.",
           "minimum": 1,
           "title": "Section Id",
           "type": [
@@ -3670,7 +3670,7 @@
     },
     "TextExport": {
       "additionalProperties": false,
-      "description": "One sentence-level span of the document text, in reading order.",
+      "description": "One row of the document text, in reading order: a sentence of the body,\nor a whole caption or footnote.",
       "properties": {
         "formatted": {
           "default": null,
@@ -3706,7 +3706,7 @@
           ]
         },
         "text": {
-          "description": "The sentence as plain text. A display equation is the placeholder '[equation]', with the expression in formatted.",
+          "description": "The row as plain text: one sentence of the body, or a whole caption or footnote, which can hold several sentences. A display equation is the placeholder '[equation]', with the expression in formatted.",
           "title": "Text",
           "type": "string"
         },
@@ -4146,7 +4146,7 @@
       "description": "One non-fatal processing warning.",
       "properties": {
         "code": {
-          "description": "Stable, machine-readable warning code in UPPER_SNAKE case, e.g. 'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other producers and converters may add their own, so readers must accept a code they do not know.",
+          "description": "Stable, machine-readable warning code in UPPER_SNAKE case, e.g. 'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other producers and converters may add their own, so readers must accept a code they do not know. A converter starts its own codes with its name ('METACHECK_\u2026'), so they cannot collide with the producer's.",
           "pattern": "^[A-Z][A-Z0-9_]*$",
           "title": "Code",
           "type": "string"
@@ -4188,7 +4188,7 @@
         },
         "start": {
           "default": null,
-          "description": "Where the printed reference starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located, and always for a footnote reference.",
+          "description": "Where the printed reference starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it was not located, as for every footnote reference bibr writes.",
           "minimum": 0,
           "title": "Start",
           "type": [
@@ -4206,7 +4206,7 @@
           ]
         },
         "text_id": {
-          "description": "text[].text_id of the sentence containing the reference. For a footnote reference it is approximate: in a DOCX, the last sentence of the paragraph holding the note's mark; in a PDF, where bibr does not find note marks in the text, the sentence before the note in reading order. A PDF note printed without a mark has no reference.",
+          "description": "text[].text_id of the sentence containing the reference. A footnote reference without start and end was not located in its sentence, so its text_id is approximate. bibr locates no footnote marks: it puts a DOCX note's reference on the last sentence of the paragraph holding the mark and a PDF note's on the sentence before the note, and gives a PDF note printed without a mark no reference.",
           "minimum": 1,
           "title": "Text Id",
           "type": "integer"
@@ -4280,7 +4280,7 @@
   "$id": "https://bibr.org/schema/bibr-export-v12.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "A research paper as extracted by bibr (export schema v12).\n\n``extraction`` holds everything about how the output was produced.\nEverything else is the paper: ``paper_id``, ``schema_version`` and\n``source`` identify the paper and its input file; ``metadata`` and the\nrecord tables ``author``, ``affiliation``, ``funding``, ``text``,\n``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table`` and ``eq``\nhold what the paper says; the ``*_match`` tables hold what external\nregistries returned for the paper, its affiliations, funders and references.\n\nEvery record table has an integer primary key named ``<table>_id``,\n1-based; the other ``*_id`` columns are foreign keys to the table they name.\nAbsent values are ``null``, never an empty-string or zero sentinel. Every\nroot key is always present; record tables may be empty. Readers dispatch on\nthe presence of the root ``schema_version``. Character offsets count\nUnicode code points of the exported text. Every score and confidence is\n0\u20131. Identifiers use each registry's canonical form: DOIs bare and\nlowercase, ORCID iDs and ROR IDs as https URIs. Every bounding box is\n``[x0, y0, x1, y1]`` in PDF points (1/72 inch) on the page as displayed,\nmeasured from its top-left corner with y increasing downward;\n``extraction.pages`` gives each page's size in the same units.",
+  "description": "A research paper as extracted by bibr (export schema v12).\n\n``extraction`` holds everything about how the output was produced.\nEverything else is the paper: ``paper_id``, ``schema_version`` and\n``source`` identify the paper and its input file; ``metadata`` and the\nrecord tables ``author``, ``affiliation``, ``funding``, ``text``,\n``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``footnote``\nand ``eq`` hold what the paper says; the ``*_match`` tables hold what external\nregistries returned for the paper, its affiliations, funders and references.\n\nEvery record table has an integer primary key named ``<table>_id``,\n1-based; the other ``*_id`` columns are foreign keys to the table they name.\nAbsent values are ``null``, never an empty-string or zero sentinel. Every\nroot key is always present; record tables may be empty. Readers dispatch on\nthe presence of the root ``schema_version``. Character offsets count\nUnicode code points of the exported text. Every score and confidence is\n0\u20131. Identifiers use each registry's canonical form: DOIs bare and\nlowercase, ORCID iDs and ROR IDs as https URIs. Every bounding box is\n``[x0, y0, x1, y1]`` in PDF points (1/72 inch) on the page as displayed,\nmeasured from its top-left corner with y increasing downward;\n``extraction.pages`` gives each page's size in the same units.\n\nA tool that writes another extractor's output in this format, or rewrites\nan export, names itself in ``extraction.converter`` and keeps the\nproducer's ``extraction.producer``. A rewrite keeps ``schema_version`` and\nevery key, including those of a later 12.x that the tool does not know.",
   "properties": {
     "affiliation": {
       "default": [],
@@ -4386,7 +4386,7 @@
       "type": "array"
     },
     "paper_id": {
-      "description": "Paper identifier and the key that joins this paper's rows across files: the user-supplied --paper-id, else the input file's name without its extension (bibr batch writes its corpus-unique id, the name of the JSON file).",
+      "description": "Paper identifier and the key that joins this paper's rows across files: the user-supplied --paper-id, else the input file's name without its extension (bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses the name of source.file_name without its extension.",
       "minLength": 1,
       "title": "Paper Id",
       "type": "string"
