@@ -80,10 +80,15 @@ _FIRST_LETTERED_RE = re.compile(LETTERED_LABEL, re.IGNORECASE)
 _NEXT_NUMBERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{NUMBERED_LABEL})", re.IGNORECASE)
 _NEXT_LETTERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{LETTERED_LABEL})", re.IGNORECASE)
 
-# A caption that marks its float as a later piece of an earlier one, near its
-# label: "Table 3 (continued)", "FIGURE 2 (Cont.)". Such a piece repeats the
-# label when it was not merged into the first.
-_CONTINUED_CAPTION_RE = re.compile(r"[(\[]\s*cont(?:inued|'d|d|\.)?\s*[)\]]", re.IGNORECASE)
+# A caption that marks its float as a later piece of an earlier one: a
+# bracketed marker near the label ("Table 3 (continued)", "FIGURE 2 (Cont.)"),
+# or nothing but the label and the word ("Table 3 continued", "Figure 3.
+# Cont."). Such a piece repeats the label when it was not merged into the first.
+_CONTINUED_CAPTION_RE = re.compile(
+    r"[(\[]\s*cont(?:inued|'d|d|\.)?\s*[)\]]"
+    r"|^\s*(?:tables?|fig(?:ure)?s?\.?)\s*\S+?\s*[.:]?\s*cont(?:inued|'d|d|\.)\s*$",
+    re.IGNORECASE,
+)
 # A label split into what precedes its last number and that number:
 # "S12" → ("S", "12"), "3.1" → ("3.", "1").
 _LABEL_NUMBER_RE = re.compile(r"(?P<head>.*?)(?P<number>\d+)")

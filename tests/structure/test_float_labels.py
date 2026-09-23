@@ -161,6 +161,19 @@ class TestResolveByLabel:
         cont.caption = "FIGURE 2 (Cont.) Panels C and D."
         assert _links("Figure 2 shows", figures=[figure, cont]) == [("figure", 1, "label")]
 
+    @pytest.mark.parametrize("caption", ["Table 3 continued", "Table 3. Cont.", "TABLE 3: Cont'd"])
+    def test_a_caption_that_only_says_continued(self, caption):
+        first, piece = _table(1, "3"), _table(2, "3")
+        first.caption, piece.caption = "Table 3. Demographics.", caption
+        assert _links("Table 3 lists", [first, piece]) == [("table", 1, "label")]
+
+    def test_continued_as_caption_prose_is_not_a_marker(self):
+        """The unbracketed word counts only when the caption says nothing else."""
+        first, second = _table(1, "3"), _table(2, "3")
+        first.caption = "Table 3. Demographics."
+        second.caption = "Table 3. Trials continued after the pilot."
+        assert _links("Table 3 lists", [first, second]) == [("table", 0, "label")]
+
     def test_roman_and_arabic_labels_are_different_strings(self):
         assert _links("Table 4 lists", LABELLED) == [("table", 0, "label")]
 
