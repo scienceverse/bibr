@@ -138,6 +138,51 @@ def test_section_ids_are_positions_in_document_order(demo_paper):
     assert payload_row(payload, "table")["section_id"] == 3
 
 
+def test_a_heading_without_text_keeps_its_place(demo_paper):
+    """A heading whose paragraphs all went to its subsections is numbered
+    where it is printed, even after ``implicit_sections`` moved it to the end
+    of the list with every other section that holds no text."""
+    contents = demo_paper.contents
+    root, introduction, results = contents.sections
+    contents.sections = [
+        root,
+        introduction,
+        PaperSection(
+            section_id=4,
+            header="Participants",
+            level=2,
+            parent_section_id=0,
+            section_type=CanonicalSection.METHODS,
+        ),
+        results,
+        PaperSection(
+            section_id=3,
+            header="Methods",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.METHODS,
+        ),
+    ]
+    results.section_id = 5
+    contents.sentences = [
+        PaperSentence(text_id=1, text="We ask.", section_id=1, paragraph_id=1),
+        PaperSentence(text_id=2, text="Forty took part.", section_id=4, paragraph_id=2),
+        PaperSentence(text_id=3, text="It replicated.", section_id=5, paragraph_id=3),
+    ]
+    contents.xrefs = []
+    contents.links = []
+    contents.equations = []
+
+    payload = _export_paper_payload(demo_paper)
+
+    assert [s["header"] for s in payload["section"]] == [
+        "Introduction",
+        "Methods",
+        "Participants",
+        "Results",
+    ]
+
+
 def test_doi_candidates_name_export_sections(demo_paper):
     """A DOI read from a caption keeps its section_type but has no section; one
     read from the body names the body section's export id."""
