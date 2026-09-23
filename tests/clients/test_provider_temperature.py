@@ -4,8 +4,9 @@ Title/author/DOI/reference extraction must not vary run to run. ``google``,
 ``groq`` and ``ollama`` pin 0.0 outright; ``openai`` forwards
 ``LLM_TEMPERATURE`` (itself 0.0 by default). The Anthropic adapter forwarded
 nothing at all, so it alone sampled at the Anthropic API default of 1.0. The
-one legitimate exception is extended thinking, which is only accepted at the
-API's own default temperature.
+legitimate exceptions are extended thinking, which is only accepted at the
+API's own default temperature, and Gemini models whose API deprecates the
+sampling parameters (see ``test_google_thinking_budget``).
 """
 
 import pytest

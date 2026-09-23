@@ -39,6 +39,45 @@ _MIN_THINKING_BUDGET: dict[str, int] = {
     "gemini-2.5-flash-lite": 512,
 }
 
+# Models configured with ``thinkingConfig.thinkingLevel`` (a string enum)
+# instead of a numeric ``thinkingBudget``. Their migration guide also says to
+# strip the deprecated sampling parameters (``temperature``, ``top_p``,
+# ``top_k``), so requests to them carry none. Their lowest level is "low":
+# thinking cannot be turned off, and "minimal" is unsupported. Prefixes, like the
+# tables above; a new family is a one-line addition. Taken from the vendor's
+# model documentation on 2026-09-21, not yet verified against the live API.
+_THINKING_LEVEL_MODELS: tuple[str, ...] = ("gemini-3.8-",)
+
+# bibr convention (the vendor publishes no budget-to-level mapping) for
+# translating a positive ``LLM_THINKING_BUDGET`` into a level: budgets up to
+# each bound map to its level, and anything larger maps to "high".
+_THINKING_LEVEL_BOUNDS: tuple[tuple[int, str], ...] = (
+    (1024, "low"),
+    (8192, "medium"),
+)
+
+
+def _uses_thinking_level(model: str) -> bool:
+    """Whether ``model`` takes ``thinking_level`` rather than ``thinking_budget``."""
+    model = (model or "").strip()
+    return any(model.startswith(p) for p in _THINKING_LEVEL_MODELS)
+
+
+def _resolve_thinking_level(budget: int) -> str | None:
+    """Map a configured thinking ``budget`` onto a ``thinking_level``.
+
+    Zero ("disabled") maps to "low", the lowest level these models accept. A
+    negative budget ("let the model decide") maps to ``None``: the request
+    carries no thinking config, so the model uses its own default level.
+    Positive budgets map through ``_THINKING_LEVEL_BOUNDS``.
+    """
+    if budget < 0:
+        return None
+    for bound, level in _THINKING_LEVEL_BOUNDS:
+        if budget <= bound:
+            return level
+    return "high"
+
 
 def _resolve_thinking_budget(model: str, budget: int) -> int:
     """Map a configured ``budget`` onto a value ``model`` will actually accept.
@@ -96,7 +135,18 @@ class GoogleProvider:
         # across model versions; raise budget via Settings.llm.thinking_budget
         # when reasoning is genuinely wanted, or set it negative for dynamic
         # thinking. The request is resolved against the model's own limits —
-        # see _resolve_thinking_budget.
+        # see _resolve_thinking_budget. Models in _THINKING_LEVEL_MODELS take a
+        # level instead of a budget, and the same setting is translated to one
+        # — see _resolve_thinking_level.
+        max_output = max_tokens or self._settings.llm.max_tokens
+        if _uses_thinking_level(self._settings.llm.model):
+            # No temperature (nor top_p/top_k, which bibr never sends): these
+            # models deprecate the sampling parameters.
+            kwargs: dict = {"generation_config": {"max_tokens": max_output}}
+            level = _resolve_thinking_level(self._settings.llm.thinking_budget)
+            if level is not None:
+                kwargs["thinking_config"] = {"thinking_level": level}
+            return kwargs
         budget = _resolve_thinking_budget(
             self._settings.llm.model, self._settings.llm.thinking_budget
         )
@@ -106,7 +156,7 @@ class GoogleProvider:
                 # adapter). Title/author/DOI/reference extraction must not vary
                 # run-to-run; sampling at temp 1.0 was an accuracy/consistency leak.
                 "temperature": 0.0,
-                "max_tokens": max_tokens or self._settings.llm.max_tokens,
+                "max_tokens": max_output,
             },
             "thinking_config": {"thinking_budget": budget},
         }

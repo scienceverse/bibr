@@ -1673,6 +1673,11 @@ class LLMClient:
                 chat_template_json=json.dumps(
                     self._settings.llm.chat_template_kwargs, sort_keys=True
                 ),
+                extra_body_json=(
+                    json.dumps(self._settings.llm.extra_body, sort_keys=True)
+                    if self._settings.llm.extra_body
+                    else None
+                ),
             )
         except Exception:  # noqa: BLE001 — caching is best-effort, never fatal
             logger.debug("LLM cache key construction failed; proceeding uncached", exc_info=True)

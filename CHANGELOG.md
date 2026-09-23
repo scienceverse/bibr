@@ -56,6 +56,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- The `LLM_REASONING_EFFORT` setting description now says how to omit the
+  parameter from an environment or `.env` file: set it to an empty value. The
+  per-call `LLM_REASONING_EFFORT_AUTHORS` and `LLM_REASONING_EFFORT_CITATIONS`
+  overrides omit it the same way.
 
 ### Added
 
@@ -69,6 +73,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- `LLM_EXTRA_BODY` sends extra request-body fields, given as a JSON object, to
+  custom OpenAI-compatible endpoints (`LLM_BASE_URL`), for example a hosted
+  API's switch for its thinking mode. `LLM_CHAT_TEMPLATE_KWARGS` is merged into
+  its `chat_template_kwargs` and wins on shared keys; configurations without
+  `LLM_EXTRA_BODY` send the same requests as before. The fields are part of the
+  LLM response-cache key when set. The Configuration guide has examples for
+  OpenAI-compatible endpoints.
+- The Google provider supports Gemini models that take a thinking level instead
+  of a thinking budget, starting with `gemini-3.8-flash`. Their requests carry
+  `thinking_level` and no sampling parameters. `LLM_THINKING_BUDGET` maps to a
+  level: 0 to 1024 is `low`, 1025 to 8192 is `medium`, and larger budgets are
+  `high`; a negative budget leaves the model on its default level. Requests to
+  other Gemini models are unchanged, and the default model is unchanged.
 
 ### Changed
 

@@ -272,23 +272,32 @@ class LlmOptions(_BibrSettings):
         description="Chat-template options for custom OpenAI-compatible endpoints, e.g. "
         "LLM_CHAT_TEMPLATE_KWARGS='{\"enable_thinking\": false}'. Ignored for real OpenAI.",
     )
+    extra_body: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra request-body fields for custom OpenAI-compatible endpoints, sent "
+        'as-is, e.g. LLM_EXTRA_BODY=\'{"thinking": {"type": "disabled"}}\'. '
+        "LLM_CHAT_TEMPLATE_KWARGS is merged into its chat_template_kwargs and wins on shared "
+        "keys. Ignored for real OpenAI.",
+    )
     ollama_base_url: str = Field(
         "http://localhost:11434", description="Ollama server URL (LLM_PROVIDER=ollama)."
     )
     reasoning_effort: str | None = Field(
         "minimal",
-        description="Reasoning effort for reasoning models (minimal/low/medium/high; "
-        "null disables the parameter for models that reject it).",
+        description="Reasoning effort for reasoning models (minimal/low/medium/high; an empty "
+        "value (LLM_REASONING_EFFORT=) or null omits the parameter for models that reject it).",
     )
     reasoning_effort_authors: str | None = Field(
         "low",
         description="Per-call reasoning effort override for the authors extraction call "
-        "(benefits from more reasoning due to spatial/cross-reference logic).",
+        "(benefits from more reasoning due to spatial/cross-reference logic); an empty value "
+        "omits the parameter for this call.",
     )
     reasoning_effort_citations: str | None = Field(
         "low",
         description="Per-call reasoning effort override for the citation-linking call "
-        "(benefits from more reasoning due to spatial/cross-reference logic).",
+        "(benefits from more reasoning due to spatial/cross-reference logic); an empty value "
+        "omits the parameter for this call.",
     )
     rate_limit_rpm: int = Field(
         60,
@@ -403,7 +412,10 @@ class LlmOptions(_BibrSettings):
         "silently produces no trace rows; a warning is logged in that case.",
     )
     thinking_budget: int = Field(
-        0, description="Thinking budget for extended-thinking models (0 = disabled)."
+        0,
+        description="Thinking budget for extended-thinking models (0 = disabled). Gemini models "
+        "that take a thinking level instead (gemini-3.8) translate it: 0-1024 low, 1025-8192 "
+        "medium, larger high, negative the model's default level.",
     )
     # Default LLM backend for chew when --llm isn't passed: "cloud" or a
     # managed local server ("local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"). Written by
