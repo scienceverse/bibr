@@ -690,6 +690,108 @@ async def test_native_reference_parse_control_errors_propagate(control_error):
         )
 
 
+def _equation_fallback_contents() -> PaperContents:
+    from bibr.models import PaperMetadata
+
+    sections = [
+        PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+        PaperSection(
+            section_id=1,
+            header="Results",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.RESULTS,
+        ),
+    ]
+    regex_hit = PaperSentence(
+        text_id=100,
+        text="The effect was reliable (t(28) = 3.42, p = .003).",
+        section_id=1,
+        paragraph_id=1,
+    )
+    # 11 regex misses: two LLM fallback batches (text_ids 1-10 and 11).
+    candidates = [
+        PaperSentence(
+            text_id=i,
+            text=f"Weird stat layout (numbers {i} and {i + 1}; value 1.0) regex misses.",
+            section_id=1,
+            paragraph_id=1,
+        )
+        for i in range(1, 12)
+    ]
+    return PaperContents(
+        sentences=[regex_hit, *candidates],
+        sections=sections,
+        tables=[],
+        links=[],
+        sections_text={},
+        preparsed_metadata=PaperMetadata(doi="10.1234/eq", title="Equation Paper"),
+        native_references=[],
+    )
+
+
+class _EquationLLM:
+    """Returns one grounded component per sentence; batches holding
+    ``hang_text_id`` never return until cancelled."""
+
+    def __init__(self, hang_text_id=None):
+        self.hang_text_id = hang_text_id
+        self.cancelled = False
+
+    async def extract_equations(self, batch, file_hash="unknown"):
+        import asyncio
+
+        from bibr.paper_contents import PaperEquation
+
+        if any(text_id == self.hang_text_id for text_id, _ in batch):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+        return [
+            PaperEquation(text_id=text_id, grp_id=0, lhs="v", comp="=", rhs="1.0")
+            for text_id, _text in batch
+        ]
+
+
+async def _run_equation_fallback(llm, timeout_seconds):
+    from bibr.config import snapshot_settings
+    from bibr.pipeline.stages.post_parse import _extract_metadata_and_equations
+
+    settings = snapshot_settings()
+    settings.EQUATION_EXTRACTION = True
+    settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS = 0
+    settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS = timeout_seconds
+    contents = _equation_fallback_contents()
+    await _extract_metadata_and_equations(contents, "hash", False, llm, settings=settings)
+    return contents
+
+
+@pytest.mark.asyncio
+async def test_equation_fallback_timeout_keeps_completed_llm_batches():
+    llm = _EquationLLM(hang_text_id=11)
+
+    contents = await _run_equation_fallback(llm, timeout_seconds=0.05)
+
+    text_ids = [eq.text_id for eq in contents.equations]
+    assert text_ids.count(100) == 2  # regex t and p
+    assert sorted(set(text_ids) - {100}) == list(range(1, 11))
+    assert llm.cancelled is True
+    assert contents.processing_warnings == [
+        "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex equations and 1/2 completed LLM batches"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_equation_fallback_within_deadline_adds_no_warning():
+    contents = await _run_equation_fallback(_EquationLLM(), timeout_seconds=5)
+
+    text_ids = [eq.text_id for eq in contents.equations]
+    assert sorted(set(text_ids) - {100}) == list(range(1, 12))
+    assert contents.processing_warnings == []
+
+
 def test_attach_text_quality_counts_empty_scoreable_regions():
     """Empty scoreable region summaries (OCR coverage failures) must reach the
     scorer. post_parse previously dropped them with an ``if rs.content`` filter,

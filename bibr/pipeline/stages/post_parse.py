@@ -593,21 +593,22 @@ async def _extract_metadata_and_equations(
 
         eq_extractor = EquationExtractor()
         # The regex pass is synchronous and always completes; only the LLM
-        # fan-out can exceed the budget. Running it inside the wait_for meant a
+        # fan-out can exceed the budget. Running it inside the deadline meant a
         # timeout destroyed equations that had already been extracted, and the
         # export shipped "eq": [] with nothing in the log. Threaded because
         # this runs on the shared serve event loop.
         regex_equations = await asyncio.to_thread(
             eq_extractor.extract_from_sentences, contents.sentences, contents.sections
         )
-        eq_coro = asyncio.wait_for(
-            eq_extractor.extract_with_llm_fallback(
-                contents.sentences,
-                contents.sections,
-                llm_client,
-                min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
-                regex_equations=regex_equations,
-            ),
+        # One deadline shared by the LLM batches, not wrapped around the whole
+        # call: batches that return in time are kept and only the stragglers
+        # are cancelled.
+        eq_coro = eq_extractor.extract_with_llm_fallback(
+            contents.sentences,
+            contents.sections,
+            llm_client,
+            min_regex_stats=effective_settings.EQUATION_LLM_FALLBACK_MIN_REGEX_STATS,
+            regex_equations=regex_equations,
             timeout=float(effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS),
         )
 
@@ -624,25 +625,28 @@ async def _extract_metadata_and_equations(
     if isinstance(results[0], BaseException):
         raise results[0]
     if isinstance(results[1], BaseException):
-        timed_out = isinstance(results[1], (TimeoutError, asyncio.TimeoutError))
-        if timed_out:
-            logger.warning(
-                "Equation LLM fallback timed out after %ss; keeping %d regex equation(s)",
-                effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS,
-                len(regex_equations),
-            )
-            contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex-only equation extraction"
-            )
-        else:
-            logger.warning("Equation extraction failed: %s", results[1])
-            contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_FAILED: kept regex-only equation extraction"
-            )
+        logger.warning("Equation extraction failed: %s", results[1])
+        contents.processing_warnings.append(
+            "EQUATION_LLM_FALLBACK_FAILED: kept regex-only equation extraction"
+        )
         # The regex pass ran to completion before the fan-out started — ship it.
         contents.equations = regex_equations
     else:
         contents.equations = results[1]
+        fallback = eq_extractor.last_llm_fallback
+        if fallback.timed_out:
+            logger.warning(
+                "Equation LLM fallback timed out after %ss; keeping %d regex equation(s) "
+                "and %d/%d completed LLM batch(es)",
+                effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS,
+                len(regex_equations),
+                fallback.batches_completed,
+                fallback.batches_total,
+            )
+            contents.processing_warnings.append(
+                "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex equations and "
+                f"{fallback.batches_completed}/{fallback.batches_total} completed LLM batches"
+            )
     if validation_issue_sink is not None and extractor is not None:
         validation_issue_sink.extend(extractor.validation_issues)
     return results[0]

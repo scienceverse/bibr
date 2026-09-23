@@ -25,6 +25,7 @@ parenthesized numeric groups but where regex extraction found nothing.
 import asyncio
 import logging
 import re
+from dataclasses import dataclass
 
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import PaperEquation, PaperSection, PaperSentence
@@ -188,6 +189,19 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
     return any(variant in compact_source for variant in variants)
 
 
+@dataclass(frozen=True)
+class LLMFallbackOutcome:
+    """How the most recent LLM fallback fan-out ended.
+
+    ``batches_completed`` counts batches that returned before the deadline,
+    including those whose LLM call failed and contributed nothing.
+    """
+
+    batches_total: int = 0
+    batches_completed: int = 0
+    timed_out: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Equation Extractor
 # ---------------------------------------------------------------------------
@@ -204,6 +218,7 @@ class EquationExtractor:
 
     def __init__(self) -> None:
         self._grp_counter = 0
+        self.last_llm_fallback = LLMFallbackOutcome()
 
     def _next_grp_id(self) -> int:
         self._grp_counter += 1
@@ -261,12 +276,16 @@ class EquationExtractor:
         llm_client=None,
         min_regex_stats: int = 0,
         regex_equations: list[PaperEquation] | None = None,
+        *,
+        timeout: float | None = None,
     ) -> list[PaperEquation]:
         """Extract equations with optional LLM fallback for missed cases.
 
         First runs regex extraction, then identifies sentences in
         methods/results sections that have parenthesized numeric content
         but where regex found nothing, and sends those to the LLM.
+
+        How the LLM fan-out ended is recorded on ``self.last_llm_fallback``.
 
         Parameters
         ----------
@@ -286,6 +305,10 @@ class EquationExtractor:
             statistical components — a paper-level proxy for "this paper
             reports statistics". Skips the fallback on papers (e.g. math/CS
             preprints) unlikely to carry the prose stats the fallback targets.
+        timeout : float | None
+            Shared deadline in seconds for all LLM batches (``None`` = no
+            deadline). Batches still running at the deadline are cancelled;
+            batches that already returned are kept.
 
         Returns
         -------
@@ -294,11 +317,14 @@ class EquationExtractor:
         """
         from bibr.paper_contents import CanonicalSection
 
-        # Step 1: regex extraction
+        self.last_llm_fallback = LLMFallbackOutcome()
+
+        # Step 1: regex extraction. A caller-supplied list is copied so it
+        # stays regex-only for the caller's own fallback paths.
         equations = (
             self.extract_from_sentences(sentences, sections)
             if regex_equations is None
-            else regex_equations
+            else list(regex_equations)
         )
 
         if llm_client is None:
@@ -366,10 +392,45 @@ class EquationExtractor:
                 )
                 return []
 
-        batch_results = await asyncio.gather(
-            *(_extract_batch(index, batch) for index, batch in enumerate(batches))
+        tasks = [
+            asyncio.create_task(_extract_batch(index, batch)) for index, batch in enumerate(batches)
+        ]
+        try:
+            _done, pending = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_EXCEPTION
+            )
+        finally:
+            # Cancel batches that missed the deadline (or all of them, if this
+            # coroutine was itself cancelled) and let them unwind, so no LLM
+            # call outlives the fallback.
+            unfinished = [task for task in tasks if not task.done()]
+            for task in unfinished:
+                task.cancel()
+            if unfinished:
+                await asyncio.gather(*unfinished, return_exceptions=True)
+
+        finished = [
+            (batch, task)
+            for batch, task in zip(batches, tasks, strict=True)
+            if not task.cancelled()
+        ]
+        # Only ProcessingError escapes _extract_batch. Retrieve every
+        # exception so none is reported as "never retrieved", then raise the
+        # first in source order.
+        errors = [task.exception() for _batch, task in finished]
+        first_error = next((error for error in errors if error is not None), None)
+        if first_error is not None:
+            raise first_error
+        self.last_llm_fallback = LLMFallbackOutcome(
+            batches_total=len(batches),
+            batches_completed=len(finished),
+            timed_out=bool(pending),
         )
-        for batch, llm_equations in zip(batches, batch_results, strict=True):
+
+        # Merge in source order whatever finished, so a deadline keeps the
+        # batches that were already paid for.
+        for batch, task in finished:
+            llm_equations = task.result()
             source_by_text_id = dict(batch)
             # Group components by sentence: the LLM emits flat components,
             # and a fallback sentence is one statistical statement in

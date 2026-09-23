@@ -56,6 +56,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- When the LLM equation fallback reaches `EQUATION_EXTRACTION_TIMEOUT_SECONDS`,
+  equations from batches that already returned are kept instead of being
+  discarded with the rest. Only unfinished batches are cancelled, and the
+  `EQUATION_LLM_FALLBACK_TIMEOUT` warning reports how many batches completed
+  (for example `1/2`). An invalid-output error in one batch now cancels the
+  batches still running instead of leaving them to finish unobserved.
+- LLM equation components whose `sentence_index` does not name a sentence in
+  the batch are dropped, as are components with no index unless the batch holds
+  a single sentence. They were previously attributed to the batch's first
+  sentence, where a short value such as `.05` could pass the grounding check
+  against the wrong sentence.
 
 ### Added
 

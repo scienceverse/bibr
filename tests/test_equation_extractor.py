@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from bibr.extract.equation_extractor import EquationExtractor
 from bibr.paper_contents import PaperSection, PaperSentence
 
@@ -894,3 +896,112 @@ class TestLlmFallbackStatsGate:
         )
 
         assert called is False
+
+
+class TestLlmFallbackDeadline:
+    """A shared deadline keeps finished LLM batches and cancels the rest."""
+
+    def _sections(self):
+        from bibr.paper_contents import CanonicalSection
+
+        return [
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+            PaperSection(
+                section_id=1,
+                header="Results",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.RESULTS,
+            ),
+        ]
+
+    def _candidates(self):
+        # 11 candidates force two LLM batches (batch_size=10): 1-10 and 11.
+        return [
+            _make_sentence(
+                i, f"Weird stat layout (numbers {i} and {i + 1}; value 1.0) regex misses."
+            )
+            for i in range(1, 12)
+        ]
+
+    def _fake_llm(self, hang_text_id=None):
+        from bibr.paper_contents import PaperEquation
+
+        cancelled: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                if any(text_id == hang_text_id for text_id, _ in batch):
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.append(hang_text_id)
+                        raise
+                return [
+                    PaperEquation(text_id=text_id, grp_id=0, lhs="v", comp="=", rhs="1.0")
+                    for text_id, _text in batch
+                ]
+
+        return FakeLLM(), cancelled
+
+    async def test_deadline_keeps_completed_batches_and_cancels_the_rest(self):
+        from bibr.extract.equation_extractor import LLMFallbackOutcome
+
+        llm, cancelled = self._fake_llm(hang_text_id=11)
+        extractor = EquationExtractor()
+
+        eqs = await extractor.extract_with_llm_fallback(
+            self._candidates(), self._sections(), llm_client=llm, timeout=0.05
+        )
+
+        # The first batch returned before the deadline and is kept.
+        assert [eq.text_id for eq in eqs] == list(range(1, 11))
+        assert extractor.last_llm_fallback == LLMFallbackOutcome(
+            batches_total=2, batches_completed=1, timed_out=True
+        )
+        # The straggler was cancelled and unwound before the call returned.
+        assert cancelled == [11]
+        assert asyncio.all_tasks() == {asyncio.current_task()}
+
+    async def test_all_batches_finishing_in_time_is_unchanged(self):
+        from bibr.extract.equation_extractor import LLMFallbackOutcome
+
+        llm, cancelled = self._fake_llm()
+        extractor = EquationExtractor()
+
+        eqs = await extractor.extract_with_llm_fallback(
+            self._candidates(), self._sections(), llm_client=llm, timeout=5.0
+        )
+
+        assert [eq.text_id for eq in eqs] == list(range(1, 12))
+        assert extractor.last_llm_fallback == LLMFallbackOutcome(
+            batches_total=2, batches_completed=2, timed_out=False
+        )
+        assert cancelled == []
+
+    async def test_processing_error_cancels_other_batches(self):
+        from bibr.exceptions import ProcessingError
+
+        error = ProcessingError("invalid output", error_code="llm_invalid_output")
+        cancelled: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                if batch[0][0] == 1:
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.append(1)
+                        raise
+                raise error
+
+        with pytest.raises(ProcessingError) as raised:
+            await asyncio.wait_for(
+                EquationExtractor().extract_with_llm_fallback(
+                    self._candidates(), self._sections(), llm_client=FakeLLM()
+                ),
+                timeout=5.0,
+            )
+
+        assert raised.value is error
+        assert cancelled == [1]
