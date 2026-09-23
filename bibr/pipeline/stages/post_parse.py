@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import NAME_CHAR_CLS
 
 if TYPE_CHECKING:
@@ -146,7 +147,7 @@ def _count_numbered_citations(numbers: set[int]) -> int:
 
 def _low_reference_count_warning(
     body_text: str, n_refs: int, *, cited_numbers: set[int] | None = None
-) -> str | None:
+) -> ProcessingWarning | None:
     """Return a warning when extracted references are grossly fewer than the
     body's distinct in-text citations (likely OCR reference-region omission),
     else None. General gross-drop net — not a single-dropped-reference detector.
@@ -160,10 +161,10 @@ def _low_reference_count_warning(
     n_cited = max(n_author_year, n_numbered)
     if n_cited >= _MIN_BODY_CITES_FOR_WARNING and n_refs < _REF_DEFICIT_RATIO * n_cited:
         kind = "numbered in-text citations" if n_numbered > n_author_year else "in-text citations"
-        return (
-            f"Reference under-extraction suspected: {n_refs} references parsed "
-            f"vs {n_cited} distinct {kind} in the body — some "
-            f"reference entries may have been dropped (OCR region omission)."
+        return ProcessingWarning(
+            WarningCode.REF_UNDER_EXTRACTION_SUSPECTED,
+            f"{n_refs} references parsed vs {n_cited} distinct {kind} in the body — some "
+            f"reference entries may have been dropped (OCR region omission).",
         )
     return None
 
@@ -183,7 +184,7 @@ def _attach_text_quality(paper, contents, settings: GlobalSettings | None = None
     populates no region summaries, so its score stays ``None`` (there is no OCR
     garbage to rate). Sets ``paper.text_quality`` and, below
     ``Settings.pipeline.text_quality_warn_threshold``, appends a
-    ``low_text_quality: <score>`` processing warning.
+    ``LOW_TEXT_QUALITY`` processing warning.
     """
     from bibr.config import snapshot_settings
     from bibr.structure.text_quality import paper_text_quality
@@ -202,9 +203,13 @@ def _attach_text_quality(paper, contents, settings: GlobalSettings | None = None
     if report is None:
         return
     paper.text_quality = report.score
-    if report.score < effective.pipeline.text_quality_warn_threshold:
-        warning = f"low_text_quality: {report.score:.2f}"
-        logger.warning(warning)
+    threshold = effective.pipeline.text_quality_warn_threshold
+    if report.score < threshold:
+        warning = ProcessingWarning(
+            WarningCode.LOW_TEXT_QUALITY,
+            f"text-quality score {report.score:.2f} is below {threshold:g}",
+        )
+        logger.warning("Low text quality: %s", warning.message)
         paper.processing_warnings.append(warning)
 
 
@@ -632,12 +637,20 @@ async def _extract_metadata_and_equations(
                 len(regex_equations),
             )
             contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex-only equation extraction"
+                ProcessingWarning(
+                    WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
+                    "timed out after "
+                    f"{effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS}s; kept regex-only "
+                    "equation extraction",
+                )
             )
         else:
             logger.warning("Equation extraction failed: %s", results[1])
             contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_FAILED: kept regex-only equation extraction"
+                ProcessingWarning(
+                    WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+                    f"{type(results[1]).__name__}; kept regex-only equation extraction",
+                )
             )
         # The regex pass ran to completion before the fan-out started — ship it.
         contents.equations = regex_equations
@@ -1841,7 +1854,7 @@ async def post_parse(
             cited_numbers=cited_reference_numbers(contents.citation_receipt),
         )
         if warning:
-            logger.warning(warning)
+            logger.warning("Reference under-extraction suspected: %s", warning.message)
             paper.processing_warnings.append(warning)
 
     # Report-only parse-quality score (Docling port): rates each region's text

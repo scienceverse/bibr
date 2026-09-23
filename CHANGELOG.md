@@ -84,6 +84,18 @@ released.
 - `figure[].image` is a `data:` URI that names its media type
   (`data:image/jpeg;base64,…`); the format used to vary unannounced (JPEG
   crops, PNG composites, whatever a DOCX embedded).
+- `extraction.warnings` holds `{code, message}` objects instead of prose
+  strings. `code` is a stable UPPER_SNAKE code like the validation issue codes
+  (`OCR_PAGE_FAILED`, `REF_SEG_CRF_FALLBACK`, `CROSSREF_ENRICHMENT_TIMEOUT`, …)
+  and `message` carries the details (page, counts, exception type). The schema
+  pins the code's form, not a list, so another producer can add codes of its
+  own; bibr's are listed in the JSON schema reference. An OCR page failure now
+  numbers its page from 1, like the region warnings. `bibr batch` ledgers count
+  warnings by code, `bibr tables` writes them to `extraction_warnings`, and the
+  `*_WARNING_PREFIX` constants in `bibr.extract` are replaced by
+  `bibr.processing_warnings.WarningCode`. The OCR disk cache (format 10) and the
+  enrichment sidecar (schema 4) store the new shape, so entries written by an
+  earlier build are not reused.
 - Every field and model in `docs/schema/bibr-export-v12.schema.json` has a
   description, and a test keeps it that way; the documentation site's JSON
   schema page shows them. Both schema documents carry a stable `$id` under
@@ -157,13 +169,13 @@ released.
   `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
   "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
   still left out.
-- The reference under-extraction warning in `processing_warnings` now also
-  covers numeric citation styles. It previously counted only author-year
-  citations, so a numbered paper whose reference region was lost to OCR was
-  never flagged. It now also counts the distinct reference numbers cited by
-  bracket and superscript markers, up to the highest number where at least
-  half of 1..n are cited, and warns when fewer than half that many references
-  were parsed (at least 15 cited).
+- The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
+  `extraction.warnings`) now also covers numeric citation styles. It previously
+  counted only author-year citations, so a numbered paper whose reference
+  region was lost to OCR was never flagged. It now also counts the distinct
+  reference numbers cited by bracket and superscript markers, up to the highest
+  number where at least half of 1..n are cited, and warns when fewer than half
+  that many references were parsed (at least 15 cited).
 - The OCR disk cache (`CACHE_OCR`, on by default in the local demo) is now keyed
   on the bibr version too, so an upgraded bibr no longer reuses rendering,
   layout, native-text and OCR bundles made by the previous release. The key

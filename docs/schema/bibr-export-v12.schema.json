@@ -1321,7 +1321,7 @@
     },
     "EnrichmentExport": {
       "additionalProperties": false,
-      "description": "Reference-enrichment completeness \u2014 lets a consumer distinguish a\npartial (timed-out) enrichment from a complete one without grepping\n``extraction.warnings``.",
+      "description": "Reference-enrichment completeness \u2014 lets a consumer distinguish a\npartial (timed-out) enrichment from a complete one without scanning\n``extraction.warnings``.",
       "properties": {
         "complete": {
           "description": "False when enrichment stopped before every reference was looked up, e.g. on a timeout.",
@@ -1717,9 +1717,9 @@
           "description": "Output validation gate result: error/warning counts, promotion disposition and the issue list. Omitted when the gate was skipped."
         },
         "warnings": {
-          "description": "Non-fatal processing warnings, as prose.",
+          "description": "Non-fatal processing warnings, each a stable code and a message.",
           "items": {
-            "type": "string"
+            "$ref": "#/$defs/WarningExport"
           },
           "title": "Warnings",
           "type": "array"
@@ -4051,6 +4051,29 @@
         "blocking"
       ],
       "title": "ValidationIssueExport",
+      "type": "object"
+    },
+    "WarningExport": {
+      "additionalProperties": false,
+      "description": "One non-fatal processing warning.",
+      "properties": {
+        "code": {
+          "description": "Stable, machine-readable warning code in UPPER_SNAKE case, e.g. 'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other producers may add their own, so readers must accept a code they do not know.",
+          "pattern": "^[A-Z][A-Z0-9_]*$",
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "description": "Human-readable details, such as the page, counts or exception type.",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "WarningExport",
       "type": "object"
     },
     "XrefExport": {

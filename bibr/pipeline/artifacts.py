@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.validation import payload_validation
 
 if TYPE_CHECKING:
@@ -19,7 +20,8 @@ if TYPE_CHECKING:
 # ``info_match`` -> ``metadata_match``. A v1 sidecar now fails its own version
 # check with an accurate message instead of the misleading core-version one.
 # "3" (v12) adds the ROR ``affiliation_match`` and ``funding_match`` rows.
-ENRICHMENT_SIDECAR_SCHEMA_VERSION = "3"
+# "4" stores warnings as ``{code, message}`` objects instead of prose.
+ENRICHMENT_SIDECAR_SCHEMA_VERSION = "4"
 CORE_SCHEMA_VERSION = "12.0"
 # Each major is a clean break: a v11 core cannot be replayed into a v12
 # payload, so the gate accepts exactly one version.
@@ -56,7 +58,7 @@ class EnrichmentSidecar:
     metadata_match: tuple[dict, ...] = ()
     affiliation_match: tuple[dict, ...] = ()
     funding_match: tuple[dict, ...] = ()
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
     detail: str | None = None
 
     def to_dict(self) -> dict:
@@ -80,7 +82,10 @@ class EnrichmentSidecar:
             metadata_match=tuple(value.get("metadata_match") or ()),
             affiliation_match=tuple(value.get("affiliation_match") or ()),
             funding_match=tuple(value.get("funding_match") or ()),
-            warnings=tuple(str(item)[:512] for item in (value.get("warnings") or ())),
+            warnings=tuple(
+                ProcessingWarning(warning.code, warning.message[:512])
+                for warning in map(ProcessingWarning.from_dict, value.get("warnings") or ())
+            ),
             detail=(str(value["detail"])[:512] if value.get("detail") is not None else None),
         )
 
@@ -227,7 +232,7 @@ def make_enrichment_sidecar(
     core_sha256: str,
     settings_digest: str,
     completeness: Literal["partial", "complete"],
-    warnings: tuple[str, ...] = (),
+    warnings: tuple[ProcessingWarning, ...] = (),
     detail: str | None = None,
 ) -> EnrichmentSidecar:
     """Extract only replayable enrichment rows from a fully exported payload."""
@@ -262,7 +267,10 @@ def make_enrichment_sidecar(
         metadata_match=tuple(metadata_match),
         affiliation_match=tuple(affiliation_match),
         funding_match=tuple(funding_match),
-        warnings=tuple(" ".join(str(item).split())[:512] for item in warnings),
+        warnings=tuple(
+            ProcessingWarning(warning.code, " ".join(warning.message.split())[:512])
+            for warning in warnings
+        ),
         detail=" ".join(str(detail).split())[:512] if detail else None,
     )
 
@@ -291,6 +299,14 @@ def replay_enrichment_sidecar(
     # contract violation it is rather than replaying a lossy payload.
     if not isinstance(core_payload.get("extraction"), dict):
         raise ArtifactReplayError("core payload has no extraction block")
+    # Replay appends coded warnings, so a core whose warnings are not all
+    # ``{code, message}`` objects (a 12.0 core written before warnings had
+    # codes holds prose) would come out with both shapes in one list.
+    core_warnings = core_payload["extraction"].get("warnings", [])
+    if not isinstance(core_warnings, list):
+        raise ArtifactReplayError("core payload has invalid warnings")
+    if not all(isinstance(warning, ProcessingWarning) for warning in sidecar.warnings):
+        raise ArtifactReplayError("invalid enrichment warning")
 
     core_bib_ids = {
         row.get("bib_id")
@@ -342,6 +358,7 @@ def replay_enrichment_sidecar(
         MetadataMatchExport,
         append_payload_warning,
     )
+    from bibr.export.models import WarningExport
 
     try:
         for row in sidecar.bib_match:
@@ -352,8 +369,15 @@ def replay_enrichment_sidecar(
             AffiliationMatchExport.model_validate(row, strict=True)
         for row in sidecar.funding_match:
             FundingMatchExport.model_validate(row, strict=True)
+        for warning in sidecar.warnings:
+            WarningExport.model_validate(warning.to_dict(), strict=True)
     except ValidationError as exc:
         raise ArtifactReplayError("invalid typed enrichment row") from exc
+    try:
+        for row in core_warnings:
+            WarningExport.model_validate(row, strict=True)
+    except ValidationError as exc:
+        raise ArtifactReplayError("core payload has invalid warnings") from exc
 
     replayed = copy.deepcopy(core_payload)
     replayed["bib_match"] = copy.deepcopy(list(sidecar.bib_match))
@@ -382,7 +406,7 @@ def replay_enrichment_sidecar(
         _clear_enrichment_pending(replayed)
     diagnostics = [*sidecar.warnings]
     if sidecar.detail:
-        diagnostics.append(f"enrichment: {sidecar.detail}")
+        diagnostics.append(ProcessingWarning(WarningCode.ENRICHMENT_INCOMPLETE, sidecar.detail))
     for diagnostic in diagnostics:
         append_payload_warning(replayed, diagnostic)
     return replayed

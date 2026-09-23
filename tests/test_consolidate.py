@@ -371,7 +371,12 @@ def test_export_hook_warns_when_crossref_disabled():
 
     data = _exportable(bib_match=[])
     out = _run_export(data, RunConfig(consolidate="fill", crossref=False))
-    assert any("consolidate" in w for w in out["extraction"]["warnings"])
+    assert out["extraction"]["warnings"] == [
+        {
+            "code": "CONSOLIDATE_WITHOUT_ENRICHMENT",
+            "message": "consolidate enabled but Crossref enrichment is off — no matches to merge",
+        }
+    ]
 
 
 def test_fill_takes_the_iso_date_and_keeps_the_printed_one():

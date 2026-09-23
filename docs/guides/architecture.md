@@ -108,7 +108,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 
 - JSON-serializable dict matching the bibr v{{ schema_version }} paper schema
 - Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version`, `source`; what the paper says — `metadata`, `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`; what external registries returned — `metadata_match`, `affiliation_match`, `funding_match`, `bib_match`; how bibr produced the output — `extraction`. Every key is always present.
-- Content rows carry no processing fields. Engines, settings, timings, LLM usage, enrichment, warnings, qualification provenance, the output-validation result, diagnostics receipts (section classification, citation-detector tiers, paper-classification confidences, consolidation), the page and bbox of every figure/table piece (`float_parts`) and the opt-in layout payloads all live under `extraction`, keyed by the content rows' IDs. A Paper exported outside the pipeline gets a minimal `extraction` block.
+- Content rows carry no processing fields. Engines, settings, timings, LLM usage, enrichment, warnings (each a stable `code` and a `message`), qualification provenance, the output-validation result, diagnostics receipts (section classification, citation-detector tiers, paper-classification confidences, consolidation), the page and bbox of every figure/table piece (`float_parts`) and the opt-in layout payloads all live under `extraction`, keyed by the content rows' IDs. A Paper exported outside the pipeline gets a minimal `extraction` block.
 - Every record table has an integer primary key named after it (`text_id`, `xref_id`, `url_id`, …); other `*_id` columns are foreign keys. Absent values are `null`, never an empty string. Closed vocabularies (`section_type`, `bib_type`, `paper_type`, OECD labels, …) are enums in the schema, and every field carries a description.
 - `xref`, `url` and `eq` rows carry `start`/`end` character spans within their sentence's `text`. Printed values keep normalized companions where one is unambiguous: `metadata.published_date` (ISO 8601), `license_url`/`license_spdx`, `author.credit_roles` (CRediT URIs), and declared `language`/`pmid`/`pmcid`/`arxiv`.
 - Every bounding box is `[x0, y0, x1, y1]` in PDF points on the page as displayed, measured from its top-left corner; `extraction.pages` gives each page's width and height.
@@ -163,8 +163,8 @@ silent per-request GLM fallback after a concrete runtime has passed startup.
 
 OCR cache entries retain page-attempt and page-failure counts with extraction
 warnings. Cache hits apply the current `OCR_MIN_SUCCESS_RATE`, so tightening
-the threshold also rejects cached OCR that falls below it. Cache format 9
-invalidates older entries that lack this completion evidence.
+the threshold also rejects cached OCR that falls below it. Cache format 10,
+which stores the warnings with their codes, invalidates older entries.
 
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one

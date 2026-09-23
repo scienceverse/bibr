@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.pipeline.state import FileState
@@ -39,7 +41,7 @@ class EnrichmentStatus(StrEnum):
 @dataclass(frozen=True)
 class EnrichmentOutcome:
     status: EnrichmentStatus
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
     detail: str | None = None
 
 
@@ -174,23 +176,30 @@ class CrossrefEnricher:
         except TimeoutError:
             if meta.references:
                 meta.enrichment_complete = False
-            fs.warnings.append("Crossref enrichment timed out")
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
+                f"Crossref enrichment timed out after {timeout:g}s",
+            )
+            fs.warnings.append(warning)
             logger.warning("[%s] Crossref enrichment timed out", fs.path.name)
             return EnrichmentOutcome(
                 EnrichmentStatus.PARTIAL,
-                warnings=("Crossref enrichment timed out",),
+                warnings=(warning,),
                 detail="Crossref enrichment timed out",
             )
         except Exception as e:  # noqa: BLE001
             if meta.references:
                 meta.enrichment_complete = False
-            fs.warnings.append(f"Crossref enrichment failed: {e}")
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_FAILED,
+                f"Crossref enrichment failed: {type(e).__name__}: {e}",
+            )
+            fs.warnings.append(warning)
             logger.warning("[%s] Crossref enrichment failed: %s", fs.path.name, e)
-            warning = f"Crossref enrichment failed: {e}"
             return EnrichmentOutcome(
                 EnrichmentStatus.PARTIAL,
                 warnings=(warning,),
-                detail=warning,
+                detail=f"Crossref enrichment failed: {e}",
             )
 
 
@@ -223,10 +232,13 @@ class RorEnricher:
         )
         if not report.attempted:
             return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
-        warnings: tuple[str, ...] = ()
+        warnings: tuple[ProcessingWarning, ...] = ()
         if report.timed_out:
             warnings = (
-                f"ROR matching stopped after {self._settings.ror.enrich_timeout:.0f}s; "
-                f"{report.matched}/{report.attempted} affiliation/funder strings matched",
+                ProcessingWarning(
+                    WarningCode.ROR_MATCHING_TIMEOUT,
+                    f"ROR matching stopped after {self._settings.ror.enrich_timeout:.0f}s; "
+                    f"{report.matched}/{report.attempted} affiliation/funder strings matched",
+                ),
             )
         return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=warnings)

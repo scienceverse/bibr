@@ -366,4 +366,3 @@ class ProcessingStatus(_Base):
     error_message: str | None = None
     failed_stage: str | None = None
     stage_times: dict[str, float] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list)

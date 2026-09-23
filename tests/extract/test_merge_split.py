@@ -383,8 +383,9 @@ def test_split_is_best_effort_on_error(monkeypatch):
 
 from unittest.mock import Mock
 
-from bibr.extract.ref_extractor import MERGE_SPLIT_WARNING_PREFIX, ReferenceExtractor
+from bibr.extract.ref_extractor import ReferenceExtractor
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import WarningCode
 
 
 def _bare_extractor():
@@ -404,4 +405,4 @@ def test_maybe_split_splits_and_warns_when_enabled():
     out = ext._maybe_split_merged([P_CORP2, N_CLEAN_SINGLE])
     assert len(out) == 3
     warnings = ext.contents.processing_warnings
-    assert any(w.startswith(MERGE_SPLIT_WARNING_PREFIX) for w in warnings)
+    assert any(w.code == WarningCode.REF_SEG_MERGE_SPLIT for w in warnings)

@@ -256,6 +256,7 @@ def _nested_export_models(model: type[BaseModel]) -> list[type[BaseModel]]:
 
 def render_schema_md() -> str:
     from bibr.export.models import _SCHEMA_VERSION, PaperExport
+    from bibr.processing_warnings import DESCRIPTIONS
 
     nested_models = _nested_export_models(PaperExport)
     parts = [
@@ -312,8 +313,9 @@ def render_schema_md() -> str:
             "`extraction.text_regions` requires `include_region_meta=True` / "
             "`--region-meta`. The `validation` gate is enabled by default "
             "and can be disabled independently of the typed export builder. "
-            "Inspect `extraction.warnings` and `extraction.validation` when reviewing "
-            "results. "
+            "Inspect `extraction.warnings` (each a stable `code` and a `message`; "
+            "[the codes are listed below](#warning-codes)) and `extraction.validation` "
+            "when reviewing results. "
             "The presence of the root `schema_version` key distinguishes v11 and "
             "later from legacy exports. For compatibility, see "
             "[the export overview](../guides/architecture.md).\n",
@@ -350,6 +352,18 @@ def render_schema_md() -> str:
             desc = _md_escape(" ".join(filter(None, [field.description or "", choices])))
             parts.append(f"| `{json_name}` | `{ann}` | {required} | {default} | {desc} |")
         parts.append("")
+    parts.extend(
+        [
+            "## Warning codes\n",
+            "The codes bibr writes to `extraction.warnings[].code`. The schema pins "
+            "their form (UPPER_SNAKE), not this list: another producer of the format "
+            "may add codes of its own, and a later bibr may add more.\n",
+            "| Code | Meaning |",
+            "|---|---|",
+            *(f"| `{code}` | {_md_escape(meaning)} |" for code, meaning in DESCRIPTIONS.items()),
+            "",
+        ]
+    )
     return "\n".join(parts) + "\n"
 
 

@@ -16,6 +16,7 @@ import pytest
 from bibr.pipeline.context import PipelineContext, RunConfig, StageSignals
 from bibr.pipeline.stages.ocr import OcrStage
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 
 def _make_fs(pages: int = 3) -> FileState:
@@ -68,8 +69,14 @@ async def test_local_path_one_page_error_does_not_fail_other_pages(monkeypatch):
     assert any("page-0" in str(r) for r in fs.ocr_regions[0])
     assert fs.ocr_regions[1] == []
     assert any("page-2" in str(r) for r in fs.ocr_regions[2])
-    # Warning recorded.
-    assert fs.warnings, "expected at least one warning for the failed page"
+    # Warning recorded, with the page numbered from 1 like the region warnings.
+    assert fs.warnings == [
+        ProcessingWarning(
+            WarningCode.OCR_PAGE_FAILED,
+            "OCR failed for a page; its text is missing (page 2): "
+            "RuntimeError: simulated page failure",
+        )
+    ]
 
 
 @pytest.mark.asyncio

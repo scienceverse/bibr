@@ -14,14 +14,12 @@ from unittest.mock import AsyncMock, patch
 
 from bibr.exceptions import UpstreamServiceError
 from bibr.extract.ref_extractor import (
-    PARSE_FALLBACK_WARNING_PREFIX,
-    PARSE_SALVAGE_RECOVERY_PREFIX,
-    PARSE_SPLIT_RECOVERY_PREFIX,
     IncompleteOutputException,
     ReferenceExtractor,
 )
 from bibr.paper import PaperReference
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import PaperReferenceLLM
 
 _REFS = [
@@ -103,8 +101,8 @@ async def test_salvaged_prefix_kept_tail_reparsed(monkeypatch):
     assert refs[2].title == "Title 3"
     assert refs[3].title == "Title 4"
     warnings = ext.contents.processing_warnings
-    assert any(w.startswith(PARSE_SALVAGE_RECOVERY_PREFIX) for w in warnings)
-    assert any(w.startswith(PARSE_SPLIT_RECOVERY_PREFIX) for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_SALVAGE_RECOVERY for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_SPLIT_RECOVERY for w in warnings)
 
 
 async def test_salvaged_prefix_kept_tail_falls_back_to_ner(monkeypatch):
@@ -140,8 +138,8 @@ async def test_salvaged_prefix_kept_tail_falls_back_to_ner(monkeypatch):
     assert refs[2].title.startswith("Ner")
     assert refs[3].title.startswith("Ner")
     warnings = ext.contents.processing_warnings
-    assert any(w.startswith(PARSE_SALVAGE_RECOVERY_PREFIX) for w in warnings)
-    assert any(w.startswith(PARSE_FALLBACK_WARNING_PREFIX) for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_SALVAGE_RECOVERY for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_NER_FALLBACK for w in warnings)
 
 
 async def test_full_salvage_skips_fallback_entirely(monkeypatch):
@@ -159,7 +157,7 @@ async def test_full_salvage_skips_fallback_entirely(monkeypatch):
     assert ext.llm_client.extract_references.await_count == 1
     assert [r.title for r in refs] == ["Salv 1", "Salv 2", "Salv 3", "Salv 4"]
     assert any(
-        w.startswith(PARSE_SALVAGE_RECOVERY_PREFIX) for w in ext.contents.processing_warnings
+        w.code == WarningCode.REF_PARSE_SALVAGE_RECOVERY for w in ext.contents.processing_warnings
     )
 
 
@@ -183,6 +181,6 @@ async def test_misaligned_indices_decline_salvage(monkeypatch):
     ner.assert_not_called()
     # No salvage recorded; the full batch is recovered by the split path instead.
     assert not any(
-        w.startswith(PARSE_SALVAGE_RECOVERY_PREFIX) for w in ext.contents.processing_warnings
+        w.code == WarningCode.REF_PARSE_SALVAGE_RECOVERY for w in ext.contents.processing_warnings
     )
     assert [r.title for r in refs] == ["Title 1", "Title 2", "Title 3", "Title 4"]

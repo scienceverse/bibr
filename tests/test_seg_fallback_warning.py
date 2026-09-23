@@ -2,20 +2,18 @@
 
 The LLM anchor-segmenter falls back to the CRF segmenter on failure
 (zero usable spans, or any exception). Each fallback must be recorded on
-``PaperContents.processing_warnings`` with a stable, machine-greppable
-prefix so fallback frequency can be measured across an eval corpus.
+``PaperContents.processing_warnings`` with the stable ``REF_SEG_CRF_FALLBACK``
+code so fallback frequency can be measured across an eval corpus.
 A directly configured ``crf`` strategy is not a fallback and records nothing.
 """
 
 from unittest import mock
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from bibr.extract.extractor import (
-    SEG_FALLBACK_WARNING_PREFIX,
-    MetadataExtractor,
-)
+from bibr.extract.extractor import MetadataExtractor
 from bibr.extract.ref_extractor import ReferenceExtractor
 from bibr.paper_contents import PaperContents, PaperSection
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 REF_TEXT = "Smith, J. (2020). A. Journal, 1, 1-10.\nDoe, A. (2019). B. Journal, 2, 11-20."
 
@@ -51,9 +49,9 @@ class TestSegmentReferencesFallbackWarning:
         fake_seg.segment.assert_called_once()
         warnings = ext.contents.processing_warnings
         assert len(warnings) == 1
-        assert warnings[0].startswith(SEG_FALLBACK_WARNING_PREFIX)
-        assert "RuntimeError" in warnings[0]
-        assert "seg down" in warnings[0]
+        assert warnings[0].code == WarningCode.REF_SEG_CRF_FALLBACK
+        assert "RuntimeError" in warnings[0].message
+        assert "seg down" in warnings[0].message
 
     async def test_fallback_on_zero_spans_records_warning(self, monkeypatch):
         fake_seg = _fake_crf(monkeypatch)
@@ -67,8 +65,8 @@ class TestSegmentReferencesFallbackWarning:
         fake_seg.segment.assert_called_once()
         warnings = ext.contents.processing_warnings
         assert len(warnings) == 1
-        assert warnings[0].startswith(SEG_FALLBACK_WARNING_PREFIX)
-        assert "LLM segmentation produced 0 usable spans" in warnings[0]
+        assert warnings[0].code == WarningCode.REF_SEG_CRF_FALLBACK
+        assert "LLM segmentation produced 0 usable spans" in warnings[0].message
 
     async def test_direct_crf_strategy_records_nothing(self, monkeypatch):
         fake_seg = _fake_crf(monkeypatch)
@@ -92,9 +90,9 @@ class TestSegmentReferencesFallbackWarning:
         assert len(ref_strings) == 2
         assert ext.contents.processing_warnings == []
 
-    def test_prefix_is_stable(self):
-        # Eval tooling greps for this exact prefix — do not reword.
-        assert SEG_FALLBACK_WARNING_PREFIX == "Reference segmentation fell back to CRF"
+    def test_code_is_stable(self):
+        # Eval tooling counts this exact code — do not rename.
+        assert WarningCode.REF_SEG_CRF_FALLBACK == "REF_SEG_CRF_FALLBACK"
 
 
 class TestSegmentReferencesTrainingDataCapture:
@@ -186,8 +184,6 @@ class TestCrfHardFailureGuard:
         assert len(refs) == 12
 
     async def test_unrecoverable_region_records_hard_failure_warning(self, monkeypatch):
-        from bibr.extract.extractor import REF_SEG_HARD_FAILURE_PREFIX
-
         fake = mock.Mock()
         fake.segment = mock.Mock(return_value=[])
         monkeypatch.setattr("bibr.extract.ref_extractor._get_ner_segmenter", lambda *_a: fake)
@@ -198,9 +194,7 @@ class TestCrfHardFailureGuard:
         refs = await ext.refs._segment_references(self.PROSE, "llm")
 
         assert refs == []
-        assert any(
-            w.startswith(REF_SEG_HARD_FAILURE_PREFIX) for w in ext.contents.processing_warnings
-        )
+        assert any(w.code == WarningCode.REF_SEG_FAILED for w in ext.contents.processing_warnings)
 
     def test_marker_split_refs_pure(self):
         from bibr.extract.extractor import _marker_split_refs
@@ -219,7 +213,7 @@ class TestPaperContentsProcessingWarnings:
 
     def test_instances_do_not_share_the_list(self):
         a, b = _minimal_contents(), _minimal_contents()
-        a.processing_warnings.append("w")
+        a.processing_warnings.append(ProcessingWarning(WarningCode.REF_SEG_CRF_FALLBACK, "w"))
         assert b.processing_warnings == []
 
 
@@ -239,7 +233,9 @@ class TestWarningPropagation:
         from bibr.pipeline.stages.post_parse import post_parse
 
         contents = _minimal_contents()
-        warning = "Reference segmentation fell back to CRF: RuntimeError('seg down')"
+        warning = ProcessingWarning(
+            WarningCode.REF_SEG_CRF_FALLBACK, "LLM segmentation error: RuntimeError('seg down')"
+        )
         contents.processing_warnings.append(warning)
 
         paper = await post_parse(
@@ -256,7 +252,12 @@ class TestWarningPropagation:
         from bibr.pipeline.stages.post_parse import post_parse
 
         contents = _minimal_contents()
-        seg_warning = "Reference segmentation fell back to CRF: ValueError('x')"
+        seg_warning = ProcessingWarning(
+            WarningCode.REF_SEG_CRF_FALLBACK, "LLM segmentation error: ValueError('x')"
+        )
+        post_parse_warning = ProcessingWarning(
+            WarningCode.REF_UNDER_EXTRACTION_SUSPECTED, "POST PARSE WARNING"
+        )
         contents.processing_warnings.append(seg_warning)
 
         with (
@@ -278,7 +279,7 @@ class TestWarningPropagation:
             ),
             patch(
                 "bibr.pipeline.stages.post_parse._low_reference_count_warning",
-                mock.Mock(return_value="POST PARSE WARNING"),
+                mock.Mock(return_value=post_parse_warning),
             ),
         ):
             paper = await post_parse(
@@ -289,15 +290,15 @@ class TestWarningPropagation:
                 llm_client=MagicMock(),
             )
 
-        assert paper.processing_warnings == [seg_warning, "POST PARSE WARNING"]
+        assert paper.processing_warnings == [seg_warning, post_parse_warning]
 
     async def test_warning_reaches_exported_json(self):
         from bibr.export.json_export import export_paper_to_json
         from bibr.pipeline.stages.post_parse import post_parse
 
         contents = _minimal_contents()
-        warning = (
-            "Reference segmentation fell back to CRF: LLM segmentation produced 0 usable spans"
+        warning = ProcessingWarning(
+            WarningCode.REF_SEG_CRF_FALLBACK, "LLM segmentation produced 0 usable spans"
         )
         contents.processing_warnings.append(warning)
 
@@ -319,4 +320,7 @@ class TestWarningPropagation:
         }
         result = export_paper_to_json(paper)
 
-        assert warning in result["extraction"]["warnings"]
+        assert {
+            "code": "REF_SEG_CRF_FALLBACK",
+            "message": "LLM segmentation produced 0 usable spans",
+        } in result["extraction"]["warnings"]

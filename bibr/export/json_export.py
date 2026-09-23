@@ -73,6 +73,7 @@ from bibr.export.normalize import arxiv_id, credit_roles, iso_date, license_ids
 from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.extract.research_integrity import collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
+from bibr.processing_warnings import ProcessingWarning
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -537,7 +538,7 @@ def _apply_output_validation(
     return payload
 
 
-def append_payload_warning(payload: dict, message: str) -> dict:
+def append_payload_warning(payload: dict, warning: ProcessingWarning) -> dict:
     """Append a non-fatal warning to an already-serialized payload.
 
     Warnings live at ``extraction.warnings``. Post-export mutators
@@ -552,8 +553,9 @@ def append_payload_warning(payload: dict, message: str) -> dict:
         return payload
     existing = extraction.get("warnings")
     warnings = list(existing) if isinstance(existing, list) else []
-    if message not in warnings:
-        warnings.append(message)
+    row = warning.to_dict()
+    if row not in warnings:
+        warnings.append(row)
     extraction["warnings"] = warnings
     return payload
 
@@ -1063,9 +1065,11 @@ def _export_paper_payload(
         # Warnings are unioned rather than overwritten: the stage snapshots
         # ``paper.processing_warnings`` when it builds the block, but callers
         # (and the stage itself) may append after that point.
-        extraction_data["warnings"] = list(
-            dict.fromkeys([*(extraction_data.get("warnings") or []), *paper.processing_warnings])
+        warnings = map(
+            ProcessingWarning.from_dict,
+            [*(extraction_data.get("warnings") or []), *paper.processing_warnings],
         )
+        extraction_data["warnings"] = [w.to_dict() for w in dict.fromkeys(warnings)]
 
     affiliation_data = _export_affiliations(paper)
     funding_data = [

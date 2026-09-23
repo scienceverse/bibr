@@ -55,7 +55,7 @@ def bounded_text(text: object, limit: int = ERROR_TEXT_LIMIT) -> str | None:
 
 
 def warning_key(warning: str) -> str:
-    """Collapse a ``processing_warnings`` string to a frequency key.
+    """Collapse a pre-12.0 prose warning to a frequency key.
 
     ``VALIDATION:<severity>:<CODE>: message`` keeps its first three segments;
     anything else keeps the text before the first ``:`` (or its first 60
@@ -68,6 +68,21 @@ def warning_key(warning: str) -> str:
     head, sep, _ = text.partition(":")
     key = head.strip() if sep else text
     return key[:60]
+
+
+def _warning_entry(warning: object) -> tuple[str, str] | None:
+    """``(frequency key, sample text)`` of one export warning; None when malformed.
+
+    A 12.x warning is a ``{code, message}`` object counted by its code; an older
+    export's prose string is counted by :func:`warning_key`.
+    """
+    if isinstance(warning, str):
+        return warning_key(warning), warning
+    if isinstance(warning, Mapping):
+        code, message = warning.get("code"), warning.get("message")
+        if isinstance(code, str) and code:
+            return code, f"{code}: {message}" if isinstance(message, str) and message else code
+    return None
 
 
 def _as_int(value: object) -> int:
@@ -135,11 +150,12 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
     text = data.get("text")
     raw_warnings = (extraction or {}).get("warnings", data.get("processing_warnings"))
     warnings = (
-        [w for w in raw_warnings if isinstance(w, str)] if isinstance(raw_warnings, list) else []
+        [entry for entry in map(_warning_entry, raw_warnings) if entry is not None]
+        if isinstance(raw_warnings, list)
+        else []
     )
     codes: dict[str, int] = {}
-    for w in warnings:
-        key = warning_key(w)
+    for key, _ in warnings:
         codes[key] = codes.get(key, 0) + 1
 
     validation = payload_validation(data)
@@ -163,7 +179,9 @@ def summarize_export(data: Mapping[str, Any] | None) -> dict[str, Any]:
         "n_validation_warnings": n_val_warnings,
         "warnings": {
             "count": len(warnings),
-            "first": [bounded_text(w, WARNING_TEXT_LIMIT) for w in warnings[:WARNING_SAMPLE]],
+            "first": [
+                bounded_text(text, WARNING_TEXT_LIMIT) for _, text in warnings[:WARNING_SAMPLE]
+            ],
             "codes": codes,
         },
     }

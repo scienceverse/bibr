@@ -18,6 +18,7 @@ from bibr.pipeline.stages.ocr import (
     _local_region_limit,
 )
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 
 def _ctx(file_states, *, resources=None, config=None, signals=None):
@@ -1286,7 +1287,7 @@ async def test_malformed_paddle_otsl_warns_but_keeps_canonical_content():
     from bibr.ocr.profiles import PADDLE_PROFILE
     from bibr.pipeline.stages.ocr import ocr_page_regions
 
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     img = Image.new("RGB", (100, 100), "white")
     regions = [{"label": "table", "bbox_2d": [0, 0, 500, 500], "task_type": "table"}]
 
@@ -1306,9 +1307,15 @@ async def test_malformed_paddle_otsl_warns_but_keeps_canonical_content():
 
     assert out[0]["content"] == "<table><tr><td>orphan</td></tr></table>"
     assert warnings == [
-        "OCR table output incomplete (page 1, region 0, finish_reason=unknown, "
-        "reasons: malformed_structure)",
-        "Malformed Paddle OTSL: left continuation has no left anchor",
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_INCOMPLETE,
+            "OCR table output incomplete (page 1, region 0, finish_reason=unknown, "
+            "reasons: malformed_structure)",
+        ),
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_MALFORMED,
+            "Malformed Paddle OTSL: left continuation has no left anchor (page 1, region 0)",
+        ),
     ]
 
 
@@ -1320,7 +1327,7 @@ async def test_length_finish_reason_is_retained_and_warned_with_region_context()
     from bibr.ocr.profiles import PADDLE_PROFILE
     from bibr.pipeline.stages.ocr import ocr_page_regions
 
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     img = Image.new("RGB", (100, 100), "white")
     regions = [{"label": "table", "bbox_2d": [0, 0, 500, 500], "task_type": "table"}]
 
@@ -1340,8 +1347,11 @@ async def test_length_finish_reason_is_retained_and_warned_with_region_context()
 
     assert out[0]["_ocr_finish_reason"] == "length"
     assert warnings == [
-        "OCR table output incomplete (page 1, region 0, finish_reason=length, "
-        "reasons: finish_reason_length)"
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_INCOMPLETE,
+            "OCR table output incomplete (page 1, region 0, finish_reason=length, "
+            "reasons: finish_reason_length)",
+        )
     ]
 
 
@@ -1353,7 +1363,7 @@ async def test_stopped_incomplete_paddle_table_warns_before_tolerant_normalizati
     from bibr.ocr.profiles import PADDLE_PROFILE
     from bibr.pipeline.stages.ocr import ocr_page_regions
 
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     img = Image.new("RGB", (100, 100), "white")
     regions = [{"label": "table", "bbox_2d": [0, 0, 500, 500], "task_type": "table"}]
 
@@ -1375,8 +1385,11 @@ async def test_stopped_incomplete_paddle_table_warns_before_tolerant_normalizati
     assert out[0]["_raw_ocr_content"] == "<fcel>A<fcel>B"
     assert out[0]["_ocr_finish_reason"] == "stop"
     assert warnings == [
-        "OCR table output incomplete (page 1, region 0, finish_reason=stop, "
-        "reasons: missing_terminal_nl)"
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_INCOMPLETE,
+            "OCR table output incomplete (page 1, region 0, finish_reason=stop, "
+            "reasons: missing_terminal_nl)",
+        )
     ]
 
 
@@ -1388,7 +1401,7 @@ async def test_stopped_complete_paddle_table_retains_finish_reason_without_warni
     from bibr.ocr.profiles import PADDLE_PROFILE
     from bibr.pipeline.stages.ocr import ocr_page_regions
 
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     img = Image.new("RGB", (100, 100), "white")
     regions = [{"label": "table", "bbox_2d": [0, 0, 500, 500], "task_type": "table"}]
 
@@ -1428,9 +1441,15 @@ async def test_stage_propagates_normalization_warnings_to_file_state():
 
     assert fs.ocr_regions is not None
     assert fs.warnings == [
-        "OCR table output incomplete (page 1, region 0, finish_reason=unknown, "
-        "reasons: malformed_structure)",
-        "Malformed Paddle OTSL: left continuation has no left anchor",
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_INCOMPLETE,
+            "OCR table output incomplete (page 1, region 0, finish_reason=unknown, "
+            "reasons: malformed_structure)",
+        ),
+        ProcessingWarning(
+            WarningCode.OCR_TABLE_MALFORMED,
+            "Malformed Paddle OTSL: left continuation has no left anchor (page 1, region 0)",
+        ),
     ]
 
 

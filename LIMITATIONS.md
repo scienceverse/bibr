@@ -160,9 +160,9 @@ Pay extra attention to:
   precise and sends every reference to the LLM.
 - Silent fallbacks are no longer silent, but they still change results. When a
   trained section or paper-type classifier cannot load or fails, the LLM
-  classifies instead and the export records it in `processing_warnings`
-  (`section_classifier_degraded`, `paper classifier degraded`). Treat those
-  exports as less validated than a clean run.
+  classifies instead and the export records it in `extraction.warnings`
+  (codes `SECTION_CLASSIFIER_DEGRADED` and `PAPER_CLASSIFIER_DEGRADED`). Treat
+  those exports as less validated than a clean run.
 
 ## Benchmark results depend on the evaluation protocol
 

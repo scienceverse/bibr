@@ -359,7 +359,12 @@
         }
       ]
     },
-    "warnings": [],
+    "warnings": [
+      {
+        "code": "STATEMENT_LEXICAL_FALLBACK",
+        "message": "data_availability filled by lexical anchor matching"
+      }
+    ],
     "pages": [
       {
         "page_number": 1,

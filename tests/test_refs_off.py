@@ -146,7 +146,9 @@ class TestUndercountWarningGate:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bibr.pipeline.stages.post_parse import post_parse
+        from bibr.processing_warnings import ProcessingWarning, WarningCode
 
+        undercount = ProcessingWarning(WarningCode.REF_UNDER_EXTRACTION_SUSPECTED, "UNDERCOUNT")
         contents = PaperContents(
             sentences=[],
             sections=[PaperSection(section_id=0, header="Root", level=0, parent_section_id=None)],
@@ -175,7 +177,7 @@ class TestUndercountWarningGate:
             ),
             patch(
                 "bibr.pipeline.stages.post_parse._low_reference_count_warning",
-                MagicMock(return_value="UNDERCOUNT WARNING"),
+                MagicMock(return_value=undercount),
             ),
         ):
             paper = await post_parse(
@@ -187,7 +189,7 @@ class TestUndercountWarningGate:
                 ref_parse_strategy="off",
             )
 
-        assert "UNDERCOUNT WARNING" not in paper.processing_warnings
+        assert undercount not in paper.processing_warnings
 
 
 class TestPipelineRefsOff:

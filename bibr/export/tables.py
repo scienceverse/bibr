@@ -13,7 +13,7 @@ prefixed with ``paper_id``, so a table covers the whole corpus and joins on
   ``eq`` and the ``*_match`` tables), with the export's columns;
 - ``extraction_*`` files for the tidy processing lists (page sizes, float
   parts, text regions, section classification, xref tiers, consolidation,
-  validation issues).
+  validation issues, warnings).
 
 Column types come from the export models, not from the data, so every file
 has the same schema however many papers it holds, and a table with no rows
@@ -79,6 +79,7 @@ TABLES: dict[str, tuple[tuple[str, ...], type[BaseModel]]] = {
         ("extraction", "validation", "issues"),
         m.ValidationIssueExport,
     ),
+    "extraction_warnings": (("extraction", "warnings"), m.WarningExport),
 }
 
 # The ``paper`` table: (column, path inside the export, annotation).

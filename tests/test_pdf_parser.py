@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from bibr.processing_warnings import WarningCode
+
 
 def _split_one(text):
     """Simple period-based sentence splitter for testing."""
@@ -592,14 +594,17 @@ class TestTableParsing:
         contents = _parse_and_segment(json_result)
 
         assert contents.tables == []
-        assert any("OCR_TABLE_DROPPED" in w for w in contents.processing_warnings)
+        assert [w.code for w in contents.processing_warnings] == [WarningCode.OCR_TABLE_DROPPED]
+        assert contents.processing_warnings[0].message.startswith("1 table region(s)")
 
     def test_valid_tables_emit_no_drop_warning(self, mock_wtpsplit):
         json_result = [[_region(0, "table", "| A |\n|---|\n| 1 |")]]
         contents = _parse_and_segment(json_result)
 
         assert len(contents.tables) == 1
-        assert not any("OCR_TABLE_DROPPED" in w for w in contents.processing_warnings)
+        assert not any(
+            w.code == WarningCode.OCR_TABLE_DROPPED for w in contents.processing_warnings
+        )
 
 
 # ---------------------------------------------------------------------------

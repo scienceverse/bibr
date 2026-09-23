@@ -8,6 +8,7 @@ import httpx
 
 from bibr.clients.crossref import CrossrefClient
 from bibr.paper import ExternalMatch, MatchSource, PaperReference
+from bibr.processing_warnings import WarningCode
 
 
 def _mock_crossref():
@@ -198,7 +199,10 @@ class TestEnrichReferences:
         assert report.attempted == 3
         assert report.matched == 2
         assert report.failed == 1
-        assert any("bib_id=2" in detail for detail in report.details)
+        assert any(
+            detail.code == WarningCode.ENRICHMENT_LOOKUP_FAILED and "bib_id=2" in detail.message
+            for detail in report.details
+        )
 
     async def test_clean_404_is_a_complete_miss_not_a_failure(self):
         from bibr.enrich.references import enrich_references
@@ -1640,7 +1644,11 @@ class TestEnrichmentPrefetch:
         report = await enrich_references([ref], prefetch=prefetch)
 
         assert report.failed == 1
-        assert any("resolver prefetch failed" in d for d in report.details)
+        assert any(
+            d.code == WarningCode.ENRICHMENT_LOOKUP_FAILED
+            and "resolver prefetch failed" in d.message
+            for d in report.details
+        )
 
     async def test_empty_reference_list_short_circuits(self):
         from bibr.enrich.references import prefetch_enrichment

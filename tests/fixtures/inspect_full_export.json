@@ -401,7 +401,10 @@
       ]
     },
     "warnings": [
-      "STATEMENT_LEXICAL_FALLBACK: funding_statement"
+      {
+        "code": "STATEMENT_LEXICAL_FALLBACK",
+        "message": "funding_statement filled by lexical anchor matching"
+      }
     ],
     "validation": {
       "errors": 0,

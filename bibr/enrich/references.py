@@ -22,6 +22,7 @@ from bibr.config import GlobalSettings, snapshot_settings
 from bibr.enrich.schemas import CrossrefWorkItem
 from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
@@ -72,7 +73,7 @@ class ResolutionStats:
     fingerprint_attempts: int = 0
     fingerprint_matches: int = 0
     failed_bib_ids: set[int] = field(default_factory=set)
-    failure_details: list[str] = field(default_factory=list)
+    failure_details: list[ProcessingWarning] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -82,7 +83,7 @@ class EnrichmentReport:
     attempted: int = 0
     matched: int = 0
     failed: int = 0
-    details: tuple[str, ...] = ()
+    details: tuple[ProcessingWarning, ...] = ()
 
 
 def _record_terminal_failure(
@@ -96,15 +97,19 @@ def _record_terminal_failure(
     stats.failed_bib_ids.add(ref.bib_id)
     diagnostic = " ".join(str(exc).split())
     stats.failure_details.append(
-        f"bib_id={ref.bib_id} {operation} failed" + (f": {diagnostic}" if diagnostic else "")
+        ProcessingWarning(
+            WarningCode.ENRICHMENT_LOOKUP_FAILED,
+            f"bib_id={ref.bib_id} {operation} failed" + (f": {diagnostic}" if diagnostic else ""),
+        )
     )
 
 
 def _record_fallback_warning(
     stats: ResolutionStats,
+    code: WarningCode,
     detail: str,
 ) -> None:
-    stats.failure_details.append(detail)
+    stats.failure_details.append(ProcessingWarning(code, detail))
 
 
 @dataclass
@@ -357,6 +362,7 @@ async def enrich_references(
                 logger.warning("Resolver fallback failed for %d refs: %s", len(eligible), e)
                 _record_fallback_warning(
                     stats,
+                    WarningCode.RESOLVER_FALLBACK_FAILED,
                     f"resolver fallback failed for {len(eligible)} refs: {' '.join(str(e).split())}",
                 )
     finally:
@@ -1147,7 +1153,7 @@ async def _enrich_resolver_fallback(
             f"{settings.resolver.fallback_timeout:g}s for {len(eligible)} refs"
         )
         logger.warning(detail)
-        _record_fallback_warning(stats, detail)
+        _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)
         return
 
     for ref, candidates in zip(eligible, results, strict=True):
@@ -1156,6 +1162,7 @@ async def _enrich_resolver_fallback(
             diagnostic = " ".join(str(candidates).split())
             _record_fallback_warning(
                 stats,
+                WarningCode.RESOLVER_FALLBACK_FAILED,
                 f"bib_id={ref.bib_id} resolver fallback failed"
                 + (f": {diagnostic}" if diagnostic else ""),
             )

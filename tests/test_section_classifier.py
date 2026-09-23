@@ -11,6 +11,7 @@ import pytest
 from bibr.clients.prompts import prompt_text
 from bibr.config import GlobalSettings, Settings
 from bibr.paper_contents import CanonicalSection
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.section_classifier import _classify_lookup, classify_header
 
 
@@ -791,7 +792,7 @@ async def test_trained_inference_failure_falls_back_and_warns(monkeypatch):
 
     settings = GlobalSettings()
     settings.ml.section_classifier_llm_escalation = False
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", fake_get_model)
     monkeypatch.setattr(sc, "_classify_trained_batch", fail_trained)
 
@@ -802,7 +803,9 @@ async def test_trained_inference_failure_falls_back_and_warns(monkeypatch):
     )
 
     assert results == [(CanonicalSection.UNKNOWN, 0.0, None, None)]
-    assert warnings == ["section_classifier_degraded"]
+    # Recorded once although both the error and the empty result fell back.
+    assert [w.code for w in warnings] == [WarningCode.SECTION_CLASSIFIER_DEGRADED]
+    assert "private document text" not in warnings[0].message
 
 
 async def test_configured_but_unloadable_model_warns(monkeypatch):
@@ -815,7 +818,7 @@ async def test_configured_but_unloadable_model_warns(monkeypatch):
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
     settings.ml.section_classifier_llm_escalation = False
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
     results = await sc.classify_headers_batch_async(
         ["unfamiliar section"],
@@ -823,7 +826,7 @@ async def test_configured_but_unloadable_model_warns(monkeypatch):
         degradation_warnings=warnings,
     )
     assert results == [(CanonicalSection.UNKNOWN, 0.0, None, None)]
-    assert warnings == ["section_classifier_degraded"]
+    assert [w.code for w in warnings] == [WarningCode.SECTION_CLASSIFIER_DEGRADED]
 
 
 async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
@@ -835,7 +838,7 @@ async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = None
     settings.ml.section_classifier_llm_escalation = False
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
     await sc.classify_headers_batch_async(
         ["unfamiliar section"],
@@ -856,7 +859,7 @@ async def test_degraded_serve_classifier_resource_warns():
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
     settings.ml.section_classifier_llm_escalation = False
-    warnings: list[str] = []
+    warnings: list[ProcessingWarning] = []
     results = await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         classifier_resources=Degraded(),
@@ -864,7 +867,7 @@ async def test_degraded_serve_classifier_resource_warns():
         degradation_warnings=warnings,
     )
     assert results == [(CanonicalSection.UNKNOWN, 0.0, None, None)]
-    assert warnings == ["section_classifier_degraded"]
+    assert [w.code for w in warnings] == [WarningCode.SECTION_CLASSIFIER_DEGRADED]
 
 
 class TestLlmEscalation:

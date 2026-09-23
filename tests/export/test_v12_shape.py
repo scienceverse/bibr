@@ -77,15 +77,15 @@ def test_usage_totals_equal_breakdown_sums():
 
 
 def test_gate_findings_are_not_mirrored_into_warnings():
-    """Gate findings live only in validation.issues — never duplicated as prose."""
+    """Gate findings live only in validation.issues — never duplicated as warnings."""
     from bibr.export.json_export import _apply_output_validation
 
-    payload = {"extraction": {"warnings": ["ocr retried page 3"]}}
+    retried = {"code": "OCR_REGION_FAILED", "message": "ocr retried page 3"}
+    payload = {"extraction": {"warnings": [retried]}}
     out = _apply_output_validation(payload, stage_issues=[])
 
     assert "validation" in out["extraction"]
-    assert out["extraction"]["warnings"] == ["ocr retried page 3"]
-    assert not any(w.startswith("VALIDATION:") for w in out["extraction"]["warnings"])
+    assert out["extraction"]["warnings"] == [retried]
 
 
 # ── root reshape (v11) ───────────────────────────────────────────────────
