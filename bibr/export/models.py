@@ -35,9 +35,9 @@ _SCHEMA_VERSION = "12.0"
 # content tables carry none.
 #   - Root keys in order: ``paper_id``, ``schema_version``, ``source``;
 #     ``metadata``, ``author``, ``affiliation``, ``funding``, ``text``,
-#     ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``, ``eq``;
-#     ``metadata_match``, ``affiliation_match``, ``funding_match``,
-#     ``bib_match``; ``extraction``.
+#     ``section``, ``url``, ``bib``, ``xref``, ``figure``, ``table``,
+#     ``footnote``, ``eq``; ``metadata_match``, ``affiliation_match``,
+#     ``funding_match``, ``bib_match``; ``extraction``.
 #   - Processing fields moved out of the content rows:
 #       ``section[].classification_score``/``classification_source``
 #         -> ``extraction.diagnostics.section_classification[]``
@@ -84,8 +84,18 @@ _SCHEMA_VERSION = "12.0"
 #     ``case_study``; ``section_type`` ``open_data`` is ``data_availability``;
 #     ``input_format`` names the format, not the file extension (``jats`` and
 #     ``tei`` for XML, no ``htm``).
+#   - ``section[]`` holds only the paper's sections. Captions and footnotes
+#     are no longer sections of their own (``section_type`` ``figure``,
+#     ``table``, ``footnote``, header "Figure 2"); their sentences stay in
+#     ``text[]`` with a ``null`` ``section_id``. ``figure[]``/``table[]`` gain
+#     ``text_id`` (the caption's row) and their ``section_id`` is the section
+#     they are printed in; the new ``footnote[]`` table has one row per
+#     footnote or endnote with its printed ``label`` and ``text_id``.
+#   - Every id is a 1-based position: ``section_id`` in document order with no
+#     gaps, and ``figure_id``/``table_id`` in document order (PDF used the
+#     printed number, leaving gaps).
 #   - ``xref[].target_id`` is a key of a real row or ``null``: ``foot`` points at
-#     the footnote's ``text_id`` (it held the footnote's ordinal), and
+#     ``footnote[].footnote_id`` (it held the footnote's ordinal), and
 #     ``equation``, ``section`` and ``supplementary`` references are ``null``
 #     (they held the printed number, or ``0``).
 #   - One scale and one name per concept: every ``score`` and confidence is 0–1
@@ -582,11 +592,15 @@ class TextExport(BaseModel):
         description="The sentence as plain text. A display equation is the placeholder "
         "'[equation]', with the expression in formatted."
     )
-    text_id: Id = Field(description="Primary key; 1-based reading-order position.")
+    text_id: Id = Field(
+        description="Primary key; 1-based reading-order position. Caption and footnote rows "
+        "come after the body."
+    )
     paragraph_id: Id = Field(description="Paragraph this sentence belongs to (1-based).")
     section_id: Id | None = Field(
-        description="section[].section_id of the enclosing section (for a caption or footnote, "
-        "its own figure, table or footnote section); null before the first section."
+        description="section[].section_id of the section the sentence belongs to; null for a "
+        "caption or footnote row (figure[], table[] and footnote[] point at those by text_id) "
+        "and before the first section."
     )
     page_number: Id | None = Field(
         description="1-based page the sentence starts on; null for inputs without pages."
@@ -601,19 +615,17 @@ class TextExport(BaseModel):
 class SectionExport(BaseModel):
     """One section of the paper, with its place in the section tree.
 
-    Besides the printed sections, the paper's title and every figure, table
-    and footnote get a section of their own (``section_type`` ``title``,
-    ``figure``, ``table``, ``footnote``), so their text rows can be told apart
-    from the body. The float and footnote sections come after the body
-    sections, at level 1, with a label such as 'Figure 2' as their header.
+    The sections the paper has: its printed headings, the title when it is
+    printed as one, and sections inferred where the paper prints no heading,
+    such as an unheaded abstract. Captions and footnotes are not sections;
+    ``figure[]``, ``table[]`` and ``footnote[]`` point at their text rows.
     """
 
     model_config = _STRICT
 
-    section_id: Id = Field(description="Primary key; 1-based document order.")
+    section_id: Id = Field(description="Primary key; 1-based position in document order.")
     header: str | None = Field(
-        description="Heading text as printed; for a figure, table or footnote section, its "
-        "label ('Figure 2', 'Footnote 3'); null when the section has no heading."
+        description="Heading text as printed; null when the section has no heading."
     )
     level: Id = Field(
         description="Heading depth: 1 for top-level sections, 2 for their subsections, and so on."
@@ -736,9 +748,10 @@ class XrefExport(BaseModel):
 
     xref_id: Id = Field(description="Primary key; 1-based position.")
     target_id: Id | None = Field(
-        description="Primary key of the referenced row, by xref_type: bib → bib_id, table → "
-        "table_id, figure → figure_id (the table or figure whose number the reference prints), "
-        "foot → text_id of the footnote's text. Null for equation, section and supplementary "
+        description="Primary key of the referenced row, by xref_type: bib → bib_id, figure → "
+        "figure_id, table → table_id, foot → footnote_id. A figure or table reference resolves "
+        "by the label it prints; extraction.diagnostics.xref_tier says when a paper with no "
+        "labels fell back to position. Null for equation, section and supplementary "
         "references, which name no exported row (the printed label is in contents), and "
         "whenever the reference did not resolve."
     )
@@ -765,11 +778,15 @@ class FigureExport(BaseModel):
 
     model_config = _STRICT
 
-    figure_id: Id = Field(description="Primary key; 1-based position.")
+    figure_id: Id = Field(description="Primary key; 1-based position in document order.")
     section_id: Id | None = Field(
         default=None,
-        description="section[].section_id of the figure's own section (section_type "
-        "'figure'), whose text rows are the caption.",
+        description="section[].section_id of the section the figure is printed in (for PDF, "
+        "the section being read where it appears); null before the first section.",
+    )
+    text_id: Id | None = Field(
+        default=None,
+        description="text[].text_id of the caption's row; null when no caption was found.",
     )
     image: str | None = Field(
         default=None,
@@ -787,11 +804,15 @@ class TableExport(BaseModel):
 
     model_config = _STRICT
 
-    table_id: Id = Field(description="Primary key; 1-based position.")
+    table_id: Id = Field(description="Primary key; 1-based position in document order.")
     section_id: Id | None = Field(
         default=None,
-        description="section[].section_id of the table's own section (section_type 'table'), "
-        "whose text rows are the caption.",
+        description="section[].section_id of the section the table is printed in (for PDF, "
+        "the section being read where it appears); null before the first section.",
+    )
+    text_id: Id | None = Field(
+        default=None,
+        description="text[].text_id of the caption's row; null when no caption was found.",
     )
     html: str | None = Field(
         default=None,
@@ -807,6 +828,19 @@ class TableExport(BaseModel):
     )
     caption: str | None = Field(default=None, description="Caption text, as printed.")
     page_number: Id | None = Field(description="1-based page the table starts on.")
+
+
+class FootnoteExport(BaseModel):
+    """One footnote or endnote. Its text is a row of ``text[]``, after the body."""
+
+    model_config = _STRICT
+
+    footnote_id: Id = Field(description="Primary key; 1-based position in document order.")
+    label: str | None = Field(
+        description="The marker the note is printed with, e.g. '1', '*' or '†'; null when none "
+        "is printed or detected."
+    )
+    text_id: Id = Field(description="text[].text_id of the note's text row.")
 
 
 class EqExport(BaseModel):
@@ -1254,7 +1288,10 @@ class DoiCandidateExport(BaseModel):
     )
     page: int | None = Field(description="1-based page, when known.")
     section_id: int | None = Field(description="section[].section_id, when known.")
-    section_type: str | None = Field(description="section_type of that section, when known.")
+    section_type: str | None = Field(
+        description="section_type of that section, when known; 'figure', 'table' or 'footnote' "
+        "for a caption or footnote row, whose section_id is null."
+    )
     region_index: int | None = Field(
         description="0-based region position on the page; see the model description."
     )
@@ -1388,7 +1425,7 @@ class CaptionAssignmentExport(BaseModel):
     caption_id: str = Field(description="caption_id of the caption.")
     object_id: str | None = Field(
         description="'figure:<figure_id>' or 'table:<table_id>' it was assigned to; null when "
-        "unassigned."
+        "unassigned, or when that float did not survive to the export."
     )
     score: float = Field(description="Assignment score.")
     reasons: list[str] = Field(description="Signals behind the decision.")
@@ -1914,7 +1951,7 @@ class PaperExport(BaseModel):
     )
     text: list[TextExport] = Field(
         description="Document text as ordered sentence-level spans, each linked to its "
-        "paragraph, section and page.",
+        "paragraph, section and page; caption and footnote rows follow the body.",
     )
     section: list[SectionExport] = Field(
         description="Sections with their headings, hierarchy and section type.",
@@ -1934,6 +1971,10 @@ class PaperExport(BaseModel):
     )
     table: list[TableExport] = Field(
         description="Tables with HTML markup, cell contents, caption and page.",
+    )
+    footnote: list[FootnoteExport] = Field(
+        [],
+        description="Footnotes and endnotes: the printed marker and the note's text row.",
     )
     eq: list[EqExport] = Field(
         description="Statistical and mathematical expressions, split into left-hand side, "

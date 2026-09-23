@@ -67,13 +67,21 @@ _TABLE_KEYS = (
     "xref",
     "figure",
     "table",
+    "footnote",
     "eq",
     "metadata_match",
+    "affiliation_match",
+    "funding_match",
     "bib_match",
 )
 
 # Friendly attribute → schema key.
-_ALIASES = {"references": "bib", "authors": "author", "sections": "section"}
+_ALIASES = {
+    "references": "bib",
+    "authors": "author",
+    "sections": "section",
+    "footnotes": "footnote",
+}
 
 # chew()/achew() option → LocalPipeline constructor argument. Identity
 # mappings are accepted too, so both ``ocr=`` and ``ocr_backend=`` work.

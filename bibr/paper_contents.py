@@ -485,6 +485,14 @@ class PaperSection:
     # Internal provenance: an inferred label is not text printed in the document.
     # Keep this independent of classification_source, which later tiers overwrite.
     header_is_synthetic: bool = False
+    # "figure", "table" or "footnote" on the section ``create_content_sections``
+    # makes to hold one caption or footnote. The export has no such sections:
+    # their sentences become the caption and footnote rows that ``figure``,
+    # ``table`` and ``footnote`` point at.
+    synthetic_kind: str | None = None
+    # On a footnote's synthetic section: the marker the note is printed with
+    # ("1", "*", "†"); None when none is printed or detected.
+    footnote_label: str | None = None
 
 
 @dataclass
@@ -573,7 +581,7 @@ class PaperTable:
     provenance: list[Provenance] = field(default_factory=list)
     # Body section where the table was originally declared (preserved before
     # ``create_content_sections`` reassigns ``section_id`` to the table's own
-    # synthetic section). Used for study-ID propagation.
+    # synthetic section). Exported as the table's ``section_id``.
     _body_section_id: int | None = field(default=None)
     parts: list[PaperTablePart] = field(default_factory=list)
 
@@ -607,7 +615,7 @@ class PaperFigure:
     provenance: list[Provenance] = field(default_factory=list)
     # Body section where the figure was originally declared (preserved before
     # ``create_content_sections`` reassigns ``section_id`` to the figure's own
-    # synthetic section). Used for study-ID propagation.
+    # synthetic section). Exported as the figure's ``section_id``.
     _body_section_id: int | None = field(default=None)
     parts: list[PaperFigurePart] = field(default_factory=list)
 
@@ -616,9 +624,10 @@ class PaperFigure:
 class PaperXref:
     """Cross-reference linking a sentence to a referenced item."""
 
-    # ID of the referenced item: bib_id, table_id, figure_id, or the footnote's
-    # text_id. For equation, section and supplementary references it is the
-    # number they print (0 when none), which the export does not publish.
+    # ID of the referenced item: bib_id, table_id, figure_id, or the text_id of
+    # the footnote's sentence (the export turns it into a footnote_id). For
+    # equation, section and supplementary references it is the number they
+    # print (0 when none), which the export does not publish.
     xref_id: int
     xref_type: str  # "bib", "table", "figure", "foot", "supplementary", "equation", "section"
     contents: str  # The reference text as it appears (e.g., "[1]", "Table 2", "Figure 3")

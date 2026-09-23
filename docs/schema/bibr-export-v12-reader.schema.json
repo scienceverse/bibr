@@ -754,7 +754,7 @@
           "type": "string"
         },
         "object_id": {
-          "description": "'figure:<figure_id>' or 'table:<table_id>' it was assigned to; null when unassigned.",
+          "description": "'figure:<figure_id>' or 'table:<table_id>' it was assigned to; null when unassigned, or when that float did not survive to the export.",
           "title": "Object Id",
           "type": [
             "string",
@@ -1201,7 +1201,7 @@
           ]
         },
         "section_type": {
-          "description": "section_type of that section, when known.",
+          "description": "section_type of that section, when known; 'figure', 'table' or 'footnote' for a caption or footnote row, whose section_id is null.",
           "title": "Section Type",
           "type": [
             "string",
@@ -1702,7 +1702,7 @@
           ]
         },
         "figure_id": {
-          "description": "Primary key; 1-based position.",
+          "description": "Primary key; 1-based position in document order.",
           "minimum": 1,
           "title": "Figure Id",
           "type": "integer"
@@ -1728,9 +1728,19 @@
         },
         "section_id": {
           "default": null,
-          "description": "section[].section_id of the figure's own section (section_type 'figure'), whose text rows are the caption.",
+          "description": "section[].section_id of the section the figure is printed in (for PDF, the section being read where it appears); null before the first section.",
           "minimum": 1,
           "title": "Section Id",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "text_id": {
+          "default": null,
+          "description": "text[].text_id of the caption's row; null when no caption was found.",
+          "minimum": 1,
+          "title": "Text Id",
           "type": [
             "integer",
             "null"
@@ -1800,6 +1810,39 @@
         "bbox"
       ],
       "title": "FloatPartExportReader",
+      "type": "object"
+    },
+    "FootnoteExportReader": {
+      "additionalProperties": true,
+      "description": "One footnote or endnote. Its text is a row of ``text[]``, after the body.",
+      "properties": {
+        "footnote_id": {
+          "description": "Primary key; 1-based position in document order.",
+          "minimum": 1,
+          "title": "Footnote Id",
+          "type": "integer"
+        },
+        "label": {
+          "description": "The marker the note is printed with, e.g. '1', '*' or '\u2020'; null when none is printed or detected.",
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "text_id": {
+          "description": "text[].text_id of the note's text row.",
+          "minimum": 1,
+          "title": "Text Id",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "footnote_id",
+        "label",
+        "text_id"
+      ],
+      "title": "FootnoteExportReader",
       "type": "object"
     },
     "FundingExportReader": {
@@ -3211,10 +3254,10 @@
     },
     "SectionExportReader": {
       "additionalProperties": true,
-      "description": "One section of the paper, with its place in the section tree.\n\nBesides the printed sections, the paper's title and every figure, table\nand footnote get a section of their own (``section_type`` ``title``,\n``figure``, ``table``, ``footnote``), so their text rows can be told apart\nfrom the body. The float and footnote sections come after the body\nsections, at level 1, with a label such as 'Figure 2' as their header.",
+      "description": "One section of the paper, with its place in the section tree.\n\nThe sections the paper has: its printed headings, the title when it is\nprinted as one, and sections inferred where the paper prints no heading,\nsuch as an unheaded abstract. Captions and footnotes are not sections;\n``figure[]``, ``table[]`` and ``footnote[]`` point at their text rows.",
       "properties": {
         "header": {
-          "description": "Heading text as printed; for a figure, table or footnote section, its label ('Figure 2', 'Footnote 3'); null when the section has no heading.",
+          "description": "Heading text as printed; null when the section has no heading.",
           "title": "Header",
           "type": [
             "string",
@@ -3237,7 +3280,7 @@
           ]
         },
         "section_id": {
-          "description": "Primary key; 1-based document order.",
+          "description": "Primary key; 1-based position in document order.",
           "minimum": 1,
           "title": "Section Id",
           "type": "integer"
@@ -3368,7 +3411,7 @@
         },
         "section_id": {
           "default": null,
-          "description": "section[].section_id of the table's own section (section_type 'table'), whose text rows are the caption.",
+          "description": "section[].section_id of the section the table is printed in (for PDF, the section being read where it appears); null before the first section.",
           "minimum": 1,
           "title": "Section Id",
           "type": [
@@ -3377,10 +3420,20 @@
           ]
         },
         "table_id": {
-          "description": "Primary key; 1-based position.",
+          "description": "Primary key; 1-based position in document order.",
           "minimum": 1,
           "title": "Table Id",
           "type": "integer"
+        },
+        "text_id": {
+          "default": null,
+          "description": "text[].text_id of the caption's row; null when no caption was found.",
+          "minimum": 1,
+          "title": "Text Id",
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -3420,7 +3473,7 @@
           "type": "integer"
         },
         "section_id": {
-          "description": "section[].section_id of the enclosing section (for a caption or footnote, its own figure, table or footnote section); null before the first section.",
+          "description": "section[].section_id of the section the sentence belongs to; null for a caption or footnote row (figure[], table[] and footnote[] point at those by text_id) and before the first section.",
           "minimum": 1,
           "title": "Section Id",
           "type": [
@@ -3434,7 +3487,7 @@
           "type": "string"
         },
         "text_id": {
-          "description": "Primary key; 1-based reading-order position.",
+          "description": "Primary key; 1-based reading-order position. Caption and footnote rows come after the body.",
           "minimum": 1,
           "title": "Text Id",
           "type": "integer"
@@ -3876,7 +3929,7 @@
           ]
         },
         "target_id": {
-          "description": "Primary key of the referenced row, by xref_type: bib \u2192 bib_id, table \u2192 table_id, figure \u2192 figure_id (the table or figure whose number the reference prints), foot \u2192 text_id of the footnote's text. Null for equation, section and supplementary references, which name no exported row (the printed label is in contents), and whenever the reference did not resolve.",
+          "description": "Primary key of the referenced row, by xref_type: bib \u2192 bib_id, figure \u2192 figure_id, table \u2192 table_id, foot \u2192 footnote_id. A figure or table reference resolves by the label it prints; extraction.diagnostics.xref_tier says when a paper with no labels fell back to position. Null for equation, section and supplementary references, which name no exported row (the printed label is in contents), and whenever the reference did not resolve.",
           "minimum": 1,
           "title": "Target Id",
           "type": [
@@ -4020,6 +4073,15 @@
       "title": "Figure",
       "type": "array"
     },
+    "footnote": {
+      "default": [],
+      "description": "Footnotes and endnotes: the printed marker and the note's text row.",
+      "items": {
+        "$ref": "#/$defs/FootnoteExportReader"
+      },
+      "title": "Footnote",
+      "type": "array"
+    },
     "funding": {
       "default": [],
       "description": "Funders and award numbers parsed from the funding statement.",
@@ -4084,7 +4146,7 @@
       "type": "array"
     },
     "text": {
-      "description": "Document text as ordered sentence-level spans, each linked to its paragraph, section and page.",
+      "description": "Document text as ordered sentence-level spans, each linked to its paragraph, section and page; caption and footnote rows follow the body.",
       "items": {
         "$ref": "#/$defs/TextExportReader"
       },
@@ -4123,6 +4185,7 @@
     "xref",
     "figure",
     "table",
+    "footnote",
     "eq",
     "metadata_match",
     "affiliation_match",

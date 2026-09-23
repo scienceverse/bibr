@@ -61,12 +61,15 @@ def mock_contents():
     ]
     contents.sections = [
         PaperSection(section_id=1, header="Title", level=1, parent_section_id=None),
+        # The section a parser makes to hold a footnote's text.
         PaperSection(
             section_id=2,
             header="Footnote 1",
             level=1,
             parent_section_id=0,
             section_type=CanonicalSection.FOOTNOTE,
+            synthetic_kind="footnote",
+            footnote_label="1",
         ),
     ]
     contents.sections_text = {1: "Test section text"}
@@ -78,7 +81,7 @@ def mock_contents():
             caption="Figure 1. Sample plot.",
         )
     ]
-    # Footnote xref: links footnote section (section_id=2) to the referencing sentence
+    # Footnote xref: the footnote's own sentence (text_id=2) is the target
     contents.xrefs = [
         PaperXref(xref_id=2, xref_type="foot", contents="1", text_id=1),
     ]
@@ -134,19 +137,16 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     assert text_list[0]["section_id"] is None  # Root section_id=0 remapped to null
     assert text_list[0]["formatted"] is None  # no display math
     assert text_list[1]["text"] == "A footnote."
-    assert text_list[1]["section_id"] == 2  # footnote section
+    assert text_list[1]["section_id"] is None  # a footnote belongs to no section
 
     # Check url (inner url→href)
     url_list = result["url"]
     assert len(url_list) == 1
     assert url_list[0]["href"] == "https://example.com"
 
-    # Check section (should exclude Root section_id=0)
+    # Check section (excludes Root section_id=0 and the footnote's own section)
     section_list = result["section"]
-    assert len(section_list) == 2
-    assert section_list[0]["header"] == "Title"
-    assert section_list[1]["header"] == "Footnote 1"
-    assert section_list[1]["section_type"] == "footnote"
+    assert [s["header"] for s in section_list] == ["Title"]
 
     # Check author (empty)
     assert len(result["author"]) == 0
@@ -158,11 +158,10 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     xref_list = result["xref"]
     assert len(xref_list) == 1
     assert xref_list[0]["xref_type"] == "foot"
-    assert xref_list[0]["target_id"] == 2
+    assert xref_list[0]["target_id"] == 1  # footnote_id
     assert xref_list[0]["text_id"] == 1
 
-    # No footnote column in v8.0
-    assert "footnote" not in result
+    assert result["footnote"] == [{"footnote_id": 1, "label": "1", "text_id": 2}]
 
     # Check fig — caption round-trips into the export
     figure_list = result["figure"]
@@ -315,7 +314,7 @@ def test_paper_export_empty_tables(mock_metadata):
     assert len(result["bib"]) == 0
     assert len(result["text"]) == 1
     assert len(result["figure"]) == 0
-    assert "footnote" not in result
+    assert result["footnote"] == []
 
 
 def test_paper_export_bib_with_populated_references(mock_contents):
@@ -502,11 +501,13 @@ def test_paper_export_display_math_formatted():
 
 
 def test_paper_export_xref_split_fks():
-    """Test that xrefs use explicit FK columns — footnote_id replaced by section_id."""
+    """xrefs carry an explicit target_id, the export id of the row they name."""
     from unittest.mock import MagicMock
 
+    import pandas as pd
+
     from bibr.input.file import InputFile
-    from bibr.paper_contents import PaperSection, PaperSentence, PaperXref
+    from bibr.paper_contents import PaperSection, PaperSentence, PaperTable, PaperXref
 
     contents = MagicMock()
     contents.sentences = [
@@ -516,7 +517,8 @@ def test_paper_export_xref_split_fks():
         PaperSection(section_id=1, header="Results", level=1, parent_section_id=None),
     ]
     contents.links = []
-    contents.tables = []
+    # The parser's table 2 is the paper's only table: it exports as table 1.
+    contents.tables = [PaperTable(2, pd.DataFrame(), "", 1)]
     contents.figures = []
     contents.xrefs = [
         PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=1),
@@ -551,7 +553,7 @@ def test_paper_export_xref_split_fks():
     # table xref
     tbl_xref = xref_list[1]
     assert tbl_xref["xref_type"] == "table"
-    assert tbl_xref["target_id"] == 2
+    assert tbl_xref["target_id"] == 1
 
 
 def test_paper_export_orcid_canonicalization():

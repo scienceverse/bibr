@@ -218,13 +218,14 @@ def _check_bbox_space(payload: dict) -> list[ValidationIssue]:
 def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
     sections = _as_list(payload, "section")
     section_ids = {s.get("section_id") for s in sections if isinstance(s, dict)}
-    section_ids.add(0)  # root section is excluded from the exported list
     text_ids = {t.get("text_id") for t in _as_list(payload, "text") if isinstance(t, dict)}
     targets = {
         "bib": {b.get("bib_id") for b in _as_list(payload, "bib") if isinstance(b, dict)},
         "figure": {f.get("figure_id") for f in _as_list(payload, "figure") if isinstance(f, dict)},
         "table": {t.get("table_id") for t in _as_list(payload, "table") if isinstance(t, dict)},
-        "foot": text_ids,
+        "foot": {
+            f.get("footnote_id") for f in _as_list(payload, "footnote") if isinstance(f, dict)
+        },
     }
     dangling = 0
     for x in _as_list(payload, "xref"):
@@ -246,12 +247,22 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
         sid = t.get("section_id")
         if sid is not None and sid not in section_ids:
             dangling += 1
-    for b in _as_list(payload, "bib"):
-        if not isinstance(b, dict):
-            continue
-        tid = b.get("text_id")
-        if tid is not None and tid not in text_ids:
-            dangling += 1
+    # Rows that point at their printed text: reference entries, captions and
+    # footnotes.
+    for key in ("bib", "figure", "table", "footnote"):
+        for row in _as_list(payload, key):
+            if not isinstance(row, dict):
+                continue
+            tid = row.get("text_id")
+            if tid is not None and tid not in text_ids:
+                dangling += 1
+    for key in ("figure", "table"):
+        for row in _as_list(payload, key):
+            if not isinstance(row, dict):
+                continue
+            sid = row.get("section_id")
+            if sid is not None and sid not in section_ids:
+                dangling += 1
     if dangling:
         return [
             ValidationIssue(

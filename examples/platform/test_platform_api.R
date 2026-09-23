@@ -148,7 +148,8 @@ nrow_safe <- function(x) {
   nrow(as.data.frame(x))
 }
 
-table_names <- c("author", "text", "section", "url", "bib", "xref", "figure", "table", "eq")
+table_names <- c("author", "text", "section", "url", "bib", "xref", "figure", "table", "footnote",
+                 "eq")
 for (tbl_name in table_names) {
   n <- nrow_safe(data[[tbl_name]])
   cat(sprintf("  %-10s %d rows\n", paste0(tbl_name, ":"), n))

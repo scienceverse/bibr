@@ -94,6 +94,30 @@
       "section_id": 2,
       "page_number": 2,
       "formatted": null
+    },
+    {
+      "text": "Figure 1. Plot",
+      "text_id": 3,
+      "paragraph_id": 3,
+      "section_id": null,
+      "page_number": 2,
+      "formatted": null
+    },
+    {
+      "text": "Table 1. Values",
+      "text_id": 4,
+      "paragraph_id": 4,
+      "section_id": null,
+      "page_number": 2,
+      "formatted": null
+    },
+    {
+      "text": "1 Collected in 2020.",
+      "text_id": 5,
+      "paragraph_id": 5,
+      "section_id": null,
+      "page_number": 2,
+      "formatted": null
     }
   ],
   "section": [
@@ -170,12 +194,22 @@
       "text_id": 2,
       "start": 48,
       "end": 55
+    },
+    {
+      "xref_id": 3,
+      "target_id": 1,
+      "xref_type": "foot",
+      "contents": "1",
+      "text_id": 2,
+      "start": null,
+      "end": null
     }
   ],
   "figure": [
     {
       "figure_id": 1,
       "section_id": 2,
+      "text_id": 3,
       "image": null,
       "caption": "Figure 1. Plot",
       "page_number": 2
@@ -185,6 +219,7 @@
     {
       "table_id": 1,
       "section_id": 2,
+      "text_id": 4,
       "html": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
       "contents": [
         [
@@ -196,6 +231,13 @@
       ],
       "caption": "Table 1. Values",
       "page_number": 2
+    }
+  ],
+  "footnote": [
+    {
+      "footnote_id": 1,
+      "label": "1",
+      "text_id": 5
     }
   ],
   "eq": [

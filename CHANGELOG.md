@@ -18,8 +18,8 @@ released.
   is always present; everything else is the paper. Root keys are emitted in the
   order `paper_id`, `schema_version`, `source`; `metadata`, `author`,
   `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`,
-  `table`, `eq`; `metadata_match`, `affiliation_match`, `funding_match`,
-  `bib_match`; `extraction`. A Paper exported
+  `table`, `footnote`, `eq`; `metadata_match`, `affiliation_match`,
+  `funding_match`, `bib_match`; `extraction`. A Paper exported
   outside the pipeline gets a minimal `extraction` block (package version,
   export time, diagnostics, validation) with `settings` omitted.
 - The root `validation` block moved to `extraction.validation`. Readers of
@@ -69,8 +69,26 @@ released.
   `input_format` names the format rather than the file extension: `jats` for
   bibr's XML input (was `xml`), `html` for `.htm` too, and `tei` for GROBID
   TEI, which converters into this format write.
+- `section[]` holds only the paper's sections. Captions and footnotes are no
+  longer sections of their own (`section_type` `figure`, `table` or `footnote`,
+  with a made-up header such as "Figure 2" or "Footnote 3"). Their sentences
+  stay in `text[]`, after the body, with a `null` `section_id`, so text search
+  still finds them and "the text of Results" is the running text of Results.
+  `figure[]` and `table[]` gain `text_id`, the caption's row, and their
+  `section_id` is now the section they are printed in (it was the caption's
+  section). The new `footnote[]` table has one row per footnote or endnote:
+  `footnote_id`, the printed marker as `label` ("1", "*", "†") and `text_id`.
+  The `figure`, `table` and `footnote` section types remain for printed
+  headings such as "Figures" or "Notes".
+- Every id is a 1-based position in document order. Section ids have no gaps
+  (a section added late, such as an unheaded abstract, is numbered where its
+  text is), and figure and table ids count the paper's figures and tables in
+  document order on every input; PDF used the printed number, which left gaps
+  where a figure was missed. Ids stay stable for the same input and bibr
+  version, not across versions: to match rows across versions, use a figure's
+  or table's printed label, a reference's DOI, or the text.
 - `xref[].target_id` names a real row or is `null`. A `foot` reference points
-  at the footnote's own `text_id` (it held the footnote's ordinal); `equation`,
+  at `footnote[].footnote_id` (it held the footnote's ordinal); `equation`,
   `section` and `supplementary` references are `null` (they held the number
   they print, or `0`, which named no row).
 - One scale and one spelling per concept. Every score and confidence is 0–1:
@@ -138,8 +156,9 @@ released.
   under CC0 1.0; the software stays AGPL. Example valid, invalid and
   newer-minor exports live in `tests/fixtures/schema_conformance/`, checked
   against both schema documents.
-- `Result` exposes `affiliation`, `funding` and `metadata_match` as `Records`
-  tables too.
+- `Result` exposes every root table as `Records`, now including
+  `affiliation`, `funding`, `footnote` and the `metadata_match`,
+  `affiliation_match` and `funding_match` tables.
 - 12.x is additive-only: new optional fields and new enum values may appear in
   any 12.x release, and the reader model and reader schema accept both. Any
   rename, move, removal, type change, new required key or dropped enum value
@@ -147,6 +166,12 @@ released.
 
 ### Fixed
 
+- JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
+  `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
+  a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
+- The demo notebooks read each section's classification score from
+  `extraction.diagnostics.section_classification`; since 12.0 moved it there,
+  they showed 0% for every section.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title

@@ -132,6 +132,7 @@ def _parse_json_response(paper_json: dict) -> dict:
     xrefs = paper_json.get("xref", [])
     figs = paper_json.get("figure", [])
     tbls = paper_json.get("table", [])
+    footnotes = paper_json.get("footnote", [])
     equations = paper_json.get("eq", [])
 
     # v12 keeps processing facts under ``extraction.diagnostics`` and the
@@ -185,6 +186,7 @@ def _parse_json_response(paper_json: dict) -> dict:
         "table": tbls,
         "eq": equations,
         "figure": figs,
+        "footnote": footnotes,
     }
 
 
@@ -366,8 +368,13 @@ def _build_text_html(result: dict) -> str:
     if not sentences:
         return "<p><em>No text was found in this paper.</em></p>"
 
+    # Captions show with their figure or table; footnotes go after the body.
+    captions = {row.get("text_id") for key in ("figure", "table") for row in result.get(key) or []}
+    notes = {row.get("text_id") for row in result.get("footnote") or []}
     by_section: dict[int, dict[int, list]] = defaultdict(lambda: defaultdict(list))
     for sent in sentences:
+        if sent.get("text_id") in captions or sent.get("text_id") in notes:
+            continue
         by_section[sent["section_id"]][sent["paragraph_id"]].append(sent["text"])
 
     section_map = {s.get("section_id", i): s for i, s in enumerate(sections)}
@@ -393,6 +400,11 @@ def _build_text_html(result: dict) -> str:
         for _pid, sents in sorted(paragraphs.items()):
             joined = "  ".join(_esc(s) for s in sents)
             parts.append(f"<p>{joined}</p>")
+
+    note_rows = [sent for sent in sentences if sent.get("text_id") in notes]
+    if note_rows:
+        parts.append("<h4>Footnotes</h4>")
+        parts.extend(f"<p>{_esc(sent['text'])}</p>" for sent in note_rows)
 
     body = "\n".join(parts)
     return (

@@ -112,6 +112,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
             "references": count("bib"),
             "tables": count("table"),
             "figures": count("figure"),
+            "footnotes": count("footnote"),
             "equations": count("eq"),
         },
         "in_text_citations": _citation_coverage(data),
@@ -311,8 +312,9 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
         ctx: Context,
     ) -> dict[str, Any]:
         """Body text as ordered sentence spans, each with text_id, section_id,
-        paragraph_id, and page_number. Filter by section_id and/or page; paginate
-        with offset/limit (limit is capped at 500)."""
+        paragraph_id, and page_number; caption and footnote rows come last, with
+        section_id null. Filter by section_id and/or page; paginate with
+        offset/limit (limit is capped at 500)."""
         rows = get_store(ctx).rows(paper_id, "text")
         if section_id is not None:
             rows = [r for r in rows if r.get("section_id") == section_id]

@@ -214,6 +214,7 @@ def test_root_keys_are_emitted_in_reading_order(export_payload):
         "xref",
         "figure",
         "table",
+        "footnote",
         "eq",
         "metadata_match",
         "affiliation_match",
@@ -565,15 +566,30 @@ def test_the_export_turns_matches_into_rows(export_payload):
 def test_xref_targets_name_a_row_or_nothing(demo_paper):
     """``target_id`` is a key of the row ``xref_type`` names, or null: the
     printed number of an equation, section or supplement names no row, and a
-    footnote reference points at the footnote's text."""
+    footnote reference points at the footnote's row."""
     from bibr.export.json_export import _export_paper_payload
-    from bibr.paper_contents import PaperXref
+    from bibr.paper_contents import CanonicalSection, PaperSection, PaperSentence, PaperXref
 
+    # A footnote as the parsers leave it: a synthetic section holding its text.
+    demo_paper.contents.sections.append(
+        PaperSection(
+            section_id=3,
+            header="Footnote 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.FOOTNOTE,
+            synthetic_kind="footnote",
+            footnote_label="1",
+        )
+    )
+    demo_paper.contents.sentences.append(
+        PaperSentence(text_id=3, text="1 Collected in 2020.", section_id=3, paragraph_id=3)
+    )
     demo_paper.contents.xrefs += [
         PaperXref(xref_id=5, xref_type="equation", contents="Eq. 5", text_id=2),
         PaperXref(xref_id=2, xref_type="section", contents="Section 2", text_id=2),
         PaperXref(xref_id=0, xref_type="supplementary", contents="Supplementary", text_id=2),
-        PaperXref(xref_id=1, xref_type="foot", contents="1", text_id=1),
+        PaperXref(xref_id=3, xref_type="foot", contents="1", text_id=1),
     ]
     rows = {x["xref_type"]: x for x in _export_paper_payload(demo_paper)["xref"]}
     assert rows["bib"]["target_id"] == 1

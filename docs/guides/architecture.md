@@ -107,7 +107,7 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 **JSON** (`bibr/export/json_export.py`):
 
 - JSON-serializable dict matching the bibr v{{ schema_version }} paper schema
-- Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version`, `source`; what the paper says — `metadata`, `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`; what external registries returned — `metadata_match`, `affiliation_match`, `funding_match`, `bib_match`; how bibr produced the output — `extraction`. Every key is always present.
+- Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version`, `source`; what the paper says — `metadata`, `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match`, `affiliation_match`, `funding_match`, `bib_match`; how bibr produced the output — `extraction`. Every key is always present.
 - Content rows carry no processing fields. Engines, settings, timings, LLM usage, enrichment, warnings, qualification provenance, the output-validation result, diagnostics receipts (section classification, citation-detector tiers, paper-classification confidences, consolidation), the page and bbox of every figure/table piece (`float_parts`) and the opt-in layout payloads all live under `extraction`, keyed by the content rows' IDs. A Paper exported outside the pipeline gets a minimal `extraction` block.
 - Every record table has an integer primary key named after it (`text_id`, `xref_id`, `url_id`, …); other `*_id` columns are foreign keys. Absent values are `null`, never an empty string. Closed vocabularies (`section_type`, `bib_type`, `paper_type`, OECD labels, …) are enums in the schema, and every field carries a description.
 - `xref`, `url` and `eq` rows carry `start`/`end` character spans within their sentence's `text`. Printed values keep normalized companions where one is unambiguous: `metadata.published_date` (ISO 8601), `license_url`/`license_spdx`, `author.credit_roles` (CRediT URIs), and declared `language`/`pmid`/`pmcid`/`arxiv`.
@@ -115,7 +115,8 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - Figure and table rows describe the whole object: a figure assembled from several panel crops gets a composited `image`, and a table continued across pages keeps each printed piece's HTML in `html` and all rows in `contents`.
 - Schema version: `{{ schema_version }}`
 - `metadata` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(metadata)`. Pipeline telemetry lives under `extraction`; the input file's identity under `source`.
-- All positional IDs are 1-based; `section_id=0` is the Root sentinel (excluded from export)
+- Every id is a 1-based position in document order; sections, figures and tables are renumbered at export, so no id has gaps or depends on how the input was parsed
+- Captions and footnotes are not sections. Their sentences are `text` rows after the body, with a null `section_id`; `figure` and `table` rows point at their caption row with `text_id`, and their `section_id` is the section they are printed in; `footnote` has one row per footnote or endnote (printed `label`, `text_id`), which `foot` references target
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
 - `paper_id` is required: the `--paper-id`, else the input file's stem (its name without the extension); `bibr batch` sets it to the corpus-unique id its JSON file is named after.
 - Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
@@ -227,9 +228,9 @@ IMRaD+ section classification enum:
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
-| `footnote` | Footnotes |
-| `table` | Table caption/label region |
-| `figure` | Figure caption/label region |
+| `footnote` | A printed Footnotes or Notes heading |
+| `table` | A printed Tables heading (captions are not sections) |
+| `figure` | A printed Figures heading (captions are not sections) |
 | `unknown` | Unclassified (fallback) |
 
 ## External services

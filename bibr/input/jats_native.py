@@ -227,7 +227,8 @@ class JatsParser:
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_references: list[PaperReference] | None = None
         self._native_ref_strings: list[str] | None = None
-        self._footnotes: list[str] = []
+        # (text, printed <label>) of each back-matter <fn>.
+        self._footnotes: list[tuple[str, str | None]] = []
         self._aff_map: dict[str, str] = {}
         self._body_ref_lists: list[tuple[object, int]] = []
 
@@ -330,6 +331,7 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FIGURE,
+                    synthetic_kind="figure",
                 )
             )
             fig.section_id = self._section_counter
@@ -356,6 +358,7 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.TABLE,
+                    synthetic_kind="table",
                 )
             )
             tbl.section_id = self._section_counter
@@ -372,7 +375,7 @@ class JatsParser:
                 )
                 self._sentence_counter += 1
 
-        for footnote_num, fn_text in enumerate(self._footnotes, start=1):
+        for footnote_num, (fn_text, fn_label) in enumerate(self._footnotes, start=1):
             self._section_counter += 1
             footnote_section_id = self._section_counter
             contents.sections.append(
@@ -382,6 +385,8 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FOOTNOTE,
+                    synthetic_kind="footnote",
+                    footnote_label=fn_label,
                 )
             )
             self._paragraph_counter += 1
@@ -633,6 +638,10 @@ class JatsParser:
             elif ln in ("list", "list-item"):
                 # Flatten list structure — list items carry <p> children.
                 self._process_container(child, section_id, depth)
+            elif ln == "fn-group":
+                # Notes printed under a heading of their own ("Footnotes")
+                # are footnotes, like a back-matter <fn-group>.
+                self._collect_footnotes(child)
             elif ln == "ref-list":
                 # EuropePMC's fullTextXML puts the bibliography in <body> as a
                 # <sec sec-type="ref-list"> instead of in <back>. Record it and
@@ -641,6 +650,15 @@ class JatsParser:
                 self._body_ref_lists.append((child, section_id))
             # title (handled by the parent sec), label, and unknown wrappers
             # are intentionally ignored.
+
+    def _collect_footnotes(self, fn_group) -> None:
+        """Keep each <fn>'s text, and its printed <label> apart, for the footnote rows."""
+        for fn in _iter_children(fn_group, "fn"):
+            fn_text = _text(fn)
+            if fn_text:
+                label_el = next(_iter_children(fn, "label"), None)
+                label = _text(label_el) if label_el is not None else ""
+                self._footnotes.append((fn_text, label or None))
 
     def _handle_sec(self, sec, depth: int, parent_id: int) -> None:
         title_el = _first_child(sec, "title")
@@ -811,10 +829,7 @@ class JatsParser:
             elif ln == "ref-list":
                 self._handle_ref_list(child)
             elif ln == "fn-group":
-                for fn in _iter_children(child, "fn"):
-                    fn_text = _text(fn)
-                    if fn_text:
-                        self._footnotes.append(fn_text)
+                self._collect_footnotes(child)
 
         # Some producers nest the ref-list inside a back <sec>; recover it.
         if not ref_lists:

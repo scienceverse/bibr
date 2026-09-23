@@ -554,6 +554,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.FIGURE,
+                synthetic_kind="figure",
             )
             contents.sections.append(section)
 
@@ -585,6 +586,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.TABLE,
+                synthetic_kind="table",
             )
             contents.sections.append(section)
 
@@ -618,6 +620,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.FOOTNOTE,
+                synthetic_kind="footnote",
+                footnote_label=printed_marker(fn_text),
             )
             contents.sections.append(section)
 

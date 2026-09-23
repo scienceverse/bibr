@@ -46,7 +46,7 @@ read_bibr_response <- function(json_bytes) {
   # Keep metadata and source as lists: null scalars and nested metadata are valid in exports.
   # Preserve other fields, including provenance and validation receipts.
   table_names <- c("author", "affiliation", "funding", "text", "section", "url", "bib",
-                   "xref", "figure", "table", "eq", "metadata_match", "affiliation_match",
+                   "xref", "figure", "table", "footnote", "eq", "metadata_match", "affiliation_match",
                    "funding_match", "bib_match")
   for (name in table_names) {
     value <- raw[[name]]

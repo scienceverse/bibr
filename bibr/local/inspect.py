@@ -240,6 +240,7 @@ def _print_report(console, data: dict, source: str) -> None:
     console.print(
         f"Tables: {_count_or_dash(data, 'table')}   "
         f"Figures: {_count_or_dash(data, 'figure')}   "
+        f"Footnotes: {_count_or_dash(data, 'footnote')}   "
         f"Equations: {_count_or_dash(data, 'eq')}"
     )
     console.print()

@@ -241,6 +241,14 @@ def test_result_empty_table_is_empty_records():
     assert isinstance(result.figure, Records)
 
 
+def test_result_exposes_every_record_table():
+    """Every root array of the export is a ``Records`` table, the footnotes and
+    the ROR match tables included."""
+    result = Result(_export_fixture())
+    for name in ("footnote", "footnotes", "affiliation_match", "funding_match"):
+        assert isinstance(getattr(result, name), Records), name
+
+
 def test_result_repr_and_dir():
     result = Result(_export_fixture())
     text = repr(result)

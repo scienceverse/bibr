@@ -427,9 +427,17 @@ def extract_sections_from_json(data: dict) -> dict[str, str]:
     type_by_sid = {
         s.get("section_id"): (s.get("section_type") or "").lower() for s in data.get("section", [])
     }
+    # Since 12.0 captions and footnotes have no section; group them by what
+    # points at them, as their own sections were typed before.
+    type_by_text_id = {
+        row.get("text_id"): kind
+        for kind in ("figure", "table", "footnote")
+        for row in data.get(kind) or []
+        if isinstance(row, dict) and row.get("text_id") is not None
+    }
     by_type: dict[str, list[str]] = {}
     for t in data.get("text", []):
-        st = type_by_sid.get(t.get("section_id"))
+        st = type_by_sid.get(t.get("section_id")) or type_by_text_id.get(t.get("text_id"))
         if not st:
             continue
         txt = t.get("text") or ""

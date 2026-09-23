@@ -263,6 +263,7 @@
     {
       "figure_id": 1,
       "section_id": 2,
+      "text_id": null,
       "image": null,
       "caption": "Figure 1 caption",
       "page_number": 1
@@ -272,12 +273,14 @@
     {
       "table_id": 1,
       "section_id": 2,
+      "text_id": null,
       "html": "<table></table>",
       "contents": [],
       "caption": "Table 1 caption",
       "page_number": 1
     }
   ],
+  "footnote": [],
   "eq": [
     {
       "eq_id": 1,

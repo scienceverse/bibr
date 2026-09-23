@@ -71,6 +71,7 @@ from bibr.export.models import (
 )
 from bibr.export.normalize import arxiv_id, credit_roles, iso_date, license_ids
 from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
+from bibr.export.structure_ids import ExportIds, export_ids
 from bibr.extract.research_integrity import collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
 from bibr.utils.text import normalize_doi
@@ -97,10 +98,6 @@ _XREF_TIERS = frozenset(get_args(XrefTierLiteral))
 # JATS (``SupportedFileType.XML``).
 _EXPORT_INPUT_FORMATS = {"xml": "jats", "htm": "html"}
 _EXPORT_SECTION_TYPES = {"open_data": "data_availability"}
-
-# xref types whose ``target_id`` names an exported row. Equation, section and
-# supplementary references carry the number they print, which is no row's key.
-_RESOLVED_XREF_TYPES = frozenset({"bib", "table", "figure", "foot"})
 
 # Spellings the equation extractor's LLM path may return for a comparator.
 _COMP_SPELLINGS = {
@@ -574,6 +571,44 @@ def _sanitize_json_strings(value):
     return value
 
 
+def _export_float_ref(object_id: str | None, ids: ExportIds) -> str | None:
+    """A caption receipt's ``figure:<id>``/``table:<id>``, with the float's export id.
+
+    None when that float did not survive to the export: the receipt is frozen
+    before floats are merged, so an id can name a float that no longer exists.
+    """
+    kind, _, internal = (object_id or "").partition(":")
+    if not internal.isdigit():
+        return None
+    position = {"figure": ids.figure_id, "table": ids.table_id}.get(kind, lambda _: None)(
+        int(internal)
+    )
+    return f"{kind}:{position}" if position is not None else None
+
+
+def _export_identity_sections(identity: Any, ids: ExportIds) -> Any:
+    """The identity block with its DOI candidates' ``section_id`` in export ids.
+
+    A DOI read from a caption or footnote keeps its ``section_type``
+    (``figure``, ``table``, ``footnote``) but has no section to point at.
+    """
+    receipt = identity.get("receipt") if isinstance(identity, dict) else None
+    if not isinstance(receipt, dict):
+        return identity
+
+    def candidate(row: Any) -> Any:
+        if not isinstance(row, dict):
+            return row
+        return {**row, "section_id": ids.section_id(row.get("section_id"))}
+
+    remapped = dict(receipt)
+    if "selected" in remapped:
+        remapped["selected"] = candidate(remapped["selected"])
+    if "candidates" in remapped:
+        remapped["candidates"] = [candidate(row) for row in remapped["candidates"] or []]
+    return {**identity, "receipt": remapped}
+
+
 def _export_paper_payload(
     paper: Paper,
     *,
@@ -614,8 +649,12 @@ def _export_paper_payload(
     # Every exported bounding box is converted from the 0..1000 layout space to
     # points on the displayed page; ``extraction.pages`` lists the page sizes.
     geometry = PageGeometry(paper.contents.page_sizes)
+    # Captions and footnotes leave their synthetic sections, and every
+    # structural id becomes a position in document order.
+    ids = export_ids(paper.contents)
 
-    # text (built from sentences; section_id=0 remapped to null, display math → formatted)
+    # text (built from sentences; captions and footnotes have no section,
+    # display math → formatted)
     text_data = []
     # v4 training layout features, opt-in: processing payload, so they ride
     # ``extraction.text_regions`` rather than the text rows. A sentence without
@@ -633,7 +672,7 @@ def _export_paper_payload(
                 text=text,
                 text_id=sent.text_id,
                 paragraph_id=sent.paragraph_id,
-                section_id=sent.section_id if sent.section_id != 0 else None,
+                section_id=ids.section_id(sent.section_id),
                 page_number=sent.page_number,
                 formatted=formatted,
             )
@@ -845,7 +884,7 @@ def _export_paper_payload(
                     font_size=region.font_size,
                     font_weight=region.font_weight,
                     font_bold=region.font_bold,
-                    section_id=region.section_id,
+                    section_id=ids.section_id(region.section_id),
                     content=region.content,
                     raw_ocr_content=region.raw_ocr_content,
                     char_density=char_density,
@@ -917,7 +956,7 @@ def _export_paper_payload(
             assignments=[
                 CaptionAssignmentExport(
                     caption_id=assignment.caption_id,
-                    object_id=assignment.object_id,
+                    object_id=_export_float_ref(assignment.object_id, ids),
                     score=assignment.score,
                     reasons=list(assignment.reasons),
                     ambiguous=assignment.ambiguous,
@@ -955,14 +994,13 @@ def _export_paper_payload(
     xref_locator = SpanLocator(texts, shared=True)
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)
-    exported_sections = [s for s in paper.contents.sections if s.section_id != 0]
     exported_links = _sane_export_links(paper.contents.links)
     exported_xrefs = list(enumerate(paper.contents.xrefs, start=1))
 
     # Processing facts about content rows, keyed by the rows' primary keys.
     section_classification = [
         SectionClassificationExport(
-            section_id=s.section_id,
+            section_id=position,
             # ``PaperSection`` defaults an unclassified section's score to 0.0
             # with no source; that is "not scored", not a zero-confidence score.
             score=_unit_interval(
@@ -975,7 +1013,7 @@ def _export_paper_payload(
             ),
             source=s.classification_source,
         )
-        for s in exported_sections
+        for position, s in enumerate(ids.sections, start=1)
     ]
     xref_tier = [
         XrefTierExport(xref_id=xref_id, tier=cast(XrefTierLiteral, tier))
@@ -1011,8 +1049,8 @@ def _export_paper_payload(
             bbox=geometry.box(part.page_number, part.bbox),
         )
         for object_type, object_id, parts in (
-            *(("figure", f.figure_id, f.parts) for f in paper.contents.figures),
-            *(("table", t.table_id, t.parts) for t in paper.contents.tables),
+            *(("figure", position, f.parts) for position, f in enumerate(ids.figures, start=1)),
+            *(("table", position, t.parts) for position, t in enumerate(ids.tables, start=1)),
         )
         for index, part in enumerate(parts, start=1)
         if part.page_number is not None or part.bbox
@@ -1047,6 +1085,8 @@ def _export_paper_payload(
         if reference_yield is not None:
             diagnostics["reference_yield"] = reference_yield
         extraction_data["diagnostics"] = diagnostics
+        if identity := extraction_data.get("identity"):
+            extraction_data["identity"] = _export_identity_sections(identity, ids)
         if enrichment_export is not None:
             extraction_data["enrichment"] = enrichment_export
         if paper.qualification_provenance:
@@ -1154,17 +1194,17 @@ def _export_paper_payload(
         text=text_data,
         section=[
             SectionExport(
-                section_id=s.section_id,
+                section_id=position,
                 header=_or_none(s.header),
                 level=s.level,
-                parent_section_id=(s.parent_section_id if s.parent_section_id != 0 else None),
+                parent_section_id=ids.section_id(s.parent_section_id),
                 section_type=(
                     cast(SectionTypeLiteral, export_section_type(s.section_type.value))
                     if s.section_type
                     else None
                 ),
             )
-            for s in exported_sections
+            for position, s in enumerate(ids.sections, start=1)
         ],
         url=[
             UrlExport(
@@ -1183,9 +1223,7 @@ def _export_paper_payload(
         xref=[
             XrefExport(
                 xref_id=xref_id,
-                target_id=(
-                    x.xref_id if x.xref_type in _RESOLVED_XREF_TYPES and x.xref_id else None
-                ),
+                target_id=ids.target_id(x),
                 xref_type=x.xref_type,
                 contents=x.contents,
                 text_id=x.text_id,
@@ -1197,25 +1235,28 @@ def _export_paper_payload(
         ],
         figure=[
             FigureExport(
-                figure_id=f.figure_id,
-                section_id=f.section_id if f.section_id != 0 else None,
+                figure_id=position,
+                section_id=ids.float_section_id(f),
+                text_id=ids.caption_text_id(f),
                 image=_data_uri(f.image_b64),
                 caption=f.caption,
                 page_number=f.page_number,
             )
-            for f in paper.contents.figures
+            for position, f in enumerate(ids.figures, start=1)
         ],
         table=[
             TableExport(
-                table_id=t.table_id,
-                section_id=t.section_id if t.section_id != 0 else None,
+                table_id=position,
+                section_id=ids.float_section_id(t),
+                text_id=ids.caption_text_id(t),
                 html=t.tbl_html or None,
                 contents=t.contents,
                 caption=t.caption,
                 page_number=t.page_number,
             )
-            for t in paper.contents.tables
+            for position, t in enumerate(ids.tables, start=1)
         ],
+        footnote=ids.footnotes,
         eq=[
             EqExport(
                 eq_id=position,

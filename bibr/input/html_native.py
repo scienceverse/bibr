@@ -309,6 +309,7 @@ class HtmlParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FIGURE,
+                    synthetic_kind="figure",
                 )
             )
             fig.section_id = self._section_counter
@@ -335,6 +336,7 @@ class HtmlParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.TABLE,
+                    synthetic_kind="table",
                 )
             )
             tbl.section_id = self._section_counter

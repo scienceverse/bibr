@@ -1112,32 +1112,59 @@ class TestBibIsolatedFromMatches:
 
 class TestExportXrefSerialization:
     def test_xref_type_routing(self):
-        """Each xref exports target_id and xref_type directly."""
+        """Each xref exports its type and the export id of the row it names:
+        the parser's table 2 and figure 3 are the paper's only ones, so they
+        export as 1, and a footnote reference names the footnote row."""
         xrefs = [
             PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=1),
             PaperXref(xref_id=2, xref_type="table", contents="Table 2", text_id=1),
             PaperXref(xref_id=3, xref_type="figure", contents="Figure 3", text_id=1),
             PaperXref(xref_id=4, xref_type="foot", contents="*", text_id=1),
         ]
-        contents = _minimal_contents(xrefs=xrefs)
+        sentences = [
+            PaperSentence(text_id=1, text="Hello.", section_id=1, paragraph_id=1),
+            PaperSentence(text_id=4, text="* A note.", section_id=2, paragraph_id=2),
+        ]
+        sections = [
+            *_minimal_contents().sections,
+            PaperSection(
+                section_id=2,
+                header="Footnote 1",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.FOOTNOTE,
+                synthetic_kind="footnote",
+                footnote_label="*",
+            ),
+        ]
+        contents = _minimal_contents(
+            xrefs=xrefs,
+            sentences=sentences,
+            sections=sections,
+            tables=[PaperTable(2, pd.DataFrame(), "", 1)],
+            figures=[PaperFigure(3, 1, None, None)],
+        )
         paper = _minimal_paper(contents=contents)
         result = export_paper_to_json(paper)
 
-        bib_xref = result["xref"][0]
-        assert bib_xref["target_id"] == 1
-        assert bib_xref["xref_type"] == "bib"
+        assert [(x["xref_type"], x["target_id"]) for x in result["xref"]] == [
+            ("bib", 1),
+            ("table", 1),
+            ("figure", 1),
+            ("foot", 1),
+        ]
+        assert result["footnote"] == [{"footnote_id": 1, "label": "*", "text_id": 4}]
 
-        tbl_xref = result["xref"][1]
-        assert tbl_xref["target_id"] == 2
-        assert tbl_xref["xref_type"] == "table"
-
-        fig_xref = result["xref"][2]
-        assert fig_xref["target_id"] == 3
-        assert fig_xref["xref_type"] == "figure"
-
-        foot_xref = result["xref"][3]
-        assert foot_xref["target_id"] == 4
-        assert foot_xref["xref_type"] == "foot"
+    def test_unresolved_targets_are_null(self):
+        """A reference to a table, figure or footnote the export does not have
+        names no row."""
+        xrefs = [
+            PaperXref(xref_id=2, xref_type="table", contents="Table 2", text_id=1),
+            PaperXref(xref_id=3, xref_type="figure", contents="Figure 3", text_id=1),
+            PaperXref(xref_id=4, xref_type="foot", contents="*", text_id=1),
+        ]
+        result = export_paper_to_json(_minimal_paper(contents=_minimal_contents(xrefs=xrefs)))
+        assert [x["target_id"] for x in result["xref"]] == [None, None, None]
 
 
 # ── JSON export: display math replacement ──────────────────────────────

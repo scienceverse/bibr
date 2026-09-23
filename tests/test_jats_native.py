@@ -647,3 +647,29 @@ def test_declared_identifiers_and_language_reach_the_metadata():
         "PMC6543210",
         "en",
     )
+
+
+FOOTNOTE_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Notes</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Text.</p></sec></body>
+  <back>
+    <sec sec-type="fn-group"><title>Footnotes</title>
+      <fn-group><fn id="FN1"><label>&#8224;</label><p>Printed under a heading.</p></fn></fn-group>
+    </sec>
+    <fn-group><fn id="FN2"><p>A back-matter note.</p></fn></fn-group>
+  </back>
+</article>"""
+
+
+def test_footnotes_become_synthetic_footnote_sections_with_their_label():
+    """Every <fn> becomes a footnote (a synthetic section the export turns into
+    a footnote row), whether its <fn-group> sits in back matter or under a
+    heading of its own; the printed <label> is kept apart."""
+    contents = _segment(_parse(FOOTNOTE_JATS))
+    notes = [s for s in contents.sections if s.synthetic_kind == "footnote"]
+    assert [s.footnote_label for s in notes] == ["\u2020", None]
+    held = [t for t in contents.sentences if t.section_id in {n.section_id for n in notes}]
+    assert [t.text for t in held] == ["\u2020 Printed under a heading.", "A back-matter note."]

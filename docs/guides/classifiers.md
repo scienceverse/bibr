@@ -60,8 +60,8 @@ uses the lookup-only path.
 | Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
 | Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
 | Footnote | `footnote` | Footnotes, Notes |
-| Table | `table` | Table (caption/label region) |
-| Figure | `figure` | Figure (caption/label region) |
+| Table | `table` | Tables (a heading; captions are not sections) |
+| Figure | `figure` | Figures (a heading; captions are not sections) |
 | Unknown | `unknown` | (fallback for unrecognized headers) |
 
 ### IMRaD enforcement

@@ -58,6 +58,7 @@ TABLES: dict[str, tuple[tuple[str, ...], type[BaseModel]]] = {
     "xref": (("xref",), m.XrefExport),
     "figure": (("figure",), m.FigureExport),
     "table": (("table",), m.TableExport),
+    "footnote": (("footnote",), m.FootnoteExport),
     "eq": (("eq",), m.EqExport),
     "metadata_match": (("metadata_match",), m.MetadataMatchExport),
     "affiliation_match": (("affiliation_match",), m.AffiliationMatchExport),
