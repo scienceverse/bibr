@@ -56,6 +56,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- The default GLM-OCR model id is now `zai-org/GLM-OCR`; the previous
+  `THUDM/GLM-OCR` repository does not resolve on Hugging Face. The id is part of
+  the OCR identity, so OCR cache entries recorded under the old id are no longer
+  reused. An explicit `OCR_LOCAL_MODEL` setting is unaffected.
+- The Deployment guide no longer lists `PIPELINE_PAGE_WINDOW_SIZE`, a setting
+  that bibr does not read.
 
 ### Added
 

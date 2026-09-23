@@ -305,11 +305,11 @@ def test_resolve_regions_device_and_model_passthrough():
         "--device",
         "cpu",
         "--ocr-model",
-        "THUDM/GLM-OCR",
+        "zai-org/GLM-OCR",
     )
     assert config.include_regions is True
     assert config.device == "cpu"
-    assert config.ocr_model == "THUDM/GLM-OCR"
+    assert config.ocr_model == "zai-org/GLM-OCR"
 
 
 # ---- active stages -------------------------------------------------------------

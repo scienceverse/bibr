@@ -110,14 +110,14 @@ def _candidate_model(backend: str, settings: GlobalSettings) -> str:
     if backend == "paddle-mlx-vlm":
         return getattr(ocr, "paddle_mlx_model", "PaddlePaddle/PaddleOCR-VL-1.6")
     if backend == "glm-rapid-mlx":
-        return getattr(ocr, "rapid_mlx_model", "THUDM/GLM-OCR")
+        return getattr(ocr, "rapid_mlx_model", "zai-org/GLM-OCR")
     if backend == "glm-llama":
-        return getattr(ocr, "llama_cpp_model", "THUDM/GLM-OCR")
+        return getattr(ocr, "llama_cpp_model", "zai-org/GLM-OCR")
     if backend in {"glm-http", "serve-http"}:
         # An HTTP backend must ask for the alias the server advertises, not
         # the HuggingFace repo id a local runtime would load weights from.
         return getattr(ocr, "model", None) or GLM_SERVED_MODEL_ALIAS
-    return getattr(ocr, "model", None) or getattr(ocr, "local_model", "THUDM/GLM-OCR")
+    return getattr(ocr, "model", None) or getattr(ocr, "local_model", "zai-org/GLM-OCR")
 
 
 def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:

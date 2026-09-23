@@ -107,7 +107,7 @@ def test_ocr_engine_reports_default_sglang_glm_model(monkeypatch):
     from bibr.config import Settings
 
     monkeypatch.setattr(Settings.ocr, "model", None)
-    monkeypatch.setattr(Settings.ocr, "local_model", "THUDM/GLM-OCR")
+    monkeypatch.setattr(Settings.ocr, "local_model", "zai-org/GLM-OCR")
     # glm-http talks to an externally-managed server, so provenance must record
     # the alias that was actually requested over the wire — not
     # ``ocr.local_model``, which is the HuggingFace repo a *local* runtime would

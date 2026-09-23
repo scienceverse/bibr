@@ -244,8 +244,8 @@ def _pin_apple_silicon_paddle_chain(monkeypatch) -> None:
         lambda backend, settings: (
             OcrBackendCandidate("paddle-rapid-mlx", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
             OcrBackendCandidate("paddle-mlx-vlm", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
-            OcrBackendCandidate("glm-rapid-mlx", "THUDM/GLM-OCR", "glm"),
-            OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
+            OcrBackendCandidate("glm-rapid-mlx", "zai-org/GLM-OCR", "glm"),
+            OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),
         ),
     )
 
@@ -369,7 +369,7 @@ def test_check_automatic_linux_paddle_uses_vllm_package_runner_cache_status(monk
         "bibr.ocr.registry.resolve_backend_candidates",
         lambda backend, settings: (
             OcrBackendCandidate("paddle-vllm", "PaddlePaddle/PaddleOCR-VL-1.6", "paddle"),
-            OcrBackendCandidate("glm-llama", "THUDM/GLM-OCR", "glm"),
+            OcrBackendCandidate("glm-llama", "zai-org/GLM-OCR", "glm"),
         ),
     )
     monkeypatch.setattr(
