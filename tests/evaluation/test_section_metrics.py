@@ -182,3 +182,27 @@ class TestDropReport:
             {**_row("p2", "method", None), "unigram_recall": None},
         ]
         assert sm.build_drop_report_rows(rows) == []
+
+
+def test_captions_and_footnotes_count_as_predicted_text():
+    """Since 12.0 caption and footnote rows have no section; the prediction
+    still groups them by the figure, table or footnote that points at them."""
+    from evaluation.evaluate import extract_sections_from_json
+
+    export = {
+        "section": [{"section_id": 1, "section_type": "results"}],
+        "text": [
+            {"text_id": 1, "section_id": 1, "text": "Body."},
+            {"text_id": 2, "section_id": None, "text": "Figure 1. Plot."},
+            {"text_id": 3, "section_id": None, "text": "1 A note."},
+            {"text_id": 4, "section_id": None, "text": "Front matter."},
+        ],
+        "figure": [{"figure_id": 1, "text_id": 2}],
+        "table": [],
+        "footnote": [{"footnote_id": 1, "text_id": 3}],
+    }
+    assert extract_sections_from_json(export) == {
+        "results": "Body.",
+        "figure": "Figure 1. Plot.",
+        "footnote": "1 A note.",
+    }

@@ -46,22 +46,22 @@ second file return `400`.
 | `file` | file | Yes | Paper file (PDF, DOCX, XML/JATS, HTML, or ePub) |
 | `start_page` | int | No | Start page for PDFs (0-indexed, inclusive) |
 | `end_page` | int | No | End page for PDFs (0-indexed, inclusive) |
-| `include_figures` | bool | No | Emit base64-encoded figure images (default: `false`) |
+| `include_figures` | bool | No | Emit figure images as `data:` URIs (default: `false`) |
 | `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
 | `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
 | `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
-**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys include: `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 from earlier versions), `source` (input-artifact identity: file name, content hash, format), `metadata` (scalar paper-level metadata), `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match` (enrichment matches for the paper's own identity), `funding`, `affiliation`, `qualification_provenance` (deployment-qualification surface: identity SHAs, per-task protocol hashes, native-validity + fallback outcome, request counts; `null` when no LLM ran), `extraction` (all extraction provenance and telemetry: engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, diagnostics receipts and warnings; `regions` is added there when `include_regions=true`), and `validation` (output-validation-gate result: error/warning counts and issue list). Figure and table rows retain their legacy primary fields and add ordered `parts` with physical payload and source provenance.
+**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
 
 `metadata` is scalar-only by design — pipeline telemetry lives under `extraction` and the input file's identity under `source` — so R consumers can call `as.data.frame(metadata)` cleanly.
 
-Within major version 11 the schema is additive-only: new fields may appear in
-any `11.x` release and clients should ignore keys they don't recognize.
-Dispatch on the *presence* of the root `schema_version` key, never on parsing
-its value — pre-v11 responses have no such key at all. See `CHANGELOG.md` for
-the full v11 break and forward-versioning policy.
+Within major version 12 the schema is additive-only: new optional fields and
+new enum values may appear in any `12.x` release, and clients should ignore
+keys they don't recognize and accept enum values they don't know. Dispatch on the *presence* of the root `schema_version` key, never
+on parsing its value — pre-v11 responses have no such key at all. See
+`CHANGELOG.md` for the v12 break and forward-versioning policy.
 
 **Example:**
 

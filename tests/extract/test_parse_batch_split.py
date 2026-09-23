@@ -13,13 +13,12 @@ from unittest import mock
 from unittest.mock import AsyncMock, patch
 
 from bibr.extract.ref_extractor import (
-    PARSE_FALLBACK_WARNING_PREFIX,
-    PARSE_SPLIT_RECOVERY_PREFIX,
     IncompleteOutputException,
     ReferenceExtractor,
 )
 from bibr.paper import PaperReference
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import PaperReferenceLLM
 
 _REFS = [
@@ -82,7 +81,9 @@ async def test_degenerate_batch_splits_and_recovers(monkeypatch):
     assert [r.bib_id for r in refs] == [1, 2, 3, 4]
     # 1 full-batch attempt + 2 halves
     assert ext.llm_client.extract_references.await_count == 3
-    assert any(w.startswith(PARSE_SPLIT_RECOVERY_PREFIX) for w in ext.contents.processing_warnings)
+    assert any(
+        w.code == WarningCode.REF_PARSE_SPLIT_RECOVERY for w in ext.contents.processing_warnings
+    )
 
 
 async def test_split_exhausted_falls_back_to_ner_with_warning(monkeypatch):
@@ -98,7 +99,7 @@ async def test_split_exhausted_falls_back_to_ner_with_warning(monkeypatch):
     assert ner.called
     assert refs
     assert any(
-        w.startswith(PARSE_FALLBACK_WARNING_PREFIX) for w in ext.contents.processing_warnings
+        w.code == WarningCode.REF_PARSE_NER_FALLBACK for w in ext.contents.processing_warnings
     )
 
 
@@ -118,7 +119,7 @@ async def test_singleton_degenerate_batch_skips_split(monkeypatch):
     # No split attempts: exactly the one original call.
     assert ext.llm_client.extract_references.await_count == 1
     assert any(
-        w.startswith(PARSE_FALLBACK_WARNING_PREFIX) for w in ext.contents.processing_warnings
+        w.code == WarningCode.REF_PARSE_NER_FALLBACK for w in ext.contents.processing_warnings
     )
 
 
@@ -163,8 +164,8 @@ async def test_partial_split_recovery_merges_in_order(monkeypatch):
     assert refs[1].title == "Title 2"
     assert refs[2].title.startswith("Ner")
     warnings = ext.contents.processing_warnings
-    assert any(w.startswith(PARSE_SPLIT_RECOVERY_PREFIX) for w in warnings)
-    assert any(w.startswith(PARSE_FALLBACK_WARNING_PREFIX) for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_SPLIT_RECOVERY for w in warnings)
+    assert any(w.code == WarningCode.REF_PARSE_NER_FALLBACK for w in warnings)
 
 
 async def test_transient_failure_still_retried_not_split(monkeypatch):

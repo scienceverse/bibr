@@ -132,7 +132,34 @@ def _parse_json_response(paper_json: dict) -> dict:
     xrefs = paper_json.get("xref", [])
     figs = paper_json.get("figure", [])
     tbls = paper_json.get("table", [])
+    footnotes = paper_json.get("footnote", [])
     equations = paper_json.get("eq", [])
+
+    # v12 keeps processing facts under ``extraction.diagnostics`` and the
+    # affiliations in their own table; fold them back into the display rows.
+    diagnostics = (paper_json.get("extraction") or {}).get("diagnostics") or {}
+    metadata = {**metadata, **(diagnostics.get("paper_classification") or {})}
+    scores = {
+        row.get("section_id"): row.get("score")
+        for row in diagnostics.get("section_classification") or []
+    }
+    if scores:
+        sections = [
+            {**s, "classification_score": scores.get(s.get("section_id"))} for s in sections
+        ]
+    affiliations = paper_json.get("affiliation") or []
+    if affiliations:
+        authors = [
+            {
+                **a,
+                "affiliation": "; ".join(
+                    row.get("text") or ""
+                    for row in affiliations
+                    if a.get("author_id") in (row.get("author_ids") or [])
+                ),
+            }
+            for a in authors
+        ]
 
     # Compute section levels from parent_section_id tree
     if sections:
@@ -159,6 +186,7 @@ def _parse_json_response(paper_json: dict) -> dict:
         "table": tbls,
         "eq": equations,
         "figure": figs,
+        "footnote": footnotes,
     }
 
 
@@ -247,9 +275,10 @@ def _build_authors_data(result: dict) -> list[list]:
     """Build authors table rows."""
     return [
         [
-            a.get("given", ""),
-            a.get("family", ""),
-            a.get("affiliation", ""),
+            a.get("given") or "",
+            # A group author's whole name is ``literal``.
+            a.get("family") or a.get("literal") or "",
+            a.get("affiliation") or "",
             a.get("orcid", ""),
             a.get("email", ""),
             "Yes" if a.get("corresponding") else "",
@@ -262,7 +291,7 @@ def _build_sections_data(result: dict) -> list[list]:
     """Build sections table rows."""
     return [
         [
-            s.get("header", ""),
+            s.get("header") or "",
             s.get("level", 0),
             s.get("section_type", ""),
             round(s.get("classification_score", 0) or 0, 3),
@@ -288,7 +317,7 @@ def _build_references_data(result: dict) -> list[list]:
             r.get("doi", ""),
             r.get("bib_type", ""),
             "Y" if r.get("bib_id") in match_by_bib else "",
-            f"{match_by_bib[r.get('bib_id')]['score']:.1f}"
+            f"{match_by_bib[r.get('bib_id')]['score']:.2f}"
             if r.get("bib_id") in match_by_bib
             and match_by_bib[r.get("bib_id")].get("score") is not None
             else "",
@@ -306,7 +335,7 @@ def _format_bib_authors(authors) -> str:
     parts = []
     for a in authors:
         if isinstance(a, dict):
-            name = " ".join(filter(None, [a.get("given", ""), a.get("family", "")]))
+            name = " ".join(filter(None, [a.get("given"), a.get("family")])) or a.get("literal")
             if name:
                 parts.append(name)
         else:
@@ -320,7 +349,7 @@ def _build_bib_matches_data(result: dict) -> list[list]:
         [
             m.get("bib_id", ""),
             m.get("service", "") or m.get("source", ""),
-            round(m.get("score", 0) or 0, 1),
+            round(m.get("score", 0) or 0, 2),
             m.get("title", ""),
             _format_bib_authors(m.get("author")),
             m.get("year", ""),
@@ -339,8 +368,13 @@ def _build_text_html(result: dict) -> str:
     if not sentences:
         return "<p><em>No text was found in this paper.</em></p>"
 
+    # Captions show with their figure or table; footnotes go after the body.
+    captions = {row.get("text_id") for key in ("figure", "table") for row in result.get(key) or []}
+    notes = {row.get("text_id") for row in result.get("footnote") or []}
     by_section: dict[int, dict[int, list]] = defaultdict(lambda: defaultdict(list))
     for sent in sentences:
+        if sent.get("text_id") in captions or sent.get("text_id") in notes:
+            continue
         by_section[sent["section_id"]][sent["paragraph_id"]].append(sent["text"])
 
     section_map = {s.get("section_id", i): s for i, s in enumerate(sections)}
@@ -353,7 +387,7 @@ def _build_text_html(result: dict) -> str:
         level = sec.get("level", 0)
         if level > 0:
             tag = f"h{min(level + 2, 6)}"
-            header = _esc(sec.get("header", ""))
+            header = _esc(sec.get("header") or "")
             badge = ""
             sec_type = sec.get("section_type", "")
             if sec_type and sec_type != "unknown":
@@ -366,6 +400,11 @@ def _build_text_html(result: dict) -> str:
         for _pid, sents in sorted(paragraphs.items()):
             joined = "  ".join(_esc(s) for s in sents)
             parts.append(f"<p>{joined}</p>")
+
+    note_rows = [sent for sent in sentences if sent.get("text_id") in notes]
+    if note_rows:
+        parts.append("<h4>Footnotes</h4>")
+        parts.extend(f"<p>{_esc(sent['text'])}</p>" for sent in note_rows)
 
     body = "\n".join(parts)
     return (
@@ -383,7 +422,9 @@ def _build_tables_html(result: dict) -> str:
 
     parts = []
     for tbl in tables:
-        parts.append(f"<p><strong>Table {_esc(str(tbl.get('table_id', '')))}</strong></p>")
+        # The printed label ("3.1", "S2"); the id is only the table's position.
+        name = tbl.get("label") or tbl.get("table_id", "")
+        parts.append(f"<p><strong>Table {_esc(str(name))}</strong></p>")
 
         contents = tbl.get("contents")
         if contents and isinstance(contents, list) and len(contents) > 0:
@@ -424,7 +465,7 @@ def _build_equations_data(result: dict) -> list[list]:
         [
             e.get("grp_id", ""),
             e.get("lhs", ""),
-            e.get("df", ""),
+            e.get("df") or "",
             e.get("comp", ""),
             e.get("rhs", ""),
             e.get("text_id", ""),
@@ -453,12 +494,12 @@ def _build_figures_html(result: dict) -> str:
 
     parts = []
     for f in figures:
-        parts.append(f"<p><strong>Figure {_esc(str(f.get('figure_id', '')))}</strong></p>")
+        name = f.get("label") or f.get("figure_id", "")
+        parts.append(f"<p><strong>Figure {_esc(str(name))}</strong></p>")
         img = f.get("image")
         if img:
-            parts.append(
-                f'<img src="data:image/jpeg;base64,{img}" style="max-width:100%; height:auto;" />'
-            )
+            # v12 exports the image as a data URI that names its media type.
+            parts.append(f'<img src="{_esc(img)}" style="max-width:100%; height:auto;" />')
         caption = f.get("caption")
         if caption:
             parts.append(f"<p><em>{_esc(caption)}</em></p>")

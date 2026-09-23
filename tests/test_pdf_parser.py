@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from bibr.processing_warnings import WarningCode
+
 
 def _split_one(text):
     """Simple period-based sentence splitter for testing."""
@@ -592,14 +594,17 @@ class TestTableParsing:
         contents = _parse_and_segment(json_result)
 
         assert contents.tables == []
-        assert any("OCR_TABLE_DROPPED" in w for w in contents.processing_warnings)
+        assert [w.code for w in contents.processing_warnings] == [WarningCode.OCR_TABLE_DROPPED]
+        assert contents.processing_warnings[0].message.startswith("1 table region(s)")
 
     def test_valid_tables_emit_no_drop_warning(self, mock_wtpsplit):
         json_result = [[_region(0, "table", "| A |\n|---|\n| 1 |")]]
         contents = _parse_and_segment(json_result)
 
         assert len(contents.tables) == 1
-        assert not any("OCR_TABLE_DROPPED" in w for w in contents.processing_warnings)
+        assert not any(
+            w.code == WarningCode.OCR_TABLE_DROPPED for w in contents.processing_warnings
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -826,7 +831,7 @@ class TestFootnotes:
         json_result = [
             [
                 _region(0, "text", "Main body text."),
-                _region(1, "footnote", "This is a footnote."),
+                _region(1, "footnote", "1 This is a footnote."),
             ]
         ]
         contents = _parse_and_segment(json_result)
@@ -842,12 +847,14 @@ class TestFootnotes:
         # Footnote text should be in the text table under the footnote section
         fn_sentences = [s for s in contents.sentences if s.section_id == fn_section.section_id]
         assert len(fn_sentences) == 1
-        assert fn_sentences[0].text == "This is a footnote."
+        assert fn_sentences[0].text == "1 This is a footnote."
 
         # Xref should link footnote section to the body sentence
         foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(foot_xrefs) == 1
-        assert foot_xrefs[0].xref_id == fn_section.section_id
+        # The target is the footnote's own text row, and the mark is printed.
+        assert foot_xrefs[0].xref_id == fn_sentences[0].text_id
+        assert foot_xrefs[0].contents == "1"
         # text_id should point to the body sentence (nearest preceding)
         body_sentences = [s for s in contents.sentences if s.section_id != fn_section.section_id]
         assert foot_xrefs[0].text_id == body_sentences[0].text_id
@@ -2000,27 +2007,26 @@ class TestSentenceProvenance:
             assert sent.provenance[0].bbox == (0.0, 0.0, 100.0, 100.0)
 
 
-class TestRegionMetaBboxPdfPts:
-    """region_meta["bbox_2d"] (exported as _bbox_2d) is populated from the
-    region's containment-correct PDF-point bbox, NOT the raw 0..1000 layout
-    space. Provenance keeps the 0..1000 bbox (its consumers are tuned to it)."""
+class TestRegionMetaLayoutBbox:
+    """region_meta["bbox"] is the region's 0..1000 layout box, which the export
+    converts to points on the displayed page; the page size comes from the
+    native pass's ``_page_w``/``_page_h`` and lands on ``contents.page_sizes``."""
 
-    def test_region_meta_uses_bbox_pdf_pts(self, mock_wtpsplit):
+    def test_region_meta_carries_the_layout_bbox_and_page(self, mock_wtpsplit):
         region = _region(0, "text", "Hello world.", bbox=[100, 200, 900, 250])
-        region["_bbox_pdf_pts"] = [61.2, 594.0, 550.8, 634.0]
+        region["_page_w"] = 612.0
+        region["_page_h"] = 792.0
         contents = _parse_and_segment([[region]])
         sent = contents.sentences[0]
-        assert sent.region_meta["bbox_2d"] == [61.2, 594.0, 550.8, 634.0]
-        # Provenance keeps the raw 0..1000 layout-space bbox.
+        assert sent.region_meta["bbox"] == [100.0, 200.0, 900.0, 250.0]
+        assert sent.region_meta["region_page"] == 1
+        assert contents.page_sizes == {1: (612.0, 792.0)}
         assert sent.provenance[0].bbox == (100.0, 200.0, 900.0, 250.0)
 
-    def test_region_meta_bbox_none_without_pdf_pts(self, mock_wtpsplit):
-        """No _bbox_pdf_pts (e.g. no native pass) → region_meta bbox_2d is None
-        rather than the mis-scaled 0..1000 value."""
+    def test_no_page_size_without_the_native_pass(self, mock_wtpsplit):
         region = _region(0, "text", "Hello world.", bbox=[100, 200, 900, 250])
         contents = _parse_and_segment([[region]])
-        sent = contents.sentences[0]
-        assert sent.region_meta["bbox_2d"] is None
+        assert contents.page_sizes == {}
 
 
 # ---------------------------------------------------------------------------

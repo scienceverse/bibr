@@ -1021,6 +1021,47 @@ class CrossrefOptions(_BibrSettings):
         return v.lower() if isinstance(v, str) else v
 
 
+class RorOptions(_BibrSettings):
+    """ROR organization matching for affiliation strings and funder names.
+
+    Runs as part of enrichment (``--crossref``), so it is off unless enrichment
+    is on. Env: ``ROR_ENRICH``, ``ROR_CLIENT_ID``, ``ROR_URL``, ...
+    """
+
+    model_config = _section("ROR_")
+
+    enrich: bool = Field(
+        True,
+        description="Match affiliation strings and funder names to ROR IDs when enrichment runs "
+        "(`--crossref`). Set false to skip ROR.",
+    )
+    client_id: str | None = Field(
+        None,
+        description="ROR API client ID (free from ror.org), sent as the Client-Id header. It "
+        "raises ROR's published rate limit from 50 to 2000 requests per 5 minutes.",
+    )
+    url: str = Field("https://api.ror.org/v2", description="ROR API base URL.")
+    requests_per_5min: int | None = Field(
+        None,
+        ge=1,
+        description="Client-side ROR request budget per 5 minutes. Default: ROR's published "
+        "limit, 50 without a client ID and 2000 with one.",
+    )
+    request_timeout: float = Field(
+        10.0, description="Per-HTTP-request timeout in seconds for ROR calls."
+    )
+    enrich_timeout: float = Field(
+        60.0,
+        description="Per-paper wall-clock budget in seconds for ROR matching. Strings not "
+        "matched in time are left without a match.",
+    )
+    cache_size: int = Field(
+        4096,
+        ge=0,
+        description="In-process cache size for ROR answers (hits and misses). 0 disables.",
+    )
+
+
 class ResolverOptions(_BibrSettings):
     """Optional external bibr-resolver candidate-search service (tier 3 in the
     enrichment chain). Default-off: when ``url`` is unset, bibr behaves exactly
@@ -2117,6 +2158,7 @@ class GlobalSettings(_BibrSettings):
     layout: LayoutOptions = Field(default_factory=LayoutOptions)
     crossref: CrossrefOptions = Field(default_factory=CrossrefOptions)
     resolver: ResolverOptions = Field(default_factory=ResolverOptions)
+    ror: RorOptions = Field(default_factory=RorOptions)
     cache: CacheOptions = Field(default_factory=CacheOptions)
     cb: CircuitBreakerOptions = Field(default_factory=CircuitBreakerOptions)
     cors: CorsOptions = Field(default_factory=CorsOptions)

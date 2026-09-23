@@ -78,6 +78,7 @@ class BatchOptions:
     remote: RemoteOptions | None = None
     cli_options: dict[str, Any] = field(default_factory=dict)
     report_json: bool = False
+    tables: bool = True  # write <out>/tables/*.parquet after the run
 
     @property
     def executor(self) -> str:
@@ -191,6 +192,37 @@ def write_run_info(out_dir: Path, info: dict[str, Any], *, append_history: bool)
 
 def export_path(out_dir: Path, item: BatchItem) -> Path:
     return out_dir / f"{item.paper_id}.json"
+
+
+TABLES_DIRNAME = "tables"
+
+
+def write_batch_tables(
+    out_dir: Path, ledger: Ledger, entries: list[dict[str, Any]], *, console: Any
+) -> None:
+    """Rebuild ``<out>/tables/`` from every paper whose latest attempt is ok.
+
+    Best-effort: the JSON exports are the run's result, so a table failure is
+    a warning, never a failed run.
+    """
+    from bibr.export.tables import write_tables
+    from bibr.local.cli import ui
+    from bibr.local.cli.tables import report_tables
+
+    files = [
+        path
+        for paper_id, entry in sorted(ledger.latest(entries).items())
+        if entry.get("status") == "ok" and (path := out_dir / f"{paper_id}.json").is_file()
+    ]
+    if not files:
+        return
+    try:
+        report = write_tables(files, out_dir / TABLES_DIRNAME)
+    except Exception as exc:  # noqa: BLE001 - tables are a derived convenience
+        logger.warning("writing Parquet tables failed", exc_info=True)
+        ui.warn(console, f"Parquet tables not written: {exc}")
+        return
+    report_tables(console, report)
 
 
 # --- local executor -----------------------------------------------------------
@@ -572,7 +604,11 @@ def run_batch(
     def record(item: BatchItem, outcome: Outcome) -> None:
         nonlocal n_ok, n_failed, done
         if outcome.ok and outcome.export is not None:
-            atomic_write_json(export_path(options.out, item), outcome.export, indent=2)
+            # The batch's own id is the corpus key: unique by construction and
+            # the name of the JSON file, where the export's default (the DOI,
+            # else the file name) can collide across a corpus.
+            export = {**outcome.export, "paper_id": item.paper_id}
+            atomic_write_json(export_path(options.out, item), export, indent=2)
         entry = ledger.record(item, outcome, context=context_holder["context"])
         done += 1
         if outcome.ok:
@@ -693,6 +729,8 @@ def run_batch(
     write_run_info(options.out, info, append_history=False)
 
     entries = ledger.read()
+    if options.tables:
+        write_batch_tables(options.out, ledger, entries, console=console)
     report = compute_report(entries, run_id=run_id)
     if options.report_json:
         print(json.dumps(report, indent=2))

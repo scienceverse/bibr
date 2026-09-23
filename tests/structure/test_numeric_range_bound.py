@@ -16,6 +16,7 @@ from bibr.structure.citation_linker import _expand_numeric_range
 from bibr.structure.xref_utils import (
     MAX_INT_RANGE_SPAN,
     _expand_nums,
+    _label_range,
     detect_xrefs,
     expand_int_range,
 )
@@ -27,6 +28,11 @@ def test_plausible_ranges_are_still_filled():
     assert _expand_numeric_range("4-7") == [4, 5, 6, 7]
     # Reversed ranges from OCR typos keep their ascending interpretation.
     assert _expand_numeric_range("5-3,9") == [3, 4, 5, 9]
+
+
+def test_printed_label_ranges_are_bounded_too():
+    assert _label_range("S1", "S3") == ["S1", "S2", "S3"]
+    assert _label_range("S1", "S999") == ["S1", "S999"]
 
 
 def test_range_at_the_bound_is_filled_and_one_past_it_is_not():

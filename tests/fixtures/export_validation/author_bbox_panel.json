@@ -18,15 +18,7 @@
     {
       "text_id": 1,
       "section_id": 1,
-      "text": "Body text.",
-      "_bbox_2d": [
-        10,
-        10,
-        9999,
-        20
-      ],
-      "_page_w": 600,
-      "_page_h": 800
+      "text": "Body text."
     }
   ],
   "section": [
@@ -50,5 +42,26 @@
   "metadata": {
     "title": "Frozen validation regression fixture"
   },
-  "schema_version": "11.0"
+  "schema_version": "12.0",
+  "extraction": {
+    "pages": [
+      {
+        "page_number": 1,
+        "width": 600,
+        "height": 800
+      }
+    ],
+    "text_regions": [
+      {
+        "text_id": 1,
+        "page_number": 1,
+        "bbox": [
+          10,
+          10,
+          9999,
+          20
+        ]
+      }
+    ]
+  }
 }

@@ -78,6 +78,33 @@ def test_v11_summary_preserves_timings_usage_and_warnings():
     assert summarize_export(current) == summarize_export(legacy)
 
 
+def test_v12_summary_counts_warnings_by_code():
+    """12.0 warnings are ``{code, message}`` objects: counted by code, sampled
+    as ``CODE: message``; an entry without a code is skipped, not miscounted."""
+    page = "OCR failed for a page; its text is missing (page 2): TimeoutError: slow"
+    data = {
+        "schema_version": "12.0",
+        "extraction": {
+            "warnings": [
+                {"code": "OCR_PAGE_FAILED", "message": page},
+                {"code": "OCR_PAGE_FAILED", "message": page.replace("page 2", "page 5")},
+                {"code": "STATEMENT_LEXICAL_FALLBACK", "message": ""},
+                {"message": "no code"},
+                7,
+            ]
+        },
+    }
+    assert summarize_export(data)["warnings"] == {
+        "count": 3,
+        "first": [
+            f"OCR_PAGE_FAILED: {page}",
+            f"OCR_PAGE_FAILED: {page.replace('page 2', 'page 5')}",
+            "STATEMENT_LEXICAL_FALLBACK",
+        ],
+        "codes": {"OCR_PAGE_FAILED": 2, "STATEMENT_LEXICAL_FALLBACK": 1},
+    }
+
+
 def test_append_and_read_roundtrip_skips_malformed_lines(tmp_path):
     ledger = Ledger(tmp_path / "out" / "outcomes.jsonl")
     ledger.append({"paper_id": "a", "status": "ok"})

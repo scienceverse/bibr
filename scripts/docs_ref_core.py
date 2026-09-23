@@ -7,6 +7,7 @@ Pure functions over live code — imported by scripts/gen_docs_reference.py at
 from __future__ import annotations
 
 import argparse
+import inspect
 import typing
 from types import UnionType
 
@@ -23,6 +24,7 @@ _SECTION_TITLES = {
     "LAYOUT_": "Layout detection",
     "CROSSREF_": "Crossref enrichment",
     "BIBR_RESOLVER_": "bibr-resolver",
+    "ROR_": "ROR organization matching",
     "CACHE_": "Cache",
     "CB_": "Circuit breaker",
     "CORS_": "CORS",
@@ -211,6 +213,10 @@ def _annotation_repr(annotation: object) -> str:
     if annotation is type(None):
         return "None"
     origin = typing.get_origin(annotation)
+    if origin is typing.Annotated:
+        # Constraints (1-based ids, 4-item boxes) show in the JSON Schema;
+        # the table names the type.
+        return _annotation_repr(typing.get_args(annotation)[0])
     if origin is None:
         name = getattr(annotation, "__name__", None)
         return name if name else str(annotation).replace("typing.", "")
@@ -250,6 +256,7 @@ def _nested_export_models(model: type[BaseModel]) -> list[type[BaseModel]]:
 
 def render_schema_md() -> str:
     from bibr.export.models import _SCHEMA_VERSION, PaperExport
+    from bibr.processing_warnings import DESCRIPTIONS
 
     nested_models = _nested_export_models(PaperExport)
     parts = [
@@ -280,51 +287,101 @@ def render_schema_md() -> str:
     parts.extend(
         [
             "\n## Reading an export\n",
+            "`extraction` holds everything about how the output was produced. "
+            "Everything else is the paper: `paper_id`, `schema_version` and `source` "
+            "identify it and its input file, `metadata` and the record tables hold "
+            "what it says, and `metadata_match` and `bib_match` hold what external "
+            "registries returned. Content rows carry no processing fields: classifier "
+            "scores, citation-detector tiers, consolidation receipts, figure/table "
+            "piece locations, layout features and the validation result live under "
+            "`extraction`, keyed by the rows' IDs.\n",
             "The root `schema_version` identifies the output schema; "
-            "`extraction.bibr_version` identifies the producing package. "
-            "Paper fields live in `metadata`, input identity in `source`, and "
-            "telemetry in `extraction`. Table rows connect through IDs: "
-            "`text.section_id` points to `section.section_id`, and `xref` links "
-            "a source `text_id` to an object identified by `xref_type` and `xref_id`. "
-            "Do not treat IDs as array positions.\n",
-            "`bib` starts with parsed references. `bib_match` and `metadata_match` hold "
-            "external enrichment separately. Explicit consolidation (`fill` or "
-            "`replace`) can update reference fields and records `consolidated_fields`. "
+            "`extraction.producer` identifies the software that wrote it. Every record "
+            "table has an integer primary key named after it (`text_id`, `xref_id`, "
+            "…); other `*_id` columns are foreign keys: `text.section_id` points to "
+            "`section.section_id`, and `xref.target_id` points to the row named by "
+            "`xref_type`. Do not treat IDs as array positions. Absent values are "
+            "`null`, never an empty string.\n",
+            "`bib` holds the parsed printed references. `bib_match` and "
+            "`metadata_match` hold external enrichment separately. Explicit "
+            "consolidation (`fill` or `replace`) can update reference fields and lists "
+            "the fields it took in `extraction.diagnostics.consolidation`. "
             "[See enrichment and consolidation](../guides/configuration.md).\n",
-            "Optional blocks may be absent rather than null. `extraction.regions` "
+            "Optional parts of `extraction` may be absent rather than null. "
+            "`extraction.regions` "
             "requires `include_regions=True` / `--regions`; "
-            "per-sentence underscore fields require `include_region_meta=True` / "
+            "`extraction.text_regions` requires `include_region_meta=True` / "
             "`--region-meta`. The `validation` gate is enabled by default "
             "and can be disabled independently of the typed export builder. "
-            "Inspect `extraction.warnings` and `validation` when reviewing results. "
-            "The root `schema_version` key distinguishes v11 from legacy exports. "
-            "For compatibility and structured reference names, see "
+            "Inspect `extraction.warnings` (each a stable `code` and a `message`; "
+            "[the codes are listed below](#warning-codes)) and `extraction.validation` "
+            "when reviewing results. "
+            "The presence of the root `schema_version` key distinguishes v11 and "
+            "later from legacy exports. For compatibility, see "
             "[the export overview](../guides/architecture.md).\n",
             "## Nested record fields\n",
-            "These tables describe the models referenced above. Required means "
-            "required by the model constructor; a nullable field may still be "
-            "required. Defaults do not guarantee that a field is emitted: the "
-            "exporter omits selected optional and debug fields.\n",
+            "These tables describe the models referenced above. *Always present* "
+            "is what the published schema's `required` states: the key is in every "
+            "export, though its value may be `null`. A key marked No is left out "
+            "when its stage did not run or its value is absent. The default is the "
+            "model constructor's.\n",
         ]
     )
     for model in nested_models:
+        parts.append(f"### {model.__name__}\n")
+        doc = inspect.cleandoc(model.__doc__ or "").split("\n\n", 1)[0].replace("\n", " ")
+        if doc:
+            parts.append(f"{doc}\n")
         parts.extend(
             [
-                f"### {model.__name__}\n",
-                "| Field | Type | Required | Default |",
-                "|---|---|---|---|",
+                "| Field | Type | Always present | Default | Description |",
+                "|---|---|---|---|---|",
             ]
         )
         for name, field in model.model_fields.items():
             json_name = field.serialization_alias or field.alias or name
-            ann = _annotation_repr(field.annotation)
-            required = "Yes" if field.is_required() else "No"
+            ann, choices = _field_type_and_choices(field.annotation)
+            omitted = getattr(model, "OMITTED_WHEN_ABSENT", ())
+            required = "No" if name in omitted else "Yes"
             if field.is_required():
                 default = "—"
             elif field.default_factory is not None:
                 default = "(computed)"
             else:
                 default = f"`{field.default!r}`"
-            parts.append(f"| `{json_name}` | `{ann}` | {required} | {default} |")
+            desc = _md_escape(" ".join(filter(None, [field.description or "", choices])))
+            parts.append(f"| `{json_name}` | `{ann}` | {required} | {default} | {desc} |")
         parts.append("")
+    parts.extend(
+        [
+            "## Warning codes\n",
+            "The codes bibr writes to `extraction.warnings[].code`. The schema pins "
+            "their form (UPPER_SNAKE), not this list: another producer of the format "
+            "may add codes of its own, and a later bibr may add more.\n",
+            "| Code | Meaning |",
+            "|---|---|",
+            *(f"| `{code}` | {_md_escape(meaning)} |" for code, meaning in DESCRIPTIONS.items()),
+            "",
+        ]
+    )
     return "\n".join(parts) + "\n"
+
+
+# A closed vocabulary longer than this renders as ``enum`` in the Type cell,
+# with its values listed in the Description cell instead.
+_MAX_INLINE_LITERAL = 3
+
+
+def _field_type_and_choices(annotation: object) -> tuple[str, str]:
+    """Type-cell text for *annotation*, plus a "One of: ..." note for a long enum."""
+    literals = [
+        arg
+        for arg in (typing.get_args(annotation) or (annotation,))
+        if typing.get_origin(arg) is typing.Literal
+    ]
+    if not literals or len(typing.get_args(literals[0])) <= _MAX_INLINE_LITERAL:
+        return _annotation_repr(annotation), ""
+    values = typing.get_args(literals[0])
+    nullable = type(None) in typing.get_args(annotation)
+    choices = "One of: " + ", ".join(f"`{v}`" for v in values) + "."
+    return ("enum | None" if nullable else "enum"), choices

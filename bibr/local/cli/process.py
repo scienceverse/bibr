@@ -24,6 +24,7 @@ from bibr.local.cli.run_config import (
     _preflight_ocr_runtime,
     resolve_run_config,
 )
+from bibr.validation import payload_validation
 
 if TYPE_CHECKING:
     from bibr.local.pipeline import LocalPipeline
@@ -48,8 +49,8 @@ def _validation_counts(result_json: dict | None) -> tuple[int, int]:
     skipped) or malformed — a clean/degraded payload must never be treated
     as having validation findings.
     """
-    validation = result_json.get("validation") if isinstance(result_json, dict) else None
-    if not isinstance(validation, dict):
+    validation = payload_validation(result_json)
+    if validation is None:
         return 0, 0
     return _as_count(validation.get("errors")), _as_count(validation.get("warnings"))
 
@@ -68,7 +69,7 @@ def _format_validation_line(result_json: dict | None) -> str | None:
     if n_errors + n_warnings <= 0:
         return None
 
-    validation = result_json.get("validation") or {}
+    validation = payload_validation(result_json) or {}
     raw_issues = validation.get("issues")
     issues = [i for i in raw_issues if isinstance(i, dict)] if isinstance(raw_issues, list) else []
     severity_rank = {"error": 0, "warning": 1}

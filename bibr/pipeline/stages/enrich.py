@@ -14,6 +14,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from bibr.pipeline.enrich_prefetch import cancel_leftover_prefetches, discard_prefetches
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
@@ -77,7 +78,7 @@ class EnrichmentStage:
         if papers:
             unexpected_failure_ids: set[int] = set()
             explicit_partial_ids: set[int] = set()
-            enrichment_warnings: dict[int, list[str]] = {id(fs): [] for fs in papers}
+            enrichment_warnings: dict[int, list[ProcessingWarning]] = {id(fs): [] for fs in papers}
             enrichment_details: dict[int, list[str]] = {id(fs): [] for fs in papers}
 
             async def _timed(enricher, fs):
@@ -118,8 +119,12 @@ class EnrichmentStage:
                             res,
                             exc_info=res,
                         )
-                        fs.warnings.append(f"enrich:{enricher_name} failed: {res}")
-                        enrichment_warnings[id(fs)].append(f"enrich:{enricher_name} failed: {res}")
+                        warning = ProcessingWarning(
+                            WarningCode.ENRICHER_FAILED,
+                            f"{enricher_name} failed: {type(res).__name__}: {res}",
+                        )
+                        fs.warnings.append(warning)
+                        enrichment_warnings[id(fs)].append(warning)
                     else:
                         from bibr.pipeline.enricher import EnrichmentOutcome, EnrichmentStatus
 

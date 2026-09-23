@@ -187,7 +187,7 @@ def test_build_extraction_carries_trace_rows_through():
 
     # Round-trips through the pydantic model too.
     validated = ExtractionExport(
-        bibr_version="0.0.0-test",
+        producer={"name": "bibr", "version": "0.0.0-test"},
         completed_at="2026-07-24T10:00:00Z",
         settings={
             "ref_seg": "geom",

@@ -171,6 +171,51 @@ class TestMergeFigurePanels:
         assert len(out) == 1
         assert len(out[0].provenance) == 2
 
+    def test_absorbed_panel_parts_are_conserved(self):
+        """``parts`` records every physical crop that fed a logical figure.
+        Absorbing a panel must carry its parts across, exactly as the inline
+        ownership merge in ``parse_media`` does — otherwise the panel's
+        page/bbox/image payload is destroyed."""
+        from bibr.paper_contents import PaperFigurePart
+
+        panel = _fig(1, 4, "A", image="img-a")
+        panel.parts = [PaperFigurePart(page_number=4, bbox=(0, 0, 10, 10), image_b64="img-a")]
+        target = _fig(2, 4, "FIGURE 1 Cap", image="img-main")
+        target.parts = [PaperFigurePart(page_number=4, bbox=(0, 20, 10, 30), image_b64="img-main")]
+
+        out = merge_figure_panels([panel, target])
+
+        assert len(out) == 1
+        assert len(out[0].parts) == 2
+        assert [p.image_b64 for p in out[0].parts] == ["img-main", "img-a"]
+
+    def test_absorbed_panels_composite_into_the_whole_figure_image(self):
+        import base64
+        import io
+
+        from PIL import Image
+
+        from bibr.paper_contents import PaperFigurePart
+
+        def crop(color):
+            out = io.BytesIO()
+            Image.new("RGB", (10, 10), color).save(out, format="PNG")
+            return base64.b64encode(out.getvalue()).decode("ascii")
+
+        panel = _fig(1, 4, "A", image=crop("red"))
+        panel.parts = [
+            PaperFigurePart(page_number=4, bbox=(0, 0, 10, 10), image_b64=panel.image_b64)
+        ]
+        target = _fig(2, 4, "FIGURE 1 Cap", image=crop("blue"))
+        target.parts = [
+            PaperFigurePart(page_number=4, bbox=(0, 20, 10, 30), image_b64=target.image_b64)
+        ]
+
+        (figure,) = merge_figure_panels([panel, target])
+
+        image = Image.open(io.BytesIO(base64.b64decode(figure.image_b64 or "")))
+        assert image.size == (10, 30)
+
 
 class TestMergeTableContinuations:
     def test_continued_pages_concatenate_into_first_table(self):
@@ -200,6 +245,18 @@ class TestMergeTableContinuations:
         out = merge_table_continuations(tables)
         assert len(out) == 1
         assert len(out[0].df) == 2
+
+    def test_a_different_dotted_label_is_not_a_continuation(self):
+        """Table 3.2 shares the number 3 with Table 3.1, not the label."""
+        tables = [
+            _tbl(1, 4, "Table 3.1 Participants"),
+            _tbl(2, 5, "Table 3.2 Participants (Continued)"),
+        ]
+        out = merge_table_continuations(tables)
+        assert [t.caption for t in out] == [
+            "Table 3.1 Participants",
+            "Table 3.2 Participants (Continued)",
+        ]
 
     def test_same_label_without_marker_not_merged(self):
         """Two genuinely different tables that happen to share a label."""
@@ -299,3 +356,25 @@ class TestPrintedLabelsSurviveMerging:
         out = merge_table_continuations(tables)
 
         assert [t.table_id for t in out] == [3, 4]
+
+    def test_continuation_parts_are_conserved(self):
+        """Each continuation page is a physical table region of its own. The
+        concat keeps its rows, so ``parts`` must keep its page/bbox/HTML too."""
+        from bibr.paper_contents import PaperTablePart
+
+        caption = "Table 1 Inventory"
+        df1 = pd.DataFrame([["a", "1"]], columns=["Species", "Uses"])
+        df2 = pd.DataFrame([["b", "2"]], columns=["Species", "Uses"])
+        first = _tbl(1, 4, caption, df1)
+        first.parts = [
+            PaperTablePart(page_number=4, bbox=(0, 0, 10, 10), tbl_html=first.tbl_html, df=df1)
+        ]
+        second = _tbl(2, 5, f"{caption} (Continued)", df2)
+        second.parts = [
+            PaperTablePart(page_number=5, bbox=(0, 0, 10, 10), tbl_html=second.tbl_html, df=df2)
+        ]
+
+        out = merge_table_continuations([first, second])
+
+        assert len(out) == 1
+        assert [p.page_number for p in out[0].parts] == [4, 5]

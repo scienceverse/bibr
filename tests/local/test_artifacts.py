@@ -6,16 +6,18 @@ from pathlib import Path
 
 import pytest
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "schema_version": "11.0",
+        "schema_version": "12.0",
         "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
         "metadata_match": [],
         "extraction": {
-            "bibr_version": "0.0.0-test",
+            "producer": {"name": "bibr", "version": "0.0.0-test"},
             "completed_at": "2026-07-24T10:00:00Z",
             "settings": {
                 "ref_seg": "geom",
@@ -121,8 +123,8 @@ def test_sidecar_replay_requires_core_settings_and_schema_match():
         core_sha256=core_hash,
         settings_digest="settings-v1",
         completeness="complete",
-        bib_match=({"bib_id": 1, "service": "crossref", "doi": "10.1/ref"},),
-        metadata_match=({"service": "crossref", "doi": "10.1/self"},),
+        bib_match=({"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"},),
+        metadata_match=({"service": "crossref", "doi": "10.1234/self"},),
     )
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings-v1")
@@ -343,7 +345,7 @@ def test_sidecar_rejects_duplicate_or_malformed_metadata_service_rows():
     core = _core_payload()
     for rows in (
         ({"service": "crossref"}, {"service": "crossref"}),
-        ({"doi": "10.1/no-service"},),
+        ({"doi": "10.1234/no-service"},),
         ("not-a-row",),
     ):
         sidecar = EnrichmentSidecar(
@@ -376,7 +378,7 @@ def test_sidecar_replay_rejects_a_core_without_an_extraction_block():
         core_sha256=canonical_json_sha256(core),
         settings_digest="settings",
         completeness="partial",
-        warnings=("transport failure",),
+        warnings=(ProcessingWarning(WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure"),),
     )
 
     with pytest.raises(ArtifactReplayError, match="no extraction block"):
@@ -385,6 +387,7 @@ def test_sidecar_replay_rejects_a_core_without_an_extraction_block():
 
 def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them():
     from bibr.pipeline.artifacts import (
+        EnrichmentSidecar,
         canonical_json_sha256,
         make_enrichment_sidecar,
         replay_enrichment_sidecar,
@@ -392,25 +395,81 @@ def test_partial_sidecar_persists_bounded_diagnostics_and_replay_restores_them()
 
     core = _core_payload()
     enriched = dict(core)
-    enriched["bib_match"] = [{"bib_id": 1, "service": "crossref", "doi": "10.1/ref"}]
+    enriched["bib_match"] = [{"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"}]
     sidecar = make_enrichment_sidecar(
         enriched,
         core_sha256=canonical_json_sha256(core),
         settings_digest="settings",
         completeness="partial",
-        warnings=("transport failure " + "x" * 2_000,),
+        warnings=(
+            ProcessingWarning(
+                WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure " + "x" * 2_000
+            ),
+        ),
         detail="1 of 1 terminal requests failed " + "y" * 2_000,
     )
 
     encoded = sidecar.to_dict()
-    assert len(encoded["warnings"][0]) <= 512
+    assert encoded["warnings"][0]["code"] == "ENRICHMENT_LOOKUP_FAILED"
+    assert len(encoded["warnings"][0]["message"]) <= 512
     assert len(encoded["detail"]) <= 512
-    assert encoded["warnings"][0].startswith("transport failure")
+    assert encoded["warnings"][0]["message"].startswith("transport failure")
+    assert EnrichmentSidecar.from_dict(json.loads(json.dumps(encoded))) == sidecar
 
     replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
     warnings = replayed["extraction"]["warnings"]
-    assert any("transport failure" in warning for warning in warnings)
-    assert any("1 of 1 terminal requests failed" in warning for warning in warnings)
+    assert [w["code"] for w in warnings] == ["ENRICHMENT_LOOKUP_FAILED", "ENRICHMENT_INCOMPLETE"]
+    assert warnings[0]["message"].startswith("transport failure")
+    assert warnings[1]["message"].startswith("1 of 1 terminal requests failed")
+
+
+@pytest.mark.parametrize(
+    "warnings",
+    [["transport failure"], [{"code": "lowercase", "message": "m"}], "not-a-list"],
+)
+def test_replay_refuses_a_core_whose_warnings_are_not_coded(warnings):
+    """A 12.0 core written before warnings had codes holds prose strings: replay
+    would append coded warnings to it and mix both shapes in one list."""
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    core["extraction"]["warnings"] = warnings
+    sidecar = make_enrichment_sidecar(
+        core,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="settings",
+        completeness="partial",
+        warnings=(ProcessingWarning(WarningCode.ENRICHMENT_LOOKUP_FAILED, "transport failure"),),
+    )
+
+    with pytest.raises(ArtifactReplayError, match="invalid warnings"):
+        replay_enrichment_sidecar(core, sidecar, expected_settings_digest="settings")
+
+
+def test_sidecar_warnings_must_be_coded():
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        EnrichmentSidecar,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = _core_payload()
+    sidecar = make_enrichment_sidecar(
+        core, core_sha256=canonical_json_sha256(core), settings_digest="s", completeness="partial"
+    )
+    for warnings in (("prose",), (ProcessingWarning("lowercase", "m"),)):
+        bad = EnrichmentSidecar(**{**sidecar.__dict__, "warnings": warnings})
+        with pytest.raises(ArtifactReplayError):
+            replay_enrichment_sidecar(core, bad, expected_settings_digest="s")
+    with pytest.raises(ValueError, match="processing warning"):
+        EnrichmentSidecar.from_dict({**sidecar.to_dict(), "warnings": ["prose"]})
 
 
 def test_enrichment_settings_digest_includes_resolver_result_settings():
@@ -437,6 +496,9 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
         settings.resolver.limit = limit
         settings.resolver.search_concurrency = 8
         settings.resolver.authoritative = authoritative
+        settings.ror.enrich = True
+        settings.ror.url = "https://api.ror.org/v2"
+        settings.ror.enrich_timeout = 60.0
         return PipelineContext(
             file_states=[],
             progress=NullProgress(),
@@ -457,3 +519,70 @@ def test_enrichment_settings_digest_includes_resolver_result_settings():
     assert baseline != enrichment_settings_digest(
         context(url="http://resolver-a", authoritative=False, limit=5)
     )
+
+
+def test_ror_rows_round_trip_through_the_sidecar():
+    from bibr.pipeline.artifacts import (
+        ArtifactReplayError,
+        EnrichmentSidecar,
+        canonical_json_sha256,
+        make_enrichment_sidecar,
+        replay_enrichment_sidecar,
+    )
+
+    core = {
+        **_core_payload(),
+        "affiliation": [{"affiliation_id": 1, "text": "Uni"}],
+        "funding": [{"funding_id": 1, "funder": "NSF"}],
+        "affiliation_match": [],
+        "funding_match": [],
+    }
+    affiliation_row = {
+        "affiliation_id": 1,
+        "service": "ror",
+        "service_id": "https://ror.org/0abcde123",
+        "score": 1.0,
+        "name": "Uni",
+        "country_code": "NL",
+    }
+    funding_row = {
+        "funding_id": 1,
+        "service": "ror",
+        "service_id": "https://ror.org/021nxhr62",
+        "score": 1.0,
+        "name": "U.S. National Science Foundation",
+        "country_code": "US",
+        "funder_doi": "10.13039/100000001",
+    }
+    enriched = {**core, "affiliation_match": [affiliation_row], "funding_match": [funding_row]}
+    sidecar = make_enrichment_sidecar(
+        enriched,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="s",
+        completeness="complete",
+    )
+    assert EnrichmentSidecar.from_dict(sidecar.to_dict()) == sidecar
+
+    replayed = replay_enrichment_sidecar(core, sidecar, expected_settings_digest="s")
+    assert replayed["affiliation_match"] == [affiliation_row]
+    assert replayed["funding_match"] == [funding_row]
+
+    dangling = {**enriched, "affiliation_match": [{**affiliation_row, "affiliation_id": 9}]}
+    bad = make_enrichment_sidecar(
+        dangling,
+        core_sha256=canonical_json_sha256(core),
+        settings_digest="s",
+        completeness="complete",
+    )
+    with pytest.raises(ArtifactReplayError, match="unknown affiliation_id"):
+        replay_enrichment_sidecar(core, bad, expected_settings_digest="s")
+
+
+def test_a_sidecar_without_ror_rows_stays_compact():
+    from bibr.pipeline.artifacts import make_enrichment_sidecar
+
+    sidecar = make_enrichment_sidecar(
+        _core_payload(), core_sha256="x", settings_digest="s", completeness="complete"
+    )
+    assert "affiliation_match" not in sidecar.to_dict()
+    assert "funding_match" not in sidecar.to_dict()

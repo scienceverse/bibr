@@ -1,11 +1,11 @@
-"""Shared v11 payload fixtures.
+"""Shared export payload fixtures.
 
 ``completed_at`` is stripped from every fixture payload: it is the export's
 only non-deterministic field, and leaving it in would make any full-payload
 comparison flaky. The per-stage timings go the same way — they are wall-clock
 too.
 
-``extraction_block()`` lives here as the single definition of the minimal v11
+``extraction_block()`` lives here as the single definition of the minimal
 ``extraction`` skeleton, with ``extraction_export()`` as its typed twin for
 tests that assert on the serializer rather than on a payload. Papers exported
 outside the pipeline carry no ``extraction`` at all, so every test asserting on
@@ -30,7 +30,10 @@ from bibr.models import (
     BibAuthor,
     ExternalMatch,
     FundingEntry,
+    MatchFunder,
+    MatchOrganization,
     MatchSource,
+    OrganizationMatch,
     PaperAuthor,
     PaperMetadata,
     PaperReference,
@@ -50,9 +53,9 @@ from bibr.paper_contents import (
 
 
 def extraction_block(**overrides) -> dict:
-    """A minimal v11 ``extraction`` block, as ``ExportStage`` would build it."""
+    """A minimal ``extraction`` block, as ``ExportStage`` would build it."""
     block = {
-        "bibr_version": "0.0.0-test",
+        "producer": {"name": "bibr", "version": "0.0.0-test", "build_sha": None},
         "completed_at": "2026-07-24T10:00:00Z",
         "settings": {
             "ref_seg": "geom",
@@ -78,7 +81,8 @@ def extraction_export(**overrides) -> ExtractionExport:
 def _input_file() -> InputFile:
     return InputFile(
         path=Path("/tmp/demo.pdf"),
-        file_hash="demo-hash",
+        file_hash="3a6eb0790f39ac87",
+        sha256="3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
         input_format=InputFormat(
             file_extension=".pdf",
             detected_mime_type="application/pdf",
@@ -100,7 +104,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
     ]
     xrefs = [
         PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=2, tier="numeric"),
-        PaperXref(xref_id=1, xref_type="table", contents="Table 1", text_id=2),
+        PaperXref(xref_id=1, xref_type="table", contents="Table 1", text_id=2, tier="label"),
     ]
     if not with_refs:
         # refs="off" leaves no bibliography to point at; the table xref stays.
@@ -135,6 +139,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
                 "Table 1. Values",
                 2,
                 [],
+                label="1",
             )
         ],
         links=[
@@ -147,7 +152,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
             )
         ],
         sections_text={1: "We measured the thing.", 2: "It replicated prior work [1]."},
-        figures=[PaperFigure(1, 2, None, "Figure 1. Plot", 2, [])],
+        figures=[PaperFigure(1, 2, None, "Figure 1. Plot", 2, [], label="1")],
         equations=[PaperEquation(text_id=2, grp_id=1, lhs="t", comp="=", rhs="3.42", df="28")],
     )
 
@@ -172,7 +177,8 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
                 match={
                     MatchSource.CROSSREF: ExternalMatch(
                         id="10.1234/prior",
-                        score=0.98,
+                        # Enrichment scores 0-100; the export publishes 0-1.
+                        score=98.0,
                         title="A Prior Study",
                         authors=[BibAuthor(given="Jane", family="Smith")],
                         year=2020,
@@ -189,8 +195,8 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
         keywords=["schema", "export"],
         paper_type="empirical",
         paper_type_confidence=0.91,
-        oecd_l1="5. Social Sciences",
-        oecd_l2="5.1 Psychology",
+        oecd_l1="Social Sciences",
+        oecd_l2="Psychology and Cognitive Sciences",
         oecd_confidence=0.77,
         authors=[
             PaperAuthor(
@@ -232,12 +238,48 @@ def _metadata(*, with_refs: bool) -> PaperMetadata:
         match={
             MatchSource.CROSSREF: ExternalMatch(
                 id="10.1234/demo",
-                score=0.99,
+                score=99.0,
                 title="A Demonstration Paper",
-                authors=[BibAuthor(given="Jane", family="Smith")],
+                authors=[
+                    BibAuthor(
+                        given="Jane",
+                        family="Smith",
+                        orcid="https://orcid.org/0000-0002-1825-0097",
+                        affiliation=[
+                            MatchOrganization(
+                                name="Example University", ror="https://ror.org/0abcde123"
+                            )
+                        ],
+                    )
+                ],
                 year=2026,
                 container="Journal of Demonstrations",
                 doi="10.1234/demo",
+                license_url="http://creativecommons.org/licenses/by/4.0/",
+                funders=[
+                    MatchFunder(
+                        name="National Science Foundation",
+                        funder_doi="10.13039/100000001",
+                        award_ids=["12345"],
+                    )
+                ],
+            )
+        },
+        affiliation_match={
+            "Department of Things, Example University": OrganizationMatch(
+                service_id="https://ror.org/0abcde123",
+                score=1.0,
+                name="Example University",
+                country_code="NL",
+            )
+        },
+        funder_match={
+            "NSF": OrganizationMatch(
+                service_id="https://ror.org/021nxhr62",
+                score=1.0,
+                name="U.S. National Science Foundation",
+                country_code="US",
+                funder_doi="10.13039/100000001",
             )
         },
         enrichment_complete=True if with_refs else None,
@@ -253,6 +295,61 @@ def _demo_paper(*, with_refs: bool) -> Paper:
     paper.text_quality = 0.87
     paper.extraction = extraction_block()
     return paper
+
+
+def as_parsed(paper: Paper) -> None:
+    """Reshape the demo paper the way ``create_content_sections`` leaves one.
+
+    Each caption and footnote is a synthetic section holding its sentence, and
+    a float points at its section while remembering the body section it sits
+    in. The export turns these into caption rows and a ``footnote`` row.
+    """
+    contents = paper.contents
+    contents.sections += [
+        PaperSection(
+            section_id=3,
+            header="Figure 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.FIGURE,
+            synthetic_kind="figure",
+        ),
+        PaperSection(
+            section_id=4,
+            header="Table 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.TABLE,
+            synthetic_kind="table",
+        ),
+        PaperSection(
+            section_id=5,
+            header="Footnote 1",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.FOOTNOTE,
+            synthetic_kind="footnote",
+            footnote_label="*",
+        ),
+    ]
+    contents.sentences += [
+        PaperSentence(
+            text_id=3, text="Figure 1. Plot", section_id=3, paragraph_id=3, page_number=2
+        ),
+        PaperSentence(
+            text_id=4, text="Table 1. Values", section_id=4, paragraph_id=4, page_number=2
+        ),
+        PaperSentence(
+            text_id=5, text="* Collected in 2020.", section_id=5, paragraph_id=5, page_number=2
+        ),
+    ]
+    for item, own_section in ((contents.figures[0], 3), (contents.tables[0], 4)):
+        item._body_section_id = item.section_id
+        item.section_id = own_section
+    contents.xrefs += [
+        PaperXref(xref_id=1, xref_type="figure", contents="Figure 1", text_id=2),
+        PaperXref(xref_id=5, xref_type="foot", contents="*", text_id=2),
+    ]
 
 
 def _strip_nondeterministic(payload: dict) -> dict:
@@ -279,12 +376,12 @@ def demo_paper_refs_off() -> Paper:
 
 
 @pytest.fixture
-def v11_payload(demo_paper) -> dict:
-    """A fully-populated v11 payload from the shared demo paper."""
+def export_payload(demo_paper) -> dict:
+    """A fully-populated payload from the shared demo paper."""
     return _strip_nondeterministic(_export_paper_payload(demo_paper))
 
 
 @pytest.fixture
-def v11_payload_refs_off(demo_paper_refs_off) -> dict:
+def export_payload_refs_off(demo_paper_refs_off) -> dict:
     """A payload from a ``refs="off"`` run — every root table must still exist."""
     return _strip_nondeterministic(_export_paper_payload(demo_paper_refs_off))

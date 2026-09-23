@@ -30,6 +30,7 @@ from bibr.paper_contents import (
     PaperURLLink,
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
+from bibr.structure.float_labels import caption_label
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -309,6 +310,7 @@ class HtmlParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FIGURE,
+                    synthetic_kind="figure",
                 )
             )
             fig.section_id = self._section_counter
@@ -335,6 +337,7 @@ class HtmlParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.TABLE,
+                    synthetic_kind="table",
                 )
             )
             tbl.section_id = self._section_counter
@@ -398,6 +401,14 @@ class HtmlParser:
         )
         meta.publisher = first("dc.publisher", "citation_publisher", "publisher") or None
         meta.license = first("dc.rights", "rights") or None
+        meta.pmid = first("citation_pmid") or None
+        meta.arxiv = first("citation_arxiv_id") or None
+        html_tag = soup.find("html")
+        meta.language = (
+            first("citation_language", "dc.language")
+            or (str(html_tag.get("lang") or "") if html_tag else "")
+            or None
+        )
         license_link = soup.find("link", rel=lambda rel: rel and "license" in rel)
         if not meta.license and license_link is not None:
             meta.license = str(license_link.get("href") or "").strip() or None
@@ -575,6 +586,7 @@ class HtmlParser:
                         df=dfs[0],
                     )
                 ],
+                label=caption_label(caption, "table"),
             )
         )
         self._table_counter += 1
@@ -598,6 +610,7 @@ class HtmlParser:
                         image_b64=None,
                     )
                 ],
+                label=caption_label(caption, "figure"),
             )
         )
         self._figure_counter += 1

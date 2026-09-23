@@ -13,7 +13,8 @@
 
 - Reads PDF, DOCX, JATS XML, HTML, and ePub.
 - Extracts metadata, references, full text, tables, figures, and equations into a
-  [versioned JSON format](https://bibr.org/reference/schema/).
+  [versioned JSON format](https://bibr.org/reference/schema/), and writes whole corpora
+  as Parquet tables for pandas, polars, DuckDB, or R.
 - Includes sentence and page references to help check extractions against the source.
 - Works through the CLI, Python, an HTTP API, a web demo, or MCP.
 - Lets you choose local or cloud models, limit page ranges, and skip extraction stages.
@@ -53,6 +54,8 @@ for development setup.
 
 ```bash
 uv run bibr chew papers/ -o results/   # Process a directory
+uv run bibr batch papers/ --out corpus/  # Resumable corpus run, plus Parquet tables
+uv run bibr tables results/ --out tables/  # JSON exports → one Parquet file per table
 uv run bibr chew paper.pdf --dry-run   # Preview the processing plan
 uv add 'bibr[demo]'                    # Add the optional web demo
 uv run bibr demo                       # Open it locally
@@ -70,6 +73,8 @@ result = bibr.chew("paper.pdf")
 print(result.title)
 references = result.references.df  # pandas DataFrame
 result.save("result.json")
+
+bibr.write_tables(bibr.chew("papers/"), "tables/")  # corpus → Parquet, keyed by paper_id
 ```
 
 See the [Python guide](https://bibr.org/guides/library/) for batch processing and
@@ -138,3 +143,6 @@ We are grateful to the open-source projects that bibr builds on:
 ## License
 
 [AGPL-3.0-or-later](https://github.com/scienceverse/bibr/blob/main/LICENSE.md).
+The export schema documents in [`docs/schema/`](https://github.com/scienceverse/bibr/tree/main/docs/schema) are dedicated to
+the public domain under [CC0 1.0](https://creativecommons.org/publicdomain/zero/1.0/),
+so other tools can adopt the format freely.

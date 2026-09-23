@@ -10,9 +10,9 @@ word-boundary anchor phrases and recovers the verbatim statement for any field
 the copy pass left ``None``.
 
 Pure lexical (no LLM), so it is safe to run alongside the copy pass, including
-under ``--no-llm``. Each recovered field appends a
-``STATEMENT_LEXICAL_FALLBACK: <field>`` warning to ``contents.processing_warnings``
-(surfaced onto ``Paper.processing_warnings`` in post_parse).
+under ``--no-llm``. Each recovered field appends a ``STATEMENT_LEXICAL_FALLBACK``
+warning naming the field to ``contents.processing_warnings`` (surfaced onto
+``Paper.processing_warnings`` in post_parse).
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from functools import cache
 from typing import TYPE_CHECKING
 
 from bibr.paper_contents import CanonicalSection
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
     from bibr.models import PaperMetadata
@@ -637,12 +638,19 @@ def _bounded_sentence_for_field(field: str, text: str) -> str:
     return text[start:end].strip()
 
 
+def lexical_fallback_warning(field: str) -> ProcessingWarning:
+    """The warning recorded when lexical anchors fill statement *field*."""
+    return ProcessingWarning(
+        WarningCode.STATEMENT_LEXICAL_FALLBACK, f"{field} filled by lexical anchor matching"
+    )
+
+
 def scan_statements_fallback(contents: PaperContents, metadata: PaperMetadata) -> None:
     """Fill still-``None`` statement fields from lexical anchors in the body.
 
     Runs after :func:`copy_integrity_statements`; only touches fields the copy
-    pass left unset. Records a ``STATEMENT_LEXICAL_FALLBACK: <field>`` warning
-    for each field it fills."""
+    pass left unset. Records a ``STATEMENT_LEXICAL_FALLBACK`` warning for each
+    field it fills."""
     sentences = [s for s in contents.sentences if not s.is_display_formula]
     if not sentences:
         return
@@ -660,7 +668,7 @@ def scan_statements_fallback(contents: PaperContents, metadata: PaperMetadata) -
         )
         if captured:
             setattr(metadata, field, captured)
-            contents.processing_warnings.append(f"STATEMENT_LEXICAL_FALLBACK: {field}")
+            contents.processing_warnings.append(lexical_fallback_warning(field))
 
 
 def _scan_field(

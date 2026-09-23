@@ -1432,7 +1432,7 @@ async def test_author_grounding_issue_reaches_paper_and_export(monkeypatch):
     assert [author.family for author in paper.metadata.authors] == ["Example", "Outside"]
     assert [issue.code for issue in paper.validation_issues] == ["VAL_AUTHOR_UNGROUNDED"]
     exported = paper.export_to_json()
-    exported_codes = {issue["code"] for issue in exported["validation"]["issues"]}
+    exported_codes = {issue["code"] for issue in exported["extraction"]["validation"]["issues"]}
     assert "VAL_AUTHOR_UNGROUNDED" in exported_codes
 
 
@@ -1502,8 +1502,8 @@ async def test_active_untargeted_abstention_is_blocking_and_not_promotable(monke
     assert paper.metadata.title == ""
     assert [item.code for item in paper.validation_issues] == ["VAL_METADATA_MULTI_ITEM"]
     exported = paper.export_to_json()
-    assert exported["validation"]["blocking"] == 1
-    assert exported["validation"]["promotable"] is False
+    assert exported["extraction"]["validation"]["blocking"] == 1
+    assert exported["extraction"]["validation"]["promotable"] is False
 
 
 async def test_end_to_end_clean_forty_author_byline_has_no_grounding_issue(monkeypatch):

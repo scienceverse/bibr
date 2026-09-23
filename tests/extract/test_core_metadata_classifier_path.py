@@ -17,6 +17,7 @@ from bibr.config import Settings
 from bibr.exceptions import UpstreamServiceError
 from bibr.extract.extractor import MetadataExtractor
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import AuthorLLM, CoreMetadataLLM, PaperClassificationLLM, PaperTypeLabel
 from bibr.structure import paper_classifier
 
@@ -392,9 +393,10 @@ class TestDegradedClassifierIsVisibleInTheExport:
         monkeypatch.setattr(paper_classifier, "classify_paper_async", fake_classify)
         ext = _build_extractor(_base_llm_result())
         await ext.extract_core_metadata()
-        assert any("paper classifier degraded" in w for w in ext.contents.processing_warnings), (
-            ext.contents.processing_warnings
-        )
+        assert any(
+            w.code == WarningCode.PAPER_CLASSIFIER_DEGRADED
+            for w in ext.contents.processing_warnings
+        ), ext.contents.processing_warnings
 
     async def test_classifier_error_is_recorded_by_type_only(self, monkeypatch):
         async def fake_classify(title, abstract):  # noqa: ARG001
@@ -404,7 +406,9 @@ class TestDegradedClassifierIsVisibleInTheExport:
         ext = _build_extractor(_base_llm_result())
         await ext.extract_core_metadata()
         warning = next(
-            w for w in ext.contents.processing_warnings if "paper classifier degraded" in w
+            w
+            for w in ext.contents.processing_warnings
+            if w.code == WarningCode.PAPER_CLASSIFIER_DEGRADED
         )
-        assert "RuntimeError" in warning
-        assert "private document text" not in warning
+        assert "RuntimeError" in warning.message
+        assert "private document text" not in warning.message

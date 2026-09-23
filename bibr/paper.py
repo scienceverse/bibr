@@ -8,6 +8,7 @@ compatibility and keeps the ``Paper`` class with its processing methods.
 
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel
@@ -27,6 +28,7 @@ from bibr.models import (
     migrate_bib_type,
 )
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
+from bibr.processing_warnings import ProcessingWarning
 from bibr.validation import ValidationIssue, references_incomplete_issue
 
 if TYPE_CHECKING:
@@ -272,7 +274,7 @@ class Paper:
     # Non-fatal warnings collected during processing (Crossref timeouts,
     # per-page OCR failures, etc.) — surfaced in the JSON export so consumers
     # can detect partial failures programmatically.
-    processing_warnings: list[str] = field(default_factory=list)
+    processing_warnings: list[ProcessingWarning] = field(default_factory=list)
     # Per-paper LLM token usage keyed by the ``(label, provider, model)``
     # triple (e.g. ``("extract_authors", "google", "gemini-flash-lite")``),
     # attached by post_parse. One row per engine that ran a label — the source
@@ -337,12 +339,14 @@ class Paper:
             self.validation_issues.append(references_incomplete_issue(self.metadata))
 
     def _compute_paper_id(self) -> str | None:
-        """Compute the paper ID: user-supplied > DOI > file_name."""
+        """Compute the paper ID: user-supplied, else the input file's stem.
+
+        The stem is what ``bibr batch`` and metacheck use too, and unlike the
+        DOI it does not change when a later bibr reads the DOI differently.
+        """
         if self.paper_id:
             return self.paper_id
-        if self.metadata and self.metadata.doi:
-            return self.metadata.doi
-        return self.input_file.file_name
+        return Path(self.input_file.file_name or "").stem or None
 
     def export_to_json(
         self, *, include_regions: bool = False, include_region_meta: bool = False

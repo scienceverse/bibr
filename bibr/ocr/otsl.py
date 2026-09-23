@@ -6,6 +6,8 @@ import html
 import re
 from dataclasses import dataclass
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 _MARKERS = ("<fcel>", "<ecel>", "<lcel>", "<ucel>", "<xcel>", "<nl>")
 _MARKER_RE = re.compile("(" + "|".join(re.escape(marker) for marker in _MARKERS) + ")")
 _ANCHOR_MARKERS = {"<fcel>", "<ecel>"}
@@ -17,7 +19,7 @@ class OtslDecodeResult:
     """Decoded table HTML and any recoverable structural warning."""
 
     html: str
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,7 @@ def decode_otsl(raw: str) -> OtslDecodeResult:
     except ValueError as exc:
         return OtslDecodeResult(
             _render_unmerged(rows),
-            (f"Malformed Paddle OTSL: {exc}",),
+            (ProcessingWarning(WarningCode.OCR_TABLE_MALFORMED, f"Malformed Paddle OTSL: {exc}"),),
         )
 
 

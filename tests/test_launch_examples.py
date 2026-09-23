@@ -64,8 +64,13 @@ def test_local_api_notebook_sends_bearer_and_reads_current_export(monkeypatch, t
         "paper_id": "synthetic",
         "metadata": {"title": "Example", "doi": None, "keywords": []},
         "author": [{"given": "Ada", "family": "Example"}],
-        "section": [{"header": "Methods", "section_type": "method", "classification_score": 0.9}],
+        "section": [{"section_id": 1, "header": "Methods", "section_type": "method"}],
         "bib": [{"bib_id": 1, "authors": "Example A", "year": 2026, "title": "Reference"}],
+        "extraction": {
+            "diagnostics": {
+                "section_classification": [{"section_id": 1, "score": 0.9, "source": "model"}]
+            }
+        },
     }
     requests = []
 

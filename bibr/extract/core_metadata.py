@@ -29,6 +29,7 @@ from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
 from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperClassificationLLM
 from bibr.utils.metadata import EXACT_GENERIC_ARTICLE_LABELS
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -41,31 +42,6 @@ if TYPE_CHECKING:
     from bibr.pipeline.classifier_resources import ClassifierResources
 
 logger = logging.getLogger(__name__)
-
-# Stable, machine-greppable marker: core-metadata extraction produced ZERO
-# authors for a non-notice paper, even after the extractor-owned grounded
-# free-JSON recovery. The byline is almost always present in the input, so this
-# flags a likely silent author-drop (vs a legitimately author-less corrigendum/
-# notice, which the correction-notice guard handles and does NOT warn on).
-# Do not reword.
-EMPTY_AUTHORS_WARNING_PREFIX = "Metadata extraction WARNING: 0 authors"
-
-# Stable, machine-greppable marker: the LLM author list showed a degeneration
-# signature and the sanitizer dropped/trimmed it — blank entries, affiliation
-# fragments mislabeled as organization authors, mass duplicates, or a runaway
-# repetition loop (e.g. NuExtract3-FP8 emitting the same fragment to the token
-# cap). Mirrors EMPTY_AUTHORS_WARNING_PREFIX. Do not reword.
-AUTHOR_ANOMALY_WARNING_PREFIX = "Metadata extraction WARNING: author anomaly"
-
-# Stable warning marker: none of the extracted names appears in the supplied text. Keep the
-# marker below unchanged for downstream consumers.
-FABRICATED_AUTHORS_WARNING_PREFIX = "Metadata extraction WARNING: ungrounded author list"
-
-# The trained paper classifier is configured but did not answer (core install
-# without torch, failed weight load, serve resource degraded, inference error)
-# and the LLM classified the paper instead. Carries the exception type only —
-# never the message, which can quote document text.
-PAPER_CLASSIFIER_DEGRADED_WARNING_PREFIX = "Metadata extraction WARNING: paper classifier degraded"
 
 # Above this incoming author count the list is treated as a model degeneration
 # and trimmed to the leading distinct run. Real bylines in bibr's domain
@@ -1565,12 +1541,13 @@ class CoreMetadataExtractor:
 
             # Observability: a 0-author result on a non-notice paper is a likely
             # silent author-drop (the byline is normally in the input and the LLM
-            # client already re-rolled once). Surface it so eval/monitoring can
-            # see it instead of shipping an empty author list quietly. A notice
+            # client already re-rolled once, and the grounded free-JSON recovery
+            # found nothing either). Surface it so eval/monitoring can see it
+            # instead of shipping an empty author list quietly. A notice
             # legitimately has no authors — the guard handles that, don't warn.
             if not metadata.authors and not is_notice:
                 self._record_metadata_warning(
-                    f"title={title[:60]!r}", prefix=EMPTY_AUTHORS_WARNING_PREFIX
+                    WarningCode.AUTHORS_EMPTY, f"0 authors extracted (title={title[:60]!r})"
                 )
 
             return metadata
@@ -1579,15 +1556,14 @@ class CoreMetadataExtractor:
             logger.error(f"Metadata extraction failed: {e}")
             raise
 
-    def _record_metadata_warning(self, reason: str, prefix: str) -> None:
-        """Log and persist a metadata-extraction warning (machine-greppable
-        prefix) onto ``PaperContents.processing_warnings`` so it reaches the
-        export instead of failing silently."""
-        warning = f"{prefix} ({reason})"
-        logger.warning(warning)
+    def _record_metadata_warning(self, code: WarningCode, message: str) -> None:
+        """Log and persist a metadata-extraction warning onto
+        ``PaperContents.processing_warnings`` so it reaches the export instead
+        of failing silently."""
+        logger.warning("Metadata extraction warning %s: %s", code, message)
         if not hasattr(self.contents, "processing_warnings"):
             self.contents.processing_warnings = []
-        self.contents.processing_warnings.append(warning)
+        self.contents.processing_warnings.append(ProcessingWarning(code, message))
 
     def _harvest_credit_authors(self) -> list[PaperAuthor]:
         """Build an author list from the CRediT contribution statement.
@@ -1672,23 +1648,26 @@ class CoreMetadataExtractor:
                 count=len(authors),
             )
         )
+        # None of the extracted names appears in the supplied text.
         self._record_metadata_warning(
+            WarningCode.AUTHORS_FABRICATED,
             f"discarded {len(authors)} author(s) absent from the extraction context",
-            prefix=FABRICATED_AUTHORS_WARNING_PREFIX,
         )
         return []
 
     def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
-        """Record ONE summary warning when the author sanitizer had to intervene
-        beyond trivially — a runaway repetition loop (incoming over the cap) or a
-        non-trivial number of dropped/collapsed entries. See
-        :meth:`_convert_llm_authors` and ``AUTHOR_ANOMALY_WARNING_PREFIX``."""
+        """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
+        to intervene beyond trivially — a runaway repetition loop (incoming over
+        the cap, e.g. NuExtract3-FP8 emitting the same fragment to the token
+        cap) or a non-trivial number of dropped/collapsed entries (blanks,
+        affiliation fragments mislabeled as organization authors, duplicates).
+        See :meth:`_convert_llm_authors`."""
         incoming = len(llm_authors)
         kept = len(cleaned)
         if incoming > _MAX_LLM_AUTHORS:
             self._record_metadata_warning(
+                WarningCode.AUTHORS_ANOMALY,
                 f"{incoming} LLM authors exceeds cap {_MAX_LLM_AUTHORS}; kept leading {kept}",
-                prefix=AUTHOR_ANOMALY_WARNING_PREFIX,
             )
         elif incoming and not kept:
             # Total wipeout is always worth a warning even below the drop
@@ -1708,15 +1687,15 @@ class CoreMetadataExtractor:
             )
             email = sum(1 for a in llm_authors if "@" in (a.given or "") or "@" in (a.family or ""))
             self._record_metadata_warning(
+                WarningCode.AUTHORS_ANOMALY,
                 f"sanitizer dropped all {incoming} LLM author entries "
                 f"(blank_name={blank}, organization_fragment={organization}, email={email})",
-                prefix=AUTHOR_ANOMALY_WARNING_PREFIX,
             )
         elif incoming - kept >= _AUTHOR_ANOMALY_MIN_DROP:
             self._record_metadata_warning(
+                WarningCode.AUTHORS_ANOMALY,
                 f"dropped {incoming - kept} of {incoming} LLM author entries "
                 "(blank/organization-fragment/duplicate)",
-                prefix=AUTHOR_ANOMALY_WARNING_PREFIX,
             )
 
     @staticmethod
@@ -2220,9 +2199,16 @@ class CoreMetadataExtractor:
             result = None
             degraded_reason = type(exc).__name__
         if result is None:
+            # The exception type only — never its message, which can quote
+            # document text.
             self._record_metadata_warning(
-                degraded_reason or "trained classifier unavailable; the LLM classified the paper",
-                prefix=PAPER_CLASSIFIER_DEGRADED_WARNING_PREFIX,
+                WarningCode.PAPER_CLASSIFIER_DEGRADED,
+                (
+                    f"trained classifier raised {degraded_reason}"
+                    if degraded_reason
+                    else "trained classifier unavailable"
+                )
+                + "; the LLM classified the paper",
             )
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata

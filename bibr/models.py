@@ -26,11 +26,40 @@ class _Base(BaseModel):
     )
 
 
+class MatchOrganization(_Base):
+    """An organization named on an external-service record."""
+
+    name: str | None = None
+    ror: str | None = None  # https://ror.org/... URI
+
+
+class MatchFunder(_Base):
+    """A funder named on an external-service record."""
+
+    name: str | None = None
+    funder_doi: str | None = None  # bare Open Funder Registry DOI, 10.13039/...
+    ror: str | None = None  # https://ror.org/... URI
+    award_ids: list[str] = Field(default_factory=list)
+
+
+class OrganizationMatch(_Base):
+    """The registry organization matched to a printed affiliation or funder name."""
+
+    service_id: str  # ROR ID URI
+    score: float | None = None
+    name: str | None = None
+    country_code: str | None = None
+    funder_doi: str | None = None
+
+
 class BibAuthor(_Base):
     """Lightweight author representation for bibliography entries and external matches."""
 
     given: str
     family: str
+    # External matches only: identifiers the service records for the person.
+    orcid: str | None = None
+    affiliation: list[MatchOrganization] | None = None
 
 
 def format_bib_authors(authors: list[BibAuthor]) -> str:
@@ -95,6 +124,14 @@ def migrate_bib_type(old: str | None) -> str:
     return _MAP.get(old.lower().strip(), BibType.OTHER.value)
 
 
+# ``PaperAuthor.role`` entry that marks a group or organization author (a
+# consortium, a working group) rather than a person: the LLM author parse emits
+# it, and the JATS reader gives a ``<collab>`` byline the same mark. The export
+# writes such an author's name to ``author[].literal`` and drops the marker
+# from ``role``.
+ORGANIZATION_ROLE = "organization"
+
+
 class PaperAuthor(_Base):
     """CrossRef-like author representation"""
 
@@ -108,9 +145,10 @@ class PaperAuthor(_Base):
     role: list[str] = Field(default_factory=list)
 
 
-_ORCID_BARE_RE = re.compile(r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$")
+# ASCII digits only: ``\d`` also matches other scripts' digits, which no ORCID has.
+_ORCID_BARE_RE = re.compile(r"^[0-9]{4}-[0-9]{4}-[0-9]{4}-[0-9]{3}[0-9X]$")
 # Same identifier with no separators — some JATS deposits carry this form.
-_ORCID_DIGITS_RE = re.compile(r"^\d{15}[\dX]$")
+_ORCID_DIGITS_RE = re.compile(r"^[0-9]{15}[0-9X]$")
 # Optional scheme/host wrapper: "https://orcid.org/", "orcid.org/", "www."
 _ORCID_HOST_RE = re.compile(r"^(?:https?://)?(?:www\.)?orcid\.org/", re.IGNORECASE)
 
@@ -140,6 +178,7 @@ class MatchSource(StrEnum):
     DATACITE = "datacite"
     DOI_ORG = "doi.org"
     OPENLIBRARY = "openlibrary"
+    ROR = "ror"
     MANUAL = "manual"
     OTHER = "other"
 
@@ -165,6 +204,8 @@ class ExternalMatch(_Base):
     date: str | None = None  # ISO date string if available
     edition: str | None = None
     version: str | None = None
+    license_url: str | None = None
+    funders: list[MatchFunder] | None = None
 
 
 class PaperReference(_Base):
@@ -257,6 +298,13 @@ class PaperMetadata(_Base):
     publisher: str | None = None
     published: str | None = None
     license: str | None = None
+    # Identifiers and language the input itself declares (JATS article-id and
+    # xml:lang, HTML citation meta tags / <html lang>); null for PDFs, where
+    # the exporter derives what it safely can (e.g. arXiv from the DOI).
+    language: str | None = None
+    pmid: str | None = None
+    pmcid: str | None = None
+    arxiv: str | None = None
     # Research-integrity statements, copied verbatim from the classified
     # section body (no LLM); null when the paper prints no such section.
     funding_statement: str | None = None
@@ -274,6 +322,10 @@ class PaperMetadata(_Base):
     # Enrichment of the paper's OWN identity (self-DOI lookup); mirrors
     # PaperReference.match. Printed fields above are never overwritten by it.
     match: dict[MatchSource, ExternalMatch] = Field(default_factory=dict)
+    # ROR organizations matched to printed affiliation strings and funder
+    # names, keyed by the exact string (``Affiliation.text`` / ``FundingEntry.funder``).
+    affiliation_match: dict[str, OrganizationMatch] = Field(default_factory=dict)
+    funder_match: dict[str, OrganizationMatch] = Field(default_factory=dict)
     # Set by CrossrefEnricher: True if enrichment ran to completion, False if it
     # timed out / failed (so bib_match is a partial prefix), None if it never ran.
     enrichment_complete: bool | None = None
@@ -314,4 +366,3 @@ class ProcessingStatus(_Base):
     error_message: str | None = None
     failed_stage: str | None = None
     stage_times: dict[str, float] = Field(default_factory=dict)
-    warnings: list[str] = Field(default_factory=list)
