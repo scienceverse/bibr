@@ -152,7 +152,7 @@ def _apply_contributions(
         author.role.extend(r for r in roles if r not in author.role)
 
 
-def _collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
+def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
     """Split each author's ``affiliation`` on "; " into verbatim components and
     dedupe across authors, preserving first-seen order.
 
@@ -221,7 +221,7 @@ async def extract_structured_integrity(
             else None
         )
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
-    unique_affils, affil_author_ids = _collect_affiliations(metadata.authors)
+    unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:
         return
 

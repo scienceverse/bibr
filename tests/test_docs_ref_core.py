@@ -158,7 +158,7 @@ def test_schema_md_list_field_keeps_item_type(core):
     assert rows["author"] == "list[AuthorExport]"
     assert rows["text"] == "list[TextExport]"
     # unions render short names, not fully-qualified module paths
-    assert rows["extraction"] == "ExtractionExport | None"
+    assert rows["extraction"] == "ExtractionExport"
 
 
 def test_schema_md_type_cells_have_no_module_paths(core):
@@ -178,7 +178,7 @@ def test_schema_md_union_type_cell_is_not_escaped(core):
     # to checking every backticked Type cell is unescaped.
     md = core.render_schema_md()
     assert "\\|" not in md
-    assert "`ExtractionExport | None`" in md
+    assert "`str | None`" in md
 
 
 def test_schema_md_uses_serialized_json_names(core):
@@ -186,18 +186,22 @@ def test_schema_md_uses_serialized_json_names(core):
     assert {"schema_version", "source", "metadata", "extraction"} <= rows
     assert not {"info", "_regions", "native_source"} & rows
     text_fields = core.render_schema_md().split("### TextExport\n", 1)[1].split("###", 1)[0]
-    assert "`_bbox_2d`" in text_fields
-    assert "`region_bbox_2d`" not in text_fields
+    assert "`_bbox_2d`" not in text_fields  # v12: layout features ride extraction
+    regions = core.render_schema_md().split("### TextRegionExport\n", 1)[1].split("###", 1)[0]
+    assert "`bbox`" in regions and "`bbox_2d`" not in regions
 
 
 def test_schema_md_explains_nested_records_and_links_schema(core):
     md = core.render_schema_md()
     assert "[Download the generated JSON Schema](paper.schema.json)" in md
     assert "### AuthorExport" in md
-    assert "| `author_id` | `int` | Yes |" in md
+    assert "| `author_id` | `int` | Yes | — | Primary key; 1-based position in the byline. |" in md
     assert "### TextExport" in md
-    assert "| `_bbox_2d` | `list[float] | None` | No | `None` |" in md
-    assert "### FigurePartExport" in md
+    assert "| `bbox` | `list[float] | None` | Yes | `None` | Bounding box" in md
+    # Keys the exporter leaves out when absent are the ones not always present.
+    assert "| `settings` | `ExtractionSettingsExport | None` | No |" in md
+    assert "### PageExport" in md
+    assert "### FloatPartExport" in md
     assert "### ValidationIssueExport" in md
 
 
@@ -212,3 +216,21 @@ def test_settings_md_union_type_cell_is_not_escaped(core):
             break
     else:
         raise AssertionError("AUTH_API_KEY row not found in settings table")
+
+
+def test_schema_md_lists_long_enums_in_the_description(core):
+    md = core.render_schema_md()
+    section = md.split("### SectionExport\n", 1)[1].split("###", 1)[0]
+    row = next(line for line in section.splitlines() if line.startswith("| `section_type`"))
+    assert "| `enum | None` |" in row
+    assert "One of: `title`, `abstract`, `intro`" in row
+
+
+def test_schema_md_lists_every_warning_code(core):
+    from bibr.processing_warnings import DESCRIPTIONS, WarningCode
+
+    md = core.render_schema_md()
+    assert "[the codes are listed below](#warning-codes)" in md
+    section = md.split("## Warning codes\n", 1)[1]
+    for code in WarningCode:
+        assert f"| `{code}` | {DESCRIPTIONS[code]} |" in section

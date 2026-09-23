@@ -117,11 +117,13 @@ def test_supported_formats_named_in_prose():
 
 
 def test_paper_type_labels_match_doc_table():
+    from bibr.export.json_export import _snake
     from bibr.structure.paper_classifier import PAPER_TYPE_LABELS, PaperTypeLiteral
 
     md = _read("docs/guides/classifiers.md")
     doc_codes = _table_col_codes(md, "| Type | Description |", col=0)
-    assert doc_codes == set(PAPER_TYPE_LABELS)
+    # The docs show the labels as the export spells them (snake_case).
+    assert doc_codes == {_snake(label) for label in PAPER_TYPE_LABELS}
     # PaperTypeLiteral must stay in lock-step with the list too.
     literal_values = set(PaperTypeLiteral.__args__)
     assert literal_values == set(PAPER_TYPE_LABELS)
@@ -133,9 +135,11 @@ def test_paper_type_labels_match_doc_table():
 
 
 def test_canonical_section_tables_match_enum():
+    from bibr.export.json_export import _EXPORT_SECTION_TYPES
     from bibr.paper_contents import CanonicalSection
 
-    values = {m.value for m in CanonicalSection}
+    # As the export spells them (``open_data`` is ``data_availability``).
+    values = {_EXPORT_SECTION_TYPES.get(m.value, m.value) for m in CanonicalSection}
 
     classifiers = _read("docs/guides/classifiers.md")
     arch = _read("docs/guides/architecture.md")
@@ -153,15 +157,16 @@ def test_canonical_section_tables_match_enum():
 
 def test_export_top_level_keys_documented():
     """Every always-present PaperExport field must appear (as a code span) in
-    both docs' "Top-level keys include:" enumerations. ``regions`` (the opt-in
-    ``_regions`` debug payload) is documented separately, so it is excluded."""
+    both docs' "Top-level keys, grouped by role" enumerations. ``regions`` (the
+    opt-in ``_regions`` debug payload) is documented separately, so it is
+    excluded."""
     from bibr.export.json_export import PaperExport
 
     fields = set(PaperExport.model_fields) - {"regions"}
 
     for rel in ("docs/guides/architecture.md", "docs/reference/rest-api.md"):
         md = _read(rel)
-        line = next(line for line in md.splitlines() if "Top-level keys include" in line)
+        line = next(line for line in md.splitlines() if "Top-level keys, grouped by role" in line)
         missing = [name for name in fields if f"`{name}`" not in line]
         assert not missing, f"{rel}: keys not documented: {missing}"
 

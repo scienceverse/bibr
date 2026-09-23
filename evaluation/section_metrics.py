@@ -41,7 +41,10 @@ BODY_SECTION_TYPES: frozenset[str] = frozenset(
         "ethics",
         "author_contributions",
         "coi",
+        # Exports since 12.0 say data_availability; older gold and predictions
+        # say open_data.
         "open_data",
+        "data_availability",
         "endnote",
     }
 )

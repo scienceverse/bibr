@@ -1,7 +1,8 @@
-# R Helper for Reading bibr JSON Format (v11 and legacy v10)
+# R Helper for Reading bibr JSON Format (v12; v11 and legacy v10 read too)
 #
 # The main record tables and paper metadata are:
-#   paper_id, metadata, source, author, text, section, url, bib, bib_match, xref, figure, table, eq
+#   paper_id, metadata, source, author, affiliation, funding, text, section, url, bib, xref,
+#   figure, table, eq, metadata_match, affiliation_match, funding_match, bib_match
 #
 # Each listed key except paper_id, metadata, and source contains an array of objects.
 # The "metadata" key ("info" in legacy exports) is a single object with paper-level metadata. Other top-level
@@ -44,8 +45,9 @@ read_bibr_response <- function(json_bytes) {
 .structure_bibr <- function(raw) {
   # Keep metadata and source as lists: null scalars and nested metadata are valid in exports.
   # Preserve other fields, including provenance and validation receipts.
-  table_names <- c("author", "text", "section", "url", "bib", "bib_match",
-                   "xref", "figure", "table", "eq")
+  table_names <- c("author", "affiliation", "funding", "text", "section", "url", "bib",
+                   "xref", "figure", "table", "footnote", "eq", "metadata_match", "affiliation_match",
+                   "funding_match", "bib_match")
   for (name in table_names) {
     value <- raw[[name]]
     raw[[name]] <- if (is.null(value) || length(value) == 0) {
@@ -74,7 +76,7 @@ read_bibr_response <- function(json_bytes) {
 # data$paper_id           # character: paper identifier
 # data$metadata$title         # paper title
 # data$metadata$doi           # DOI
-# data$extraction$bibr_version  # producing package version
+# data$extraction$producer$version  # producing package version
 # data$author             # data.frame of authors
 # data$text               # data.frame of sentences
 # data$section            # data.frame of sections

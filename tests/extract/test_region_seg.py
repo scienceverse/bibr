@@ -14,16 +14,13 @@ import pandas as pd
 import pytest
 
 from bibr.config import Settings
-from bibr.extract.ref_extractor import (
-    REGION_ANCHOR_RECOVERY_PREFIX,
-    REGION_CASCADE_WARNING_PREFIX,
-)
 from bibr.extract.region_seg import (
     region_anchor_texts,
     region_chunks,
     segment_by_region_anchors,
 )
 from bibr.paper_contents import PaperContents, RegionSummary
+from bibr.processing_warnings import WarningCode
 
 
 def _rs(label: str, content: str, page: int = 9, index: int = 0) -> RegionSummary:
@@ -319,7 +316,9 @@ class TestSourceRecallBackstop:
 
         assert len(segments) == 4
         llm.segment_references.assert_awaited_once()
-        assert any(REGION_CASCADE_WARNING_PREFIX in w for w in ext.contents.processing_warnings)
+        assert any(
+            w.code == WarningCode.REF_SEG_REGION_CASCADE for w in ext.contents.processing_warnings
+        )
 
     async def test_reserved_region_segmentation_beats_crf_when_the_llm_fails(self, monkeypatch):
         monkeypatch.setattr(Settings, "REF_SEG_MIN_SOURCE_RECALL", 0.6)
@@ -336,7 +335,9 @@ class TestSourceRecallBackstop:
         assert len(segments) == 3
         assert segments[0].startswith("Smith, J.")
         crf.assert_not_called()
-        assert any(REGION_ANCHOR_RECOVERY_PREFIX in w for w in ext.contents.processing_warnings)
+        assert any(
+            w.code == WarningCode.REF_SEG_REGION_RECOVERY for w in ext.contents.processing_warnings
+        )
 
     def test_default_setting_is_a_permissive_floor(self, monkeypatch):
         from bibr.config import GlobalSettings
@@ -470,7 +471,9 @@ async def test_region_strategy_primary_success_has_no_recovery_warning(extractor
     )
     segments = await ext.refs._segment_references(REF_TEXT, "region")
     assert len(segments) >= 3
-    assert not any(REGION_ANCHOR_RECOVERY_PREFIX in w for w in ext.contents.processing_warnings)
+    assert not any(
+        w.code == WarningCode.REF_SEG_REGION_RECOVERY for w in ext.contents.processing_warnings
+    )
 
 
 async def test_region_strategy_primary_decline_no_regions_records_reason(extractor_no_regions):
@@ -480,7 +483,9 @@ async def test_region_strategy_primary_decline_no_regions_records_reason(extract
     segments = await ext.refs._segment_references(REF_TEXT, "region")
     assert segments == ["fallback seg"]
     ext.llm_client.segment_references.assert_awaited_once()
-    assert any(REGION_CASCADE_WARNING_PREFIX in w for w in ext.contents.processing_warnings)
+    assert any(
+        w.code == WarningCode.REF_SEG_REGION_CASCADE for w in ext.contents.processing_warnings
+    )
     assert ext.refs._segmentation_attempts[0].reason_flags == ("no_summaries",)
 
 
@@ -503,7 +508,9 @@ async def test_region_strategy_primary_decline_misalignment_records_reason(monke
 
     assert segments == ["fallback seg"]
     ext.llm_client.segment_references.assert_awaited_once()
-    assert any(REGION_CASCADE_WARNING_PREFIX in w for w in ext.contents.processing_warnings)
+    assert any(
+        w.code == WarningCode.REF_SEG_REGION_CASCADE for w in ext.contents.processing_warnings
+    )
     assert ext.refs._segmentation_attempts[0].reason_flags == ("too_few_or_misaligned_anchors",)
 
 
@@ -533,7 +540,9 @@ async def test_geom_cascade_region_fallback_success_still_records_recovery_warni
     )
     segments = await ext.refs._segment_references(REF_TEXT, "geom")
     assert len(segments) >= 3
-    assert any(REGION_ANCHOR_RECOVERY_PREFIX in w for w in ext.contents.processing_warnings)
+    assert any(
+        w.code == WarningCode.REF_SEG_REGION_RECOVERY for w in ext.contents.processing_warnings
+    )
 
 
 # ----------------------------------------------------------------------------

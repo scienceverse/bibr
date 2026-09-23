@@ -127,13 +127,13 @@ def test_papermetadata_required_doi_and_title():
 # ---- ProcessingStatus ------------------------------------------------------
 
 
-def test_processingstatus_warnings_independent_per_instance():
+def test_processingstatus_stage_times_independent_per_instance():
     from bibr.models import ProcessingStatus
 
     a = ProcessingStatus()
     b = ProcessingStatus()
-    a.warnings.append("oops")
-    assert b.warnings == []
+    a.stage_times["ocr"] = 1.0
+    assert b.stage_times == {}
 
 
 # ---- Helper functions stay ------------------------------------------------

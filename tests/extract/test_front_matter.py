@@ -2084,13 +2084,13 @@ def test_multi_item_blocker_is_deduped_and_exported_as_non_promotable():
     )
     exported = [
         issue
-        for issue in payload["validation"]["issues"]
+        for issue in payload["extraction"]["validation"]["issues"]
         if issue["code"] == "VAL_METADATA_MULTI_ITEM"
     ]
 
     assert len(exported) == 1
     assert exported[0]["blocking"] is True
-    assert payload["validation"]["promotable"] is False
+    assert payload["extraction"]["validation"]["promotable"] is False
     assert disposition_for_issues(issues) is ArtifactDisposition.BLOCKED
 
 

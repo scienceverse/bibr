@@ -119,9 +119,11 @@ class ServePipeline(Pipeline):
         # ``RunConfig.enrichment_enabled``. A request can also override a
         # deployment whose reference parser defaults to off, so that default
         # must not permanently remove the enricher.
-        from bibr.pipeline.enricher import CrossrefEnricher
+        from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
 
         enrichers = [CrossrefEnricher(settings=settings_snapshot)]
+        if settings_snapshot.ror.enrich:
+            enrichers.append(RorEnricher(settings=settings_snapshot))
 
         # NOTE: ServePipeline omits LlmServerStage (which LocalPipeline includes
         # at bibr/local/pipeline.py). The serve worker manages its own

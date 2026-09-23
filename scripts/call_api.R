@@ -40,7 +40,7 @@ json_string <- resp_body_string(resp)
 data <- fromJSON(json_string, simplifyVector = TRUE, flatten = TRUE)
 
 # Keep nullable and nested paper metadata as a named list.
-info_df     <- data$info
+metadata    <- data$metadata
 
 to_df <- function(x) {
   if (is.null(x) || length(x) == 0) return(data.frame())
@@ -61,11 +61,11 @@ eq_df       <- to_df(data$eq)
 
 cat("\n=== PAPER INFORMATION ===\n")
 cat("Paper ID:", data$paper_id, "\n")
-cat("Title:   ", info_df$title[1], "\n")
-cat("DOI:     ", info_df$doi[1], "\n")
-cat("Format:  ", info_df$input_format[1], "\n")
-cat("File:    ", info_df$file_name[1], "\n")
-cat("Version: ", info_df$bibr_version[1], "\n\n")
+cat("Title:   ", metadata$title[1], "\n")
+cat("DOI:     ", metadata$doi[1], "\n")
+cat("Format:  ", data$source$input_format[1], "\n")
+cat("File:    ", data$source$file_name[1], "\n")
+cat("Version: ", data$extraction$producer$version[1], "\n\n")
 
 cat("=== CONTENT SUMMARY ===\n")
 cat("Sentences:  ", nrow(text_df), "\n")

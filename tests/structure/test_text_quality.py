@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from bibr.config import Settings
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.text_quality import (
     SCOREABLE_TREATMENTS,
     paper_text_quality,
@@ -219,7 +220,9 @@ class TestPostParseWiring:
         )
 
         assert paper.text_quality == 0.0
-        assert any(w.startswith("low_text_quality:") for w in paper.processing_warnings)
+        assert paper.processing_warnings == [
+            ProcessingWarning(WarningCode.LOW_TEXT_QUALITY, "text-quality score 0.00 is below 0.5")
+        ]
 
     async def test_clean_paper_no_warning(self, monkeypatch):
         from bibr.pipeline.stages.post_parse import post_parse
@@ -234,7 +237,7 @@ class TestPostParseWiring:
         )
 
         assert paper.text_quality == 1.0
-        assert not any(w.startswith("low_text_quality:") for w in paper.processing_warnings)
+        assert not any(w.code == WarningCode.LOW_TEXT_QUALITY for w in paper.processing_warnings)
 
     async def test_gate_off_skips_scoring(self, monkeypatch):
         from bibr.pipeline.stages.post_parse import post_parse
@@ -247,7 +250,7 @@ class TestPostParseWiring:
         )
 
         assert paper.text_quality is None
-        assert not any(w.startswith("low_text_quality:") for w in paper.processing_warnings)
+        assert not any(w.code == WarningCode.LOW_TEXT_QUALITY for w in paper.processing_warnings)
 
 
 # ── export: info.text_quality scalar field ───────────────────────────────

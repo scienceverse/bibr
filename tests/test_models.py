@@ -150,7 +150,6 @@ class TestProcessingStatus:
         assert status.error_message is None
         assert status.failed_stage is None
         assert status.stage_times == {}
-        assert status.warnings == []
 
     def test_backward_compat_parsed_true(self):
         status = ProcessingStatus(parsed=True)
@@ -163,11 +162,9 @@ class TestProcessingStatus:
             error_code=ErrorCode.OCR_FAILED,
             error_message="OCR server unreachable",
             failed_stage="ocr",
-            warnings=["Crossref timed out"],
         )
         assert status.error_code == "ocr_failed"
         assert status.failed_stage == "ocr"
-        assert len(status.warnings) == 1
 
     def test_stage_times_independent(self):
         s1 = ProcessingStatus()

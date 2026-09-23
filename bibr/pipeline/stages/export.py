@@ -9,6 +9,8 @@ import time
 from dataclasses import asdict, is_dataclass
 from typing import TYPE_CHECKING
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
@@ -24,6 +26,19 @@ _GC_MIN_INTERVAL_SECONDS = 30.0
 # Per-file timings that overlap another stage's wall clock and therefore must
 # not be added into ``extraction.timings.total_seconds``.
 _OVERLAPPED_TIMINGS = frozenset({"enrich_prefetch"})
+
+# Warnings meaning the configured reference segmenter did NOT produce the final
+# segmentation: an LLM->CRF fall-back, a geom->LLM cascade, or a region or CRF
+# segmenter that raised. (Merge-split is a correction layered on top of the
+# segmenter, not a fall-back from it, so it does not count.)
+_REF_SEG_FALLBACK_CODES = frozenset(
+    {
+        WarningCode.REF_SEG_CRF_FALLBACK,
+        WarningCode.REF_SEG_GEOM_CASCADE,
+        WarningCode.REF_SEG_REGION_ERROR,
+        WarningCode.REF_SEG_CRF_ERROR,
+    }
+)
 
 
 # Input formats parsed natively, without ever reaching an OCR engine: DocxHandling
@@ -88,25 +103,17 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     """
     import datetime as _dt
 
-    import bibr
+    from bibr.export.json_export import bibr_producer, export_section_type
     from bibr.export.usage import build_usage_export
-    from bibr.extract.extractor import (
-        GEOM_CASCADE_WARNING_PREFIX,
-        SEG_FALLBACK_WARNING_PREFIX,
-        _resolve_ref_strategies,
-    )
+    from bibr.extract.extractor import _resolve_ref_strategies
 
     seg_strategy, parse_strategy = _resolve_ref_strategies(
         getattr(ctx.config, "ref_seg_strategy", None),
         getattr(ctx.config, "ref_parse_strategy", None),
         settings=ctx.settings,
     )
-    # True when the configured segmenter did NOT produce the final segmentation:
-    # a CRF fall-back OR a geom->LLM cascade. (Merge-split is a correction layered
-    # on top of the segmenter, not a fall-back from it, so it does not count here.)
-    fallback_prefixes = (SEG_FALLBACK_WARNING_PREFIX, GEOM_CASCADE_WARNING_PREFIX)
     fallback_used = any(
-        str(w).startswith(fallback_prefixes) for w in (paper.processing_warnings or [])
+        w.code in _REF_SEG_FALLBACK_CODES for w in (paper.processing_warnings or [])
     )
     raw_timings = (getattr(fs, "stage_times", None) or {}) or (
         (getattr(ctx, "scratch", None) or {}).get("stage_timings") or {}
@@ -125,8 +132,7 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
     ocr, llm = _build_engines(ctx, paper)
 
     extraction = {
-        "bibr_version": bibr.__version__,
-        "build_sha": ctx.settings.BIBR_BUILD_SHA,
+        "producer": bibr_producer(ctx.settings.BIBR_BUILD_SHA),
         "completed_at": _dt.datetime.now(_dt.UTC)
         .replace(microsecond=0)
         .isoformat()
@@ -148,7 +154,7 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
             ),
             "ref_seg_fallback_used": fallback_used,
         },
-        "warnings": list(paper.processing_warnings or []),
+        "warnings": [w.to_dict() for w in paper.processing_warnings or []],
         # Opt-in (LLM_CAPTURE_TRACE); a sibling of "regions", not nested under
         # diagnostics. Empty list -> None so the key is omitted entirely when
         # nothing was captured (absence rule).
@@ -161,11 +167,17 @@ def _build_extraction(ctx: PipelineContext, paper, fs=None) -> dict:
         identity_block["expected"] = asdict(expected_identity)
     doi_selection = getattr(paper, "doi_selection", None)
     if is_dataclass(doi_selection):
+
+        def _candidate(candidate) -> dict:
+            row = asdict(candidate)
+            row["section_type"] = export_section_type(row.get("section_type"))
+            return row
+
         identity_block["receipt"] = {
-            "selected": asdict(doi_selection.selected)
+            "selected": _candidate(doi_selection.selected)
             if doi_selection.selected is not None
             else None,
-            "candidates": [asdict(candidate) for candidate in doi_selection.candidates],
+            "candidates": [_candidate(candidate) for candidate in doi_selection.candidates],
             "issue_codes": [issue.code for issue in doi_selection.issues],
         }
     if identity_block:
@@ -209,7 +221,10 @@ async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> None:
     if not crossref_on and not payload.get("bib_match"):
         append_payload_warning(
             payload,
-            "consolidate enabled but Crossref enrichment is off — no matches to merge",
+            ProcessingWarning(
+                WarningCode.CONSOLIDATE_WITHOUT_ENRICHMENT,
+                "consolidate enabled but Crossref enrichment is off — no matches to merge",
+            ),
         )
 
 

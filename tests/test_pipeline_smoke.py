@@ -363,6 +363,8 @@ async def test_local_pipeline_end_to_end_smoke(tmp_path, monkeypatch):
     # Gate findings live only in ``validation.issues`` — never mirrored into
     # warnings — and this smoke run emits no genuine processing warnings.
     assert result["extraction"]["warnings"] == []
-    assert "VAL_ABSTRACT_SUSPECT" in {i["code"] for i in result["validation"]["issues"]}
+    assert "VAL_ABSTRACT_SUSPECT" in {
+        i["code"] for i in result["extraction"]["validation"]["issues"]
+    }
 
     await pipeline.aclose()

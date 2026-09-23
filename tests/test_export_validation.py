@@ -190,6 +190,18 @@ def test_author_blank():
     assert "VAL_AUTHOR_BLANK" in _codes(issues)
 
 
+def test_group_author_with_only_a_literal_name_is_not_blank():
+    p = _base()
+    p["author"].append({"given": None, "family": None, "literal": "The Consortium"})
+    assert "VAL_AUTHOR_BLANK" not in _codes(validate_export(p))
+
+
+def test_author_outlier_repeated_group_author():
+    p = _base()
+    p["author"] = [{"given": None, "family": None, "literal": "The Consortium"} for _ in range(3)]
+    assert "VAL_AUTHOR_OUTLIER" in _codes(validate_export(p))
+
+
 def test_author_outlier_count():
     p = _base()
     p["author"] = [{"given": f"A{i}", "family": f"B{i}"} for i in range(65)]
@@ -210,33 +222,33 @@ def test_author_repeated_twice_is_ok():
 
 def test_bbox_space_violation():
     p = _base()
-    p["text"] = [
-        {
-            "text_id": i,
-            "section_id": 1,
-            "text": "x",
-            "_bbox_2d": [10, 10, 9999, 20],  # x2 > page_w
-            "_page_w": 600,
-            "_page_h": 800,
-        }
-        for i in range(5)
-    ]
+    p["extraction"] = {
+        "pages": [{"page_number": 1, "width": 600, "height": 800}],
+        "text_regions": [
+            {
+                "text_id": i,
+                "page_number": 1,
+                "bbox": [10, 10, 9999, 20],  # x2 > the page width
+            }
+            for i in range(5)
+        ],
+    }
     assert "VAL_BBOX_SPACE" in _codes(validate_export(p))
 
 
 def test_bbox_space_within_bounds_ok():
     p = _base()
-    p["text"] = [
-        {
-            "text_id": i,
-            "section_id": 1,
-            "text": "x",
-            "_bbox_2d": [10, 10, 100, 20],
-            "_page_w": 600,
-            "_page_h": 800,
-        }
-        for i in range(5)
-    ]
+    p["extraction"] = {
+        "pages": [{"page_number": 1, "width": 600, "height": 800}],
+        "text_regions": [
+            {
+                "text_id": i,
+                "page_number": 1,
+                "bbox": [10, 10, 100, 20],
+            }
+            for i in range(5)
+        ],
+    }
     assert "VAL_BBOX_SPACE" not in _codes(validate_export(p))
 
 
@@ -598,7 +610,9 @@ def test_post_parse_xref_low_coverage_issue_suppresses_export_replay_duplicate()
 
     out = _apply_output_validation(p, [source_issue])
     survived = [
-        issue for issue in out["validation"]["issues"] if issue["code"] == source_issue.code
+        issue
+        for issue in out["extraction"]["validation"]["issues"]
+        if issue["code"] == source_issue.code
     ]
 
     assert len(survived) == 1
@@ -616,7 +630,9 @@ def test_xref_low_coverage_export_replay_remains_available_without_source_issue(
 
     out = _apply_output_validation(p)
     survived = [
-        issue for issue in out["validation"]["issues"] if issue["code"] == "VAL_XREF_LOW_COVERAGE"
+        issue
+        for issue in out["extraction"]["validation"]["issues"]
+        if issue["code"] == "VAL_XREF_LOW_COVERAGE"
     ]
 
     assert len(survived) == 1

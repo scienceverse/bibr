@@ -28,6 +28,7 @@ dependencies = [
     "jsonref>=1.1.0", # instructor's Gemini provider imports it to map response models to GenAI tool schemas (default LLM path)
     "tenacity>=8.0.0", # validation-retry policy for the LLM client (imported directly)
     "pandas>=2.3.3",
+    "pyarrow>=23.0.1", # Parquet corpus tables (bibr tables, bibr batch); >=23.0.1 fixes PYSEC-2026-113
     "pydantic>=2.0.0",
     "pydantic-settings>=2.14.2", # fixes GHSA-4xgf-cpjx-pc3j secrets-dir symlink escape
     "python-magic>=0.4.27; sys_platform != 'win32'",
@@ -98,7 +99,6 @@ dev = [
     "pandas-stubs>=2.0.0",
     "pre-commit>=4.0.0",
     "pip-audit>=2.7.0",
-    "pyarrow>=23.0.1", # evaluation scripts only; >=23.0.1 fixes PYSEC-2026-113
     "requests>=2.28.0", # evaluation scripts only
     "scikit-learn>=1.9.0",
     "sklearn-crfsuite>=0.5.0",
@@ -343,5 +343,7 @@ module = [
     "redis.asyncio",
     "onnxruntime.*",
     "lxml.*",
+    "pyarrow",
+    "pyarrow.*",
 ]
 ignore_missing_imports = true

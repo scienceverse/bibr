@@ -49,8 +49,10 @@ from bibr.paper_contents import (
     RegionSummary,
     is_exact_front_matter_furniture,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.carry_over_manager import CarryOverState
+from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
     merge_figure_panels_with_remap,
     merge_table_continuations_with_remap,
@@ -185,24 +187,28 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # results" — and ``_handle_content`` then re-routes that sentence into
     # caption ownership, dropping it from the body text entirely.
     #
+    # The id is any printed label (``bibr.structure.float_labels.LABEL``):
+    # "Table S2:", "Figure A1.", "TABLE IV.", "Supplementary Table 4:".
+    #
     # Shared by the heading gate (HeadingHandlersMixin._is_implausible_heading),
     # the content caption re-router (TextHandlersMixin._handle_content), and the
     # loose caption discriminator (MediaHandlersMixin._handle_caption), so it
     # stays on PDFParser and the mixins reach it via ``self``.
     _TABLE_CAPTION_RE = re.compile(
-        r"^(Table\s+\d+(?:\.\d+)*\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?Table\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        r"^((?:Figure|Fig\.?)\s+\d+(?:\.\d+)*\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
     # Loose discriminator used ONLY on regions the layout model already labelled
     # as a caption (figure_title/chart_title).  No separator required — some
     # backends emit "Table 1 Overview" (space) or "Table 1 | Overview" (pipe).
+    # Any printed label counts, so "Table S1" is routed to the tables too.
     _LOOSE_TABLE_CAPTION_RE = re.compile(
-        r"^Table\s+(?:(?:\d+|[IVXLCDM]+)\b|contin(?:ued|uation)\b)", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?Table\s+(?:{LABEL}|contin(?:ued|uation)\b)", re.IGNORECASE
     )
 
     def __init__(
@@ -235,7 +241,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # Deferred-text buffer + sentence-emission driver shared with DocxParser.
         # Each entry carries its own optional provenance (source-region bboxes,
         # inherited by every sentence split from it) and region_meta (font_size,
-        # font_bold, bbox_2d, region_type, page_w, page_h, is_italic from the
+        # font_bold, bbox, region_type, is_italic from the
         # first contributing layout region — used by the v4 training features —
         # plus that region's region_page/region_index key)
         # side-channels, so they stay aligned with the text by construction.
@@ -257,6 +263,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         self.detected_footers: list[str] = []
         self.layout_hints: list[tuple[str, int]] = []
         self.region_summaries: list[RegionSummary] = []
+        # Page size in PDF points (as displayed) by 1-based page number, from
+        # the native pass's ``_page_w``/``_page_h``: the frame the export
+        # converts 0..1000 layout boxes into (bibr.export.geometry).
+        self.page_sizes: dict[int, tuple[float, float]] = {}
         self._clean_region_content: dict[tuple[int, int], str] = {}
         # Regions whose raw text carried corrupted-OCR control chars (counted
         # pre-strip in _process_page); surfaced as one OCR_CONTROL_CHARS
@@ -448,24 +458,30 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             caption_assignment_receipt, {**figure_remap, **table_remap}
         )
 
-        processing_warnings: list[str] = []
+        processing_warnings: list[ProcessingWarning] = []
         if self._corrupt_region_count:
             processing_warnings.append(
-                f"OCR:warning:OCR_CONTROL_CHARS: {self._corrupt_region_count} region(s) "
-                "contained control characters — OCR output is corrupted; section headers "
-                "and references may be unreliable"
+                ProcessingWarning(
+                    WarningCode.OCR_CONTROL_CHARS,
+                    f"{self._corrupt_region_count} region(s) contained control characters — "
+                    "OCR output is corrupted; section headers and references may be unreliable",
+                )
             )
         if self._native_text_pua_fallback_count:
             processing_warnings.append(
-                "OCR:warning:OCR_NATIVE_TEXT_PUA_FALLBACK: "
-                f"{self._native_text_pua_fallback_count} region(s) contained private-use "
-                "native text and were recovered with OCR"
+                ProcessingWarning(
+                    WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK,
+                    f"{self._native_text_pua_fallback_count} region(s) contained private-use "
+                    "native text and were recovered with OCR",
+                )
             )
         if self._dropped_table_count:
             processing_warnings.append(
-                f"OCR:warning:OCR_TABLE_DROPPED: {self._dropped_table_count} table region(s) "
-                "could not be parsed and were dropped — table content is missing from the "
-                "output"
+                ProcessingWarning(
+                    WarningCode.OCR_TABLE_DROPPED,
+                    f"{self._dropped_table_count} table region(s) could not be parsed and were "
+                    "dropped — table content is missing from the output",
+                )
             )
 
         # Sentences not yet created — caller must invoke
@@ -483,6 +499,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             detected_footers=self.detected_footers,
             layout_hints=self.layout_hints,
             region_summaries=self.region_summaries,
+            page_sizes=self.page_sizes,
             processing_warnings=processing_warnings,
             structure_validation_issues=self._structure_validation_issues,
             caption_assignment_receipt=caption_assignment_receipt,
@@ -530,8 +547,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         Must be called after :meth:`apply_segmentation`.  Appends new
         sections (type ``fig``, ``table``, ``footnote``) after all body
         sections.  Captions and footnote text become sentences in the
-        text table.  Footnote xrefs are created linking the footnote
-        section to the referencing sentence.
+        text table.  A footnote printed with a mark gets a xref from the
+        sentence before it to its text.
 
         Preserves the original body ``section_id`` on each figure/table
         so that study-ID propagation can inherit from the correct section.
@@ -549,6 +566,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.FIGURE,
+                synthetic_kind="figure",
             )
             contents.sections.append(section)
 
@@ -580,6 +598,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.TABLE,
+                synthetic_kind="table",
             )
             contents.sections.append(section)
 
@@ -606,6 +625,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         ):
             self._section_counter += 1
             footnote_section_id = self._section_counter
+            marker = printed_marker(fn_text)
 
             section = PaperSection(
                 section_id=footnote_section_id,
@@ -613,6 +633,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.FOOTNOTE,
+                synthetic_kind="footnote",
+                footnote_label=marker,
             )
             contents.sections.append(section)
 
@@ -628,6 +650,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             contents.sentences.append(sent)
             self._sentence_counter += 1
 
+            # A note printed without a mark (an author note, or text taken
+            # for a note) is referenced from nowhere in the text, so it gets
+            # no xref: one would carry an ordinal no reader can see.
+            if marker is None:
+                continue
+
             # Find nearest preceding text_id for the xref. Display-formula
             # sentences are skipped: they export as "[equation]" placeholders,
             # so an anchor there points consumers at text they never see
@@ -636,15 +664,15 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 fn_deferred_idx, skip_text_ids=formula_text_ids
             )
 
-            # Create xref linking footnote section to the referencing sentence.
-            # ``contents`` is what a reader sees printed, so prefer the marker
-            # the footnote actually carries and fall back to the ordinal only
-            # when it carries none.
+            # Link the note to the sentence before it. bibr does not find the
+            # mark in the text, so this is where the reference probably is,
+            # and ``contents`` is the mark the note is printed with.
             contents.xrefs.append(
                 PaperXref(
-                    xref_id=footnote_num,
+                    # The footnote's own text row: the xref's target.
+                    xref_id=sent.text_id,
                     xref_type="foot",
-                    contents=printed_marker(fn_text) or str(footnote_num),
+                    contents=marker,
                     text_id=nearest_text_id,
                 )
             )
@@ -836,6 +864,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         if page_idx < 0:
             page_idx = page_number - 1
         for region_idx, region in enumerate(regions):
+            if region.page_w and region.page_h and page_number not in self.page_sizes:
+                self.page_sizes[page_number] = (region.page_w, region.page_h)
             label = region.label
             native_label = region.native_label
             if (
@@ -904,8 +934,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 content.strip()
             ):
                 # Some rotated PMC table labels are emitted as vision
-                # footnotes. Only a bare numbered/Roman TABLE label is safe to
-                # promote; ordinary statistical notes remain footnotes.
+                # footnotes. Only a bare TABLE label ("TABLE 2", "TABLE IV",
+                # "Table S1") is safe to promote; ordinary statistical notes
+                # remain footnotes.
                 treatment = "table_caption"
             dispatch_treatment = (
                 "structural"
@@ -922,12 +953,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "font_size": region.font_size,
                 "font_bold": region.font_bold,
                 "is_italic": region.is_italic,
-                # Export the containment-correct PDF-point bbox (bottom-left
-                # origin, y-up; matches _page_w/_page_h) rather than the raw
-                # 0..1000 image-space `bbox` — which is preserved untouched for
-                # provenance / cropping / dedup consumers. None when no native
-                # pass ran (DOCX, scanned pre-v4).
-                "bbox_2d": list(region.bbox_pdf_pts) if region.bbox_pdf_pts else None,
+                # The 0..1000 layout-space box; the export converts it to
+                # points on the displayed page (bibr.export.geometry).
+                "bbox": list(bbox_tuple) if bbox_tuple else None,
                 "region_type": native_label or label or None,
                 # This region's RegionSummary key, exported as the ``page`` and
                 # ``index`` of its ``extraction.regions`` row. ``index`` is the
@@ -935,8 +963,6 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # renumbered it, which can differ from the layout detector's slot.
                 "region_page": region_summary.page,
                 "region_index": region_summary.index,
-                "page_w": region.page_w,
-                "page_h": region.page_h,
             }
 
             if treatment == "abandon":

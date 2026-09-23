@@ -1257,6 +1257,8 @@ async def detect_bib_xrefs_with_receipt(
                 contents=_normalize_citation_text(candidate.raw),
                 text_id=candidate.text_id,
                 tier=candidate.style,
+                start=candidate.start,
+                end=candidate.end,
             )
             for candidate in candidates
             if candidate.accepted
@@ -1359,6 +1361,8 @@ async def detect_bib_xrefs_with_receipt(
                         contents=_normalize_citation_text(cite_text),
                         text_id=text_id,
                         tier="llm",
+                        start=start,
+                        end=end,
                     ),
                     start,
                     end,

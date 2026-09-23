@@ -12,6 +12,7 @@ class InputFormat:
 @dataclass
 class InputFile:
     path: str | Path
+    # First 16 hex characters of ``sha256`` (cache keys, internal identity).
     file_hash: str | None = None
     file_name: str | None = None
     input_format: InputFormat | None = None
@@ -20,6 +21,8 @@ class InputFile:
     is_corrupted: bool = False
     is_encrypted: bool = False
     native_artifact: object | None = None
+    # Full SHA-256 hex digest of the input bytes, exported as ``source.sha256``.
+    sha256: str | None = None
 
     def __post_init__(self):
         self.path = Path(self.path)

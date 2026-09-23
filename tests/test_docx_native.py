@@ -118,6 +118,100 @@ class TestDocxParserTables:
         assert tbl.df.iloc[0].tolist() == ["1", "2"]
 
 
+def _add_table(doc, first_cell: str = "A"):
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = first_cell
+    table.cell(0, 1).text = "B"
+    table.cell(1, 0).text = "1"
+    table.cell(1, 1).text = "2"
+
+
+def _body_texts(parser: DocxParser) -> list[str]:
+    return [text for text, *_ in parser._deferred_texts]
+
+
+class TestDocxParserTableCaptions:
+    """A Caption-styled paragraph next to a table is its caption, as a
+    picture's is; it used to stay in the body and leave the table uncaptioned."""
+
+    def test_caption_above_a_table_is_its_caption_and_leaves_the_body(self):
+        def build(doc):
+            doc.add_heading("Results", level=1)
+            doc.add_paragraph("Table 2. Demographics", style="Caption")
+            doc.add_paragraph("")
+            _add_table(doc)
+            doc.add_paragraph("Table 2 shows the sample.")
+
+        parser = DocxParser(_make_docx_bytes(build))
+        contents = parser.parse()
+        (table,) = contents.tables
+        assert (table.caption, table.label) == ("Table 2. Demographics", "2")
+        assert _body_texts(parser) == ["Table 2 shows the sample."]
+
+        parser.apply_segmentation(contents, [["Table 2 shows the sample."]])
+        assert [(x.xref_type, x.xref_id, x.tier) for x in contents.xrefs] == [
+            ("table", table.table_id, "label")
+        ]
+
+    def test_back_to_back_tables_with_captions_below(self):
+        def build(doc):
+            _add_table(doc, "First")
+            doc.add_paragraph("Table 1. First", style="Caption")
+            _add_table(doc, "Second")
+            doc.add_paragraph("Table 2. Second", style="Caption")
+
+        parser = DocxParser(_make_docx_bytes(build))
+        contents = parser.parse()
+        assert [(t.df.columns[0], t.caption) for t in contents.tables] == [
+            ("First", "Table 1. First"),
+            ("Second", "Table 2. Second"),
+        ]
+        assert _body_texts(parser) == []
+
+    def test_back_to_back_tables_with_captions_above(self):
+        def build(doc):
+            doc.add_paragraph("Table 1. First", style="Caption")
+            _add_table(doc, "First")
+            doc.add_paragraph("Table 2. Second", style="Caption")
+            _add_table(doc, "Second")
+
+        contents = DocxParser(_make_docx_bytes(build)).parse()
+        assert [(t.df.columns[0], t.label) for t in contents.tables] == [
+            ("First", "1"),
+            ("Second", "2"),
+        ]
+
+    def test_a_style_based_on_caption_counts(self):
+        from docx.enum.style import WD_STYLE_TYPE
+
+        def build(doc):
+            style = doc.styles.add_style("Table Caption", WD_STYLE_TYPE.PARAGRAPH)
+            style.base_style = doc.styles["Caption"]
+            doc.add_paragraph("Table S1: Robustness", style="Table Caption")
+            _add_table(doc)
+
+        (table,) = DocxParser(_make_docx_bytes(build)).parse().tables
+        assert (table.caption, table.label) == ("Table S1: Robustness", "S1")
+
+    def test_figure_captions_stay_with_the_figures(self):
+        def build(doc):
+            doc.add_picture(io.BytesIO(_png_bytes()))
+            _add_table(doc)
+            # Under a table, but it names a figure.
+            doc.add_paragraph("Figure 1. A plot", style="Caption")
+            doc.add_picture(io.BytesIO(_png_bytes()))
+            # Above a table, but directly under a picture.
+            doc.add_paragraph("Participant flow", style="Caption")
+            _add_table(doc)
+
+        contents = DocxParser(_make_docx_bytes(build)).parse()
+        assert [t.caption for t in contents.tables] == [None, None]
+        assert [(f.caption, f.label) for f in contents.figures] == [
+            ("Figure 1. A plot", "1"),
+            ("Participant flow", None),
+        ]
+
+
 class TestDocxParserUrls:
     def test_url_in_body_detected(self):
         def build(doc):
@@ -251,6 +345,7 @@ class TestDocxParserImages:
         assert len(contents.figures) == 1
         fig = contents.figures[0]
         assert fig.caption == "Figure 1: A red dot."
+        assert fig.label == "1"
         assert fig.image_b64 is not None and len(fig.image_b64) > 0
 
         from bibr.paper_contents import CanonicalSection
@@ -355,11 +450,11 @@ class TestDocxParserFootnotes:
         # Footnote content present as a sentence
         fn_sentences = [s for s in contents.sentences if s.section_id == fn_sections[0].section_id]
         assert any("This is a footnote." in s.text for s in fn_sentences)
-        # Xref linking footnote section back to the body sentence; xref_id is
-        # the 1-based footnote ordinal (matches PDFParser, see PaperXref docs).
+        # Xref linking the body sentence to the footnote; xref_id is the
+        # footnote's own text row (matches PDFParser, see PaperXref docs).
         xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(xrefs) == 1
-        assert xrefs[0].xref_id == 1
+        assert xrefs[0].xref_id == fn_sentences[0].text_id
 
 
 # ----- Run-level separators (w:br / w:tab / w:cr) -----

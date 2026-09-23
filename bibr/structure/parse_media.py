@@ -22,6 +22,8 @@ from bibr.paper_contents import (
     Provenance,
 )
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
+from bibr.structure.float_images import composite_panel_image
+from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD, caption_label, normalize_label
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -48,9 +50,21 @@ class MediaHandlersMixin:
     # making html5lib see an unknown tag. Rewriting table-family tags to their
     # bare form recovers the structure when rows/cells survived.
     _TABLE_TAG_RE = re.compile(r"<(/?)(table|thead|tbody|tr|t[dh])\b[^>]*>", re.IGNORECASE)
-    _BARE_TABLE_LABEL_RE = re.compile(r"^Table\s+(?:\d+|[IVXLCDM]+)\s*[.:]?\s*$", re.IGNORECASE)
-    _EXPLICIT_FIGURE_RE = re.compile(r"^(?:Figure|Fig\.?)\s+(?P<label>\d+)\b", re.IGNORECASE)
-    _TABLE_LABEL_RE = re.compile(r"^Table\s+(?P<label>\d+|[IVXLCDM]+)\b", re.IGNORECASE)
+    # Captions that print a label (``bibr.structure.float_labels.LABEL``):
+    # "Table 3", "Table 3.1", "Table S2", "Figure A1", "TABLE IV", and the
+    # "Supplementary Table 4" spelling.
+    _BARE_TABLE_LABEL_RE = re.compile(
+        rf"^{SUPPLEMENT_WORD}?Table\s+{LABEL}\s*[.:]?\s*$", re.IGNORECASE
+    )
+    _EXPLICIT_FIGURE_RE = re.compile(
+        rf"^(?P<supplement>{SUPPLEMENT_WORD})?(?:Figure|Fig\.?)\s+(?P<label>{LABEL})",
+        re.IGNORECASE,
+    )
+    _TABLE_LABEL_RE = re.compile(
+        rf"^(?P<supplement>{SUPPLEMENT_WORD})?Table\s+(?P<label>{LABEL})", re.IGNORECASE
+    )
+    _ROMAN_LABEL_RE = re.compile(r"[IVXLCDM]+")
+    _DOTTED_NUMBER_RE = re.compile(r"(?P<major>\d+)(?:\.\d+)*")
     _DOI_URL_RE = re.compile(r"https?://doi\.org/[^\s]+", re.IGNORECASE)
     _TRAILING_DOI_URL_RE = re.compile(
         r"(?:\s*https?://doi\.org/[^\s]+)+\s*$",
@@ -488,7 +502,7 @@ class MediaHandlersMixin:
         candidates = list(self._caption_candidates)
         semantic_keys = [self._caption_semantic_key(item.text) for item in candidates]
         doi_urls = [self._caption_doi_urls(item.text) for item in candidates]
-        explicit_labels = [self._caption_explicit_label(item.text) for item in candidates]
+        explicit_labels = [self._caption_printed_label(item) for item in candidates]
         parents = list(range(len(candidates)))
 
         def find(index: int) -> int:
@@ -625,15 +639,32 @@ class MediaHandlersMixin:
         return " ".join(useful.casefold().split())
 
     @classmethod
-    def _caption_explicit_label(cls, text: str) -> int | None:
-        match = cls._EXPLICIT_FIGURE_RE.match(text.strip()) or cls._TABLE_LABEL_RE.match(
-            text.strip()
+    def _caption_printed_label(cls, candidate: CaptionCandidate) -> str | None:
+        """The candidate's printed label, normalized for comparison ("3.1", "s2")."""
+        label = caption_label(
+            candidate.text, "table" if candidate.object_type == "table" else "figure"
         )
-        if match is None:
+        return normalize_label(label) if label is not None else None
+
+    @classmethod
+    def _caption_explicit_label(cls, text: str) -> int | None:
+        """The number an explicit caption prints, as the printed-id reservation
+        in :meth:`_reconcile_object_ids` reads it: "Table 3.1" → 3, "TABLE IV"
+        → 4. ``None`` for a label that is not a number ("S2", "A1", "2a") or a
+        supplementary caption; mentions resolve by the whole printed label
+        (``PaperTable.label``/``PaperFigure.label``) instead.
+        """
+        figure_match = cls._EXPLICIT_FIGURE_RE.match(text.strip())
+        match = figure_match or cls._TABLE_LABEL_RE.match(text.strip())
+        if match is None or match.group("supplement"):
             return None
-        label = match.group("label").casefold()
-        if label.isdigit():
-            return int(label)
+        label = match.group("label")
+        if number := cls._DOTTED_NUMBER_RE.fullmatch(label):
+            return int(number.group("major"))
+        # Only a table's roman numeral reserves an id, as before labels.
+        if figure_match is not None or not cls._ROMAN_LABEL_RE.fullmatch(label):
+            return None
+        label = label.casefold()
         values = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
         total = previous = 0
         for character in reversed(label):
@@ -860,11 +891,11 @@ class MediaHandlersMixin:
                 (source for source in figure_sources if source > caption.source_index),
                 float("inf"),
             )
-            current_label = self._caption_explicit_label(caption.text)
+            current_label = self._caption_printed_label(caption)
             future_captions: list[CaptionCandidate] = []
-            future_labels: set[int] = set()
+            future_labels: set[str] = set()
             for later in explicit_captions[caption_index + 1 :]:
-                label = self._caption_explicit_label(later.text)
+                label = self._caption_printed_label(later)
                 if (
                     later.page_number is None
                     or caption.page_number is None
@@ -915,6 +946,8 @@ class MediaHandlersMixin:
                 primary.parts.extend(member.parts)
                 primary.provenance.extend(member.provenance)
                 grouped_ids.add(id(member))
+            # The whole figure, not just its first panel's crop.
+            primary.image_b64 = composite_panel_image(primary.parts) or primary.image_b64
             self._figure_source_indices[id(primary)] = max(
                 self._figure_source_indices[id(item)] for item in grouped_members
             )
@@ -960,11 +993,12 @@ class MediaHandlersMixin:
             and not text.endswith((".", ":", ";", "?", "!"))
         )
 
-    @classmethod
-    def _table_label(cls, caption: str | None) -> str | None:
-        if not caption or not (match := cls._TABLE_LABEL_RE.match(caption.strip())):
-            return None
-        return match.group("label").casefold()
+    @staticmethod
+    def _table_label(caption: str | None) -> str | None:
+        # The whole printed label, so "Table 3.1" and "Table 3.2" on adjacent
+        # pages are two tables, not one continued.
+        label = caption_label(caption, "table")
+        return normalize_label(label) if label is not None else None
 
     def _group_continuation_tables(
         self, candidates: list[CaptionCandidate]
@@ -1093,7 +1127,12 @@ class MediaHandlersMixin:
             previous.parts.extend(table.parts)
             previous.provenance.extend(table.provenance)
             previous.df = pd.concat([previous.df, table.df], ignore_index=True)
-            previous.tbl_html = previous.df.to_html(index=False)
+            # Keep each printed piece's source markup (rowspans, multi-level
+            # headers) rather than re-rendering the merged frame, which is lossy
+            # (see ``_handle_table``); the merged frame still feeds ``contents``.
+            previous.tbl_html = "\n".join(
+                part.tbl_html for part in previous.parts if part.tbl_html
+            ) or previous.df.to_html(index=False)
             self._table_source_indices[id(previous)] = min(
                 self._table_source_indices[id(previous)], self._table_source_indices[id(table)]
             )
@@ -1396,6 +1435,12 @@ class MediaHandlersMixin:
             finalized.append(assignment)
 
         finalized.extend(duplicate_assignments)
+        # Every caption is attached now. Its printed label is what in-text
+        # mentions resolve by (``detect_xrefs``); the ids stay provisional.
+        for figure in self.figures:
+            figure.label = caption_label(figure.caption, "figure")
+        for table in self.tables:
+            table.label = caption_label(table.caption, "table")
         # ``finalized`` is complete here, so unowned means unowned. Delete
         # before ``_reconcile_media_ids`` renumbers, and it renumbers the
         # survivors only; no assignment can name a deleted figure, so the list

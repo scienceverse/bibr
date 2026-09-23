@@ -14,13 +14,13 @@ import pytest
 
 from bibr.exceptions import UpstreamServiceError
 from bibr.extract.ref_extractor import (
-    PARSE_FALLBACK_WARNING_PREFIX,
     ReferenceExtractor,
     _is_degenerate_ref_failure,
     _normalize_vol_issue,
 )
 from bibr.ner.decode import _FIELD_TO_PAPER_REF
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import PaperReference, PaperReferenceLLM
 
 REFS = [
@@ -80,7 +80,7 @@ class TestNerFallbackIsNeverSilent:
                 await ext._parse_references_llm("\n".join(REFS), REFS)
 
         assert any(
-            w.startswith(PARSE_FALLBACK_WARNING_PREFIX) and "NER fallback also failed" in w
+            w.code == WarningCode.REF_PARSE_LOST and "NER fallback also failed" in w.message
             for w in ext.contents.processing_warnings
         ), ext.contents.processing_warnings
 
@@ -132,9 +132,10 @@ class TestSkippedSegmentsAreRecovered:
 
         ner.assert_called_once()
         assert [r.title for r in refs] == ["Title 1", "Ner 2", "Title 3"]
-        assert any("skipped by the LLM" in w for w in ext.contents.processing_warnings), (
-            ext.contents.processing_warnings
-        )
+        assert any(
+            w.code == WarningCode.REF_PARSE_NER_FALLBACK and "skipped by the LLM" in w.message
+            for w in ext.contents.processing_warnings
+        ), ext.contents.processing_warnings
 
     async def test_a_complete_batch_triggers_no_recovery(self, monkeypatch):
         monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)
@@ -473,9 +474,10 @@ class TestStubRefsAreNotCountedAsCovered:
             refs = await ext._parse_references_llm("\n".join(REFS), REFS)
 
         assert [r.title for r in refs] == ["Title 1", "Title 3"]
-        assert any("skipped by the LLM" in w for w in ext.contents.processing_warnings), (
-            ext.contents.processing_warnings
-        )
+        assert any(
+            w.code == WarningCode.REF_PARSE_NER_FALLBACK and "skipped by the LLM" in w.message
+            for w in ext.contents.processing_warnings
+        ), ext.contents.processing_warnings
 
     async def test_a_ner_recovery_that_is_itself_a_stub_is_not_kept(self, monkeypatch):
         monkeypatch.setattr("bibr.config.Settings.REF_PARSE_BATCH_SIZE", 15)

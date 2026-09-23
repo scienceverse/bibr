@@ -109,3 +109,105 @@ class TestCrossrefWorkItem:
         item = CrossrefWorkItem.from_raw(raw)
         assert item.year == 2021
         assert item.date == "2021-05"
+
+
+class TestCrossrefIdentifiers:
+    """ORCIDs, affiliation ROR IDs, funders and the license reach the match."""
+
+    RAW = {
+        "DOI": "10.1234/ids",
+        "title": ["Identified"],
+        "author": [
+            {
+                "given": "Jane",
+                "family": "Smith",
+                "ORCID": "http://orcid.org/0000-0002-1825-0097",
+                "affiliation": [
+                    {
+                        "name": "University of Glasgow",
+                        "id": [
+                            {
+                                "id": "https://ror.org/00vtgdb53",
+                                "id-type": "ROR",
+                                "asserted-by": "publisher",
+                            }
+                        ],
+                    },
+                    {"name": "Somewhere Else"},
+                    {},
+                ],
+            }
+        ],
+        "funder": [
+            {
+                "DOI": "10.13039/501100000780",
+                "name": "European Commission",
+                "award": ["101000001", " "],
+            },
+            {
+                "name": "Wellcome Trust",
+                "id": [
+                    {"id": "https://ror.org/029chgv08", "id-type": "ROR"},
+                    {"id": "10.13039/100010269", "id-type": "DOI"},
+                ],
+            },
+            {"award": ["orphan"]},
+        ],
+        "license": [
+            {"URL": "https://www.elsevier.com/tdm/userlicense/1.0/", "content-version": "tdm"},
+            {"URL": "http://creativecommons.org/licenses/by-nc/4.0/", "content-version": "vor"},
+        ],
+    }
+
+    def test_parsed_from_the_raw_record(self):
+        from bibr.enrich.schemas import CrossrefWorkItem
+
+        item = CrossrefWorkItem.from_raw(self.RAW)
+        author = item.authors[0]
+        assert [(a.name, a.ror) for a in author.affiliations] == [
+            ("University of Glasgow", "https://ror.org/00vtgdb53"),
+            ("Somewhere Else", None),
+        ]
+        assert [(f.name, f.funder_doi, f.ror, f.award_ids) for f in item.funders] == [
+            ("European Commission", "10.13039/501100000780", None, ["101000001"]),
+            ("Wellcome Trust", "10.13039/100010269", "https://ror.org/029chgv08", []),
+        ]
+        assert item.license_url == "http://creativecommons.org/licenses/by-nc/4.0/"
+
+    def test_text_mining_licenses_never_stand_for_the_article(self):
+        from bibr.enrich.schemas import CrossrefWorkItem
+
+        raw = {"license": [{"URL": "https://example.org/tdm", "content-version": "tdm"}]}
+        assert CrossrefWorkItem.from_raw(raw).license_url is None
+
+    def test_carried_onto_the_match(self):
+        from bibr.enrich.references import _build_match
+        from bibr.enrich.schemas import CrossrefWorkItem
+
+        match = _build_match(CrossrefWorkItem.from_raw(self.RAW), 100.0)
+        (author,) = match.authors
+        assert author.orcid == "https://orcid.org/0000-0002-1825-0097"
+        assert author.affiliation[0].ror == "https://ror.org/00vtgdb53"
+        assert match.license_url == "http://creativecommons.org/licenses/by-nc/4.0/"
+        assert match.funders[1].ror == "https://ror.org/029chgv08"
+
+    def test_search_selects_the_identifier_fields(self):
+        import asyncio
+
+        from bibr.clients.crossref import CrossrefClient
+        from bibr.config import GlobalSettings
+
+        client = CrossrefClient(settings=GlobalSettings())
+        seen: dict = {}
+
+        async def request(path, params=None):
+            seen.update(params or {})
+            return {"message": {"items": []}}
+
+        async def cached(key, fetch, **kwargs):
+            return await fetch()
+
+        client._request = request
+        client._cached = cached
+        asyncio.run(client.search("A title"))
+        assert {"author", "funder", "license"} <= set(seen["select"].split(","))

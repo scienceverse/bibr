@@ -74,6 +74,13 @@ def test_full_export_title_doi_paper_type(capsys):
     assert "empirical" in out
 
 
+def test_group_author_is_named_by_its_literal():
+    from bibr.local.inspect import _authors_line
+
+    data = {"author": [{"given": None, "family": None, "literal": "The Consortium"}]}
+    assert _authors_line(data) == "1 (The Consortium)"
+
+
 def test_full_export_authors_count_and_first_three(capsys):
     from bibr.local.inspect import run_inspect
 

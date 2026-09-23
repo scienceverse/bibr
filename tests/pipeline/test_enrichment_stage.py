@@ -11,6 +11,7 @@ from bibr.pipeline.context import PipelineContext, RunConfig
 from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.enrich import EnrichmentStage
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 
 def _ctx_with_progress(file_states, prog):
@@ -107,7 +108,12 @@ async def test_raising_enricher_does_not_abort_chunk():
     # The later enricher still ran on every file…
     assert sorted(follow_up.calls) == ["bad.pdf", "ok.pdf"]
     # …the failing file carries a warning, not an error…
-    assert any("boom" in w for w in fs_bad.warnings)
+    assert fs_bad.warnings == [
+        ProcessingWarning(
+            WarningCode.ENRICHER_FAILED, "_ExplodingEnricher failed: RuntimeError: boom"
+        )
+    ]
+    assert fs_bad.enrichment_warnings == fs_bad.warnings
     assert fs_bad.error is None
     # …and the healthy file is untouched.
     assert fs_ok.warnings == []

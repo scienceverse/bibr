@@ -9,6 +9,9 @@ from dataclasses import asdict, dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Literal, Protocol
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.validation import payload_validation
+
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
     from bibr.pipeline.state import FileState
@@ -16,10 +19,12 @@ if TYPE_CHECKING:
 # Bumped to "2" for v11: the persisted paper-enrichment key was renamed
 # ``info_match`` -> ``metadata_match``. A v1 sidecar now fails its own version
 # check with an accurate message instead of the misleading core-version one.
-ENRICHMENT_SIDECAR_SCHEMA_VERSION = "2"
-CORE_SCHEMA_VERSION = "11.0"
-# v11 is a clean break: a v10 core cannot be replayed into a v11 payload, so
-# the gate accepts exactly one version.
+# "3" (v12) adds the ROR ``affiliation_match`` and ``funding_match`` rows.
+# "4" stores warnings as ``{code, message}`` objects instead of prose.
+ENRICHMENT_SIDECAR_SCHEMA_VERSION = "4"
+CORE_SCHEMA_VERSION = "12.0"
+# Each major is a clean break: a v11 core cannot be replayed into a v12
+# payload, so the gate accepts exactly one version.
 SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})
 CROSSREF_ENRICHMENT_SCHEMA_REVISION = "crossref-v1"
 
@@ -51,14 +56,17 @@ class EnrichmentSidecar:
     completeness: Literal["partial", "complete"]
     bib_match: tuple[dict, ...] = ()
     metadata_match: tuple[dict, ...] = ()
-    warnings: tuple[str, ...] = ()
+    affiliation_match: tuple[dict, ...] = ()
+    funding_match: tuple[dict, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
     detail: str | None = None
 
     def to_dict(self) -> dict:
         value = asdict(self)
-        # Keep the common complete sidecar compact and backward compatible.
-        if not self.warnings:
-            value.pop("warnings")
+        # Keep the common complete sidecar compact.
+        for key in ("affiliation_match", "funding_match", "warnings"):
+            if not value[key]:
+                value.pop(key)
         if self.detail is None:
             value.pop("detail")
         return value
@@ -72,7 +80,12 @@ class EnrichmentSidecar:
             completeness=value.get("completeness"),
             bib_match=tuple(value.get("bib_match") or ()),
             metadata_match=tuple(value.get("metadata_match") or ()),
-            warnings=tuple(str(item)[:512] for item in (value.get("warnings") or ())),
+            affiliation_match=tuple(value.get("affiliation_match") or ()),
+            funding_match=tuple(value.get("funding_match") or ()),
+            warnings=tuple(
+                ProcessingWarning(warning.code, warning.message[:512])
+                for warning in map(ProcessingWarning.from_dict, value.get("warnings") or ())
+            ),
             detail=(str(value["detail"])[:512] if value.get("detail") is not None else None),
         )
 
@@ -114,6 +127,7 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
 
     crossref = ctx.settings.crossref
     resolver = ctx.settings.resolver
+    ror = ctx.settings.ror
     settings = {
         "schema_revision": CROSSREF_ENRICHMENT_SCHEMA_REVISION,
         "enabled": ctx.config.enrichment_enabled(ctx.settings),
@@ -132,6 +146,11 @@ def enrichment_settings_digest(ctx: PipelineContext) -> str:
             "limit": resolver.limit,
             "search_concurrency": resolver.search_concurrency,
             "authoritative": resolver.authoritative,
+        },
+        "ror": {
+            "enabled": bool(ror.enrich),
+            "url": ror.url,
+            "enrich_timeout": ror.enrich_timeout,
         },
     }
     return canonical_json_sha256(settings)
@@ -167,7 +186,8 @@ def disposition_for_issues(issues) -> ArtifactDisposition:
 def mark_enrichment_pending(payload: dict) -> dict:
     """Add a temporary fail-closed promotion gate to an enrichment-bound core."""
 
-    validation = payload.setdefault(
+    extraction = payload.setdefault("extraction", {})
+    validation = extraction.setdefault(
         "validation",
         {"errors": 0, "warnings": 0, "blocking": 0, "promotable": True, "issues": []},
     )
@@ -193,7 +213,7 @@ def mark_enrichment_pending(payload: dict) -> dict:
 
 
 def _clear_enrichment_pending(payload: dict) -> None:
-    validation = payload.get("validation") or {}
+    validation = payload_validation(payload) or {}
     issues = validation.get("issues") or []
     removed = [issue for issue in issues if issue.get("code") == "VAL_ENRICHMENT_PENDING"]
     if not removed:
@@ -212,7 +232,7 @@ def make_enrichment_sidecar(
     core_sha256: str,
     settings_digest: str,
     completeness: Literal["partial", "complete"],
-    warnings: tuple[str, ...] = (),
+    warnings: tuple[ProcessingWarning, ...] = (),
     detail: str | None = None,
 ) -> EnrichmentSidecar:
     """Extract only replayable enrichment rows from a fully exported payload."""
@@ -229,6 +249,14 @@ def make_enrichment_sidecar(
         copy.deepcopy(enriched_payload.get("metadata_match") or ()),
         key=lambda row: str(row.get("service", "")) if isinstance(row, dict) else "",
     )
+    affiliation_match = sorted(
+        copy.deepcopy(enriched_payload.get("affiliation_match") or ()),
+        key=lambda row: str(row.get("affiliation_id", "")) if isinstance(row, dict) else "",
+    )
+    funding_match = sorted(
+        copy.deepcopy(enriched_payload.get("funding_match") or ()),
+        key=lambda row: str(row.get("funding_id", "")) if isinstance(row, dict) else "",
+    )
 
     return EnrichmentSidecar(
         schema_version=ENRICHMENT_SIDECAR_SCHEMA_VERSION,
@@ -237,7 +265,12 @@ def make_enrichment_sidecar(
         completeness=completeness,
         bib_match=tuple(bib_match),
         metadata_match=tuple(metadata_match),
-        warnings=tuple(" ".join(str(item).split())[:512] for item in warnings),
+        affiliation_match=tuple(affiliation_match),
+        funding_match=tuple(funding_match),
+        warnings=tuple(
+            ProcessingWarning(warning.code, " ".join(warning.message.split())[:512])
+            for warning in warnings
+        ),
         detail=" ".join(str(detail).split())[:512] if detail else None,
     )
 
@@ -266,6 +299,14 @@ def replay_enrichment_sidecar(
     # contract violation it is rather than replaying a lossy payload.
     if not isinstance(core_payload.get("extraction"), dict):
         raise ArtifactReplayError("core payload has no extraction block")
+    # Replay appends coded warnings, so a core whose warnings are not all
+    # ``{code, message}`` objects (a 12.0 core written before warnings had
+    # codes holds prose) would come out with both shapes in one list.
+    core_warnings = core_payload["extraction"].get("warnings", [])
+    if not isinstance(core_warnings, list):
+        raise ArtifactReplayError("core payload has invalid warnings")
+    if not all(isinstance(warning, ProcessingWarning) for warning in sidecar.warnings):
+        raise ArtifactReplayError("invalid enrichment warning")
 
     core_bib_ids = {
         row.get("bib_id")
@@ -289,6 +330,20 @@ def replay_enrichment_sidecar(
         if row["service"] in seen_metadata_services:
             raise ArtifactReplayError("duplicate paper enrichment service row")
         seen_metadata_services.add(row["service"])
+    for table, id_key, rows in (
+        ("affiliation", "affiliation_id", sidecar.affiliation_match),
+        ("funding", "funding_id", sidecar.funding_match),
+    ):
+        core_ids = {
+            row.get(id_key) for row in core_payload.get(table) or [] if isinstance(row, dict)
+        }
+        seen_ids: set[object] = set()
+        for row in rows:
+            if not isinstance(row, dict) or row.get(id_key) not in core_ids:
+                raise ArtifactReplayError(f"{table} enrichment references unknown {id_key}")
+            if row[id_key] in seen_ids:
+                raise ArtifactReplayError(f"duplicate {table} enrichment row")
+            seen_ids.add(row[id_key])
 
     # Identity checks alone do not make external rows safe to publish. Apply
     # the same strict, extra-forbid models used by the public export so bad
@@ -297,22 +352,38 @@ def replay_enrichment_sidecar(
     from pydantic import ValidationError
 
     from bibr.export.json_export import (
+        AffiliationMatchExport,
         BibMatchExport,
+        FundingMatchExport,
         MetadataMatchExport,
         append_payload_warning,
     )
+    from bibr.export.models import WarningExport
 
     try:
         for row in sidecar.bib_match:
             BibMatchExport.model_validate(row, strict=True)
         for row in sidecar.metadata_match:
             MetadataMatchExport.model_validate(row, strict=True)
+        for row in sidecar.affiliation_match:
+            AffiliationMatchExport.model_validate(row, strict=True)
+        for row in sidecar.funding_match:
+            FundingMatchExport.model_validate(row, strict=True)
+        for warning in sidecar.warnings:
+            WarningExport.model_validate(warning.to_dict(), strict=True)
     except ValidationError as exc:
         raise ArtifactReplayError("invalid typed enrichment row") from exc
+    try:
+        for row in core_warnings:
+            WarningExport.model_validate(row, strict=True)
+    except ValidationError as exc:
+        raise ArtifactReplayError("core payload has invalid warnings") from exc
 
     replayed = copy.deepcopy(core_payload)
     replayed["bib_match"] = copy.deepcopy(list(sidecar.bib_match))
     replayed["metadata_match"] = copy.deepcopy(list(sidecar.metadata_match))
+    replayed["affiliation_match"] = copy.deepcopy(list(sidecar.affiliation_match))
+    replayed["funding_match"] = copy.deepcopy(list(sidecar.funding_match))
     bibliography = replayed.get("bib") or []
     # v11: enrichment completeness and warnings live under ``extraction``, whose
     # presence the contract checks above already guaranteed.
@@ -335,7 +406,7 @@ def replay_enrichment_sidecar(
         _clear_enrichment_pending(replayed)
     diagnostics = [*sidecar.warnings]
     if sidecar.detail:
-        diagnostics.append(f"enrichment: {sidecar.detail}")
+        diagnostics.append(ProcessingWarning(WarningCode.ENRICHMENT_INCOMPLETE, sidecar.detail))
     for diagnostic in diagnostics:
         append_payload_warning(replayed, diagnostic)
     return replayed

@@ -909,8 +909,9 @@ class BibrPipelineAPI(ls.LitAPI):
                 detail=detail,
             )
         # The producing bibr version is carried in the export schema at
-        # ``extraction.bibr_version`` (set at export time, so it reflects the
-        # bibr that produced the result even on cache hits). No serve-side stamp.
+        # ``extraction.producer.version`` (set at export time, so it reflects
+        # the bibr that produced the result even on cache hits). No serve-side
+        # stamp.
         return output["paper_json"]
 
     def _effective_crossref(self, requested: bool | None) -> bool:

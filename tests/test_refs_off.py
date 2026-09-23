@@ -146,7 +146,9 @@ class TestUndercountWarningGate:
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from bibr.pipeline.stages.post_parse import post_parse
+        from bibr.processing_warnings import ProcessingWarning, WarningCode
 
+        undercount = ProcessingWarning(WarningCode.REF_UNDER_EXTRACTION_SUSPECTED, "UNDERCOUNT")
         contents = PaperContents(
             sentences=[],
             sections=[PaperSection(section_id=0, header="Root", level=0, parent_section_id=None)],
@@ -175,7 +177,7 @@ class TestUndercountWarningGate:
             ),
             patch(
                 "bibr.pipeline.stages.post_parse._low_reference_count_warning",
-                MagicMock(return_value="UNDERCOUNT WARNING"),
+                MagicMock(return_value=undercount),
             ),
         ):
             paper = await post_parse(
@@ -187,7 +189,7 @@ class TestUndercountWarningGate:
                 ref_parse_strategy="off",
             )
 
-        assert "UNDERCOUNT WARNING" not in paper.processing_warnings
+        assert undercount not in paper.processing_warnings
 
 
 class TestPipelineRefsOff:
@@ -216,7 +218,7 @@ class TestPipelineRefsOff:
 
         monkeypatch.setattr(bibr.config.Settings.crossref, "enrich", True)
         pipe = LocalPipeline(llm_backend="cloud")
-        assert len(self._enrichment_stage(pipe)._enrichers) == 1
+        assert _names(self._enrichment_stage(pipe)._enrichers) == ["crossref", "ror"]
 
     def test_default_drops_crossref_enricher_when_setting_off(self, monkeypatch):
         """CROSSREF_ENRICH is off by default: no enricher unless forced per run."""
@@ -226,7 +228,14 @@ class TestPipelineRefsOff:
         monkeypatch.setattr(bibr.config.Settings.crossref, "enrich", False)
         assert self._enrichment_stage(LocalPipeline(llm_backend="cloud"))._enrichers == []
         forced = LocalPipeline(llm_backend="cloud", crossref=True)
-        assert len(self._enrichment_stage(forced)._enrichers) == 1
+        assert _names(self._enrichment_stage(forced)._enrichers) == ["crossref", "ror"]
+        monkeypatch.setattr(bibr.config.Settings.ror, "enrich", False)
+        forced = LocalPipeline(llm_backend="cloud", crossref=True)
+        assert _names(self._enrichment_stage(forced)._enrichers) == ["crossref"]
+
+
+def _names(enrichers) -> list[str]:
+    return [e.name for e in enrichers]
 
 
 class TestConfigAcceptsOff:

@@ -28,6 +28,7 @@ import pandas as pd
 
 from bibr.input.xml_entities import parse_xml
 from bibr.models import (
+    ORGANIZATION_ROLE,
     PaperAuthor,
     PaperMetadata,
     PaperReference,
@@ -46,6 +47,7 @@ from bibr.paper_contents import (
     PaperURLLink,
 )
 from bibr.structure.assembler import DocumentAssembler
+from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -226,7 +228,8 @@ class JatsParser:
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_references: list[PaperReference] | None = None
         self._native_ref_strings: list[str] | None = None
-        self._footnotes: list[str] = []
+        # (text, printed <label>) of each back-matter <fn>.
+        self._footnotes: list[tuple[str, str | None]] = []
         self._aff_map: dict[str, str] = {}
         self._body_ref_lists: list[tuple[object, int]] = []
 
@@ -267,6 +270,9 @@ class JatsParser:
 
         if front is not None:
             self._metadata = self._parse_front(front)
+            self._metadata.language = (
+                root.get("{http://www.w3.org/XML/1998/namespace}lang") or root.get("lang") or None
+            )
         if body is not None:
             self._process_container(body, section_id=0, depth=0)
         if back is not None:
@@ -326,6 +332,7 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FIGURE,
+                    synthetic_kind="figure",
                 )
             )
             fig.section_id = self._section_counter
@@ -352,6 +359,7 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.TABLE,
+                    synthetic_kind="table",
                 )
             )
             tbl.section_id = self._section_counter
@@ -368,7 +376,7 @@ class JatsParser:
                 )
                 self._sentence_counter += 1
 
-        for footnote_num, fn_text in enumerate(self._footnotes, start=1):
+        for footnote_num, (fn_text, fn_label) in enumerate(self._footnotes, start=1):
             self._section_counter += 1
             footnote_section_id = self._section_counter
             contents.sections.append(
@@ -378,6 +386,8 @@ class JatsParser:
                     level=1,
                     parent_section_id=0,
                     section_type=CanonicalSection.FOOTNOTE,
+                    synthetic_kind="footnote",
+                    footnote_label=fn_label,
                 )
             )
             self._paragraph_counter += 1
@@ -411,11 +421,20 @@ class JatsParser:
         if article_meta is None:
             return meta
 
-        # DOI
+        # DOI and the other identifiers JATS declares
         for aid in _iter_children(article_meta, "article-id"):
-            if _attr(aid, "pub-id-type") == "doi":
-                meta.doi = _text(aid)
-                break
+            id_type = (_attr(aid, "pub-id-type") or "").lower()
+            value = _text(aid) or None
+            if id_type == "doi" and not meta.doi:
+                meta.doi = value or ""
+            elif id_type == "pmid" and meta.pmid is None:
+                meta.pmid = value
+            elif id_type in ("pmc", "pmcid") and meta.pmcid is None:
+                meta.pmcid = (
+                    value if value is None or value.upper().startswith("PMC") else f"PMC{value}"
+                )
+            elif id_type == "arxiv" and meta.arxiv is None:
+                meta.arxiv = value
 
         # Title
         title_group = _first_desc(article_meta, "title-group")
@@ -539,6 +558,7 @@ class JatsParser:
             if name is None:
                 name = _first_desc(contrib, "string-name")
             given = family = ""
+            roles: list[str] = []
             if name is not None:
                 if _ln(name) == "string-name":
                     family = _text(name)
@@ -547,11 +567,12 @@ class JatsParser:
                     family = _text(_first_child(name, "surname"))
             else:
                 # A consortium/working-group byline carries <collab> instead of
-                # a personal name. Treat it like <string-name>: one unsplit
-                # name in `family`, matching how Crossref models a group author.
+                # a personal name: one unsplit name, marked as an organization
+                # so the export writes it to ``author[].literal``.
                 collab = _first_desc(contrib, "collab")
                 if collab is not None:
                     family = _text(collab)
+                    roles = [ORGANIZATION_ROLE]
 
             if not given and not family:
                 # No name of any kind — emitting the row would only produce a
@@ -592,6 +613,7 @@ class JatsParser:
                     email=email,
                     corresponding=corresponding,
                     orcid=orcid,
+                    role=roles,
                 )
             )
         return authors
@@ -617,6 +639,10 @@ class JatsParser:
             elif ln in ("list", "list-item"):
                 # Flatten list structure — list items carry <p> children.
                 self._process_container(child, section_id, depth)
+            elif ln == "fn-group":
+                # Notes printed under a heading of their own ("Footnotes")
+                # are footnotes, like a back-matter <fn-group>.
+                self._collect_footnotes(child)
             elif ln == "ref-list":
                 # EuropePMC's fullTextXML puts the bibliography in <body> as a
                 # <sec sec-type="ref-list"> instead of in <back>. Record it and
@@ -625,6 +651,15 @@ class JatsParser:
                 self._body_ref_lists.append((child, section_id))
             # title (handled by the parent sec), label, and unknown wrappers
             # are intentionally ignored.
+
+    def _collect_footnotes(self, fn_group) -> None:
+        """Keep each <fn>'s text, and its printed <label> apart, for the footnote rows."""
+        for fn in _iter_children(fn_group, "fn"):
+            fn_text = _text(fn)
+            if fn_text:
+                label_el = next(_iter_children(fn, "label"), None)
+                label = _text(label_el) if label_el is not None else ""
+                self._footnotes.append((fn_text, label or None))
 
     def _handle_sec(self, sec, depth: int, parent_id: int) -> None:
         title_el = _first_child(sec, "title")
@@ -702,6 +737,7 @@ class JatsParser:
                         df=df,
                     )
                 ],
+                label=self._float_label(table_wrap, caption, "table"),
             )
         )
         self._table_counter += 1
@@ -757,6 +793,7 @@ class JatsParser:
                         image_b64=None,
                     )
                 ],
+                label=self._float_label(fig, caption, "figure"),
             )
         )
         self._figure_counter += 1
@@ -768,6 +805,16 @@ class JatsParser:
         caption_el = _first_child(el, "caption")
         caption = _text(caption_el) if caption_el is not None else ""
         return " ".join(x for x in (label, caption) if x)
+
+    @staticmethod
+    def _float_label(el, caption: str, kind: FloatKind) -> str | None:
+        """The printed label of a fig/table-wrap: its ``<label>`` without the
+        word ("Table 2" → "2", a bare "S1" stays "S1"), else the label a
+        caption opens with when there is no ``<label>``."""
+        label_el = _first_child(el, "label")
+        if label_el is not None:
+            return label_element_label(_text(label_el), kind)
+        return caption_label(caption, kind)
 
     # ------------------------------------------------------------------
     # Back matter → acknowledgments / footnotes / references
@@ -795,10 +842,7 @@ class JatsParser:
             elif ln == "ref-list":
                 self._handle_ref_list(child)
             elif ln == "fn-group":
-                for fn in _iter_children(child, "fn"):
-                    fn_text = _text(fn)
-                    if fn_text:
-                        self._footnotes.append(fn_text)
+                self._collect_footnotes(child)
 
         # Some producers nest the ref-list inside a back <sec>; recover it.
         if not ref_lists:

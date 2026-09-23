@@ -109,10 +109,17 @@ in-flight much above that only lengthens the queue.
 ```
 <out>/
   <paper_id>.json     the export, one per successful paper
+  tables/*.parquet    every successful paper as one Parquet file per table
   outcomes.jsonl      the ledger — one JSON object per attempt
   run_info.json       the latest run: options, executor, redacted settings, counts
   runs.jsonl          run_info of every run, appended
 ```
+
+Each export's `paper_id` is the batch's own id, the name of its JSON file, so it
+is unique across the corpus even when papers share a DOI. `tables/` is rebuilt
+from every paper whose latest attempt is `ok` at the end of each run
+(`--no-tables` skips it); see the
+[Python guide](library.md#corpus-tables-parquet) for its layout.
 
 `run_info.json` carries the `run_id` that stamps this run's ledger lines,
 `started_at`/`finished_at`, the invocation (`options`, without the token),
@@ -142,7 +149,7 @@ One JSON object per line of `outcomes.jsonl`:
 | `llm_tokens`, `llm_input_tokens`, `llm_output_tokens` | int | from `extraction.usage.totals` (legacy: `llm_usage`) |
 | `n_refs`, `n_matched` | int | `bib` rows and accepted `bib_match` rows (falls back to `extraction.enrichment.refs_enriched`) |
 | `n_sentences` | int | `text` rows |
-| `warnings` | `{count, first, codes}` | `extraction.warnings` (legacy: `processing_warnings`): total, the first three, and a frequency map by warning kind |
+| `warnings` | `{count, first, codes}` | `extraction.warnings` (legacy: `processing_warnings`): total, the first three (as `CODE: message`), and a frequency map by warning code |
 | `n_validation_errors`, `n_validation_warnings` | int | from the export's `validation` block |
 | `bibr_version`, `build_sha` | str | producing bibr; remote runs record the serve's build |
 | `executor` | `local` / `remote` | |
@@ -173,7 +180,7 @@ bibr batch report · results/
   llm tokens   41,220,118 total · 100,049 / paper
   references   19,870 refs · 17,102 matched (86%) · 48.2 / paper
   failures     poll_timeout ×5 · http_413 ×3 · OCR_EMPTY ×1 | stage: ocr ×1
-  warnings     140 papers · VALIDATION:warning:REF_YEAR_MISSING ×212 · STATEMENT_LEXICAL_FALLBACK ×31
+  warnings     140 papers · OCR_REGION_FAILED ×212 · STATEMENT_LEXICAL_FALLBACK ×31
 ```
 
 - **papers** counts the *latest* attempt per paper; **attempts** is the raw
@@ -188,8 +195,10 @@ bibr batch report · results/
 - **references** is the corpus match rate (`n_matched / n_refs`).
 - **failures** groups the latest-failed papers by `error_code` and, when the
   export reported it, by `failed_stage`.
-- **warnings** lists the ten most frequent warning kinds (`VALIDATION:<severity>:<CODE>`
-  or the text before the first colon).
+- **warnings** lists the ten most frequent warning codes
+  (`extraction.warnings[].code`). An export older than 12.0 has prose warnings,
+  counted by the text before the first colon (`VALIDATION:<severity>:<CODE>`
+  for validation findings).
 
 The ledger is plain JSONL, so anything else is one `pandas.read_json(...,
 lines=True)` away.

@@ -34,6 +34,7 @@ from bibr.paper_contents import (
     PaperURLLink,
     PaperXref,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.structure.xref_utils import detect_xrefs
 from tests.export.conftest import extraction_block as _extraction_block
 
@@ -199,9 +200,9 @@ def test_sane_url_rejects_invalid_bracketed_authority():
 
 class TestConsolidatedExportValidates:
     def test_consolidated_export_passes_schema_validation(self):
-        # Consolidation injects `consolidated_fields` into bib rows after
-        # export; the strict BibExport model must accept it — consolidated
-        # output shipped to clients has to validate against our own schema.
+        # Consolidation records its receipt under extraction.diagnostics after
+        # export; the strict models must accept it — consolidated output
+        # shipped to clients has to validate against our own schema.
         from bibr.enrich.consolidate import consolidate_bibs
         from bibr.export.json_export import validate_export
 
@@ -214,14 +215,18 @@ class TestConsolidatedExportValidates:
             year=2020,
             container=None,
         )
-        ref.match = {MatchSource.CROSSREF: ExternalMatch(doi="10.1/x", score=99.0)}
-        meta = PaperMetadata(doi="10.1/x", title="T", references=[ref])
-        out = export_paper_to_json(_minimal_paper(metadata=meta))
+        ref.match = {MatchSource.CROSSREF: ExternalMatch(doi="10.1234/x", score=99.0)}
+        meta = PaperMetadata(doi="10.1234/x", title="T", references=[ref])
+        paper = _minimal_paper(metadata=meta)
+        paper.extraction = _extraction_block()
+        out = export_paper_to_json(paper)
 
         n = consolidate_bibs(out, mode="fill")
 
         assert n == 1
-        assert out["bib"][0]["consolidated_fields"]
+        assert out["extraction"]["diagnostics"]["consolidation"] == [
+            {"bib_id": 1, "fields": ["doi"]}
+        ]
         assert validate_export(out) == []
 
 
@@ -400,24 +405,27 @@ class TestComputePaperId:
         paper = _minimal_paper(paper_id="custom-id")
         assert paper._compute_paper_id() == "custom-id"
 
-    def test_doi_used_when_no_user_id(self):
+    def test_file_stem_used_when_no_user_id(self):
+        # Not the DOI: the id must not change when a later bibr reads the DOI
+        # differently, and it matches ``bibr batch`` and metacheck's stem ids.
         paper = _minimal_paper()
-        assert paper._compute_paper_id() == "10.1234/test"
+        assert paper.metadata.doi == "10.1234/test"
+        assert paper._compute_paper_id() == "test"
 
-    def test_filename_fallback_when_no_doi(self):
+    def test_file_stem_without_doi(self):
         paper = _minimal_paper(
             metadata=PaperMetadata(doi="", title="No DOI Paper"),
         )
-        assert paper._compute_paper_id() == "test.pdf"
+        assert paper._compute_paper_id() == "test"
 
     def test_user_id_beats_doi(self):
         paper = _minimal_paper(paper_id="my-id")
         paper.metadata.doi = "10.9999/should-not-use"
         assert paper._compute_paper_id() == "my-id"
 
-    def test_no_metadata_falls_to_filename(self):
+    def test_no_metadata_falls_to_file_stem(self):
         paper = _minimal_paper(metadata=None)
-        assert paper._compute_paper_id() == "test.pdf"
+        assert paper._compute_paper_id() == "test"
 
 
 # ── _merge_ocr_metadata ───────────────────────────────────────────────
@@ -562,18 +570,19 @@ class TestDetectXrefs:
         sentences = [
             PaperSentence(text_id=1, text="See Table 2 for results.", section_id=1, paragraph_id=1)
         ]
-        tables = [PaperTable(table_id=2, df=pd.DataFrame(), tbl_html="", section_id=1)]
+        tables = [PaperTable(table_id=2, df=pd.DataFrame(), tbl_html="", section_id=1, label="2")]
         xrefs = detect_xrefs(sentences, tables, [])
         assert len(xrefs) == 1
         assert xrefs[0].xref_type == "table"
         assert xrefs[0].xref_id == 2
         assert xrefs[0].text_id == 1
+        assert xrefs[0].tier == "label"
 
     def test_figure_xref_detected(self):
         sentences = [
             PaperSentence(text_id=1, text="As shown in Figure 3.", section_id=1, paragraph_id=1)
         ]
-        figures = [PaperFigure(figure_id=3, section_id=1, image_b64=None, caption=None)]
+        figures = [PaperFigure(figure_id=3, section_id=1, image_b64=None, caption=None, label="3")]
         xrefs = detect_xrefs(sentences, [], figures)
         assert len(xrefs) == 1
         assert xrefs[0].xref_type == "figure"
@@ -599,13 +608,13 @@ class TestDetectXrefs:
         xrefs = detect_xrefs(sentences, [], figures)
         assert len(xrefs) == 2
 
-    def test_nonexistent_table_not_matched(self):
+    def test_nonexistent_table_keeps_a_row_without_target(self):
         sentences = [
             PaperSentence(text_id=1, text="Table 99 is referenced.", section_id=1, paragraph_id=1)
         ]
         tables = [PaperTable(table_id=1, df=pd.DataFrame(), tbl_html="", section_id=1)]
         xrefs = detect_xrefs(sentences, tables, [])
-        assert len(xrefs) == 0
+        assert [(x.xref_type, x.xref_id, x.tier) for x in xrefs] == [("table", 0, "position")]
 
     def test_multiple_tables_in_one_sentence(self):
         sentences = [
@@ -618,12 +627,12 @@ class TestDetectXrefs:
         xrefs = detect_xrefs(sentences, tables, [])
         assert len(xrefs) == 3
 
-    def test_no_xrefs_without_items(self):
+    def test_mentions_without_items_have_no_target(self):
         sentences = [
             PaperSentence(text_id=1, text="Table 1 and Figure 1.", section_id=1, paragraph_id=1)
         ]
         xrefs = detect_xrefs(sentences, [], [])
-        assert len(xrefs) == 0
+        assert [(x.xref_type, x.xref_id) for x in xrefs] == [("table", 0), ("figure", 0)]
 
     # ── Compound "and" refs ──
 
@@ -632,7 +641,7 @@ class TestDetectXrefs:
             PaperSentence(text_id=1, text="Tables 5 and 6 show.", section_id=1, paragraph_id=1)
         ]
         tables = [
-            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1)
+            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1, label=str(i))
             for i in range(5, 7)
         ]
         xrefs = detect_xrefs(sentences, tables, [])
@@ -659,7 +668,7 @@ class TestDetectXrefs:
         """Tables 5-7 should produce xrefs for 5, 6, and 7."""
         sentences = [PaperSentence(text_id=1, text="See Tables 5-7.", section_id=1, paragraph_id=1)]
         tables = [
-            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1)
+            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1, label=str(i))
             for i in range(5, 8)
         ]
         xrefs = detect_xrefs(sentences, tables, [])
@@ -873,10 +882,10 @@ class TestExportMatchSerialization:
             year=2020,
             container="Nature",
             match={
-                MatchSource.CROSSREF: ExternalMatch(id="10.1/cr", score=0.95, title="Ref"),
+                MatchSource.CROSSREF: ExternalMatch(id="10.1234/CR", score=95.0, title="Ref"),
             },
         )
-        meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
+        meta = PaperMetadata(doi="10.1234/test", title="Test", references=[ref])
         paper = _minimal_paper(metadata=meta)
         result = export_paper_to_json(paper)
 
@@ -884,7 +893,9 @@ class TestExportMatchSerialization:
         assert "match" not in result["bib"][0]
         bib_match = result["bib_match"]
         assert len(bib_match) == 1
-        assert bib_match[0]["service_id"] == "10.1/cr"
+        # A DOI service id is lowercase like every exported DOI, and the
+        # enrichment score (0-100) is published on the 0-1 scale.
+        assert bib_match[0]["service_id"] == "10.1234/cr"
         assert bib_match[0]["score"] == 0.95
         assert bib_match[0]["service"] == "crossref"
         assert bib_match[0]["bib_id"] == 1
@@ -997,9 +1008,9 @@ class TestBibIsolatedFromMatches:
             url=None,
             match={
                 MatchSource.CROSSREF: ExternalMatch(
-                    id="10.1/cr",
+                    id="10.1234/cr",
                     score=100.0,
-                    doi="10.1/cr",
+                    doi="10.1234/cr",
                     title="A Study of X",
                     year=2020,
                     container="Nature",
@@ -1008,7 +1019,7 @@ class TestBibIsolatedFromMatches:
                     first_page="100",
                     last_page="115",
                     publisher="Nature Publishing",
-                    url="https://doi.org/10.1/cr",
+                    url="https://doi.org/10.1234/cr",
                 ),
             },
         )
@@ -1029,7 +1040,7 @@ class TestBibIsolatedFromMatches:
         assert bib["title"] == "A study of X"
         # The Crossref match is preserved in bib_match[] for traceability.
         assert len(result["bib_match"]) == 1
-        assert result["bib_match"][0]["doi"] == "10.1/cr"
+        assert result["bib_match"][0]["doi"] == "10.1234/cr"
 
     def test_book_reference_not_contaminated_by_journal_match(self):
         """Regression for the v12 corpus pattern: book entries (Cohen 1988,
@@ -1077,7 +1088,7 @@ class TestBibIsolatedFromMatches:
             authors="Smith, J. & Jones, K.",
             year=2020,
             container="Nature",
-            doi="10.999/raw",
+            doi="10.9999/RAW",
             match={
                 MatchSource.CROSSREF: ExternalMatch(
                     id="10.1234/abc",
@@ -1091,7 +1102,8 @@ class TestBibIsolatedFromMatches:
         meta = PaperMetadata(doi="10.1/test", title="Test", references=[ref])
         result = export_paper_to_json(_minimal_paper(metadata=meta))
         bib = result["bib"][0]
-        assert bib["doi"] == "10.999/raw"
+        # Printed values stay, except that a DOI is lowercased like every DOI.
+        assert bib["doi"] == "10.9999/raw"
         assert bib["title"] == "A study of X"
         assert bib["container"] == "Nature"
         assert bib["authors"] == "Smith, J. & Jones, K."
@@ -1102,32 +1114,59 @@ class TestBibIsolatedFromMatches:
 
 class TestExportXrefSerialization:
     def test_xref_type_routing(self):
-        """Each xref exports target_id and xref_type directly."""
+        """Each xref exports its type and the export id of the row it names:
+        the parser's table 2 and figure 3 are the paper's only ones, so they
+        export as 1, and a footnote reference names the footnote row."""
         xrefs = [
             PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=1),
             PaperXref(xref_id=2, xref_type="table", contents="Table 2", text_id=1),
             PaperXref(xref_id=3, xref_type="figure", contents="Figure 3", text_id=1),
             PaperXref(xref_id=4, xref_type="foot", contents="*", text_id=1),
         ]
-        contents = _minimal_contents(xrefs=xrefs)
+        sentences = [
+            PaperSentence(text_id=1, text="Hello.", section_id=1, paragraph_id=1),
+            PaperSentence(text_id=4, text="* A note.", section_id=2, paragraph_id=2),
+        ]
+        sections = [
+            *_minimal_contents().sections,
+            PaperSection(
+                section_id=2,
+                header="Footnote 1",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.FOOTNOTE,
+                synthetic_kind="footnote",
+                footnote_label="*",
+            ),
+        ]
+        contents = _minimal_contents(
+            xrefs=xrefs,
+            sentences=sentences,
+            sections=sections,
+            tables=[PaperTable(2, pd.DataFrame(), "", 1)],
+            figures=[PaperFigure(3, 1, None, None)],
+        )
         paper = _minimal_paper(contents=contents)
         result = export_paper_to_json(paper)
 
-        bib_xref = result["xref"][0]
-        assert bib_xref["target_id"] == 1
-        assert bib_xref["xref_type"] == "bib"
+        assert [(x["xref_type"], x["target_id"]) for x in result["xref"]] == [
+            ("bib", 1),
+            ("table", 1),
+            ("figure", 1),
+            ("foot", 1),
+        ]
+        assert result["footnote"] == [{"footnote_id": 1, "label": "*", "text_id": 4}]
 
-        tbl_xref = result["xref"][1]
-        assert tbl_xref["target_id"] == 2
-        assert tbl_xref["xref_type"] == "table"
-
-        fig_xref = result["xref"][2]
-        assert fig_xref["target_id"] == 3
-        assert fig_xref["xref_type"] == "figure"
-
-        foot_xref = result["xref"][3]
-        assert foot_xref["target_id"] == 4
-        assert foot_xref["xref_type"] == "foot"
+    def test_unresolved_targets_are_null(self):
+        """A reference to a table, figure or footnote the export does not have
+        names no row."""
+        xrefs = [
+            PaperXref(xref_id=2, xref_type="table", contents="Table 2", text_id=1),
+            PaperXref(xref_id=3, xref_type="figure", contents="Figure 3", text_id=1),
+            PaperXref(xref_id=4, xref_type="foot", contents="*", text_id=1),
+        ]
+        result = export_paper_to_json(_minimal_paper(contents=_minimal_contents(xrefs=xrefs)))
+        assert [x["target_id"] for x in result["xref"]] == [None, None, None]
 
 
 # ── JSON export: display math replacement ──────────────────────────────
@@ -1211,29 +1250,53 @@ class TestExportUrlSanity:
 
 
 class TestExportTopLevel:
-    def test_paper_id_from_doi(self):
+    def test_paper_id_from_file_stem(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["paper_id"] == "10.1234/test"
+        assert result["paper_id"] == "test"
 
     def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "11.0"
+        assert result["schema_version"] == "12.0"
         assert result["metadata"]["title"] == "Test Paper"
         assert result["metadata"]["doi"] == "10.1234/test"
-        # v11 split the input artifact's identity out of the paper's metadata.
+        # v11 split the input artifact's identity out of the paper's metadata;
+        # v12 carries the whole SHA-256, null when the bytes were never seen.
         assert result["source"] == {
             "file_name": "test.pdf",
-            "file_hash": "abc123",
+            "sha256": None,
             "input_format": "pdf",
         }
-        assert "file_hash" not in result["metadata"]
+        assert "sha256" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]
+
+    def test_source_sha256_is_the_full_digest(self):
+        paper = _minimal_paper()
+        paper.input_file.sha256 = "ab" * 32
+        result = export_paper_to_json(paper)
+        assert result["source"]["sha256"] == "ab" * 32
+
+    def test_xml_input_is_jats(self):
+        # The vocabulary names the format: bibr reads XML only as JATS, and
+        # ``tei`` is left for GROBID converters.
+        paper = _minimal_paper(
+            input_file=InputFile(
+                path=Path("/tmp/test.xml"),
+                file_hash="abc123",
+                input_format=InputFormat(
+                    file_extension=".xml",
+                    detected_mime_type="application/xml",
+                    file_type="XML",
+                ),
+            )
+        )
+        result = export_paper_to_json(paper)
+        assert result["source"]["input_format"] == "jats"
 
     def test_input_format_lowercased(self):
         # The pipeline stores enum member names ("PDF", "DOCX", "XML"); the
-        # schema contract is lowercase ("pdf", "docx", "xml", "unknown").
+        # schema contract is lowercase ("pdf", "docx", "jats", "unknown").
         paper = _minimal_paper(
             input_file=InputFile(
                 path=Path("/tmp/test.pdf"),
@@ -1428,9 +1491,9 @@ class TestSchemaValidation:
         paper.extraction = _extraction_block()
         data = export_paper_to_json(paper)
         data["extraction"]["diagnostics"].pop("references_complete")
-        data["validation"].pop("blocking")
-        data["validation"].pop("promotable")
-        for issue in data["validation"]["issues"]:
+        data["extraction"]["validation"].pop("blocking")
+        data["extraction"]["validation"].pop("promotable")
+        for issue in data["extraction"]["validation"]["issues"]:
             issue.pop("origin_stage")
             issue.pop("evidence_ids")
             issue.pop("blocking")
@@ -1438,11 +1501,13 @@ class TestSchemaValidation:
         validated = PaperExport.model_validate(data)
 
         assert validated.extraction.diagnostics.references_complete is True
-        assert validated.validation.blocking == 0
-        assert validated.validation.promotable is True
-        assert validated.validation.issues[0].origin_stage == "export"
-        assert validated.validation.issues[0].evidence_ids == []
-        assert validated.validation.issues[0].blocking is False
+        validation = validated.extraction.validation
+        assert validation is not None
+        assert validation.blocking == 0
+        assert validation.promotable is True
+        assert validation.issues[0].origin_stage == "export"
+        assert validation.issues[0].evidence_ids == []
+        assert validation.issues[0].blocking is False
 
 
 class TestSchemaIsContract:
@@ -1464,24 +1529,28 @@ class TestSchemaIsContract:
         data["text"][0]["_bogus"] = 1
         assert validate_export(data), "undeclared text key must fail validation"
 
-    def test_region_meta_text_fields_are_declared(self):
-        """The v4 underscore region fields are part of the export contract."""
+    def test_region_meta_is_declared_under_extraction_not_on_text_rows(self):
+        """v12: the v4 layout features are processing payload
+        (``extraction.text_regions``); text rows reject them."""
         from bibr.export.json_export import validate_export
 
-        data = export_paper_to_json(_minimal_paper())
-        data["text"][0].update(
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block()
+        data = export_paper_to_json(paper)
+        data["extraction"]["text_regions"] = [
             {
-                "_font_size": 9.5,
-                "_font_bold": True,
-                "_is_italic": False,
-                "_bbox_2d": [10.0, 20.0, 110.0, 40.0],
-                "_region_type": "text",
-                "_page_w": 612,
-                "_page_h": 792,
+                "text_id": 1,
+                "font_size": 9.5,
+                "font_bold": True,
+                "is_italic": False,
+                "page_number": 1,
+                "bbox": [10.0, 20.0, 110.0, 40.0],
+                "region_type": "text",
             }
-        )
-        errors = validate_export(data)
-        assert errors == [], f"Validation errors: {errors}"
+        ]
+        assert validate_export(data) == []
+        data["text"][0]["_bbox_2d"] = [10.0, 20.0, 110.0, 40.0]
+        assert validate_export(data), "text rows must not accept layout features"
 
     def test_regions_payload_is_declared(self):
         """include_regions output (extraction.regions) validates against the schema."""
@@ -1501,8 +1570,6 @@ class TestSchemaIsContract:
                 "font_bold": False,
                 "section_id": 1,
                 "content": "Hello.",
-                "bbox_height": 2.0,
-                "bbox_width": 2.0,
                 "char_density": 0.5,
                 "estimated_line_height": 1.1,
             }
@@ -1679,13 +1746,13 @@ class TestProcessingWarnings:
         paper = _minimal_paper()
         paper.extraction = _extraction_block()
         paper.processing_warnings = [
-            "OCR failed for page index 3: timeout",
-            "Crossref enrichment timed out",
+            ProcessingWarning(WarningCode.OCR_PAGE_FAILED, "page 4: TimeoutError: timeout"),
+            ProcessingWarning(WarningCode.CROSSREF_ENRICHMENT_TIMEOUT, "timed out after 120s"),
         ]
         result = export_paper_to_json(paper)
         assert result["extraction"]["warnings"] == [
-            "OCR failed for page index 3: timeout",
-            "Crossref enrichment timed out",
+            {"code": "OCR_PAGE_FAILED", "message": "page 4: TimeoutError: timeout"},
+            {"code": "CROSSREF_ENRICHMENT_TIMEOUT", "message": "timed out after 120s"},
         ]
 
     def test_warnings_round_trip_through_schema(self):
@@ -1693,9 +1760,29 @@ class TestProcessingWarnings:
 
         paper = _minimal_paper()
         paper.extraction = _extraction_block()
-        paper.processing_warnings = ["test warning"]
+        paper.processing_warnings = [ProcessingWarning(WarningCode.LOW_TEXT_QUALITY, "0.12")]
         result = export_paper_to_json(paper)
         assert validate_export(result) == []
+
+    def test_block_and_paper_warnings_are_unioned_in_order(self):
+        """The stage snapshots the warnings into the block as objects; the
+        Paper may gain more afterwards. Both reach the export once each."""
+        seen = ProcessingWarning(WarningCode.REF_SEG_CRF_FALLBACK, "LLM seg tier disabled")
+        later = ProcessingWarning(WarningCode.CONSOLIDATE_WITHOUT_ENRICHMENT, "nothing to merge")
+        paper = _minimal_paper()
+        paper.extraction = _extraction_block(warnings=[seen.to_dict()])
+        paper.processing_warnings = [seen, later]
+        result = export_paper_to_json(paper)
+        assert result["extraction"]["warnings"] == [seen.to_dict(), later.to_dict()]
+
+    def test_prose_and_malformed_warnings_fail_the_export(self):
+        import pytest
+
+        for bad in ("OCR failed for page index 3", {"code": "lowercase", "message": "m"}):
+            paper = _minimal_paper()
+            paper.extraction = _extraction_block(warnings=[bad])
+            with pytest.raises(ValueError):
+                export_paper_to_json(paper)
 
 
 # ── output validation gate wiring ──────────────────────────────────────
@@ -1706,7 +1793,7 @@ class TestValidationGateWiring:
         paper = _minimal_paper()
         paper.extraction = _extraction_block()
         result = export_paper_to_json(paper)
-        assert result["validation"] == {
+        assert result["extraction"]["validation"] == {
             "errors": 0,
             "warnings": 0,
             "blocking": 0,
@@ -1722,7 +1809,7 @@ class TestValidationGateWiring:
             references_incomplete=True,
         )
         paper = _minimal_paper(metadata=metadata)
-        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
+        paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
 
         result = export_paper_to_json(paper)
 
@@ -1730,12 +1817,12 @@ class TestValidationGateWiring:
         assert result["metadata"]["doi"] == "10.1234/core"
         assert result["bib"] == []
         assert result["extraction"]["diagnostics"]["references_complete"] is False
-        assert result["validation"]["errors"] == 1
-        assert result["validation"]["blocking"] == 1
-        assert result["validation"]["promotable"] is False
+        assert result["extraction"]["validation"]["errors"] == 1
+        assert result["extraction"]["validation"]["blocking"] == 1
+        assert result["extraction"]["validation"]["promotable"] is False
         issue = next(
             issue
-            for issue in result["validation"]["issues"]
+            for issue in result["extraction"]["validation"]["issues"]
             if issue["code"] == "VAL_REFERENCES_INCOMPLETE"
         )
         assert issue["severity"] == "error"
@@ -1766,11 +1853,11 @@ class TestValidationGateWiring:
 
         result = export_paper_to_json(paper)
 
-        assert [issue["code"] for issue in result["validation"]["issues"]] == [
+        assert [issue["code"] for issue in result["extraction"]["validation"]["issues"]] == [
             "VAL_DUPLICATE",
             "VAL_REPLAY",
         ]
-        assert result["validation"]["warnings"] == 2
+        assert result["extraction"]["validation"]["warnings"] == 2
 
     def test_source_abstract_warning_remains_one_canonical_issue_through_export(self):
         from bibr.extract.front_matter import (
@@ -1842,7 +1929,7 @@ class TestValidationGateWiring:
 
         suspect = [
             issue
-            for issue in result["validation"]["issues"]
+            for issue in result["extraction"]["validation"]["issues"]
             if issue["code"] == "VAL_ABSTRACT_SUSPECT"
         ]
         assert len(suspect) == 1
@@ -1861,15 +1948,16 @@ class TestValidationGateWiring:
         two shapes of one finding made every consumer reconcile them."""
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
         paper.extraction = _extraction_block()
-        paper.processing_warnings = ["ocr retried page 3"]
+        retried = ProcessingWarning(WarningCode.OCR_REGION_FAILED, "ocr retried page 3")
+        paper.processing_warnings = [retried]
 
         result = export_paper_to_json(paper)
 
-        block = result["validation"]
+        block = result["extraction"]["validation"]
         assert block["warnings"] >= 1
         codes = {i["code"] for i in block["issues"]}
         assert "VAL_TITLE_GENERIC" in codes
-        assert result["extraction"]["warnings"] == ["ocr retried page 3"]
+        assert result["extraction"]["warnings"] == [retried.to_dict()]
 
     def test_validate_false_skips_gate(self):
         paper = _minimal_paper(metadata=PaperMetadata(doi="10.1/x", title="Untitled"))
@@ -1887,8 +1975,8 @@ class TestValidationGateWiring:
         paper.extraction = _extraction_block()
         result = export_paper_to_json(paper)
         # export still produced a dict, with the failure surfaced as VAL_INTERNAL
-        assert result["validation"]["warnings"] >= 1
-        assert "VAL_INTERNAL" in {i["code"] for i in result["validation"]["issues"]}
+        assert result["extraction"]["validation"]["warnings"] >= 1
+        assert "VAL_INTERNAL" in {i["code"] for i in result["extraction"]["validation"]["issues"]}
         assert result["extraction"]["warnings"] == []
 
 
@@ -1917,7 +2005,10 @@ class TestMetadataIsScalarOnly:
         paper.extraction = _extraction_block(
             ocr={"backend": "glm-http", "model": None, "profile": "glm"},
         )
-        paper.processing_warnings = ["w1", "w2"]
+        paper.processing_warnings = [
+            ProcessingWarning(WarningCode.OCR_TABLE_DROPPED, "w1"),
+            ProcessingWarning(WarningCode.OCR_CONTROL_CHARS, "w2"),
+        ]
         metadata = export_paper_to_json(paper)["metadata"]
         for k, v in metadata.items():
             if k == "keywords":
@@ -2013,129 +2104,73 @@ class TestIncludeRegionsToggle:
 # ── v4 training region metadata on text blocks ─────────────────────────
 
 
-class TestV4RegionMetadataOnTextBlocks:
-    """The v4 training _* fields on text blocks are opt-in (include_region_meta):
-    they are debug/training payload , not consumer API."""
+class TestV4RegionMetadataInExtraction:
+    """The v4 training layout features are opt-in (include_region_meta) and,
+    since v12, ride ``extraction.text_regions`` keyed by ``text_id``: they are
+    debug/training payload, not paper content."""
 
-    _META_KEYS = (
-        "_font_size",
-        "_font_bold",
-        "_is_italic",
-        "_bbox_2d",
-        "_region_type",
-        "_page_w",
-        "_page_h",
-    )
+    _REGION_META = {
+        "font_size": 10.5,
+        "font_bold": True,
+        "is_italic": False,
+        "bbox": [100.0, 50.0, 900.0, 250.0],  # 0..1000 layout space
+        "region_type": "text",
+        "region_page": 2,
+        "region_index": 3,
+    }
+
+    def _paper(self, region_meta):
+        sent = PaperSentence(
+            text_id=1,
+            text="Some text.",
+            section_id=1,
+            paragraph_id=1,
+            page_number=2,
+            region_meta=region_meta,
+        )
+        contents = _minimal_contents(sentences=[sent])
+        contents.page_sizes = {2: (612.0, 792.0)}  # US Letter, points
+        paper = _minimal_paper(contents=contents)
+        paper.extraction = _extraction_block()
+        return paper
 
     def test_region_meta_omitted_by_default(self):
-        """Without include_region_meta, no _* keys appear even when region_meta is set."""
-        sent = PaperSentence(
-            text_id=1,
-            text="Some text.",
-            section_id=1,
-            paragraph_id=1,
-            page_number=2,
-            region_meta={
-                "font_size": 10.5,
-                "font_bold": True,
-                "is_italic": False,
-                "bbox_2d": [61.2, 594.0, 550.8, 752.4],
-                "region_type": "text",
-                "page_w": 612.0,
-                "page_h": 792.0,
-            },
-        )
-        paper = _minimal_paper(contents=_minimal_contents(sentences=[sent]))
-        result = export_paper_to_json(paper)
-        blk = result["text"][0]
-        for key in self._META_KEYS:
-            assert key not in blk, f"{key} must be omitted without include_region_meta"
+        result = export_paper_to_json(self._paper(dict(self._REGION_META)))
+        assert "text_regions" not in result["extraction"]
+        assert not [k for k in result["text"][0] if k.startswith("_")]
 
-    def test_region_meta_fields_present_when_set(self):
-        """_font_size, _bbox_2d, _region_type always present when region_meta given.
-
-        region_meta["bbox_2d"] now carries PDF-point coords (bottom-left origin,
-        y-up) — the containment-correct bbox produced upstream — NOT the raw
-        0..1000 layout space. It must land inside the page dimensions.
-        """
-        page_w, page_h = 612.0, 792.0
-        bbox_pts = [61.2, 594.0, 550.8, 752.4]  # inside the US-Letter page, points
-        sent = PaperSentence(
-            text_id=1,
-            text="Some text.",
-            section_id=1,
-            paragraph_id=1,
-            page_number=2,
-            region_meta={
-                "font_size": 10.5,
-                "font_bold": True,
-                "is_italic": False,
-                "bbox_2d": bbox_pts,
-                "region_type": "text",
-                "page_w": page_w,
-                "page_h": page_h,
-            },
+    def test_region_meta_rows_present_when_opted_in(self):
+        """The region's 0..1000 layout box is exported in points from the
+        top-left of its page, inside the page size ``extraction.pages`` gives."""
+        result = export_paper_to_json(
+            self._paper(dict(self._REGION_META)), include_region_meta=True
         )
-        paper = _minimal_paper(contents=_minimal_contents(sentences=[sent]))
-        result = export_paper_to_json(paper, include_region_meta=True)
-        text_blocks = result.get("text", [])
-        assert text_blocks, "expected at least one text block"
-        blk = text_blocks[0]
-        for key in ("_font_size", "_bbox_2d", "_region_type"):
-            assert key in blk, f"missing v4 training field: {key}"
-        assert blk["_font_size"] == 10.5
-        assert blk["_font_bold"] is True
-        assert blk["_is_italic"] is False
-        assert blk["_bbox_2d"] == bbox_pts
-        assert blk["_region_type"] == "text"
-        assert blk["_page_w"] == page_w
-        assert blk["_page_h"] == page_h
-        # Containment invariant: the PDF-point bbox lands inside the page.
-        x1, y1, x2, y2 = blk["_bbox_2d"]
-        assert 0 <= x1 <= x2 <= blk["_page_w"]
-        assert 0 <= y1 <= y2 <= blk["_page_h"]
+        (row,) = result["extraction"]["text_regions"]
+        assert row == {
+            "text_id": 1,
+            "font_size": 10.5,
+            "font_bold": True,
+            "is_italic": False,
+            "page_number": 2,
+            "bbox": [61.2, 39.6, 550.8, 198.0],
+            "region_type": "text",
+        }
+        (page,) = result["extraction"]["pages"]
+        assert page == {"page_number": 2, "width": 612.0, "height": 792.0}
+        x1, y1, x2, y2 = row["bbox"]
+        assert 0 <= x1 <= x2 <= page["width"]
+        assert 0 <= y1 <= y2 <= page["height"]
+        assert not [k for k in result["text"][0] if k.startswith("_")]
 
-    def test_region_meta_fields_present_and_none_when_no_region_meta(self):
-        """Opted in but region_meta is None (DOCX, pre-v4): _* fields present but None."""
-        sent = PaperSentence(
-            text_id=1,
-            text="Some text.",
-            section_id=1,
-            paragraph_id=1,
-            page_number=1,
-            # region_meta=None is the default
-        )
-        paper = _minimal_paper(contents=_minimal_contents(sentences=[sent]))
-        result = export_paper_to_json(paper, include_region_meta=True)
-        text_blocks = result.get("text", [])
-        assert text_blocks
-        blk = text_blocks[0]
-        for key in self._META_KEYS:
-            assert key in blk, f"missing v4 training field: {key}"
-            assert blk[key] is None, f"{key} should be None when region_meta is absent"
+    def test_no_row_for_a_sentence_without_region_meta(self):
+        """Opted in but region_meta is None (DOCX, pre-v4): no row at all."""
+        result = export_paper_to_json(self._paper(None), include_region_meta=True)
+        assert "text_regions" not in result["extraction"]
 
     def test_reference_region_type_preserved(self):
-        """reference_content region_type threads through to the exported text block."""
-        sent = PaperSentence(
-            text_id=1,
-            text="Smith J. (2020). Some paper.",
-            section_id=2,
-            paragraph_id=1,
-            page_number=3,
-            region_meta={
-                "font_size": 9.0,
-                "font_bold": False,
-                "is_italic": None,
-                "bbox_2d": [50.0, 700.0, 950.0, 730.0],
-                "region_type": "reference_content",
-                "page_w": None,
-                "page_h": None,
-            },
-        )
-        paper = _minimal_paper(contents=_minimal_contents(sentences=[sent]))
-        result = export_paper_to_json(paper, include_region_meta=True)
-        blk = result["text"][0]
-        assert blk["_region_type"] == "reference_content"
+        meta = {**self._REGION_META, "region_type": "reference_content"}
+        result = export_paper_to_json(self._paper(meta), include_region_meta=True)
+        assert result["extraction"]["text_regions"][0]["region_type"] == "reference_content"
 
 
 # The commentary abstract-fabrication guard and the keyword-recovery policy
@@ -2175,21 +2210,24 @@ class TestExtractionProvenance:
 
     def test_schema_version_is_at_the_root_and_package_version_under_extraction(self):
         # v11 put the schema version at the root (its presence is the reader's
-        # dispatch signal) and left the producing *package* version as the sole
-        # ``extraction.bibr_version``.
+        # dispatch signal); the producing *package* version is only
+        # ``extraction.producer.version`` (``extraction.bibr_version`` before 12).
         paper = _minimal_paper()
-        paper.extraction = _extraction_block(bibr_version="9.9.9-test")
+        paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "11.0"
-        assert result["extraction"]["bibr_version"] == "9.9.9-test"
+        assert result["schema_version"] == "12.0"
+        assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert "schema_version" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]
 
-    def test_extraction_none_when_unset_and_validates(self):
+    def test_minimal_extraction_when_unset_and_validates(self):
+        """Outside the pipeline the exporter still emits ``extraction``: the
+        producer and export time, no settings (v12)."""
         from bibr.export.json_export import validate_export
 
         result = export_paper_to_json(_minimal_paper())
-        assert result.get("extraction") is None
+        assert set(result["extraction"]) >= {"producer", "completed_at", "validation"}
+        assert "settings" not in result["extraction"]
         assert validate_export(result) == []
 
     def test_export_passes_through_paper_extraction(self):
@@ -2197,7 +2235,7 @@ class TestExtractionProvenance:
 
         paper = _minimal_paper()
         paper.extraction = _extraction_block(
-            bibr_version="9.9.9-test",
+            producer={"name": "bibr", "version": "9.9.9-test"},
             settings={
                 "ref_seg": "llm",
                 "ref_parse": "ner",
@@ -2208,7 +2246,7 @@ class TestExtractionProvenance:
             timings={"stages": {"extract": 1.0}, "total_seconds": 1.0},
         )
         result = export_paper_to_json(paper)
-        assert result["extraction"]["bibr_version"] == "9.9.9-test"
+        assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert result["extraction"]["settings"]["ref_parse"] == "ner"
         assert result["extraction"]["diagnostics"]["ref_seg_fallback_used"] is True
         assert result["extraction"]["timings"]["total_seconds"] == 1.0
@@ -2345,7 +2383,7 @@ class TestExtractionProvenance:
         ctx = self._ctx(timings={"validate": 0.10, "extract": 1.2345})
         ext = _build_extraction(ctx, _minimal_paper())
 
-        assert ext["bibr_version"] == bibr.__version__
+        assert ext["producer"] == {"name": "bibr", "version": bibr.__version__, "build_sha": None}
         assert ext["settings"]["ref_seg"] == "llm"
         assert ext["settings"]["ref_parse"] == "llm"
         assert ext["diagnostics"]["references_complete"] is True
@@ -2363,37 +2401,52 @@ class TestExtractionProvenance:
 
         ext = _build_extraction(ctx, _minimal_paper())
 
-        assert ext["build_sha"] == "a" * 40
+        assert ext["producer"]["build_sha"] == "a" * 40
 
     def test_build_extraction_detects_seg_fallback(self):
-        from bibr.extract.extractor import SEG_FALLBACK_WARNING_PREFIX
-        from bibr.pipeline.stages.export import _build_extraction
-
-        paper = _minimal_paper()
-        paper.processing_warnings = [f"{SEG_FALLBACK_WARNING_PREFIX}: produced 0 spans"]
-        ext = _build_extraction(self._ctx(), paper)
-        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
-
-    def test_build_extraction_detects_geom_cascade(self):
-        # A geom->LLM cascade is a fall-back from the configured (geom) segmenter
-        # and must flip ref_seg_fallback_used, even though it uses a distinct prefix.
-        from bibr.extract.extractor import GEOM_CASCADE_WARNING_PREFIX
         from bibr.pipeline.stages.export import _build_extraction
 
         paper = _minimal_paper()
         paper.processing_warnings = [
-            f"{GEOM_CASCADE_WARNING_PREFIX}: geom low-confidence (0.947 < 0.95) or empty"
+            ProcessingWarning(WarningCode.REF_SEG_CRF_FALLBACK, "produced 0 spans")
+        ]
+        ext = _build_extraction(self._ctx(), paper)
+        assert ext["diagnostics"]["ref_seg_fallback_used"] is True
+        assert ext["warnings"] == [{"code": "REF_SEG_CRF_FALLBACK", "message": "produced 0 spans"}]
+
+    def test_build_extraction_detects_geom_cascade(self):
+        # A geom->LLM cascade is a fall-back from the configured (geom) segmenter
+        # and must flip ref_seg_fallback_used, even though it has a distinct code.
+        from bibr.pipeline.stages.export import _build_extraction
+
+        paper = _minimal_paper()
+        paper.processing_warnings = [
+            ProcessingWarning(
+                WarningCode.REF_SEG_GEOM_CASCADE, "geom low-confidence (0.947 < 0.95) or empty"
+            )
         ]
         ext = _build_extraction(self._ctx(), paper)
         assert ext["diagnostics"]["ref_seg_fallback_used"] is True
 
+    def test_build_extraction_detects_a_segmenter_error(self):
+        # A region or CRF segmenter that raised did not produce the final
+        # segmentation either (both were filed under the CRF-fallback prefix).
+        from bibr.pipeline.stages.export import _build_extraction
+
+        for code in (WarningCode.REF_SEG_REGION_ERROR, WarningCode.REF_SEG_CRF_ERROR):
+            paper = _minimal_paper()
+            paper.processing_warnings = [ProcessingWarning(code, "error: RuntimeError('x')")]
+            ext = _build_extraction(self._ctx(), paper)
+            assert ext["diagnostics"]["ref_seg_fallback_used"] is True, code
+
     def test_build_extraction_merge_split_is_not_fallback(self):
         # Merge-split is a correction on top of the segmenter, not a fall-back.
-        from bibr.extract.extractor import MERGE_SPLIT_WARNING_PREFIX
         from bibr.pipeline.stages.export import _build_extraction
 
         paper = _minimal_paper()
-        paper.processing_warnings = [f"{MERGE_SPLIT_WARNING_PREFIX}: +1 segment(s)"]
+        paper.processing_warnings = [
+            ProcessingWarning(WarningCode.REF_SEG_MERGE_SPLIT, "split into 1 more segment(s)")
+        ]
         ext = _build_extraction(self._ctx(), paper)
         assert ext["diagnostics"]["ref_seg_fallback_used"] is False
 
@@ -2477,28 +2530,30 @@ class TestExtractionProvenance:
         assert ext["timings"]["total_seconds"] == 4.0
 
 
-class TestQualificationProvenanceIsAlwaysPresent:
-    """An external qualification runner reads
-    ``prediction["qualification_provenance"]`` by SUBSCRIPT, so this key is
-    carved out of the v11 absence rule: null when no LLM ran, never omitted.
-    Omitting it would KeyError the runner mid-sweep on any --no-llm arm."""
+class TestQualificationProvenanceRidesExtraction:
+    """v12 moved the deployment-qualification surface from the root
+    ``qualification_provenance`` key to ``extraction.qualification``. It follows
+    the ``extraction`` absence rule: omitted when no LLM task ran."""
 
-    def test_null_not_omitted_when_no_llm_ran(self):
+    def test_omitted_when_no_llm_ran(self):
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         assert paper.qualification_provenance is None
 
         result = export_paper_to_json(paper)
 
-        assert "qualification_provenance" in result
-        assert result["qualification_provenance"] is None
+        assert "qualification" not in result["extraction"]
+        assert "qualification_provenance" not in result
 
     def test_populated_when_an_llm_ran(self):
         paper = _minimal_paper()
+        paper.extraction = _extraction_block()
         paper.qualification_provenance = {"model_id": "nuextract3", "fallback_outcome": "recovered"}
 
         result = export_paper_to_json(paper)
 
-        assert result["qualification_provenance"]["model_id"] == "nuextract3"
+        assert result["extraction"]["qualification"]["model_id"] == "nuextract3"
+        assert "qualification_provenance" not in result
 
 
 # ── paper self-identity: scalar fields + info_match ────────────────────
@@ -2569,7 +2624,7 @@ class TestPaperSelfIdentityExport:
         assert "bib_id" not in entry
         assert entry["service"] == "crossref"
         assert entry["service_id"] == "10.1234/test"
-        assert entry["score"] == 100.0
+        assert entry["score"] == 1.0
         assert entry["container"] == "Psychological Science"
         assert entry["volume"] == "31"
         assert entry["first_page"] == "65"
@@ -2584,11 +2639,19 @@ class TestPaperSelfIdentityExport:
 # ── xref tier export ──────────────────────────────────────────────────
 
 
-def test_xref_export_carries_tier():
+def test_xref_tier_is_exported_under_diagnostics_not_on_the_row():
     from bibr.export.json_export import XrefExport
 
-    x = XrefExport(target_id=1, xref_type="bib", contents="[1]", text_id=3, tier="numeric")
-    assert x.tier == "numeric"
-    # non-bib xrefs default to null
-    fig = XrefExport(target_id=1, xref_type="figure", contents="Figure 1", text_id=3)
-    assert fig.tier is None
+    x = XrefExport(xref_id=1, target_id=1, xref_type="bib", contents="[1]", text_id=3)
+    assert "tier" not in x.model_dump()
+
+    paper = _minimal_paper()
+    paper.extraction = _extraction_block()
+    paper.contents.xrefs.append(
+        PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=1, tier="numeric")
+    )
+    result = export_paper_to_json(paper)
+    xref_id = result["xref"][-1]["xref_id"]
+    assert result["extraction"]["diagnostics"]["xref_tier"] == [
+        {"xref_id": xref_id, "tier": "numeric"}
+    ]

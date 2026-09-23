@@ -41,8 +41,10 @@ def test_part_models_are_trailing_and_preserve_physical_payloads():
         "df",
         "provenance",
     ]
-    assert fields(PaperFigure)[-1].name == "parts"
-    assert fields(PaperTable)[-1].name == "parts"
+    # Fields added later trail the positional ones, so positional construction
+    # keeps working.
+    assert [item.name for item in fields(PaperFigure)][-2:] == ["parts", "label"]
+    assert [item.name for item in fields(PaperTable)][-2:] == ["parts", "label"]
 
 
 def test_ord29_page_one_decoration_does_not_become_a_tenth_scholarly_figure():
@@ -186,7 +188,9 @@ def test_ord121_containment_caption_variants_are_evidence_not_next_ownership():
     )
     assert "VAL_CAPTION_DUPLICATE" in {issue.code for issue in paper.validation_issues}
     exported = export_paper_to_json(paper)
-    assert "VAL_CAPTION_DUPLICATE" in {issue["code"] for issue in exported["validation"]["issues"]}
+    assert "VAL_CAPTION_DUPLICATE" in {
+        issue["code"] for issue in exported["extraction"]["validation"]["issues"]
+    }
 
 
 def test_doi_only_caption_does_not_bridge_different_explicit_figure_numbers():
@@ -336,6 +340,34 @@ def test_ord237_rotated_continued_table_groups_before_caption_contention():
     )
     assert continued.object_id == "table:1"
     assert "continuation_evidence" in continued.reasons
+
+
+def test_continued_html_table_keeps_each_pages_source_markup():
+    """A table continued across pages exports the printed HTML of each piece,
+    not a re-render of the merged frame, which drops rowspans and adds
+    ``class="dataframe"`` noise."""
+    first = (
+        "<table><tr><th>Domain</th><th>Score</th></tr>"
+        '<tr><td rowspan="2">Monitoring</td><td>10</td></tr><tr><td>11</td></tr></table>'
+    )
+    second = (
+        "<table><tr><th>Domain</th><th>Score</th></tr><tr><td>Action</td><td>20</td></tr></table>"
+    )
+    pages = [[] for _ in range(2)]
+    pages[0] = [
+        _region(1, "figure_title", "Table 1 | Scores", bbox=[70, 60, 900, 80]),
+        _region(2, "table", first, bbox=[70, 100, 930, 900]),
+    ]
+    pages[1] = [
+        _region(1, "figure_title", "Table 1 (continued) | Scores", bbox=[70, 60, 900, 80]),
+        _region(2, "table", second, bbox=[70, 100, 930, 600]),
+    ]
+
+    (table,) = _parse(pages).tables
+
+    assert len(table.parts) == 2
+    assert table.tbl_html == f"{first}\n{second}"
+    assert "dataframe" not in table.tbl_html
 
 
 def test_unlabelled_explicit_continuation_groups_only_with_compatible_previous_table():
@@ -693,10 +725,15 @@ def test_printed_roman_table_id_reconciles_receipt_xref_and_content_section():
     )
     assert assignment.object_id == "table:1"
 
-    sentence = PaperSentence(text_id=1, text="See Table 1.", section_id=0, paragraph_id=1)
+    # Mentions resolve by the printed label, which is a string: "Table I"
+    # finds it, an arabic "Table 1" names no printed table.
+    assert printed_table.label == "I"
+    sentence = PaperSentence(
+        text_id=1, text="See Table I, not Table 1.", section_id=0, paragraph_id=1
+    )
     assert [
         (xref.xref_type, xref.xref_id) for xref in detect_xrefs([sentence], contents.tables, [])
-    ] == [("table", 1)]
+    ] == [("table", 1), ("table", 0)]
 
     parser.create_content_sections(contents)
     printed_section = next(

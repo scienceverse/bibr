@@ -6,6 +6,211 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed — export schema 12.0 (breaking)
+
+The JSON export moves to schema `12.0`. It separates what the paper says from
+how bibr produced it, and the generated JSON Schema is now a documented
+contract. bibr writes and reads only 12.x; a v11 export or core checkpoint is
+rejected, as v10 was by 11.0. The drafted 11.1 is retired and was never
+released.
+
+- `extraction` now holds everything about how the output was produced, and
+  is always present; everything else is the paper. Root keys are emitted in the
+  order `paper_id`, `schema_version`, `source`; `metadata`, `author`,
+  `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`,
+  `table`, `footnote`, `eq`; `metadata_match`, `affiliation_match`,
+  `funding_match`, `bib_match`; `extraction`. A Paper exported
+  outside the pipeline gets a minimal `extraction` block (package version,
+  export time, diagnostics, validation) with `settings` omitted.
+- The root `validation` block moved to `extraction.validation`. Readers of
+  saved files can use `bibr.validation.payload_validation(payload)`, which
+  finds it in both 12.x and older exports.
+- Figure and table `parts` left the content rows. The whole-object fields are
+  now truly whole: a figure detected as several panel crops gets an `image`
+  composited from them (it used to be the first panel), and a table continued
+  across pages keeps each printed piece's HTML in `html` instead of a lossy
+  re-render of the merged cells. Each piece's page and bounding box moved to
+  `extraction.float_parts`. Merged figures and continued tables no longer lose
+  pieces when a later merge step combines them. With images requested, each
+  figure image is now serialized once, not twice.
+- Processing fields left the content rows and now live under `extraction`,
+  keyed by the rows' IDs: `section[].classification_score` and
+  `classification_source` → `extraction.diagnostics.section_classification`
+  (an unscored section's score is `null`, not `0.0`); `xref[].tier` →
+  `extraction.diagnostics.xref_tier`; `metadata.paper_type_confidence` and
+  `oecd_confidence` → `extraction.diagnostics.paper_classification`;
+  `bib[].consolidated_fields` (a comma-joined string) →
+  `extraction.diagnostics.consolidation` (a list of field names per `bib_id`);
+  the opt-in per-sentence `text[]._bbox_2d`, `_font_size`, `_font_bold`,
+  `_is_italic`, `_region_type`, `_page_w` and `_page_h` →
+  `extraction.text_regions` (same `--region-meta` opt-in); and the root
+  `qualification_provenance` → `extraction.qualification`, omitted rather than
+  `null` when no LLM task ran.
+- Duplicates are gone. `bib[].author` and `editor`, a split derived from the
+  printed strings, are removed; `bib[].authors` and `editors` stay exactly as
+  printed. `author[].affiliation` is removed; the `affiliation[]` table,
+  linked by `author_ids`, is the one source and is now built on every run from
+  the byline, with the parsed components `null` when no LLM ran (it used to be
+  empty then).
+- `xref[].xref_id` and `url[].url_id` are new 1-based primary keys, so every
+  record table has one. The xref's target stays in `target_id`; up to v10,
+  `xref_id` meant the target.
+- Absent values are `null`, never `""`: `author[].given` and `family`,
+  `section[].header` and `eq[].df`.
+- Closed vocabularies are enums in the schema: `section[].section_type`,
+  `bib_type` in `bib` and both match tables, `metadata.paper_type`,
+  `metadata.oecd_l1` and `oecd_l2`, the match tables' `service`,
+  `source.input_format`, `eq[].comp` and `validation.issues[].severity`. Export
+  maps a foreign reference type (`journal-article`, `article`) into the enum and
+  drops an off-vocabulary classifier label with a logged warning instead of
+  failing the paper. Every token is snake_case: `paper_type` `meta_analysis` and
+  `case_study`, `section_type` `data_availability` (was `open_data`), and
+  `xref_tier` `paren_numeric`, `flattened_superscript`, `author_year`.
+  `input_format` names the format rather than the file extension: `jats` for
+  bibr's XML input (was `xml`), `html` for `.htm` too, and `tei` for GROBID
+  TEI, which converters into this format write.
+- `section[]` holds only the paper's sections. Captions and footnotes are no
+  longer sections of their own (`section_type` `figure`, `table` or `footnote`,
+  with a made-up header such as "Figure 2" or "Footnote 3"). Their text
+  stays in `text[]`, after the body, one row per whole caption or note (not
+  per sentence), with a `null` `section_id`, so text search
+  still finds them and "the text of Results" is the running text of Results.
+  `figure[]` and `table[]` gain `text_id`, the caption's row, and their
+  `section_id` is now the section they are printed in (it was the caption's
+  section). The new `footnote[]` table has one row per footnote or endnote:
+  `footnote_id`, the printed marker as `label` ("1", "*", "†") and `text_id`.
+  The `figure`, `table` and `footnote` section types remain for printed
+  headings such as "Figures" or "Notes".
+- Every id is a 1-based position in document order. Section ids have no gaps
+  (a section added late, such as an unheaded abstract, is numbered where its
+  text is), and figure and table ids count the paper's figures and tables in
+  document order on every input; PDF used the printed number, which left gaps
+  where a figure was missed. Ids stay stable for the same input and bibr
+  version, not across versions: to match rows across versions, use a figure's
+  or table's printed label, a reference's DOI, or the text.
+- `xref[].target_id` names a real row or is `null`. A `foot` reference points
+  at `footnote[].footnote_id` (it held the footnote's ordinal); `equation`,
+  `section` and `supplementary` references are `null` (they held the number
+  they print, or `0`, which named no row).
+- A `foot` reference no longer claims more than bibr knows. A PDF note printed
+  without a mark (an author note, or text taken for a note) gets no reference;
+  it used to get one with its ordinal as `contents`, which is printed nowhere.
+  A footnote reference has no `start`/`end`: its mark is not in the sentence
+  text, and the search for the digit landed on any number there. Its
+  `text_id` is approximate: the last sentence of the paragraph holding the
+  mark (DOCX), or the sentence before the note (PDF).
+- One scale and one spelling per concept. Every score and confidence is 0–1:
+  `bib_match[]` and `metadata_match[]` `score` was 0–100. The match tables'
+  ISO 8601 `date` is `published_date`, like `metadata.published_date`; `bib[]`
+  gains `published_date` (the printed date or year in ISO form), and
+  consolidation fills it from the match instead of overwriting the printed
+  `bib[].date`. Every DOI is bare and lowercase.
+- A group author (a consortium, a JATS `<collab>`) is `author[].literal`, with
+  `given` and `family` null; it was in `family`.
+- `figure[].image` is a `data:` URI that names its media type
+  (`data:image/jpeg;base64,…`); the format used to vary unannounced (JPEG
+  crops, PNG composites, whatever a DOCX embedded).
+- `extraction.warnings` holds `{code, message}` objects instead of prose
+  strings. `code` is a stable UPPER_SNAKE code like the validation issue codes
+  (`OCR_PAGE_FAILED`, `REF_SEG_CRF_FALLBACK`, `CROSSREF_ENRICHMENT_TIMEOUT`, …)
+  and `message` carries the details (page, counts, exception type). The schema
+  pins the code's form, not a list, so another producer can add codes of its
+  own; bibr's are listed in the JSON schema reference. An OCR page failure now
+  numbers its page from 1, like the region warnings. `bibr batch` ledgers count
+  warnings by code, `bibr tables` writes them to `extraction_warnings`, and the
+  `*_WARNING_PREFIX` constants in `bibr.extract` are replaced by
+  `bibr.processing_warnings.WarningCode`. The OCR disk cache (format 10) and the
+  enrichment sidecar (schema 4) store the new shape, so entries written by an
+  earlier build are not reused.
+- Every field and model in `docs/schema/bibr-export-v12.schema.json` has a
+  description, and a test keeps it that way; the documentation site's JSON
+  schema page shows them. Both schema documents carry a stable `$id` under
+  `https://bibr.org/schema/`. The v11 and v10 schema files stay published,
+  frozen. In the strict document `required` means *present*: every key bibr
+  always writes is required, nullable or not, so a producer that drops a column
+  fails validation. Nullable fields are spelled `"type": [T, "null"]`, the form
+  R and code generators read, and identifiers (DOI, ORCID, ROR, SHA-256, ISO
+  dates, country codes, CRediT URIs), ids (1-based), offsets and scores carry
+  patterns and bounds.
+- `xref[]`, `url[]` and `eq[]` carry `start`/`end`: the span of the item
+  within its sentence's `text` in Unicode code points (0-based, end exclusive),
+  or `null` when it cannot be located unambiguously. `eq[].verbatim` is now
+  filled from it.
+- Normalized fields sit next to the printed ones: `metadata.published_date`
+  (ISO 8601, as precise as printed), `license_url` and `license_spdx`
+  (Creative Commons with a known version, CC0), `language`, `pmid`, `pmcid` and
+  `arxiv` (declared by JATS/HTML inputs; arXiv also from an arXiv DOI or the
+  page-1 arXiv stamp), and `author[].credit_roles` (CRediT term URIs matched
+  from the printed roles).
+- `source.file_hash` (the first 16 hex characters of the input's SHA-256) is
+  replaced by `source.sha256`, the whole digest. `extraction.bibr_version` and
+  `build_sha` are replaced by `extraction.producer` {`name`, `version`,
+  `build_sha`}, so another tool writing this format can say so. `producer` is
+  the software that extracted the content; the new `extraction.converter`, of
+  the same shape, names a tool that wrote another extractor's output into this
+  format, and is `null` in bibr's own exports. A file converted from GROBID TEI
+  has producer `grobid` and the converter, and its `source` is the PDF GROBID
+  read when the converter has it, else the TEI (`input_format` `tei`), so
+  `source.sha256` joins it to a bibr export of the same PDF. A converter
+  keeps the producer's `completed_at` (now the time the content was
+  extracted) when it has it, takes `paper_id` from `source.file_name`, and
+  starts its own warning codes with its name (`METACHECK_…`); a tool that
+  rewrites an export keeps its `schema_version` and every key, including
+  those of a later 12.x it does not know.
+- `paper_id` is required and never `null`: `--paper-id`, else the input file's
+  stem, as `bibr batch` and metacheck already name papers. It used to be the
+  DOI, which changed whenever a later bibr read the DOI differently. `bibr
+  batch` writes its own corpus-unique id (the name of the JSON file) into each
+  export.
+- One geometry convention for every bounding box: `[x0, y0, x1, y1]` in PDF
+  points on the page as displayed, measured from the top-left corner. The new
+  `extraction.pages` gives each page's width and height. `float_parts[].bbox`
+  and the caption and region boxes were in the layout model's 0–1000 space;
+  `text_regions[].bbox_2d` was in points from the bottom-left and is now `bbox`,
+  with the row's `page_number` replacing the per-row `page_w`/`page_h`.
+  `extraction.regions` drops `bbox_height`/`bbox_width` (derivable from
+  `bbox`), and its `char_density` and `estimated_line_height` are now per point.
+- The match tables carry the identifiers Crossref records hold: `author[]`
+  entries gain `orcid` and `affiliation` (name and ROR ID), and each record
+  gains `funder` (name, Open Funder Registry DOI, ROR ID, award numbers),
+  `license_url` (the version-of-record license; text-mining licenses are
+  skipped) and `license_spdx`.
+- New `affiliation_match` and `funding_match` tables hold the ROR organization
+  matched to each affiliation string and printed funder name (ROR ID, name,
+  country code, and for funders the Open Funder Registry DOI). They are filled
+  when enrichment runs (`--crossref`), with `ROR_ENRICH=false` to skip ROR. Only
+  ROR's own recommended (`chosen`) match is kept; strings without one stay
+  unmatched. `ROR_CLIENT_ID` raises ROR's rate limit from 50 to 2000 requests
+  per 5 minutes; matching is capped per paper by `ROR_ENRICH_TIMEOUT` and never
+  holds an export back.
+- The schema documents in `docs/schema/` are dedicated to the public domain
+  under CC0 1.0; the software stays AGPL. Example valid, invalid and
+  newer-minor exports live in `tests/fixtures/schema_conformance/`, checked
+  against both schema documents.
+- `Result` exposes every root table as `Records`, now including
+  `affiliation`, `funding`, `footnote` and the `metadata_match`,
+  `affiliation_match` and `funding_match` tables.
+- `figure[]` and `table[]` gain `label`: what the caption prints after the
+  word, as printed without whitespace (`3`, `3.1`, `S2`, `A1`, `IV`, `C`); a
+  "Supplementary Table 4" caption is labelled `S4`. It is read from PDF, DOCX
+  and HTML captions and from the JATS `<label>`, and is `null` when none was
+  printed or detected. Figure and table references now resolve by it, compared
+  case-insensitively without whitespace, instead of taking the printed number
+  as the id: "Table 3.1", "Table S2", "Figure A1" and "Table IV" link, and a
+  float bibr missed no longer shifts every later link. When no float of a kind
+  has a label, "Figure N" links the N-th figure by page and reading order. A
+  reference whose label names no float, or two, is still exported with a
+  `null` `target_id`; it used to be dropped. A piece captioned as a
+  continuation ("Table 3 (continued)", "Figure 3. Cont.") that was not merged
+  into its float does not count as a second float with that label. "Table S2" and "Supplementary
+  Table 2" are `table` references when an extracted table carries that label
+  and `supplementary` ones otherwise. `extraction.diagnostics.xref_tier`
+  records `label` or `position` for every figure and table reference.
+- 12.x is additive-only: new optional fields and new enum values may appear in
+  any 12.x release, and the reader model and reader schema accept both. Any
+  rename, move, removal, type change, new required key or dropped enum value
+  needs 13.0.
+
 ### Fixed
 
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
@@ -19,6 +224,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runtime check again, as `bibr batch` does. It stops before the layout model
   loads when no local OCR runtime can start, for example `--ocr paddle-vllm`
   without an NVIDIA GPU.
+- JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
+  `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
+  a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
+- The demo notebooks read each section's classification score from
+  `extraction.diagnostics.section_classification`; since 12.0 moved it there,
+  they showed 0% for every section.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title
@@ -29,13 +240,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
   "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
   still left out.
-- The reference under-extraction warning in `processing_warnings` now also
-  covers numeric citation styles. It previously counted only author-year
-  citations, so a numbered paper whose reference region was lost to OCR was
-  never flagged. It now also counts the distinct reference numbers cited by
-  bracket and superscript markers, up to the highest number where at least
-  half of 1..n are cited, and warns when fewer than half that many references
-  were parsed (at least 15 cited).
+- The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
+  `extraction.warnings`) now also covers numeric citation styles. It previously
+  counted only author-year citations, so a numbered paper whose reference
+  region was lost to OCR was never flagged. It now also counts the distinct
+  reference numbers cited by bracket and superscript markers, up to the highest
+  number where at least half of 1..n are cited, and warns when fewer than half
+  that many references were parsed (at least 15 cited).
 - The OCR disk cache (`CACHE_OCR`, on by default in the local demo) is now keyed
   on the bibr version too, so an upgraded bibr no longer reuses rendering,
   layout, native-text and OCR bundles made by the previous release. The key
@@ -67,9 +278,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- `bibr.Result(data)` loads exports written by newer releases of the same
+  major version, as the additive-only policy promises. It previously rejected
+  any unknown key and any `schema_version` other than the exact one it writes.
+  Unknown keys at any nesting level are now kept in `result.data` and in the
+  model's `model_extra`, and enum values it does not know yet are accepted. A
+  different major `schema_version` (`11.x`, `13.x`) and known fields of the
+  wrong type are still rejected. What bibr writes is still validated against
+  the strict models.
+- Tables captioned "Table 3.1" and "Table 3.2" on adjacent pages are no
+  longer merged as one table continued across pages, which appended Table
+  3.2's rows to Table 3.1 and lost its caption. Only the same whole label
+  continues a table.
+- "Supplementary Table 4" and "Supplementary Figure 4" give one
+  `supplementary` xref; they also gave a `table` or `figure` xref to the
+  paper's own Table 4 or Figure 4.
+- DOCX tables get their captions: a Caption-styled paragraph directly above
+  or below a table is its caption and leaves the body text, as figure
+  captions do; the table had none and the caption stayed in the body. A style
+  based on Caption, such as pandoc's "Table Caption" and "Image Caption",
+  counts as Caption-styled for tables and figures alike.
+- A PDF caption the layout model tags as a figure title that opens with
+  "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
+  found no table and fell back into the body text.
 
 ### Added
 
+- Parquet corpus tables. `bibr tables <exports> --out DIR`, `bibr.write_tables()`
+  and `bibr batch` (into `<out>/tables/` after every run; `--no-tables` skips
+  it) write any number of exports as one Parquet file per table: `paper` (one
+  row per paper), every record and match table, and `extraction_*` files for
+  the processing lists. Rows start with `paper_id`; column types come from the
+  schema, so every file has the same columns whatever papers it holds, with
+  lists and nested records kept as Arrow lists and structs. `pyarrow` is now a
+  core dependency.
 - `CROSSREF_NOT_FOUND_TTL_SECONDS` (default 1 day, `0` disables): the Crossref
   response caches now remember a DOI lookup's 404 (no record, typically a
   malformed DOI or one registered elsewhere) for that long. Repeat lookups then
@@ -80,6 +322,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
+  generated from the strict `PaperExport` models. `Result.model` is an instance
+  of it when built from a dict, and it remains a `PaperExport` subclass.
+  `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
+  alongside the strict `bibr-export-v12.schema.json`.
 
 ### Changed
 

@@ -1,9 +1,10 @@
 """Tests for footnote handling in PDFParser."""
 
 
-def test_footnote_xref_uses_ordinal_not_section_id():
-    """A footnote xref should reference the footnote *number*, not the
-    arbitrary section_id assigned by the parser counter."""
+def test_footnote_xref_targets_the_footnote_text():
+    """A footnote xref points at the footnote's own text row (``text_id``), the
+    key the export's ``target_id`` names, not at its ordinal or the section id
+    the parser counter assigned."""
     from bibr.paper_contents import PaperContents
     from bibr.structure.pdf_parser import PDFParser
 
@@ -15,12 +16,12 @@ def test_footnote_xref_uses_ordinal_not_section_id():
         links=[],
         sections_text={},
     )
-    # Seed two pending footnotes so we can verify ordinals 1 and 2.
+    # Seed two pending footnotes, printed with their marks.
     parser._footnotes.record(
-        text="first footnote text", page_number=1, body_section_id=0, deferred_text_index=0
+        text="1 first footnote text", page_number=1, body_section_id=0, deferred_text_index=0
     )
     parser._footnotes.record(
-        text="second footnote text", page_number=1, body_section_id=0, deferred_text_index=1
+        text="2 second footnote text", page_number=1, body_section_id=0, deferred_text_index=1
     )
     parser._deferred_last_text_id = [None]
     parser._section_counter = 5
@@ -29,9 +30,41 @@ def test_footnote_xref_uses_ordinal_not_section_id():
 
     parser.create_content_sections(contents)
     foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
-    assert [x.xref_id for x in foot_xrefs] == [1, 2], (
-        f"expected ordinals [1, 2], got {[x.xref_id for x in foot_xrefs]}"
+    footnote_text_ids = [s.text_id for s in contents.sentences if "footnote text" in s.text]
+    assert footnote_text_ids == [100, 101]
+    assert [x.xref_id for x in foot_xrefs] == footnote_text_ids
+    assert [x.contents for x in foot_xrefs] == ["1", "2"]
+
+
+def test_a_note_without_a_mark_is_referenced_from_nowhere():
+    """An author note or text taken for a note prints no mark, so no sentence
+    refers to it: it becomes a footnote row without a xref, instead of one
+    whose contents is an ordinal printed nowhere."""
+    from bibr.paper_contents import PaperContents
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(json_result=[])
+    contents = PaperContents(sentences=[], sections=[], tables=[], links=[], sections_text={})
+    parser._footnotes.record(
+        text="Correspondence should be addressed to J. Doe.",
+        page_number=1,
+        body_section_id=0,
+        deferred_text_index=0,
     )
+    parser._footnotes.record(
+        text="* Both authors contributed equally.",
+        page_number=1,
+        body_section_id=0,
+        deferred_text_index=0,
+    )
+    parser._deferred_last_text_id = [None]
+    parser._sentence_counter = 100
+
+    parser.create_content_sections(contents)
+
+    notes = [s for s in contents.sections if s.synthetic_kind == "footnote"]
+    assert [n.footnote_label for n in notes] == [None, "*"]
+    assert [x.contents for x in contents.xrefs if x.xref_type == "foot"] == ["*"]
 
 
 def test_footnote_xref_skips_display_formula_anchor():
@@ -70,7 +103,7 @@ def test_footnote_xref_skips_display_formula_anchor():
         ),
     ]
     parser._footnotes.record(
-        text="a real prose footnote", page_number=1, body_section_id=1, deferred_text_index=2
+        text="1 a real prose footnote", page_number=1, body_section_id=1, deferred_text_index=2
     )
     parser._deferred_last_text_id = [10, 11]
 
@@ -107,7 +140,7 @@ def test_footnote_xref_keeps_formula_anchor_when_nothing_else_precedes():
         ),
     ]
     parser._footnotes.record(
-        text="footnote after a leading formula",
+        text="1 footnote after a leading formula",
         page_number=1,
         body_section_id=1,
         deferred_text_index=1,

@@ -118,12 +118,18 @@ authors
 ### Sections (IMRaD classification)
 
 ```{r}
+# How each section's type was decided lives under extraction$diagnostics.
+scores <- data$extraction$diagnostics$section_classification %||% list()
+score_of <- function(id) {
+  for (row in scores) if (identical(row$section_id, id)) return(row$score %||% NA_real_)
+  NA_real_
+}
 sections <- do.call(rbind, lapply(data$section, function(s) {
   data.frame(
     section_id = s$section_id,
     header = s$header %||% "",
     section_type = s$section_type %||% "unknown",
-    score = round(s$classification_score %||% 0, 2),
+    score = round(score_of(s$section_id), 2),
     stringsAsFactors = FALSE
   )
 }))

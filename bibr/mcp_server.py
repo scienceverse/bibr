@@ -4,7 +4,7 @@ Exposes the extraction pipeline as MCP tools over stdio so agents (Claude
 Code, Claude Desktop, any MCP client) can chew papers and query the results
 without shelling out to the CLI or parsing whole export files.
 
-A full v11 export is far too large for a single tool result (sentence-level
+A full export is far too large for a single tool result (sentence-level
 text spans, table HTML, optionally base64 figure images), so the surface
 follows a chew-once / query-granularly contract: ``chew_paper`` runs the
 pipeline and returns only a compact summary; the ``get_*`` and
@@ -43,6 +43,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.api import Chewer, ChewOptions
 from bibr.exceptions import BibrError
+from bibr.validation import payload_validation
 
 __all__ = ["build_server", "run_mcp"]
 
@@ -91,7 +92,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
         value = data.get(key)
         return len(value) if isinstance(value, list) else None
 
-    if isinstance(data.get("validation"), dict):
+    if payload_validation(data) is not None:
         line = _format_validation_line(data)
         validation = line.strip() if line else "clean (0 errors, 0 warnings)"
     else:
@@ -111,6 +112,7 @@ def _summarize(paper_id: str, data: dict[str, Any], source: str) -> dict[str, An
             "references": count("bib"),
             "tables": count("table"),
             "figures": count("figure"),
+            "footnotes": count("footnote"),
             "equations": count("eq"),
         },
         "in_text_citations": _citation_coverage(data),
@@ -310,8 +312,9 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
         ctx: Context,
     ) -> dict[str, Any]:
         """Body text as ordered sentence spans, each with text_id, section_id,
-        paragraph_id, and page_number. Filter by section_id and/or page; paginate
-        with offset/limit (limit is capped at 500)."""
+        paragraph_id, and page_number; caption and footnote rows come last, with
+        section_id null. Filter by section_id and/or page; paginate with
+        offset/limit (limit is capped at 500)."""
         rows = get_store(ctx).rows(paper_id, "text")
         if section_id is not None:
             rows = [r for r in rows if r.get("section_id") == section_id]
@@ -402,8 +405,8 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
     async def get_tables(
         paper_id: str, table_id: int | None = None, *, ctx: Context
     ) -> dict[str, Any]:
-        """Extracted tables. Without table_id: id/caption/page per table. With
-        table_id: the full table including HTML markup and structured cells."""
+        """Extracted tables. Without table_id: id/label/caption/page per table.
+        With table_id: the full table including HTML markup and structured cells."""
         rows = get_store(ctx).rows(paper_id, "table")
         if table_id is None:
             return {
@@ -411,6 +414,7 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
                 "tables": [
                     {
                         "table_id": r.get("table_id"),
+                        "label": r.get("label"),
                         "caption": r.get("caption"),
                         "page_number": r.get("page_number"),
                         "section_id": r.get("section_id"),

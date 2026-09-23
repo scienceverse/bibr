@@ -271,6 +271,7 @@ def _run_batch(args: Any) -> int:
         dry_run=args.dry_run,
         cli_options=_cli_options(args),
         report_json=args.json,
+        tables=not args.no_tables,
     )
     if args.serve_url:
         options.remote = _remote_options(args, console)

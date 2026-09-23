@@ -25,6 +25,7 @@ from bibr.paper_contents import (
     CanonicalSection,
     is_exact_front_matter_furniture,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 # Pure-Python bucket helper, shared with both classifier runtimes (torch-free
 # module, so building the composite dedup key never forces torch).
@@ -39,10 +40,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-SECTION_CLASSIFIER_DEGRADED_WARNING = "section_classifier_degraded"
+SECTION_CLASSIFIER_DEGRADED_WARNING = ProcessingWarning(
+    WarningCode.SECTION_CLASSIFIER_DEGRADED,
+    "The trained section classifier is configured but did not answer; the LLM tier classified "
+    "the section headers",
+)
 
 
-def _note_section_classifier_degraded(degradation_warnings: list[str] | None) -> None:
+def _note_section_classifier_degraded(
+    degradation_warnings: list[ProcessingWarning] | None,
+) -> None:
     """Record once per paper that the configured trained tier did not answer.
 
     Whatever the cause — a core install without torch, weights that failed
@@ -560,7 +567,7 @@ async def classify_headers_batch_async(
     *,
     classifier_resources: ClassifierResources | None = None,
     settings: GlobalSettings | None = None,
-    degradation_warnings: list[str] | None = None,
+    degradation_warnings: list[ProcessingWarning] | None = None,
 ) -> list[tuple[CanonicalSection, float, bool | None, str | None]]:
     """Classify multiple headers efficiently (async version with model fallback).
 

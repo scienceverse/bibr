@@ -103,8 +103,10 @@ def test_crossref_enrich_respects_instance_settings():
 
     off = GlobalSettings()
     off.crossref.enrich = False
+    off.ror.enrich = False
     on = GlobalSettings()
     on.crossref.enrich = True
+    on.ror.enrich = False
 
     # ``crossref=None`` (the default) follows the instance's setting.
     assert enrichers_of(LocalPipeline(settings=off)) == []

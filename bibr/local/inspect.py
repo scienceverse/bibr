@@ -1,6 +1,6 @@
 """``bibr inspect`` — human-readable summary of a bibr JSON export.
 
-Reads a single extraction-output JSON file (a v11 export from
+Reads a single extraction-output JSON file (a v11 or v12 export from
 ``bibr.export.json_export.export_paper_to_json``) and prints title/authors/
 DOI/paper-type, structure counts (sections/sentences/tables/figures/
 equations), reference stats (bib count, in-text citation coverage,
@@ -35,6 +35,7 @@ from typing import Any
 # needs. cli.py is a light import (argparse/json/stdlib + a couple of lazy
 # in-function imports), so importing it here doesn't pull in heavy deps.
 from bibr.local.cli import _format_validation_line
+from bibr.validation import payload_validation
 
 
 def _looks_like_bibr_export(data: Any) -> bool:
@@ -100,7 +101,8 @@ def _authors_line(data: dict) -> str:
         if isinstance(a, dict):
             given = (a.get("given") or "").strip()
             family = (a.get("family") or "").strip()
-            full = f"{given} {family}".strip() or "?"
+            literal = (a.get("literal") or "").strip()  # a group author
+            full = f"{given} {family}".strip() or literal or "?"
         else:
             full = "?"
         names.append(full)
@@ -212,8 +214,7 @@ def _validation_lines(data: dict) -> list[str]:
     """Reuses Task 5's ``_format_validation_line`` (bibr/local/cli.py) —
     same rendering, same hardening against malformed ``errors``/``warnings``/
     ``issues`` shapes."""
-    validation = data.get("validation")
-    if not isinstance(validation, dict):
+    if payload_validation(data) is None:
         return ["  not present"]
     line = _format_validation_line(data)
     if line is None:
@@ -239,6 +240,7 @@ def _print_report(console, data: dict, source: str) -> None:
     console.print(
         f"Tables: {_count_or_dash(data, 'table')}   "
         f"Figures: {_count_or_dash(data, 'figure')}   "
+        f"Footnotes: {_count_or_dash(data, 'footnote')}   "
         f"Equations: {_count_or_dash(data, 'eq')}"
     )
     console.print()

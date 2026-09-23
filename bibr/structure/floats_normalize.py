@@ -26,9 +26,9 @@ already froze into the caption-assignment receipt. The ``*_with_remap``
 variants therefore hand back the old→new object-id map, and
 :func:`remap_caption_receipt` replays it onto the receipt so its
 ``object_id`` values still name live floats. The renumbering keeps a printed
-"Figure N"/"Table N" label as the id where a caption carries one — a bare
-positional renumber from 1 broke the correspondence ``detect_xrefs`` resolves
-body mentions by.
+"Figure N"/"Table N" number as the id where a caption carries one, as
+``_reconcile_object_ids`` reserved it. Body mentions resolve by the printed
+label itself (``PaperFigure.label``/``PaperTable.label``), not by the id.
 """
 
 from __future__ import annotations
@@ -44,6 +44,8 @@ from bibr.paper_contents import (
     PaperFigure,
     PaperTable,
 )
+from bibr.structure.float_images import composite_panel_image
+from bibr.structure.float_labels import caption_label, normalize_label
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,9 @@ _BARE_PANEL_RE = re.compile(r"^\(?(?:[A-Za-z]|\d{1,2})[\).]?$")
 _FIGURE_LABEL_RE = re.compile(r"^fig(?:ure)?\.?\s*\d+\b", re.IGNORECASE)
 _FIGURE_LABEL_NUMBER_RE = re.compile(r"^fig(?:ure)?\.?\s*(\d+)\b", re.IGNORECASE)
 
+# The printed number the renumbering keeps as a table's id. Continuations
+# match on the whole printed label instead (``caption_label``), so "Table 3.2
+# (continued)" never joins "Table 3.1".
 _TABLE_LABEL_RE = re.compile(r"^table\s+(\d+)\b", re.IGNORECASE)
 
 # Trailing continuation marker; parenthesized/bracketed only — a bare
@@ -99,13 +104,13 @@ def _renumber_honouring_printed_labels(objects, id_attribute: str, label_re) -> 
     """Renumber survivors, keeping the printed label as the id where there is one.
 
     ``_reconcile_object_ids`` deliberately reserves the printed number as the
-    object id — that is how ``detect_xrefs`` resolves a body mention of
-    "Figure 2" — and it runs *before* the mergers here. Renumbering
-    positionally from 1 therefore broke the correspondence whenever anything
-    merged: with a caption-less panel absorbed into FIGURE 2, the survivors
-    became 1 and 2, so a mention of "Figure 2" resolved to the figure
-    captioned FIGURE 3. Unlabelled survivors take the lowest number the
-    printed labels have not claimed.
+    object id — which is how ``detect_xrefs`` resolved a body mention of
+    "Figure 2" before mentions resolved by label — and it runs *before* the
+    mergers here. Renumbering positionally from 1 therefore broke the
+    correspondence whenever anything merged: with a caption-less panel
+    absorbed into FIGURE 2, the survivors became 1 and 2, so a mention of
+    "Figure 2" resolved to the figure captioned FIGURE 3. Unlabelled survivors
+    take the lowest number the printed labels have not claimed.
     """
     printed: dict[int, int] = {}
     claimed: set[int] = set()
@@ -216,8 +221,13 @@ def merge_figure_panels_with_remap(
         target = figures[target_idx]
         panel = figures[i]
         target.provenance.extend(panel.provenance)
+        target.parts.extend(panel.parts)
         if target.image_b64 is None and panel.image_b64 is not None:
             target.image_b64 = panel.image_b64
+    for target_idx in set(absorbed.values()):
+        target = figures[target_idx]
+        # The whole figure, not just one panel's crop.
+        target.image_b64 = composite_panel_image(target.parts) or target.image_b64
     # Snapshot the pre-merge ids before renumbering overwrites them; they are
     # what the caption receipt was frozen against.
     old_object_ids = [f"figure:{fig.figure_id}" for fig in figures]
@@ -256,11 +266,12 @@ def merge_table_continuations_with_remap(
 ) -> tuple[list[PaperTable], dict[str, str]]:
     """Collapse per-page continuation tables into the first page's table.
 
-    A table continues an earlier one when its "Table N" label matches *and*
-    its caption carries an explicit trailing "(Continued)" marker. A bare
-    repeated caption is not enough: the inline ownership layer already weighs
-    evidence this function cannot see (an intervening section heading, for
-    one) and deliberately keeps such tables apart.
+    A table continues an earlier one when its whole printed label matches
+    ("Table 3.1", not just "Table 3") *and* its caption carries an explicit
+    trailing "(Continued)" marker. A bare repeated caption is not enough: the
+    inline ownership layer already weighs evidence this function cannot see
+    (an intervening section heading, for one) and deliberately keeps such
+    tables apart.
     Rows are concatenated; a continuation page whose
     header row was promoted to column names by the HTML parser (headerless
     page) has that row restored as data. Survivors are renumbered from 1.
@@ -282,11 +293,11 @@ def merge_table_continuations_with_remap(
     merges = 0
     for table in tables:
         caption = (table.caption or "").strip()
-        label_match = _TABLE_LABEL_RE.match(caption)
-        if label_match is None:
+        label = caption_label(caption, "table")
+        if label is None:
             result.append(table)
             continue
-        survivor = by_label.get(label_match.group(1))
+        survivor = by_label.get(normalize_label(label))
         if (
             survivor is not None
             and _CONTINUED_RE.search(caption)
@@ -295,7 +306,7 @@ def merge_table_continuations_with_remap(
             merges += 1
             absorbed.append((old_object_ids[id(table)], survivor))
             continue
-        by_label[label_match.group(1)] = table
+        by_label[normalize_label(label)] = table
         result.append(table)
     if not merges:
         return result, {}
@@ -374,4 +385,5 @@ def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool
     survivor.df = merged
     survivor.tbl_html = f"{survivor.tbl_html}\n{continuation.tbl_html}"
     survivor.provenance.extend(continuation.provenance)
+    survivor.parts.extend(continuation.parts)
     return True

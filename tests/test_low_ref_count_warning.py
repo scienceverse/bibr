@@ -15,6 +15,7 @@ from bibr.pipeline.stages.post_parse import (
     _count_numbered_citations,
     _low_reference_count_warning,
 )
+from bibr.processing_warnings import WarningCode
 
 
 class TestCountDistinctIntextCitations:
@@ -46,7 +47,8 @@ class TestLowReferenceCountWarning:
         # 20 distinct cited works, only 5 references extracted.
         warn = _low_reference_count_warning(_body_with_n_distinct_cites(20), n_refs=5)
         assert warn is not None
-        assert "5" in warn and "20" in warn
+        assert warn.code == WarningCode.REF_UNDER_EXTRACTION_SUSPECTED
+        assert warn.message.startswith("5 references parsed vs 20 distinct in-text citations")
 
     def test_no_warning_when_counts_align(self):
         assert _low_reference_count_warning(_body_with_n_distinct_cites(20), n_refs=20) is None
@@ -83,7 +85,7 @@ class TestNumberedLowReferenceCountWarning:
         # A numeric-style body cites 1..40 but only 15 references were parsed.
         warn = _low_reference_count_warning("", n_refs=15, cited_numbers=set(range(1, 41)))
         assert warn is not None
-        assert "15 references parsed vs 40 distinct numbered in-text citations" in warn
+        assert "15 references parsed vs 40 distinct numbered in-text citations" in warn.message
 
     def test_no_warning_when_counts_align(self):
         assert _low_reference_count_warning("", n_refs=40, cited_numbers=set(range(1, 41))) is None
@@ -103,4 +105,4 @@ class TestNumberedLowReferenceCountWarning:
             _body_with_n_distinct_cites(30), n_refs=5, cited_numbers=set(range(1, 21))
         )
         assert warn is not None
-        assert "vs 30 distinct in-text citations" in warn
+        assert "vs 30 distinct in-text citations" in warn.message

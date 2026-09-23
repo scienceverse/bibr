@@ -1178,10 +1178,10 @@ def test_smoke_test_declines_by_default():
 def _smoke_export(*, n_authors: int, n_refs: int) -> dict:
     return {
         "paper_id": "sample",
-        "schema_version": "11.0",
+        "schema_version": "12.0",
         "source": {
             "file_name": "sample_paper.pdf",
-            "file_hash": "sample-hash",
+            "sha256": "5a" * 32,
             "input_format": "pdf",
         },
         "metadata": {
@@ -1206,6 +1206,10 @@ def _smoke_export(*, n_authors: int, n_refs: int) -> dict:
         "figure": [],
         "table": [],
         "eq": [],
+        "extraction": {
+            "producer": {"name": "bibr", "version": "0.0.0-test"},
+            "completed_at": "2026-09-22T10:00:00Z",
+        },
     }
 
 
