@@ -151,6 +151,16 @@ class TestResolveByLabel:
         tables = [_table(1, "2"), _table(2, "2")]
         assert _links("Table 2 lists", tables) == [("table", 0, "label")]
 
+    def test_an_unmerged_continuation_does_not_make_its_label_ambiguous(self):
+        """A continued piece that was not merged repeats its float's label;
+        the first piece is still the one the text means."""
+        first, piece = _table(1, "2", page=3), _table(2, "2", page=4)
+        first.caption, piece.caption = "Table 2. Results.", "Table 2 (continued)"
+        assert _links("Table 2 lists", [first, piece]) == [("table", 1, "label")]
+        figure, cont = _figure(1, "2"), _figure(2, "2")
+        cont.caption = "FIGURE 2 (Cont.) Panels C and D."
+        assert _links("Figure 2 shows", figures=[figure, cont]) == [("figure", 1, "label")]
+
     def test_roman_and_arabic_labels_are_different_strings(self):
         assert _links("Table 4 lists", LABELLED) == [("table", 0, "label")]
 

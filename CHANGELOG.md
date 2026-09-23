@@ -181,7 +181,9 @@ released.
   float bibr missed no longer shifts every later link. When no float of a kind
   has a label, "Figure N" links the N-th figure by page and reading order. A
   reference whose label names no float, or two, is still exported with a
-  `null` `target_id`; it used to be dropped. "Table S2" and "Supplementary
+  `null` `target_id`; it used to be dropped. A piece captioned "(continued)"
+  that was not merged into its float does not count as a second float with
+  that label. "Table S2" and "Supplementary
   Table 2" are `table` references when an extracted table carries that label
   and `supplementary` ones otherwise. `extraction.diagnostics.xref_tier`
   records `label` or `position` for every figure and table reference.

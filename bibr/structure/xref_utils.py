@@ -79,6 +79,11 @@ _FIRST_NUMBERED_RE = re.compile(NUMBERED_LABEL, re.IGNORECASE)
 _FIRST_LETTERED_RE = re.compile(LETTERED_LABEL, re.IGNORECASE)
 _NEXT_NUMBERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{NUMBERED_LABEL})", re.IGNORECASE)
 _NEXT_LETTERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{LETTERED_LABEL})", re.IGNORECASE)
+
+# A caption that marks its float as a later piece of an earlier one, near its
+# label: "Table 3 (continued)", "FIGURE 2 (Cont.)". Such a piece repeats the
+# label when it was not merged into the first.
+_CONTINUED_CAPTION_RE = re.compile(r"[(\[]\s*cont(?:inued|'d|d|\.)?\s*[)\]]", re.IGNORECASE)
 # A label split into what precedes its last number and that number:
 # "S12" → ("S", "12"), "3.1" → ("3.", "1").
 _LABEL_NUMBER_RE = re.compile(r"(?P<head>.*?)(?P<number>\d+)")
@@ -261,13 +266,25 @@ class _FloatIndex:
     page first), then in the order the parser produced them.
     """
 
-    def __init__(self, floats: list[tuple[int, str | None, int | None]]) -> None:
+    def __init__(self, floats: list[tuple[int, str | None, int | None, str | None]]) -> None:
         self.by_label: dict[str, list[int]] = {}
-        for float_id, label, _page in floats:
+        self._continued: set[int] = set()
+        for float_id, label, _page, caption in floats:
             if label:
                 self.by_label.setdefault(normalize_label(label), []).append(float_id)
+            if caption and _CONTINUED_CAPTION_RE.search(caption[:80]):
+                self._continued.add(float_id)
         ordered = sorted(floats, key=lambda item: item[2] or 0)
-        self.by_position = [float_id for float_id, _label, _page in ordered]
+        self.by_position = [item[0] for item in ordered]
+
+    def _named(self, ids: list[int]) -> int:
+        """The float a label names: the only one printed with it or, when
+        unmerged continuation pieces repeat the label, the only one that is not
+        a continuation; else 0."""
+        if len(ids) == 1:
+            return ids[0]
+        firsts = [float_id for float_id in ids if float_id not in self._continued]
+        return firsts[0] if len(firsts) == 1 else 0
 
     def resolve(self, label: str, kind: str) -> tuple[str, int, str | None]:
         """``(xref_type, xref_id, tier)`` for a mention of *kind* printing *label*.
@@ -289,7 +306,7 @@ class _FloatIndex:
                 [],
             )
             if ids or not supplementary:
-                return kind, ids[0] if len(ids) == 1 else 0, LABEL_TIER
+                return kind, self._named(ids) if ids else 0, LABEL_TIER
         elif not supplementary:
             number = next(
                 (int(candidate) for candidate in _label_candidates(label) if candidate.isdecimal()),
@@ -341,12 +358,12 @@ def detect_xrefs(
         (
             "table",
             TABLE_XREF_RE,
-            _FloatIndex([(t.table_id, t.label, t.page_number) for t in tables]),
+            _FloatIndex([(t.table_id, t.label, t.page_number, t.caption) for t in tables]),
         ),
         (
             "figure",
             FIGURE_XREF_RE,
-            _FloatIndex([(f.figure_id, f.label, f.page_number) for f in figures]),
+            _FloatIndex([(f.figure_id, f.label, f.page_number, f.caption) for f in figures]),
         ),
     )
 
