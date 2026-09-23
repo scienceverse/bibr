@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
+  preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
+  but only the torch layout path imports cv2. A core install runs layout
+  through ONNX Runtime, and `bibr chew` already accepted the same PDFs. The two
+  commands now share one check. Without torch, neither needs OpenCV. With
+  torch, both refuse a missing or broken `cv2` before any model loads, and
+  suggest `uv sync --extra torch`, or reinstalling `opencv-python-headless`
+  for a broken one. `bibr chew` on a core install also runs the local OCR
+  runtime check again, as `bibr batch` does. It stops before the layout model
+  loads when no local OCR runtime can start, for example `--ocr paddle-vllm`
+  without an NVIDIA GPU.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title

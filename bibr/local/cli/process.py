@@ -1,7 +1,6 @@
 """Chunked file processing loop for ``bibr chew``."""
 
 import asyncio
-import importlib.util
 import json
 import logging
 import sys
@@ -22,6 +21,7 @@ from bibr.local.cli.run_config import (
     _apply_runtime_settings,
     _preflight_local_backend,
     _preflight_ocr_runtime,
+    _preflight_opencv,
     resolve_run_config,
 )
 
@@ -317,14 +317,13 @@ async def _run_process(args) -> None:
     """Run the process command."""
     from rich.console import Console
 
-    # Imported from the package root (not from the ``doctor``/``inputs``
-    # submodules directly) so that
-    # ``monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", ...)``
-    # and ``monkeypatch.setattr("bibr.local.cli._collect_files", ...)`` (both
-    # used by existing tests) still take effect — those patches set an
+    # Imported from the package root (not from the ``inputs`` submodule
+    # directly) so that ``monkeypatch.setattr("bibr.local.cli._collect_files",
+    # ...)`` (used by existing tests) still takes effect — the patch sets an
     # attribute on the package, and only a lookup through the package at call
-    # time observes it.
-    from bibr.local.cli import _collect_files, _opencv_unavailable_reason
+    # time observes it. ``_preflight_opencv`` resolves
+    # ``_opencv_unavailable_reason`` the same way.
+    from bibr.local.cli import _collect_files
 
     console = Console(stderr=True)
 
@@ -425,27 +424,11 @@ async def _run_process(args) -> None:
             )
             sys.exit(2)
 
-    # opencv is only on the torch layout path (transformers' image processor
-    # imports cv2); a core install runs layout through ONNX Runtime, where the
-    # crop and post-processing are Pillow/numpy, so a missing cv2 is not a
-    # reason to refuse the PDF.
-    if (
-        not args.dry_run
-        and any(p.suffix.lower() == ".pdf" for p in files)
-        and importlib.util.find_spec("torch") is not None
-    ):
-        opencv_reason = _opencv_unavailable_reason()
-        if opencv_reason is not None:
-            hint = (
-                "uv sync --extra torch"
-                if "not installed" in opencv_reason
-                else "uv pip install --reinstall opencv-python-headless"
-            )
-            ui.error(
-                console,
-                f"Layout/OCR image runtime unavailable: {opencv_reason}",
-                hint=f"Repair with: [cyan]{hint}[/cyan]",
-            )
+    if not args.dry_run and any(p.suffix.lower() == ".pdf" for p in files):
+        opencv_problem = _preflight_opencv()
+        if opencv_problem is not None:
+            message, repair = opencv_problem
+            ui.error(console, message, hint=f"Repair with: [cyan]{repair}[/cyan]")
             sys.exit(1)
         # Fail fast when no local OCR runtime can start here (no suitable GPU
         # for paddle-vllm, no llama-server on PATH) — otherwise the run loads

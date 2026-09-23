@@ -173,10 +173,10 @@ def _remote_options(args: Any, console: Any) -> Any:
 def _local_options(args: Any, console: Any) -> Any:
     """Resolve the local pipeline exactly as ``bibr chew`` does; ``None`` on error."""
     from bibr.batch.runner import LocalOptions
-    from bibr.local.cli import _opencv_unavailable_reason
     from bibr.local.cli.run_config import (
         _apply_runtime_settings,
         _preflight_ocr_runtime,
+        _preflight_opencv,
         resolve_run_config,
     )
 
@@ -190,14 +190,10 @@ def _local_options(args: Any, console: Any) -> Any:
     def preflight(files: Sequence[Path]) -> str | None:
         if not any(f.suffix.lower() == ".pdf" for f in files):
             return None
-        reason = _opencv_unavailable_reason()
-        if reason is not None:
-            hint = (
-                "uv sync --extra ml"
-                if "not installed" in reason
-                else "uv pip install --reinstall opencv-python-headless"
-            )
-            return f"Layout/OCR image runtime unavailable: {reason} (repair with: {hint})"
+        opencv_problem = _preflight_opencv()
+        if opencv_problem is not None:
+            message, repair = opencv_problem
+            return f"{message} (repair with: {repair})"
         return _preflight_ocr_runtime(config)
 
     return LocalOptions(
