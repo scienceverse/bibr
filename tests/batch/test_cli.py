@@ -295,7 +295,7 @@ def test_local_pdfs_need_no_opencv_on_a_core_install(tmp_path, monkeypatch, caps
 
     assert sorted(p.name for p in chewed) == ["a.pdf", "b.pdf"]
     assert (out / "a.json").is_file() and (out / "b.json").is_file()
-    assert "opencv" not in capsys.readouterr().err
+    assert "Layout/OCR image runtime unavailable" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -348,7 +348,7 @@ def test_local_pdfs_still_get_the_ocr_runtime_check_on_a_core_install(
 
     err = capsys.readouterr().err
     assert "OCR backend cannot start here — paddle-vllm: no NVIDIA GPU" in err
-    assert "opencv" not in err
+    assert "Layout/OCR image runtime unavailable" not in err
     assert chewed == []
 
 

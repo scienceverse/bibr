@@ -127,7 +127,7 @@ async def test_chew_still_checks_the_ocr_runtime_on_a_core_install(tmp_path, mon
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "OCR backend cannot start here — paddle-vllm: no NVIDIA GPU" in err
-    assert "opencv" not in err
+    assert "Layout/OCR image runtime unavailable" not in err
 
 
 @pytest.mark.parametrize(
