@@ -140,9 +140,11 @@ def test_html_metadata_sections_tables_figures_refs_and_noise_filtering():
     ]
     assert len(contents.tables) == 1
     assert contents.tables[0].caption == "Table 1. Small table."
+    assert contents.tables[0].label == "1"
     assert contents.tables[0].contents == [["A", "B"], ["1", "2"]]
     assert len(contents.figures) == 1
     assert contents.figures[0].caption == "Figure 1. HTML figure caption."
+    assert contents.figures[0].label == "1"
 
     deferred = " ".join(t[0] for t in parser._deferred_texts)
     assert "Intro text with data link." in deferred
@@ -303,3 +305,22 @@ def test_declared_identifiers_and_language_reach_the_metadata():
     meta = HtmlParser(html).parse().preparsed_metadata
     assert meta is not None
     assert (meta.pmid, meta.arxiv, meta.language) == ("31234567", "2101.12345", "de")
+
+
+def test_html_figcaption_label_resolves_mentions():
+    html = b"""<!doctype html><html><body><article>
+      <h1>Labelled</h1>
+      <p>Figure S3 and Figure 2 agree.</p>
+      <figure><img src="a.png"><figcaption>Figure 2. Main.</figcaption></figure>
+      <figure><img src="b.png"><figcaption>Supplementary Figure 3. Extra.</figcaption></figure>
+      <figure><img src="c.png" alt="Figure 4 as alt text"></figure>
+    </article></body></html>"""
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    assert [figure.label for figure in contents.figures] == ["2", "S3", "4"]
+    assert [(x.xref_type, x.xref_id, x.tier) for x in contents.xrefs] == [
+        ("figure", 2, "label"),
+        ("figure", 1, "label"),
+    ]

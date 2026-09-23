@@ -18,6 +18,7 @@ PROSE = [
     "Figure 3.2 illustrates the effect of dose on latency.",
     "Fig. 3.2 illustrates the effect of dose on latency.",
     "Table 7 shows the results.",
+    "Table S1 lists the robustness checks.",
 ]
 
 CAPTIONS = [
@@ -27,12 +28,18 @@ CAPTIONS = [
     "Table 7.5. Descriptive statistics",
     "Table 2 - Results by condition",
     "Table 1 | Overview of measures",
+    "Table S2: Robustness checks",
+    "Table A1. Items",
+    "TABLE IV. Characteristics",
+    "Supplementary Table 4: Extra items",
 ]
 
 FIGURE_CAPTIONS = [
     "Figure 3: Effect of dose",
     "Fig. 3. Effect of dose",
     "Figure 3.2: Effect of dose",
+    "Figure S1. Controls",
+    "Suppl. Fig. 2: Traces",
 ]
 
 

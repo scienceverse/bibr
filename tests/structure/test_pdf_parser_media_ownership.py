@@ -41,8 +41,10 @@ def test_part_models_are_trailing_and_preserve_physical_payloads():
         "df",
         "provenance",
     ]
-    assert fields(PaperFigure)[-1].name == "parts"
-    assert fields(PaperTable)[-1].name == "parts"
+    # Fields added later trail the positional ones, so positional construction
+    # keeps working.
+    assert [item.name for item in fields(PaperFigure)][-2:] == ["parts", "label"]
+    assert [item.name for item in fields(PaperTable)][-2:] == ["parts", "label"]
 
 
 def test_ord29_page_one_decoration_does_not_become_a_tenth_scholarly_figure():
@@ -723,10 +725,15 @@ def test_printed_roman_table_id_reconciles_receipt_xref_and_content_section():
     )
     assert assignment.object_id == "table:1"
 
-    sentence = PaperSentence(text_id=1, text="See Table 1.", section_id=0, paragraph_id=1)
+    # Mentions resolve by the printed label, which is a string: "Table I"
+    # finds it, an arabic "Table 1" names no printed table.
+    assert printed_table.label == "I"
+    sentence = PaperSentence(
+        text_id=1, text="See Table I, not Table 1.", section_id=0, paragraph_id=1
+    )
     assert [
         (xref.xref_type, xref.xref_id) for xref in detect_xrefs([sentence], contents.tables, [])
-    ] == [("table", 1)]
+    ] == [("table", 1), ("table", 0)]
 
     parser.create_content_sections(contents)
     printed_section = next(

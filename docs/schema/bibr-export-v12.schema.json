@@ -1184,7 +1184,7 @@
         },
         "xref_tier": {
           "default": null,
-          "description": "Detector tier of each bibliography xref that recorded one.",
+          "description": "How each bibliography, figure and table xref that recorded it was linked.",
           "items": {
             "$ref": "#/$defs/XrefTierExport"
           },
@@ -1798,6 +1798,15 @@
             "null"
           ]
         },
+        "label": {
+          "default": null,
+          "description": "The printed label without the word, as printed with whitespace removed: '3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Figure 4' caption gives 'S4'. In-text references resolve by it. Null when none was printed or detected.",
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "page_number": {
           "description": "1-based page the figure starts on.",
           "minimum": 1,
@@ -1820,6 +1829,7 @@
       },
       "required": [
         "figure_id",
+        "label",
         "section_id",
         "image",
         "caption",
@@ -3543,6 +3553,15 @@
             "null"
           ]
         },
+        "label": {
+          "default": null,
+          "description": "The printed label without the word, as printed with whitespace removed: '3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Table 4' caption gives 'S4'. In-text references resolve by it. Null when none was printed or detected.",
+          "title": "Label",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "page_number": {
           "description": "1-based page the table starts on.",
           "minimum": 1,
@@ -3571,6 +3590,7 @@
       },
       "required": [
         "table_id",
+        "label",
         "section_id",
         "html",
         "contents",
@@ -4135,16 +4155,18 @@
     },
     "XrefTierExport": {
       "additionalProperties": false,
-      "description": "Which detector produced one bibliography xref.",
+      "description": "How one bibliography, figure or table xref was linked.",
       "properties": {
         "tier": {
-          "description": "Citation detector that produced the link.",
+          "description": "How the link was made: for a bib reference, the citation detector that found it; for a figure or table reference, 'label' (matched against the printed labels) or 'position' (no float of that kind has a label, so the printed number was taken as a position).",
           "enum": [
             "numeric",
             "paren_numeric",
             "flattened_superscript",
             "author_year",
-            "llm"
+            "llm",
+            "label",
+            "position"
           ],
           "title": "Tier",
           "type": "string"

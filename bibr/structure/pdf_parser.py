@@ -51,6 +51,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DocumentAssembler
 from bibr.structure.carry_over_manager import CarryOverState
+from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
 from bibr.structure.floats_normalize import (
     merge_figure_panels_with_remap,
     merge_table_continuations_with_remap,
@@ -185,24 +186,28 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
     # results" — and ``_handle_content`` then re-routes that sentence into
     # caption ownership, dropping it from the body text entirely.
     #
+    # The id is any printed label (``bibr.structure.float_labels.LABEL``):
+    # "Table S2:", "Figure A1.", "TABLE IV.", "Supplementary Table 4:".
+    #
     # Shared by the heading gate (HeadingHandlersMixin._is_implausible_heading),
     # the content caption re-router (TextHandlersMixin._handle_content), and the
     # loose caption discriminator (MediaHandlersMixin._handle_caption), so it
     # stays on PDFParser and the mixins reach it via ``self``.
     _TABLE_CAPTION_RE = re.compile(
-        r"^(Table\s+\d+(?:\.\d+)*\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?Table\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        r"^((?:Figure|Fig\.?)\s+\d+(?:\.\d+)*\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
     # Loose discriminator used ONLY on regions the layout model already labelled
     # as a caption (figure_title/chart_title).  No separator required — some
     # backends emit "Table 1 Overview" (space) or "Table 1 | Overview" (pipe).
+    # Any printed label counts, so "Table S1" is routed to the tables too.
     _LOOSE_TABLE_CAPTION_RE = re.compile(
-        r"^Table\s+(?:(?:\d+|[IVXLCDM]+)\b|contin(?:ued|uation)\b)", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?Table\s+(?:{LABEL}|contin(?:ued|uation)\b)", re.IGNORECASE
     )
 
     def __init__(
@@ -912,8 +917,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 content.strip()
             ):
                 # Some rotated PMC table labels are emitted as vision
-                # footnotes. Only a bare numbered/Roman TABLE label is safe to
-                # promote; ordinary statistical notes remain footnotes.
+                # footnotes. Only a bare TABLE label ("TABLE 2", "TABLE IV",
+                # "Table S1") is safe to promote; ordinary statistical notes
+                # remain footnotes.
                 treatment = "table_caption"
             dispatch_treatment = (
                 "structural"

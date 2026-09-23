@@ -104,7 +104,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
     ]
     xrefs = [
         PaperXref(xref_id=1, xref_type="bib", contents="[1]", text_id=2, tier="numeric"),
-        PaperXref(xref_id=1, xref_type="table", contents="Table 1", text_id=2),
+        PaperXref(xref_id=1, xref_type="table", contents="Table 1", text_id=2, tier="label"),
     ]
     if not with_refs:
         # refs="off" leaves no bibliography to point at; the table xref stays.
@@ -139,6 +139,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
                 "Table 1. Values",
                 2,
                 [],
+                label="1",
             )
         ],
         links=[
@@ -151,7 +152,7 @@ def _contents(*, with_refs: bool) -> PaperContents:
             )
         ],
         sections_text={1: "We measured the thing.", 2: "It replicated prior work [1]."},
-        figures=[PaperFigure(1, 2, None, "Figure 1. Plot", 2, [])],
+        figures=[PaperFigure(1, 2, None, "Figure 1. Plot", 2, [], label="1")],
         equations=[PaperEquation(text_id=2, grp_id=1, lhs="t", comp="=", rhs="3.42", df="28")],
     )
 

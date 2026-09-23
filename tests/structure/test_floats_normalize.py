@@ -246,6 +246,18 @@ class TestMergeTableContinuations:
         assert len(out) == 1
         assert len(out[0].df) == 2
 
+    def test_a_different_dotted_label_is_not_a_continuation(self):
+        """Table 3.2 shares the number 3 with Table 3.1, not the label."""
+        tables = [
+            _tbl(1, 4, "Table 3.1 Participants"),
+            _tbl(2, 5, "Table 3.2 Participants (Continued)"),
+        ]
+        out = merge_table_continuations(tables)
+        assert [t.caption for t in out] == [
+            "Table 3.1 Participants",
+            "Table 3.2 Participants (Continued)",
+        ]
+
     def test_same_label_without_marker_not_merged(self):
         """Two genuinely different tables that happen to share a label."""
         tables = [

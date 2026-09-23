@@ -12,6 +12,7 @@ from enum import StrEnum
 
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.paper_contents import CanonicalSection, PaperSection, Provenance
+from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD
 from bibr.structure.section_tree import STUDY_MARKER_RE, infer_level_from_numbering
 from bibr.structure.text_repair import (
     bbox_to_tuple,
@@ -52,7 +53,9 @@ _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]
 # transparency badge in Psychological Science). An explicit allowlist keeps the
 # strip from clipping legitimate trailing acronyms / Roman numerals.
 _TITLE_BADGE_GLYPH_RE = re.compile(r"\s+(?:TC)\s*$")
-_LOOSE_FIGURE_CAPTION_RE = re.compile(r"^(?:Figure|Fig\.?)\s+\d+\b", re.IGNORECASE)
+_LOOSE_FIGURE_CAPTION_RE = re.compile(
+    rf"^{SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}", re.IGNORECASE
+)
 
 # Prose that merely *opens* with a float reference. The loose caption
 # discriminators require no separator, because a caption-labelled region may
@@ -68,10 +71,12 @@ _LOOSE_FIGURE_CAPTION_RE = re.compile(r"^(?:Figure|Fig\.?)\s+\d+\b", re.IGNORECA
 # it is excluded explicitly.
 # Deliberately case-SENSITIVE: the lowercase continuation is the whole signal,
 # so the label alternation spells its own case variants instead of using
-# re.IGNORECASE.
+# re.IGNORECASE. The printed label is any the loose discriminators accept
+# ("Table S1 lists", "Supplementary Figure 2 shows").
 _FLOAT_PROSE_CONTINUATION_RE = re.compile(
-    r"^(?:[Tt]able|[Ff]igure|[Ff]ig\.?)\s+"
-    r"(?:\d+(?:\.\d+)*|[IVXLCDM]+)\s+"
+    r"^(?:[Ss]upplementa(?:ry|l)\s+|[Ss]uppl?\.\s*)?"
+    r"(?:[Tt]able|[Ff]igure|[Ff]ig\.?)\s+"
+    rf"{LABEL}\s+"
     r"(?!contin(?:ued|uation)\b)[a-z]"
 )
 

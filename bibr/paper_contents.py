@@ -576,6 +576,9 @@ class PaperTable:
     # synthetic section). Used for study-ID propagation.
     _body_section_id: int | None = field(default=None)
     parts: list[PaperTablePart] = field(default_factory=list)
+    # Printed label without the word ("3", "3.1", "S2", "IV"), from the
+    # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.
+    label: str | None = None
 
     @property
     def contents(self) -> list[list[str]]:
@@ -610,6 +613,9 @@ class PaperFigure:
     # synthetic section). Used for study-ID propagation.
     _body_section_id: int | None = field(default=None)
     parts: list[PaperFigurePart] = field(default_factory=list)
+    # Printed label without the word ("3", "3.1", "S2", "A1"), from the
+    # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.
+    label: str | None = None
 
 
 @dataclass
@@ -617,15 +623,17 @@ class PaperXref:
     """Cross-reference linking a sentence to a referenced item."""
 
     # ID of the referenced item: bib_id, table_id, figure_id, or the footnote's
-    # text_id. For equation, section and supplementary references it is the
+    # text_id; 0 for a table or figure reference that names no extracted float
+    # (or two). For equation, section and supplementary references it is the
     # number they print (0 when none), which the export does not publish.
     xref_id: int
     xref_type: str  # "bib", "table", "figure", "foot", "supplementary", "equation", "section"
     contents: str  # The reference text as it appears (e.g., "[1]", "Table 2", "Figure 3")
     text_id: int  # The sentence containing this reference
-    # Detection tier for bib xrefs ("numeric", "paren-numeric",
-    # "flattened-superscript", "author-year", "llm"); None for non-bib types
-    # and until the citation linker records it. Exported as
+    # How the xref was linked: for bib xrefs the detection tier ("numeric",
+    # "paren-numeric", "flattened-superscript", "author-year", "llm"), for
+    # table/figure xrefs "label" or "position" (``detect_xrefs``); None for
+    # other types and until the citation linker records it. Exported as
     # ``extraction.diagnostics.xref_tier``.
     tier: str | None = None
     # Character span of the reference in the sentence text, when the detector

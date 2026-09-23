@@ -140,6 +140,20 @@ released.
   against both schema documents.
 - `Result` exposes `affiliation`, `funding` and `metadata_match` as `Records`
   tables too.
+- `figure[]` and `table[]` gain `label`: what the caption prints after the
+  word, as printed without whitespace (`3`, `3.1`, `S2`, `A1`, `IV`, `C`); a
+  "Supplementary Table 4" caption is labelled `S4`. It is read from PDF, DOCX
+  and HTML captions and from the JATS `<label>`, and is `null` when none was
+  printed or detected. Figure and table references now resolve by it, compared
+  case-insensitively without whitespace, instead of taking the printed number
+  as the id: "Table 3.1", "Table S2", "Figure A1" and "Table IV" link, and a
+  float bibr missed no longer shifts every later link. When no float of a kind
+  has a label, "Figure N" links the N-th figure by page and reading order. A
+  reference whose label names no float, or two, is still exported with a
+  `null` `target_id`; it used to be dropped. "Table S2" and "Supplementary
+  Table 2" are `table` references when an extracted table carries that label
+  and `supplementary` ones otherwise. `extraction.diagnostics.xref_tier`
+  records `label` or `position` for every figure and table reference.
 - 12.x is additive-only: new optional fields and new enum values may appear in
   any 12.x release, and the reader model and reader schema accept both. Any
   rename, move, removal, type change, new required key or dropped enum value
@@ -203,6 +217,21 @@ released.
   different major `schema_version` (`11.x`, `13.x`) and known fields of the
   wrong type are still rejected. What bibr writes is still validated against
   the strict models.
+- Tables captioned "Table 3.1" and "Table 3.2" on adjacent pages are no
+  longer merged as one table continued across pages, which appended Table
+  3.2's rows to Table 3.1 and lost its caption. Only the same whole label
+  continues a table.
+- "Supplementary Table 4" and "Supplementary Figure 4" give one
+  `supplementary` xref; they also gave a `table` or `figure` xref to the
+  paper's own Table 4 or Figure 4.
+- DOCX tables get their captions: a Caption-styled paragraph directly above
+  or below a table is its caption and leaves the body text, as figure
+  captions do; the table had none and the caption stayed in the body. A style
+  based on Caption, such as pandoc's "Table Caption" and "Image Caption",
+  counts as Caption-styled for tables and figures alike.
+- A PDF caption the layout model tags as a figure title that opens with
+  "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
+  found no table and fell back into the body text.
 
 ### Added
 

@@ -1198,6 +1198,7 @@ def _export_paper_payload(
         figure=[
             FigureExport(
                 figure_id=f.figure_id,
+                label=_or_none(f.label),
                 section_id=f.section_id if f.section_id != 0 else None,
                 image=_data_uri(f.image_b64),
                 caption=f.caption,
@@ -1208,6 +1209,7 @@ def _export_paper_payload(
         table=[
             TableExport(
                 table_id=t.table_id,
+                label=_or_none(t.label),
                 section_id=t.section_id if t.section_id != 0 else None,
                 html=t.tbl_html or None,
                 contents=t.contents,

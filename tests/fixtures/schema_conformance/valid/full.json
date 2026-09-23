@@ -175,6 +175,7 @@
   "figure": [
     {
       "figure_id": 1,
+      "label": "1",
       "section_id": 2,
       "image": null,
       "caption": "Figure 1. Plot",
@@ -184,6 +185,7 @@
   "table": [
     {
       "table_id": 1,
+      "label": "1",
       "section_id": 2,
       "html": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
       "contents": [
@@ -356,6 +358,10 @@
         {
           "xref_id": 1,
           "tier": "numeric"
+        },
+        {
+          "xref_id": 2,
+          "tier": "label"
         }
       ]
     },
