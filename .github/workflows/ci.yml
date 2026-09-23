@@ -46,11 +46,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+          FORCED_PUSH: ${{ github.event.forced }}
           PUSH_HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # A force push rewrites the history its diff would be taken against, so it
+        # validates every surface. The helper itself also selects every surface when
+        # a base commit is missing from this clone.
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$BEFORE_SHA" =~ ^0+$ ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$BEFORE_SHA" =~ ^0+$ ||
+                "$FORCED_PUSH" == "true" ]]; then
             python scripts/ci/changed_surfaces.py --all >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             python scripts/ci/changed_surfaces.py \
@@ -475,15 +480,27 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # gitleaks logs an invalid revision range, scans 0 commits and exits 0, so a
+        # base missing from this clone (a force push rewrote it) must be caught here.
+        # The whole history is then scanned instead: it is the only base a rewritten
+        # history leaves, and it costs seconds at this repository's size.
         run: |
           git config --global --add safe.directory "$PWD"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            range="$PR_BASE_SHA..$PR_HEAD_SHA"
+            base="$PR_BASE_SHA" head="$PR_HEAD_SHA"
           elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
-            range="$BEFORE_SHA..$HEAD_SHA"
+            base="$BEFORE_SHA" head="$HEAD_SHA"
           else
             echo "no commit range for a $EVENT_NAME event; the tree scan covers HEAD"
             exit 0
+          fi
+          if git cat-file -e "$base^{commit}" 2>/dev/null; then
+            range="$base..$head"
+          else
+            echo "::warning title=Commit-range secret scan widened::$base is not in" \
+              "this checkout (history rewritten by a force push?); scanning the full" \
+              "history reachable from $head instead"
+            range="$head"
           fi
           echo "scanning $range"
           gitleaks git . --config .gitleaks.toml --log-opts="$range" \

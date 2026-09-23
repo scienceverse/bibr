@@ -147,6 +147,16 @@ released.
 
 ### Fixed
 
+- A title that opens with a parenthetical, such as "(Rural) Clinics as layered
+  civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
+  the parenthetical as an annotation and return only the rest of the title. Title
+  grounding accepted that because the rest is still printed verbatim, and once a
+  front-matter record is selected the layout title is not consulted. Grounding
+  now restores the parenthetical from the selected record's printed title row
+  and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
+  "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
+  still left out.
 - The reference under-extraction warning in `processing_warnings` now also
   covers numeric citation styles. It previously counted only author-year
   citations, so a numbered paper whose reference region was lost to OCR was
