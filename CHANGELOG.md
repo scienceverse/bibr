@@ -56,6 +56,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- On the torch-free core install, `bibr batch` no longer refuses PDF input
+  because OpenCV is missing; like `bibr chew`, it requires OpenCV only when
+  torch is installed. `bibr chew` now checks that a local OCR runtime can start
+  on core installs too, as `bibr batch` already did.
+- `--dry-run` lists the layout model the configured `ML_RUNTIME` loads: the
+  ONNX export from `LAYOUT_ONNX_MODEL_ID` by default, and the PyTorch weights
+  only with `ML_RUNTIME=torch` or no ONNX repo configured. It also lists the
+  section classifier on core installs, where it runs on ONNX Runtime.
 
 ### Added
 

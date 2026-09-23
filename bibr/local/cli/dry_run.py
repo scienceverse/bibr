@@ -243,6 +243,24 @@ def _hf_cache_status(repo_id: str) -> str:
     return f"will download (~{size})" if size else "will download (size unknown)"
 
 
+def _dry_run_layout_spec() -> tuple[str, str]:
+    """``(label, repo_id)`` of the layout model ``ML_RUNTIME`` selects.
+
+    Mirrors ``resolve_layout_runtime``: ``auto`` and ``onnx`` load the ONNX
+    export from ``LAYOUT_ONNX_MODEL_ID``; the third-party torch weights load
+    only under ``ML_RUNTIME=torch`` or with no ONNX repo configured. Whether a
+    Hub bundle resolves is not probed — that would be a network call.
+    """
+    from bibr.config import Settings
+
+    onnx_model_id = Settings.layout.onnx_model_id
+    if Settings.ml.runtime != "torch" and onnx_model_id:
+        if Path(onnx_model_id).expanduser().exists():
+            return "layout (PP-DocLayoutV3, onnx)", f"local bundle: {onnx_model_id}"
+        return "layout (PP-DocLayoutV3, onnx)", onnx_model_id
+    return "layout (PP-DocLayoutV3, torch)", "PaddlePaddle/PP-DocLayoutV3_safetensors"
+
+
 def _dry_run_model_specs(
     config: ResolvedRunConfig,
     seg_strategy: str,
@@ -251,24 +269,24 @@ def _dry_run_model_specs(
     needs_ocr: bool,
 ) -> list[tuple[str, str]]:
     """``(label, repo_id)`` for every model this run's resolved config implies."""
-    import importlib.util
-
     from bibr.config import Settings
+    from bibr.utils.ml_runtime import torch_available
 
     specs: list[tuple[str, str]] = []
     if needs_ocr:
-        specs.append(("layout (PP-DocLayoutV3)", "PaddlePaddle/PP-DocLayoutV3_safetensors"))
+        specs.append(_dry_run_layout_spec())
     specs.append(
         ("sentence segmenter (wtpsplit)", display_wtpsplit_repo_id(Settings.WTPSPLIT_MODEL))
     )
 
-    # The trained MiniLM section classifier needs the ml extra and is not
-    # used at all under --no-llm (lookup-only alias path — see post_parse.py
-    # ``_classify_sections``).
+    # The trained MiniLM section classifier runs on ONNX Runtime from the same
+    # repo, so only ML_RUNTIME=torch without torch leaves it unloaded (the run
+    # falls back to the LLM classifier). It is not used at all under --no-llm
+    # (lookup-only alias path — see post_parse.py ``_classify_sections``).
     if (
         not config.no_llm
-        and importlib.util.find_spec("torch") is not None
         and Settings.ml.section_classifier_model_id
+        and (Settings.ml.runtime != "torch" or torch_available())
     ):
         specs.append(("section classifier", Settings.ml.section_classifier_model_id))
 

@@ -86,3 +86,32 @@ def test_explicit_ocr_url_skips_the_local_check():
     from bibr.local.cli import run_config
 
     assert run_config._preflight_ocr_runtime(_cfg("paddle-http", url="http://ocr:8080")) is None
+
+
+class _ForbiddenPipeline:
+    def __init__(self, *args, **kwargs):
+        raise AssertionError("the preflight must stop the run before the pipeline is built")
+
+
+async def test_chew_on_a_core_install_still_runs_the_ocr_preflight(tmp_path, monkeypatch, capsys):
+    """OCR runtimes do not depend on the torch extra, so a torch-free install
+    gets the same fail-fast verdict (and no opencv requirement)."""
+    import sys
+
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setitem(sys.modules, "torch", None)
+    monkeypatch.setitem(sys.modules, "cv2", None)
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: None)
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _ForbiddenPipeline)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+
+    args = _build_parser().parse_args(["chew", str(pdf), "--ocr", "paddle-vllm", "--no-llm"])
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(args)
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "paddle-vllm" in err and "no NVIDIA GPU" in err
+    assert "opencv" not in err
