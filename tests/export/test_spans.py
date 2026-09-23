@@ -39,6 +39,15 @@ def test_targets_of_one_citation_share_its_span():
     assert first == second == (11, 17)
 
 
+def test_a_footnote_reference_is_never_located():
+    """Its mark is not in the text, so a search for "1" would find the 1 of a
+    citation or a statistic."""
+    texts = {1: "It replicated prior work [1] in 2021."}
+    locator = SpanLocator(texts, shared=True)
+    foot = SimpleNamespace(text_id=1, contents="1", start=None, end=None, xref_type="foot")
+    assert xref_span(locator, texts, foot) is None
+
+
 def test_unlocatable_items_stay_null():
     texts = {1: "[equation]"}
     locator = SpanLocator(texts, shared=True)

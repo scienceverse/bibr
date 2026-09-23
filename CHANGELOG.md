@@ -91,6 +91,13 @@ released.
   at `footnote[].footnote_id` (it held the footnote's ordinal); `equation`,
   `section` and `supplementary` references are `null` (they held the number
   they print, or `0`, which named no row).
+- A `foot` reference no longer claims more than bibr knows. A PDF note printed
+  without a mark (an author note, or text taken for a note) gets no reference;
+  it used to get one with its ordinal as `contents`, which is printed nowhere.
+  A footnote reference has no `start`/`end`: its mark is not in the sentence
+  text, and the search for the digit landed on any number there. Its
+  `text_id` is approximate: the last sentence of the paragraph holding the
+  mark (DOCX), or the sentence before the note (PDF).
 - One scale and one spelling per concept. Every score and confidence is 0–1:
   `bib_match[]` and `metadata_match[]` `score` was 0–100. The match tables'
   ISO 8601 `date` is `published_date`, like `metadata.published_date`; `bib[]`

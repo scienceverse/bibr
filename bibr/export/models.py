@@ -771,12 +771,18 @@ class XrefExport(BaseModel):
     contents: str | None = Field(
         description="The citation or reference as printed, e.g. '(Smith, 2020)' or 'Table 2'."
     )
-    text_id: Id = Field(description="text[].text_id of the sentence containing the reference.")
+    text_id: Id = Field(
+        description="text[].text_id of the sentence containing the reference. For a footnote "
+        "reference it is approximate: in a DOCX, the last sentence of the paragraph holding the "
+        "note's mark; in a PDF, where bibr does not find note marks in the text, the sentence "
+        "before the note in reading order. A PDF note printed without a mark has no reference."
+    )
     start: int | None = Field(
         default=None,
         ge=0,
         description="Where the printed reference starts in text[].text of text_id: a 0-based "
-        "offset in Unicode code points; null when it could not be located.",
+        "offset in Unicode code points; null when it could not be located, and always for a "
+        "footnote reference.",
     )
     end: int | None = Field(
         default=None,

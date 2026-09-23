@@ -547,8 +547,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         Must be called after :meth:`apply_segmentation`.  Appends new
         sections (type ``fig``, ``table``, ``footnote``) after all body
         sections.  Captions and footnote text become sentences in the
-        text table.  Footnote xrefs are created linking the footnote
-        section to the referencing sentence.
+        text table.  A footnote printed with a mark gets a xref from the
+        sentence before it to its text.
 
         Preserves the original body ``section_id`` on each figure/table
         so that study-ID propagation can inherit from the correct section.
@@ -625,6 +625,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         ):
             self._section_counter += 1
             footnote_section_id = self._section_counter
+            marker = printed_marker(fn_text)
 
             section = PaperSection(
                 section_id=footnote_section_id,
@@ -633,7 +634,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 parent_section_id=0,
                 section_type=CanonicalSection.FOOTNOTE,
                 synthetic_kind="footnote",
-                footnote_label=printed_marker(fn_text),
+                footnote_label=marker,
             )
             contents.sections.append(section)
 
@@ -649,6 +650,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             contents.sentences.append(sent)
             self._sentence_counter += 1
 
+            # A note printed without a mark (an author note, or text taken
+            # for a note) is referenced from nowhere in the text, so it gets
+            # no xref: one would carry an ordinal no reader can see.
+            if marker is None:
+                continue
+
             # Find nearest preceding text_id for the xref. Display-formula
             # sentences are skipped: they export as "[equation]" placeholders,
             # so an anchor there points consumers at text they never see
@@ -657,16 +664,15 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 fn_deferred_idx, skip_text_ids=formula_text_ids
             )
 
-            # Create xref linking footnote section to the referencing sentence.
-            # ``contents`` is what a reader sees printed, so prefer the marker
-            # the footnote actually carries and fall back to the ordinal only
-            # when it carries none.
+            # Link the note to the sentence before it. bibr does not find the
+            # mark in the text, so this is where the reference probably is,
+            # and ``contents`` is the mark the note is printed with.
             contents.xrefs.append(
                 PaperXref(
                     # The footnote's own text row: the xref's target.
                     xref_id=sent.text_id,
                     xref_type="foot",
-                    contents=printed_marker(fn_text) or str(footnote_num),
+                    contents=marker,
                     text_id=nearest_text_id,
                 )
             )

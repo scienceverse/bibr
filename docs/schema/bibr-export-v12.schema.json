@@ -4188,7 +4188,7 @@
         },
         "start": {
           "default": null,
-          "description": "Where the printed reference starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located.",
+          "description": "Where the printed reference starts in text[].text of text_id: a 0-based offset in Unicode code points; null when it could not be located, and always for a footnote reference.",
           "minimum": 0,
           "title": "Start",
           "type": [
@@ -4206,7 +4206,7 @@
           ]
         },
         "text_id": {
-          "description": "text[].text_id of the sentence containing the reference.",
+          "description": "text[].text_id of the sentence containing the reference. For a footnote reference it is approximate: in a DOCX, the last sentence of the paragraph holding the note's mark; in a PDF, where bibr does not find note marks in the text, the sentence before the note in reading order. A PDF note printed without a mark has no reference.",
           "minimum": 1,
           "title": "Text Id",
           "type": "integer"

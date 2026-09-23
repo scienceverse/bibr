@@ -112,7 +112,12 @@ class SpanLocator:
 
 
 def xref_span(locator: SpanLocator, texts: dict[int, str], xref) -> Span | None:
-    """Span of one ``PaperXref``: its recorded span if it checks out, else located."""
+    """Span of one ``PaperXref``: its recorded span if it checks out, else located.
+
+    A footnote reference is never located: its mark is not in the sentence
+    text (a DOCX note mark is a field, and bibr does not find PDF marks), so a
+    search for "1" would land on any 1 in the sentence.
+    """
     contents = xref.contents or ""
     text = texts.get(xref.text_id)
     if text is not None:
@@ -121,6 +126,8 @@ def xref_span(locator: SpanLocator, texts: dict[int, str], xref) -> Span | None:
         )
         if recorded is not None:
             return recorded
+    if getattr(xref, "xref_type", None) == "foot":
+        return None
     return locator.locate(xref.text_id, contents, lambda: _whitespace_flexible(contents))
 
 

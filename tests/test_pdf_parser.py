@@ -831,7 +831,7 @@ class TestFootnotes:
         json_result = [
             [
                 _region(0, "text", "Main body text."),
-                _region(1, "footnote", "This is a footnote."),
+                _region(1, "footnote", "1 This is a footnote."),
             ]
         ]
         contents = _parse_and_segment(json_result)
@@ -847,13 +847,14 @@ class TestFootnotes:
         # Footnote text should be in the text table under the footnote section
         fn_sentences = [s for s in contents.sentences if s.section_id == fn_section.section_id]
         assert len(fn_sentences) == 1
-        assert fn_sentences[0].text == "This is a footnote."
+        assert fn_sentences[0].text == "1 This is a footnote."
 
         # Xref should link footnote section to the body sentence
         foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
         assert len(foot_xrefs) == 1
-        # The target is the footnote's own text row.
+        # The target is the footnote's own text row, and the mark is printed.
         assert foot_xrefs[0].xref_id == fn_sentences[0].text_id
+        assert foot_xrefs[0].contents == "1"
         # text_id should point to the body sentence (nearest preceding)
         body_sentences = [s for s in contents.sentences if s.section_id != fn_section.section_id]
         assert foot_xrefs[0].text_id == body_sentences[0].text_id
