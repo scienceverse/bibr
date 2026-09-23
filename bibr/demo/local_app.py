@@ -422,7 +422,9 @@ def _build_tables_html(result: dict) -> str:
 
     parts = []
     for tbl in tables:
-        parts.append(f"<p><strong>Table {_esc(str(tbl.get('table_id', '')))}</strong></p>")
+        # The printed label ("3.1", "S2"); the id is only the table's position.
+        name = tbl.get("label") or tbl.get("table_id", "")
+        parts.append(f"<p><strong>Table {_esc(str(name))}</strong></p>")
 
         contents = tbl.get("contents")
         if contents and isinstance(contents, list) and len(contents) > 0:
@@ -492,7 +494,8 @@ def _build_figures_html(result: dict) -> str:
 
     parts = []
     for f in figures:
-        parts.append(f"<p><strong>Figure {_esc(str(f.get('figure_id', '')))}</strong></p>")
+        name = f.get("label") or f.get("figure_id", "")
+        parts.append(f"<p><strong>Figure {_esc(str(name))}</strong></p>")
         img = f.get("image")
         if img:
             # v12 exports the image as a data URI that names its media type.
