@@ -788,7 +788,9 @@ class FigureExport(BaseModel):
         default=None,
         description="The printed label without the word, as printed with whitespace removed: "
         "'3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Figure 4' caption gives 'S4'. In-text "
-        "references resolve by it. Null when none was printed or detected.",
+        "references resolve by it. Not unique: the unmerged pieces of a "
+        "figure split across pages repeat it ('Figure 3. Cont.'), and references target "
+        "the piece not marked as continued. Null when none was printed or detected.",
     )
     section_id: Id | None = Field(
         default=None,
@@ -820,7 +822,9 @@ class TableExport(BaseModel):
         default=None,
         description="The printed label without the word, as printed with whitespace removed: "
         "'3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Table 4' caption gives 'S4'. In-text "
-        "references resolve by it. Null when none was printed or detected.",
+        "references resolve by it. Not unique: the unmerged pieces of a "
+        "table split across pages repeat it ('Table 3 (continued)'), and references target "
+        "the piece not marked as continued. Null when none was printed or detected.",
     )
     section_id: Id | None = Field(
         default=None,

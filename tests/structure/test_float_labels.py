@@ -153,7 +153,7 @@ class TestResolveByLabel:
 
     def test_an_unmerged_continuation_does_not_make_its_label_ambiguous(self):
         """A continued piece that was not merged repeats its float's label;
-        the first piece is still the one the text means."""
+        the piece not marked as continued is the one the text means."""
         first, piece = _table(1, "2", page=3), _table(2, "2", page=4)
         first.caption, piece.caption = "Table 2. Results.", "Table 2 (continued)"
         assert _links("Table 2 lists", [first, piece]) == [("table", 1, "label")]
@@ -166,6 +166,13 @@ class TestResolveByLabel:
         first, piece = _table(1, "3"), _table(2, "3")
         first.caption, piece.caption = "Table 3. Demographics.", caption
         assert _links("Table 3 lists", [first, piece]) == [("table", 1, "label")]
+
+    def test_the_captioned_piece_can_come_last(self):
+        """A figure split across pages can print its caption under the last
+        piece and mark the earlier ones "Figure 3. Cont."."""
+        cont, figure = _figure(1, "3", page=15), _figure(2, "3", page=16)
+        cont.caption, figure.caption = "Figure 3. Cont.", "Figure 3. Four dendrograms."
+        assert _links("Figure 3a shows", figures=[cont, figure]) == [("figure", 2, "label")]
 
     def test_continued_as_caption_prose_is_not_a_marker(self):
         """The unbracketed word counts only when the caption says nothing else."""
