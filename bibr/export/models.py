@@ -107,7 +107,10 @@ _SCHEMA_VERSION = "12.0"
 #   - ``source.file_hash`` (16 hex of the SHA-256) -> ``source.sha256`` (all
 #     64); ``extraction.bibr_version``/``build_sha`` ->
 #     ``extraction.producer`` {name, version, build_sha}, so other producers of
-#     the format can identify themselves.
+#     the format can identify themselves. ``producer`` is the extractor of the
+#     content; the new ``extraction.converter`` names the tool that wrote
+#     another extractor's output into this format (a GROBID converter writes
+#     producer ``grobid`` and itself as converter), null in bibr's exports.
 #   - ``paper_id`` defaults to the input file's stem, as ``bibr batch`` and
 #     metacheck already do, not to the DOI.
 #   - ``figure[].image`` is a ``data:`` URI that names its media type.
@@ -392,7 +395,11 @@ Box = Annotated[list[float], Field(min_length=4, max_length=4)]
 
 
 class SourceExport(BaseModel):
-    """Identity of the input file — not of the paper."""
+    """Identity of the input file — not of the paper.
+
+    In a converted export (``extraction.converter`` set), the file the
+    producer extracted from, such as the PDF GROBID read, when the converter
+    has it; else the file the converter read, such as GROBID's TEI."""
 
     model_config = _STRICT
 
@@ -1773,21 +1780,22 @@ class ValidationExport(BaseModel):
 
 
 class ProducerExport(BaseModel):
-    """The software that wrote the export."""
+    """A piece of software: the extractor of the content
+    (``extraction.producer``) or the converter that wrote it into this format
+    (``extraction.converter``)."""
 
     model_config = _STRICT
 
     name: str = Field(
         min_length=1,
-        description="Name of the producing software: 'bibr', or another tool that writes this "
-        "format (e.g. a converter from GROBID TEI).",
+        description="Name of the software, e.g. 'bibr', 'grobid' or 'metacheck'.",
     )
     version: str = Field(
         min_length=1,
-        description="Version of the producing software (not the schema version).",
+        description="Version of the software (not the schema version).",
     )
     build_sha: str | None = Field(
-        default=None, description="Commit SHA of the producer's build, when known."
+        default=None, description="Commit SHA of the software's build, when known."
     )
 
 
@@ -1805,7 +1813,8 @@ class WarningExport(BaseModel):
         pattern=WARNING_CODE_PATTERN,
         description="Stable, machine-readable warning code in UPPER_SNAKE case, e.g. "
         "'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other "
-        "producers may add their own, so readers must accept a code they do not know.",
+        "producers and converters may add their own, so readers must accept a code they do "
+        "not know.",
     )
     message: str = Field(
         description="Human-readable details, such as the page, counts or exception type."
@@ -1824,7 +1833,15 @@ class ExtractionExport(BaseModel):
 
     model_config = _STRICT
 
-    producer: ProducerExport = Field(description="The software that wrote this export.")
+    producer: ProducerExport = Field(
+        description="The software that extracted the content: 'bibr', or another extractor "
+        "(e.g. 'grobid') whose output a converter wrote into this format."
+    )
+    converter: ProducerExport | None = Field(
+        default=None,
+        description="The software that wrote another extractor's output into this format, or "
+        "rewrote an export (e.g. 'metacheck'); null when the producer wrote this file itself.",
+    )
     # UTC ISO-8601 export timestamp — the export's only wall-clock provenance.
     # Excluded from fixture/replay diffs (see tests) so it stays deterministic.
     completed_at: str = Field(

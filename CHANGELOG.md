@@ -137,7 +137,13 @@ released.
 - `source.file_hash` (the first 16 hex characters of the input's SHA-256) is
   replaced by `source.sha256`, the whole digest. `extraction.bibr_version` and
   `build_sha` are replaced by `extraction.producer` {`name`, `version`,
-  `build_sha`}, so another tool writing this format can say so.
+  `build_sha`}, so another tool writing this format can say so. `producer` is
+  the software that extracted the content; the new `extraction.converter`, of
+  the same shape, names a tool that wrote another extractor's output into this
+  format, and is `null` in bibr's own exports. A file converted from GROBID TEI
+  has producer `grobid` and the converter, and its `source` is the PDF GROBID
+  read when the converter has it, else the TEI (`input_format` `tei`), so
+  `source.sha256` joins it to a bibr export of the same PDF.
 - `paper_id` is required and never `null`: `--paper-id`, else the input file's
   stem, as `bibr batch` and metacheck already name papers. It used to be the
   DOI, which changed whenever a later bibr read the DOI differently. `bibr

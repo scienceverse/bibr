@@ -1534,6 +1534,18 @@
           "title": "Completed At",
           "type": "string"
         },
+        "converter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProducerExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The software that wrote another extractor's output into this format, or rewrote an export (e.g. 'metacheck'); null when the producer wrote this file itself."
+        },
         "diagnostics": {
           "anyOf": [
             {
@@ -1620,7 +1632,7 @@
         },
         "producer": {
           "$ref": "#/$defs/ProducerExport",
-          "description": "The software that wrote this export."
+          "description": "The software that extracted the content: 'bibr', or another extractor (e.g. 'grobid') whose output a converter wrote into this format."
         },
         "qualification": {
           "additionalProperties": true,
@@ -1727,6 +1739,7 @@
       },
       "required": [
         "producer",
+        "converter",
         "completed_at",
         "ocr",
         "llm",
@@ -3125,11 +3138,11 @@
     },
     "ProducerExport": {
       "additionalProperties": false,
-      "description": "The software that wrote the export.",
+      "description": "A piece of software: the extractor of the content\n(``extraction.producer``) or the converter that wrote it into this format\n(``extraction.converter``).",
       "properties": {
         "build_sha": {
           "default": null,
-          "description": "Commit SHA of the producer's build, when known.",
+          "description": "Commit SHA of the software's build, when known.",
           "title": "Build Sha",
           "type": [
             "string",
@@ -3137,13 +3150,13 @@
           ]
         },
         "name": {
-          "description": "Name of the producing software: 'bibr', or another tool that writes this format (e.g. a converter from GROBID TEI).",
+          "description": "Name of the software, e.g. 'bibr', 'grobid' or 'metacheck'.",
           "minLength": 1,
           "title": "Name",
           "type": "string"
         },
         "version": {
-          "description": "Version of the producing software (not the schema version).",
+          "description": "Version of the software (not the schema version).",
           "minLength": 1,
           "title": "Version",
           "type": "string"
@@ -3525,7 +3538,7 @@
     },
     "SourceExport": {
       "additionalProperties": false,
-      "description": "Identity of the input file \u2014 not of the paper.",
+      "description": "Identity of the input file \u2014 not of the paper.\n\nIn a converted export (``extraction.converter`` set), the file the\nproducer extracted from, such as the PDF GROBID read, when the converter\nhas it; else the file the converter read, such as GROBID's TEI.",
       "properties": {
         "file_name": {
           "description": "Name of the input file, without directories.",
@@ -4133,7 +4146,7 @@
       "description": "One non-fatal processing warning.",
       "properties": {
         "code": {
-          "description": "Stable, machine-readable warning code in UPPER_SNAKE case, e.g. 'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other producers may add their own, so readers must accept a code they do not know.",
+          "description": "Stable, machine-readable warning code in UPPER_SNAKE case, e.g. 'OCR_PAGE_FAILED'. bibr's codes are listed in its JSON schema reference; other producers and converters may add their own, so readers must accept a code they do not know.",
           "pattern": "^[A-Z][A-Z0-9_]*$",
           "title": "Code",
           "type": "string"

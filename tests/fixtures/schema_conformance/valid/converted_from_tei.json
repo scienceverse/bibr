@@ -1,9 +1,10 @@
 {
   "paper_id": "example",
+  "schema_version": "12.0",
   "source": {
-    "file_name": "example.pdf",
-    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
-    "input_format": "pdf"
+    "file_name": "example.tei.xml",
+    "sha256": "1381be58ff61c837f922512c19392ea90fd3caec38cd0ba4a2e4344fcfd48a71",
+    "input_format": "tei"
   },
   "metadata": {
     "title": null,
@@ -52,11 +53,15 @@
   "bib_match": [],
   "extraction": {
     "producer": {
-      "name": "bibr",
-      "version": "0.5.1",
+      "name": "grobid",
+      "version": "0.8.2",
       "build_sha": null
     },
-    "converter": null,
+    "converter": {
+      "name": "metacheck",
+      "version": "0.0.0.9000",
+      "build_sha": null
+    },
     "completed_at": "2026-09-22T12:00:00Z",
     "ocr": null,
     "llm": null,
