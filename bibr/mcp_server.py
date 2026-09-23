@@ -405,8 +405,8 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
     async def get_tables(
         paper_id: str, table_id: int | None = None, *, ctx: Context
     ) -> dict[str, Any]:
-        """Extracted tables. Without table_id: id/caption/page per table. With
-        table_id: the full table including HTML markup and structured cells."""
+        """Extracted tables. Without table_id: id/label/caption/page per table.
+        With table_id: the full table including HTML markup and structured cells."""
         rows = get_store(ctx).rows(paper_id, "table")
         if table_id is None:
             return {
@@ -414,6 +414,7 @@ def _register_query_tools(server: MCPServer, get_store: Callable[[Context], _Pap
                 "tables": [
                     {
                         "table_id": r.get("table_id"),
+                        "label": r.get("label"),
                         "caption": r.get("caption"),
                         "page_number": r.get("page_number"),
                         "section_id": r.get("section_id"),

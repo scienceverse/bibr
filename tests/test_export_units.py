@@ -570,18 +570,19 @@ class TestDetectXrefs:
         sentences = [
             PaperSentence(text_id=1, text="See Table 2 for results.", section_id=1, paragraph_id=1)
         ]
-        tables = [PaperTable(table_id=2, df=pd.DataFrame(), tbl_html="", section_id=1)]
+        tables = [PaperTable(table_id=2, df=pd.DataFrame(), tbl_html="", section_id=1, label="2")]
         xrefs = detect_xrefs(sentences, tables, [])
         assert len(xrefs) == 1
         assert xrefs[0].xref_type == "table"
         assert xrefs[0].xref_id == 2
         assert xrefs[0].text_id == 1
+        assert xrefs[0].tier == "label"
 
     def test_figure_xref_detected(self):
         sentences = [
             PaperSentence(text_id=1, text="As shown in Figure 3.", section_id=1, paragraph_id=1)
         ]
-        figures = [PaperFigure(figure_id=3, section_id=1, image_b64=None, caption=None)]
+        figures = [PaperFigure(figure_id=3, section_id=1, image_b64=None, caption=None, label="3")]
         xrefs = detect_xrefs(sentences, [], figures)
         assert len(xrefs) == 1
         assert xrefs[0].xref_type == "figure"
@@ -607,13 +608,13 @@ class TestDetectXrefs:
         xrefs = detect_xrefs(sentences, [], figures)
         assert len(xrefs) == 2
 
-    def test_nonexistent_table_not_matched(self):
+    def test_nonexistent_table_keeps_a_row_without_target(self):
         sentences = [
             PaperSentence(text_id=1, text="Table 99 is referenced.", section_id=1, paragraph_id=1)
         ]
         tables = [PaperTable(table_id=1, df=pd.DataFrame(), tbl_html="", section_id=1)]
         xrefs = detect_xrefs(sentences, tables, [])
-        assert len(xrefs) == 0
+        assert [(x.xref_type, x.xref_id, x.tier) for x in xrefs] == [("table", 0, "position")]
 
     def test_multiple_tables_in_one_sentence(self):
         sentences = [
@@ -626,12 +627,12 @@ class TestDetectXrefs:
         xrefs = detect_xrefs(sentences, tables, [])
         assert len(xrefs) == 3
 
-    def test_no_xrefs_without_items(self):
+    def test_mentions_without_items_have_no_target(self):
         sentences = [
             PaperSentence(text_id=1, text="Table 1 and Figure 1.", section_id=1, paragraph_id=1)
         ]
         xrefs = detect_xrefs(sentences, [], [])
-        assert len(xrefs) == 0
+        assert [(x.xref_type, x.xref_id) for x in xrefs] == [("table", 0), ("figure", 0)]
 
     # ── Compound "and" refs ──
 
@@ -640,7 +641,7 @@ class TestDetectXrefs:
             PaperSentence(text_id=1, text="Tables 5 and 6 show.", section_id=1, paragraph_id=1)
         ]
         tables = [
-            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1)
+            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1, label=str(i))
             for i in range(5, 7)
         ]
         xrefs = detect_xrefs(sentences, tables, [])
@@ -667,7 +668,7 @@ class TestDetectXrefs:
         """Tables 5-7 should produce xrefs for 5, 6, and 7."""
         sentences = [PaperSentence(text_id=1, text="See Tables 5-7.", section_id=1, paragraph_id=1)]
         tables = [
-            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1)
+            PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="", section_id=1, label=str(i))
             for i in range(5, 8)
         ]
         xrefs = detect_xrefs(sentences, tables, [])

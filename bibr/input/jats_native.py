@@ -47,6 +47,7 @@ from bibr.paper_contents import (
     PaperURLLink,
 )
 from bibr.structure.assembler import DocumentAssembler
+from bibr.structure.float_labels import FloatKind, caption_label, label_element_label
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -736,6 +737,7 @@ class JatsParser:
                         df=df,
                     )
                 ],
+                label=self._float_label(table_wrap, caption, "table"),
             )
         )
         self._table_counter += 1
@@ -791,6 +793,7 @@ class JatsParser:
                         image_b64=None,
                     )
                 ],
+                label=self._float_label(fig, caption, "figure"),
             )
         )
         self._figure_counter += 1
@@ -802,6 +805,16 @@ class JatsParser:
         caption_el = _first_child(el, "caption")
         caption = _text(caption_el) if caption_el is not None else ""
         return " ".join(x for x in (label, caption) if x)
+
+    @staticmethod
+    def _float_label(el, caption: str, kind: FloatKind) -> str | None:
+        """The printed label of a fig/table-wrap: its ``<label>`` without the
+        word ("Table 2" → "2", a bare "S1" stays "S1"), else the label a
+        caption opens with when there is no ``<label>``."""
+        label_el = _first_child(el, "label")
+        if label_el is not None:
+            return label_element_label(_text(label_el), kind)
+        return caption_label(caption, kind)
 
     # ------------------------------------------------------------------
     # Back matter → acknowledgments / footnotes / references

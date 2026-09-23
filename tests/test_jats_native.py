@@ -673,3 +673,28 @@ def test_footnotes_become_synthetic_footnote_sections_with_their_label():
     assert [s.footnote_label for s in notes] == ["\u2020", None]
     held = [t for t in contents.sentences if t.section_id in {n.section_id for n in notes}]
     assert [t.text for t in held] == ["\u2020 Printed under a heading.", "A back-matter note."]
+
+
+def test_floats_take_their_label_from_the_label_element():
+    """``<label>`` without the word is the float's label; the caption keeps it
+    glued on as before. Mentions resolve by the label, not the order."""
+    xml = b"""
+    <article><front><article-meta>
+      <title-group><article-title>Labelled</article-title></title-group>
+    </article-meta></front><body><sec><title>Results</title>
+      <p>Table S1 and Table 2 agree with Fig. 3.</p>
+      <table-wrap><label>Table 2</label><caption><p>Main.</p></caption>
+        <table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>
+      <table-wrap><label>S1</label><caption><p>Extra.</p></caption>
+        <table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>
+      <fig><label>Fig. 3</label><caption><p>A figure.</p></caption><graphic/></fig>
+      <fig><caption><p>Figure 4. No label element.</p></caption><graphic/></fig>
+      <fig><label>Scheme 1</label><caption><p>Not a figure label.</p></caption><graphic/></fig>
+    </sec></body></article>
+    """
+    c = _segment(_parse(xml))
+    assert [(t.label, t.caption) for t in c.tables] == [("2", "Table 2 Main."), ("S1", "S1 Extra.")]
+    assert [f.label for f in c.figures] == ["3", "4", None]
+    table_xrefs = [(x.xref_type, x.xref_id, x.tier) for x in c.xrefs if x.xref_type != "figure"]
+    assert table_xrefs == [("table", 2, "label"), ("table", 1, "label")]
+    assert [(x.xref_id, x.tier) for x in c.xrefs if x.xref_type == "figure"] == [(1, "label")]

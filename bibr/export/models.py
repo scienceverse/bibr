@@ -351,8 +351,11 @@ SeverityLiteral = Literal["error", "warning"]
 
 XrefTypeLiteral = Literal["bib", "table", "figure", "foot", "supplementary", "equation", "section"]
 
-# The citation linker's tiers with ``-`` spelled ``_`` (see ``json_export``).
-XrefTierLiteral = Literal["numeric", "paren_numeric", "flattened_superscript", "author_year", "llm"]
+# The citation linker's tiers with ``-`` spelled ``_`` (see ``json_export``),
+# then how ``detect_xrefs`` resolved a figure or table xref.
+XrefTierLiteral = Literal[
+    "numeric", "paren_numeric", "flattened_superscript", "author_year", "llm", "label", "position"
+]
 
 
 # ---------------------------------------------------------------------------
@@ -781,6 +784,12 @@ class FigureExport(BaseModel):
     model_config = _STRICT
 
     figure_id: Id = Field(description="Primary key; 1-based position in document order.")
+    label: str | None = Field(
+        default=None,
+        description="The printed label without the word, as printed with whitespace removed: "
+        "'3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Figure 4' caption gives 'S4'. In-text "
+        "references resolve by it. Null when none was printed or detected.",
+    )
     section_id: Id | None = Field(
         default=None,
         description="section[].section_id of the section the figure is printed in (for PDF, "
@@ -807,6 +816,12 @@ class TableExport(BaseModel):
     model_config = _STRICT
 
     table_id: Id = Field(description="Primary key; 1-based position in document order.")
+    label: str | None = Field(
+        default=None,
+        description="The printed label without the word, as printed with whitespace removed: "
+        "'3', '3.1', 'S2', 'A1', 'IV'; a 'Supplementary Table 4' caption gives 'S4'. In-text "
+        "references resolve by it. Null when none was printed or detected.",
+    )
     section_id: Id | None = Field(
         default=None,
         description="section[].section_id of the section the table is printed in (for PDF, "
@@ -1494,12 +1509,17 @@ class SectionClassificationExport(BaseModel):
 
 
 class XrefTierExport(BaseModel):
-    """Which detector produced one bibliography xref."""
+    """How one bibliography, figure or table xref was linked."""
 
     model_config = _STRICT
 
     xref_id: Id = Field(description="xref[].xref_id.")
-    tier: XrefTierLiteral = Field(description="Citation detector that produced the link.")
+    tier: XrefTierLiteral = Field(
+        description="How the link was made: for a bib reference, the citation detector that "
+        "found it; for a figure or table reference, 'label' (matched against the printed "
+        "labels) or 'position' (no float of that kind has a label, so the printed number was "
+        "taken as a position)."
+    )
 
 
 class PaperClassificationExport(BaseModel):
@@ -1554,7 +1574,8 @@ class DiagnosticsExport(BaseModel):
         default=None, description="Confidence of metadata.paper_type and metadata.oecd_*."
     )
     xref_tier: list[XrefTierExport] | None = Field(
-        default=None, description="Detector tier of each bibliography xref that recorded one."
+        default=None,
+        description="How each bibliography, figure and table xref that recorded it was linked.",
     )
     citation_linking: CitationLinkingExport | None = Field(
         default=None, description="Receipt for inline citation linking."

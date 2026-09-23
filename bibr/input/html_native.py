@@ -30,6 +30,7 @@ from bibr.paper_contents import (
     PaperURLLink,
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
+from bibr.structure.float_labels import caption_label
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -585,6 +586,7 @@ class HtmlParser:
                         df=dfs[0],
                     )
                 ],
+                label=caption_label(caption, "table"),
             )
         )
         self._table_counter += 1
@@ -608,6 +610,7 @@ class HtmlParser:
                         image_b64=None,
                     )
                 ],
+                label=caption_label(caption, "figure"),
             )
         )
         self._figure_counter += 1

@@ -8,6 +8,16 @@ import logging
 import re
 
 from bibr.paper_contents import PaperFigure, PaperSentence, PaperTable, PaperXref
+from bibr.structure.float_labels import (
+    FIGURE_WORD,
+    LETTERED_LABEL,
+    NUMBERED_LABEL,
+    SUPPLEMENT_WORD,
+    TABLE_WORD,
+    is_supplementary_label,
+    normalize_label,
+    printed_label,
+)
 from bibr.utils.text import URL_RE as URL_RE  # URL_RE re-exported here
 from bibr.utils.text import collapse_ws
 
@@ -31,50 +41,62 @@ def expand_int_range(lo: int, hi: int) -> list[int]:
     return list(range(lo, hi + 1))
 
 
-# ── Number separator used by table/figure/equation/section compound refs ──
+# ── Number separator used by supplementary/equation/section compound refs ──
 # Matches: "1, 2 & 3", "1 and 2", "1-3"
 _NUM_LIST = r"(?:\s*(?:[,&]|\band\b)\s*\d+)"
 _NUM_RANGE = r"(?:\s*[-–]\s*\d+)?"
 
 # ── Table / Figure xref patterns ──────────────────────────────────────────
+# A mention is the word and one or more printed labels (see
+# ``bibr.structure.float_labels``): "Table 3", "Tables 3.1 and 3.2", "Fig. 2a",
+# "Figs. S1–S3", "Tables II and III", "Supplementary Table 4". A list holds
+# numbered or lettered labels, not both, so the panels of "Fig. 2A, B" are not
+# read as a figure "B".
 # The letter lookbehind blocks substring matches — author names
 # ("Constable 2014" → "table 2014"), suffix words with glued footnote
 # markers ("stable11" → "table11"), URL path segments
-# ("ditctab20121en.pdf" → "tab20121"), "config 3" → "fig 3" — while
-# still allowing an OCR-flattened marker glued to the word ("9Table 1").
-# Mirrors EQUATION_XREF_RE.
+# ("ditctab20121en.pdf" → "tab20121"), "config 3" → "fig 3", "unstable S1" —
+# while still allowing an OCR-flattened marker glued to the word
+# ("9Table 1"). Mirrors EQUATION_XREF_RE.
+_LABEL_SEP = r"\s*(?:[-–]|,?\s*(?:&|\band\b)|,)\s*"
 
-TABLE_XREF_RE = re.compile(
-    r"(?<![A-Za-z])(?:Tables?|Tab\.?|Tbl\.?)\s*"
-    r"(\d+" + _NUM_RANGE + _NUM_LIST + r"*)",
-    re.IGNORECASE,
-)
 
-FIGURE_XREF_RE = re.compile(
-    r"(?<![A-Za-z])(?:Figures?|Fig\.?|Figs\.?)\s*"
-    r"(\d+(?:[a-z](?![a-z]))?"
-    r"(?:\s*[-–]\s*\d+(?:[a-z](?![a-z]))?)?"
-    r"(?:\s*(?:[,&]|\band\b)\s*\d+(?:[a-z](?![a-z]))?)*)",
-    re.IGNORECASE,
-)
+def _float_xref_re(word: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"(?<![A-Za-z])(?P<supplement>{SUPPLEMENT_WORD})?(?P<word>{word})\s*"
+        rf"(?P<labels>{NUMBERED_LABEL}(?:{_LABEL_SEP}{NUMBERED_LABEL})*"
+        rf"|{LETTERED_LABEL}(?:{_LABEL_SEP}{LETTERED_LABEL})*)",
+        re.IGNORECASE,
+    )
+
+
+TABLE_XREF_RE = _float_xref_re(TABLE_WORD)
+FIGURE_XREF_RE = _float_xref_re(FIGURE_WORD)
+
+# Re-reads a mention's label list one label at a time, the separator before
+# each one telling a range ("1–3") from a list ("1 and 3").
+_FIRST_NUMBERED_RE = re.compile(NUMBERED_LABEL, re.IGNORECASE)
+_FIRST_LETTERED_RE = re.compile(LETTERED_LABEL, re.IGNORECASE)
+_NEXT_NUMBERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{NUMBERED_LABEL})", re.IGNORECASE)
+_NEXT_LETTERED_RE = re.compile(rf"(?P<sep>{_LABEL_SEP})(?P<label>{LETTERED_LABEL})", re.IGNORECASE)
+# A label split into what precedes its last number and that number:
+# "S12" → ("S", "12"), "3.1" → ("3.", "1").
+_LABEL_NUMBER_RE = re.compile(r"(?P<head>.*?)(?P<number>\d+)")
+_LETTER_PREFIX_RE = re.compile(r"[A-Za-z][.-]?")
+
+# How a figure or table xref was resolved, exported as
+# ``extraction.diagnostics.xref_tier``: by the float's printed label, or — when
+# no float of that kind has a label — by taking the printed number as the
+# float's position.
+LABEL_TIER = "label"
+POSITION_TIER = "position"
 
 # ── Supplementary xref patterns ───────────────────────────────────────────
-# Matches: Table S1, Fig. S2, Supplementary Table 1, Supplemental Figure 3,
-#          Supplementary Material, Supplemental Material, Online Supplement
-# Supp/section ids are unvalidated against real ids, so the lookbehind is
-# the only defense against substring matches ("unstable S1", "config S2").
-SUPP_TABLE_XREF_RE = re.compile(
-    r"(?<![A-Za-z])(?:Tables?|Tab\.?|Tbl\.?)\s*S(\d+" + _NUM_RANGE + _NUM_LIST + r"*)",
-    re.IGNORECASE,
-)
-
-SUPP_FIGURE_XREF_RE = re.compile(
-    r"(?<![A-Za-z])(?:Figures?|Fig\.?|Figs\.?)\s*S(\d+(?:[a-z](?![a-z]))?"
-    r"(?:\s*[-–]\s*\d+(?:[a-z](?![a-z]))?)?"
-    r"(?:\s*(?:[,&]|\band\b)\s*\d+(?:[a-z](?![a-z]))?)*)",
-    re.IGNORECASE,
-)
-
+# Matches: Supplementary Material, Supplemental Data 2, Supplementary Tables.
+# A supplement named by a table or figure label ("Table S1", "Supplementary
+# Figure 3") is read by the table/figure patterns above instead.
+# Supp ids are unvalidated against real ids, so the lookbehind is the only
+# defense against substring matches.
 SUPP_NAMED_XREF_RE = re.compile(
     r"(?<![A-Za-z])(?:(?:Online\s+)?Supplementa(?:ry|l))\s+"
     r"(?:Tables?|Figures?|Fig\.?|Materials?|Information|Data|Methods?|Results?|Appendix)"
@@ -118,8 +140,8 @@ SECTION_XREF_RE = re.compile(
 # "Table"/"Tab."→tab, "Tbl."→tbl, "Figure"/"Fig."→fig, "Supplementary"/
 # "Supplemental"→supplementa, "Equation"/"Eq."→eq, "Section"/"Subsection"→
 # section, and the section sign. A necessary condition, so a sentence that
-# fails it can skip all seven passes — ~6.5 ms/paper of the shared serve
-# event loop, verified match-identical on 200 real papers.
+# fails it can skip every pass — ~6.5 ms/paper of the shared serve event
+# loop, verified match-identical on 200 real papers.
 _XREF_PRESCAN_RE = re.compile(r"tab|tbl|fig|supplementa|eq|section|§", re.IGNORECASE)
 
 # Helper to parse number references like "1, 2, 3" or "1-3"
@@ -161,6 +183,123 @@ def _expand_nums(num_str: str) -> list[int]:
     return result
 
 
+def _label_range(first: str, last: str) -> list[str]:
+    """The labels from *first* to *last*: "1"–"3", "S1"–"S3" (and "S1"–"3"),
+    "3.1"–"3.3". Any other pair — or an implausible span — keeps its ends."""
+    lo = _LABEL_NUMBER_RE.fullmatch(first)
+    hi = _LABEL_NUMBER_RE.fullmatch(last)
+    if lo is None or hi is None:
+        return [first, last]
+    head = lo.group("head")
+    hi_head = hi.group("head")
+    if not hi_head and _LETTER_PREFIX_RE.fullmatch(head):
+        hi_head = head  # "Tables S1–3"
+    lo_number, hi_number = int(lo.group("number")), int(hi.group("number"))
+    if hi_head.casefold() != head.casefold() or lo_number >= hi_number:
+        return [first, last]
+    return [f"{head}{number}" for number in expand_int_range(lo_number, hi_number)]
+
+
+def _mention_labels(match: re.Match[str]) -> list[tuple[str, bool]] | None:
+    """The labels a table/figure mention prints, with ranges filled in.
+
+    Each label comes with whether it can only name a supplement: after
+    "Supplementary" a label that is neither a number (read as "S<n>") nor
+    "S"-prefixed ("Supplementary Table A1"). ``None`` for a lettered label
+    after a lowercase word ("the table I made"), which is prose.
+    """
+    text = match.group("labels")
+    first = _FIRST_NUMBERED_RE.match(text)
+    following = _NEXT_NUMBERED_RE
+    if first is None:
+        if match.group("word")[0].islower():
+            return None
+        first = _FIRST_LETTERED_RE.match(text)
+        following = _NEXT_LETTERED_RE
+    if first is None:  # the patterns above always leave one; typing guard only
+        return None
+    labels = [printed_label(first.group(0))]
+    position = first.end()
+    while (step := following.match(text, position)) is not None:
+        label = printed_label(step.group("label"))
+        if step.group("sep").strip() in {"-", "–"}:
+            labels[-1:] = _label_range(labels[-1], label)
+        else:
+            labels.append(label)
+        position = step.end()
+    if not match.group("supplement"):
+        return [(label, False) for label in labels]
+    return [
+        (
+            printed_label(label, supplement=True),
+            not label[:1].isdigit() and not is_supplementary_label(label),
+        )
+        for label in labels
+    ]
+
+
+def _label_candidates(label: str) -> list[str]:
+    """*label*, then — for a letter after a number ("2a") — the label without
+    it, so a panel mention ("Figure 2a") finds figure "2"."""
+    if len(label) > 1 and label[-1].isalpha() and label[-2].isdecimal():
+        return [label, label[:-1]]
+    return [label]
+
+
+def _printed_number(label: str) -> int:
+    """The first number *label* prints ("S2" → 2), or 0: what a supplementary
+    xref records, which no exported row is keyed by."""
+    number = NUM_SEP_RE.search(label)
+    return int(number.group()) if number else 0
+
+
+class _FloatIndex:
+    """Where mentions of one kind of float (tables, or figures) point.
+
+    ``by_label`` maps each normalized printed label to the ids of the floats
+    printed with it. ``by_position`` lists the ids by page (a float without a
+    page first), then in the order the parser produced them.
+    """
+
+    def __init__(self, floats: list[tuple[int, str | None, int | None]]) -> None:
+        self.by_label: dict[str, list[int]] = {}
+        for float_id, label, _page in floats:
+            if label:
+                self.by_label.setdefault(normalize_label(label), []).append(float_id)
+        ordered = sorted(floats, key=lambda item: item[2] or 0)
+        self.by_position = [float_id for float_id, _label, _page in ordered]
+
+    def resolve(self, label: str, kind: str) -> tuple[str, int, str | None]:
+        """``(xref_type, xref_id, tier)`` for a mention of *kind* printing *label*.
+
+        When any float of the kind has a label, only the label decides: one
+        float printed with it is the target; none, or two (ambiguous), leave
+        the xref without one (``xref_id`` 0, exported as a null
+        ``target_id``). When none has, a plain number is the float's position.
+        An "S"-prefixed label that no float carries names a supplement.
+        """
+        supplementary = is_supplementary_label(label)
+        if self.by_label:
+            ids: list[int] = next(
+                (
+                    found
+                    for candidate in _label_candidates(label)
+                    if (found := self.by_label.get(normalize_label(candidate)))
+                ),
+                [],
+            )
+            if ids or not supplementary:
+                return kind, ids[0] if len(ids) == 1 else 0, LABEL_TIER
+        elif not supplementary:
+            number = next(
+                (int(candidate) for candidate in _label_candidates(label) if candidate.isdecimal()),
+                None,
+            )
+            in_range = number is not None and 1 <= number <= len(self.by_position)
+            return kind, self.by_position[number - 1] if in_range else 0, POSITION_TIER
+        return "supplementary", _printed_number(label), None
+
+
 def detect_xrefs(
     sentences: list[PaperSentence],
     tables: list[PaperTable],
@@ -172,6 +311,13 @@ def detect_xrefs(
     Scans sentence text for patterns like "Table 1", "Figure 3", "Table S1",
     "Eq. 5", "Section 2", etc. and creates PaperXref objects linking each
     mention to the referenced item.
+
+    A table or figure mention resolves by the floats' printed labels
+    (``PaperTable.label``/``PaperFigure.label``): "Table 3.1" links the table
+    captioned "Table 3.1", whatever its id. Only when no float of that kind
+    has a label is the printed number taken as a position: "Figure 2" is then
+    the second figure by page. Every mention yields a row, with ``xref_id`` 0
+    when it names no float or two, and ``tier`` saying which way it resolved.
 
     Footnote xrefs are created separately by ``PDFParser.create_content_sections``.
 
@@ -191,11 +337,18 @@ def detect_xrefs(
     """
     xrefs: list[PaperXref] = []
 
-    # Build lookup: table_id / figure_id → validate that the ID exists.
-    # Papers reference tables/figures by their ID (e.g., "Table 3" means table_id=3),
-    # not by ordinal position in the list.
-    tbl_id_set = {tbl.table_id for tbl in tables}
-    fig_id_set = {fig.figure_id for fig in figures}
+    float_patterns = (
+        (
+            "table",
+            TABLE_XREF_RE,
+            _FloatIndex([(t.table_id, t.label, t.page_number) for t in tables]),
+        ),
+        (
+            "figure",
+            FIGURE_XREF_RE,
+            _FloatIndex([(f.figure_id, f.label, f.page_number) for f in figures]),
+        ),
+    )
 
     for sent in sentences:
         # Display formulas are exported as "[equation]" placeholders — any
@@ -207,70 +360,38 @@ def detect_xrefs(
         if not _XREF_PRESCAN_RE.search(sent.text):
             continue
 
-        # Table xrefs
-        for m in TABLE_XREF_RE.finditer(sent.text):
-            nums = _expand_nums(m.group(1))
-            for num in nums:
-                if num in tbl_id_set:
+        # Table and figure xrefs, supplements named by a label included
+        # ("Table S1", "Supplementary Figure 2"): one row per printed label.
+        float_spans: list[tuple[int, int]] = []
+        for kind, pattern, index in float_patterns:
+            for m in pattern.finditer(sent.text):
+                labels = _mention_labels(m)
+                if labels is None:
+                    continue
+                float_spans.append(m.span())
+                for label, supplement_only in labels:
+                    xref_type, xref_id, tier = (
+                        ("supplementary", _printed_number(label), None)
+                        if supplement_only
+                        else index.resolve(label, kind)
+                    )
                     xrefs.append(
                         PaperXref(
-                            xref_id=num,
-                            xref_type="table",
+                            xref_id=xref_id,
+                            xref_type=xref_type,
                             contents=_normalize_xref_text(m.group(0)),
                             text_id=sent.text_id,
+                            tier=tier,
                             start=m.start(),
                             end=m.end(),
                         )
                     )
 
-        # Figure xrefs
-        for m in FIGURE_XREF_RE.finditer(sent.text):
-            nums = _expand_nums(m.group(1))
-            for num in nums:
-                if num in fig_id_set:
-                    xrefs.append(
-                        PaperXref(
-                            xref_id=num,
-                            xref_type="figure",
-                            contents=_normalize_xref_text(m.group(0)),
-                            text_id=sent.text_id,
-                            start=m.start(),
-                            end=m.end(),
-                        )
-                    )
-
-        # Supplementary table xrefs (Table S1, etc.) — no validation
-        for m in SUPP_TABLE_XREF_RE.finditer(sent.text):
-            nums = _expand_nums(m.group(1))
-            for num in nums:
-                xrefs.append(
-                    PaperXref(
-                        xref_id=num,
-                        xref_type="supplementary",
-                        contents=_normalize_xref_text(m.group(0)),
-                        text_id=sent.text_id,
-                        start=m.start(),
-                        end=m.end(),
-                    )
-                )
-
-        # Supplementary figure xrefs (Fig. S1, etc.) — no validation
-        for m in SUPP_FIGURE_XREF_RE.finditer(sent.text):
-            nums = _expand_nums(m.group(1))
-            for num in nums:
-                xrefs.append(
-                    PaperXref(
-                        xref_id=num,
-                        xref_type="supplementary",
-                        contents=_normalize_xref_text(m.group(0)),
-                        text_id=sent.text_id,
-                        start=m.start(),
-                        end=m.end(),
-                    )
-                )
-
-        # Supplementary named refs (Supplementary Table 1, Supplemental Material)
+        # Supplementary named refs (Supplemental Material, Supplementary Data 2)
+        # that no table/figure mention above already covers.
         for m in SUPP_NAMED_XREF_RE.finditer(sent.text):
+            if any(start < m.end() and m.start() < end for start, end in float_spans):
+                continue
             if m.group(1):
                 nums = _expand_nums(m.group(1))
                 for num in nums:

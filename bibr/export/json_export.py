@@ -1240,6 +1240,7 @@ def _export_paper_payload(
         figure=[
             FigureExport(
                 figure_id=position,
+                label=_or_none(f.label),
                 section_id=ids.float_section_id(f),
                 text_id=ids.caption_text_id(f),
                 image=_data_uri(f.image_b64),
@@ -1251,6 +1252,7 @@ def _export_paper_payload(
         table=[
             TableExport(
                 table_id=position,
+                label=_or_none(t.label),
                 section_id=ids.float_section_id(t),
                 text_id=ids.caption_text_id(t),
                 html=t.tbl_html or None,

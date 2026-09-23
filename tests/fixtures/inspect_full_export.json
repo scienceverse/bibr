@@ -262,6 +262,7 @@
   "figure": [
     {
       "figure_id": 1,
+      "label": "1",
       "section_id": 2,
       "text_id": null,
       "image": null,
@@ -272,6 +273,7 @@
   "table": [
     {
       "table_id": 1,
+      "label": "1",
       "section_id": 2,
       "text_id": null,
       "html": "<table></table>",

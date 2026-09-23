@@ -78,7 +78,7 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `search_text(paper_id, query, limit?)` | Case-insensitive substring search over sentences |
 | `get_references(paper_id, offset?, limit?)` | Parsed bibliography entries, paginated, empty fields omitted |
 | `get_reference_citations(paper_id, bib_id)` | Every in-text citation of one reference, with the full source sentence and page |
-| `get_tables(paper_id, table_id?)` | Captions per table; full HTML + cells for one `table_id` |
+| `get_tables(paper_id, table_id?)` | Printed label and caption per table; full HTML + cells for one `table_id` |
 | `get_figures(paper_id, figure_id?)` | Captions and pages; the image is replaced by `has_image` |
 | `save_paper(paper_id, path, compact?)` | Writes the complete export JSON to disk |
 

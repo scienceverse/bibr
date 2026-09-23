@@ -299,8 +299,13 @@ def test_section_classification_keeps_a_recorded_score(demo_paper):
 
 def test_xref_tier_moved_to_diagnostics_keyed_by_xref_id(export_payload):
     tiers = export_payload["extraction"]["diagnostics"]["xref_tier"]
-    bib_xrefs = [x for x in export_payload["xref"] if x["xref_type"] == "bib"]
-    assert tiers == [{"xref_id": bib_xrefs[0]["xref_id"], "tier": "numeric"}]
+    xref_ids = {x["xref_type"]: x["xref_id"] for x in export_payload["xref"]}
+    # A bib xref records its citation detector; a table or figure xref how it
+    # resolved: by the printed label, or by position when no float has one.
+    assert tiers == [
+        {"xref_id": xref_ids["bib"], "tier": "numeric"},
+        {"xref_id": xref_ids["table"], "tier": "label"},
+    ]
 
 
 def test_paper_classification_confidences_moved_to_diagnostics(export_payload):
@@ -808,3 +813,31 @@ def test_identity_receipt_spells_section_types_like_the_section_rows():
     ctx = TestExtractionProvenance()._ctx(timings={})
     receipt = _build_extraction(ctx, paper)["identity"]["receipt"]
     assert receipt["candidates"][0]["section_type"] == "data_availability"
+
+
+def test_floats_export_their_printed_label_and_xrefs_how_they_resolved(demo_paper):
+    """A figure/table row carries the label its caption prints, right after
+    its id; each figure/table xref records whether it resolved by label or
+    by position."""
+    from bibr.export.json_export import _export_paper_payload
+    from bibr.paper_contents import PaperXref
+
+    demo_paper.contents.figures[0].label = None
+    demo_paper.contents.xrefs += [
+        PaperXref(xref_id=1, xref_type="figure", contents="Figure 1", text_id=2, tier="position"),
+        PaperXref(xref_id=0, xref_type="table", contents="Table 9", text_id=2, tier="label"),
+    ]
+    payload = _export_paper_payload(demo_paper)
+
+    assert list(payload["table"][0])[:2] == ["table_id", "label"]
+    assert payload["table"][0]["label"] == "1"
+    assert list(payload["figure"][0])[:2] == ["figure_id", "label"]
+    assert payload["figure"][0]["label"] is None
+    rows = {(x["xref_type"], x["contents"]): x for x in payload["xref"]}
+    unresolved = rows[("table", "Table 9")]
+    assert unresolved["target_id"] is None
+    tiers = {
+        row["xref_id"]: row["tier"] for row in payload["extraction"]["diagnostics"]["xref_tier"]
+    }
+    assert tiers[rows[("figure", "Figure 1")]["xref_id"]] == "position"
+    assert tiers[unresolved["xref_id"]] == "label"

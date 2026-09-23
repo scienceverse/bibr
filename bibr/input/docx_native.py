@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
 from dataclasses import dataclass
 
 import pandas as pd
@@ -41,11 +42,18 @@ from bibr.paper_contents import (
     PaperXref,
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
+from bibr.structure.float_labels import FIGURE_WORD, SUPPLEMENT_WORD, TABLE_WORD, caption_label
 from bibr.structure.section_tree import infer_level_from_numbering
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url
 
 logger = logging.getLogger(__name__)
+
+# A caption paragraph that opens with a figure or table word, labelled or not.
+_FIGURE_CAPTION_START_RE = re.compile(
+    rf"{SUPPLEMENT_WORD}?{FIGURE_WORD}(?![A-Za-z])", re.IGNORECASE
+)
+_TABLE_CAPTION_START_RE = re.compile(rf"{SUPPLEMENT_WORD}?{TABLE_WORD}(?![A-Za-z])", re.IGNORECASE)
 
 # OOXML namespaces — used for XPath into paragraph trees.
 _NS = {
@@ -155,6 +163,92 @@ def _extract_image_blobs(paragraph, doc) -> list[tuple[bytes, str]]:
     return out
 
 
+def _is_caption_style(style) -> bool:
+    """True for Word's Caption style and styles based on it (pandoc's "Table
+    Caption" and "Image Caption")."""
+    for _ in range(8):  # base-style chains are short; a malformed cycle must end
+        if style is None:
+            return False
+        if getattr(style, "name", None) == "Caption":
+            return True
+        style = getattr(style, "base_style", None)
+    return False
+
+
+def _has_picture(paragraph) -> bool:
+    return bool(paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"))
+
+
+def _nearest_block(blocks: list[_Block], index: int, step: int) -> int | None:
+    """Index of the nearest block before (``step=-1``) or after (``step=1``)
+    *index* that is not an empty paragraph."""
+    index += step
+    while 0 <= index < len(blocks):
+        block = blocks[index]
+        if not (
+            block.kind == "paragraph"
+            and not (block.obj.text or "").strip()
+            and not _has_picture(block.obj)
+        ):
+            return index
+        index += step
+    return None
+
+
+def _is_table_caption(blocks: list[_Block], index: int) -> bool:
+    """Can the block at *index*, found next to a table, be that table's caption?
+
+    It must be a Caption-styled paragraph, without a picture of its own, that
+    does not name a figure. An unlabelled one directly under a picture stays
+    the picture's caption.
+    """
+    block = blocks[index]
+    if (
+        block.kind != "paragraph"
+        or not _is_caption_style(getattr(block.obj, "style", None))
+        or _has_picture(block.obj)
+    ):
+        return False
+    text = (block.obj.text or "").strip()
+    if not text or _FIGURE_CAPTION_START_RE.match(text):
+        return False
+    if _TABLE_CAPTION_START_RE.match(text):
+        return True
+    previous = _nearest_block(blocks, index, -1)
+    return previous is None or not (
+        blocks[previous].kind == "paragraph" and _has_picture(blocks[previous].obj)
+    )
+
+
+def _table_caption_blocks(blocks: list[_Block]) -> dict[int, int]:
+    """Map each table block's index to that of its caption paragraph.
+
+    A table's caption is the Caption-styled paragraph directly above or below
+    it (empty paragraphs between are skipped). A caption between two tables
+    could be either one's, so the side that the unambiguous captions of the
+    document sit on is tried first — above, on a tie.
+    """
+    above: dict[int, int] = {}
+    below: dict[int, int] = {}
+    for index, block in enumerate(blocks):
+        # A table without cells is dropped, and must not take its caption along.
+        if block.kind != "table" or not any(row.cells for row in block.obj.rows):
+            continue
+        for side, step in ((above, -1), (below, 1)):
+            neighbour = _nearest_block(blocks, index, step)
+            if neighbour is not None and _is_table_caption(blocks, neighbour):
+                side[index] = neighbour
+    shared = set(above.values()) & set(below.values())
+    votes_above = sum(caption not in shared for caption in above.values())
+    votes_below = sum(caption not in shared for caption in below.values())
+    captions: dict[int, int] = {}
+    for side in (above, below) if votes_above >= votes_below else (below, above):
+        for table_index, caption_index in side.items():
+            if table_index not in captions and caption_index not in captions.values():
+                captions[table_index] = caption_index
+    return captions
+
+
 class DocxParser:
     """Parses DOCX bytes directly into a :class:`PaperContents`.
 
@@ -242,11 +336,22 @@ class DocxParser:
         self._footnotes_map = _load_footnotes(doc)
         self._endnotes_map = _load_endnotes(doc)
 
-        for block in _iter_blocks(doc):
+        blocks = _iter_blocks(doc)
+        # A table's caption paragraph leaves the body text, as a figure's does.
+        table_captions = _table_caption_blocks(blocks)
+        caption_blocks = set(table_captions.values())
+        for index, block in enumerate(blocks):
             if block.kind == "paragraph":
-                self._handle_paragraph(block.obj)
+                if index not in caption_blocks:
+                    self._handle_paragraph(block.obj)
             elif block.kind == "table":
-                self._handle_table(block.obj)
+                caption_index = table_captions.get(index)
+                caption = (
+                    (blocks[caption_index].obj.text or "").strip()
+                    if caption_index is not None
+                    else None
+                )
+                self._handle_table(block.obj, caption=caption)
             elif block.kind == "math_para":
                 self._handle_math_para(block.obj)
 
@@ -477,9 +582,10 @@ class DocxParser:
             return
 
         # Caption-styled paragraph: drain pending images, attach text as caption.
-        if style_name == "Caption" and self._unfilled_caption_figures and plain:
+        if self._unfilled_caption_figures and plain and _is_caption_style(paragraph.style):
             fig = self._unfilled_caption_figures.pop(0)
             fig.caption = plain
+            fig.label = caption_label(plain, "figure")
             return
 
         # Walk the paragraph XML in document order to interleave:
@@ -713,7 +819,7 @@ class DocxParser:
             is_formula=True,
         )
 
-    def _handle_table(self, table) -> None:
+    def _handle_table(self, table, *, caption: str | None = None) -> None:
         rows = list(table.rows)
         if not rows:
             return
@@ -736,7 +842,7 @@ class DocxParser:
                 df=df,
                 tbl_html=html,
                 section_id=self._current_section_id,
-                caption=None,
+                caption=caption or None,
                 page_number=None,
                 parts=[
                     PaperTablePart(
@@ -746,6 +852,7 @@ class DocxParser:
                         df=df,
                     )
                 ],
+                label=caption_label(caption, "table"),
             )
         )
         self._table_counter += 1

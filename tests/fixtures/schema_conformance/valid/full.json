@@ -217,6 +217,7 @@
   "figure": [
     {
       "figure_id": 1,
+      "label": "1",
       "section_id": 2,
       "text_id": 3,
       "image": null,
@@ -227,6 +228,7 @@
   "table": [
     {
       "table_id": 1,
+      "label": "1",
       "section_id": 2,
       "text_id": 4,
       "html": "<table><tr><th>A</th></tr><tr><td>1</td></tr></table>",
@@ -407,6 +409,10 @@
         {
           "xref_id": 1,
           "tier": "numeric"
+        },
+        {
+          "xref_id": 2,
+          "tier": "label"
         }
       ]
     },

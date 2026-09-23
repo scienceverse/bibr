@@ -68,6 +68,13 @@ def test_xref_tiers_match_the_citation_linker():
     assert {json_export._snake(t) for t in tiers} <= set(get_args(models.XrefTierLiteral))
 
 
+def test_xref_tiers_cover_figure_and_table_resolution():
+    from bibr.structure import xref_utils
+
+    tiers = {xref_utils.LABEL_TIER, xref_utils.POSITION_TIER}
+    assert {json_export._snake(t) for t in tiers} <= set(get_args(models.XrefTierLiteral))
+
+
 def test_eq_comparators_match_the_equation_extractor():
     import re
 
