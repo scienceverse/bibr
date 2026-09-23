@@ -4,20 +4,9 @@ bibr requires **Python >=3.11,<3.15** (3.11, 3.12, 3.13, or 3.14).
 
 ## System prerequisites
 
-bibr identifies input files by content, through the `python-magic` binding to the system
-**libmagic** library. `python-magic` is only the binding — on macOS and most Linux distros
-libmagic itself has to be installed separately, or the first file bibr reads fails with
-`failed to find libmagic`:
-
-| Platform | Command |
-|---|---|
-| macOS | `brew install libmagic` |
-| Debian / Ubuntu | `sudo apt install libmagic1` |
-| Fedora / RHEL | `sudo dnf install file-libs` |
-| Windows | nothing to do — the `python-magic-bin` wheel bundles it |
-
-`bibr doctor` reports this as its own check, so run it if an extraction fails on a fresh
-machine.
+None beyond Python. bibr recognizes PDF, DOCX, JATS XML, HTML, and ePub inputs from their
+content with built-in checks, so it does not need the system **libmagic** library. If
+libmagic is installed, bibr uses it only to name unrecognized files in its logs.
 
 ## Install from PyPI
 

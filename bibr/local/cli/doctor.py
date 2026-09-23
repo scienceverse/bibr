@@ -617,16 +617,14 @@ def _run_doctor() -> None:
     else:
         fail("uv not on PATH", hint="Install from https://docs.astral.sh/uv/")
 
-    # libmagic is a system library python-magic only binds to; a fresh install
-    # on macOS/Linux can be missing it and every extraction dies on the first
-    # file sniff (issue #64). Name it here, where users come to find it.
-    from bibr.input.validate import libmagic_unavailable_reason
+    # Input files are identified by built-in rules; the system libmagic library
+    # is an optional extra that only names unrecognized content in logs.
+    from bibr.input.sniff import libmagic_available
 
-    libmagic_problem = libmagic_unavailable_reason()
-    if libmagic_problem is None:
-        ok("libmagic available")
+    if libmagic_available():
+        ok("Input file detection: built-in (libmagic hints available)")
     else:
-        fail("libmagic not found", hint=libmagic_problem)
+        ok("Input file detection: built-in")
 
     # --- Configuration -------------------------------------------------------
     ui.section(console, "Configuration")

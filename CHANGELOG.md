@@ -56,6 +56,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- Input validation no longer needs the system libmagic library, so a plain
+  `pip install bibr` on macOS or Linux works without installing it separately.
+  Built-in content checks identify PDF, DOCX, JATS XML, HTML, and ePub inputs;
+  an installed libmagic only names unrecognized files in logs and no longer
+  affects whether a file is accepted. HTML and XML files that mention the PDF
+  header near their start are no longer rejected as mislabeled PDFs. DOCX and
+  ePub files renamed to another supported extension, and Windows or Linux
+  executables renamed to any supported extension, are now always reported as an
+  unsupported format. `bibr doctor` no longer fails when libmagic is missing.
+  `python-magic` and `python-magic-bin` are no longer dependencies, which also
+  removes the Windows install's dependence on a prebuilt x86-64 libmagic wheel,
+  and the serve image no longer installs `libmagic1`. Installing `python-magic`
+  yourself still enables the optional libmagic hint.
 
 ### Added
 

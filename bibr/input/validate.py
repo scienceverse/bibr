@@ -2,30 +2,19 @@
 
 Validates input files by detecting MIME types, checking file type support,
 cross-referencing extensions against detected content types, and populating
-InputFile validation flags.
+InputFile validation flags. Content types come from the pure-Python rules in
+:mod:`bibr.input.sniff`, so validation needs no system library.
 """
 
 import hashlib
 import logging
-import sys
 import zipfile
 import zlib
 from pathlib import Path
 
-try:
-    import magic
-except ImportError as _exc:  # pragma: no cover - depends on the host's libmagic
-    # python-magic raises at import time when the *system* libmagic shared
-    # library is absent (a plain `pip install` cannot supply it). Failing here
-    # would take down `import bibr` wholesale, so `bibr doctor` could not even
-    # start to report the problem. Defer it to first use instead (issue #64).
-    magic = None  # type: ignore[assignment]
-    _MAGIC_IMPORT_ERROR: ImportError | None = _exc
-else:
-    _MAGIC_IMPORT_ERROR = None
-
 from bibr.exceptions import InputValidationError
 from bibr.input.file import InputFile, InputFormat
+from bibr.input.sniff import EXECUTABLE_MIMES, detect_mime_type
 from bibr.input.supported_files import (
     SUPPORTED_EXTENSIONS,
     UNSUPPORTED_EXTENSIONS,
@@ -35,8 +24,8 @@ from bibr.input.supported_files import (
 logger = logging.getLogger(__name__)
 
 # Content MIME types distinctive enough (magic bytes) that an extension mismatch
-# means the file is mislabeled/spoofed, not a fuzzy libmagic guess. html<->xml
-# are routinely confused, so they are intentionally excluded (audit L8).
+# means the file is mislabeled/spoofed, not a fuzzy guess. html<->xml overlap
+# (XHTML is both), so they are intentionally excluded (audit L8).
 _STRICT_MISMATCH_MIMES: frozenset[str] = frozenset(
     {
         "application/pdf",
@@ -58,49 +47,6 @@ _MIME_TO_EXTENSIONS: dict[str, set[str]] = {
     "application/xhtml+xml": {".html", ".htm"},
     "application/epub+zip": {".epub"},
 }
-
-
-_LIBMAGIC_INSTALL_HINTS = {
-    "darwin": "brew install libmagic",
-    "linux": (
-        "sudo apt install libmagic1 (Debian/Ubuntu) or sudo dnf install file-libs (Fedora/RHEL)"
-    ),
-}
-
-
-def libmagic_unavailable_reason() -> str | None:
-    """Return an actionable message when libmagic is missing, else ``None``.
-
-    ``python-magic`` is a binding, not an implementation: the system libmagic
-    library has to be installed separately on macOS and most Linux distros
-    (Windows gets it from the ``python-magic-bin`` wheel). Surfacing that as a
-    named, fixable check beats the bare "failed to find libmagic" that a fresh
-    ``bibr setup`` otherwise dies on.
-    """
-    if _MAGIC_IMPORT_ERROR is None:
-        return None
-    hint = _LIBMAGIC_INSTALL_HINTS.get(sys.platform)
-    detail = f"libmagic is not installed ({_MAGIC_IMPORT_ERROR})."
-    if hint:
-        return f"{detail} Install it with: {hint}"
-    return f"{detail} Install your platform's libmagic/file library."
-
-
-def detect_mime_type(file_content: bytes) -> str:
-    """Detect the MIME type of file content using libmagic.
-
-    Args:
-        file_content: Raw bytes of the file (at least first 2048 bytes recommended).
-
-    Returns:
-        Detected MIME type string, e.g. "application/pdf".
-
-    Raises:
-        ImportError: If the system libmagic library is unavailable.
-    """
-    if magic is None:
-        raise ImportError(libmagic_unavailable_reason()) from _MAGIC_IMPORT_ERROR
-    return magic.from_buffer(file_content, mime=True)
 
 
 def _check_extension_mime_consistency(extension: str, detected_mime: str) -> bool:
@@ -435,13 +381,13 @@ def validate_input_file(
         )
         # Reject when the content is an unambiguous document type the extension
         # misrepresents, rather than dispatching by the spoofable extension (L8).
-        # Scoped to distinctive magic-byte formats — html<->xml are routinely
-        # confused by libmagic, so those stay warn-only to avoid false rejects.
+        # Scoped to distinctive magic-byte formats — html<->xml overlap, so
+        # those stay warn-only to avoid false rejects.
         if detected_mime in _STRICT_MISMATCH_MIMES:
             input_file.is_supported = False
 
     # If MIME indicates dangerous or unsupported content regardless of extension
-    if detected_mime in ("application/x-msdownload", "application/x-executable"):
+    if detected_mime in EXECUTABLE_MIMES:
         logger.warning(
             f"MIME type {detected_mime} indicates executable content for {input_file.file_name}"
         )

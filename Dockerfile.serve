@@ -116,7 +116,7 @@ RUN apt-get update && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         python3.13 python3.13-venv \
-        libmagic1 libnuma1 curl && \
+        libnuma1 curl && \
     apt-get purge -y --auto-remove software-properties-common && \
     ln -sf /usr/bin/python3.13 /usr/local/bin/python && \
     rm -rf /var/lib/apt/lists/*
