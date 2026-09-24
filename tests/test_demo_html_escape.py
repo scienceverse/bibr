@@ -16,6 +16,7 @@ def test_summary_md_shows_extracted_metadata_literally():
             "doi": "10.1234/a`b",
             "paper_type": "<b>article</b>",
             "oecd_l1": "Social [sciences](https://attacker.example)",
+            "oecd_l2": "Psychology ![y](https://attacker.example/r.png)",
             "keywords": ["*bold*", "[k](https://attacker.example)"],
         }
     }
@@ -27,12 +28,23 @@ def test_summary_md_shows_extracted_metadata_literally():
     assert "`" not in md.replace("\\`", "")
     assert "Evil" in md
     assert "Heading" in md
+    assert " > Psychology" in md
 
 
 def test_summary_md_keeps_plain_titles_readable():
-    md = _build_summary_md({"metadata": {"title": "Ageing and memory", "doi": "10.1/x"}})
+    md = _build_summary_md(
+        {
+            "metadata": {
+                "title": "Ageing and memory",
+                "doi": "10.1/x",
+                "oecd_l1": "Social sciences",
+                "oecd_l2": "Psychology",
+            }
+        }
+    )
     assert md.startswith("### Ageing and memory")
     assert "10\\.1/x" in md
+    assert "**OECD domain:** Social sciences > Psychology" in md
 
 
 def test_text_html_escapes_script_tags():
