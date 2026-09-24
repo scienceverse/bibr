@@ -125,8 +125,8 @@ class HeadingHandlersMixin:
         if not text:
             return
 
-        # Collapse stray spaces in numbered prefixes from GLM-OCR (e.g.
-        # "3. 1 Encoder" → "3.1 Encoder"). Without this the heading both
+        # Collapse stray spaces in numbered prefixes (e.g. "3. 1 Encoder" →
+        # "3.1 Encoder"; see text_repair). Without this the heading both
         # displays oddly AND fails infer_level_from_numbering, which expects
         # tightly-spelled "N.M" for level inference.
         text = collapse_numbered_prefix_spaces(text)

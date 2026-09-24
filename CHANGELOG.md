@@ -213,6 +213,20 @@ released.
 
 ### Fixed
 
+- The per-region OCR clean-up no longer touches the PDF text layer, and it no
+  longer damages formulas and numbers. On text-layer regions it split "U.S."
+  into "U. S." and "e.g." into "e. g.", and it broke a DOI that opens a line
+  into "10. 1038/…". It cut a table of contents longer than 2,048 characters
+  with spaced dot leaders to its first entry. It also turned a printed "* p <
+  .05" into a bullet. Those regions are now only trimmed. In OCR output, a
+  formula that starts with `\theta`, `\tau`, `\text`, `\tilde` or `\times` no
+  longer loses its leading `\t`; on the default Paddle profile it exported as
+  "heta_{t+1} = …". The list-marker spacing ("1.text" → "1. text") no longer
+  applies to decimals, DOIs, abbreviations or formulas. The repeated-content
+  trimmer keeps the text after a repeated run instead of dropping the rest of
+  the region. A formula region that holds two formulas ("\(a\) + \(b\)") keeps
+  its delimiters, and one wrapped in single dollars is no longer nested inside
+  `$$`.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
