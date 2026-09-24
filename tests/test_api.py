@@ -14,10 +14,10 @@ from bibr.api import Records, Result, _pipeline_kwargs
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",
-        "schema_version": "11.0",
+        "schema_version": "12.0",
         "source": {
             "file_name": "paper.pdf",
-            "file_hash": "abc123",
+            "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
             "input_format": "pdf",
         },
         "metadata": {
@@ -39,15 +39,14 @@ def _export_fixture() -> dict:
                 "section_id": 1,
                 "header": "Intro",
                 "level": 1,
-                "parent_section_id": 0,
+                "parent_section_id": None,
                 "section_type": "intro",
-                "classification_score": 1.0,
             }
         ],
         "url": [],
         "bib": [
-            {"bib_id": 1, "title": "Ref One", "doi": "10.1/1"},
-            {"bib_id": 2, "title": "Ref Two", "doi": "10.1/2"},
+            {"bib_id": 1, "title": "Ref One", "doi": "10.1234/ref1"},
+            {"bib_id": 2, "title": "Ref Two", "doi": "10.1234/ref2"},
         ],
         "bib_match": [],
         "xref": [],
@@ -55,7 +54,7 @@ def _export_fixture() -> dict:
         "table": [],
         "eq": [],
         "extraction": {
-            "bibr_version": "0.3.0",
+            "producer": {"name": "bibr", "version": "0.3.0", "build_sha": None},
             "completed_at": "2026-07-24T10:00:00Z",
             "ocr": {"backend": "glm-mlx"},
             "llm": {"provider": "google", "model": "some-model"},
@@ -205,7 +204,7 @@ def test_result_table_keys_and_aliases():
     assert result.authors == result.author
     assert result.sections == result.section
     assert [r["title"] for r in result.references] == ["Ref One", "Ref Two"]
-    assert list(result.references.df["doi"]) == ["10.1/1", "10.1/2"]
+    assert list(result.references.df["doi"]) == ["10.1234/ref1", "10.1234/ref2"]
 
 
 def test_result_metadata_source_and_toplevel_passthrough():
@@ -215,7 +214,7 @@ def test_result_metadata_source_and_toplevel_passthrough():
     assert result.paper_id == "10.1234/example"
     assert result.extraction["usage"]["totals"]["input_tokens"] == 10
     assert result["metadata"]["title"] == "A Paper"
-    assert result.file_hash == "abc123"
+    assert result.sha256 == "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
     assert result.data is not None
 
 
@@ -242,6 +241,14 @@ def test_result_empty_table_is_empty_records():
     assert isinstance(result.figure, Records)
 
 
+def test_result_exposes_every_record_table():
+    """Every root array of the export is a ``Records`` table, the footnotes and
+    the ROR match tables included."""
+    result = Result(_export_fixture())
+    for name in ("footnote", "footnotes", "affiliation_match", "funding_match"):
+        assert isinstance(getattr(result, name), Records), name
+
+
 def test_result_repr_and_dir():
     result = Result(_export_fixture())
     text = repr(result)
@@ -258,6 +265,171 @@ def test_result_save(tmp_path):
     assert json.loads(out.read_text())["paper_id"] == "10.1234/example"
     compact = result.save(tmp_path / "compact.json", compact=True)
     assert "\n" not in compact.read_text()
+
+
+# --- forward compatibility within 12.x -----------------------------------------
+
+
+def _next_minor_export_fixture() -> dict:
+    """A valid export as a later 12.x writer might emit it: the next minor
+    ``schema_version`` plus fields this bibr does not know, at several depths."""
+    data = _export_fixture()
+    data["schema_version"] = "12.1"
+    data["future_block"] = {"enabled": True, "items": [1, 2]}
+    data["metadata"]["subtitle"] = "A sequel"
+    data["section"][0]["numbering"] = "1."
+    data["bib"][0]["raw"] = "Doe J. Ref One. 2020."
+    data["bib_match"] = [
+        {
+            "bib_id": 1,
+            "service": "crossref",
+            "author": [{"family": "Doe", "given": "J.", "particle": "van"}],
+        }
+    ]
+    data["text"] = [
+        {
+            "text": "Some sentence.",
+            "text_id": 1,
+            "paragraph_id": 1,
+            "section_id": 1,
+            "page_number": 1,
+            "language": "en",
+        }
+    ]
+    data["table"] = [
+        {
+            "table_id": 1,
+            "contents": [["a", "b"], ["1", "2"]],
+            "page_number": 2,
+            "cell_count": 4,
+        }
+    ]
+    data["extraction"]["float_parts"] = [
+        {
+            "object_type": "table",
+            "object_id": 1,
+            "part_index": 1,
+            "page_number": 2,
+            "bbox": [0.0, 0.0, 1.0, 1.0],
+            "rotation": 90,
+        }
+    ]
+    data["extraction"]["settings"]["future_knob"] = "on"
+    data["extraction"]["usage"]["totals"]["reasoning_tokens"] = 0
+    return data
+
+
+def test_result_loads_a_newer_minor_export_with_unknown_fields():
+    from bibr.export import PaperExport
+
+    result = Result(_next_minor_export_fixture())
+
+    assert result.title == "A Paper"
+    assert result.doi == "10.1234/example"
+    assert result.sha256 == "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+    assert [r["title"] for r in result.references] == ["Ref One", "Ref Two"]
+    assert result.sections[0]["header"] == "Intro"
+
+    model = result.model
+    assert isinstance(model, PaperExport)
+    assert model.schema_version == "12.1"
+    assert model.metadata.title == "A Paper"
+    assert model.section[0].section_type == "intro"
+    assert model.bib[0].title == "Ref One"
+    assert model.bib_match[0].author is not None
+    assert model.bib_match[0].author[0].family == "Doe"
+    assert model.text[0].text == "Some sentence."
+    assert model.table[0].contents == [["a", "b"], ["1", "2"]]
+    assert model.extraction is not None
+    assert model.extraction.float_parts is not None
+    assert model.extraction.float_parts[0].page_number == 2
+    assert model.extraction.settings.ref_seg == "geom"
+    assert model.extraction.usage is not None
+    assert model.extraction.usage.totals.input_tokens == 10
+
+
+def test_result_keeps_unknown_fields_from_a_newer_minor_export():
+    payload = _next_minor_export_fixture()
+    result = Result(payload)
+
+    # The raw dict is untouched, and unknown top-level/metadata keys resolve
+    # as attributes like known ones.
+    assert result.data is payload
+    assert result.future_block == {"enabled": True, "items": [1, 2]}
+    assert result.subtitle == "A sequel"
+    assert result.references[0]["raw"] == "Doe J. Ref One. 2020."
+
+    model = result.model
+    assert model.model_extra == {"future_block": {"enabled": True, "items": [1, 2]}}
+    assert model.metadata.model_extra == {"subtitle": "A sequel"}
+    assert model.section[0].model_extra == {"numbering": "1."}
+    assert model.bib[0].model_extra == {"raw": "Doe J. Ref One. 2020."}
+    assert model.bib_match[0].author is not None
+    assert model.bib_match[0].author[0].model_extra == {"particle": "van"}
+    assert model.table[0].model_extra == {"cell_count": 4}
+    assert model.extraction is not None
+    assert model.extraction.float_parts is not None
+    assert model.extraction.float_parts[0].model_extra == {"rotation": 90}
+    assert model.extraction.settings.model_extra == {"future_knob": "on"}
+
+    # Re-wrapping the model keeps the unknown fields in the dumped dict.
+    rewrapped = Result(model)
+    assert rewrapped.future_block == {"enabled": True, "items": [1, 2]}
+    assert rewrapped.data["extraction"]["float_parts"][0]["rotation"] == 90
+
+
+@pytest.mark.parametrize("version", ["13.0", "13.1", "11.0", "12", "12.1.0", "v12.1"])
+def test_result_rejects_a_schema_version_outside_12x(version):
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    payload["schema_version"] = version
+    with pytest.raises(ValidationError, match="schema_version"):
+        Result(payload)
+
+
+def test_result_rejects_an_export_without_schema_version():
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    del payload["schema_version"]
+    with pytest.raises(ValidationError, match="schema_version"):
+        Result(payload)
+
+
+def test_result_still_rejects_a_known_field_of_the_wrong_type():
+    from pydantic import ValidationError
+
+    payload = _next_minor_export_fixture()
+    payload["metadata"]["keywords"] = "not a list"
+    with pytest.raises(ValidationError, match="keywords"):
+        Result(payload)
+
+
+@pytest.mark.parametrize(
+    ("location", "mutate"),
+    [
+        ("root", lambda d: d.update(future_block={})),
+        ("metadata", lambda d: d["metadata"].update(subtitle="A sequel")),
+        ("section", lambda d: d["section"][0].update(numbering="1.")),
+        ("bib", lambda d: d["bib"][0].update(raw="Doe J.")),
+        ("extraction", lambda d: d["extraction"]["settings"].update(future_knob="on")),
+        ("schema_version", lambda d: d.update(schema_version="12.1")),
+    ],
+)
+def test_producer_models_still_reject_fields_they_do_not_define(location, mutate):
+    """Leniency is for reading only: what bibr writes must match its own schema."""
+    from pydantic import ValidationError
+
+    from bibr.export import PaperExport, validate_export
+
+    payload = _export_fixture()
+    PaperExport.model_validate(payload)
+    mutate(payload)
+
+    with pytest.raises(ValidationError):
+        PaperExport.model_validate(payload)
+    assert validate_export(payload), location
 
 
 # --- option mapping ----------------------------------------------------------
@@ -535,8 +707,11 @@ def test_result_consolidate_returns_new_result():
     enriched = result.consolidate()
     assert enriched is not result
     assert enriched.bib[0]["container"] == "J. Test"
-    assert enriched.bib[0]["consolidated_fields"] == "container"
-    assert "consolidated_fields" not in result.bib[0]  # original untouched
+    assert enriched.extraction["diagnostics"]["consolidation"] == [
+        {"bib_id": 1, "fields": ["container"]}
+    ]
+    assert "container" not in result.bib[0]  # original untouched
+    assert "consolidation" not in (result.extraction.get("diagnostics") or {})
 
 
 def test_chew_consolidate_false_forces_off(stub_pipeline, tmp_path):

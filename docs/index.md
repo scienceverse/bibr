@@ -56,7 +56,7 @@ The first run may download models and additional runtimes.
 
     ---
 
-    Sentence IDs, page links, processing warnings, and extraction provenance
+    Sentence IDs, page links, coded processing warnings, and extraction provenance
     help you review results. Coverage depends on the input and stage.
     [Explore the output](reference/schema.md).
 

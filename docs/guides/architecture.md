@@ -94,6 +94,8 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 - DOI lookup for direct matches
 - Bibliographic search as fallback (fuzzy title matching)
 - Matches stay in `bib_match` and `metadata_match`; explicit `fill`/`replace` consolidation can merge accepted reference fields into `bib`
+- Crossref records also bring identifiers: author ORCIDs and affiliation ROR IDs, funders (Open Funder Registry DOI, ROR ID, awards) and the version-of-record license, which land on the match rows
+- With enrichment on, affiliation strings and funder names are matched to ROR (`bibr/clients/ror.py`, `ROR_ENRICH`, default on) into `affiliation_match` and `funding_match`. Only ROR's own `chosen` match is kept. Set `ROR_CLIENT_ID` for ROR's higher rate limit (2000 instead of 50 requests per 5 minutes); strings not matched within `ROR_ENRICH_TIMEOUT` stay unmatched with a warning
 - Off by default. `CROSSREF_ENRICH=true` enables it for a deployment; per run, `bibr chew --crossref` / `--no-crossref`, `chew(crossref=True|False)` and the serve API's `crossref` form field override the setting either way (`extraction.settings.crossref_enrich` in the output records the effective value)
 - A served request can enable both reference parsing and Crossref even when
   `REF_PARSE_STRATEGY=off` is the deployment default. Enrichment is skipped when
@@ -105,18 +107,47 @@ Opt-in Crossref (and optional bibr-resolver) enrichment of extracted references:
 **JSON** (`bibr/export/json_export.py`):
 
 - JSON-serializable dict matching the bibr v{{ schema_version }} paper schema
-- Top-level keys include: `paper_id`, `schema_version`, `source`, `metadata`, `author`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `eq`, `bib_match`, `metadata_match`, `funding`, `affiliation`, `qualification_provenance`, `extraction`, `validation`. All telemetry (engines, timings, LLM usage, enrichment, warnings, diagnostics receipts, opt-in regions) lives under `extraction`. Figure/table rows retain legacy primary fields and add ordered physical `parts` with provenance.
+- Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version`, `source`; what the paper says — `metadata`, `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match`, `affiliation_match`, `funding_match`, `bib_match`; how bibr produced the output — `extraction`. Every key is always present.
+- Content rows carry no processing fields. Engines, settings, timings, LLM usage, enrichment, warnings (each a stable `code` and a `message`), qualification provenance, the output-validation result, diagnostics receipts (section classification, citation-detector tiers, paper-classification confidences, consolidation), the page and bbox of every figure/table piece (`float_parts`) and the opt-in layout payloads all live under `extraction`, keyed by the content rows' IDs. A Paper exported outside the pipeline gets a minimal `extraction` block.
+- Every record table has an integer primary key named after it (`text_id`, `xref_id`, `url_id`, …); other `*_id` columns are foreign keys. Absent values are `null`, never an empty string. Closed vocabularies (`section_type`, `bib_type`, `paper_type`, OECD labels, …) are enums in the schema, and every field carries a description.
+- `xref`, `url` and `eq` rows carry `start`/`end` character spans within their sentence's `text`. Printed values keep normalized companions where one is unambiguous: `metadata.published_date` (ISO 8601), `license_url`/`license_spdx`, `author.credit_roles` (CRediT URIs), and declared `language`/`pmid`/`pmcid`/`arxiv`.
+- Every bounding box is `[x0, y0, x1, y1]` in PDF points on the page as displayed, measured from its top-left corner; `extraction.pages` gives each page's width and height.
+- Figure and table rows describe the whole object: a figure assembled from several panel crops gets a composited `image`, and a table continued across pages keeps each printed piece's HTML in `html` and all rows in `contents`.
 - Schema version: `{{ schema_version }}`
 - `metadata` is scalar-only (no nested objects or lists of objects) so R consumers can `as.data.frame(metadata)`. Pipeline telemetry lives under `extraction`; the input file's identity under `source`.
-- All positional IDs are 1-based; `section_id=0` is the Root sentinel (excluded from export)
+- Every id is a 1-based position in document order; sections, figures and tables are renumbered at export, so no id has gaps or depends on how the input was parsed
+- Captions and footnotes are not sections. Their sentences are `text` rows after the body, with a null `section_id`; `figure` and `table` rows point at their caption row with `text_id`, and their `section_id` is the section they are printed in; `footnote` has one row per footnote or endnote (printed `label`, `text_id`), which `foot` references target
 - Enrichment matches are in a separate top-level `bib_match` array (flat, keyed by `bib_id` + `service`)
+- `paper_id` is required: the `--paper-id`, else the input file's stem (its name without the extension); `bibr batch` sets it to the corpus-unique id its JSON file is named after.
 - Optional `extraction.regions` debug payload (per-region bbox/font/content) is opt-in via `include_regions=True` on `Paper.export_to_json()` / `export_paper_to_json()` / the `include_regions` form field on `POST /papers/extract` / the `--regions` CLI flag. It also preserves `raw_ocr_content` when Paddle normalization changed a table or formula response, so diagnostics can compare the original model output with canonical content.
 
-Within major version 11, the schema is additive-only: new fields may appear in
-any `11.x` release and readers must ignore keys they don't recognize. Dispatch
-on the *presence* of a root `schema_version` key, never on parsing its value —
-pre-v11 payloads have no such key at all. See `CHANGELOG.md` for the full v11
-break and forward-versioning policy.
+**Parquet** (`bibr/export/tables.py`): `bibr tables <exports> --out DIR`,
+`bibr.write_tables()`, and `bibr batch` (into `<out>/tables/`, after every run)
+write a corpus as one Parquet file per table: `paper` (one row per paper), each
+record and match table, and the `extraction_*` processing lists. Every row starts
+with `paper_id`; column types come from the export models, so all files share one
+schema whatever papers they hold.
+
+Within major version 12, the schema is additive-only: new optional fields and
+new enum values may appear in any `12.x` release, and readers must ignore keys
+they don't recognize and accept enum values they don't know.
+Dispatch on the *presence* of a root `schema_version` key, never on parsing its
+value — pre-v11 payloads have no such key at all. See `CHANGELOG.md` for the
+v12 break and forward-versioning policy.
+
+Two JSON Schema documents are generated from the export models.
+[`bibr-export-v12.schema.json`](../schema/bibr-export-v12.schema.json) is exact
+to what the current release writes: unknown keys are rejected and
+`schema_version` is `{{ schema_version }}`.
+[`bibr-export-v12-reader.schema.json`](../schema/bibr-export-v12-reader.schema.json)
+is the reader contract: every object allows unknown keys, every enum accepts
+values it does not know yet (the known ones are listed as `examples`), and
+`schema_version` may be any `12.x`. The `PaperExport` and `PaperExportReader` models in
+`bibr.export` apply the same two rules in Python. Both documents carry a stable
+`$id` under `https://bibr.org/schema/`, so downstream readers can reference them
+instead of copying them. The superseded
+[`v11`](../schema/bibr-export-v11.schema.json) and
+[`v10`](../schema/bibr-export-v10.schema.json) schemas stay published, frozen.
 
 ### OCR selection and evidence
 
@@ -133,8 +164,8 @@ silent per-request GLM fallback after a concrete runtime has passed startup.
 
 OCR cache entries retain page-attempt and page-failure counts with extraction
 warnings. Cache hits apply the current `OCR_MIN_SUCCESS_RATE`, so tightening
-the threshold also rejects cached OCR that falls below it. Cache format 9
-invalidates older entries that lack this completion evidence.
+the threshold also rejects cached OCR that falls below it. Cache format 10,
+which stores the warnings with their codes, invalidates older entries.
 
 Paddle table output uses OTSL markers (such as `<fcel>`, `<lcel>`, `<nl>`, and
 `<ecel>`) that bibr decodes into canonical HTML. Paddle formula output has one
@@ -193,13 +224,13 @@ IMRaD+ section classification enum:
 | `keywords` | Keywords |
 | `endnote` | Supplementary material, future work, outlook |
 | `appendix` | Appendix / Supporting Information |
-| `open_data` | Data availability / code availability |
+| `data_availability` | Data availability / code availability |
 | `author_contributions` | Author Contributions / CRediT statement |
 | `coi` | Conflict of Interest / Competing Interests |
 | `ethics` | Ethics statement / IRB approval / Informed consent |
-| `footnote` | Footnotes |
-| `table` | Table caption/label region |
-| `figure` | Figure caption/label region |
+| `footnote` | A printed Footnotes or Notes heading |
+| `table` | A printed Tables heading (captions are not sections) |
+| `figure` | A printed Figures heading (captions are not sections) |
 | `unknown` | Unclassified (fallback) |
 
 ## External services
@@ -305,7 +336,7 @@ Key settings:
 | `OCR_BASE_URL` | Base URL for an external HTTP OCR server | `http://localhost:8080` |
 | `CROSSREF_ENRICH` | Enable Crossref/resolver reference enrichment (per-run override: `--crossref`/`--no-crossref`, `chew(crossref=...)`, serve `crossref` field) | `false` |
 | `EQUATION_EXTRACTION` | Enable equation extraction | `true` |
-| `FIGURE_IMAGES` | Include base64-encoded figure images in output | `false` |
+| `FIGURE_IMAGES` | Include figure images in output, as `data:` URIs | `false` |
 | `REF_SEG_STRATEGY` | Reference segmentation strategy (`geom`, `region`, `llm`, or `crf`) | `geom` |
 | `REF_PARSE_STRATEGY` | Reference parsing strategy (`ner`, `llm`, `llm-chunked`, or `off`) | `ner` |
 | `REF_TRAINING_DATA_DIR` | Save raw bib text + LLM extracts (parser data); LLM segmentation spans in `segmentation/` subdir (segmenter data) | disabled |

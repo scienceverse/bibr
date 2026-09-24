@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from bibr.paper_contents import PaperContents
     from bibr.pipeline.artifacts import ArtifactDisposition, ArtifactSink, RunState
     from bibr.pipeline.identity import DoiSelection, ExpectedIdentity
+    from bibr.processing_warnings import ProcessingWarning
 
 
 @dataclass
@@ -52,7 +53,7 @@ class FileState:
     core_sha256: str | None = None
     artifact_disposition: "ArtifactDisposition | None" = None
     enrichment_state: "RunState | None" = None
-    enrichment_warnings: list[str] = field(default_factory=list)
+    enrichment_warnings: "list[ProcessingWarning]" = field(default_factory=list)
     enrichment_detail: str | None = None
 
     # Populated during processing — nulled progressively
@@ -94,7 +95,7 @@ class FileState:
     failed_stage: str | None = None
     original_error: BaseException | None = None
     stage_times: dict = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
+    warnings: "list[ProcessingWarning]" = field(default_factory=list)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""

@@ -89,6 +89,7 @@ async def test_load_paper_returns_inspect_style_summary():
             "references": 2,
             "tables": 1,
             "figures": 1,
+            "footnotes": 0,
             "equations": 1,
         }
         assert summary["authors"].startswith("4 (")

@@ -34,9 +34,9 @@ requirement instead.
 
 Headers the trained model leaves as `unknown` (when `ML_SECTION_CLASSIFIER_LLM_ESCALATION` is on, the default) or that skip Tier 2 entirely are sent to the configured LLM provider in a batch. The LLM returns one of the canonical section values for each header (confidence: 0.85). Results are validated against the known section types. Ambiguous headings can include body-text snippets and study-scope context.
 
-Exported section rows include `classification_source` alongside
-`classification_score`, so consumers can distinguish model, lookup, LLM,
-and later hierarchy decisions. With `no_llm=True`, heading classification
+The export records each section's `score` and `source` in
+`extraction.diagnostics.section_classification`, keyed by `section_id`, so
+consumers can distinguish model, lookup, LLM, and later hierarchy decisions. With `no_llm=True`, heading classification
 uses the lookup-only path.
 
 ### Canonical section types
@@ -58,10 +58,10 @@ uses the lookup-only path.
 | Keywords | `keywords` | Keywords |
 | Endnote | `endnote` | Supplementary Materials, Future Work, Outlook |
 | Appendix | `appendix` | Appendix, Supplementary Material, Supporting Information |
-| Data Availability | `open_data` | Data Availability, Code Availability, Reproducibility Statement |
+| Data Availability | `data_availability` | Data Availability, Code Availability, Reproducibility Statement |
 | Footnote | `footnote` | Footnotes, Notes |
-| Table | `table` | Table (caption/label region) |
-| Figure | `figure` | Figure (caption/label region) |
+| Table | `table` | Tables (a heading; captions are not sections) |
+| Figure | `figure` | Figures (a heading; captions are not sections) |
 | Unknown | `unknown` | (fallback for unrecognized headers) |
 
 ### IMRaD enforcement
@@ -161,8 +161,8 @@ guards during core metadata extraction:
 |---|---|
 | `empirical` | Original research with data collection/analysis |
 | `review` | Systematic review, literature review, scoping review |
-| `meta-analysis` | Quantitative synthesis of multiple studies |
-| `case-study` | Case study, case report, case series |
+| `meta_analysis` | Quantitative synthesis of multiple studies |
+| `case_study` | Case study, case report, case series |
 | `commentary` | Commentary, editorial, opinion piece |
 | `corrigendum` | Notice amending a previously published article |
 | `erratum` | Notice amending a previously published article |

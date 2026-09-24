@@ -3,6 +3,7 @@
 import pytest
 
 from bibr.ocr.otsl import check_otsl_completeness, decode_otsl
+from bibr.processing_warnings import WarningCode
 
 
 @pytest.mark.parametrize(
@@ -103,7 +104,8 @@ def test_decode_otsl_malformed_spans_degrade_to_unmerged_text_preserving_html(ra
     result = decode_otsl(raw)
 
     assert result.warnings
-    assert result.warnings[0].startswith("Malformed Paddle OTSL:")
+    assert result.warnings[0].code == WarningCode.OCR_TABLE_MALFORMED
+    assert result.warnings[0].message.startswith("Malformed Paddle OTSL:")
     assert "<table>" in result.html
     assert "rowspan" not in result.html
     assert "colspan" not in result.html

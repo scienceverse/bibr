@@ -606,6 +606,13 @@ class TestCollabAuthors:
         m = _parse(COLLAB_JATS)._contents.preparsed_metadata
         assert [a.author_id for a in m.authors] == [1, 2]
 
+    def test_collab_is_marked_as_an_organization(self):
+        # The export writes an organization author's name to author[].literal.
+        from bibr.models import ORGANIZATION_ROLE
+
+        m = _parse(COLLAB_JATS)._contents.preparsed_metadata
+        assert [a.role for a in m.authors] == [[], [ORGANIZATION_ROLE]]
+
 
 # ---------------------------------------------------------------------------
 # Text flattening — markup that implies a word boundary
@@ -663,3 +670,73 @@ class TestTextBoundaries:
     def test_caption_title_and_body_are_separated(self):
         c = _parse(BOUNDARY_JATS)._contents
         assert c.figures[0].caption == "Figure 1 Overview The design."
+
+
+def test_declared_identifiers_and_language_reach_the_metadata():
+    xml = b"""
+    <article xml:lang="en"><front><article-meta>
+      <article-id pub-id-type="doi">10.1234/x</article-id>
+      <article-id pub-id-type="pmid">31234567</article-id>
+      <article-id pub-id-type="pmc">6543210</article-id>
+      <title-group><article-title>Identified</article-title></title-group>
+    </article-meta></front><body><sec><title>Intro</title><p>Text.</p></sec></body></article>
+    """
+    meta = JatsParser(xml).parse().preparsed_metadata
+    assert meta is not None
+    assert (meta.doi, meta.pmid, meta.pmcid, meta.language) == (
+        "10.1234/x",
+        "31234567",
+        "PMC6543210",
+        "en",
+    )
+
+
+FOOTNOTE_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Notes</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Text.</p></sec></body>
+  <back>
+    <sec sec-type="fn-group"><title>Footnotes</title>
+      <fn-group><fn id="FN1"><label>&#8224;</label><p>Printed under a heading.</p></fn></fn-group>
+    </sec>
+    <fn-group><fn id="FN2"><p>A back-matter note.</p></fn></fn-group>
+  </back>
+</article>"""
+
+
+def test_footnotes_become_synthetic_footnote_sections_with_their_label():
+    """Every <fn> becomes a footnote (a synthetic section the export turns into
+    a footnote row), whether its <fn-group> sits in back matter or under a
+    heading of its own; the printed <label> is kept apart."""
+    contents = _segment(_parse(FOOTNOTE_JATS))
+    notes = [s for s in contents.sections if s.synthetic_kind == "footnote"]
+    assert [s.footnote_label for s in notes] == ["\u2020", None]
+    held = [t for t in contents.sentences if t.section_id in {n.section_id for n in notes}]
+    assert [t.text for t in held] == ["\u2020 Printed under a heading.", "A back-matter note."]
+
+
+def test_floats_take_their_label_from_the_label_element():
+    """``<label>`` without the word is the float's label; the caption keeps it
+    glued on as before. Mentions resolve by the label, not the order."""
+    xml = b"""
+    <article><front><article-meta>
+      <title-group><article-title>Labelled</article-title></title-group>
+    </article-meta></front><body><sec><title>Results</title>
+      <p>Table S1 and Table 2 agree with Fig. 3.</p>
+      <table-wrap><label>Table 2</label><caption><p>Main.</p></caption>
+        <table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>
+      <table-wrap><label>S1</label><caption><p>Extra.</p></caption>
+        <table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>
+      <fig><label>Fig. 3</label><caption><p>A figure.</p></caption><graphic/></fig>
+      <fig><caption><p>Figure 4. No label element.</p></caption><graphic/></fig>
+      <fig><label>Scheme 1</label><caption><p>Not a figure label.</p></caption><graphic/></fig>
+    </sec></body></article>
+    """
+    c = _segment(_parse(xml))
+    assert [(t.label, t.caption) for t in c.tables] == [("2", "Table 2 Main."), ("S1", "S1 Extra.")]
+    assert [f.label for f in c.figures] == ["3", "4", None]
+    table_xrefs = [(x.xref_type, x.xref_id, x.tier) for x in c.xrefs if x.xref_type != "figure"]
+    assert table_xrefs == [("table", 2, "label"), ("table", 1, "label")]
+    assert [(x.xref_id, x.tier) for x in c.xrefs if x.xref_type == "figure"] == [(1, "label")]

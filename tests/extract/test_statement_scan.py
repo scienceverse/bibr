@@ -6,7 +6,7 @@ acknowledgment-embedded funding).
 
 import pytest
 
-from bibr.extract.statement_scan import scan_statements_fallback
+from bibr.extract.statement_scan import lexical_fallback_warning, scan_statements_fallback
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
     CanonicalSection,
@@ -14,6 +14,7 @@ from bibr.paper_contents import (
     PaperSection,
     PaperSentence,
 )
+from bibr.processing_warnings import WarningCode
 
 
 def _contents(sections_spec: list[tuple[int, str, CanonicalSection, list[str]]]) -> PaperContents:
@@ -109,16 +110,17 @@ class TestKeldersShape:
         metadata = PaperMetadata(doi="", title="T")
         scan_statements_fallback(contents, metadata)
         warnings = contents.processing_warnings
-        assert "STATEMENT_LEXICAL_FALLBACK: coi_statement" in warnings
-        assert "STATEMENT_LEXICAL_FALLBACK: funding_statement" in warnings
-        assert "STATEMENT_LEXICAL_FALLBACK: ethics_statement" in warnings
+        assert all(w.code == WarningCode.STATEMENT_LEXICAL_FALLBACK for w in warnings)
+        assert lexical_fallback_warning("coi_statement") in warnings
+        assert lexical_fallback_warning("funding_statement") in warnings
+        assert lexical_fallback_warning("ethics_statement") in warnings
 
     def test_already_populated_field_untouched(self):
         contents = self._kelders()
         metadata = PaperMetadata(doi="", title="T", coi_statement="pre-existing")
         scan_statements_fallback(contents, metadata)
         assert metadata.coi_statement == "pre-existing"
-        assert "STATEMENT_LEXICAL_FALLBACK: coi_statement" not in contents.processing_warnings
+        assert lexical_fallback_warning("coi_statement") not in contents.processing_warnings
 
 
 class TestEyecolorShape:

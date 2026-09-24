@@ -46,9 +46,34 @@ _MAX_THROTTLE_WINDOW_SECONDS = 2.0
 _THROTTLE_RECOVERY_QUIET_SECONDS = 60.0
 
 # Module-level singleton (double-checked locking, same pattern as SectionClassifier etc.)
+# A DOI lookup's cached 404 is this one-key entry holding its wall-clock
+# expiry: Redis also expires it on its own, the in-process LRU checks the time.
+_NOT_FOUND_UNTIL = "__bibr_not_found_until__"
+
 _client: "CrossrefClient | None" = None
 _clients_by_settings: dict[tuple[object, ...], "CrossrefClient"] = {}
 _client_lock = threading.Lock()
+
+
+def _not_found_until(entry: dict[str, Any]) -> float | None:
+    """The expiry of a cached-404 entry, or ``None`` for a real response."""
+    until = entry.get(_NOT_FOUND_UNTIL) if len(entry) == 1 else None
+    return float(until) if isinstance(until, int | float) else None
+
+
+def _is_expired_not_found(entry: dict[str, Any]) -> bool:
+    until = _not_found_until(entry)
+    return until is not None and time.time() >= until
+
+
+def _cached_not_found_error(path: str) -> httpx.HTTPStatusError:
+    """The 404 a remembered miss re-raises, shaped like the upstream one."""
+    request = httpx.Request("GET", _CROSSREF_API_BASE + path)
+    return httpx.HTTPStatusError(
+        f"Crossref 404 (cached, no record): {path}",
+        request=request,
+        response=httpx.Response(404, request=request),
+    )
 
 
 def _settings_key(settings: GlobalSettings) -> tuple[object, ...]:
@@ -62,6 +87,7 @@ def _settings_key(settings: GlobalSettings) -> tuple[object, ...]:
         settings.crossref.redis_cache,
         settings.crossref.cache_redis_url,
         settings.crossref.cache_ttl_seconds,
+        settings.crossref.not_found_ttl_seconds,
         settings.redis.url,
         settings.cb.failure_threshold,
         settings.cb.reset_timeout_seconds,
@@ -319,13 +345,15 @@ class CrossrefClient:
         # `();:` which legacy DOIs (e.g. `10.1002/(SICI)...;2-#`) require
         # literal in the Crossref REST path. Encode genuinely unsafe chars
         # (space, `#`, `<`, `>`, etc.).
+        path = f"/works/{quote(ids, safe='/,();:')}"
         return await self._cached(
             # DOIs are case-insensitive, so key on the folded form: otherwise
             # "10.1037/ABC" and "10.1037/abc" occupied two cache entries and
             # each paid its own network round trip. The request path keeps the
             # original casing.
             f"works:{ids.casefold()}",
-            lambda: self._request(f"/works/{quote(ids, safe='/,();:')}"),
+            lambda: self._request(path),
+            not_found_path=path,
         )
 
     async def prefetch_works_by_doi(self, dois: list[str]) -> int:
@@ -406,7 +434,10 @@ class CrossrefClient:
             The JSON response from CrossRef.
         """
         # select= is only supported on the list/search route, not on /works/{doi}
-        _SELECT = "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,score"
+        _SELECT = (
+            "DOI,title,author,editor,issued,container-title,volume,issue,page,publisher,type,URL,"
+            "score,funder,license"
+        )
         return await self._cached(
             f"search:{limit}:{query}",
             lambda: self._request(
@@ -440,15 +471,21 @@ class CrossrefClient:
         return self._response_cache_backend
 
     async def _cached(
-        self, key: str, fetch: Callable[[], Awaitable[dict[str, Any]]]
+        self,
+        key: str,
+        fetch: Callable[[], Awaitable[dict[str, Any]]],
+        *,
+        not_found_path: str | None = None,
     ) -> dict[str, Any]:
         """Two-tier cache: in-process LRU → shared Redis → upstream fetch.
 
         Tier 1 is the per-process LRU (``CROSSREF_CACHE_SIZE``, 0 = off). Tier 2
         is the optional shared Redis cache (``CROSSREF_REDIS_CACHE``), which
         survives restarts and is shared across serve + workers. Failures are
-        never cached; a Redis outage degrades to the fetch. With both disabled
-        this is a plain fetch (today's behavior).
+        never cached, with one exception: given *not_found_path*, a 404 (no
+        record) is remembered for ``CROSSREF_NOT_FOUND_TTL_SECONDS`` and
+        re-raised as the same 404 without a request. A Redis outage degrades to
+        the fetch. With both tiers disabled this is a plain fetch.
         """
         size = self._settings.crossref.cache_size
         cache: OrderedDict[str, dict[str, Any]] | None = None
@@ -456,24 +493,41 @@ class CrossrefClient:
             cache = self.__dict__.get("_response_cache")
             if cache is None:
                 cache = self.__dict__["_response_cache"] = OrderedDict()
-            if key in cache:
+            entry = cache.get(key)
+            if entry is not None and _is_expired_not_found(entry):
+                del cache[key]
+            elif entry is not None:
                 cache.move_to_end(key)
-                return cache[key]
+                return self._unless_not_found(entry, not_found_path)
 
         redis_cache = await self._ensure_response_cache()
         if redis_cache is not None:
             hit = await redis_cache.get(key)
-            if hit is not None:
+            if hit is not None and not _is_expired_not_found(hit):
                 if cache is not None:
                     cache[key] = hit
                     while len(cache) > size:
                         cache.popitem(last=False)
-                return hit
+                return self._unless_not_found(hit, not_found_path)
 
-        data = await fetch()
+        try:
+            data = await fetch()
+        except httpx.HTTPStatusError as exc:
+            ttl = self._settings.crossref.not_found_ttl_seconds
+            if not_found_path is not None and ttl > 0 and exc.response.status_code == 404:
+                await self._cache_store(key, {_NOT_FOUND_UNTIL: time.time() + ttl}, ttl_seconds=ttl)
+            raise
 
         await self._cache_store(key, data)
         return data
+
+    @staticmethod
+    def _unless_not_found(entry: dict[str, Any], not_found_path: str | None) -> dict[str, Any]:
+        """Return a cached response, or re-raise the 404 a cached miss stands for."""
+        if _not_found_until(entry) is None:
+            return entry
+        logger.debug("CrossRef 404 (cached, no record): %s", not_found_path)
+        raise _cached_not_found_error(not_found_path or "")
 
     def _cache_peek(self, key: str) -> dict[str, Any] | None:
         """Tier-1 (in-process) lookup only — no await, no Redis round trip.
@@ -485,13 +539,18 @@ class CrossrefClient:
         if self._settings.crossref.cache_size <= 0:
             return None
         cache = self.__dict__.get("_response_cache")
-        return None if cache is None else cache.get(key)
+        entry = None if cache is None else cache.get(key)
+        return None if entry is None or _is_expired_not_found(entry) else entry
 
-    async def _cache_store(self, key: str, data: dict[str, Any]) -> None:
+    async def _cache_store(
+        self, key: str, data: dict[str, Any], *, ttl_seconds: int | None = None
+    ) -> None:
         """Write one response into both cache tiers."""
         redis_cache = await self._ensure_response_cache()
-        if redis_cache is not None:
+        if redis_cache is not None and ttl_seconds is None:
             await redis_cache.set(key, data)
+        elif redis_cache is not None:
+            await redis_cache.set(key, data, ttl_seconds=ttl_seconds)
         size = self._settings.crossref.cache_size
         if size > 0:
             cache = self.__dict__.get("_response_cache")

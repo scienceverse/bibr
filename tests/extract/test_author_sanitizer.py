@@ -11,9 +11,10 @@ from unittest import mock
 
 import pandas as pd
 
-from bibr.extract.core_metadata import AUTHOR_ANOMALY_WARNING_PREFIX, CoreMetadataExtractor
+from bibr.extract.core_metadata import CoreMetadataExtractor
 from bibr.extract.extractor import MetadataExtractor
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import AuthorLLM, CoreMetadataLLM
 
 
@@ -383,7 +384,7 @@ class TestRunawayWarning:
 
         assert ext.metadata is not None
         assert len(ext.metadata.authors) == 64
-        assert any(AUTHOR_ANOMALY_WARNING_PREFIX in w for w in contents.processing_warnings)
+        assert any(w.code == WarningCode.AUTHORS_ANOMALY for w in contents.processing_warnings)
 
     async def test_clean_byline_records_no_anomaly(self):
         incoming = [AuthorLLM(given=f"First{i}", family=f"Last{i}") for i in range(5)]
@@ -394,4 +395,4 @@ class TestRunawayWarning:
         await ext.extract_core_metadata()
 
         assert len(ext.metadata.authors) == 5
-        assert not any(AUTHOR_ANOMALY_WARNING_PREFIX in w for w in contents.processing_warnings)
+        assert not any(w.code == WarningCode.AUTHORS_ANOMALY for w in contents.processing_warnings)

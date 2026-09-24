@@ -9,8 +9,15 @@ def _data(bib=None, bib_match=None):
     return {
         "bib": bib or [],
         "bib_match": bib_match or [],
-        "processing_warnings": [],
+        "extraction": {"warnings": [], "diagnostics": {}},
     }
+
+
+def _taken(data) -> dict[int, list[str]]:
+    """The consolidation receipt, ``{bib_id: fields}``; bib rows never carry it."""
+    assert all("consolidated_fields" not in row for row in data["bib"])
+    diagnostics = (data.get("extraction") or {}).get("diagnostics") or {}
+    return {row["bib_id"]: row["fields"] for row in diagnostics.get("consolidation") or []}
 
 
 def test_fill_fills_empty_fields_only():
@@ -32,7 +39,7 @@ def test_fill_fills_empty_fields_only():
     assert row["doi"] == "10.1/x"  # was None → filled
     assert row["volume"] == "12"  # was "" → filled
     assert row["title"] == "Printed Title"  # printed value kept
-    assert row["consolidated_fields"] == "doi,volume"
+    assert _taken(data) == {1: ["doi", "volume"]}
 
 
 def test_replace_overwrites_disagreeing_fields():
@@ -51,7 +58,78 @@ def test_replace_overwrites_disagreeing_fields():
     assert n == 1
     assert data["bib"][0]["title"] == "Attention is all you need"
     # doi agreed — not listed as consolidated
-    assert data["bib"][0]["consolidated_fields"] == "title"
+    assert _taken(data) == {1: ["title"]}
+
+
+def test_replace_keeps_printed_fields_against_a_search_match():
+    # A bibliographic-search hit for another work (different DOI): it may fill
+    # gaps, but must not rewrite what the paper printed — DOI included.
+    data = _data(
+        bib=[{"bib_id": 1, "doi": "10.1/printed", "volume": "12", "issue": None}],
+        bib_match=[
+            {
+                "bib_id": 1,
+                "service": "crossref",
+                "score": 100.0,
+                "doi": "10.1/other",
+                "volume": "13",
+                "issue": "2",
+            }
+        ],
+    )
+    n = consolidate_bibs(data, mode="replace")
+    assert n == 1
+    row = data["bib"][0]
+    assert row["doi"] == "10.1/printed"
+    assert row["volume"] == "12"
+    assert row["issue"] == "2"
+    assert _taken(data) == {1: ["issue"]}
+
+
+def test_replace_only_fills_when_no_doi_was_printed():
+    data = _data(
+        bib=[{"bib_id": 1, "doi": None, "title": "Printed Title", "volume": "12"}],
+        bib_match=[
+            {
+                "bib_id": 1,
+                "service": "crossref",
+                "doi": "10.1/x",
+                "title": "External Title",
+                "volume": "13",
+            }
+        ],
+    )
+    consolidate_bibs(data, mode="replace")
+    row = data["bib"][0]
+    assert row["doi"] == "10.1/x"
+    assert row["title"] == "Printed Title"
+    assert row["volume"] == "12"
+    assert _taken(data) == {1: ["doi"]}
+
+
+def test_replace_matches_the_printed_doi_case_and_prefix_insensitively():
+    data = _data(
+        bib=[{"bib_id": 1, "doi": "https://doi.org/10.1037/ABC.123", "volume": "1"}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1037/abc.123", "volume": "2"}],
+    )
+    consolidate_bibs(data, mode="replace")
+    row = data["bib"][0]
+    assert row["volume"] == "2"
+    assert row["doi"] == "10.1037/abc.123"
+
+
+def test_replace_overwrites_from_the_match_carrying_the_printed_doi():
+    # The higher-precedence Crossref row is a search hit for another work; the
+    # lower-precedence row carries the printed DOI and is the one to trust.
+    data = _data(
+        bib=[{"bib_id": 1, "doi": "10.1/printed", "volume": "12"}],
+        bib_match=[
+            {"bib_id": 1, "service": "crossref", "doi": "10.1/other", "volume": "99"},
+            {"bib_id": 1, "service": "someday-openalex", "doi": "10.1/printed", "volume": "13"},
+        ],
+    )
+    consolidate_bibs(data, mode="replace")
+    assert data["bib"][0]["volume"] == "13"
 
 
 def test_unmatched_rows_untouched_and_unmarked():
@@ -62,7 +140,30 @@ def test_unmatched_rows_untouched_and_unmarked():
     n = consolidate_bibs(data, mode="fill")
     assert n == 1
     assert data["bib"][1]["doi"] is None
-    assert "consolidated_fields" not in data["bib"][1]
+    assert _taken(data) == {1: ["doi"]}
+
+
+def test_repeated_consolidation_unions_the_receipt():
+    data = _data(
+        bib=[{"bib_id": 1, "doi": None, "volume": None}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}],
+    )
+    consolidate_bibs(data, mode="fill")
+    data["bib_match"].append({"bib_id": 1, "service": "crossref", "volume": "4"})
+    consolidate_bibs(data, mode="fill")
+    assert _taken(data) == {1: ["doi", "volume"]}
+
+
+def test_consolidation_without_an_extraction_block_records_nothing():
+    """A Paper exported outside the pipeline has nowhere to keep the receipt;
+    the merge still happens and nothing leaks onto the bib rows."""
+    data = {
+        "bib": [{"bib_id": 1, "doi": None}],
+        "bib_match": [{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}],
+    }
+    assert consolidate_bibs(data, mode="fill") == 1
+    assert data["bib"][0] == {"bib_id": 1, "doi": "10.1/x"}
+    assert "extraction" not in data
 
 
 def test_authors_and_editors_never_consolidated():
@@ -114,12 +215,14 @@ def test_fill_missing_key_in_bib():
 
 
 def test_replace_year_reconciles_orphaned_year_suffix():
-    # "Smith (2005a)" matched to a different-year work: once `year` is
+    # "Smith (2005a)" whose printed DOI names a 2007 work: once `year` is
     # overwritten the printed disambiguator no longer describes the row, so it
     # must not be left orphaned as a stale "a".
     data = _data(
-        bib=[{"bib_id": 1, "year": 2005, "year_suffix": "a", "is_in_press": False}],
-        bib_match=[{"bib_id": 1, "service": "crossref", "year": 2007}],
+        bib=[
+            {"bib_id": 1, "year": 2005, "year_suffix": "a", "is_in_press": False, "doi": "10.1/x"}
+        ],
+        bib_match=[{"bib_id": 1, "service": "crossref", "year": 2007, "doi": "10.1/x"}],
     )
     consolidate_bibs(data, mode="replace")
     row = data["bib"][0]
@@ -240,7 +343,7 @@ def test_export_hook_consolidates_when_runconfig_set():
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig(consolidate="fill"))
     assert out["bib"][0]["doi"] == "10.1/x"
-    assert out["bib"][0]["consolidated_fields"] == "doi"
+    assert _taken(out) == {1: ["doi"]}
 
 
 def test_export_hook_falls_back_to_settings():
@@ -251,7 +354,7 @@ def test_export_hook_falls_back_to_settings():
     settings.crossref.consolidate = "fill"
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig(), settings=settings)  # consolidate=None → settings
-    assert out["bib"][0]["consolidated_fields"] == "doi"
+    assert _taken(out) == {1: ["doi"]}
 
 
 def test_export_hook_off_by_default():
@@ -260,7 +363,7 @@ def test_export_hook_off_by_default():
     data = _exportable(bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x"}])
     out = _run_export(data, RunConfig())
     assert out["bib"][0]["doi"] is None
-    assert "consolidated_fields" not in out["bib"][0]
+    assert _taken(out) == {}
 
 
 def test_export_hook_warns_when_crossref_disabled():
@@ -268,4 +371,62 @@ def test_export_hook_warns_when_crossref_disabled():
 
     data = _exportable(bib_match=[])
     out = _run_export(data, RunConfig(consolidate="fill", crossref=False))
-    assert any("consolidate" in w for w in out["extraction"]["warnings"])
+    assert out["extraction"]["warnings"] == [
+        {
+            "code": "CONSOLIDATE_WITHOUT_ENRICHMENT",
+            "message": "consolidate enabled but Crossref enrichment is off — no matches to merge",
+        }
+    ]
+
+
+def test_fill_takes_the_iso_date_and_keeps_the_printed_one():
+    data = _data(
+        bib=[{"bib_id": 1, "date": "Spring 2019", "published_date": None, "year": None}],
+        bib_match=[
+            {"bib_id": 1, "service": "crossref", "published_date": "2019-04-02", "year": 2019}
+        ],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert row["date"] == "Spring 2019"  # printed, never overwritten
+    assert row["published_date"] == "2019-04-02"
+    assert row["year"] == 2019
+    assert _taken(data) == {1: ["year", "published_date"]}
+
+
+def test_a_taken_year_carries_published_date_with_it():
+    # The record dates the work only by year: published_date follows the year
+    # instead of keeping a printed date the year now contradicts.
+    data = _data(
+        bib=[{"bib_id": 1, "doi": "10.1234/x", "year": 2006, "published_date": "2006"}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1234/x", "year": 2007}],
+    )
+    consolidate_bibs(data, mode="replace")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"]) == (2007, "2007")
+    assert _taken(data) == {1: ["year", "published_date"]}
+
+
+def test_fill_never_rewrites_a_printed_date_for_a_taken_year():
+    # The printed entry dates the work May 2019 but lost its year; filling the
+    # year from the match must not overwrite what the entry printed.
+    data = _data(
+        bib=[{"bib_id": 1, "date": "May 2019", "published_date": "2019-05", "year": None}],
+        bib_match=[
+            {"bib_id": 1, "service": "crossref", "year": 2020, "published_date": "2020-01-15"}
+        ],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"], row["date"]) == (2020, "2019-05", "May 2019")
+    assert _taken(data) == {1: ["year"]}
+
+
+def test_fill_gives_a_year_only_record_its_year_as_the_date():
+    data = _data(
+        bib=[{"bib_id": 1, "published_date": None, "year": None}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "year": 2020, "published_date": None}],
+    )
+    consolidate_bibs(data, mode="fill")
+    row = data["bib"][0]
+    assert (row["year"], row["published_date"]) == (2020, "2020")

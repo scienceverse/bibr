@@ -22,6 +22,7 @@ from bibr.ocr.profiles import (
     resolve_ocr_runtime_identity,
 )
 from bibr.ocr.types import OcrRegionResult
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
 
@@ -390,7 +391,7 @@ def ocr_page_regions(
     include_figures: bool | None = None,
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
-    warning_sink: Callable[[str], None] | None = None,
+    warning_sink: Callable[[ProcessingWarning], None] | None = None,
 ) -> Coroutine[None, None, list[dict]]:
     """OCR all regions on a single page (shared between LitServe and local pipelines).
 
@@ -430,7 +431,7 @@ async def _ocr_page_regions_impl(
     include_figures: bool | None = None,
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
-    warning_sink: Callable[[str], None] | None = None,
+    warning_sink: Callable[[ProcessingWarning], None] | None = None,
 ) -> list[dict]:
     """Implementation of ocr_page_regions; see public wrapper for documentation.
 
@@ -576,12 +577,13 @@ async def _ocr_page_regions_impl(
                 # The region ships blank. Without an export-visible warning
                 # three failed regions in a 40-page paper look like missing
                 # paragraphs behind a clean receipt.
-                warning = (
+                warning = ProcessingWarning(
+                    WarningCode.OCR_REGION_FAILED,
                     "OCR failed for a region; its text is missing "
                     f"(page {page_idx + 1}, region {orig_idx}, task {task_type}): "
-                    f"{type(result).__name__}: {result}"
+                    f"{type(result).__name__}: {result}",
                 )
-                logger.warning(warning)
+                logger.warning(warning.message)
                 if warning_sink is not None:
                     warning_sink(warning)
             else:
@@ -594,21 +596,23 @@ async def _ocr_page_regions_impl(
                         incomplete_reasons.insert(0, "finish_reason_length")
                     if incomplete_reasons:
                         reasons = ", ".join(dict.fromkeys(incomplete_reasons))
-                        warning = (
+                        warning = ProcessingWarning(
+                            WarningCode.OCR_TABLE_INCOMPLETE,
                             "OCR table output incomplete "
                             f"(page {page_idx + 1}, region {orig_idx}, "
                             f"finish_reason={provider_finish_reason or 'unknown'}, "
-                            f"reasons: {reasons})"
+                            f"reasons: {reasons})",
                         )
-                        logger.warning(warning)
+                        logger.warning(warning.message)
                         if warning_sink is not None:
                             warning_sink(warning)
                 elif provider_finish_reason == "length":
-                    warning = (
+                    warning = ProcessingWarning(
+                        WarningCode.OCR_OUTPUT_TRUNCATED,
                         "OCR output truncated at the generation limit "
-                        f"(page {page_idx + 1}, region {orig_idx}, task {task_type})"
+                        f"(page {page_idx + 1}, region {orig_idx}, task {task_type})",
                     )
-                    logger.warning(warning)
+                    logger.warning(warning.message)
                     if warning_sink is not None:
                         warning_sink(warning)
                 normalized = normalize_ocr_output(profile, task_type, result)
@@ -620,7 +624,12 @@ async def _ocr_page_regions_impl(
                 )
                 if warning_sink is not None:
                     for warning in normalized.warnings:
-                        warning_sink(warning)
+                        warning_sink(
+                            ProcessingWarning(
+                                warning.code,
+                                f"{warning.message} (page {page_idx + 1}, region {orig_idx})",
+                            )
+                        )
 
             slot_idx = slot_map[orig_idx]
             region_list[slot_idx] = OcrRegionResult.from_layout_region(
@@ -1005,7 +1014,13 @@ class OcrStage:
             for page_idx, r in zip(fs.page_indices, page_results, strict=True):
                 if isinstance(r, BaseException):
                     errors.append(r)
-                    fs.warnings.append(f"OCR failed for page index {page_idx}: {r}")
+                    fs.warnings.append(
+                        ProcessingWarning(
+                            WarningCode.OCR_PAGE_FAILED,
+                            "OCR failed for a page; its text is missing "
+                            f"(page {page_idx + 1}): {type(r).__name__}: {r}",
+                        )
+                    )
                     clean_pages.append([])
                 else:
                     clean_pages.append(r)

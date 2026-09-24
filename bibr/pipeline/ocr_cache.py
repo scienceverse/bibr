@@ -1,7 +1,10 @@
 """Opt-in disk cache for OCR stage output (``bibr.pipeline.stages.ocr``).
 
 Keyed on ``file_hash`` + page range + OCR backend/model + every setting that
-shapes the cached artifacts + a format-version constant. A complete entry
+shapes the cached artifacts + the bibr version + a format-version constant.
+The key cannot see code changes between releases: when comparing source
+revisions that touch rendering, layout, native text or OCR, use a fresh
+``CACHE_OCR_DIR`` per revision. A complete entry
 contains OCR regions plus the native-PDF artifacts needed by parsing, so the
 local pipeline can skip render, layout, native analysis, OCR model load, and
 inference entirely. Off by default (``CACHE_OCR``). Corrupt/unreadable entries
@@ -29,6 +32,7 @@ from bibr.ocr.profiles import (
     resolve_ocr_profile,
 )
 from bibr.ocr.types import OcrRegionResult
+from bibr.processing_warnings import ProcessingWarning
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -39,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 # Version 9 preserves OCR completion evidence and warnings. Earlier bundles
 # cannot distinguish failed pages from empty pages, so invalidate them.
-_CACHE_FORMAT_VERSION = 9
+# Version 10 stores the warnings as ``{code, message}`` objects.
+_CACHE_FORMAT_VERSION = 10
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -96,8 +101,13 @@ def _key(
         if identity.backend == "serve-http" and identity.profile == "paddle"
         else 0
     )
+    from bibr import __version__
+
     parts = [
         str(_CACHE_FORMAT_VERSION),
+        # A release can change how the cached artifacts are produced without
+        # anyone bumping _CACHE_FORMAT_VERSION; never reuse another release's.
+        f"bibr={__version__}",
         fs.file_hash or "",
         "" if cfg.start_page is None else str(cfg.start_page),
         "" if cfg.end_page is None else str(cfg.end_page),
@@ -188,18 +198,18 @@ def _decode_regions(payload: dict) -> list[list[OcrRegionResult]]:
     return [[OcrRegionResult.from_dict(d) for d in page] for page in payload["regions"]]
 
 
-def _decode_quality(payload: dict) -> tuple[int, int, list[str]]:
+def _decode_quality(payload: dict) -> tuple[int, int, list[ProcessingWarning]]:
     evidence = payload["ocr_quality"]
     attempted, failed = evidence["pages_attempted"], evidence["pages_failed"]
     warnings = evidence["warnings"]
     if type(attempted) is not int or type(failed) is not int or not 0 <= failed <= attempted:
         raise ValueError("invalid OCR page completion evidence")
-    if not isinstance(warnings, list) or any(not isinstance(w, str) for w in warnings):
+    if not isinstance(warnings, list):
         raise ValueError("invalid OCR warnings")
-    return attempted, failed, warnings
+    return attempted, failed, [ProcessingWarning.from_dict(w) for w in warnings]
 
 
-def _restore_quality(fs: FileState, quality: tuple[int, int, list[str]]) -> None:
+def _restore_quality(fs: FileState, quality: tuple[int, int, list[ProcessingWarning]]) -> None:
     fs.ocr_pages_attempted, fs.ocr_pages_failed, warnings = quality
     fs.warnings = list(dict.fromkeys([*fs.warnings, *warnings]))
 
@@ -292,7 +302,7 @@ def store(
         "ocr_quality": {
             "pages_attempted": fs.ocr_pages_attempted,
             "pages_failed": fs.ocr_pages_failed,
-            "warnings": list(fs.warnings),
+            "warnings": [w.to_dict() for w in fs.warnings],
         },
         "artifacts": {
             "native_metadata": fs.native_metadata,

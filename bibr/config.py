@@ -995,18 +995,71 @@ class CrossrefOptions(_BibrSettings):
         2_592_000,
         description="TTL for shared Crossref cache entries, in seconds (default 30 days).",
     )
+    # How long both cache tiers remember a DOI lookup's 404 (no Crossref
+    # record: a malformed DOI or another registry's). Short next to the
+    # positive TTL, since a newly registered DOI starts resolving within days.
+    # 0 = never cached. Env: CROSSREF_NOT_FOUND_TTL_SECONDS
+    not_found_ttl_seconds: int = Field(
+        86_400,
+        ge=0,
+        description="How long a Crossref 404 for a DOI (no record) is remembered in the response "
+        "caches, in seconds (default 1 day), so repeat lookups skip the request. 0 disables.",
+    )
     # Merge accepted bib_match data into bib rows at export:
-    # "off" (default) | "fill" (fill empty fields only) | "replace" (overwrite too)
+    # "off" (default) | "fill" (fill empty fields only) | "replace" (also overwrite
+    # from a match carrying the reference's printed DOI)
     consolidate: Literal["off", "fill", "replace"] = Field(
         "off",
         description='Merge accepted bib_match data into bib rows at export: "off" (default), '
-        '"fill" (fill empty fields only), or "replace" (overwrite too).',
+        '"fill" (fill empty fields only), or "replace" (also overwrite printed values, only '
+        "from a match carrying the reference's printed DOI).",
     )
 
     @field_validator("consolidate", mode="before")
     @classmethod
     def _lower_consolidate(cls, v):
         return v.lower() if isinstance(v, str) else v
+
+
+class RorOptions(_BibrSettings):
+    """ROR organization matching for affiliation strings and funder names.
+
+    Runs as part of enrichment (``--crossref``), so it is off unless enrichment
+    is on. Env: ``ROR_ENRICH``, ``ROR_CLIENT_ID``, ``ROR_URL``, ...
+    """
+
+    model_config = _section("ROR_")
+
+    enrich: bool = Field(
+        True,
+        description="Match affiliation strings and funder names to ROR IDs when enrichment runs "
+        "(`--crossref`). Set false to skip ROR.",
+    )
+    client_id: str | None = Field(
+        None,
+        description="ROR API client ID (free from ror.org), sent as the Client-Id header. It "
+        "raises ROR's published rate limit from 50 to 2000 requests per 5 minutes.",
+    )
+    url: str = Field("https://api.ror.org/v2", description="ROR API base URL.")
+    requests_per_5min: int | None = Field(
+        None,
+        ge=1,
+        description="Client-side ROR request budget per 5 minutes. Default: ROR's published "
+        "limit, 50 without a client ID and 2000 with one.",
+    )
+    request_timeout: float = Field(
+        10.0, description="Per-HTTP-request timeout in seconds for ROR calls."
+    )
+    enrich_timeout: float = Field(
+        60.0,
+        description="Per-paper wall-clock budget in seconds for ROR matching. Strings not "
+        "matched in time are left without a match.",
+    )
+    cache_size: int = Field(
+        4096,
+        ge=0,
+        description="In-process cache size for ROR answers (hits and misses). 0 disables.",
+    )
 
 
 class ResolverOptions(_BibrSettings):
@@ -1139,7 +1192,11 @@ class CacheOptions(_BibrSettings):
     ocr: bool = Field(
         False,
         description="Opt-in disk cache for OCR stage output — reuses cached OCR regions for the "
-        "same PDF instead of re-running the OCR backend. Off by default.",
+        "same PDF instead of re-running the OCR backend. A complete entry also skips page "
+        "rendering, layout detection and native-text analysis, so leave it off when timing "
+        "runs. Entries are keyed on the settings, model pins and bibr version, not on source "
+        "changes between releases; use a fresh CACHE_OCR_DIR per source revision when "
+        "comparing revisions that touch those stages. Off by default.",
     )
     # Directory for the OCR disk cache. None → $XDG_CACHE_HOME/bibr/ocr (else
     # ~/.cache/bibr/ocr). Env: CACHE_OCR_DIR.
@@ -2101,6 +2158,7 @@ class GlobalSettings(_BibrSettings):
     layout: LayoutOptions = Field(default_factory=LayoutOptions)
     crossref: CrossrefOptions = Field(default_factory=CrossrefOptions)
     resolver: ResolverOptions = Field(default_factory=ResolverOptions)
+    ror: RorOptions = Field(default_factory=RorOptions)
     cache: CacheOptions = Field(default_factory=CacheOptions)
     cb: CircuitBreakerOptions = Field(default_factory=CircuitBreakerOptions)
     cors: CorsOptions = Field(default_factory=CorsOptions)

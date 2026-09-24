@@ -45,6 +45,7 @@ from bibr.paper_contents import (
     ReferenceSegmentationAttempt,
     ReferenceYieldReceipt,
 )
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.schemas import PaperReferenceLLM
 from bibr.utils.json_salvage import salvage_array_objects
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
@@ -64,22 +65,14 @@ except ImportError:  # pragma: no cover — instructor is always present on LLM 
 
 logger = logging.getLogger(__name__)
 
-# Stable, machine-greppable prefix for CRF-fallback warnings recorded on
-# ``PaperContents.processing_warnings`` — eval tooling greps for it to
-# measure fallback frequency across a corpus. Do not reword.
-SEG_FALLBACK_WARNING_PREFIX = "Reference segmentation fell back to CRF"
-
-# Distinct prefix for geom→LLM cascades, so eval tooling counts geometry
-# cascades separately from LLM→CRF fallbacks. Do not reword.
-GEOM_CASCADE_WARNING_PREFIX = "Reference segmentation cascaded from geom to LLM"
-
-# Distinct prefix for an explicit REF_SEG_STRATEGY=region PRIMARY selection
-# declining (few anchors / misalignment / no regions) and chaining onward —
-# separate from the fallback-tier recovery marker below, which only fires
-# when region runs as a cascade fallback, not as the primary strategy. Do
-# not reword.
-REGION_CASCADE_WARNING_PREFIX = "Reference segmentation cascaded from region to LLM"
-MERGE_SPLIT_WARNING_PREFIX = "Reference merge-split corrected under-segmentation"
+# Every fallback, recovery and loss in reference segmentation and parsing is
+# recorded as a coded warning (``_record_warning``) that reaches the exported
+# ``extraction.warnings``, not just a log line, so eval tooling can count each
+# tier's events across a corpus. ``--refs llm`` promises full-precision LLM
+# parsing, so a surviving fallback to the NER parser must be visible; and a
+# populated references region that ends with 0 references (``REF_SEG_FAILED``)
+# or references lost to a failed parse (``REF_PARSE_LOST``) must never look like
+# a paper that printed fewer.
 
 # Geom segment-count sanity gate: reject a confident geom result whose span
 # count is below this fraction of the independent layout reference-onset count.
@@ -92,37 +85,6 @@ GEOM_MIN_REGION_RATIO = 0.6
 # that case, reject a geom result that loses more than 10% of those starts.
 GEOM_STRONG_REGION_RATIO = 0.9
 GEOM_STRONG_REGION_ALIGN_FRACTION = 0.9
-
-# Parse-path degradation markers. ``--refs llm`` promises full-precision LLM
-# parsing, so any surviving fallback to the NER parser must be visible in the
-# exported ``extraction.warnings`` — not just a log line. Do not reword.
-PARSE_FALLBACK_WARNING_PREFIX = "Reference parsing fell back to NER"
-PARSE_SPLIT_RECOVERY_PREFIX = "Reference parsing recovered via batch split"
-
-# A batch's LLM completion truncated mid-array (output-token cap): the complete
-# leading objects are salvaged and only the un-parsed tail is re-parsed / falls
-# back. Distinct prefix so eval tooling counts salvage separately. Do not reword.
-PARSE_SALVAGE_RECOVERY_PREFIX = "Reference parsing salvaged truncated batch"
-
-# Distinct marker for a successful zero-LLM marker-split recovery after the full
-# geom→LLM→CRF cascade produced nothing. Do not reword (eval tooling greps it).
-MARKER_SPLIT_RECOVERY_PREFIX = "Reference segmentation recovered via marker split"
-REGION_ANCHOR_RECOVERY_PREFIX = "Reference segmentation recovered via layout regions"
-
-# Stable, machine-greppable HIGH-severity marker: a populated references region
-# produced ZERO segments after the full geom→LLM→CRF cascade AND the zero-LLM
-# marker-split last resort. Surfaced instead of silently exporting 0 refs so
-# monitoring/eval flags it. Do not reword.
-REF_SEG_HARD_FAILURE_PREFIX = "Reference extraction FAILED: refs region present but 0 segments"
-
-# Stable, machine-greppable HIGH-severity marker: reference extraction raised an
-# unexpected NON-BibrError exception — a CUDA OOM / CUBLAS alloc failure or a
-# model-load error in the local NER parser is the observed case — that
-# ``MetadataExtractor.extract_all_metadata`` swallows to keep core metadata.
-# Surfaced on ``extraction.warnings`` so a total reference wipeout is never
-# silent: without it the ONLY downstream signal is VAL_REF_COUNT_MISMATCH, which
-# flags the symptom (N ref rows, 0 bib) but cannot name the cause. Do not reword.
-REF_EXTRACTION_ERROR_PREFIX = "Reference extraction FAILED with an unexpected error"
 
 # A references region shorter than this is too small for "0 segments" to count
 # as a hard failure (avoids crying wolf on tiny/empty regions).
@@ -1514,11 +1476,11 @@ class ReferenceExtractor:
                 # Keep the segmentation as a reserve rather than discarding it:
                 # it is still better than the CRF last resort if the LLM fails.
                 region_reserve = region_strings
-                self._record_seg_fallback(
+                self._record_warning(
+                    WarningCode.REF_SEG_REGION_CASCADE,
                     f"region segment count {len(region_strings)} < "
                     f"{self._settings.REF_SEG_MIN_SOURCE_RECALL:.2f} × {records} "
                     "reference-section source records",
-                    prefix=REGION_CASCADE_WARNING_PREFIX,
                 )
         if self._settings.REF_SEG_LLM_FALLBACK:
             return await self._segment_llm_then_crf(
@@ -1527,7 +1489,9 @@ class ReferenceExtractor:
         self._record_segmentation_attempt(
             "llm_anchor", ref_text, selected=False, reason_flags=("tier_disabled",)
         )
-        self._record_seg_fallback("LLM seg tier disabled (REF_SEG_LLM_FALLBACK=false)")
+        self._record_warning(
+            WarningCode.REF_SEG_CRF_FALLBACK, "LLM seg tier disabled (REF_SEG_LLM_FALLBACK=false)"
+        )
         if region_reserve:
             return self._select_region_reserve(ref_text, region_reserve)
         return await asyncio.to_thread(self._crf_segment_or_recover, ref_text)
@@ -1541,9 +1505,9 @@ class ReferenceExtractor:
             credible_starts=self._aligned_region_onset_count(ref_text) or None,
             selected=True,
         )
-        self._record_seg_fallback(
+        self._record_warning(
+            WarningCode.REF_SEG_REGION_RECOVERY,
             f"kept {len(reserve)} region segment(s) after the LLM tier failed",
-            prefix=REGION_ANCHOR_RECOVERY_PREFIX,
         )
         return reserve
 
@@ -1557,8 +1521,8 @@ class ReferenceExtractor:
                 selected=False,
                 reason_flags=("source_geometry_unavailable",),
             )
-            self._record_seg_fallback(
-                "no ref-line geometry (DOCX/non-native)", prefix=GEOM_CASCADE_WARNING_PREFIX
+            self._record_warning(
+                WarningCode.REF_SEG_GEOM_CASCADE, "no ref-line geometry (DOCX/non-native)"
             )
             return None
         with LOCAL_INFERENCE_LOCK:
@@ -1567,8 +1531,8 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "geom", ref_text, selected=False, reason_flags=("segmenter_unavailable",)
             )
-            self._record_seg_fallback(
-                "geom segmenter unavailable (deps/artifact)", prefix=GEOM_CASCADE_WARNING_PREFIX
+            self._record_warning(
+                WarningCode.REF_SEG_GEOM_CASCADE, "geom segmenter unavailable (deps/artifact)"
             )
             return None
         try:
@@ -1578,7 +1542,7 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "geom", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
-            self._record_seg_fallback(f"geom error: {e!r}", prefix=GEOM_CASCADE_WARNING_PREFIX)
+            self._record_warning(WarningCode.REF_SEG_GEOM_CASCADE, f"geom error: {e!r}")
             return None
         # Alignment-yield gate: see REF_GEOM_MIN_ALIGN_YIELD in config.py for
         # the OOD rationale. Rides the same cascade path as a sub-threshold
@@ -1592,9 +1556,9 @@ class ReferenceExtractor:
                 selected=False,
                 reason_flags=("zero_labeled_starts",),
             )
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_SEG_GEOM_CASCADE,
                 f"geom alignment yield undefined (labeled 0, aligned {aligned})",
-                prefix=GEOM_CASCADE_WARNING_PREFIX,
             )
             return None
         yield_ratio = aligned / labeled
@@ -1608,11 +1572,11 @@ class ReferenceExtractor:
                 selected=False,
                 reason_flags=("low_alignment_yield",),
             )
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_SEG_GEOM_CASCADE,
                 f"geom alignment yield {yield_ratio:.2f} < "
                 f"{self._settings.REF_GEOM_MIN_ALIGN_YIELD} "
                 f"(labeled {labeled}, aligned {aligned})",
-                prefix=GEOM_CASCADE_WARNING_PREFIX,
             )
             return None
         # Segment-count sanity gate: a confidently *under*-segmenting geom result
@@ -1638,10 +1602,10 @@ class ReferenceExtractor:
                 selected=False,
                 reason_flags=("low_segment_count",),
             )
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_SEG_GEOM_CASCADE,
                 f"geom segment count {len(spans)} < "
                 f"{min_region_ratio:.2f} × {region_onsets} region onsets",
-                prefix=GEOM_CASCADE_WARNING_PREFIX,
             )
             return None
         ref_strings = [ref_text[s:e] for s, e in spans]
@@ -1660,10 +1624,10 @@ class ReferenceExtractor:
             selected=False,
             reason_flags=("low_confidence_or_empty",),
         )
-        self._record_seg_fallback(
+        self._record_warning(
+            WarningCode.REF_SEG_GEOM_CASCADE,
             f"geom low-confidence ({confidence:.3f} < "
             f"{self._settings.REF_GEOM_SEG_CASCADE_THRESHOLD}) or empty",
-            prefix=GEOM_CASCADE_WARNING_PREFIX,
         )
         return None
 
@@ -1701,7 +1665,9 @@ class ReferenceExtractor:
                 )
                 self._save_seg_training_data(ref_text, ref_strings, settings=self._settings)
                 return ref_strings
-            self._record_seg_fallback("LLM segmentation produced 0 usable spans")
+            self._record_warning(
+                WarningCode.REF_SEG_CRF_FALLBACK, "LLM segmentation produced 0 usable spans"
+            )
             self._record_segmentation_attempt(
                 "llm_anchor", ref_text, selected=False, reason_flags=("no_usable_spans",)
             )
@@ -1711,7 +1677,7 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "llm_anchor", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
-            self._record_seg_fallback(repr(e))
+            self._record_warning(WarningCode.REF_SEG_CRF_FALLBACK, f"LLM segmentation error: {e!r}")
         if try_region:
             region_strings = self._segment_region_anchors(ref_text)
             if region_strings:
@@ -1751,8 +1717,8 @@ class ReferenceExtractor:
                 "region", ref_text, selected=False, reason_flags=("no_summaries",)
             )
             if not as_fallback:
-                self._record_seg_fallback(
-                    "no layout regions available", prefix=REGION_CASCADE_WARNING_PREFIX
+                self._record_warning(
+                    WarningCode.REF_SEG_REGION_CASCADE, "no layout regions available"
                 )
             return None
         try:
@@ -1761,7 +1727,7 @@ class ReferenceExtractor:
             self._record_segmentation_attempt(
                 "region", ref_text, selected=False, reason_flags=("segmentation_error",)
             )
-            self._record_seg_fallback(f"region-anchor error: {e!r}")
+            self._record_warning(WarningCode.REF_SEG_REGION_ERROR, f"region-anchor error: {e!r}")
             return None
         if segments:
             credible_starts = self._aligned_region_onset_count(ref_text)
@@ -1773,15 +1739,14 @@ class ReferenceExtractor:
                 selected=True,
             )
             if as_fallback:
-                self._record_seg_fallback(
+                self._record_warning(
+                    WarningCode.REF_SEG_REGION_RECOVERY,
                     f"recovered {len(segments)} segment(s) from layout regions",
-                    prefix=REGION_ANCHOR_RECOVERY_PREFIX,
                 )
             return segments
         if not as_fallback:
-            self._record_seg_fallback(
-                "too few anchors or misaligned with ref_text",
-                prefix=REGION_CASCADE_WARNING_PREFIX,
+            self._record_warning(
+                WarningCode.REF_SEG_REGION_CASCADE, "too few anchors or misaligned with ref_text"
             )
         self._record_segmentation_attempt(
             "region",
@@ -1810,7 +1775,7 @@ class ReferenceExtractor:
                 ref_strings = _get_ner_segmenter(self._settings).segment(ref_text)
         except Exception as e:  # noqa: BLE001 — a CRF load/inference failure must not 0 the refs
             failure_reason = "segmentation_error"
-            self._record_seg_fallback(f"CRF segmenter error: {e!r}")
+            self._record_warning(WarningCode.REF_SEG_CRF_ERROR, f"CRF segmenter error: {e!r}")
             ref_strings = []
         if ref_strings:
             self._record_segmentation_attempt("crf", ref_text, segments=ref_strings, selected=True)
@@ -1828,12 +1793,14 @@ class ReferenceExtractor:
                     credible_starts=len(recovered),
                     selected=True,
                 )
-                self._record_seg_fallback(
-                    f"recovered {len(recovered)} segment(s)", prefix=MARKER_SPLIT_RECOVERY_PREFIX
+                self._record_warning(
+                    WarningCode.REF_SEG_MARKER_SPLIT_RECOVERY,
+                    f"recovered {len(recovered)} segment(s) by splitting on reference markers",
                 )
                 return recovered
-            self._record_seg_fallback(
-                f"{len(ref_text.strip())} chars, 0 segments", prefix=REF_SEG_HARD_FAILURE_PREFIX
+            self._record_warning(
+                WarningCode.REF_SEG_FAILED,
+                f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
 
@@ -1847,18 +1814,21 @@ class ReferenceExtractor:
             return ref_strings
         split, n_new = split_merged_refs(ref_strings)
         if n_new:
-            self._record_seg_fallback(f"+{n_new} segment(s)", prefix=MERGE_SPLIT_WARNING_PREFIX)
+            self._record_warning(
+                WarningCode.REF_SEG_MERGE_SPLIT,
+                f"split merged reference strings into {n_new} more segment(s)",
+            )
         return split
 
-    def _record_seg_fallback(self, reason: str, prefix: str = SEG_FALLBACK_WARNING_PREFIX) -> None:
-        """Log and persist a seg-fallback/cascade event so eval tooling can count it."""
-        warning = f"{prefix}: {reason}"
-        logger.warning(warning)
+    def _record_warning(self, code: WarningCode, message: str) -> None:
+        """Log and persist a segmentation/parse fallback, recovery or loss so
+        eval tooling can count it."""
+        logger.warning("Reference extraction warning %s: %s", code, message)
         # Mock(spec=PaperContents) doubles don't expose default_factory
         # dataclass fields — create the sink on first write if missing.
         if not hasattr(self.contents, "processing_warnings"):
             self.contents.processing_warnings = []
-        self.contents.processing_warnings.append(warning)
+        self.contents.processing_warnings.append(ProcessingWarning(code, message))
 
     async def _reparse_split(
         self, batch: list[str], offset: int, depth: int
@@ -1968,19 +1938,19 @@ class ReferenceExtractor:
                 # a log line marked the loss, so the export was
                 # indistinguishable from a paper that simply printed fewer
                 # references.
-                self._record_seg_fallback(
+                self._record_warning(
+                    WarningCode.REF_PARSE_LOST,
                     f"indices {offset}-{last_index}, 0/{len(segs)} refs recovered "
                     f"(NER fallback also failed: {ner_exc.__class__.__name__})",
-                    prefix=PARSE_FALLBACK_WARNING_PREFIX,
                 )
                 return
             recovered = [(slot, ref) for slot, ref in enumerate(aligned) if ref is not None]
             for slot, rec in recovered:
                 ner_recovered.append((offset + slot, rec))
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_PARSE_NER_FALLBACK,
                 f"indices {offset}-{last_index}, {len(recovered)}/{len(segs)} refs "
                 f"recovered ({cause.__class__.__name__})",
-                prefix=PARSE_FALLBACK_WARNING_PREFIX,
             )
 
         for bi, res in enumerate(results):
@@ -2000,11 +1970,11 @@ class ReferenceExtractor:
                     salvaged = _salvage_truncated_batch(res, off)
                     if salvaged:
                         llm_refs.extend(salvaged)
-                        self._record_seg_fallback(
+                        self._record_warning(
+                            WarningCode.REF_PARSE_SALVAGE_RECOVERY,
                             f"indices {off}-{off + len(salvaged) - 1}, "
                             f"{len(salvaged)}/{len(b)} refs salvaged from truncated "
                             f"completion ({res.__class__.__name__})",
-                            prefix=PARSE_SALVAGE_RECOVERY_PREFIX,
                         )
                         b, off = b[len(salvaged) :], off + len(salvaged)
                         if not b:
@@ -2026,11 +1996,11 @@ class ReferenceExtractor:
                         )
                         split_refs = l_refs + r_refs
                         if split_refs:
-                            self._record_seg_fallback(
+                            self._record_warning(
+                                WarningCode.REF_PARSE_SPLIT_RECOVERY,
                                 f"indices {off}-{off + len(b) - 1}, "
                                 f"{len(split_refs)}/{len(b)} refs re-parsed in "
                                 f"smaller batches ({res.__class__.__name__})",
-                                prefix=PARSE_SPLIT_RECOVERY_PREFIX,
                             )
                             llm_refs.extend(split_refs)
                         for span_off, span_segs, span_exc in l_failed + r_failed:
@@ -2165,10 +2135,10 @@ class ReferenceExtractor:
         stubs = sorted({index for index, ref in positioned if _is_stub_reference(ref)})
         if not ref_strings:
             if stubs:
-                self._record_seg_fallback(
+                self._record_warning(
+                    WarningCode.REF_PARSE_LOST,
                     f"{len(stubs)} ref(s) parsed with no title and no authors were dropped; "
                     "no reference strings were available to re-parse them",
-                    prefix=PARSE_FALLBACK_WARNING_PREFIX,
                 )
             return
         covered = {index for index, ref in positioned if not _is_stub_reference(ref)}
@@ -2183,10 +2153,10 @@ class ReferenceExtractor:
             raise
         except Exception as ner_exc:  # noqa: BLE001 — recovery is best-effort
             logger.error("NER recovery of %d skipped refs failed: %s", len(missing), ner_exc)
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_PARSE_LOST,
                 f"{len(missing)} ref(s) skipped by the LLM, 0 recovered "
                 f"(NER failed: {ner_exc.__class__.__name__})",
-                prefix=PARSE_FALLBACK_WARNING_PREFIX,
             )
             return
         if len(aligned) != len(missing):
@@ -2215,9 +2185,9 @@ class ReferenceExtractor:
                 if not (item[0] in replaced and _is_stub_reference(item[1]))
             ]
         positioned.extend(recovered)
-        self._record_seg_fallback(
+        self._record_warning(
+            WarningCode.REF_PARSE_NER_FALLBACK,
             f"{len(recovered)}/{len(missing)} ref(s) skipped by the LLM recovered via NER",
-            prefix=PARSE_FALLBACK_WARNING_PREFIX,
         )
 
     async def _parse_references_llm_chunked(
@@ -2285,15 +2255,15 @@ class ReferenceExtractor:
                 )
                 # Same contract as the batched path: a dropped chunk must be
                 # visible in the export, not only in the log.
-                self._record_seg_fallback(
+                self._record_warning(
+                    WarningCode.REF_PARSE_LOST,
                     f"chunk {ci}, 0/{len(members)} refs recovered "
                     f"(NER fallback also failed: {ner_exc.__class__.__name__})",
-                    prefix=PARSE_FALLBACK_WARNING_PREFIX,
                 )
                 return []
-            self._record_seg_fallback(
+            self._record_warning(
+                WarningCode.REF_PARSE_NER_FALLBACK,
                 f"chunk {ci}, {len(recovered)}/{len(members)} refs recovered",
-                prefix=PARSE_FALLBACK_WARNING_PREFIX,
             )
             return recovered
 

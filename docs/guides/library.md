@@ -17,9 +17,10 @@ result.save("paper.json")
 ```
 
 `chew()` returns a `Result`, an attribute-based view over the export dict
-with a validated v11 `PaperExport` model available as `result.model`.
-Table-shaped keys (`bib`, `author`, `text`, `section`, `url`, `bib_match`,
-`xref`, `figure`, `table`, `eq`) come back as `Records`, a `list` subclass
+with a validated v12 `PaperExport` model available as `result.model`.
+Table-shaped keys (`author`, `affiliation`, `funding`, `text`, `section`,
+`url`, `bib`, `xref`, `figure`, `table`, `eq`, `metadata_match`, `bib_match`)
+come back as `Records`, a `list` subclass
 with a `.df` convenience property for pandas:
 
 ```python
@@ -31,9 +32,16 @@ result.model.metadata.title  # typed Pydantic model access
 
 `references`, `authors`, and `sections` are friendly aliases for the
 schema's `bib`, `author`, and `section` tables; `metadata` fields (`title`,
-`doi`, …), `source` fields (`file_name`, `file_hash`, `input_format`), and
+`doi`, …), `source` fields (`file_name`, `sha256`, `input_format`), and
 remaining top-level keys (`paper_id`, `extraction`, …) resolve as attributes
 too.
+
+`bibr.Result(data)` also wraps a saved export dict, such as
+`json.loads(Path("paper.json").read_text())`. It accepts an export from any
+12.x release, including a newer one that adds fields or bumps the minor
+`schema_version` or adds enum values. Unknown keys are kept in `result.data`
+and in the model's `model_extra`. A `schema_version` with a different major version (`11.x`,
+`13.x`) raises a validation error.
 
 ## Batch
 
@@ -74,6 +82,29 @@ Their async equivalents are `achew_file()` and `achew_many()`. The same
 four methods are available on `Chewer`. File-specific methods reject
 directories; batch-specific methods take an explicit sequence of paths.
 
+## Corpus tables (Parquet)
+
+`bibr.write_tables()` writes any number of results, export dicts or export
+JSON files as one Parquet file per table: `paper.parquet` (one row per paper),
+one file per record and match table (`author`, `bib`, `text`, `bib_match`, …)
+and `extraction_*` files for the processing lists. Every row starts with
+`paper_id`, and the column types come from the schema, so every file has the
+same columns however many papers it holds. Failed slots of a batch are skipped.
+
+```python
+report = bibr.write_tables(bibr.chew("papers/"), "tables/")
+
+import pandas as pd
+refs = pd.read_parquet("tables/bib.parquet")        # every paper's references
+papers = pd.read_parquet("tables/paper.parquet")    # titles, DOIs, file hashes, …
+```
+
+In R: `arrow::read_parquet("tables/bib.parquet")`. The CLI equivalent is
+`bibr tables results/ --out tables/`, and `bibr batch` writes the same files to
+`<out>/tables/` after every run. `paper_id` joins the tables, so it must be
+unique across the corpus; pass `paper_id=` (or use `bibr batch`, which names
+each paper after its file) when several papers share a DOI.
+
 ## Options
 
 `chew()` (and `Chewer`, below) accept keyword options that mirror the `bibr
@@ -91,16 +122,16 @@ chew` CLI flags:
 | `crossref` | `--crossref` / `--no-crossref` | Tri-state: `True` runs Crossref/resolver reference enrichment for this call, `False` skips it, omitted/`None` follows `CROSSREF_ENRICH` (off by default) |
 | `equations` | `--no-equations` (inverted) | Enable/disable equation extraction |
 | `pages` | `--pages` | Page range to process, 1-based (e.g. `"1-5"`) |
-| `figure_images` | `--figure-images` | Include base64-encoded figure images in the output |
+| `figure_images` | `--figure-images` | Include figure images in the output, as `data:` URIs |
 | `include_regions` | `--regions` | Include the `extraction.regions` debug payload (per-region bbox/font/content) |
-| `include_region_meta` | `--region-meta` | Include the per-text `_bbox_2d`/`_font_size`/`_region_type`/... underscore fields (opt-in v4-training metadata, distinct from `extraction.regions`) |
+| `include_region_meta` | `--region-meta` | Include `extraction.text_regions`: per-sentence layout features (`bbox`, `font_size`, `region_type`, …) keyed by `text_id` (opt-in v4-training metadata, distinct from `extraction.regions`) |
 | `ocr_url` | `--ocr-url` | URL for an external OCR server |
 | `ocr_model` | `--ocr-model` | OCR model path or served model alias |
 | `ocr_profile` | `--ocr-profile` | `"paddle"` or `"glm"`; required when a custom model alias does not identify its family |
 | `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both |
 | `paper_id` | `--paper-id` | Paper ID override (single-file calls only) |
 | `batch_size` | `--batch-size` | Files per chunk in batch processing (batch calls only) |
-| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones; `False` forces it off |
+| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; `False` forces it off |
 | `settings` | `.env` / environment | A `GlobalSettings` instance copied into the pipeline at construction |
 
 ```python

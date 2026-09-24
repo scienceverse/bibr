@@ -121,6 +121,8 @@ def _enrichment_stage(pl):
 def _build_with(settings):
     from bibr.serve.pipeline import ServePipeline
 
+    # These tests drive the Crossref enricher alone; ROR has its own test below.
+    settings.ror.enrich = False
     return ServePipeline(
         layout=MagicMock(),
         segmenter=MagicMock(),
@@ -148,6 +150,24 @@ def test_enricher_is_built_even_when_crossref_enrich_setting_is_off():
     (checkpoint,) = [s for s in pl._stages if isinstance(s, CoreCheckpointStage)]
     assert checkpoint._enrichment_requested is True
     assert pl._config.crossref is None
+
+
+def test_ror_enricher_follows_crossref_unless_switched_off():
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
+    from bibr.serve.pipeline import ServePipeline
+
+    settings = GlobalSettings()
+    pl = ServePipeline(
+        layout=MagicMock(),
+        segmenter=MagicMock(),
+        http_client=MagicMock(),
+        ocr_base_url="http://ocr.local",
+        ocr_sem_global=asyncio.Semaphore(16),
+        ocr_breaker=MagicMock(),
+        settings=settings,
+    )
+    assert [type(e) for e in _enrichment_stage(pl)._enrichers] == [CrossrefEnricher, RorEnricher]
 
 
 async def test_refs_off_default_allows_a_request_to_enable_parsing_and_enrichment():

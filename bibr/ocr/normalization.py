@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from bibr.ocr.otsl import decode_otsl
 from bibr.ocr.profiles import OcrProfile, OcrTask
+from bibr.processing_warnings import ProcessingWarning
 
 
 @dataclass(frozen=True)
@@ -12,7 +13,7 @@ class NormalizedOcrOutput:
 
     content: str
     raw_content: str | None
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
 
 
 def normalize_ocr_output(

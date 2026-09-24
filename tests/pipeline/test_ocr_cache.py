@@ -15,6 +15,12 @@ from bibr.pipeline.progress import NullProgress
 from bibr.pipeline.stages.ocr import OcrStage
 from bibr.pipeline.stages.render_ocr import InterleavedRenderOcrStage
 from bibr.pipeline.state import FileState
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
+_PAGE_FAILED = ProcessingWarning(
+    WarningCode.OCR_PAGE_FAILED,
+    "OCR failed for a page; its text is missing (page 7): RuntimeError: temporary failure",
+)
 
 
 @pytest.fixture
@@ -400,16 +406,19 @@ def test_cache_restores_partial_page_evidence_and_warnings(enabled_cache, bundle
     fs, cfg, identity = _fs(), RunConfig(ocr_backend="glm-http"), _identity()
     fs.ocr_pages_attempted = 10
     fs.ocr_pages_failed = 4
-    fs.warnings = ["OCR failed for page index 6: temporary failure"]
+    fs.warnings = [_PAGE_FAILED]
     ocr_cache.store(fs, cfg, identity, _regions())
 
     incoming = _fs()
-    incoming.warnings = ["a warning from this run"]
+    incoming.warnings = [ProcessingWarning(WarningCode.OCR_REGION_FAILED, "from this run")]
     loader = ocr_cache.load_bundle if bundle else ocr_cache.load
     assert loader(incoming, cfg, identity)
     assert incoming.ocr_pages_attempted == 10
     assert incoming.ocr_pages_failed == 4
-    assert incoming.warnings == ["a warning from this run", *fs.warnings]
+    assert incoming.warnings == [
+        ProcessingWarning(WarningCode.OCR_REGION_FAILED, "from this run"),
+        _PAGE_FAILED,
+    ]
     assert loader(incoming, cfg, identity)
     assert incoming.warnings.count(fs.warnings[0]) == 1
 
@@ -421,6 +430,21 @@ def test_bad_completion_evidence_is_a_miss_without_partial_restore(enabled_cache
     path = ocr_cache._path(fs, cfg, identity)
     payload = json.loads(path.read_text())
     payload["ocr_quality"]["pages_failed"] = -1
+    path.write_text(json.dumps(payload))
+    loader = ocr_cache.load_bundle if bundle else ocr_cache.load
+    assert not loader(fs, cfg, identity)
+    assert fs.ocr_regions is None and not fs.warnings
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("bundle", [False, True])
+def test_prose_warnings_are_a_miss(enabled_cache, bundle):
+    """Format 9 stored warnings as prose; a coded reader must not load them."""
+    fs, cfg, identity = _fs(), RunConfig(), _identity()
+    ocr_cache.store(fs, cfg, identity, _regions())
+    path = ocr_cache._path(fs, cfg, identity)
+    payload = json.loads(path.read_text())
+    payload["ocr_quality"]["warnings"] = ["OCR failed for page index 6: temporary failure"]
     path.write_text(json.dumps(payload))
     loader = ocr_cache.load_bundle if bundle else ocr_cache.load
     assert not loader(fs, cfg, identity)
@@ -440,7 +464,7 @@ async def test_cache_hits_obey_current_ocr_success_threshold(
     source = _fs()
     source.ocr_pages_attempted = 10
     source.ocr_pages_failed = 4
-    source.warnings = ["OCR failed for page index 6: temporary failure"]
+    source.warnings = [_PAGE_FAILED]
     regions = [_regions()[0] for _ in range(6)] + [[] for _ in range(4)]
     ocr_cache.store(source, cfg, identity, regions)
     monkeypatch.setattr(Settings.ocr, "min_success_rate", threshold)
@@ -875,3 +899,13 @@ def test_the_served_alias_does_not_hide_a_repin():
 
     assert alias.model == _identity().model
     assert ocr_cache._key(fs, cfg, alias, baseline) != ocr_cache._key(fs, cfg, alias, repinned)
+
+
+def test_key_changes_with_the_bibr_version(monkeypatch):
+    import bibr
+
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    base = ocr_cache._key(fs, cfg, _identity())
+    monkeypatch.setattr(bibr, "__version__", "99.0.0")
+    assert ocr_cache._key(fs, cfg, _identity()) != base

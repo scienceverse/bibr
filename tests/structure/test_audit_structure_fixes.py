@@ -28,6 +28,9 @@ class TestProseIsNotStolenAsACaption:
         "Table 7.5 reports the residuals for each cohort.",
         "Figure 2 depicts the experimental timeline.",
         "Table IV summarises the demographic characteristics.",
+        "Table S1 lists the robustness checks.",
+        "Supplementary Table 2 reports the items.",
+        "Figure A1 plots the sensitivity analysis.",
     ]
 
     CAPTIONS = [
@@ -37,6 +40,10 @@ class TestProseIsNotStolenAsACaption:
         "Figure 3 Mean latency by condition",
         "Table 2 continued",
         "Table 2 Continued",
+        "Table S1 Robustness checks",
+        "Supplementary Table 2: Items",
+        "Figure A1. Sensitivity",
+        "TABLE IV Characteristics",
     ]
 
     @pytest.mark.parametrize("text", PROSE)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import subprocess
+import sys
 from collections.abc import Iterable
 
 SURFACES = ("python", "package", "docs", "container", "workflow")
@@ -87,6 +88,22 @@ def classify_paths(paths: Iterable[str]) -> dict[str, bool]:
     return result
 
 
+def is_commit(ref: str) -> bool:
+    """Return whether *ref* names a commit present in the local repository.
+
+    A force push reports the rewritten tip as ``github.event.before``. No ref
+    reaches that commit any more, so a fresh ``fetch-depth: 0`` clone lacks it and
+    ``git diff`` against it exits 128.
+    """
+
+    result = subprocess.run(  # noqa: S603 - arguments are passed without a shell
+        ["git", "cat-file", "-e", f"{ref}^{{commit}}"],  # noqa: S607 - see changed_paths
+        check=False,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def changed_paths(base: str, head: str) -> list[str]:
     """List paths changed between explicit Git object IDs using a merge-base diff."""
 
@@ -122,7 +139,17 @@ def main() -> int:
     else:
         if not args.base or not args.head:
             _parser().error("--base and --head are required unless --all is supplied")
-        surfaces = classify_paths(changed_paths(args.base, args.head))
+        if is_commit(args.base):
+            surfaces = classify_paths(changed_paths(args.base, args.head))
+        else:
+            # Without the base there is no diff to classify, so fail safe.
+            print(
+                f"::warning title=Changed surfaces unknown::base {args.base} is not a "
+                "commit in this checkout (history rewritten by a force push?); "
+                "selecting every surface",
+                file=sys.stderr,
+            )
+            surfaces = dict.fromkeys(SURFACES, True)
 
     for name in SURFACES:
         print(f"{name}={str(surfaces[name]).lower()}")

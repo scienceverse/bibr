@@ -75,8 +75,6 @@ def test_xref_prescan_never_hides_a_real_match():
     patterns = [
         xu.TABLE_XREF_RE,
         xu.FIGURE_XREF_RE,
-        xu.SUPP_TABLE_XREF_RE,
-        xu.SUPP_FIGURE_XREF_RE,
         xu.SUPP_NAMED_XREF_RE,
         xu.EQUATION_XREF_RE,
         xu.SECTION_XREF_RE,

@@ -4,6 +4,7 @@ from unittest import mock
 from bibr.clients.crossref import CrossrefClient
 from bibr.models import PaperReference
 from bibr.paper import MatchSource
+from bibr.processing_warnings import WarningCode
 
 
 def _mock_crossref():
@@ -605,8 +606,9 @@ async def test_fallback_item_error_warns_without_marking_enrichment_partial():
     assert not ref.match
     assert report.failed == 0
     assert len(report.details) == 1
-    assert "resolver fallback" in report.details[0]
-    assert "openalex down" in report.details[0]
+    assert report.details[0].code == WarningCode.RESOLVER_FALLBACK_FAILED
+    assert "resolver fallback" in report.details[0].message
+    assert "openalex down" in report.details[0].message
 
 
 async def test_fallback_timeout_discards_batch_and_cancels_search():
@@ -642,7 +644,8 @@ async def test_fallback_timeout_discards_batch_and_cancels_search():
     assert all(not ref.match for ref in refs)
     assert report.failed == 0
     assert len(report.details) == 1
-    assert "fallback timed out" in report.details[0]
+    assert report.details[0].code == WarningCode.RESOLVER_FALLBACK_TIMEOUT
+    assert "fallback timed out" in report.details[0].message
 
 
 async def test_authoritative_resolver_skips_the_crossref_doi_prefetch(monkeypatch):

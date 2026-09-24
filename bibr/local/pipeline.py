@@ -236,7 +236,7 @@ class LocalPipeline(Pipeline):
         # accepts everything `bibr chew --ocr` does.
         from bibr.ocr.registry import resolve_backend_name
         from bibr.pipeline.context import RunConfig
-        from bibr.pipeline.enricher import CrossrefEnricher
+        from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
 
@@ -327,6 +327,8 @@ class LocalPipeline(Pipeline):
         enrichers = []
         if config.enrichment_enabled(settings_snapshot) and not refs_off:
             enrichers.append(CrossrefEnricher(settings=settings_snapshot))
+            if settings_snapshot.ror.enrich:
+                enrichers.append(RorEnricher(settings=settings_snapshot))
 
         # Cloud LLM has no OCR→LLM VRAM handoff, so each OCR window's back
         # half (parse → extract → enrich → export) streams under subsequent

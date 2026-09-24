@@ -8,7 +8,7 @@
     result.title             # from the metadata block
     result.references        # list of dicts (alias for the schema's "bib")
     result.references.df     # the same rows as a pandas DataFrame
-    result.data              # the raw v11.0 export dict
+    result.data              # the raw v12.0 export dict
     result.save("out.json")
 
 Inside an already-running event loop (Jupyter, async apps) use the async
@@ -55,22 +55,33 @@ __all__ = [
     "chew_many",
 ]
 
-# Table-shaped top-level keys of the v11.0 export schema.
+# Table-shaped top-level keys of the v12.0 export schema.
 _TABLE_KEYS = (
     "author",
+    "affiliation",
+    "funding",
     "text",
     "section",
     "url",
     "bib",
-    "bib_match",
     "xref",
     "figure",
     "table",
+    "footnote",
     "eq",
+    "metadata_match",
+    "affiliation_match",
+    "funding_match",
+    "bib_match",
 )
 
 # Friendly attribute → schema key.
-_ALIASES = {"references": "bib", "authors": "author", "sections": "section"}
+_ALIASES = {
+    "references": "bib",
+    "authors": "author",
+    "sections": "section",
+    "footnotes": "footnote",
+}
 
 # chew()/achew() option → LocalPipeline constructor argument. Identity
 # mappings are accepted too, so both ``ocr=`` and ``ocr_backend=`` work.
@@ -159,34 +170,49 @@ class ChewFailure:
 
 
 class Result:
-    """Read-only view over a bibr v11.0 export dict.
+    """Read-only view over a bibr v12 export dict.
 
     Table keys (``bib``, ``author``, ``text``, ...) and their friendly
     aliases (``references``, ``authors``, ``sections``) come back as
     :class:`Records`; ``metadata`` fields (``title``, ``doi``, ...) and
-    ``source`` fields (``file_name``, ``file_hash``, ``input_format``) resolve
+    ``source`` fields (``file_name``, ``sha256``, ``input_format``) resolve
     as attributes, as do the remaining top-level keys (``paper_id``,
     ``extraction``, ...). The raw dict stays available as :attr:`data`.
+
+    A dict is validated with the lenient
+    :data:`~bibr.export.PaperExportReader`, so an export written by
+    any 12.x bibr loads, including one from a newer 12.x release that adds
+    fields or bumps the minor ``schema_version``. Unknown keys are kept:
+    :attr:`data` is the dict exactly as given, unknown top-level, ``metadata``
+    and ``source`` keys resolve as attributes like known ones, and
+    :attr:`model` carries them as pydantic extras (``model_extra``). A
+    different major ``schema_version`` (``11.x``, ``13.x``) raises
+    :class:`pydantic.ValidationError`, as does a known field of the wrong type.
     """
 
     def __init__(self, data: dict[str, Any] | PaperExport):
-        from bibr.export import PaperExport
+        from bibr.export import PaperExport, PaperExportReader
 
         if isinstance(data, PaperExport):
             self._model = data
             self._data = cast(dict[str, Any], data.model_dump(by_alias=True, exclude_unset=True))
         else:
-            self._model = PaperExport.model_validate(data)
+            self._model = PaperExportReader.model_validate(data)
             self._data = data
 
     @property
     def model(self) -> PaperExport:
-        """Validated v11.0 export model for statically typed consumers."""
+        """Validated v12 export model for statically typed consumers.
+
+        Built from a dict, it is a :data:`~bibr.export.PaperExportReader`
+        instance: a :class:`~bibr.export.PaperExport` subclass whose nested
+        models keep unknown keys in ``model_extra``.
+        """
         return self._model
 
     @property
     def data(self) -> dict[str, Any]:
-        """The raw v11.0 export dict."""
+        """The raw v12.0 export dict."""
         return self._data
 
     @property
@@ -206,8 +232,9 @@ class Result:
             return Records(data.get(key) or [])
         if key in data:
             return data[key]
-        # ``source`` is searched alongside ``metadata`` so ``result.file_hash``
-        # keeps resolving after v11 split file identity out of the old ``info``.
+        # ``source`` is searched alongside ``metadata`` so ``result.sha256``
+        # resolves like ``result.title``, though v11 split file identity out of
+        # the old ``info``.
         for container in ("metadata", "source"):
             block = data.get(container) or {}
             if key in block:
@@ -249,8 +276,9 @@ class Result:
         """Return a new Result with ``bib_match`` data merged into ``bib``.
 
         ``mode="fill"`` only fills empty fields; ``mode="replace"`` also
-        overwrites disagreeing ones. The original Result keeps the
-        PDF-verbatim data untouched.
+        overwrites disagreeing ones, but only from a match carrying the
+        reference's printed DOI. The original Result keeps the PDF-verbatim
+        data untouched.
         """
         import copy
 

@@ -40,6 +40,7 @@ examples:
     bibr chew paper.pdf --figure-images          # include base64 figure images
     bibr chew paper.pdf --preset NAME            # apply a saved preset for this run
     bibr inspect result.json                     # summarize an extraction-output JSON
+    bibr tables results/ --out tables/           # exports → one Parquet file per table
 
   presets & config:
     bibr preset list                             # show all saved presets
@@ -69,6 +70,8 @@ examples:
 
 ledger: <out>/outcomes.jsonl — one JSON line per attempt (status, error_code,
 timings, stage times, LLM tokens, reference counts, warnings, build sha).
+tables: <out>/tables/*.parquet — every successful paper as one Parquet file per
+table, keyed by paper_id (rewritten after each run; --no-tables to skip).
 """
 
 
@@ -245,9 +248,10 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         help=(
             "Merge accepted Crossref match data (bib_match) into the bib table. "
             "Bare flag = 'fill' (only fills missing fields); 'replace' also "
-            "overwrites disagreeing ones. Modified rows get a consolidated_fields "
-            "marker. No-op when enrichment is off (the default; see --crossref) "
-            "or when no matches were found. "
+            "overwrites disagreeing ones, but only from a match carrying the "
+            "reference's printed DOI. The fields taken per row are listed in "
+            "extraction.diagnostics.consolidation. No-op when enrichment is off "
+            "(the default; see --crossref) or when no matches were found. "
             "Place after the input path (e.g. `bibr chew paper.pdf "
             "--consolidate`), or use `--consolidate=replace`."
         ),
@@ -271,9 +275,9 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
         "--region-meta",
         action="store_true",
         help=(
-            "Include the per-text underscore region metadata (_bbox_2d, "
-            "_font_size, _region_type, …; training/debug payload from "
-            "output). Off by default."
+            "Include extraction.text_regions: per-sentence layout features "
+            "(bbox, font size, region type; training/debug payload). "
+            "Off by default."
         ),
     )
     parser.add_argument(
@@ -436,6 +440,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="Print the report as JSON instead of a table",
+    )
+    batch.add_argument(
+        "--no-tables",
+        action="store_true",
+        help=(
+            "Do not write <out>/tables/: the corpus as one Parquet file per table, "
+            "rebuilt from every successful paper at the end of each run"
+        ),
     )
     batch.add_argument(
         "-v",
@@ -648,6 +660,26 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "doctor",
         help="validate your environment",
+    )
+
+    # --- tables subcommand ---
+    tables_parser = sub.add_parser(
+        "tables",
+        help="write JSON exports as Parquet tables (one file per table)",
+        description=(
+            "Write bibr JSON exports as one Parquet file per table — paper, author, "
+            "affiliation, text, section, bib, xref, figure, table, eq, the *_match "
+            "tables and the extraction_* processing lists — each row keyed by "
+            "paper_id. Column types come from the export schema, so every file has "
+            "the same columns however many papers it holds. Directories are "
+            "searched recursively for *.json; other JSON files are skipped."
+        ),
+    )
+    tables_parser.add_argument(
+        "inputs", nargs="+", help="Export JSON files or directories containing them"
+    )
+    tables_parser.add_argument(
+        "--out", required=True, help="Output directory for the .parquet files"
     )
 
     # --- inspect subcommand ---

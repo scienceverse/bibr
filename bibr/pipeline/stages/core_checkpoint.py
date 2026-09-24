@@ -6,6 +6,7 @@ import logging
 
 from bibr.pipeline.artifacts import RunState, disposition_for_issues, mark_enrichment_pending
 from bibr.pipeline.stages.export import build_result_payload
+from bibr.validation import payload_validation
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class CoreCheckpointStage:
                 # The serialized validation block is the public authority: it
                 # may contain output-only blockers absent from Paper's in-memory
                 # issue list. Resolve routing before adding our temporary gate.
-                serialized_issues = (payload.get("validation") or {}).get("issues") or []
+                serialized_issues = (payload_validation(payload) or {}).get("issues") or []
                 fs.artifact_disposition = disposition_for_issues(serialized_issues)
                 enrichment_requested = (
                     self._enrichment_requested

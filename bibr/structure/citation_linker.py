@@ -816,6 +816,45 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
     return candidates
 
 
+# A marker expanding to more numbers than this is taken for a bracketed scale
+# or span ("[1-50]"), not a citation list, when sizing the bibliography.
+_MAX_NUMBERS_PER_CITED_MARKER = 20
+
+
+def cited_reference_numbers(receipt: CitationLinkingReceipt | None) -> set[int]:
+    """Printed reference numbers cited by the body's bracket and superscript markers.
+
+    Counts accepted markers and markers rejected only as ``unknown_bib_id`` —
+    a number that no parsed reference carries, which is how a reference
+    dropped from the parsed list shows up in the body. Candidate ``bib_ids``
+    hold only the parsed ones (already remapped to internal IDs), so the
+    printed numbers are re-read from the marker text. The noisier
+    parenthetical and flattened-superscript fallback tiers are left out.
+    """
+    numbers: set[int] = set()
+    if receipt is None:
+        return numbers
+    for candidate in receipt.candidates:
+        if candidate.style != "numeric" or not set(candidate.rejection_reasons) <= {
+            "unknown_bib_id"
+        }:
+            continue
+        if "bracket_marker" in candidate.evidence:
+            match = NUMERIC_CITE_RE.fullmatch(candidate.raw)
+            group_text = match.group(1) if match else None
+        elif "superscript_marker" in candidate.evidence:
+            match = _STRIP_CITE_SUP_RE.fullmatch(candidate.raw)
+            group_text = (match.group(1) or match.group(2)) if match else None
+        else:
+            continue
+        nums = _expand_numeric_range(group_text) if group_text else []
+        # A bracket containing 0 is never a citation (``[0, 1]``, the unit
+        # interval), mirroring ``_is_likely_citation_bracket``.
+        if nums and min(nums) >= 1 and len(nums) <= _MAX_NUMBERS_PER_CITED_MARKER:
+            numbers.update(nums)
+    return numbers
+
+
 def _fallback_style_reasons(
     local_candidates: list[CitationCandidate],
     printed_numeric_ids: set[int],
@@ -1218,6 +1257,8 @@ async def detect_bib_xrefs_with_receipt(
                 contents=_normalize_citation_text(candidate.raw),
                 text_id=candidate.text_id,
                 tier=candidate.style,
+                start=candidate.start,
+                end=candidate.end,
             )
             for candidate in candidates
             if candidate.accepted
@@ -1320,6 +1361,8 @@ async def detect_bib_xrefs_with_receipt(
                         contents=_normalize_citation_text(cite_text),
                         text_id=text_id,
                         tier="llm",
+                        start=start,
+                        end=end,
                     ),
                     start,
                     end,

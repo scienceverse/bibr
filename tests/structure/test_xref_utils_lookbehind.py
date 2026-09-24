@@ -14,12 +14,16 @@ def _sent(text: str) -> list[PaperSentence]:
 
 def _tables(*ids: int) -> list[PaperTable]:
     return [
-        PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="<table/>", section_id=1) for i in ids
+        PaperTable(table_id=i, df=pd.DataFrame(), tbl_html="<table/>", section_id=1, label=str(i))
+        for i in ids
     ]
 
 
 def _figures(*ids: int) -> list[PaperFigure]:
-    return [PaperFigure(figure_id=i, section_id=1, image_b64=None, caption=None) for i in ids]
+    return [
+        PaperFigure(figure_id=i, section_id=1, image_b64=None, caption=None, label=str(i))
+        for i in ids
+    ]
 
 
 class TestTableXrefFalsePositives:
@@ -112,6 +116,15 @@ class TestRecallPreserved:
         xrefs = detect_xrefs(_sent("as shown in Fig. 4a."), [], _figures(4))
         assert [x.xref_id for x in xrefs] == [4]
         assert xrefs[0].xref_type == "figure"
+
+    def test_label_glued_to_the_next_word(self):
+        # Extracted text sometimes loses the space after the number.
+        xrefs = detect_xrefs(_sent("Figure 3shows the effect."), [], _figures(3))
+        assert [x.xref_id for x in xrefs] == [3]
+
+    def test_a_year_is_not_a_table(self):
+        xrefs = detect_xrefs(_sent("See the OECD Tables 2019 release."), _tables(1), [])
+        assert xrefs == []
 
     def test_supp_table(self):
         xrefs = detect_xrefs(_sent("Full estimates appear in Table S1."), [], [])

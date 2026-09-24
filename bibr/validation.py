@@ -107,3 +107,20 @@ def references_incomplete_issue(metadata: PaperMetadata) -> ValidationIssue:
         origin_stage="extract",
         blocking=True,
     )
+
+
+def payload_validation(payload: object) -> dict | None:
+    """The output-validation block of an export payload, or ``None``.
+
+    Schema 12 keeps it at ``extraction.validation``; exports up to 11.x kept
+    it at the root. Readers that meet saved files of either vintage (batch
+    ledgers, ``bibr inspect``, evaluation) go through here. The returned dict
+    is the payload's own, so writers may mutate it in place.
+    """
+    if not isinstance(payload, dict):
+        return None
+    extraction = payload.get("extraction")
+    if isinstance(extraction, dict) and isinstance(extraction.get("validation"), dict):
+        return extraction["validation"]
+    legacy = payload.get("validation")
+    return legacy if isinstance(legacy, dict) else None

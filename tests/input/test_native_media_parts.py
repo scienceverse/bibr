@@ -1,4 +1,4 @@
-"""Native media objects preserve their physical payload in v10.7 parts."""
+"""Natively parsed media objects export as whole-object rows (v12)."""
 
 from __future__ import annotations
 
@@ -39,6 +39,9 @@ def _export(contents, *, suffix: str, mime_type: str, file_type: str) -> dict:
 
 
 def _assert_single_parts_match_legacy_payload(contents, output: dict) -> None:
+    """Natively parsed media keep one internal part, but a part with no page or
+    box says nothing the whole-object row does not: v12 exports no ``parts``
+    on the rows and no ``extraction.float_parts`` entry for it."""
     source_figure = contents.figures[0]
     source_table = contents.tables[0]
     figure = output["figure"][0]
@@ -48,31 +51,26 @@ def _assert_single_parts_match_legacy_payload(contents, output: dict) -> None:
     assert source_figure.parts[0].image_b64 == source_figure.image_b64
     assert source_figure.parts[0].page_number == source_figure.page_number
     assert source_figure.parts[0].provenance == source_figure.provenance
-    assert figure["parts"] == [
-        {
-            "part_index": 1,
-            "image": figure["image"],
-            "page_number": figure["page_number"],
-            "bbox": None,
-            "provenance": [],
-        }
-    ]
+    # Exported as a data URI that names the embedded image's media type.
+    assert figure["image"] == (
+        "data:image/png;base64," + source_figure.image_b64 if source_figure.image_b64 else None
+    )
+    assert "parts" not in figure
 
     assert len(source_table.parts) == 1
     assert source_table.parts[0].tbl_html == source_table.tbl_html
     assert source_table.parts[0].df.equals(source_table.df)
     assert source_table.parts[0].page_number == source_table.page_number
     assert source_table.parts[0].provenance == source_table.provenance
-    assert table["parts"] == [
-        {
-            "part_index": 1,
-            "html": table["html"],
-            "contents": table["contents"],
-            "page_number": table["page_number"],
-            "bbox": None,
-            "provenance": [],
-        }
+    assert table["html"] == source_table.tbl_html
+    assert "parts" not in table
+
+    located = [
+        part
+        for part in (*source_figure.parts, *source_table.parts)
+        if part.page_number is not None or part.bbox
     ]
+    assert len(output["extraction"].get("float_parts") or []) == len(located)
 
 
 def test_docx_native_export_has_one_part_per_media_object():

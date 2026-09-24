@@ -1,11 +1,16 @@
-"""Title grounding preserves an invented printed grammatical error instead of silently correcting it."""
+"""Title grounding keeps the printed title when a model silently corrects or truncates it."""
+
+import pytest
 
 from bibr.extract.core_metadata import ground_title_to_printed_text
+from bibr.schemas import AuthorLLM, CoreMetadataLLM
 
-from .test_core_metadata_author_guards import _candidate, _resolution
+from .test_core_metadata_author_guards import _candidate, _extractor, _resolution
 
 _PRINTED = "ВИВЧЕННЯ СЕЗОННИХ ЗМІН У МАЛЕНЬКУ САДУ БІЛЯ ШКОЛИ"
 _REWRITTEN = "ВИВЧЕННЯ СЕЗОННИХ ЗМІН У МАЛЕНЬКОМУ САДУ БІЛЯ ШКОЛИ"
+_PARENTHESIZED = "(Rural) Clinics as layered civic organizations"
+_UNPARENTHESIZED = "Clinics as layered civic organizations"
 
 
 def _titles(*texts):
@@ -128,3 +133,117 @@ def test_printed_rows_outside_the_front_matter_cannot_supply_a_title():
     assert title == unrelated
     assert issue is not None
     assert issue.code == "VAL_TITLE_UNGROUNDED"
+
+
+def test_dropped_leading_parenthetical_is_restored():
+    # A model reads "(Rural)" as an annotation and returns the rest of the
+    # title. The rest is still printed verbatim, so the verbatim test alone
+    # would accept the truncated title.
+    title, issue = ground_title_to_printed_text(
+        _UNPARENTHESIZED, _titles(_PARENTHESIZED), _PARENTHESIZED
+    )
+
+    assert title == _PARENTHESIZED
+    assert issue is not None
+    assert issue.code == "VAL_TITLE_REGROUNDED"
+    assert issue.evidence_ids == ("c1", "reason:title_leading_parenthetical_dropped")
+    assert not issue.blocking
+
+
+def test_printed_leading_parenthetical_passes_through_untouched():
+    title, issue = ground_title_to_printed_text(
+        _PARENTHESIZED, _titles(_PARENTHESIZED), _PARENTHESIZED
+    )
+
+    assert title == _PARENTHESIZED
+    assert issue is None
+
+
+def test_restored_parenthetical_keeps_a_subtitle_printed_on_another_row():
+    subtitle = "A Survey of Twelve Districts"
+
+    title, issue = ground_title_to_printed_text(
+        f"{_UNPARENTHESIZED}: {subtitle}",
+        _titles(_PARENTHESIZED, subtitle),
+        f"{_PARENTHESIZED}\n{subtitle}",
+    )
+
+    assert title == f"{_PARENTHESIZED}: {subtitle}"
+    assert issue is not None
+    assert issue.code == "VAL_TITLE_REGROUNDED"
+
+
+def test_fused_leading_parenthetical_is_restored_without_a_space():
+    printed = "(Re)thinking Garden Plots as Classrooms"
+
+    title, _ = ground_title_to_printed_text(
+        "thinking Garden Plots as Classrooms", _titles(printed), printed
+    )
+
+    assert title == printed
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["(1)", "(2.1)", "(b)", "(iv)", "(2020)", "(Review)", "(Original Article)", "(Open Access)"],
+)
+def test_numbering_and_article_type_labels_stay_dropped(label):
+    # These label the row rather than belong to the title, so the model was
+    # right to leave them out. "(2020)" is a citation line's year, wrapped to
+    # the start of a row after the author list.
+    printed = f"{label} {_UNPARENTHESIZED}"
+
+    title, issue = ground_title_to_printed_text(_UNPARENTHESIZED, _titles(printed), printed)
+
+    assert title == _UNPARENTHESIZED
+    assert issue is None
+
+
+def test_parenthetical_is_restored_only_from_the_selected_title_rows():
+    # An abstract sentence, or another record's title, that opens with the same
+    # words is not this paper's printed title row.
+    abstract = _candidate("c1", _PARENTHESIZED, roles=frozenset({"abstract"}))
+    other_record = _candidate("c2", _PARENTHESIZED, roles=frozenset({"title"}))
+    own_title = _candidate("c3", _UNPARENTHESIZED, roles=frozenset({"title"}))
+    resolution = _resolution(abstract, other_record, own_title, selected_ids=("c1", "c3"))
+
+    title, issue = ground_title_to_printed_text(
+        _UNPARENTHESIZED, resolution, f"{_PARENTHESIZED}\n{_UNPARENTHESIZED}"
+    )
+
+    assert title == _UNPARENTHESIZED
+    assert issue is None
+
+
+def test_title_rows_that_disagree_on_the_parenthetical_abstain():
+    printed = (_PARENTHESIZED, f"(Urban) {_UNPARENTHESIZED}")
+
+    title, issue = ground_title_to_printed_text(
+        _UNPARENTHESIZED, _titles(*printed), "\n".join(printed)
+    )
+
+    assert title == _UNPARENTHESIZED
+    assert issue is None
+
+
+async def test_extracted_title_keeps_the_printed_leading_parenthetical():
+    # With a selected front-matter record, the model title is final: the
+    # layout-title preference in post_parse does not run, so a truncated model
+    # title used to reach the export unchanged.
+    resolution = _resolution(
+        _candidate("c1", _PARENTHESIZED, roles=frozenset({"title"}), source_kind="heading"),
+        _candidate("c2", "Mira Ellison", roles=frozenset({"byline"}), text_ids=(2,)),
+    )
+    ext = _extractor(
+        resolution,
+        CoreMetadataLLM(
+            title=_UNPARENTHESIZED,
+            authors=[AuthorLLM(given="Mira", family="Ellison")],
+            keywords=[],
+        ),
+    )
+
+    metadata = await ext.extract()
+
+    assert metadata.title == _PARENTHESIZED
+    assert "VAL_TITLE_REGROUNDED" in [issue.code for issue in ext.validation_issues]

@@ -13,6 +13,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import NAME_CHAR_CLS
 
 if TYPE_CHECKING:
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 # In-text author-year citation marker: a capitalised surname, optional
 # co-authors / "et al.", then a 4-digit year. Used only to size the body's
 # distinct citation count for the reference-undercount safety net (residual #3);
-# numeric "[1]" citation styles yield zero, so the net stays silent there.
+# numeric "[1]" citation styles yield zero here and are sized from the citation
+# linker's receipt instead (``_count_numbered_citations``).
 _INTEXT_CITE_RE = re.compile(
     r"([A-Z]" + NAME_CHAR_CLS + r"+)"
     r"(?:[,\s]+(?:et\s+al\.?|&|and|[A-Z]" + NAME_CHAR_CLS + r"+))*"
@@ -40,6 +42,12 @@ _INTEXT_CITE_RE = re.compile(
 # leaves no output trace) never trips it and short papers are never flagged.
 _MIN_BODY_CITES_FOR_WARNING = 15
 _REF_DEFICIT_RATIO = 0.5
+
+# A numbered bibliography is cited almost densely from 1 upward. Cited numbers
+# only count up to the highest n that has at least this share of 1..n cited, so
+# stray bracketed integers far above the list (values, intervals) cannot
+# inflate the count.
+_NUMBERED_CITE_MIN_DENSITY = 0.5
 
 _RESULTS_CHILD_CUE_RE = re.compile(
     r"\b(?:results?|findings?|outcomes?|views?|perspectives?|experiences?|themes?|engagement)\b",
@@ -123,17 +131,40 @@ def _count_distinct_intext_citations(text: str) -> int:
     return len({(m.group(1).lower(), m.group(2)) for m in _INTEXT_CITE_RE.finditer(text)})
 
 
-def _low_reference_count_warning(body_text: str, n_refs: int) -> str | None:
+def _count_numbered_citations(numbers: set[int]) -> int:
+    """Count the distinct cited reference numbers inside the dense run from 1.
+
+    With the numbers sorted, the i-th smallest one ``n`` has exactly ``i``
+    cited numbers at or below it; the run extends to the largest ``n`` where
+    that is at least ``_NUMBERED_CITE_MIN_DENSITY`` of ``1..n``.
+    """
+    count = 0
+    for i, number in enumerate(sorted(numbers), start=1):
+        if i >= _NUMBERED_CITE_MIN_DENSITY * number:
+            count = i
+    return count
+
+
+def _low_reference_count_warning(
+    body_text: str, n_refs: int, *, cited_numbers: set[int] | None = None
+) -> ProcessingWarning | None:
     """Return a warning when extracted references are grossly fewer than the
     body's distinct in-text citations (likely OCR reference-region omission),
     else None. General gross-drop net — not a single-dropped-reference detector.
+
+    Author-year citations are counted from *body_text*; numeric ones from
+    *cited_numbers*, the printed reference numbers the body's markers cite
+    (``citation_linker.cited_reference_numbers``). The larger count decides.
     """
-    n_cited = _count_distinct_intext_citations(body_text)
+    n_author_year = _count_distinct_intext_citations(body_text)
+    n_numbered = _count_numbered_citations(cited_numbers or set())
+    n_cited = max(n_author_year, n_numbered)
     if n_cited >= _MIN_BODY_CITES_FOR_WARNING and n_refs < _REF_DEFICIT_RATIO * n_cited:
-        return (
-            f"Reference under-extraction suspected: {n_refs} references parsed "
-            f"vs {n_cited} distinct in-text citations in the body — some "
-            f"reference entries may have been dropped (OCR region omission)."
+        kind = "numbered in-text citations" if n_numbered > n_author_year else "in-text citations"
+        return ProcessingWarning(
+            WarningCode.REF_UNDER_EXTRACTION_SUSPECTED,
+            f"{n_refs} references parsed vs {n_cited} distinct {kind} in the body — some "
+            f"reference entries may have been dropped (OCR region omission).",
         )
     return None
 
@@ -153,7 +184,7 @@ def _attach_text_quality(paper, contents, settings: GlobalSettings | None = None
     populates no region summaries, so its score stays ``None`` (there is no OCR
     garbage to rate). Sets ``paper.text_quality`` and, below
     ``Settings.pipeline.text_quality_warn_threshold``, appends a
-    ``low_text_quality: <score>`` processing warning.
+    ``LOW_TEXT_QUALITY`` processing warning.
     """
     from bibr.config import snapshot_settings
     from bibr.structure.text_quality import paper_text_quality
@@ -172,9 +203,13 @@ def _attach_text_quality(paper, contents, settings: GlobalSettings | None = None
     if report is None:
         return
     paper.text_quality = report.score
-    if report.score < effective.pipeline.text_quality_warn_threshold:
-        warning = f"low_text_quality: {report.score:.2f}"
-        logger.warning(warning)
+    threshold = effective.pipeline.text_quality_warn_threshold
+    if report.score < threshold:
+        warning = ProcessingWarning(
+            WarningCode.LOW_TEXT_QUALITY,
+            f"text-quality score {report.score:.2f} is below {threshold:g}",
+        )
+        logger.warning("Low text quality: %s", warning.message)
         paper.processing_warnings.append(warning)
 
 
@@ -602,12 +637,20 @@ async def _extract_metadata_and_equations(
                 len(regex_equations),
             )
             contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_TIMEOUT: kept regex-only equation extraction"
+                ProcessingWarning(
+                    WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
+                    "timed out after "
+                    f"{effective_settings.EQUATION_EXTRACTION_TIMEOUT_SECONDS}s; kept regex-only "
+                    "equation extraction",
+                )
             )
         else:
             logger.warning("Equation extraction failed: %s", results[1])
             contents.processing_warnings.append(
-                "EQUATION_LLM_FALLBACK_FAILED: kept regex-only equation extraction"
+                ProcessingWarning(
+                    WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+                    f"{type(results[1]).__name__}; kept regex-only equation extraction",
+                )
             )
         # The regex pass ran to completion before the fan-out started — ship it.
         contents.equations = regex_equations
@@ -1803,12 +1846,15 @@ async def post_parse(
     # Skipped when reference extraction is off by design (--refs off): zero
     # parsed references would spuriously trip the net on every cited paper.
     if not no_llm and parse_strategy != "off":
+        from bibr.structure.citation_linker import cited_reference_numbers
+
         warning = _low_reference_count_warning(
             _body_text_excluding_references(contents),
             len(paper_metadata.references),
+            cited_numbers=cited_reference_numbers(contents.citation_receipt),
         )
         if warning:
-            logger.warning(warning)
+            logger.warning("Reference under-extraction suspected: %s", warning.message)
             paper.processing_warnings.append(warning)
 
     # Report-only parse-quality score (Docling port): rates each region's text
@@ -1906,6 +1952,10 @@ class PostParseStage:
                         exc_info=result,
                     )
             else:
+                # The export's ``source.sha256`` is the full digest the validate
+                # stage computed; ``file_hash`` keeps its 16-character prefix for
+                # the caches keyed on it.
+                result.input_file.sha256 = fs.content_sha256
                 fs.paper = result
 
         logger.debug("Post-parse stage: %.1fs", time.monotonic() - t0)

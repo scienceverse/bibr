@@ -79,8 +79,8 @@ class RedisResponseCache(ResponseCache):
         self.hits += 1
         return value
 
-    async def set(self, key: str, value: dict[str, Any]) -> None:
-        await self._set_raw(key, json.dumps(value))
+    async def set(self, key: str, value: dict[str, Any], *, ttl_seconds: int | None = None) -> None:
+        await self._set_raw(key, json.dumps(value), ttl_seconds=ttl_seconds)
 
     async def close(self) -> None:
         if self.hits or self.misses:

@@ -46,11 +46,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BEFORE_SHA: ${{ github.event.before }}
+          FORCED_PUSH: ${{ github.event.forced }}
           PUSH_HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # A force push rewrites the history its diff would be taken against, so it
+        # validates every surface. The helper itself also selects every surface when
+        # a base commit is missing from this clone.
         run: |
-          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$BEFORE_SHA" =~ ^0+$ ]]; then
+          if [[ "$EVENT_NAME" == "workflow_dispatch" || "$BEFORE_SHA" =~ ^0+$ ||
+                "$FORCED_PUSH" == "true" ]]; then
             python scripts/ci/changed_surfaces.py --all >> "$GITHUB_OUTPUT"
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
             python scripts/ci/changed_surfaces.py \
@@ -80,7 +85,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -150,7 +155,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: "3.12"
@@ -171,7 +176,7 @@ jobs:
           github.actor != 'dependabot[bot]' &&
           (github.event_name != 'pull_request' ||
           github.event.pull_request.head.repo.full_name == github.repository)
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.2
+        uses: codecov/codecov-action@0b35c9ecc4f0529d0eb674914510c22f85b196b4 # v7.0.2
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: scienceverse/bibr
@@ -214,7 +219,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ matrix.python-version }}
@@ -251,7 +256,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -297,7 +302,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -355,7 +360,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -396,7 +401,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -475,15 +480,27 @@ jobs:
           HEAD_SHA: ${{ github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # gitleaks logs an invalid revision range, scans 0 commits and exits 0, so a
+        # base missing from this clone (a force push rewrote it) must be caught here.
+        # The whole history is then scanned instead: it is the only base a rewritten
+        # history leaves, and it costs seconds at this repository's size.
         run: |
           git config --global --add safe.directory "$PWD"
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            range="$PR_BASE_SHA..$PR_HEAD_SHA"
+            base="$PR_BASE_SHA" head="$PR_HEAD_SHA"
           elif [[ "$EVENT_NAME" == "push" && ! "$BEFORE_SHA" =~ ^0+$ ]]; then
-            range="$BEFORE_SHA..$HEAD_SHA"
+            base="$BEFORE_SHA" head="$HEAD_SHA"
           else
             echo "no commit range for a $EVENT_NAME event; the tree scan covers HEAD"
             exit 0
+          fi
+          if git cat-file -e "$base^{commit}" 2>/dev/null; then
+            range="$base..$head"
+          else
+            echo "::warning title=Commit-range secret scan widened::$base is not in" \
+              "this checkout (history rewritten by a force push?); scanning the full" \
+              "history reachable from $head instead"
+            range="$head"
           fi
           echo "scanning $range"
           gitleaks git . --config .gitleaks.toml --log-opts="$range" \
@@ -508,7 +525,7 @@ jobs:
           persist-credentials: false
 
       - name: Install locked uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         with:
           version: ${{ env.UV_VERSION }}
           python-version: ${{ env.PRIMARY_PYTHON }}
@@ -838,16 +855,16 @@ jobs:
           path: site/
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Package the verified site for GitHub Pages
-        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site/
 
       - name: Deploy production
         id: deploy
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
       - name: Prove public production availability and revision
         env:

@@ -81,6 +81,7 @@ def _snapshot_contents(contents) -> dict:
         {
             "table_id": t.table_id,
             "caption": t.caption,
+            "label": t.label,
             "section_id": t.section_id,
         }
         for t in contents.tables
@@ -89,6 +90,7 @@ def _snapshot_contents(contents) -> dict:
         {
             "figure_id": f.figure_id,
             "caption": f.caption,
+            "label": f.label,
             "section_id": f.section_id,
         }
         for f in contents.figures

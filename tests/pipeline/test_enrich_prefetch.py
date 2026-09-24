@@ -97,6 +97,21 @@ async def test_handle_runs_prefetch_and_records_timing():
     assert _pending_tasks() == []
 
 
+async def test_result_records_timing_before_the_done_callback_runs():
+    # Awaiting an already-finished task returns before its done callbacks run,
+    # which is how the enricher reaches a prefetch that finished in the same
+    # loop iteration (Python 3.11, under wait_for plus gather).
+    settings = _settings()
+    with patch(PREFETCH, await _fake_prefetch(0, result="done")):
+        handle = start_enrichment_prefetch([_ref()], settings=settings)
+        assert handle is not None
+        await asyncio.wait([handle.task])
+    handle.finished_at = None  # as if ``_on_done`` had not run yet
+
+    assert await handle.result() == "done"
+    assert handle.seconds is not None
+
+
 async def test_failed_prefetch_surfaces_as_unavailable_not_as_an_error():
     async def boom(references, *, settings=None, **_kwargs):  # noqa: ARG001
         raise RuntimeError("resolver exploded")

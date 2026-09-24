@@ -1,12 +1,13 @@
-"""Observability: a 0-author extraction on a non-notice paper must surface a
-machine-greppable processing_warning instead of failing silently."""
+"""Observability: a 0-author extraction on a non-notice paper must surface an
+``AUTHORS_EMPTY`` processing warning instead of failing silently."""
 
 from unittest import mock
 
 import pandas as pd
 
-from bibr.extract.extractor import EMPTY_AUTHORS_WARNING_PREFIX, MetadataExtractor
+from bibr.extract.extractor import MetadataExtractor
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
+from bibr.processing_warnings import WarningCode
 from bibr.schemas import AuthorLLM, AuthorsLLM, CoreMetadataLLM
 
 
@@ -49,9 +50,9 @@ async def test_empty_authors_emits_processing_warning():
     await ext.extract_core_metadata()
 
     assert ext.metadata.authors == []
-    assert any(
-        w.startswith(EMPTY_AUTHORS_WARNING_PREFIX) for w in ext.contents.processing_warnings
-    ), ext.contents.processing_warnings
+    assert any(w.code == WarningCode.AUTHORS_EMPTY for w in ext.contents.processing_warnings), (
+        ext.contents.processing_warnings
+    )
 
 
 async def test_populated_authors_emits_no_warning():
@@ -66,9 +67,7 @@ async def test_populated_authors_emits_no_warning():
     await ext.extract_core_metadata()
 
     assert len(ext.metadata.authors) == 1
-    assert not any(
-        w.startswith(EMPTY_AUTHORS_WARNING_PREFIX) for w in ext.contents.processing_warnings
-    )
+    assert not any(w.code == WarningCode.AUTHORS_EMPTY for w in ext.contents.processing_warnings)
 
 
 async def test_correction_notice_empty_authors_emits_no_warning():
@@ -85,9 +84,7 @@ async def test_correction_notice_empty_authors_emits_no_warning():
     await ext.extract_core_metadata()
 
     assert ext.metadata.authors == []  # guard cleared them
-    assert not any(
-        w.startswith(EMPTY_AUTHORS_WARNING_PREFIX) for w in ext.contents.processing_warnings
-    )
+    assert not any(w.code == WarningCode.AUTHORS_EMPTY for w in ext.contents.processing_warnings)
 
 
 def _resolution_with_byline(byline_text: str):
@@ -215,7 +212,7 @@ async def test_sanitizer_wipeout_is_reported_with_the_clause_that_fired():
     wipeout = [
         w
         for w in ext.contents.processing_warnings
-        if "sanitizer dropped all" in w and "organization_fragment=1" in w
+        if "sanitizer dropped all" in w.message and "organization_fragment=1" in w.message
     ]
     assert wipeout, ext.contents.processing_warnings
 

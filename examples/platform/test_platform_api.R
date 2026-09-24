@@ -138,7 +138,8 @@ cat("Saved:   ", json_path, " (", nchar(json_string), " chars)\n\n")
 data <- fromJSON(json_string, simplifyVector = TRUE, flatten = TRUE)
 metadata <- data$metadata %||% data$info
 
-cat("bibr version:", data$extraction$bibr_version %||% metadata$bibr_version, "\n")
+cat("bibr version:", data$extraction$producer$version %||% data$extraction$bibr_version %||%
+  metadata$bibr_version, "\n")
 cat("Paper ID:    ", data$paper_id, "\n\n")
 
 # Helper for safe row count
@@ -147,7 +148,8 @@ nrow_safe <- function(x) {
   nrow(as.data.frame(x))
 }
 
-table_names <- c("author", "text", "section", "url", "bib", "xref", "figure", "table", "eq")
+table_names <- c("author", "text", "section", "url", "bib", "xref", "figure", "table", "footnote",
+                 "eq")
 for (tbl_name in table_names) {
   n <- nrow_safe(data[[tbl_name]])
   cat(sprintf("  %-10s %d rows\n", paste0(tbl_name, ":"), n))

@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from bibr.processing_warnings import ProcessingWarning, WarningCode
+
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.pipeline.state import FileState
@@ -39,7 +41,7 @@ class EnrichmentStatus(StrEnum):
 @dataclass(frozen=True)
 class EnrichmentOutcome:
     status: EnrichmentStatus
-    warnings: tuple[str, ...] = ()
+    warnings: tuple[ProcessingWarning, ...] = ()
     detail: str | None = None
 
 
@@ -117,33 +119,42 @@ class CrossrefEnricher:
         )
         enrich_started_at = time.monotonic()
 
-        async def _run() -> list[EnrichmentReport]:
-            reports: list[EnrichmentReport] = []
-            # Self-DOI lookup first (one call), then the reference fan-out.
-            if meta.doi:
-                report = await enrich_paper_identity(meta, settings=self._settings)
-                reports.append(
-                    report
-                    if isinstance(report, EnrichmentReport)
-                    else EnrichmentReport(attempted=1)
-                )
-            if meta.references:
-                kwargs: dict = {"settings": self._settings}
+        async def _identity() -> EnrichmentReport | None:
+            if not meta.doi:
+                return None
+            report = await enrich_paper_identity(meta, settings=self._settings)
+            return report if isinstance(report, EnrichmentReport) else EnrichmentReport(attempted=1)
+
+        async def _references() -> EnrichmentReport | None:
+            if not meta.references:
                 if prefetch_handle is not None:
-                    # Inside the timeout budget: a timed-out wait cancels the
-                    # prefetch along with the rest of the enrichment.
-                    prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
-                    if prefetch is not None:
-                        kwargs["prefetch"] = prefetch
-                report = await enrich_references(meta.references, **kwargs)
-                reports.append(
-                    report
-                    if isinstance(report, EnrichmentReport)
-                    else EnrichmentReport(attempted=len(meta.references))
-                )
-            elif prefetch_handle is not None:
-                await prefetch_handle.discard()
-            return reports
+                    await prefetch_handle.discard()
+                return None
+            kwargs: dict = {"settings": self._settings}
+            if prefetch_handle is not None:
+                # Inside the timeout budget: a timed-out wait cancels the
+                # prefetch along with the rest of the enrichment.
+                prefetch = await self._await_prefetch(fs, prefetch_handle, enrich_started_at)
+                if prefetch is not None:
+                    kwargs["prefetch"] = prefetch
+            report = await enrich_references(meta.references, **kwargs)
+            return (
+                report
+                if isinstance(report, EnrichmentReport)
+                else EnrichmentReport(attempted=len(meta.references))
+            )
+
+        async def _run() -> list[EnrichmentReport]:
+            # The self-DOI lookup writes only ``meta.match`` and the reference
+            # fan-out only each ``ref.match``; they share nothing but the
+            # Crossref rate limiter, so the paper's own lookup no longer delays
+            # the references by a round-trip. Both finish before a failure is
+            # raised, so neither is left running unowned; a timeout cancels both.
+            results = await asyncio.gather(_identity(), _references(), return_exceptions=True)
+            for result in results:
+                if isinstance(result, BaseException):
+                    raise result
+            return [result for result in results if result is not None]
 
         try:
             reports = await asyncio.wait_for(_run(), timeout=timeout)
@@ -165,21 +176,69 @@ class CrossrefEnricher:
         except TimeoutError:
             if meta.references:
                 meta.enrichment_complete = False
-            fs.warnings.append("Crossref enrichment timed out")
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
+                f"Crossref enrichment timed out after {timeout:g}s",
+            )
+            fs.warnings.append(warning)
             logger.warning("[%s] Crossref enrichment timed out", fs.path.name)
             return EnrichmentOutcome(
                 EnrichmentStatus.PARTIAL,
-                warnings=("Crossref enrichment timed out",),
+                warnings=(warning,),
                 detail="Crossref enrichment timed out",
             )
         except Exception as e:  # noqa: BLE001
             if meta.references:
                 meta.enrichment_complete = False
-            fs.warnings.append(f"Crossref enrichment failed: {e}")
+            warning = ProcessingWarning(
+                WarningCode.CROSSREF_ENRICHMENT_FAILED,
+                f"Crossref enrichment failed: {type(e).__name__}: {e}",
+            )
+            fs.warnings.append(warning)
             logger.warning("[%s] Crossref enrichment failed: %s", fs.path.name, e)
-            warning = f"Crossref enrichment failed: {e}"
             return EnrichmentOutcome(
                 EnrichmentStatus.PARTIAL,
                 warnings=(warning,),
-                detail=warning,
+                detail=f"Crossref enrichment failed: {e}",
             )
+
+
+class RorEnricher:
+    """Matches affiliation strings and funder names to ROR organizations.
+
+    Best-effort by design: a rate limit, timeout or outage leaves strings
+    unmatched with a warning, and never marks enrichment partial (which would
+    hold the export behind the enrichment-pending gate).
+    """
+
+    name = "ror"
+
+    def __init__(self, *, settings: GlobalSettings | None = None) -> None:
+        from bibr.config import snapshot_settings
+
+        self._settings = settings if settings is not None else snapshot_settings()
+
+    async def enrich(self, fs: FileState) -> EnrichmentOutcome:
+        paper = fs.paper
+        if paper is None or paper.metadata is None:
+            return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
+        from bibr.clients.ror import get_client
+        from bibr.enrich.organizations import enrich_organizations
+
+        report = await enrich_organizations(
+            paper.metadata,
+            get_client(self._settings),
+            timeout=self._settings.ror.enrich_timeout,
+        )
+        if not report.attempted:
+            return EnrichmentOutcome(EnrichmentStatus.NO_WORK)
+        warnings: tuple[ProcessingWarning, ...] = ()
+        if report.timed_out:
+            warnings = (
+                ProcessingWarning(
+                    WarningCode.ROR_MATCHING_TIMEOUT,
+                    f"ROR matching stopped after {self._settings.ror.enrich_timeout:.0f}s; "
+                    f"{report.matched}/{report.attempted} affiliation/funder strings matched",
+                ),
+            )
+        return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=warnings)
