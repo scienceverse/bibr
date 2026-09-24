@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -38,16 +40,42 @@ class _FailsOnBadModel:
         return [[f"model:{item}"] for item in batch]
 
 
+class _FakeOrtSession:
+    def __init__(self, providers: list[str]) -> None:
+        self._providers = providers
+        self.runs: list[tuple] = []
+
+    def get_providers(self) -> list[str]:
+        return list(self._providers)
+
+    def get_provider_options(self) -> dict[str, dict[str, str]]:
+        return {"CUDAExecutionProvider": {"device_id": "0"}} if "CUDA" in self._providers[0] else {}
+
+    def run(self, output_names, input_feed, run_options=None):
+        self.runs.append((output_names, input_feed, run_options))
+        return [None]
+
+
 class _RecordingSplitModel:
-    def __init__(self) -> None:
+    def __init__(self, session_providers: list[str] | None = None) -> None:
         self.calls: list[tuple[list[str], dict[str, object]]] = []
+        # wtpsplit-lite's SaT keeps the ORT session it opened at ``.model.ort_session``.
+        self.opened_session = _FakeOrtSession(session_providers or ["CPUExecutionProvider"])
+        self.model = SimpleNamespace(ort_session=self.opened_session)
 
     def split(self, batch: list[str], **kwargs) -> list[list[str]]:
         self.calls.append((list(batch), kwargs))
         return [[item] for item in batch]
 
 
-def _build_segmenter(monkeypatch, *, model_name: str, threshold: float | None = None):
+def _build_segmenter(
+    monkeypatch,
+    *,
+    model_name: str,
+    threshold: float | None = None,
+    requested_providers: list | None = None,
+    session_providers: list[str] | None = None,
+):
     # Constructing a segmenter probes the torch device, which lives in the
     # optional ``ml`` extra. The pure-resolution tests above need none of it.
     # exc_type: the module re-raises a plain ImportError (not the
@@ -58,7 +86,7 @@ def _build_segmenter(monkeypatch, *, model_name: str, threshold: float | None = 
         exc_type=ImportError,
     )
 
-    model = _RecordingSplitModel()
+    model = _RecordingSplitModel(session_providers)
     init: dict[str, object] = {}
 
     def fake_sat(name, **kwargs):
@@ -74,9 +102,12 @@ def _build_segmenter(monkeypatch, *, model_name: str, threshold: float | None = 
     )
     monkeypatch.setattr(
         "bibr.utils.onnx_providers.get_ort_providers",
-        lambda **kwargs: ["CPUExecutionProvider"],
+        lambda **kwargs: requested_providers or ["CPUExecutionProvider"],
     )
-    monkeypatch.setattr("bibr.utils.device.report_device", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "bibr.utils.device.report_device",
+        lambda component, device, **kwargs: init.__setitem__("reported_device", device),
+    )
     segmenter = BaseSentenceSegmenter(
         model_name=model_name,
         use_gpu=False,
@@ -174,6 +205,60 @@ def test_default_hub_model_loads_its_pinned_snapshot(monkeypatch):
     assert init["name"] == f"/pinned/segment-any-text/sat-6l-sm@{revision}"
     assert init["kwargs"]["hub_prefix"] is None
     assert "from_pretrained_kwargs" not in init["kwargs"]
+
+
+_CUDA_CHAIN = [("CUDAExecutionProvider", {}), "CPUExecutionProvider"]
+
+
+def test_segmenter_reports_cpu_when_its_session_dropped_cuda(monkeypatch, caplog):
+    """ORT runs the session on CPU when the CUDA provider fails to start; the
+    segmenter reports that, not the CUDA it asked for."""
+    with caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"):
+        _, _, init = _build_segmenter(
+            monkeypatch,
+            model_name="sat-6l-sm",
+            requested_providers=_CUDA_CHAIN,
+            session_providers=["CPUExecutionProvider"],
+        )
+
+    assert init["reported_device"] == "cpu"
+    assert "wtpsplit-sat requested CUDA" in caplog.text
+
+
+def test_segmenter_reports_cuda_when_its_session_has_it(monkeypatch, caplog):
+    with caplog.at_level(logging.WARNING, logger="bibr.utils.onnx_providers"):
+        _, _, init = _build_segmenter(
+            monkeypatch,
+            model_name="sat-6l-sm",
+            requested_providers=_CUDA_CHAIN,
+            session_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+        )
+
+    assert init["reported_device"] == "cuda"
+    assert "requested CUDA" not in caplog.text
+
+
+def test_segmenter_cuda_session_frees_unused_arena_memory_after_each_run(monkeypatch):
+    """SaT runs its ORT session itself; on CUDA the segmenter wraps that session
+    so every run ends with arena shrinkage."""
+    _, model, _ = _build_segmenter(
+        monkeypatch,
+        model_name="sat-6l-sm",
+        requested_providers=_CUDA_CHAIN,
+        session_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    model.model.ort_session.run(["logits"], {"input_ids": 1})
+
+    [(names, feed, run_options)] = model.opened_session.runs
+    assert (names, feed) == (["logits"], {"input_ids": 1})
+    assert run_options.get_run_config_entry("memory.enable_memory_arena_shrinkage") == "gpu:0"
+    assert model.model.ort_session.get_providers()[0] == "CUDAExecutionProvider"
+
+
+def test_segmenter_cpu_session_is_left_as_opened(monkeypatch):
+    _, model, _ = _build_segmenter(monkeypatch, model_name="sat-6l-sm")
+
+    assert model.model.ort_session is model.opened_session
 
 
 def test_resolver_preserves_existing_local_directory(tmp_path):

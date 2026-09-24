@@ -379,7 +379,12 @@ class BaseSentenceSegmenter:
         from wtpsplit_lite import SaT
 
         from bibr.utils.device import report_device
-        from bibr.utils.onnx_providers import cuda_provider_available, get_ort_providers
+        from bibr.utils.onnx_providers import (
+            cuda_provider_available,
+            get_ort_providers,
+            session_device,
+            shrink_arena_after_runs,
+        )
 
         self._settings = settings if settings is not None else snapshot_settings()
         self._resolved_model = resolve_wtpsplit_model(
@@ -451,9 +456,14 @@ class BaseSentenceSegmenter:
             if pinned_tokenizer is not None:
                 model_kwargs["tokenizer_name_or_path"] = pinned_tokenizer
         self.model = SaT(sat_target, **model_kwargs)
-        on_cuda = any(
-            (p[0] if isinstance(p, tuple) else p) == "CUDAExecutionProvider" for p in providers
-        )
+        # SaT opens the ORT session itself. Report the providers that session
+        # got, not the ones requested: ORT drops a CUDA provider that fails to
+        # start and runs on CPU.
+        session = self.model.model.ort_session
+        device = session_device(session, providers, model_name="wtpsplit-sat")
+        # SaT also runs the session itself, so wrap it in place: on CUDA, each
+        # run then frees the arena memory it no longer uses.
+        self.model.model.ort_session = shrink_arena_after_runs(session)
         logger.info(
             "SentenceSegmenter ready (source=%s, threshold=%s, threshold_source=%s, "
             "windowing=%s/%s, windowing_source=%s, manifest_revision=%s, providers=%s)",
@@ -464,11 +474,9 @@ class BaseSentenceSegmenter:
             self._eval_stride if self._eval_stride is not None else "default",
             self._windowing_source,
             self._resolved_model.manifest_revision or "none",
-            [p if isinstance(p, str) else p[0] for p in providers],
+            session.get_providers(),
         )
-        report_device(
-            f"SentenceSegmenter ({self._variant})", "cuda" if on_cuda else "cpu", gpu_capable=True
-        )
+        report_device(f"SentenceSegmenter ({self._variant})", device, gpu_capable=True)
         self._run_warmup()
 
     def _run_warmup(self):

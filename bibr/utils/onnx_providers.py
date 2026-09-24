@@ -7,11 +7,47 @@ providers ad-hoc.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import logging
 import sys
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+_preload_lock = threading.Lock()
+_cuda_libraries_preloaded = False
+
+
+def _preload_cuda_libraries(ort) -> None:
+    """Load the CUDA and cuDNN libraries the CUDA provider needs, once per process.
+
+    ``onnxruntime-gpu[cuda,cudnn]`` installs CUDA and cuDNN as ``nvidia-*``
+    wheels, but ORT's CUDA provider library does not look in their
+    directories. Unless something loaded them first (a PyTorch built for the
+    same CUDA major, imported earlier, or ``LD_LIBRARY_PATH``), the provider
+    fails to load and ORT runs the session on CPU. ``onnxruntime.preload_dlls()`` (ORT >= 1.21) loads
+    them. It reports failures with ``print``; those go to the log instead of
+    stdout, next to the fallback warning in :func:`session_device`.
+    """
+    global _cuda_libraries_preloaded
+    with _preload_lock:
+        if _cuda_libraries_preloaded:
+            return
+        _cuda_libraries_preloaded = True
+        preload = getattr(ort, "preload_dlls", None)
+        if preload is None:
+            return
+        printed = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(printed):
+                preload()
+        except Exception as exc:  # noqa: BLE001 — a failed preload must not break ORT setup
+            logger.warning("onnxruntime.preload_dlls() failed: %s", exc)
+        lines = [line.strip() for line in printed.getvalue().splitlines() if line.strip()]
+        if lines:
+            logger.warning("onnxruntime.preload_dlls(): %s", " ".join(lines))
 
 
 def cuda_provider_available() -> bool:
@@ -37,7 +73,8 @@ def get_ort_providers(
 ) -> list[str | tuple[str, dict]]:
     """Build ONNX Runtime provider list.
 
-    Falls back gracefully: CUDA → CoreML → CPU.
+    Falls back gracefully: CUDA → CoreML → CPU. Including CUDA first loads
+    the CUDA libraries it needs (see :func:`_preload_cuda_libraries`).
 
     Args:
         enable_cuda: Whether to include CUDAExecutionProvider.
@@ -58,6 +95,7 @@ def get_ort_providers(
     providers: list[str | tuple[str, dict]] = []
 
     if enable_cuda and "CUDAExecutionProvider" in available:
+        _preload_cuda_libraries(ort)
         cuda_opts: dict[str, str | int | bool] = {
             "arena_extend_strategy": "kSameAsRequested",
             "do_copy_in_default_stream": True,
@@ -98,6 +136,72 @@ def selected_device(providers: list[str | tuple[str, dict]]) -> str:
     return "cpu"
 
 
+def session_device(
+    session, requested: list[str | tuple[str, dict]], *, model_name: str = ""
+) -> str:
+    """The device ``session`` actually runs on: ``"cuda"`` or ``"cpu"``.
+
+    Read from the session's own providers, not the ``requested`` chain: ORT
+    drops a provider that fails to start (a CUDA library it cannot load, no
+    visible GPU, a driver too old for its CUDA) and runs the session on the
+    next one without raising. Losing requested CUDA that way logs a warning.
+    """
+    device = selected_device(session.get_providers())
+    if device != "cuda" and selected_device(requested) == "cuda":
+        logger.warning(
+            "%s requested CUDA, but onnxruntime could not start its CUDA execution "
+            "provider and runs it on CPU. onnxruntime's own error names the cause, "
+            "usually a CUDA or cuDNN library it cannot load (install "
+            "'onnxruntime-gpu[cuda,cudnn]') or no visible GPU.",
+            model_name or "ONNX model",
+        )
+    return device
+
+
+_ARENA_SHRINKAGE = "memory.enable_memory_arena_shrinkage"
+
+
+class _ArenaShrinkingSession:
+    """A CUDA session whose every run frees the arena memory it no longer uses.
+
+    Everything but ``run`` passes through to the wrapped ``InferenceSession``.
+    """
+
+    def __init__(self, session, run_options) -> None:
+        self._session = session
+        self._run_options = run_options
+
+    def run(self, output_names, input_feed, run_options=None):
+        return self._session.run(output_names, input_feed, run_options or self._run_options)
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+
+def shrink_arena_after_runs(session):
+    """Make each run of a CUDA ``session`` give the memory it no longer uses back to CUDA.
+
+    ORT's CUDA arena keeps every block it allocates, and bibr grows it by
+    exactly the size a run asks for (``kSameAsRequested``). Input shapes change
+    from call to call (page batches, reference and header lengths), so new
+    shapes keep asking for blocks that no free one fits, and over a batch of
+    papers the arenas grow until the GPU is full. A ``gpu_mem_limit`` only turns
+    that into an earlier allocation failure. With
+    ``memory.enable_memory_arena_shrinkage`` each run ends by freeing the
+    arena regions nothing uses any more, so the arena holds the weights and
+    what the runs in flight need. A session that is not on CUDA comes back
+    unchanged.
+    """
+    if selected_device(session.get_providers()) != "cuda":
+        return session
+    import onnxruntime as ort
+
+    cuda_options = session.get_provider_options().get("CUDAExecutionProvider", {})
+    run_options = ort.RunOptions()
+    run_options.add_run_config_entry(_ARENA_SHRINKAGE, f"gpu:{cuda_options.get('device_id', '0')}")
+    return _ArenaShrinkingSession(session, run_options)
+
+
 def enable_cuda_for(device: str | None) -> bool:
     """Map a torch-style device request onto the CUDA provider switch.
 
@@ -119,9 +223,11 @@ def create_session(
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
-    Returns ``(session, device)`` where ``device`` is ``"cuda"`` or ``"cpu"``.
-    Graph optimisations are left at ORT's default (all), which is what the
-    wtpsplit segmenter already runs with.
+    Returns ``(session, device)`` where ``device`` is ``"cuda"`` or ``"cpu"``,
+    the one the session got (see :func:`session_device`). A CUDA session comes
+    back wrapped by :func:`shrink_arena_after_runs`. Graph optimisations are
+    left at ORT's default (all), which is what the wtpsplit segmenter already
+    runs with.
     """
     try:
         import onnxruntime as ort
@@ -138,4 +244,5 @@ def create_session(
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
-    return session, selected_device(providers)
+    device = session_device(session, providers, model_name=model_name)
+    return shrink_arena_after_runs(session), device

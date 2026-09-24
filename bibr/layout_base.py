@@ -1,4 +1,4 @@
-"""Shared PP-DocLayoutV3 layout-detector core.
+"""Shared PP-DocLayout layout-detector core (PP-DocLayoutV3, or V4 when selected).
 
 ``BaseLayoutDetector`` owns everything the local and serve variants have in
 common: model loading, device resolution, the fixed-size padded PyTorch
@@ -11,6 +11,12 @@ Two runtimes sit behind the same class (``bibr/utils/ml_runtime.py``): the
 ONNX Runtime backend (:mod:`bibr.layout_onnx`, core install) and the original
 torch/transformers path (``torch`` extra). ``_runtime`` records which one a
 detector holds; ``_detect_images`` dispatches on it.
+
+The checkpoint is ``LAYOUT_MODEL_ID`` at ``LAYOUT_MODEL_REVISION`` for torch and
+the bundle manifest's ``architecture`` for ONNX. PP-DocLayoutV4 keeps V3's 25
+labels and region contract; it regresses quadrilaterals (the enclosing
+rectangle becomes ``bbox_2d``) and decodes reading order from two order heads
+(:func:`bibr.layout_onnx.decode_detections_v4`, shared by both runtimes).
 """
 
 import logging
@@ -100,19 +106,46 @@ def _is_oom_error(exc: BaseException) -> bool:
     )
 
 
+def _check_label_map(id2label, source: str) -> None:
+    """Refuse a checkpoint whose class list is not the 25 labels bibr maps.
+
+    Every downstream rule keys on label *names* through ``_CORRECT_ID2LABEL``;
+    a checkpoint with a reordered or extended class list would silently swap
+    region types. ``None`` (V3 bundles and checkpoints) skips the check.
+    """
+    if id2label is None:
+        return
+    labels = {int(k): str(v) for k, v in dict(id2label).items()}
+    if labels != _CORRECT_ID2LABEL:
+        from bibr.exceptions import ConfigurationError
+
+        changed = sorted(
+            i
+            for i in set(labels) | set(_CORRECT_ID2LABEL)
+            if labels.get(i) != _CORRECT_ID2LABEL.get(i)
+        )
+        raise ConfigurationError(
+            f"{source} has a different layout label list than bibr maps "
+            f"(ids {changed[:8]} differ); update bibr.layout_utils._CORRECT_ID2LABEL "
+            "and the label rules before using it."
+        )
+
+
 def resolve_layout_runtime(settings: GlobalSettings):
     """Apply the ``ML_RUNTIME`` rule to the layout model.
 
     The ONNX bundle lives in ``LAYOUT_ONNX_MODEL_ID`` at ``LAYOUT_ONNX_REVISION``
     (a bibr-owned repo or a local directory), since the torch weights are in
-    a third-party repo bibr cannot add files to.
+    a third-party repo bibr cannot add files to. The bundle's manifest names
+    the architecture it was exported from, so it need not match
+    ``LAYOUT_MODEL_ID``.
     """
     from bibr.utils.ml_runtime import find_onnx_bundle, hub_bundle_hint, resolve_runtime
 
     model_id = settings.layout.onnx_model_id
     revision = settings.layout.onnx_revision
     return resolve_runtime(
-        "layout detector (PP-DocLayoutV3)",
+        "layout detector (PP-DocLayout)",
         settings=settings,
         bundle=lambda: find_onnx_bundle(model_id, revision, label="layout detector"),
         bundle_hint=hub_bundle_hint("LAYOUT_ONNX_MODEL_ID", model_id, revision),
@@ -120,7 +153,7 @@ def resolve_layout_runtime(settings: GlobalSettings):
 
 
 class BaseLayoutDetector:
-    """PP-DocLayoutV3 wrapper: loading, inference, and postprocessing.
+    """PP-DocLayout wrapper: loading, inference, and postprocessing.
 
     Subclasses set ``_variant`` (used in device reporting) and implement
     ``_install_model(model)`` to take ownership of the loaded model (compile
@@ -131,7 +164,7 @@ class BaseLayoutDetector:
 
     def __init__(
         self,
-        model_id: str = "PaddlePaddle/PP-DocLayoutV3_safetensors",
+        model_id: str | None = None,
         threshold: float | None = None,
         device: str | None = None,
         settings: GlobalSettings | None = None,
@@ -171,7 +204,7 @@ class BaseLayoutDetector:
         if runtime == "onnx":
             self._init_onnx(bundle_dir, device)
         else:
-            self._init_torch(model_id, device)
+            self._init_torch(model_id or self._settings.layout.model_id, device)
 
         logger.info("LayoutDetector ready (runtime=%s, device=%s)", self._runtime, self._device)
         from bibr.utils.device import report_device
@@ -184,9 +217,30 @@ class BaseLayoutDetector:
 
     def _init_onnx(self, bundle_dir, device: str | None) -> None:
         """Open the ONNX bundle; ``self._model`` is the ORT backend."""
-        from bibr.layout_onnx import OnnxLayoutBackend
+        from bibr.layout_onnx import PP_DOCLAYOUT_V4, OnnxLayoutBackend
 
         backend = OnnxLayoutBackend(bundle_dir, device=device, threshold=self.threshold)
+        id2label = backend.manifest.get("id2label")
+        if id2label is None and backend.architecture == PP_DOCLAYOUT_V4:
+            from bibr.exceptions import ConfigurationError
+
+            raise ConfigurationError(
+                f"ONNX layout bundle {bundle_dir} is PP-DocLayoutV4 but declares no id2label; "
+                "re-export it with scripts/export_onnx_layout.py, which records the label list."
+            )
+        _check_label_map(id2label, f"ONNX layout bundle {bundle_dir}")
+        source = (backend.manifest.get("source") or {}).get("repo_id")
+        if source and source != self._settings.layout.model_id:
+            # Under ONNX the bundle alone decides the model; LAYOUT_MODEL_ID and
+            # LAYOUT_MODEL_REVISION only pin the torch runtime.
+            logger.warning(
+                "LAYOUT_MODEL_ID=%s is not used: the ONNX layout runtime loads %s, exported "
+                "from %s. Set LAYOUT_ONNX_MODEL_ID/LAYOUT_ONNX_REVISION to change its model, "
+                "or ML_RUNTIME=torch to load LAYOUT_MODEL_ID.",
+                self._settings.layout.model_id,
+                bundle_dir,
+                source,
+            )
         # ``.type`` is what the variants read (warmup, unload, cache handback).
         self._device = SimpleNamespace(type=backend.device)
         self._install_model(backend)
@@ -215,6 +269,11 @@ class BaseLayoutDetector:
         revision = self._settings.layout.model_revision
         self._image_processor = AutoImageProcessor.from_pretrained(model_id, revision=revision)
         model = AutoModelForObjectDetection.from_pretrained(model_id, revision=revision)
+        config = getattr(model, "config", None)
+        if getattr(config, "model_type", None) == "pp_doclayout_v4":
+            # V3's hub config collapses five labels (see _CORRECT_ID2LABEL), so
+            # only V4, whose converter writes the real list, can be checked.
+            _check_label_map(config.id2label, f"{model_id}@{revision}")
         if self._device.type != "cpu":
             model = model.to(self._device)
         if self._device.type == "cuda":
@@ -299,16 +358,34 @@ class BaseLayoutDetector:
         # Free input tensors immediately
         del inputs
 
-        # Post-process only real images — slice model outputs to real_count
-        # before HF post-processing to avoid decoding boxes for dummy padding.
-        real_outputs = type(outputs)(**{k: v[:real_count] for k, v in outputs.items()})
-        del outputs
+        if getattr(outputs, "successor_order_logits", None) is not None:
+            # PP-DocLayoutV4: bibr's numpy decode, which the ONNX path shares,
+            # instead of the processor's (that one needs scipy for the reading
+            # order graph). Only the real images are decoded.
+            from bibr.layout_onnx import decode_detections_v4
 
-        target_sizes = torch.tensor(orig_sizes[:real_count], dtype=torch.float32)
-        results = self._image_processor.post_process_object_detection(
-            real_outputs, threshold=self.threshold, target_sizes=target_sizes
-        )
-        del real_outputs, target_sizes
+            arrays = [
+                getattr(outputs, name)[:real_count].float().cpu().numpy()
+                for name in (
+                    "logits",
+                    "pred_boxes",
+                    "relative_order_logits",
+                    "successor_order_logits",
+                )
+            ]
+            del outputs
+            results = decode_detections_v4(*arrays, orig_sizes[:real_count], self.threshold)
+        else:
+            # Post-process only real images — slice model outputs to real_count
+            # before HF post-processing to avoid decoding boxes for dummy padding.
+            real_outputs = type(outputs)(**{k: v[:real_count] for k, v in outputs.items()})
+            del outputs
+
+            target_sizes = torch.tensor(orig_sizes[:real_count], dtype=torch.float32)
+            results = self._image_processor.post_process_object_detection(
+                real_outputs, threshold=self.threshold, target_sizes=target_sizes
+            )
+            del real_outputs, target_sizes
 
         all_results = []
         for result, (orig_h, orig_w) in zip(results, orig_sizes[:real_count], strict=True):

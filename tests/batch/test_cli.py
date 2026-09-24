@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import sys
+from importlib.machinery import ModuleSpec
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +19,38 @@ def _pdf(tmp_path, name="paper"):
     path = tmp_path / f"{name}.pdf"
     path.write_bytes(b"%PDF-1.4\n")
     return path
+
+
+def _pin_install(monkeypatch, *, torch, cv2):
+    """Pin whether torch is installed and what ``import cv2`` finds (``None``: not installed)."""
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "torch":
+            return ModuleSpec("torch", None) if torch else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+
+
+def _stub_chew_many(monkeypatch):
+    """Stand in for the warm local pipeline; returns the paths it was asked to chew."""
+    chewed = []
+
+    class _Result:
+        ok = True
+
+        def __init__(self, path):
+            self.data = {"info": {"title": path.stem}, "bib": [], "text": []}
+
+    def chew_many(paths, batch_size):
+        chewed.extend(paths)
+        return [_Result(p) for p in paths]
+
+    monkeypatch.setattr("bibr.batch.runner.open_chew_many", lambda local: chew_many)
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: "sha")
+    return chewed
 
 
 def _seed_ledger(out):
@@ -240,6 +275,81 @@ def test_cli_local_run_end_to_end_with_stubbed_pipeline(tmp_path, monkeypatch, c
     assert info["options"]["no_llm"] is True
     assert "token" not in info["options"]
     assert "1 ok · 1 failed" in capsys.readouterr().out
+
+
+def test_local_pdfs_need_no_opencv_on_a_core_install(tmp_path, monkeypatch, capsys):
+    """A core install runs layout through ONNX Runtime, so ``bibr chew`` takes
+    its PDFs without cv2 — and so must the batch preflight."""
+    _pin_install(monkeypatch, torch=False, cv2=None)
+    chewed = _stub_chew_many(monkeypatch)
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    _pdf(papers, "a")
+    _pdf(papers, "b")
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(
+        ["batch", str(papers), "--out", str(out), "--ocr-url", "http://ocr.invalid:8080"]
+    )
+
+    assert _run_batch(args) == 0
+
+    assert sorted(p.name for p in chewed) == ["a.pdf", "b.pdf"]
+    assert (out / "a.json").is_file() and (out / "b.json").is_file()
+    assert "Layout/OCR image runtime unavailable" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("cv2", "reason", "repair"),
+    [
+        (None, "opencv (cv2) not installed", "uv sync --extra torch"),
+        (
+            SimpleNamespace(),
+            "cv2 module is incomplete",
+            "uv pip install --reinstall opencv-python-headless",
+        ),
+    ],
+    ids=["missing", "broken"],
+)
+def test_local_pdfs_need_a_working_opencv_when_torch_is_installed(
+    tmp_path, monkeypatch, capsys, cv2, reason, repair
+):
+    """The torch layout path imports cv2: refuse before any model loads, with
+    the same repair ``bibr chew`` gives."""
+    _pin_install(monkeypatch, torch=True, cv2=cv2)
+    chewed = _stub_chew_many(monkeypatch)
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(
+        ["batch", str(_pdf(tmp_path)), "--out", str(out), "--ocr-url", "http://ocr.invalid:8080"]
+    )
+
+    assert _run_batch(args) == 1
+
+    err = capsys.readouterr().err
+    assert f"Layout/OCR image runtime unavailable: {reason}" in err
+    assert f"(repair with: {repair})" in err
+    assert chewed == []
+    assert not out.exists()
+
+
+def test_local_pdfs_still_get_the_ocr_runtime_check_on_a_core_install(
+    tmp_path, monkeypatch, capsys
+):
+    """Skipping the opencv check on a core install must not skip the local
+    OCR runtime check that follows it."""
+    _pin_install(monkeypatch, torch=False, cv2=None)
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: None)
+    chewed = _stub_chew_many(monkeypatch)
+    out = tmp_path / "out"
+    args = _build_parser().parse_args(
+        ["batch", str(_pdf(tmp_path)), "--out", str(out), "--ocr", "paddle-vllm"]
+    )
+
+    assert _run_batch(args) == 1
+
+    err = capsys.readouterr().err
+    assert "OCR backend cannot start here — paddle-vllm: no NVIDIA GPU" in err
+    assert "Layout/OCR image runtime unavailable" not in err
+    assert chewed == []
 
 
 def test_form_fields_map_flags_to_the_job_api(tmp_path):

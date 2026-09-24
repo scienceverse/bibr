@@ -6,6 +6,9 @@ spent the OCR startup budget (900 s for a hidden vLLM bootstrap) before
 now delivered before any model loads, with the install hints attached.
 """
 
+import importlib.util
+import sys
+from importlib.machinery import ModuleSpec
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +16,24 @@ import pytest
 
 def _cfg(backend, url=None):
     return SimpleNamespace(ocr_backend=backend, ocr_url=url)
+
+
+def _pin_install(monkeypatch, *, torch, cv2):
+    """Pin whether torch is installed and what ``import cv2`` finds (``None``: not installed)."""
+    real_find_spec = importlib.util.find_spec
+
+    def find_spec(name, *args, **kwargs):
+        if name == "torch":
+            return ModuleSpec("torch", None) if torch else None
+        return real_find_spec(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+    monkeypatch.setitem(sys.modules, "cv2", cv2)
+
+
+class _NoPipeline:
+    def __init__(self, **_kwargs):
+        raise AssertionError("the preflight should have stopped the run")
 
 
 @pytest.fixture
@@ -86,3 +107,56 @@ def test_explicit_ocr_url_skips_the_local_check():
     from bibr.local.cli import run_config
 
     assert run_config._preflight_ocr_runtime(_cfg("paddle-http", url="http://ocr:8080")) is None
+
+
+async def test_chew_still_checks_the_ocr_runtime_on_a_core_install(tmp_path, monkeypatch, capsys):
+    """A core install needs no opencv for PDFs, but the OCR runtime check
+    behind the opencv one still runs — as it does for ``bibr batch``."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    _pin_install(monkeypatch, torch=False, cv2=None)
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: None)
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _NoPipeline)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    args = _build_parser().parse_args(["chew", str(pdf), "--ocr", "paddle-vllm"])
+
+    with pytest.raises(SystemExit) as exc:
+        await _run_process(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "OCR backend cannot start here — paddle-vllm: no NVIDIA GPU" in err
+    assert "Layout/OCR image runtime unavailable" not in err
+
+
+@pytest.mark.parametrize(
+    ("cv2", "reason", "repair"),
+    [
+        (None, "opencv (cv2) not installed", "uv sync --extra torch"),
+        (
+            SimpleNamespace(),
+            "cv2 module is incomplete",
+            "uv pip install --reinstall opencv-python-headless",
+        ),
+    ],
+    ids=["missing", "broken"],
+)
+async def test_chew_refuses_pdfs_without_a_working_opencv_when_torch_is_installed(
+    tmp_path, monkeypatch, capsys, cv2, reason, repair
+):
+    from bibr.local.cli import _build_parser, _run_process
+
+    _pin_install(monkeypatch, torch=True, cv2=cv2)
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _NoPipeline)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    args = _build_parser().parse_args(["chew", str(pdf), "--ocr-url", "http://ocr.invalid:8080"])
+
+    with pytest.raises(SystemExit) as exc:
+        await _run_process(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"Layout/OCR image runtime unavailable: {reason}" in err
+    assert f"Repair with: {repair}" in err
