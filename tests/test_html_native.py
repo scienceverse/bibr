@@ -227,8 +227,10 @@ def test_epub_opf_metadata_resolves_named_entities():
     assert meta.publisher == "Verlag München"
 
 
-def _make_epub_utf8(title: str, creator: str, body: str) -> bytes:
-    """An ePub whose OPF and chapter carry literal UTF-8, no entities."""
+def _make_epub_utf8(title: str, creator: str, body: str, extra: str = "") -> bytes:
+    """An ePub whose OPF and chapter carry literal UTF-8, no entities.
+
+    *extra* is markup placed after the chapter's paragraph."""
     container_xml = b"""<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles>
@@ -246,7 +248,7 @@ def _make_epub_utf8(title: str, creator: str, body: str) -> bytes:
   <spine><itemref idref="c1"/></spine>
 </package>""".encode()
     chapter1 = f"""<html xmlns="http://www.w3.org/1999/xhtml">
-  <body><section><h1>Kapitel</h1><p>{body}</p></section></body>
+  <body><section><h1>Kapitel</h1><p>{body}</p>{extra}</section></body>
 </html>""".encode()
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -324,3 +326,77 @@ def test_html_figcaption_label_resolves_mentions():
         ("figure", 2, "label"),
         ("figure", 1, "label"),
     ]
+
+
+# ``pandas.read_html`` inferred column types: "0.050" came back as 0.05, "007"
+# as 7, a decimal comma "1,5" as 15, and an empty cell as the string "nan".
+_NUMERIC_TABLE = (
+    "<table><caption>Table 2. Results.</caption>"
+    "<thead><tr><th>N</th><th>Code</th><th>M</th><th>p</th></tr></thead>"
+    "<tbody><tr><td>12</td><td>007</td><td>1,234</td><td>0.050</td></tr>"
+    "<tr><td></td><td>010</td><td>1,5</td><td>0.10</td></tr></tbody></table>"
+)
+_NUMERIC_CONTENTS = [
+    ["N", "Code", "M", "p"],
+    ["12", "007", "1,234", "0.050"],
+    ["", "010", "1,5", "0.10"],
+]
+
+
+def _article(body: str) -> bytes:
+    return (
+        f"<html><body><article><h1>Results</h1><p>Text.</p>{body}</article></body></html>".encode()
+    )
+
+
+def test_html_table_cells_are_exported_as_printed():
+    from pathlib import Path
+
+    from bibr.export import export_paper_to_json
+    from bibr.input.file import InputFile, InputFormat
+    from bibr.models import PaperMetadata
+    from bibr.paper import Paper
+
+    contents = HtmlParser(_article(_NUMERIC_TABLE)).parse()
+
+    assert contents.tables[0].contents == _NUMERIC_CONTENTS
+    paper = Paper(
+        input_file=InputFile(
+            path=Path("/tmp/paper.html"),
+            file_hash="hash",
+            input_format=InputFormat(
+                file_extension=".html", detected_mime_type="text/html", file_type="html"
+            ),
+        ),
+        metadata=PaperMetadata(title="Paper", doi=""),
+        contents=contents,
+    )
+    exported = export_paper_to_json(paper, validate=True)["table"]
+    assert [table["contents"] for table in exported] == [_NUMERIC_CONTENTS]
+
+
+def test_epub_table_cells_keep_printed_text():
+    parser = EpubParser(_make_epub_utf8("Tabelle", "Jane Smith", "Text.", _NUMERIC_TABLE))
+
+    contents = parser.parse()
+
+    assert [table.contents for table in contents.tables] == [_NUMERIC_CONTENTS]
+
+
+def test_captioned_table_without_cell_text_is_kept():
+    """A table with no cell grid (an image-only table) was dropped with its
+    caption; its caption and markup now survive with empty contents."""
+    contents = HtmlParser(
+        _article(
+            '<table><caption>Table 3. Scanned values.</caption><tr><td><img src="t3.png">'
+            "</td></tr></table>"
+            '<table><tr><td><img src="spacer.png"></td></tr></table>'
+        )
+    ).parse()
+
+    assert len(contents.tables) == 1
+    table = contents.tables[0]
+    assert table.caption == "Table 3. Scanned values."
+    assert table.label == "3"
+    assert table.contents == []
+    assert 'src="t3.png"' in table.tbl_html
