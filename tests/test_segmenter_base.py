@@ -43,18 +43,25 @@ class _FailsOnBadModel:
 class _FakeOrtSession:
     def __init__(self, providers: list[str]) -> None:
         self._providers = providers
+        self.runs: list[tuple] = []
 
     def get_providers(self) -> list[str]:
         return list(self._providers)
+
+    def get_provider_options(self) -> dict[str, dict[str, str]]:
+        return {"CUDAExecutionProvider": {"device_id": "0"}} if "CUDA" in self._providers[0] else {}
+
+    def run(self, output_names, input_feed, run_options=None):
+        self.runs.append((output_names, input_feed, run_options))
+        return [None]
 
 
 class _RecordingSplitModel:
     def __init__(self, session_providers: list[str] | None = None) -> None:
         self.calls: list[tuple[list[str], dict[str, object]]] = []
         # wtpsplit-lite's SaT keeps the ORT session it opened at ``.model.ort_session``.
-        self.model = SimpleNamespace(
-            ort_session=_FakeOrtSession(session_providers or ["CPUExecutionProvider"])
-        )
+        self.opened_session = _FakeOrtSession(session_providers or ["CPUExecutionProvider"])
+        self.model = SimpleNamespace(ort_session=self.opened_session)
 
     def split(self, batch: list[str], **kwargs) -> list[list[str]]:
         self.calls.append((list(batch), kwargs))
@@ -229,6 +236,29 @@ def test_segmenter_reports_cuda_when_its_session_has_it(monkeypatch, caplog):
 
     assert init["reported_device"] == "cuda"
     assert "requested CUDA" not in caplog.text
+
+
+def test_segmenter_cuda_session_frees_unused_arena_memory_after_each_run(monkeypatch):
+    """SaT runs its ORT session itself; on CUDA the segmenter wraps that session
+    so every run ends with arena shrinkage."""
+    _, model, _ = _build_segmenter(
+        monkeypatch,
+        model_name="sat-6l-sm",
+        requested_providers=_CUDA_CHAIN,
+        session_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+    model.model.ort_session.run(["logits"], {"input_ids": 1})
+
+    [(names, feed, run_options)] = model.opened_session.runs
+    assert (names, feed) == (["logits"], {"input_ids": 1})
+    assert run_options.get_run_config_entry("memory.enable_memory_arena_shrinkage") == "gpu:0"
+    assert model.model.ort_session.get_providers()[0] == "CUDAExecutionProvider"
+
+
+def test_segmenter_cpu_session_is_left_as_opened(monkeypatch):
+    _, model, _ = _build_segmenter(monkeypatch, model_name="sat-6l-sm")
+
+    assert model.model.ort_session is model.opened_session
 
 
 def test_resolver_preserves_existing_local_directory(tmp_path):
