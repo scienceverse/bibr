@@ -223,12 +223,12 @@ released.
   "n/a" or "None" came out empty from a PDF and as "nan" from HTML or ePub,
   where every empty cell was "nan" too. A PDF table without a header row,
   whose first row becomes the header, could get headers such as "2019.0".
-  Cells now keep their printed text and an empty cell is "", with the same
-  rows, columns and headers as before. A table printed as an image is now kept
+  Cells now keep their printed text and an empty cell is "", and tables keep
+  the shape they had before. A table printed as an image is now kept
   with its caption and empty `contents`, so a mention of it resolves: in HTML
   and ePub input a `<table>` with no cell text whose caption prints a table
   label ("Table 3. ..."), in JATS a `<table-wrap>` with a label or caption but
-  no `<table>`. An HTML table with a span such as `colspan="2px"` is no longer
+  no `<table>` with rows. An HTML table with a span such as `colspan="2px"` is no longer
   dropped.
 - A table continued across pages no longer gets its repeated header as a data
   row in the middle of `contents` when the later page prints the header with
