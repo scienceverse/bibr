@@ -220,6 +220,9 @@ released.
   (`DEMO_CACHE_TTL_SECONDS`, `0` keeps them), and all of them when the demo
   stops. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
   arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

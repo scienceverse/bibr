@@ -239,26 +239,39 @@ def _strip_figure_images(paper_json: dict) -> dict:
     return stripped
 
 
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|>~])")
+
+
+def _md_text(value: object) -> str:
+    """Show extracted text literally in Markdown: no HTML, links, images or emphasis.
+
+    Titles and keywords come from the uploaded document, so a crafted PDF could
+    otherwise make the viewer's browser load an outside image or follow a link.
+    """
+    flat = " ".join(str(value).split())
+    return _MD_SPECIAL.sub(r"\\\1", _esc(flat))
+
+
 def _build_summary_md(result: dict) -> str:
     """Build a markdown summary card from the API result dict."""
     meta = result.get("metadata", {})
     lines = []
-    lines.append(f"### {meta.get('title') or '(untitled)'}")
+    lines.append(f"### {_md_text(meta.get('title') or '(untitled)')}")
     if meta.get("doi"):
-        lines.append(f"**DOI:** `{meta['doi']}`")
+        lines.append(f"**DOI:** {_md_text(meta['doi'])}")
     if meta.get("paper_type"):
         conf = (
             f" ({meta['paper_type_confidence']:.2f})" if meta.get("paper_type_confidence") else ""
         )
-        lines.append(f"**Paper type:** {meta['paper_type']}{conf}")
+        lines.append(f"**Paper type:** {_md_text(meta['paper_type'])}{conf}")
     if meta.get("oecd_l1"):
-        domain = meta["oecd_l1"]
+        domain = _md_text(meta["oecd_l1"])
         if meta.get("oecd_l2"):
-            domain += f" > {meta['oecd_l2']}"
+            domain += f" > {_md_text(meta['oecd_l2'])}"
         conf = f" ({meta['oecd_confidence']:.2f})" if meta.get("oecd_confidence") else ""
         lines.append(f"**OECD domain:** {domain}{conf}")
     if meta.get("keywords"):
-        lines.append(f"**Keywords:** {', '.join(meta['keywords'])}")
+        lines.append(f"**Keywords:** {', '.join(_md_text(k) for k in meta['keywords'])}")
     authors = result.get("authors", [])
     refs = result.get("bib", [])
     sections = result.get("sections", [])
