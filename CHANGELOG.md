@@ -213,6 +213,13 @@ released.
 
 ### Fixed
 
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. Uploads and
+  downloads are now deleted an hour after they were made
+  (`DEMO_CACHE_TTL_SECONDS`, `0` keeps them), and all of them when the demo
+  stops. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 _MAX_FILE_SIZE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
 _MAX_FILE_SIZE_BYTES = _MAX_FILE_SIZE_MB * 1024 * 1024
 
+# Uploaded papers and the JSON downloads made from them are deleted once they
+# are this old (checked as often), and all of them when the server stops.
+_DEFAULT_CACHE_TTL_SECONDS = 3600
+
 _ALLOWED_EXTENSIONS: list[str] = sorted(SUPPORTED_EXTENSIONS)
 
 _TABLE_SCROLL_CSS = """\
@@ -190,16 +194,30 @@ def _parse_json_response(paper_json: dict) -> dict:
     }
 
 
+def _cache_lifetime() -> tuple[int, int] | None:
+    """Gradio ``delete_cache`` setting: ``DEMO_CACHE_TTL_SECONDS``, 0 keeps files."""
+    ttl = int(os.environ.get("DEMO_CACHE_TTL_SECONDS", str(_DEFAULT_CACHE_TTL_SECONDS)))
+    return (ttl, ttl) if ttl > 0 else None
+
+
 def _write_json_file(paper_json: dict, suffix: str = "") -> str:
     """Serialize the full bibr JSON to a temp file, named after the DOI/title.
 
     Returns the path so a DownloadButton can serve it; the basename becomes the
     downloaded filename. ``suffix`` disambiguates variants (e.g. no-images).
+
+    The file is written inside Gradio's temp folder, so Gradio serves it in
+    place and deletes it with the uploads (``DEMO_CACHE_TTL_SECONDS``). A file
+    outside it would be copied in, and the original never deleted.
     """
+    from gradio.utils import get_upload_folder
+
     metadata = paper_json.get("metadata", {}) or {}
     slug = metadata.get("doi") or metadata.get("title") or "bibr"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(slug)).strip("_")[:60] or "bibr"
-    tmpdir = tempfile.mkdtemp(prefix="bibr_json_")
+    upload_folder = get_upload_folder()
+    os.makedirs(upload_folder, exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix="bibr_json_", dir=upload_folder)
     path = os.path.join(tmpdir, f"{slug}{suffix}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(paper_json, fh, indent=2, ensure_ascii=False)
@@ -671,7 +689,7 @@ def create_local_demo(
         getattr(pipeline_state["pipeline"], "llm_backend", llm_backend or Settings.llm.backend),
     )
 
-    with gr.Blocks(title="bibr 🦫 Demo") as demo:
+    with gr.Blocks(title="bibr 🦫 Demo", delete_cache=_cache_lifetime()) as demo:
         gr.Markdown(_HEADER_MD)
         status_display = gr.Markdown(status_md)
 
