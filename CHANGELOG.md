@@ -224,6 +224,14 @@ released.
   runtime check again, as `bibr batch` does. It stops before the layout model
   loads when no local OCR runtime can start, for example `--ocr paddle-vllm`
   without an NVIDIA GPU.
+- A GPU install (`onnxruntime-gpu[cuda,cudnn]`, the `gpu` extra) ran bibr's
+  ONNX models on the CPU. The CUDA and cuDNN libraries those wheels install
+  are found only after `onnxruntime.preload_dlls()` loads them, and bibr never
+  called it, so onnxruntime could not start its CUDA provider and fell back
+  to CPU. bibr now calls it before it opens a CUDA session. The logs still
+  said `cuda`, because they named the device bibr asked for. The layout
+  detector and sentence segmenter now log the device their session got, and
+  any ONNX model that loses CUDA this way logs a warning.
 - JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
   `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
   a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
