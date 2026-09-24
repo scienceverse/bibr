@@ -154,7 +154,14 @@ def _key(
         # is the *alias* ("paddle-ocr-vl-1.6"), which is what the vLLM server
         # is launched with under `--served-model-name` while `--revision` takes
         # the pin below; the alias is unchanged by a re-pin.
+        f"layout_model_id={layout.model_id}",
         f"layout_model_revision={layout.model_revision}",
+        # The ONNX bundle is a separate artifact: a V3 -> V4 switch can move
+        # only this pair while the torch pin stays put. ML_RUNTIME picks which
+        # of the two pairs runs, so the two runtimes never share an entry.
+        f"layout_onnx_model_id={layout.onnx_model_id}",
+        f"layout_onnx_revision={layout.onnx_revision}",
+        f"ml_runtime={effective.ml.runtime}",
         f"ocr_paddle_model={effective.ocr.paddle_model}",
         f"ocr_paddle_revision={effective.ocr.paddle_revision}",
     ]

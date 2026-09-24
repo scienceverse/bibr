@@ -863,6 +863,45 @@ def test_key_changes_with_the_layout_model_revision():
     )
 
 
+def test_key_changes_with_the_layout_model_id():
+    """PP-DocLayoutV3 → V4 is a checkpoint swap, not only a re-pin."""
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    baseline, other = _settings_pair()
+    other.layout.model_id = "PaddlePaddle/PP-DocLayoutV4_safetensors"
+
+    assert ocr_cache._key(fs, cfg, _identity(), baseline) != ocr_cache._key(
+        fs, cfg, _identity(), other
+    )
+
+
+def test_key_changes_with_the_layout_onnx_bundle():
+    """The ONNX runtime loads its own bundle; moving only that pair must miss too."""
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    baseline, repinned = _settings_pair()
+    repinned.layout.onnx_revision = "0" * 40
+    _, moved = _settings_pair()
+    moved.layout.onnx_model_id = "/local/layout-v4-bundle"
+
+    keys = {
+        ocr_cache._key(fs, cfg, _identity(), settings) for settings in (baseline, repinned, moved)
+    }
+    assert len(keys) == 3
+
+
+def test_key_changes_with_the_ml_runtime():
+    """Torch and ONNX may be pinned to different layout models (say V4 and V3)."""
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    keys = set()
+    for runtime in ("auto", "torch", "onnx"):
+        _, settings = _settings_pair()
+        settings.ml.runtime = runtime
+        keys.add(ocr_cache._key(fs, cfg, _identity(), settings))
+    assert len(keys) == 3
+
+
 def test_key_changes_with_the_paddle_model_revision():
     fs = _fs()
     cfg = RunConfig(ocr_backend="serve-http", ocr_profile="paddle")

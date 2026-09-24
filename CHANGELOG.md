@@ -213,6 +213,11 @@ released.
 
 ### Fixed
 
+- The OCR disk cache key now includes the layout checkpoint (`LAYOUT_MODEL_ID`),
+  the ONNX layout bundle (`LAYOUT_ONNX_MODEL_ID`, `LAYOUT_ONNX_REVISION`) and
+  `ML_RUNTIME`. It held only the torch revision, so moving the ONNX bundle,
+  which is what the default runtime loads, replayed the previous model's cached
+  regions.
 - JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
   `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
   a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
@@ -293,6 +298,25 @@ released.
 
 ### Added
 
+- PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
+  `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
+  still loads PP-DocLayoutV3; switching is a settings change behind an
+  evaluation gate (see the Configuration guide, "Layout model generation").
+  `scripts/export_onnx_layout.py` exports either generation, and the bundle
+  manifest's `architecture` selects the pre- and post-processing of the ONNX
+  runtime; the torch runtime loads V4 through `LAYOUT_MODEL_ID` once
+  transformers ships it. V4 keeps V3's 25 region labels. bibr uses the
+  rectangle enclosing each predicted quadrilateral and decodes V4's reading
+  order (a successor graph made acyclic, sorted topologically, with
+  relative-order votes breaking ties) in numpy, without scipy. It matches
+  transformers' processor except where scores tie exactly or are NaN, which a
+  trained head's output does not produce. A bundle or checkpoint whose label
+  list differs from the one bibr maps, or a V4 bundle that declares none, is
+  refused. Under the ONNX runtime a `LAYOUT_MODEL_ID` naming a different
+  checkpoint than the bundle's source is logged as unused.
+- `LAYOUT_MODEL_ID` names the torch layout checkpoint (default
+  `PaddlePaddle/PP-DocLayoutV3_safetensors`). The serve image bakes it next to
+  `LAYOUT_MODEL_REVISION`.
 - Parquet corpus tables. `bibr tables <exports> --out DIR`, `bibr.write_tables()`
   and `bibr batch` (into `<out>/tables/` after every run; `--no-tables` skips
   it) write any number of exports as one Parquet file per table: `paper` (one

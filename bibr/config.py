@@ -801,20 +801,29 @@ class FigureOptions(_BibrSettings):
 
 
 class LayoutOptions(_BibrSettings):
-    """PP-DocLayoutV3 detection tuning. Env: ``LAYOUT_DPI``, ``LAYOUT_BATCH_SIZE``, ..."""
+    """PP-DocLayout detection tuning. Env: ``LAYOUT_DPI``, ``LAYOUT_BATCH_SIZE``, ..."""
 
     model_config = _section("LAYOUT_")
 
+    # The torch checkpoint. PP-DocLayoutV4 (PaddlePaddle/PP-DocLayoutV4_safetensors)
+    # loads through the same Auto classes once transformers ships it; switch
+    # this, the revision and the ONNX pair below together, behind an eval gate.
+    model_id: str = Field(
+        "PaddlePaddle/PP-DocLayoutV3_safetensors",
+        description="HF Hub repo id (or local directory) of the PP-DocLayout torch checkpoint "
+        "(PP-DocLayoutV3 or PP-DocLayoutV4) used when layout runs on torch.",
+    )
     model_revision: str = Field(
         "97d101e6db2642e162a1d05392d1b0231c91033e",
-        description="HF Hub revision (commit SHA or branch) of PaddlePaddle/PP-DocLayoutV3_safetensors "
-        "to load. Pinned so a hub push cannot change layout output; 'main' tracks the repo head.",
+        description="HF Hub revision (commit SHA or branch) of LAYOUT_MODEL_ID to load. Pinned "
+        "so a hub push cannot change layout output; 'main' tracks the repo head.",
     )
     # ONNX artifact for the layout model. The torch weights live in a
     # third-party repo, so the exported graph is hosted in a bibr-owned repo
     # (or a local bundle directory containing onnx/model.onnx). Resolved under
     # ML_RUNTIME (bibr/utils/ml_runtime.py); a missing repo/revision falls back
-    # to torch in "auto" mode.
+    # to torch in "auto" mode. The bundle manifest records which architecture
+    # (PP-DocLayoutV3 or V4) it was exported from.
     onnx_model_id: str | None = Field(
         "scienceverse/bibr-layout-onnx",
         description="HF Hub repo id (or local bundle directory) holding the ONNX export of the "
@@ -897,7 +906,7 @@ class LayoutOptions(_BibrSettings):
     # Run the serve layout model on GPU. None = auto-detect (cuda→mps→cpu in the
     # worker). LitServe's accelerator="auto" can't be trusted here — it resolves
     # to CPU whenever torch isn't pre-imported in the master process, which bibr
-    # never does — so the serve layer auto-detects independently. PP-DocLayoutV3
+    # never does — so the serve layer auto-detects independently. PP-DocLayout
     # on CPU is dramatically slower; force CPU with LAYOUT_USE_GPU=false only on
     # VRAM-tight boxes that co-locate OCR (mirrors SEGMENTER_USE_GPU).
     use_gpu: bool | None = Field(
