@@ -335,6 +335,139 @@ def test_step_extras_failed_uv_sync_stops_setup(monkeypatch):
     assert "No solution found" in text
 
 
+def _gpu_build_run(
+    *, reinstall_returncode=0, reinstall_stderr="", probe_stdout="True\n", probe_stderr=""
+):
+    """A subprocess.run stub for the gpu step: the install, the reinstall, then the probe."""
+
+    def run(cmd, **kwargs):
+        if cmd[:2] == [sys.executable, "-c"]:
+            return MagicMock(returncode=0, stdout=probe_stdout, stderr=probe_stderr)
+        if "--reinstall-package" in cmd or "--force-reinstall" in cmd:
+            return MagicMock(returncode=reinstall_returncode, stdout="", stderr=reinstall_stderr)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    return MagicMock(side_effect=run)
+
+
+def test_gpu_extra_reinstalls_the_synced_onnxruntime_gpu_last(monkeypatch, tmp_path):
+    """The sync writes onnxruntime and onnxruntime-gpu at once, so either can win;
+    the wizard reinstalls the version the sync chose and checks the GPU build loads."""
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "bibr"\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("bibr.setup_wizard.shutil.which", lambda name: "/bin/uv")
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", lambda name: "1.26.0")
+    run = _gpu_build_run()
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", run)
+    wizard = _recording_wizard()
+    wizard.selected_extras = {"gpu"}
+
+    wizard._install_selected_extras()
+
+    commands = [call.args[0] for call in run.call_args_list]
+    assert commands[0] == ["/bin/uv", "sync", "--inexact", "--extra=gpu"]
+    assert commands[1] == [
+        "/bin/uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--reinstall-package",
+        "onnxruntime-gpu",
+        "onnxruntime-gpu[cuda,cudnn]==1.26.0",
+    ]
+    assert commands[2][:2] == [sys.executable, "-c"]
+    assert "CUDAExecutionProvider" in commands[2][2]
+    assert "onnxruntime-gpu 1.26.0 is the onnxruntime build that loads" in (
+        wizard.console.export_text()
+    )
+
+
+def test_gpu_build_reinstall_uses_pip_without_uv(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", lambda name: "1.30.0")
+    run = _gpu_build_run()
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", run)
+    wizard = _recording_wizard()
+
+    wizard._reinstall_onnxruntime_gpu(None)
+
+    assert run.call_args_list[0].args[0] == [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        "onnxruntime-gpu==1.30.0",
+    ]
+
+
+def test_gpu_build_reinstall_reports_a_cpu_build_that_still_loads(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", lambda name: "1.26.0")
+    monkeypatch.setattr(
+        "bibr.setup_wizard.subprocess.run",
+        _gpu_build_run(probe_stdout="False\n"),
+    )
+    wizard = _recording_wizard()
+
+    wizard._reinstall_onnxruntime_gpu("/bin/uv")
+
+    text = wizard.console.export_text()
+    assert "onnxruntime-gpu 1.26.0 is not the onnxruntime build that loads" in text
+    assert "The CPU build still loads." in text
+    assert "--reinstall-package onnxruntime-gpu 'onnxruntime-gpu[cuda,cudnn]==1.26.0'" in text
+
+
+def test_gpu_build_reinstall_reports_an_import_failure(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", lambda name: "1.26.0")
+    monkeypatch.setattr(
+        "bibr.setup_wizard.subprocess.run",
+        _gpu_build_run(
+            probe_stdout="",
+            probe_stderr="Traceback (most recent call last):\n"
+            "ImportError: libcudart.so.13: cannot open shared object file",
+        ),
+    )
+    wizard = _recording_wizard()
+
+    wizard._reinstall_onnxruntime_gpu("/bin/uv")
+
+    text = wizard.console.export_text()
+    assert "ImportError: libcudart.so.13" in text
+    assert "Traceback" not in text
+
+
+def test_gpu_build_reinstall_failure_skips_the_probe(monkeypatch):
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", lambda name: "1.26.0")
+    run = _gpu_build_run(reinstall_returncode=2, reinstall_stderr="error: Failed to download")
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", run)
+    wizard = _recording_wizard()
+
+    wizard._reinstall_onnxruntime_gpu("/bin/uv")
+
+    assert run.call_count == 1
+    text = wizard.console.export_text()
+    assert "error: Failed to download" in text
+    assert "Run: /bin/uv pip install" in text
+
+
+def test_gpu_build_reinstall_without_onnxruntime_gpu_installed(monkeypatch):
+    from importlib.metadata import PackageNotFoundError
+
+    def not_installed(name):
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("bibr.setup_wizard.importlib.metadata.version", not_installed)
+    run = MagicMock()
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", run)
+    wizard = _recording_wizard()
+
+    wizard._reinstall_onnxruntime_gpu("/bin/uv")
+
+    run.assert_not_called()
+    assert "onnxruntime-gpu is not installed" in wizard.console.export_text()
+
+
 def _install_command_for_extras_for_test(extras, *, cwd, uv_bin):
     from bibr.setup_wizard import _install_command_for_extras
 

@@ -70,7 +70,7 @@ extra syntax is `uv add 'bibr[<extra>]'`.
 | `local` | `vllm-mlx` on Apple Silicon | Local-runtime dependencies. The default `OCR_BACKEND=paddle` selector uses PaddleOCR-VL-1.6 first; Linux/CUDA can use `paddle-vllm`, while Apple Silicon can use the Paddle MLX candidates. On Linux/CUDA, GPU OCR comes from `paddle-vllm` (part of `vllm`) rather than this extra. |
 | `local-mlx` | `vllm-mlx` (macOS, Apple Silicon only) | Pinning the vLLM-MLX local-LLM backend directly on Apple Silicon (`local` covers this automatically on macOS). |
 | `vllm` | `vllm==0.27.0`, `openai>=2.54.0,<3` (requires Python <3.14) | The *managed* local vLLM server bibr starts for `--llm local` on Linux/CUDA (the path `bibr setup`'s "fully local" flow configures). |
-| `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. `onnxruntime-gpu` shares an import name with the core `onnxruntime` package, so after syncing you also need to run `uv pip install 'onnxruntime-gpu[cuda,cudnn]'` to replace the CPU-only build. |
+| `gpu` | `onnxruntime-gpu[cuda,cudnn]` (Linux/Windows) | GPU execution providers for ONNX Runtime — sentence segmentation, and on a core install layout, the classifiers and the NER parser too. It needs one more command after syncing; see [GPU ONNX Runtime](#gpu-onnx-runtime). |
 | `cache` | `redis>=5.0.0` | Redis-backed response caching — set `REDIS_URL` to enable it (the result cache is on by default, but only uses Redis once a URL is configured). |
 | `demo` | `gradio>=6.15.0` | The interactive Gradio demo app. |
 | `batch` | `anthropic>=0.40.0` | Offline processing via the Anthropic Message Batches API — bulk paper-type/OECD labeling and similar bulk LLM workflows. |
@@ -88,7 +88,8 @@ The serving extras are still hardware-specific, so most people want a subset:
 - **`--extra all` is the superset to reach for.** It bundles `batch` + `cache` + `demo` + `mcp` + `torch` — everything that is useful regardless of hardware.
 - Add **`vllm`** on Linux/CUDA (managed vLLM for `--llm local`, and the
   `paddle-vllm` GPU OCR backend), **`local`** or **`local-mlx`** on Apple
-  Silicon, and **`gpu`** for GPU-accelerated ONNX sentence segmentation.
+  Silicon, and **`gpu`** for GPU-accelerated ONNX sentence segmentation
+  (see [GPU ONNX Runtime](#gpu-onnx-runtime)).
 
 If `vllm` isn't installed, bibr's managed vLLM server falls back to launching it
 via `uv tool run --from vllm==0.27.0 --with 'openai>=2.54.0,<3' vllm serve ...` in an isolated environment,
@@ -101,6 +102,38 @@ same bootstrap. On Python 3.14, where `vllm==0.27.0` has no wheels and the
 `vllm` extra therefore installs nothing, both launchers run the bootstrap
 inside a managed Python 3.13, and `bibr doctor` says so; a 3.11-3.13
 interpreter for the project avoids the detour.
+
+## GPU ONNX Runtime
+
+The `gpu` extra installs `onnxruntime-gpu` next to the core `onnxruntime`
+package. They are separate packages that write the same `onnxruntime/`
+directory, and when one install writes both, as `uv sync --extra gpu` does,
+either build can end up loaded. When the CPU build wins, every ONNX model runs
+on the CPU. After syncing, reinstall the GPU build so its files are written
+last:
+
+```bash
+uv sync --extra gpu
+uv pip install --reinstall-package onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"
+```
+
+`1.26.0` is the version `uv.lock` pins, the last `onnxruntime-gpu` release on
+PyPI built for CUDA 12. In a project that installed `bibr[gpu]` from PyPI, use
+the version that install chose (`uv pip show onnxruntime-gpu`). With pip, the
+command is `python -m pip install --force-reinstall --no-deps
+"onnxruntime-gpu==<version>"`. `bibr setup` runs this step itself when it
+installs the `gpu` extra.
+
+Leave `onnxruntime` installed too. `uv run` reinstalls it when it is missing,
+and its files would then replace the GPU build's. For the same reason, repeat
+the reinstall after any `uv sync` that changes either package's version, and
+keep `--extra gpu` on every later `uv sync`: a sync without it removes
+`onnxruntime-gpu` along with the files the two packages share, and `import
+onnxruntime` fails until `uv sync --reinstall-package onnxruntime` restores the
+CPU build.
+
+When both packages are installed and the CPU build is the one loaded, bibr logs
+a warning that gives the command for your environment.
 
 ## Installing from source (contributors)
 

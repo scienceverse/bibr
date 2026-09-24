@@ -246,6 +246,19 @@ released.
 - JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
   `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
   a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
+- A GPU install could run bibr's ONNX models on the CPU. The core `onnxruntime`
+  package and the `gpu` extra's `onnxruntime-gpu` write the same `onnxruntime/`
+  directory, and `uv sync --extra gpu` writes both at once, so either build
+  could end up loaded. The documented remedy, `uv pip install
+  'onnxruntime-gpu[cuda,cudnn]'` after the sync, did nothing, because
+  `onnxruntime-gpu` was already installed. `bibr setup` now reinstalls the
+  `onnxruntime-gpu` version the sync chose, which writes the GPU build's files
+  last, and checks that the GPU build is the one that loads. The install guide
+  and the tester guide give the same step: `uv pip install --reinstall-package
+  onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"`. `onnxruntime` stays
+  installed, because `uv run` reinstalls a missing one and its files would
+  replace the GPU build's. When both packages are installed and the CPU build is
+  the one loaded, bibr logs a warning once, with the command that fixes it.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
