@@ -155,9 +155,14 @@ demo = ["gradio>=6.15.0"]  # fixes CVE-2026-48545 shared-client cookie injection
 # Offline batch LLM layer (Anthropic Message Batches) — see bibr/clients/batch.py.
 # Message Batches is not exposed by Instructor, so we use the official SDK directly.
 batch = ["anthropic>=0.40.0"]
-# NOTE: onnxruntime-gpu shares the same import namespace as the core onnxruntime
-# dep but is a separate PyPI package. After `uv sync --extra gpu`, you must also run
-# `uv pip install 'onnxruntime-gpu[cuda,cudnn]'` to override the CPU-only version.
+# NOTE: onnxruntime-gpu and the core onnxruntime dep are separate packages that
+# write the same `onnxruntime/` directory, and when one install writes both,
+# either build can end up loaded. After `uv sync --extra gpu`, reinstall the GPU
+# build at its locked version so its files are written last (`bibr setup` does
+# this when it installs the extra):
+#   uv pip install --reinstall-package onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"
+# Keep onnxruntime installed: `uv run` reinstalls a missing one over the GPU
+# build. See docs/getting-started/install.md, "GPU ONNX Runtime".
 gpu = ["onnxruntime-gpu[cuda,cudnn]; sys_platform == 'linux' or sys_platform == 'win32'"]
 # vllm-mlx 0.4.x is the first release line bibr has validated for both local
 # NuExtract-style LLM serving and GLM-OCR MLLM serving on Apple Silicon.
