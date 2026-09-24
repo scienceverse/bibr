@@ -239,6 +239,12 @@ released.
   said `cuda`, because they named the device bibr asked for. The layout
   detector and sentence segmenter now log the device their session got, and
   any ONNX model that loses CUDA this way logs a warning.
+- On a GPU, bibr's ONNX models held on to all the GPU memory they had ever
+  used. Page batches, reference lists and section headers come in different
+  sizes, and each new size added memory, so a batch run filled a 24 GB card
+  after 11 papers and every later paper failed. Each ONNX Runtime run on CUDA
+  now ends by freeing the memory it no longer uses (onnxruntime's arena
+  shrinkage), so GPU memory follows the model calls in flight.
 - JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
   `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
   a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
