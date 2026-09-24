@@ -59,10 +59,15 @@ from evaluation.validation_metrics import (
 logger = logging.getLogger(__name__)
 
 # Metric-definition version recorded in every scoring artifact. Re-score inputs
-# before comparing results produced by different metric versions.
+# before comparing results produced by different metric versions. Bump it only
+# when a definition changes, together with docs/contributing/evaluation.md.
 # v2: abstention-aware metrics and title containment for spaceless scripts.
 # v3: bounded title containment, empty-gold DOI penalties, stricter author matching.
-# v4: full-cohort pass rate; prediction abstracts come only from info.abstract.
+# v4: full-cohort pass rate; prediction abstracts come only from metadata.abstract
+#     (info.abstract before schema 11, still read).
+# Reading schema 11 and 12 exports changed no definition. The 0.5.0 changelog's
+# metrics_version=6 was a counter shared with scorers that are not in this
+# repository; it does not apply to this evaluator.
 METRICS_VERSION = 4
 
 # Suffix for the shadow columns holding a metric's value *before* an abstention
@@ -450,8 +455,8 @@ def extract_comparable_from_json(data: dict, *, is_gold: bool = False) -> dict:
     """Extract comparable fields from a bibr JSON export (current or legacy schema).
 
     Args:
-        data: Parsed JSON export dict with top-level keys: info, author,
-              text, section, bib, etc.
+        data: Parsed JSON export dict with top-level keys: metadata
+              (``info`` before schema 11), author, text, section, bib, etc.
         is_gold: True when ``data`` is a gold record rather than a prediction.
             Only the abstract differs; see below.
 

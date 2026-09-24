@@ -309,3 +309,32 @@ PyTorch stack — `torch.compile` on the layout model in particular — and sinc
 classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
 setting unset would let `auto` move serve onto ONNX Runtime the next time the
 image is built. Switching it is a deliberate choice, not a build-time accident.
+
+### Layout model generation
+
+bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps
+V3's 25 region labels but predicts a quadrilateral per region (bibr uses the
+rectangle enclosing it) and decodes reading order from a successor head as well
+as V3's relative-order head. V4 is not the default: PaddlePaddle has not yet
+published its weights (`PaddlePaddle/PP-DocLayoutV4_safetensors`), and the
+downstream layout rules were tuned on V3, so switching goes through the
+evaluation gate like any other model change.
+
+Each runtime selects the generation on its own:
+
+- **ONNX** (the default runtime): the bundle's `bibr_onnx.json` names the
+  architecture it was exported from, and that picks the pre- and
+  post-processing. Point `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION` at a V4
+  export — `scripts/export_onnx_layout.py --model-id
+  PaddlePaddle/PP-DocLayoutV4_safetensors --revision <sha>` writes one and checks
+  it against transformers.
+- **PyTorch**: set `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` to the V4
+  checkpoint. This needs a transformers release that includes PP-DocLayoutV4.
+
+Under the ONNX runtime `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` are not
+used, and bibr logs a warning when they name a different checkpoint than the
+bundle was exported from. bibr refuses a V4 bundle or checkpoint whose label
+list differs from the one it maps, or a V4 bundle that declares none, since
+every downstream rule keys on the label names. The OCR disk cache keys on all
+four layout settings and on `ML_RUNTIME`, so switching either never replays
+cached regions of the other model.
