@@ -377,6 +377,35 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     )
 
 
+def _preflight_opencv() -> tuple[str, str] | None:
+    """``(problem, repair command)`` when PDF input needs opencv and it is unusable.
+
+    opencv is only on the torch layout path (transformers' image processor
+    imports cv2); a core install runs layout through ONNX Runtime, where the
+    crop and post-processing are Pillow/numpy, so a missing cv2 is not a
+    reason to refuse the PDF. ``bibr chew`` and ``bibr batch`` both ask here,
+    so they refuse the same runs with the same repair.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("torch") is None:
+        return None
+    # Looked up through the package root at call time so that
+    # ``monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", ...)``
+    # (used by existing tests) takes effect.
+    from bibr.local.cli import _opencv_unavailable_reason
+
+    reason = _opencv_unavailable_reason()
+    if reason is None:
+        return None
+    repair = (
+        "uv sync --extra torch"
+        if "not installed" in reason
+        else "uv pip install --reinstall opencv-python-headless"
+    )
+    return f"Layout/OCR image runtime unavailable: {reason}", repair
+
+
 def _managed_llm_model(backend: str, settings) -> str:
     """The model a managed backend will serve — mirrors each server's own resolution."""
     if backend == "llmster":

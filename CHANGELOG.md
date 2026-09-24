@@ -213,6 +213,17 @@ released.
 
 ### Fixed
 
+- `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
+  preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
+  but only the torch layout path imports cv2. A core install runs layout
+  through ONNX Runtime, and `bibr chew` already accepted the same PDFs. The two
+  commands now share one check. Without torch, neither needs OpenCV. With
+  torch, both refuse a missing or broken `cv2` before any model loads, and
+  suggest `uv sync --extra torch`, or reinstalling `opencv-python-headless`
+  for a broken one. `bibr chew` on a core install also runs the local OCR
+  runtime check again, as `bibr batch` does. It stops before the layout model
+  loads when no local OCR runtime can start, for example `--ocr paddle-vllm`
+  without an NVIDIA GPU.
 - A GPU install (`onnxruntime-gpu[cuda,cudnn]`, the `gpu` extra) ran bibr's
   ONNX models on the CPU. The CUDA and cuDNN libraries those wheels install
   are found only after `onnxruntime.preload_dlls()` loads them, and bibr never
