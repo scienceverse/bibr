@@ -257,7 +257,7 @@ def _dry_run_model_specs(
 
     specs: list[tuple[str, str]] = []
     if needs_ocr:
-        specs.append(("layout (PP-DocLayoutV3)", "PaddlePaddle/PP-DocLayoutV3_safetensors"))
+        specs.append(("layout (PP-DocLayout)", Settings.layout.model_id))
     specs.append(
         ("sentence segmenter (wtpsplit)", display_wtpsplit_repo_id(Settings.WTPSPLIT_MODEL))
     )

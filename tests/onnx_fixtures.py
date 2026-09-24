@@ -18,6 +18,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+from bibr.layout_utils import _CORRECT_ID2LABEL
+
 WORDS = [
     "smith",
     "j",
@@ -512,3 +514,156 @@ def fake_hf_outputs(logits, boxes, order):
         order_logits=torch.as_tensor(order),
         out_masks=torch.zeros((b, q, 4, 4)),
     )
+
+
+# --------------------------------------------------------------------------
+# PP-DocLayoutV4 stand-in
+# --------------------------------------------------------------------------
+
+V4_OUTPUTS = ["logits", "pred_boxes", "relative_order_logits", "successor_order_logits"]
+
+
+def tiny_layout_v4_module(seed: int = 6):
+    """Conv stand-in with PP-DocLayoutV4's output signature.
+
+    Returns ``(logits (B,Q,C), pred_boxes (B,Q,10) quads in sigmoid space,
+    relative_order_logits (B,Q,Q) antisymmetric, successor_order_logits (B,Q,Q)
+    with the head's -1e4 diagonal)``.
+    """
+    import torch
+    from torch import nn
+
+    class TinyDetectorV4(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv = nn.Conv2d(3, 4, kernel_size=4, stride=4)
+            self.pool = nn.AdaptiveAvgPool2d(4)
+            q, c = LAYOUT_QUERIES, LAYOUT_CLASSES
+            self.fc = nn.Linear(4 * 16, q * (c + 10 + 2 * q))
+            self.register_buffer("diagonal", torch.eye(q) * -1e4)
+
+        def forward(self, pixel_values):
+            q, c = LAYOUT_QUERIES, LAYOUT_CLASSES
+            x = torch.relu(self.conv(pixel_values))
+            x = self.pool(x).flatten(1)
+            out = self.fc(x) * 3.0
+            b = out.shape[0]
+            logits = out[:, : q * c].reshape(b, q, c)
+            start = q * c
+            boxes = torch.sigmoid(out[:, start : start + q * 10]).reshape(b, q, 10)
+            start += q * 10
+            relative = out[:, start : start + q * q].reshape(b, q, q)
+            relative = relative - relative.transpose(1, 2)
+            start += q * q
+            successor = out[:, start:].reshape(b, q, q) + self.diagonal
+            return logits, boxes, relative, successor
+
+    torch.manual_seed(seed)
+    return TinyDetectorV4().eval()
+
+
+def export_layout_v4_bundle(module, out: Path, *, manifest_extra: dict | None = None) -> Path:
+    import torch
+
+    bundle = out / "onnx"
+    bundle.mkdir(parents=True, exist_ok=True)
+    example = torch.zeros((1, 3, LAYOUT_SIZE, LAYOUT_SIZE))
+    _export(
+        module,
+        (example,),
+        bundle / "model.onnx",
+        input_names=["pixel_values"],
+        output_names=V4_OUTPUTS,
+        dynamic_axes={name: {0: "batch"} for name in ["pixel_values", *V4_OUTPUTS]},
+    )
+    _write_manifest(
+        bundle,
+        {
+            "model": "layout",
+            "architecture": "PPDocLayoutV4ForObjectDetection",
+            "preprocessing": {
+                "size": {"height": LAYOUT_SIZE, "width": LAYOUT_SIZE},
+                "rescale_factor": 1 / 255,
+                "image_mean": [0, 0, 0],
+                "image_std": [1, 1, 1],
+                "rescale_before_resize": True,
+            },
+            "num_queries": LAYOUT_QUERIES,
+            "num_labels": LAYOUT_CLASSES,
+            # The stand-in scores only the first LAYOUT_CLASSES labels, but a
+            # V4 bundle must declare the full list bibr maps.
+            "id2label": {str(k): v for k, v in _CORRECT_ID2LABEL.items()},
+            **(manifest_extra or {}),
+        },
+    )
+    return bundle
+
+
+def fake_hf_v4_outputs(logits, boxes, relative, successor):
+    """Mimic ``PPDocLayoutV4ForObjectDetectionOutput`` for HF post-processing."""
+    import torch
+
+    return SimpleNamespace(
+        logits=torch.as_tensor(logits),
+        pred_boxes=torch.as_tensor(boxes),
+        relative_order_logits=torch.as_tensor(relative),
+        successor_order_logits=torch.as_tensor(successor),
+    )
+
+
+def tiny_hf_v4_checkpoint(out: Path, *, labels: list[str], seed: int = 0) -> Path:
+    """A randomly initialised ``PPDocLayoutV4ForObjectDetection`` saved to ``out``.
+
+    Needs a transformers with PP-DocLayoutV4. The library init zeroes the box
+    and class heads, which makes every output a constant, so every parameter
+    is re-drawn; the class heads get a wider spread so query selection is not
+    a near-tie that float noise could reorder.
+    """
+    import torch
+    from transformers import (
+        PPDocLayoutV4Config,
+        PPDocLayoutV4ForObjectDetection,
+        PPDocLayoutV4ImageProcessor,
+    )
+
+    config = PPDocLayoutV4Config(
+        backbone_config={
+            "model_type": "hgnet_v2",
+            "hidden_sizes": [32, 32, 32, 32],
+            "stem_channels": [3, 32, 32],
+            "stage_in_channels": [32, 32, 32, 32],
+            "stage_mid_channels": [32, 32, 32, 32],
+            "stage_out_channels": [32, 32, 32, 32],
+            "return_idx": [1, 2, 3],
+            "out_features": ["stage2", "stage3", "stage4"],
+        },
+        num_labels=len(labels),
+        id2label=dict(enumerate(labels)),
+        label2id={label: i for i, label in enumerate(labels)},
+        encoder_hidden_dim=32,
+        encoder_in_channels=[32, 32, 32],
+        feat_strides=[8, 16, 32],
+        encoder_layers=1,
+        encoder_ffn_dim=64,
+        encoder_attention_heads=2,
+        d_model=32,
+        num_queries=20,
+        decoder_in_channels=[32, 32, 32],
+        decoder_ffn_dim=8,
+        decoder_layers=2,
+        decoder_attention_heads=2,
+        num_denoising=0,
+        global_pointer_head_size=8,
+        gp_dropout_value=0.0,
+        s2r_closure_weight_init=0.7,
+    )
+    model = PPDocLayoutV4ForObjectDetection(config).eval()
+    generator = torch.Generator().manual_seed(seed)
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            param.copy_(torch.randn(param.shape, generator=generator) * 0.15)
+            if any(key in name for key in ("enc_score_head", "enc_output", "class_embed")):
+                param.mul_(8.0)
+    model.save_pretrained(out)
+    PPDocLayoutV4ImageProcessor(size={"height": 64, "width": 64}).save_pretrained(out)
+    return out
