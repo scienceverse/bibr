@@ -320,6 +320,14 @@ released.
 - A PDF caption the layout model tags as a figure title that opens with
   "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
   found no table and fell back into the body text.
+- The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
+  `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
+  harness that are not part of this repository. The evaluator here,
+  `evaluation/evaluate.py`, records `metrics_version: 4`, as it did in 0.5.0 and
+  0.5.1. No metric definition has changed since v4, so saved v4 evaluations need
+  no re-scoring. Full printed names (`authors_fullname_f1`) were already its
+  primary author metric in 0.5.0, with family-name-only `authors_f1` as a
+  diagnostic.
 
 ### Added
 
