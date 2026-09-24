@@ -349,6 +349,35 @@ def test_doctor_fails_on_a_hollow_module_with_the_repair(monkeypatch):
     assert hint.endswith(_UV_REPAIR)
 
 
+def test_missing_onnxruntime_keeps_the_import_error():
+    """Not installed at all is an ImportError naming the feature, not the hollow error."""
+    with (
+        patch.dict("sys.modules", {"onnxruntime": None}),
+        pytest.raises(ImportError, match="^layout detector requires onnxruntime"),
+    ):
+        onnx_providers.import_onnxruntime("layout detector")
+
+
+def test_doctor_fails_when_onnxruntime_is_not_installed(monkeypatch):
+    _installed(monkeypatch, cpu=None, gpu=None)
+    status, msg, hint = _doctor_onnx_line(module=None)
+
+    assert (status, msg) == ("fail", "ONNX Runtime: not installed")
+    assert "core dependency" in hint
+
+
+def test_doctor_fails_when_the_loaded_build_cannot_list_providers(monkeypatch):
+    _installed(monkeypatch, gpu=None)
+    module = _loaded_build(gpu=False)
+    module.get_available_providers.side_effect = RuntimeError("provider bridge failed")
+
+    assert _doctor_onnx_line(module=module) == (
+        "fail",
+        "ONNX Runtime: provider bridge failed",
+        "",
+    )
+
+
 def test_doctor_device_line_on_a_core_install_leaves_build_problems_to_the_onnx_line(
     monkeypatch, caplog
 ):
