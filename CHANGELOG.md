@@ -213,6 +213,14 @@ released.
 
 ### Fixed
 
+- A GPU install (`onnxruntime-gpu[cuda,cudnn]`, the `gpu` extra) ran bibr's
+  ONNX models on the CPU. The CUDA and cuDNN libraries those wheels install
+  are found only after `onnxruntime.preload_dlls()` loads them, and bibr never
+  called it, so onnxruntime could not start its CUDA provider and fell back
+  to CPU. bibr now calls it before it opens a CUDA session. The logs still
+  said `cuda`, because they named the device bibr asked for. The layout
+  detector and sentence segmenter now log the device their session got, and
+  any ONNX model that loses CUDA this way logs a warning.
 - The OCR disk cache key now includes the layout checkpoint (`LAYOUT_MODEL_ID`),
   the ONNX layout bundle (`LAYOUT_ONNX_MODEL_ID`, `LAYOUT_ONNX_REVISION`) and
   `ML_RUNTIME`. It held only the torch revision, so moving the ONNX bundle,
