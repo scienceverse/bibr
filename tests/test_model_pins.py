@@ -13,6 +13,7 @@ def _defaults(monkeypatch) -> GlobalSettings:
     for var in (
         "ML_SECTION_CLASSIFIER_REVISION",
         "ML_PAPER_CLASSIFIER_REVISION",
+        "LAYOUT_MODEL_ID",
         "LAYOUT_MODEL_REVISION",
         "LAYOUT_ONNX_REVISION",
         "NER_PARSER_REVISION",
@@ -51,6 +52,7 @@ def test_serve_image_bakes_the_same_revisions(monkeypatch):
     dockerfile = Path("Dockerfile.serve").read_text()
     assert f"ARG PAPER_CLASSIFIER_REVISION={s.ml.paper_classifier_revision}" in dockerfile
     assert f"ARG SECTION_CLASSIFIER_REVISION={s.ml.section_classifier_revision}" in dockerfile
+    assert f"ARG LAYOUT_MODEL_ID={s.layout.model_id}" in dockerfile
     assert f"ARG LAYOUT_MODEL_REVISION={s.layout.model_revision}" in dockerfile
 
 
