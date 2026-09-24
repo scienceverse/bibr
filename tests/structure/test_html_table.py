@@ -32,8 +32,9 @@ class TestCellsStayAsPrinted:
         assert df is not None
         assert _grid(df) == [
             ["N", "Code", "Count", "M"],
-            # read_html: "12.0", "7", "1234.0", "2.5" — the int column with an
-            # empty cell turned into floats and the empty cell into NaN.
+            # read_html: "12.0", "7.0", "1234.0", "2.5", with "nan" for the
+            # empty cell below — every column became numbers, and the int
+            # column with an empty cell floats.
             ["12", "007", "1,234", "2.50"],
             ["", "010", "56", "0.10"],
         ]
@@ -89,6 +90,19 @@ class TestReadHtmlLayoutIsKept:
             "<tr><td>x<style>.s{}</style></td><td> y </td></tr></table>",
             # The first table without text is skipped.
             "<table><tr><td></td></tr></table><table><tr><th>T</th></tr><tr><td>v</td></tr></table>",
+            # A rowspan in the last column carries into the rows below.
+            "<table><tr><th>G</th><th>p</th></tr>"
+            '<tr><td>a</td><td rowspan="2">x</td></tr><tr><td>b</td></tr></table>',
+            # A header row with no text adds no level to the MultiIndex.
+            "<table><thead><tr><th>A</th><th>B</th></tr><tr><th></th><th></th></tr>"
+            "<tr><th>x</th><th>y</th></tr></thead><tbody><tr><td>p</td><td>q</td></tr></tbody>"
+            "</table>",
+            # A hidden first table is skipped.
+            "<table style='display:none'><tr><td>h</td></tr></table>"
+            "<table><tr><th>T</th></tr><tr><td>v</td></tr></table>",
+            # A first table with only a caption has no rows, so the next is read.
+            "<table><caption>c</caption></table>"
+            "<table><tr><th>T</th></tr><tr><td>v</td></tr></table>",
         ],
     )
     def test_shape_labels_and_text_match_read_html(self, html):
@@ -119,6 +133,7 @@ class TestReadHtmlLayoutIsKept:
 
     def test_no_table_with_text_is_none(self):
         assert html_table_frame("<table><tr><td></td></tr></table>") is None
+        assert html_table_frame("<table><tr><td></td><td></td></tr></table>") is None
         assert html_table_frame("<p>no table</p>") is None
         assert html_table_frame("<table><caption>Only a caption</caption></table>") is None
 

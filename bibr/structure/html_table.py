@@ -74,7 +74,7 @@ def html_table_frame(source: str | Tag) -> pd.DataFrame | None:
         br.replace_with("\n")
     candidates: list[Tag] = []
     for table in tables:
-        if "display:none" in str(table.get("style") or "").replace(" ", ""):
+        if is_hidden_table(table):
             continue
         for element in table.find_all("style"):
             element.decompose()
@@ -90,6 +90,12 @@ def html_table_frame(source: str | Tag) -> pd.DataFrame | None:
     return None
 
 
+def is_hidden_table(table: Tag) -> bool:
+    """True when *table*'s own style hides it (``display:none``), which is
+    how ``read_html`` decides a table is not shown."""
+    return "display:none" in str(table.get("style") or "").replace(" ", "")
+
+
 def _cells(row: Tag) -> list[Tag]:
     return row.find_all(("td", "th"), recursive=False)
 
@@ -103,9 +109,15 @@ def _sections(table: Tag) -> tuple[list[list[str]], list[list[str]], list[list[s
         # No <thead>: the leading rows made only of <th> are the header.
         while body_rows and all(cell.name == "th" for cell in _cells(body_rows[0])):
             head_rows.append(body_rows.pop(0))
-    head, pending = _expand_spans(head_rows, [], flush=False)
-    body, pending = _expand_spans(body_rows, pending, flush=not foot_rows)
-    foot, _ = _expand_spans(foot_rows, pending, flush=True)
+    head, pending = _expand_spans(head_rows, [])
+    body, pending = _expand_spans(body_rows, pending)
+    foot, pending = _expand_spans(foot_rows, pending)
+    # Rows that exist only because a rowspan runs past the last <tr> come
+    # last: ``read_html`` adds them after the body when there is no footer
+    # and after the footer otherwise.
+    while pending:
+        foot.append([text for _, text, _ in pending])
+        pending = [(i, text, left - 1) for i, text, left in pending if left > 1]
     return head, body, foot
 
 
@@ -115,12 +127,12 @@ def _span(value: Any, limit: int) -> int:
 
 
 def _expand_spans(
-    rows: list[Tag], pending: list[_Pending], *, flush: bool
+    rows: list[Tag], pending: list[_Pending]
 ) -> tuple[list[list[str]], list[_Pending]]:
     """Rows of cell text, each spanned cell copied into every slot it covers.
 
-    *pending* holds the rowspans still open from the rows above; they carry
-    over into the next section unless *flush* adds rows for them here.
+    *pending* holds the rowspans still open from the rows above; the ones
+    still open after *rows* are returned to carry into the next section.
     """
     grid: list[list[str]] = []
     for tr in rows:
@@ -148,11 +160,6 @@ def _expand_spans(
                 still_open.append((prev_index, prev_text, prev_rows - 1))
         grid.append(texts)
         pending = still_open
-    if flush:
-        # Rows that exist only because a rowspan runs past the last <tr>.
-        while pending:
-            grid.append([text for _, text, _ in pending])
-            pending = [(i, text, left - 1) for i, text, left in pending if left > 1]
     return grid, pending
 
 
@@ -171,8 +178,11 @@ def _frame(head: list[list[str]], body: list[list[str]], foot: list[list[str]]) 
     rows = head + body + foot
     width = max((len(row) for row in rows), default=0)
     rows = [row + [""] * (width - len(row)) for row in rows]
-    # dtype=str with na_filter off and no thousands separator: no cell is
-    # converted, and none becomes NaN.
+    # dtype=str keeps every cell a string and na_filter=False keeps "NA" and
+    # "" as text, so no cell is rewritten or becomes NaN. dtype=str already
+    # exempts every column from thousands-separator stripping; thousands=None
+    # (TextParser's default) is spelled out because ``read_html`` passes ","
+    # and that stripping is what turned "1,5" into "15".
     with TextParser(rows, header=header, dtype=str, na_filter=False, thousands=None) as parser:
         frame: pd.DataFrame = parser.read()
     return frame

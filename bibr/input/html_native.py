@@ -30,7 +30,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
-from bibr.structure.html_table import html_table_frame
+from bibr.structure.html_table import html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -560,18 +560,25 @@ class HtmlParser:
         return any(word in tokens for word in ("reference", "bibliography", "citation"))
 
     def _handle_table(self, tag: Tag) -> None:
+        if is_hidden_table(tag):
+            # A display:none table (a print-only or responsive duplicate of a
+            # visible one) is not part of the page as read.
+            return
         caption_tag = tag.find("caption")
         caption = _text(caption_tag) or None
+        label = caption_label(caption, "table")
         try:
             df = html_table_frame(tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTML table parse failed: %s", exc)
             df = None
         if df is None:
-            # No cell grid (an image-only table, say). A captioned table is
-            # still a printed table that mentions resolve to, so it is kept
-            # with its markup and no contents; one with neither is dropped.
-            if caption is None:
+            # No cell grid (an image-only table, say). A table whose caption
+            # prints a table label ("Table 3. ...") is still a table that
+            # mentions resolve to, so it is kept with its markup and no
+            # contents. Any other grid-less table is dropped: a spacer, or a
+            # layout table holding a figure ("Figure 1. ...").
+            if label is None:
                 return
             df = pd.DataFrame()
         html = str(tag)
@@ -591,7 +598,7 @@ class HtmlParser:
                         df=df,
                     )
                 ],
-                label=caption_label(caption, "table"),
+                label=label,
             )
         )
         self._table_counter += 1

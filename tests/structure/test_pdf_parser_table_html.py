@@ -3,7 +3,7 @@
 An OCR/VLM table region emitted as HTML carries structure the flat
 DataFrame cannot represent: ``rowspan``/``colspan`` merged cells and
 multi-level headers. The parser must preserve that HTML **verbatim** in
-``tbl_html`` (round-tripping it through ``pandas.read_html`` ->
+``tbl_html`` (round-tripping it through the DataFrame ->
 ``DataFrame.to_html`` drops ``rowspan``, mangles stub headers into
 ``Unnamed: 0_level_0`` and injects ``class="dataframe"``/``halign`` noise).
 The DataFrame is still used for the flattened ``contents`` grid.

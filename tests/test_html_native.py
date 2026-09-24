@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pytest
+
 from bibr.input.epub_native import EpubParser
 from bibr.input.html_native import HtmlParser
 from bibr.paper_contents import CanonicalSection
@@ -400,3 +402,39 @@ def test_captioned_table_without_cell_text_is_kept():
     assert table.label == "3"
     assert table.contents == []
     assert 'src="t3.png"' in table.tbl_html
+
+
+@pytest.mark.parametrize(
+    "caption", ["Figure 1. A layout-table figure.", "Scanned values without a label."]
+)
+def test_gridless_table_without_a_table_label_is_dropped(caption):
+    """Only a caption that prints a table label makes a <table> with no cell
+    text a table: a layout table holding a figure, or one whose caption names
+    no table, is not one."""
+    contents = HtmlParser(
+        _article(f'<table><caption>{caption}</caption><tr><td><img src="f1.png"></td></tr></table>')
+    ).parse()
+
+    assert contents.tables == []
+
+
+def test_hidden_table_is_dropped_and_mentions_resolve_to_the_visible_one():
+    """A display:none copy of a table (print-only or responsive markup) is not
+    part of the page; kept, it came out as an empty "Table 1" ahead of the
+    visible one and the mention no longer resolved."""
+    html = b"""<!doctype html><html><body><article>
+      <h1>Results</h1>
+      <p>Baseline characteristics are in Table 1.</p>
+      <table style="display: none"><caption>Table 1. Baseline.</caption>
+        <tr><th>Group</th><th>N</th></tr><tr><td>Control</td><td>120</td></tr></table>
+      <table><caption>Table 1. Baseline.</caption>
+        <tr><th>Group</th><th>N</th></tr><tr><td>Control</td><td>120</td></tr></table>
+    </article></body></html>"""
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    assert [(t.label, t.contents) for t in contents.tables] == [
+        ("1", [["Group", "N"], ["Control", "120"]])
+    ]
+    assert [(x.xref_type, x.xref_id) for x in contents.xrefs] == [("table", 1)]
