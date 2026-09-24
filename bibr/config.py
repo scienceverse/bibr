@@ -252,12 +252,14 @@ class LlmOptions(_BibrSettings):
     model_revision: str | None = Field(
         None,
         description="Exact model revision/commit deployed (surfaced in qualification_provenance; "
-        "null falls back to the expected NuExtract3 revision for NuExtract deployments).",
+        "null falls back to the expected revision only when LLM_MODEL is "
+        "numind/NuExtract3-FP8).",
     )
     jinja_sha256: str | None = Field(
         None,
         description="sha256 of the deployed chat template (surfaced in qualification_provenance; "
-        "null falls back to the expected NuExtract3 jinja sha for NuExtract deployments).",
+        "null falls back to the expected template sha only when LLM_MODEL is "
+        "numind/NuExtract3-FP8).",
     )
     api_key: str | None = Field(
         None,
