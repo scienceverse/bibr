@@ -248,6 +248,17 @@ released.
   installed, because `uv run` reinstalls a missing one and its files would
   replace the GPU build's. When both packages are installed and the CPU build is
   the one loaded, bibr logs a warning once, with the command that fixes it.
+- `bibr doctor` now reports which ONNX Runtime build loads, CPU or GPU, and its
+  version. Before, it said nothing about it once torch was installed. When
+  `onnxruntime-gpu` is installed but the CPU build is the one loaded, the line
+  is a warning, and its hint gives the reinstall command.
+- After a GPU install, a `uv sync` without `--extra gpu` uninstalls
+  `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
+  `onnxruntime` stays installed but its package is empty: `import onnxruntime`
+  still works, and the first ONNX model failed with an `AttributeError`. bibr
+  now raises a `ConfigurationError` that gives the repair, `uv sync
+  --reinstall-package onnxruntime`, and `bibr doctor` fails its ONNX Runtime
+  line with the same command.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.

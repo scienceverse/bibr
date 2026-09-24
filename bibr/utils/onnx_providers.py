@@ -156,6 +156,66 @@ def _installed_builds() -> tuple[str, str, str] | None:
         return None
 
 
+def onnxruntime_repair_command() -> list[str]:
+    """The command that rewrites the ``onnxruntime`` distribution's files.
+
+    The uv form resyncs the project; the pip form is for environments pip
+    manages, pinned to the installed version when metadata still has one.
+    """
+    from importlib import metadata
+
+    try:
+        dist = metadata.distribution("onnxruntime")
+        installer = (dist.read_text("INSTALLER") or "").strip()
+        requirement = f"onnxruntime=={dist.version}"
+    except Exception:  # noqa: BLE001 — missing or unreadable metadata: assume a uv project
+        installer, requirement = "uv", "onnxruntime"
+    if installer == "pip":
+        return [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--force-reinstall",
+            "--no-deps",
+            requirement,
+        ]
+    return ["uv", "sync", "--reinstall-package", "onnxruntime"]
+
+
+def import_onnxruntime(feature: str = "ONNX Runtime inference"):
+    """Import ``onnxruntime``, raising a fixable error when it is missing or hollow.
+
+    ``onnxruntime`` and ``onnxruntime-gpu`` write the same ``onnxruntime/``
+    directory, so uninstalling one deletes files the other still needs. A
+    ``uv sync`` without ``--extra gpu`` after a GPU install does exactly that:
+    ``onnxruntime`` stays installed per its metadata, ``import onnxruntime``
+    finds only a namespace package, and ``get_available_providers`` is missing.
+    That raises :class:`ConfigurationError` with the repair command instead of
+    an ``AttributeError`` somewhere later.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError as e:
+        from bibr.utils.ml_extra import onnxruntime_import_error
+
+        raise onnxruntime_import_error(feature) from e
+
+    if not hasattr(ort, "get_available_providers"):
+        import shlex
+
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(
+            f"{feature} requires onnxruntime, but the onnxruntime package is empty: its "
+            "files were deleted, typically by uninstalling onnxruntime-gpu (which a "
+            "`uv sync` without `--extra gpu` does after a GPU install), since the two "
+            "share the onnxruntime/ directory. Reinstall it with: "
+            f"{shlex.join(onnxruntime_repair_command())}"
+        )
+    return ort
+
+
 def get_ort_providers(
     *,
     enable_cuda: bool = True,
@@ -174,14 +234,12 @@ def get_ort_providers(
 
     Returns:
         Ordered list of providers suitable for ``ort.InferenceSession(providers=...)``.
+
+    Raises:
+        ConfigurationError: onnxruntime is installed but its files are gone
+            (see :func:`import_onnxruntime`).
     """
-    try:
-        import onnxruntime as ort
-    except ImportError as e:  # pragma: no cover
-        from bibr.utils.ml_extra import onnxruntime_import_error
-
-        raise onnxruntime_import_error("ONNX Runtime inference") from e
-
+    ort = import_onnxruntime()
     available = set(ort.get_available_providers())
     providers: list[str | tuple[str, dict]] = []
 
@@ -279,13 +337,7 @@ def create_session(
     optimisations are left at ORT's default (all), which is what the
     wtpsplit segmenter already runs with.
     """
-    try:
-        import onnxruntime as ort
-    except ImportError as e:  # pragma: no cover
-        from bibr.utils.ml_extra import onnxruntime_import_error
-
-        raise onnxruntime_import_error(model_name or "ONNX Runtime inference") from e
-
+    ort = import_onnxruntime(model_name or "ONNX Runtime inference")
     providers = get_ort_providers(
         enable_cuda=enable_cuda_for(device),
         model_name=model_name,
