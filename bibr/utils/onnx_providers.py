@@ -158,6 +158,50 @@ def session_device(
     return device
 
 
+_ARENA_SHRINKAGE = "memory.enable_memory_arena_shrinkage"
+
+
+class _ArenaShrinkingSession:
+    """A CUDA session whose every run frees the arena memory it no longer uses.
+
+    Everything but ``run`` passes through to the wrapped ``InferenceSession``.
+    """
+
+    def __init__(self, session, run_options) -> None:
+        self._session = session
+        self._run_options = run_options
+
+    def run(self, output_names, input_feed, run_options=None):
+        return self._session.run(output_names, input_feed, run_options or self._run_options)
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+
+def shrink_arena_after_runs(session):
+    """Make each run of a CUDA ``session`` give the memory it no longer uses back to CUDA.
+
+    ORT's CUDA arena keeps every block it allocates, and bibr grows it by
+    exactly the size a run asks for (``kSameAsRequested``). Input shapes change
+    from call to call (page batches, reference and header lengths), so new
+    shapes keep asking for blocks that no free one fits, and over a batch of
+    papers the arenas grow until the GPU is full. A ``gpu_mem_limit`` only turns
+    that into an earlier allocation failure. With
+    ``memory.enable_memory_arena_shrinkage`` each run ends by freeing the
+    arena regions nothing uses any more, so the arena holds the weights and
+    what the runs in flight need. A session that is not on CUDA comes back
+    unchanged.
+    """
+    if selected_device(session.get_providers()) != "cuda":
+        return session
+    import onnxruntime as ort
+
+    cuda_options = session.get_provider_options().get("CUDAExecutionProvider", {})
+    run_options = ort.RunOptions()
+    run_options.add_run_config_entry(_ARENA_SHRINKAGE, f"gpu:{cuda_options.get('device_id', '0')}")
+    return _ArenaShrinkingSession(session, run_options)
+
+
 def enable_cuda_for(device: str | None) -> bool:
     """Map a torch-style device request onto the CUDA provider switch.
 
@@ -180,9 +224,10 @@ def create_session(
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
     Returns ``(session, device)`` where ``device`` is ``"cuda"`` or ``"cpu"``,
-    the one the session got (see :func:`session_device`). Graph
-    optimisations are left at ORT's default (all), which is what the
-    wtpsplit segmenter already runs with.
+    the one the session got (see :func:`session_device`). A CUDA session comes
+    back wrapped by :func:`shrink_arena_after_runs`. Graph optimisations are
+    left at ORT's default (all), which is what the wtpsplit segmenter already
+    runs with.
     """
     try:
         import onnxruntime as ort
@@ -199,4 +244,5 @@ def create_session(
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
-    return session, session_device(session, providers, model_name=model_name)
+    device = session_device(session, providers, model_name=model_name)
+    return shrink_arena_after_runs(session), device
