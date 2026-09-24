@@ -307,6 +307,26 @@ class TestMergeTableContinuations:
         assert out[0].df["Species"].tolist() == ["a", "d", "e"]
         assert out[0].df["Uses"].tolist() == ["1", "4", "5"]
 
+    def test_repeated_header_differing_in_spacing_or_case_is_not_a_data_row(self):
+        """Each page is read on its own, so the header a continuation page
+        repeats can come back as "Mean(SD)" under "Mean (SD)"; the exact
+        comparison took it for a promoted data row and inserted it mid-table."""
+        df1 = pd.DataFrame([["Age", "34.1 (5.2)"]], columns=["Variable", "Mean (SD)"])
+        df2 = pd.DataFrame([["BMI", "24.3 (3.1)"]], columns=["VARIABLE", "Mean(SD)"])
+        tables = [
+            _tbl(1, 4, "Table 1. Sample", df1),
+            _tbl(2, 5, "Table 1. Sample (continued)", df2),
+        ]
+
+        out = merge_table_continuations(tables)
+
+        assert len(out) == 1
+        assert out[0].contents == [
+            ["Variable", "Mean (SD)"],
+            ["Age", "34.1 (5.2)"],
+            ["BMI", "24.3 (3.1)"],
+        ]
+
     def test_unlabeled_tables_are_untouched(self):
         tables = [_tbl(1, 4, None), _tbl(2, 5, None)]
         out = merge_table_continuations(tables)
