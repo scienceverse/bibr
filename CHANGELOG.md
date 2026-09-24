@@ -232,8 +232,8 @@ released.
   dropped.
 - A table continued across pages no longer gets its repeated header as a data
   row in the middle of `contents` when the later page prints the header with
-  different spacing or case ("Mean(SD)" under "Mean (SD)"), as per-page OCR
-  often reads it.
+  different spacing, case, dashes or punctuation ("Mean(SD)" under
+  "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

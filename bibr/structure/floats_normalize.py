@@ -68,6 +68,10 @@ _TABLE_LABEL_RE = re.compile(r"^table\s+(\d+)\b", re.IGNORECASE)
 # trailing word "continued" is too likely to be caption prose.
 _CONTINUED_RE = re.compile(r"[([]\s*continued\s*[)\]]\s*[.:]?\s*$", re.IGNORECASE)
 
+# What a repeated continuation header is compared without: everything but
+# letters and digits.
+_NON_ALNUM_RE = re.compile(r"[\W_]+")
+
 # Same threshold as parse_text._is_bbox_nearby.
 _MAX_VERTICAL_GAP = 200
 
@@ -274,9 +278,10 @@ def merge_table_continuations_with_remap(
     (an intervening section heading, for one) and deliberately keeps such
     tables apart.
     Rows are concatenated; a header the continuation page repeats is dropped
-    even when its spacing or case differs, and a continuation page whose
-    header row was promoted to column names by the HTML parser (headerless
-    page) has that row restored as data. Survivors are renumbered from 1.
+    even when it is read with other spacing, case, dashes or punctuation, and
+    a continuation page whose header row was promoted to column names by the
+    HTML parser (headerless page) has that row restored as data. Survivors
+    are renumbered from 1.
 
     Returns the merged list plus the ``table:<old>`` → ``table:<new>`` map
     that renumbering implies, with every absorbed continuation page pointing
@@ -364,8 +369,14 @@ def remap_caption_receipt(
 
 
 def _header_key(label: object) -> str:
-    """*label* compared the way a header repeated on a later page must match."""
-    return re.sub(r"\s+", "", unicodedata.normalize("NFKC", str(label))).casefold()
+    """*label* compared the way a header repeated on a later page must match.
+
+    Each page is read on its own, so the repeat drifts: "Mean(SD)" under
+    "Mean (SD)", another case, full-width letters, an en dash or a minus sign
+    for a hyphen, "p value" for "p-value", "No" for "No.". Only the letters
+    and digits are compared, after NFKC and casefolding.
+    """
+    return _NON_ALNUM_RE.sub("", normalize_label(unicodedata.normalize("NFKC", str(label))))
 
 
 def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool:
@@ -382,9 +393,9 @@ def _concat_continuation(survivor: PaperTable, continuation: PaperTable) -> bool
     body = c_df.copy()
     body.columns = s_df.columns
     if [_header_key(c) for c in c_df.columns] == [_header_key(c) for c in s_df.columns]:
-        # The page repeats the header. Each page is read on its own, so the
-        # repeat can differ in spacing or case ("Mean(SD)" under "Mean (SD)");
-        # the first page's labels stand and the rows align by position.
+        # The page repeats the header, perhaps read with other spacing, case
+        # or punctuation; the first page's labels stand and the rows align by
+        # position.
         merged = pd.concat([s_df, body], ignore_index=True)
     else:
         # Headerless continuation page: the HTML parser promoted its first
