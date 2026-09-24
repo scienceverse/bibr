@@ -232,6 +232,12 @@ released.
   said `cuda`, because they named the device bibr asked for. The layout
   detector and sentence segmenter now log the device their session got, and
   any ONNX model that loses CUDA this way logs a warning.
+- On a GPU, bibr's ONNX models held on to all the GPU memory they had ever
+  used. Page batches, reference lists and section headers come in different
+  sizes, and each new size added memory, so a batch run filled a 24 GB card
+  after 11 papers and every later paper failed. Each ONNX Runtime run on CUDA
+  now ends by freeing the memory it no longer uses (onnxruntime's arena
+  shrinkage), so GPU memory follows the model calls in flight.
 - The OCR disk cache key now includes the layout checkpoint (`LAYOUT_MODEL_ID`),
   the ONNX layout bundle (`LAYOUT_ONNX_MODEL_ID`, `LAYOUT_ONNX_REVISION`) and
   `ML_RUNTIME`. It held only the torch revision, so moving the ONNX bundle,
