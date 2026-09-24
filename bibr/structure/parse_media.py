@@ -103,6 +103,7 @@ class MediaHandlersMixin:
         page_number: int | None,
         *,
         source_index: int | None = None,
+        from_ocr: bool = True,
     ) -> str:
         caption_id = f"caption:{len(self._caption_candidates) + 1}"
         # Remember where the candidate was printed. ``CaptionCandidate`` is
@@ -110,6 +111,8 @@ class MediaHandlersMixin:
         # internal side map instead of widening that schema. Used to replay an
         # unowned candidate as body text (see ``replay_unowned_captions``).
         self._caption_candidate_sections[caption_id] = self._current_section_id
+        # Likewise whether OCR produced the text (``PaperSentence.from_ocr``).
+        self._caption_candidate_from_ocr[caption_id] = from_ocr
         self._caption_candidates.append(
             CaptionCandidate(
                 caption_id=caption_id,
@@ -237,13 +240,22 @@ class MediaHandlersMixin:
 
         self._figure_counter += 1
 
-    def _handle_table_caption(self, content: str, bbox: list | None, page_number: int) -> None:
+    def _handle_table_caption(
+        self,
+        content: str,
+        bbox: list | None,
+        page_number: int,
+        *,
+        from_ocr: bool = True,
+    ) -> None:
         """Collect a table-caption candidate without mutating any table."""
         self._expire_pending_table_label_fragment()
         text = content.strip()
         if not text:
             return
-        caption_id = self._add_caption_candidate(text, "table", bbox, page_number)
+        caption_id = self._add_caption_candidate(
+            text, "table", bbox, page_number, from_ocr=from_ocr
+        )
         pending = (text, bbox, page_number, caption_id)
         if self._BARE_TABLE_LABEL_RE.fullmatch(text):
             self._pending_bare_table_label = pending
@@ -260,6 +272,7 @@ class MediaHandlersMixin:
         *,
         region_meta: dict | None = None,
         source_label: str = "content",
+        from_ocr: bool = True,
     ) -> bool:
         """Buffer the next adjacent fragment until a table confirms ownership."""
         pending = getattr(self, "_pending_bare_table_label", None)
@@ -283,6 +296,7 @@ class MediaHandlersMixin:
             region_meta,
             source_label,
             self._source_region_index,
+            from_ocr,
         )
         return True
 
@@ -304,6 +318,7 @@ class MediaHandlersMixin:
             _region_meta,
             _source_label,
             fragment_source_index,
+            fragment_from_ocr,
         ) = staged
         label, label_bbox, label_page, caption_id = pending
         composed_bbox = self._merge_bboxes(label_bbox, fragment_bbox)
@@ -319,6 +334,7 @@ class MediaHandlersMixin:
             fragment_bbox,
             fragment_page,
             source_index=fragment_source_index,
+            from_ocr=fragment_from_ocr,
         )
         self._table_caption_fragments[caption_id] = fragment_id
         return caption_id
@@ -332,16 +348,28 @@ class MediaHandlersMixin:
             self._replay_table_caption_fragment(staged)
 
     def _replay_table_caption_fragment(self, staged: tuple) -> None:
-        _pending, content, bbox, page_number, region_meta, source_label, source_index = staged
+        (
+            _pending,
+            content,
+            bbox,
+            page_number,
+            region_meta,
+            source_label,
+            source_index,
+            from_ocr,
+        ) = staged
         if source_label in {"figure_title", "chart_title"}:
             self._handle_figure_caption(
                 content,
                 bbox,
                 page_number,
                 source_index=source_index,
+                from_ocr=from_ocr,
             )
         else:
-            self._handle_content(content, page_number, bbox, region_meta=region_meta)
+            self._handle_content(
+                content, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+            )
 
     def _prepare_table_caption_state_for_region(self, treatment: str, content: str) -> None:
         """Advance provisional caption state at every OCR region boundary."""
@@ -360,6 +388,7 @@ class MediaHandlersMixin:
         page_number: int,
         *,
         source_label: str | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Route a caption to figure or table handler based on content.
 
@@ -380,12 +409,13 @@ class MediaHandlersMixin:
             bbox,
             page_number,
             source_label=source_label or "figure_title",
+            from_ocr=from_ocr,
         ):
             return
         if self._LOOSE_TABLE_CAPTION_RE.match(text):
-            self._handle_table_caption(content, bbox, page_number)
+            self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
         else:
-            self._handle_figure_caption(content, bbox, page_number)
+            self._handle_figure_caption(content, bbox, page_number, from_ocr=from_ocr)
 
     @classmethod
     def _is_panel_label(cls, text: str) -> bool:
@@ -410,6 +440,7 @@ class MediaHandlersMixin:
         page_number: int,
         *,
         source_index: int | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Collect every figure-title region for lossless ownership accounting."""
         self._expire_pending_table_label_fragment()
@@ -422,6 +453,7 @@ class MediaHandlersMixin:
             bbox,
             page_number,
             source_index=source_index,
+            from_ocr=from_ocr,
         )
         if text.casefold() == "author manuscript":
             self._non_caption_candidate_reasons[caption_id] = ("publisher_noise",)
@@ -429,6 +461,20 @@ class MediaHandlersMixin:
             self._non_caption_candidate_reasons[caption_id] = ("doi_only_evidence",)
         elif re.fullmatch(r"p\s*[<=>≤≥]\s*\.?\d+", text, re.IGNORECASE):
             self._non_caption_candidate_reasons[caption_id] = ("table_note",)
+
+    def _caption_text_from_ocr(self) -> dict[str, bool]:
+        """Caption candidate text → whether OCR may have produced it.
+
+        A figure or table caption taken whole from one candidate read from the
+        PDF text layer is not OCR text. A caption composed from several
+        candidates, or rewritten for display, matches no candidate here and
+        keeps the OCR default, as does text any OCR candidate shares.
+        """
+        from_ocr: dict[str, bool] = {}
+        for candidate in self._caption_candidates:
+            flag = self._caption_candidate_from_ocr.get(candidate.caption_id, True)
+            from_ocr[candidate.text] = from_ocr.get(candidate.text, False) or flag
+        return from_ocr
 
     def replay_unowned_captions(self, receipt: CaptionAssignmentReceipt) -> int:
         """Re-emit caption candidates that never found an owner as body text.
@@ -476,6 +522,7 @@ class MediaHandlersMixin:
                     if candidate.bbox is not None
                     else None
                 ),
+                from_ocr=self._caption_candidate_from_ocr.get(candidate.caption_id, True),
             )
             replayed += 1
         if replayed:

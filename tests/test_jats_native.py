@@ -698,3 +698,44 @@ def test_floats_take_their_label_from_the_label_element():
     table_xrefs = [(x.xref_type, x.xref_id, x.tier) for x in c.xrefs if x.xref_type != "figure"]
     assert table_xrefs == [("table", 2, "label"), ("table", 1, "label")]
     assert [(x.xref_id, x.tier) for x in c.xrefs if x.xref_type == "figure"] == [(1, "label")]
+
+
+def test_jats_sentences_are_not_ocr_text_and_keep_their_prose():
+    """Late cleanup assumed OCR input and fused "a 2 x 2 design" into "a2x2"
+    and dropped the underscores from ``age_group`` and email addresses."""
+    prose = "Participants completed a 2 x 2 x 3 design; age_group was coded 1 2 3."
+    xml = (
+        b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+        b"<article-title>T</article-title></title-group></article-meta></front>"
+        b"<body><sec><title>Method</title><p>" + prose.encode() + b"</p></sec></body>"
+        b"<back><fn-group><fn><p>Contact john_smith@uni.edu.</p></fn></fn-group></back>"
+        b"</article>"
+    )
+    contents = _segment(_parse(xml))
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert prose in texts
+    assert any("john_smith@uni.edu" in text for text in texts)
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def test_jats_captions_are_not_ocr_text():
+    """Captions are document text too: the late cleanup's spaced-run collapse
+    turned "items 1 2 3" into "items 123"."""
+    xml = (
+        b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+        b"<article-title>T</article-title></title-group></article-meta></front>"
+        b"<body><sec><title>Results</title><p>Body text.</p>"
+        b"<table-wrap><label>Table 1</label><caption><p>Items 1 2 3 by age_group.</p></caption>"
+        b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>"
+        b"<fig><label>Figure 1</label><caption><p>Scores on items 1 2 3 by age_group.</p>"
+        b"</caption><graphic/></fig></sec></body></article>"
+    )
+    contents = _segment(_parse(xml))
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert "Table 1 Items 1 2 3 by age_group." in texts
+    assert "Figure 1 Scores on items 1 2 3 by age_group." in texts
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)

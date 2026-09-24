@@ -294,13 +294,15 @@ class JatsParser:
         )
 
     def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:
-        """Build a sentence — no provenance/region_meta side-channels (like DOCX)."""
+        """Build a sentence — no provenance/region_meta side-channels, never OCR text
+        (like DOCX)."""
         return PaperSentence(
             text_id=text_id,
             text=text,
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
         )
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
@@ -345,6 +347,7 @@ class JatsParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -372,6 +375,7 @@ class JatsParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -398,6 +402,7 @@ class JatsParser:
                     section_id=footnote_section_id,
                     paragraph_id=self._paragraph_counter,
                     page_number=None,
+                    from_ocr=False,
                 )
             )
             self._sentence_counter += 1

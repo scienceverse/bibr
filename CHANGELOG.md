@@ -213,6 +213,23 @@ released.
 
 ### Fixed
 
+- Text from DOCX, JATS, HTML, ePub and the PDF text layer no longer goes
+  through the late clean-up meant for OCR output. That clean-up ran on every
+  sentence of every input. It fused "a 2 x 2 x 3 design" into "a2x2x3" and
+  "Items 1 2 3" into "Items 123". It deleted the underscore from identifiers,
+  file names and email addresses (`age_group`, `NM_022770`, `RRID:SCR_003070`,
+  `john_smith@uni.edu`), and it turned `10^6` into `106`. It also read two
+  literal dollar signs as a math span and deleted them along with the
+  underscores between (`df$age_group`, "US$ 60 to US$ 1,419", `$SAMPLE_R1`).
+  Each sentence now records whether any of its text came from OCR, and only
+  OCR text gets those repairs. In document text only a tightly delimited
+  `$…$`, the way DOCX writes its inline equations, is still unwrapped and
+  flattened; two literal dollars that happen to fit that shape still are. In
+  OCR text, `_x` and `^x` are now flattened only inside `$…$` and `\(…\)`
+  math, email addresses are protected like URLs, and "2 x 2" and "2 × 2" are
+  no longer fused. The PDF text layer sometimes extracts a superscript or
+  subscript as a separate token ("R 2 ,", "r 2 ¼"). The old clean-up fused
+  those by accident; they are now kept as extracted.
 - The per-region OCR clean-up no longer touches the PDF text layer, and it no
   longer damages formulas and numbers. On text-layer regions it split "U.S."
   into "U. S." and "e.g." into "e. g.", and it broke a DOI that opens a line

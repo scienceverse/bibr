@@ -328,6 +328,30 @@ def test_html_figcaption_label_resolves_mentions():
     ]
 
 
+def test_html_sentences_are_not_ocr_text_and_keep_their_prose():
+    """Late cleanup assumed OCR input and fused "a 2 x 2 design" into "a2x2"
+    and dropped the underscores from ``age_group`` and email addresses."""
+    prose = [
+        "Participants completed a 2 x 2 x 3 mixed design.",
+        "Items 1 2 3 and 4 were reverse scored; age_group was coded.",
+        "Data are available from john_smith@uni.edu on request.",
+    ]
+    html = (
+        "<html><body><article><h2>Method</h2><p>" + " ".join(prose) + "</p></article></body></html>"
+    ).encode()
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = parser._contents
+    parser.apply_segmentation(
+        contents, [list(prose) for e in parser.assembler.entries if e.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+
+    contents.finalize_text()
+    assert [s.text for s in contents.sentences] == prose
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
 def test_inline_markup_stays_attached_to_its_word():
     """``get_text(" ")`` put a space around every element: "H 2 S", "m 6 A",
     "( Figure 1 )". Only block-level elements separate words."""
@@ -367,3 +391,24 @@ def test_deeply_nested_legacy_markup_still_parses(body):
     assert texts
     assert texts[0].startswith(("w0 w1 ", "para 0."))
 
+
+def test_html_captions_are_not_ocr_text():
+    """Captions are document text too: the late cleanup's spaced-run collapse
+    turned "items 1 2 3" into "items 123"."""
+    figure_caption = "Figure 1. Scores on items 1 2 3 by age_group."
+    table_caption = "Table 1. Items 1 2 3 by age_group."
+    html = (
+        "<html><body><article><h2>Results</h2><p>Body text.</p>"
+        f'<figure><img src="a.png"><figcaption>{figure_caption}</figcaption></figure>'
+        f"<table><caption>{table_caption}</caption><tr><th>A</th></tr><tr><td>1</td></tr>"
+        "</table></article></body></html>"
+    ).encode()
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert figure_caption in texts
+    assert table_caption in texts
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)

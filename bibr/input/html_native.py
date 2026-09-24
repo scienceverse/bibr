@@ -364,6 +364,7 @@ class HtmlParser:
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
         )
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
@@ -428,6 +429,7 @@ class HtmlParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -455,6 +457,7 @@ class HtmlParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1

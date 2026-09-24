@@ -376,7 +376,8 @@ class DocxParser:
         text_id: int,
         paragraph_id: int,
     ) -> PaperSentence:
-        """Build a DOCX sentence — no provenance/region_meta side-channels.
+        """Build a DOCX sentence — no provenance/region_meta side-channels, and
+        never OCR text.
 
         Formula entries are intentionally left with ``is_display_formula`` at
         its default of ``False`` (the historical DOCX behaviour).
@@ -387,6 +388,7 @@ class DocxParser:
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
         )
 
     def apply_segmentation(
@@ -476,6 +478,7 @@ class DocxParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -504,6 +507,7 @@ class DocxParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -540,6 +544,7 @@ class DocxParser:
                     section_id=footnote_section_id,
                     paragraph_id=self._paragraph_counter,
                     page_number=None,
+                    from_ocr=False,
                 )
             )
             self._sentence_counter += 1

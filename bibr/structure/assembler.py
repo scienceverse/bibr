@@ -63,6 +63,9 @@ class DeferredText:
     # paragraph was joined across a page break; a single-page entry leaves it
     # empty and is described entirely by :attr:`page_number`.
     page_spans: list[tuple[int, int]] = field(default_factory=list)
+    # False only when no OCR output contributed to :attr:`text`; copied onto
+    # every sentence split from it (``PaperSentence.from_ocr``).
+    from_ocr: bool = True
 
     def page_for_offset(self, offset: int) -> int | None:
         """Page on which the text at ``offset`` was printed.
@@ -110,6 +113,7 @@ class DocumentAssembler:
         provenance: list[Provenance] | None = None,
         region_meta: dict | None = None,
         page_spans: list[tuple[int, int]] | None = None,
+        from_ocr: bool = True,
     ) -> int:
         """Append a deferred entry and return its index in the buffer."""
         normalized = normalize_unicode(text)
@@ -130,6 +134,7 @@ class DocumentAssembler:
                 provenance=list(provenance) if provenance else [],
                 region_meta=region_meta,
                 page_spans=list(page_spans) if page_spans else [],
+                from_ocr=from_ocr,
             )
         )
         return len(self.entries) - 1

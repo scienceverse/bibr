@@ -518,6 +518,11 @@ class PaperSentence:
     # ``(page, index)``.
     # None for DOCX-native input or when font metadata was not extracted.
     region_meta: dict | None = None
+    # Whether any of the text may come from OCR. ``finalize_text`` repairs OCR
+    # artifacts only there. Native parsers (DOCX, JATS, HTML, ePub) and PDF
+    # paragraphs built only from the embedded text layer set False; unknown
+    # provenance keeps the default, so it still gets the OCR repairs.
+    from_ocr: bool = True
 
 
 @dataclass
@@ -789,6 +794,8 @@ class PaperContents:
         commands (``^{}``, ``\\alpha``, etc.) that were intentionally
         preserved during parsing so that citation linking, equation
         extraction, and xref detection could operate on the raw patterns.
+        Outside ``$...$`` spans only sentences with OCR text are cleaned
+        (``PaperSentence.from_ocr``; see ``clean_text_content_late``).
 
         Display-formula sentences are skipped — their LaTeX content is
         the actual data and should not be cleaned.
@@ -800,7 +807,7 @@ class PaperContents:
         """
         for sent in self.sentences:
             if not sent.is_display_formula:
-                sent.text = clean_text_content_late(sent.text)
+                sent.text = clean_text_content_late(sent.text, from_ocr=sent.from_ocr)
         self.invalidate_text_caches()
 
     @cached_property
