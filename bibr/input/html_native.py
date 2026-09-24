@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
 from io import StringIO
 from typing import Any
 
 import pandas as pd
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
@@ -59,6 +60,71 @@ _CONTAINER_TAGS = {
     "details",
 }
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+# Elements a browser lays out inline, MathML presentation markup included:
+# their text continues the word around them. Every other element is a word
+# boundary.
+_INLINE_TAGS = frozenset(
+    {
+        "a",
+        "abbr",
+        "acronym",
+        "b",
+        "bdi",
+        "bdo",
+        "big",
+        "cite",
+        "code",
+        "data",
+        "del",
+        "dfn",
+        "em",
+        "font",
+        "i",
+        "ins",
+        "kbd",
+        "label",
+        "mark",
+        "q",
+        "s",
+        "samp",
+        "small",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "sup",
+        "time",
+        "tt",
+        "u",
+        "var",
+        "wbr",
+        "math",
+        "menclose",
+        "mfenced",
+        "mfrac",
+        "mi",
+        "mmultiscripts",
+        "mn",
+        "mo",
+        "mover",
+        "mpadded",
+        "mphantom",
+        "mprescripts",
+        "mroot",
+        "mrow",
+        "ms",
+        "mspace",
+        "msqrt",
+        "mstyle",
+        "msub",
+        "msubsup",
+        "msup",
+        "mtext",
+        "munder",
+        "munderover",
+        "semantics",
+    }
+)
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
 # above any real article/JATS/EPUB spine document, below what makes parsing a
 # DoS. Kept below the serve upload cap so it fails fast on the parse path.
@@ -71,10 +137,49 @@ def _tag_name(tag: Any) -> str:
     return (getattr(tag, "name", "") or "").lower()
 
 
+def _flatten(tag: Tag) -> str:
+    """Concatenate *tag*'s text the way a browser lays it out.
+
+    ``get_text(" ")`` put a space around every element, so ``H<sub>2</sub>O``
+    read "H 2 O", ``m<sup>6</sup>A`` "m 6 A" and a linked citation
+    "( Figure 1 )". Inline elements now join their neighbours, as they do in
+    the JATS parser; any other element still separates words. The strings
+    kept are the ones ``get_text`` keeps (no comments).
+
+    The walk keeps its own stack: html5lib does not bound nesting depth, and
+    legacy markup such as unclosed ``<font>`` or ``<span>`` tags nests every
+    later element one level deeper, past Python's recursion limit.
+    """
+    parts: list[str] = []
+
+    def boundary() -> None:
+        if parts and not parts[-1][-1:].isspace():
+            parts.append(" ")
+
+    # One frame per open element: its remaining children, and whether the
+    # element separates words (a boundary goes in on entry and on exit).
+    stack: list[tuple[Iterator[Any], bool]] = [(iter(tag.children), False)]
+    while stack:
+        children, separates = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            if separates:
+                boundary()
+        elif isinstance(child, Tag):
+            separates = _tag_name(child) not in _INLINE_TAGS
+            if separates:
+                boundary()
+            stack.append((iter(child.children), separates))
+        elif type(child) in (NavigableString, CData):
+            parts.append(str(child))
+    return "".join(parts)
+
+
 def _text(tag: Any) -> str:
     if tag is None:
         return ""
-    text = collapse_ws(tag.get_text(" ", strip=True)).strip()
+    text = collapse_ws(_flatten(tag)).strip()
     return re.sub(r"\s+([,.;:!?])", r"\1", text)
 
 

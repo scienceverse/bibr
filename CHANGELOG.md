@@ -227,6 +227,14 @@ released.
   the region. A formula region that holds two formulas ("\(a\) + \(b\)") keeps
   its delimiters, and one wrapped in single dollars is no longer nested inside
   `$$`.
+- HTML and ePub text keeps inline markup attached to its word. The parser put a
+  space around every element, so `H<sub>2</sub>O` read "H 2 O",
+  `m<sup>6</sup>A` "m 6 A" and a linked citation "( Figure 1 )". Now only
+  block-level elements separate words, as in the JATS parser; like there, an
+  exponent joins its number (`10<sup>6</sup>` reads "106"). eLife publishes
+  each of its 984 test articles as both HTML and JATS. The share of HTML
+  sentences that also appear word for word in the same article's JATS rose
+  from about 24% to 41%.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

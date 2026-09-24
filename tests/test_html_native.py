@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import zipfile
 
+import pytest
+
 from bibr.input.epub_native import EpubParser
 from bibr.input.html_native import HtmlParser
 from bibr.paper_contents import CanonicalSection
@@ -324,3 +326,44 @@ def test_html_figcaption_label_resolves_mentions():
         ("figure", 2, "label"),
         ("figure", 1, "label"),
     ]
+
+
+def test_inline_markup_stays_attached_to_its_word():
+    """``get_text(" ")`` put a space around every element: "H 2 S", "m 6 A",
+    "( Figure 1 )". Only block-level elements separate words."""
+    html = (
+        b"<html><body><article><h2>Method</h2>"
+        b"<p>Dissolved H<sub>2</sub>S and m<sup>6</sup>A (<a href='#f1'>Figure 1</a>) in "
+        b"<i>Mus musculus</i><!-- note --> cells, by the <i>p</i>-value.<br>Next line.</p>"
+        b"<ul><li>One</li><li>Two</li></ul></article></body></html>"
+    )
+    parser = HtmlParser(html)
+    parser.parse()
+
+    assert [entry.text for entry in parser.assembler.entries] == [
+        "Dissolved H2S and m6A (Figure 1) in Mus musculus cells, by the p-value. Next line.",
+        "One",
+        "Two",
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<p>" + "".join(f"<span>w{i} " for i in range(2000)) + "</p>",
+        "".join(f"<p><font size={i % 7 + 1}>para {i}." for i in range(2000)),
+    ],
+    ids=["unclosed-spans", "font-soup"],
+)
+def test_deeply_nested_legacy_markup_still_parses(body):
+    """html5lib nests every element after an unclosed ``<span>`` or
+    ``<font>`` one level deeper; a recursive walk hit the recursion limit and
+    failed the whole document."""
+    html = ("<html><body><article><h2>Method</h2>" + body + "</article></body></html>").encode()
+    parser = HtmlParser(html)
+    parser.parse()
+
+    texts = [entry.text for entry in parser.assembler.entries]
+    assert texts
+    assert texts[0].startswith(("w0 w1 ", "para 0."))
+
