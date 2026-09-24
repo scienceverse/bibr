@@ -1,11 +1,14 @@
 """Tests for bibr.structure.citation_matcher — reference-anchored Tier 2."""
 
+import pytest
+
 from bibr.models import PaperReference
 from bibr.paper_contents import PaperSentence
 from bibr.structure.citation_matcher import (
     _family_keys_for,
     detect_author_year_xrefs,
     extract_families,
+    match_with_candidates,
 )
 
 
@@ -184,6 +187,47 @@ class TestYearSuffix:
         out = detect_author_year_xrefs(sents, refs)
         assert len(out) == 1
         assert out[0].xref_id == 2
+
+    @staticmethod
+    def _match(text, refs):
+        xrefs, ambiguous, _ = match_with_candidates([_sent(0, text)], refs)
+        return [x.xref_id for x in xrefs], [a.candidate_bib_ids for a in ambiguous]
+
+    @pytest.mark.parametrize(("cite", "bib_id"), [("2020a", 1), ("2020b", 2)])
+    def test_suffixed_citation_links_its_own_entry(self, cite, bib_id):
+        refs = [
+            _ref(1, "Smith, J., & Jones, K.", year_suffix="a"),
+            _ref(2, "Smith, J., & Jones, K.", year_suffix="b"),
+        ]
+        assert self._match(f"As shown (Smith & Jones, {cite}).", refs) == ([bib_id], [])
+        assert self._match(f"As shown (Smith, {cite}).", refs) == ([bib_id], [])
+
+    def test_suffixless_citation_links_a_lone_suffixed_entry(self):
+        refs = [_ref(1, "Smith, J.", year_suffix="a"), _ref(2, "Jones, K.")]
+        assert self._match("As shown (Smith, 2020).", refs) == ([1], [])
+
+    @pytest.mark.parametrize("text", ["(Smith, 2020)", "(Smith & Jones, 2020)"])
+    def test_suffixless_citation_leaves_a_and_b_ambiguous(self, text):
+        refs = [
+            _ref(1, "Smith, J., & Jones, K.", year_suffix="a"),
+            _ref(2, "Smith, J., & Jones, K.", year_suffix="b"),
+        ]
+        assert self._match(f"As shown {text}.", refs) == ([], [[1, 2]])
+
+    def test_suffixed_citation_links_an_entry_without_a_suffix(self):
+        refs = [_ref(1, "Smith, J."), _ref(2, "Jones, K.")]
+        assert self._match("As shown (Smith, 2020b).", refs) == ([1], [])
+
+    def test_suffixed_citation_falls_back_when_no_entry_of_its_authors_has_it(self):
+        # Only another author's entry carries "a"; the author's own entry was
+        # printed (or parsed) with a different letter.
+        refs = [_ref(1, "Smith, J.", year_suffix="a"), _ref(2, "Jones, K.", year_suffix="b")]
+        assert self._match("As shown (Jones, 2020a).", refs) == ([2], [])
+
+    def test_matching_ignores_suffixes_when_no_entry_has_one(self):
+        refs = [_ref(1, "Smith, J."), _ref(2, "Smith, J.")]
+        assert self._match("As shown (Smith, 2020).", refs) == ([], [[1, 2]])
+        assert self._match("As shown (Smith, 2020a).", refs) == ([], [[1, 2]])
 
 
 class TestMultiYearCite:

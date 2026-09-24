@@ -2360,6 +2360,7 @@ class ReferenceExtractor:
                     "authors": authors,
                     "container": fields.get("container"),
                     "year": fields.get("year"),
+                    "year_suffix": fields.get("year_suffix"),
                     "volume": volume,
                     "issue": issue,
                     "first_page": fields.get("first_page"),

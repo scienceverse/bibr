@@ -18,7 +18,7 @@ from bibr.extract.ref_extractor import (
     _is_degenerate_ref_failure,
     _normalize_vol_issue,
 )
-from bibr.ner.decode import _FIELD_TO_PAPER_REF
+from bibr.ner.decode import _FIELD_TO_PAPER_REF, map_fields_to_paper_ref
 from bibr.paper_contents import PaperContents
 from bibr.processing_warnings import WarningCode
 from bibr.schemas import PaperReference, PaperReferenceLLM
@@ -398,6 +398,7 @@ class TestNerPathKeepsNerOnlyFields:
             name: clean.get(name, f"{name} value") for name in set(_FIELD_TO_PAPER_REF.values())
         }
         fields["year"] = 2020
+        fields["year_suffix"] = "a"
         with self._parser_returning(fields):
             (ref,) = _extractor()._parse_references_ner([REFS[0]])
 
@@ -421,6 +422,37 @@ class TestNerPathKeepsNerOnlyFields:
         assert len(refs) == len(REFS)
         for ref in refs:
             assert {name: getattr(ref, name) for name in self.NER_ONLY} == self.NER_ONLY
+
+
+class TestNerPathKeepsYearSuffix:
+    """The "a" of an author-year "2020a" reaches the reference on the NER path.
+
+    ``year_suffix`` is what tells "(Smith, 2020a)" and "(Smith, 2020b)" apart
+    when in-text citations are linked to references.
+    """
+
+    @staticmethod
+    def _parse(year: str) -> PaperReference:
+        decoded = map_fields_to_paper_ref({"TITLE": "A study", "AUTHOR": "Smith, J.", "YEAR": year})
+
+        class _Parser:
+            @staticmethod
+            def parse_batch(segments):
+                return [dict(decoded) for _ in segments]
+
+        segment = f"Smith, J. ({year}). A study. Journal of Things, 55(7), 1-10."
+        with patch("bibr.extract.ref_extractor._get_ner_parser", return_value=_Parser()):
+            (ref,) = _extractor()._parse_references_ner([segment])
+        return ref
+
+    def test_the_letter_after_the_year_is_kept(self):
+        ref = self._parse("2020a")
+        assert (ref.year, ref.year_suffix) == (2020, "a")
+
+    @pytest.mark.parametrize("year", ["2020", "2020-2021", "2020ab"])
+    def test_no_letter_no_suffix(self, year):
+        ref = self._parse(year)
+        assert (ref.year, ref.year_suffix) == (2020, None)
 
 
 class TestStubRefsAreNotCountedAsCovered:

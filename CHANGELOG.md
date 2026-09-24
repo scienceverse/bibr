@@ -290,6 +290,20 @@ released.
 - A PDF caption the layout model tags as a figure title that opens with
   "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
   found no table and fell back into the body text.
+- References parsed by the default NER parser and JATS `<element-citation>`
+  references now fill `bib[].year_suffix`, the letter that distinguishes
+  same-author, same-year works ("2020a", "2020b"); it was always `null` on these
+  paths. In-text citations such as "(Smith, 2020b)" can now link to the matching
+  entry instead of being reported as ambiguous. Only a single lowercase letter
+  printed directly after a four-digit year counts; year ranges ("2020-2021"),
+  "n.d.", "in press", decades ("1990s") and years followed by a space or two
+  letters keep a `null` suffix, and the parsed `year` is unchanged.
+- In-text citation linking falls back to matching on the year alone when
+  matching on the year and its suffix finds no unique reference. A citation
+  printed without the letter, such as "(Smith, 2020)", now links to a lone
+  "2020a" entry, and "2020a" and "2020b" entries are reported as an ambiguous
+  shortlist. Previously such a citation was matched only against references
+  without a suffix, so it did not link when the LLM parser had recorded one.
 
 ### Added
 

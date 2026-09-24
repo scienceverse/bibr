@@ -211,6 +211,36 @@ YEARISH_RE = re.compile(
 )
 
 
+# Author-year disambiguation letter printed directly after a four-digit year
+# ("2020a", "(2020b)."), which CSL calls ``year-suffix``. One lowercase Latin
+# letter, the form the in-text matcher (``citation_matcher._YEAR_RE``) reads
+# from "(Smith, 2020a)". Multi-letter suffixes, which styles print only after
+# "z" is used up, are not recognised. Latin digits only.
+_YEAR_SUFFIX_RE = re.compile(r"[0-9]{3}([0-9])([a-z])")
+# Bracketing and trailing punctuation a year field is printed with.
+_YEAR_FIELD_TRIM = " \t\n()[].,;:"
+
+
+def parse_year_suffix(value: str | None) -> str | None:
+    """Return the disambiguation letter of a year field such as ``"(2020a)."``.
+
+    The whole field, once surrounding brackets and punctuation are trimmed, must
+    be a four-digit year followed by exactly one lowercase letter. Anything else
+    yields ``None``: a bare year, a range ("2020-2021", "1999/2000"), a spaced
+    or doubled letter ("2020 a", "2020ab"), "n.d." and "in press", non-Latin
+    digits, and a decade ("1990s").
+    """
+    if not value:
+        return None
+    match = _YEAR_SUFFIX_RE.fullmatch(value.strip(_YEAR_FIELD_TRIM))
+    if match is None:
+        return None
+    last_digit, letter = match.groups()
+    if letter == "s" and last_digit == "0":  # a decade, "1990s"
+        return None
+    return letter
+
+
 # Apostrophe variants: straight (U+0027), left-curly (U+2018), right-curly
 # (U+2019). Built via chr() — mirroring citation_matcher._APOS — so an editor
 # can't silently normalize the curly glyphs to a plain ASCII apostrophe.

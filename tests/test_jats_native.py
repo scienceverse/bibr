@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from bibr.input.jats_native import JatsParser
 from bibr.paper_contents import CanonicalSection
 
@@ -304,6 +306,46 @@ class TestReferences:
         refs = _parse(xml)._contents.native_references
         assert refs is not None and len(refs) == 1
         assert refs[0].bib_type == "thesis"
+
+    @staticmethod
+    def _year_fields(year_element: str) -> tuple[int | None, str | None]:
+        xml = f"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>T</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Body.</p></sec></body>
+  <back><ref-list>
+    <ref><element-citation publication-type="journal">
+      <person-group person-group-type="author">
+        <name><surname>Smith</surname><given-names>J</given-names></name></person-group>
+      {year_element}<article-title>A study</article-title><source>Jrnl</source>
+    </element-citation></ref>
+  </ref-list></back>
+</article>""".encode()
+        refs = _parse(xml)._contents.native_references
+        assert refs is not None and len(refs) == 1
+        return refs[0].year, refs[0].year_suffix
+
+    @pytest.mark.parametrize(
+        ("year_element", "expected"),
+        [
+            ("<year>2020a</year>", (2020, "a")),
+            ("<year>2020b.</year>", (2020, "b")),
+            ("<year>(2020a)</year>", (2020, "a")),
+            ("<year>2020</year>", (2020, None)),
+            ("<year>2020-2021</year>", (2020, None)),
+            ("<year>1999/2000</year>", (1999, None)),
+            ("<year>2020 a</year>", (2020, None)),
+            ("<year>2020ab</year>", (2020, None)),
+            ("<year>\u0662\u0660\u0662\u0660a</year>", (2020, None)),
+            ("<year>in press</year>", (None, None)),
+            ("<year>n.d.</year>", (None, None)),
+            ("", (None, None)),
+        ],
+    )
+    def test_year_disambiguation_letter_becomes_year_suffix(self, year_element, expected):
+        assert self._year_fields(year_element) == expected
 
     def test_references_section_created(self):
         c = _parse(FULL_JATS)._contents
