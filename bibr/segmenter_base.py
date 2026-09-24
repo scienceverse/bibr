@@ -383,6 +383,7 @@ class BaseSentenceSegmenter:
             cuda_provider_available,
             get_ort_providers,
             session_device,
+            shrink_arena_after_runs,
         )
 
         self._settings = settings if settings is not None else snapshot_settings()
@@ -460,6 +461,9 @@ class BaseSentenceSegmenter:
         # start and runs on CPU.
         session = self.model.model.ort_session
         device = session_device(session, providers, model_name="wtpsplit-sat")
+        # SaT also runs the session itself, so wrap it in place: on CUDA, each
+        # run then frees the arena memory it no longer uses.
+        self.model.model.ort_session = shrink_arena_after_runs(session)
         logger.info(
             "SentenceSegmenter ready (source=%s, threshold=%s, threshold_source=%s, "
             "windowing=%s/%s, windowing_source=%s, manifest_revision=%s, providers=%s)",

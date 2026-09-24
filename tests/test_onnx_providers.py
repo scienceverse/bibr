@@ -213,3 +213,69 @@ def test_create_session_on_cpu_request_does_not_warn(caplog):
 
     assert device == "cpu"
     assert "requested CUDA" not in caplog.text
+
+
+def _open_cuda_session(device_id: str = "0"):
+    mock_ort = _cuda_build_ort()
+    opened = mock_ort.InferenceSession.return_value
+    opened.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    opened.get_provider_options.return_value = {
+        "CUDAExecutionProvider": {"device_id": device_id},
+        "CPUExecutionProvider": {},
+    }
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        session, device = onnx_providers.create_session("model.onnx", model_name="ner")
+    return mock_ort, opened, session, device
+
+
+def test_cuda_session_runs_free_unused_arena_memory():
+    """ORT's CUDA arena keeps every block it allocates; with input shapes that
+    change from call to call it grows until the GPU is full. Every run of a CUDA
+    session ends with arena shrinkage, on the session's own device."""
+    mock_ort, opened, session, device = _open_cuda_session(device_id="1")
+
+    session.run(["emissions"], {"input_ids": 1})
+
+    assert device == "cuda"
+    mock_ort.RunOptions.return_value.add_run_config_entry.assert_called_once_with(
+        "memory.enable_memory_arena_shrinkage", "gpu:1"
+    )
+    opened.run.assert_called_once_with(
+        ["emissions"], {"input_ids": 1}, mock_ort.RunOptions.return_value
+    )
+
+
+def test_cuda_session_wrapper_passes_everything_else_through():
+    _, opened, session, _ = _open_cuda_session()
+
+    assert session.get_inputs() is opened.get_inputs.return_value
+    assert session.get_providers()[0] == "CUDAExecutionProvider"
+
+
+def test_cpu_session_is_returned_as_opened():
+    """Shrinkage is only asked for a CUDA arena; ORT rejects it for a device the
+    session has no arena on."""
+    mock_ort = _cuda_build_ort()
+    opened = mock_ort.InferenceSession.return_value
+    opened.get_providers.return_value = ["CPUExecutionProvider"]
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        session, device = onnx_providers.create_session("model.onnx", device="cpu")
+
+    assert device == "cpu"
+    assert session is opened
+    mock_ort.RunOptions.assert_not_called()
+
+
+def test_arena_shrinkage_run_option_is_accepted_by_onnxruntime():
+    """The config key and value format are onnxruntime's own; a real RunOptions takes them."""
+    ort = pytest.importorskip("onnxruntime")
+    opened = MagicMock()
+    opened.get_providers.return_value = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    opened.get_provider_options.return_value = {"CUDAExecutionProvider": {"device_id": "0"}}
+
+    session = onnx_providers.shrink_arena_after_runs(opened)
+    session.run(None, {})
+
+    run_options = opened.run.call_args.args[2]
+    assert isinstance(run_options, ort.RunOptions)
+    assert run_options.get_run_config_entry("memory.enable_memory_arena_shrinkage") == "gpu:0"
