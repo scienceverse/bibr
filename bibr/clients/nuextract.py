@@ -30,6 +30,7 @@ from bibr.config import GlobalSettings, snapshot_settings
 __all__ = [
     "NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256",
     "NUEXTRACT3_FP8_EXPECTED_REVISION",
+    "NUEXTRACT3_FP8_MODEL_ID",
     "NativeCompletionEnvelope",
     "NativeSchemaContract",
     "NativeInvalidCategory",
@@ -45,6 +46,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# The qualified checkpoint. The expected revision and chat-template sha below
+# are this repo's; the bf16, GGUF and MLX repos have their own histories.
+NUEXTRACT3_FP8_MODEL_ID = "numind/NuExtract3-FP8"
 NUEXTRACT3_FP8_EXPECTED_REVISION = "d88964bad5ba47333cb721b351e19045ee6a6fc0"
 NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 = (
     "31e44d28615d268efdc3dcf59cb59bd2d51714d517455fbad97518d351b84119"
