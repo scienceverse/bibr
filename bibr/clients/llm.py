@@ -352,6 +352,18 @@ def _failure_chain(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+def http_status_in_chain(exc: BaseException) -> int | None:
+    """The first HTTP status carried by *exc* or an error it wraps.
+
+    Instructor wraps a provider SDK's error in its own exception, which has
+    no status; the status is on the error it wraps.
+    """
+    return next(
+        (status for error in _failure_chain(exc) if (status := _extract_http_status(error))),
+        None,
+    )
+
+
 def _exc_names(exc: BaseException) -> set[str]:
     return {klass.__name__ for klass in type(exc).__mro__}
 
@@ -392,9 +404,7 @@ def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
         return LlmUnreachableError
     if any(_exc_names(error) & _TIMEOUT_EXC_NAMES for error in chain):
         return LlmTimeoutError
-    status = next(
-        (code for error in chain if (code := _extract_http_status(error)) is not None), None
-    )
+    status = http_status_in_chain(exc)
     if status == 408:
         return LlmTimeoutError
     if status is not None and (status == 429 or status >= 500):

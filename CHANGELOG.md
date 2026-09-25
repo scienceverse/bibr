@@ -328,6 +328,12 @@ released.
   validation re-asks are enabled (cloud providers by default; a custom
   OpenAI-compatible endpoint makes one attempt), and otherwise an
   `llm_invalid_output` failure.
+- Cloud OCR (`--ocr gemini|openai|anthropic`) now sees the HTTP status of a
+  failed call. Instructor wraps the provider's error in its own exception,
+  which carries no status, so a bad key (401/403/404) returned blank regions
+  until the file failed as mostly-failed OCR instead of raising at once, and a
+  429 or 5xx was never retried by bibr. The status is now read from the
+  wrapped error, as the LLM client's failure classification does.
 - One network blip while loading the default front-role classifier no longer
   turns it off for the rest of the process. The loader cached any load failure
   as "unavailable" and the resource manager pinned it, so after a Hub timeout a
