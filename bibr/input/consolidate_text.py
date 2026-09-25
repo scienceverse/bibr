@@ -655,6 +655,9 @@ _LATEX_SYMBOL_MAP: dict[str, str] = {
     r"\cdot": "\u00b7",
     r"\leq": "\u2264",
     r"\geq": "\u2265",
+    # Matched longest first, so neither prints as "≤slant"
+    r"\leqslant": "\u2264",
+    r"\geqslant": "\u2265",
     r"\neq": "\u2260",
     r"\approx": "\u2248",
     r"\sim": "~",

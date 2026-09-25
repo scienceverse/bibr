@@ -727,13 +727,68 @@ class TestCompleteValues:
             ("p", "", "=", ".05")
         ]
 
-    def test_count_before_a_slash_is_printed_whole(self):
-        # "12 of 20 cells" and "150 WT and 123 KO": each n is a printed count
+    def test_count_before_a_slash_is_kept(self):
+        # "12 of 20 cells" and "150 WT and 123 KO": the count is kept, cut at
+        # the slash, rather than dropped as a fraction
         assert _components(_extract("It fired (C; n = 12/20 cells).")) == [("n", "", "=", "12")]
         assert _components(_extract("It fell (p = .01; n = 150/123 WT/KO).")) == [
             ("p", "", "=", ".01"),
             ("n", "", "=", "150"),
         ]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("(OR 1·45, 95% CI 1·10–1·91; p=0·008)", [("p", "", "=", "0·008")]),
+            ("Risk rose (OR = 3·4; CI95 1·4–8·2; P 0·007).", [("OR", "", "=", "3·4")]),
+            (
+                "It held (cotyledons: r = 0·86, P < 10−5; leaves: r = 0·78, P < 10−4).",
+                [
+                    ("r", "", "=", "0·86"),
+                    ("r", "", "=", "0·78"),
+                    ("P", "", "<", "10−5"),
+                    ("P", "", "<", "10−4"),
+                ],
+            ),
+            ("It held (r = 0·10–0·20).", [("r", "", "=", "0·10–0·20")]),
+            ("It held, P < 0·001.", [("P", "", "<", "0·001")]),
+            # The dot multiplies a power of ten
+            ("It held (p = 6·10−6).", [("p", "", "=", "6·10−6")]),
+            ("It held (p = 6·10⁻⁶).", [("p", "", "=", "6·10⁻⁶")]),
+        ],
+    )
+    def test_mid_dot_decimals(self, text, expected):
+        # Lancet and Oxford journals print "0·008": it was cut to "p = 0"
+        assert _components(_extract(text)) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Age 0.21 −0.05 0.47 β = 0.21 −0.05 0.47 .12", ("β", "", "=", "0.21")),
+            ("It held (r = .45 −.12 .60).", ("r", "", "=", ".45")),
+            # An en dash is a range's, spaced or not
+            (
+                "Monkey RE: η = 5.1×10 −4 –9.2 × 10 −4 held.",
+                ("η", "", "=", "5.1×10 −4 –9.2 × 10 −4"),
+            ),
+        ],
+    )
+    def test_signed_number_after_a_space_is_not_a_range_end(self, text, expected):
+        # A table flattened to text prints an estimate and its negative bound
+        assert _components(_extract(text)) == [expected]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("It held (p<10 −10).", ("p", "", "<", "10 −10")),
+            ("It held (p = 3.10 −9).", ("p", "", "=", "3.10 −9")),
+            ("It held (P < 10− 3 compared to control).", ("P", "", "<", "10− 3")),
+            ("with expectation values of E = 10 −5.", ("E", "", "=", "10 −5")),
+        ],
+    )
+    def test_flattened_exponent_after_a_space(self, text, expected):
+        # eLife HTML and PDF text layers print 10⁻¹⁰ as "10 −10"
+        assert _components(_extract(text)) == [expected]
 
 
 class TestStatisticNames:
@@ -802,21 +857,103 @@ class TestStatisticNames:
     @pytest.mark.parametrize(
         ("text", "expected"),
         [
-            # A Holm-adjusted p, Spearman's r_s, membrane resistance R_m, d_z
+            # A Holm-adjusted p and membrane resistance R_m
             (
                 "(WT: 36.1 pA; n = 12; BACHD: 45.6 pA; n = 11; p h = 0.7399; Figure 2A)",
                 [("n", "", "=", "12"), ("n", "", "=", "11")],
             ),
-            ("(Spearman’s Rho r s = 0.42; p=0.1)", [("p", "", "=", "0.1")]),
             ("(R m = 2.04 Ωm 2, R a = 1.02 Ωm; n = 5)", [("n", "", "=", "5")]),
-            ("(d z = 0.5, p = .03)", [("p", "", "=", ".03")]),
-            ("Spearman’s Rho r s = 0.42, p=0.1.", [("p", "", "=", "0.1")]),
         ],
     )
     def test_spaced_subscript_is_not_a_statistic(self, text, expected):
         # An HTML or PDF text layer prints p_h as "p h": h alone is a
         # Kruskal-Wallis H to a consumer.
         assert _components(_extract(f"It held {text}")) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Spearman's r_s, Cohen's d_z and d_av
+            (
+                "(Spearman’s Rho r s = 0.42; p=0.1)",
+                [("r s", "", "=", "0.42"), ("p", "", "=", "0.1")],
+            ),
+            (
+                "Spearman’s Rho r s = 0.42, p=0.1.",
+                [("r s", "", "=", "0.42"), ("p", "", "=", "0.1")],
+            ),
+            ("(rs = 0.56, P < .0001)", [("rs", "", "=", "0.56"), ("P", "", "<", ".0001")]),
+            ("(d z = 0.5, p = .03)", [("d z", "", "=", "0.5"), ("p", "", "=", ".03")]),
+            ("the effect was d av = 0.41.", [("d av", "", "=", "0.41")]),
+            ("the effect was Cohen’s d z = 0.41.", [("Cohen’s d z", "", "=", "0.41")]),
+            # A tight "dz" is an integral's differential as often
+            ("e^{-z^2} \\, dz = .29782.", []),
+            ("allele (rs1467568 = 3) used", []),
+        ],
+    )
+    def test_spaced_subscript_of_a_known_statistic_is_its_name(self, text, expected):
+        assert _components(_extract(f"It held {text}")) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Association was strong (OR = 1.2, P-value = 2.3 × 10−5).",
+                [("OR", "", "=", "1.2"), ("P-value", "", "=", "2.3 × 10−5")],
+            ),
+            (
+                "audit yield (82.2% vs. 33% on average, p-value = 3.8∙10−35) or",
+                [("p-value", "", "=", "3.8∙10−35")],
+            ),
+            (
+                "at the inpatient center (51% vs. 24%; p-value<0.001).",
+                [("p-value", "", "<", "0.001")],
+            ),
+            ("The overall p value = 0.043 held.", [("p value", "", "=", "0.043")]),
+            ("genes changing with a p -value <10 –5 were kept.", [("p -value", "", "<", "10 –5")]),
+            ("Differences with P‐values < 0.05 were significant.", [("P‐values", "", "<", "0.05")]),
+            ("The p-value-adjusted scores were used.", []),
+        ],
+    )
+    def test_p_value_by_its_full_name(self, text, expected):
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) <= 1
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "eggs (χ 2 = 148.9, df = 2, p < 0.001).",
+                [("χ 2", "", "=", "148.9"), ("p", "", "<", "0.001")],
+            ),
+            (
+                "by explanation condition (χ 2 (4) = 2.09, p = 0.72).",
+                [("χ 2", "4", "=", "2.09"), ("p", "", "=", "0.72")],
+            ),
+            # Its df parenthesis is no group of its own with a bare N
+            (
+                "It held, χ 2 (2, N = 150) = 9.87, p = .007.",
+                [("χ 2", "2, N = 150", "=", "9.87"), ("p", "", "=", ".007")],
+            ),
+            (
+                "vs 7%, 7/101; X 2 = 4.73, p=0.03).",
+                [("X 2", "", "=", "4.73"), ("p", "", "=", "0.03")],
+            ),
+            (
+                "The fit improved, Δχ 2 (1) = 5.2, p = .02.",
+                [("Δχ 2", "1", "=", "5.2"), ("p", "", "=", ".02")],
+            ),
+        ],
+    )
+    def test_spaced_chi_square(self, text, expected):
+        # PDF text layers and eLife HTML print χ² as "χ 2": the χ² was lost and
+        # its p exported alone.
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) == 1
 
     @pytest.mark.parametrize(
         ("text", "expected"),
@@ -937,6 +1074,26 @@ class TestSharedParentheses:
         eqs = _extract("It held (p = 0.85 in 1 mM TEA and p = 0.95 in 5 mM TEA).")
 
         assert _components(eqs) == [("p", "", "=", "0.85"), ("p", "", "=", "0.95")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Error bars (n = 3 analytical replicates and n = 4 experimental replicates)",
+                [("n", "", "=", "3"), ("n", "", "=", "4")],
+            ),
+            (
+                "Summary data (n = 6 for control and n = 7 for βARK-CT, ***p=0.00032).",
+                [("n", "", "=", "6"), ("n", "", "=", "7"), ("p", "", "=", "0.00032")],
+            ),
+        ],
+    )
+    def test_every_count_of_one_part_is_kept_in_order(self, text, expected):
+        # Read as a bare statistic, a second small count looked like "i = 1"
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
         assert len({eq.grp_id for eq in eqs}) == 1
 
     def test_repeated_value_is_not_merged(self):
@@ -1139,8 +1296,41 @@ class TestDuplicates:
         ],
     )
     def test_inline_latex_is_not_read_again(self, text, expected):
-        # The LaTeX pass skips a formula whose relation, or a statistic after
-        # it, another pass read; the broad pass skips the LaTeX pass's.
+        # The LaTeX pass reads only what another pass did not ("^{***}" holds
+        # no relation); the broad pass skips the LaTeX pass's.
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "It held ($\\chi^2(1) = 3.84, p = .05$).",
+                [("p", "", "=", ".05"), ("\\chi^2", "1", "=", "3.84")],
+            ),
+            (
+                "The effect was large ($\\eta_p^2 = .12, p = .03$).",
+                [("p", "", "=", ".03"), ("\\eta_p^2", "", "=", ".12")],
+            ),
+            (
+                "Evidence favoured H1, $BF_{10} = 12.3, p < .001$.",
+                [("BF_{10}", "", "=", "12.3"), ("p", "", "<", ".001")],
+            ),
+            (
+                "A main effect was found, $F(1, 40) = 5.2, p = .03, \\eta_p^2 = .12$.",
+                [("F", "1, 40", "=", "5.2"), ("p", "", "=", ".03"), ("\\eta_p^2", "", "=", ".12")],
+            ),
+            (
+                "It held ($p = .03, \\chi^2 = 3.84$).",
+                [("p", "", "=", ".03"), ("\\chi^2", "", "=", "3.84")],
+            ),
+        ],
+    )
+    def test_latex_statistic_sharing_a_formula_with_its_p(self, text, expected):
+        # The structured passes read the p; the LaTeX pass reads the rest of
+        # the formula rather than skipping it, and no pass reads \chi or \eta.
         eqs = _extract(text)
 
         assert _components(eqs) == expected
