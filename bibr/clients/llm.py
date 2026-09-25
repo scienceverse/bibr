@@ -429,7 +429,8 @@ def _bounded(text: str, limit: int = 160) -> str:
 
 
 def _failure_cause(error_class: type[LlmCallError], exc: BaseException) -> str:
-    """A bounded description of why the call failed, without model output.
+    """A bounded description of why the call failed, without model output
+    or the provider's error text.
 
     Validation errors quote the rejected values, so for invalid output only
     the error locations and types are kept.
@@ -457,10 +458,11 @@ def _failure_cause(error_class: type[LlmCallError], exc: BaseException) -> str:
         if _extract_http_status(error) is not None:
             root = error
             break
-    detail = str(root)
+    # Not the provider's error text: it can carry account details (an
+    # organization id, a masked key) into serve responses and exported
+    # warnings. The error class and status say what failed.
     status = _extract_http_status(root)
-    prefix = f"HTTP {status}: " if status is not None and str(status) not in detail else ""
-    return _bounded(f"{prefix}{type(root).__name__}: {detail}" if detail else type(root).__name__)
+    return f"{type(root).__name__}: HTTP {status}" if status is not None else type(root).__name__
 
 
 def llm_call_error(message: str, exc: BaseException) -> LlmCallError:

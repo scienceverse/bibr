@@ -247,8 +247,9 @@ released.
   (`LlmTruncatedError`, `LlmInvalidOutputError`, `LlmTimeoutError`,
   `LlmServiceError`, `LlmRejectedError`), still an `UpstreamServiceError`, with
   an `error_code` (`llm_truncated`, `llm_invalid_output`, `llm_timeout`,
-  `llm_failed`) and a bounded cause in the message; for invalid output it
-  names the error locations only, never the model's text. Serve answers a
+  `llm_failed`) and a bounded cause in the message: the error class and HTTP
+  status, never the provider's error text, and for invalid output the error
+  locations only, never the model's text. Serve answers a
   truncated or invalid response with 422 and its code, and keeps 502, now with
   the code, for the others. A post-parse failure caused by an LLM error
   records that code instead of `extraction_failed`. `LlmUnreachableError`, an

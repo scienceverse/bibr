@@ -131,8 +131,15 @@ def test_rewrapping_keeps_class_and_cause():
     outer = llm.llm_call_error("Failed to extract core metadata", inner)
 
     assert type(outer) is LlmTimeoutError
-    assert outer.cause == inner.cause
-    assert "timed out after 9s" in str(outer)
+    assert outer.cause == inner.cause == "TimeoutError"
+
+
+def test_service_cause_names_status_but_never_provider_text():
+    provider = _StatusError(429)
+    provider.args = ("Rate limit reached in organization org-SECRET on tokens per min",)
+    wrapped = llm.llm_call_error("Failed to extract authors", _retry_wrapping(provider))
+
+    assert str(wrapped) == "Error in LLM: Failed to extract authors (_StatusError: HTTP 429)"
 
 
 def test_typed_processing_error_keeps_its_own_code():
