@@ -364,8 +364,8 @@ released.
   through both, because the HTML reader also collects other lists under a
   references heading, such as page navigation.
 - The merged-reference splitter no longer cuts one reference in two at a
-  citation inside its title when the title opens right after the reference's
-  own year ("Brown, T. (2018). Beyond Kahneman and Tversky (1979): …"), or at
+  citation inside its title when the title opens right after that reference's
+  own date ("Brown, T. (2018). Beyond Kahneman and Tversky (1979): …"), or at
   an edition number that equals the next entry number in a numbered list
   ("1. Müller A. Lehrbuch. 2. Aufl. …", and likewise "udg.", "uppl.", "ed.",
   "wyd." and similar edition words).

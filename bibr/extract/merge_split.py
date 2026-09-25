@@ -190,13 +190,18 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
     Empty unless the string carries at least two parenthesized dates.
 
     A merge puts reference 1's title (and container) between its date and
-    reference 2's author lead. A lead that opens right after the previous date,
-    as in "Brown, T. (2018). Beyond Kahneman and Tversky (1979): ...", is the
-    start of a title that cites another work, so it is not an onset."""
+    reference 2's author lead. A lead that opens right after the date of the
+    reference it would end, as in "Brown, T. (2018). Beyond Kahneman and
+    Tversky (1979): ...", is the start of a title that cites another work, so
+    it is not an onset. That date is the one that opened the current
+    reference (the first anchor, then each accepted onset's), not merely the
+    previous anchor: a reference whose title ends in its own "(2000)" still
+    ends there when the next reference follows."""
     anchors = list(_DATE_ANCHOR.finditer(ref_string))
     if len(anchors) < 2:
         return []
     offsets: list[int] = []
+    head = anchors[0]
     for i in range(1, len(anchors)):
         between = ref_string[anchors[i - 1].end() : anchors[i].start()]
         if _META_BEFORE.search(between):
@@ -206,9 +211,10 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
         start = _lead_start(ref_string, anchors[i].start())
         if start is None or start <= 0 or start in offsets:
             continue
-        if not _LETTER.search(ref_string[anchors[i - 1].end() : start]):
+        if not _LETTER.search(ref_string[head.end() : start]):
             continue
         offsets.append(start)
+        head = anchors[i]
     return sorted(offsets)
 
 

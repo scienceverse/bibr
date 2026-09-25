@@ -390,6 +390,41 @@ def test_merge_whose_second_title_cites_a_work_splits_once():
     ]
 
 
+def test_merge_after_a_title_ending_in_a_date_still_splits():
+    # Reference 1's title ends in its own parenthesized date, so the next
+    # reference's lead follows a date with no letters in between. The title
+    # guard measures from the date that opened reference 1, not that one.
+    merged = (
+        "Smith, J. (2001). Estimates of the population census (2000). "
+        "Jones, K. (2002). Other title. Journal, 3, 1-5."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "Smith, J. (2001). Estimates of the population census (2000).",
+        "Jones, K. (2002). Other title. Journal, 3, 1-5.",
+    ]
+
+
+def test_title_case_title_ending_in_a_date_splits_only_at_the_next_reference():
+    # "Proceedings of the CHI Conference" reads as an author lead before its
+    # "(2015)", but it opens right after reference 1's own date.
+    merged = (
+        "Lee, K. (2015). Proceedings of the CHI Conference (2015). "
+        "Park, S. (2016). Interfaces. HCI, 2, 3-4."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "Lee, K. (2015). Proceedings of the CHI Conference (2015).",
+        "Park, S. (2016). Interfaces. HCI, 2, 3-4.",
+    ]
+
+
 def test_real_merge_with_citation_verb_in_title_still_splits():
     # ref1's title legitimately contains reply/comment/correction -> must STILL split
     for s in MERGED_WITH_VERB_IN_TITLE:
