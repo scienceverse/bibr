@@ -320,6 +320,14 @@ released.
   that call failed too. `LLMClient.resolve_citations` and
   `extract_equations` now raise the typed error instead of returning an empty
   list; their callers degrade as before.
+- A wrong-typed value in an LLM response (an abstract sent as a list of
+  paragraphs, a reference `bib_type` sent as a number) raised an
+  `AttributeError` from a validator, which skipped Instructor's re-ask and
+  failed the call as an upstream error. The validators now leave a non-string
+  to the schema's type check, so it is a `ValidationError`: re-asked where
+  validation re-asks are enabled (cloud providers by default; a custom
+  OpenAI-compatible endpoint makes one attempt), and otherwise an
+  `llm_invalid_output` failure.
 - Serve no longer caches a result shaped by a failure a retry could avoid. Every
   successful response was cached for 24 hours, so one Crossref timeout, OCR
   blip or failed LLM call was replayed to every later request for the same

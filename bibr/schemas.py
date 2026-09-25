@@ -450,9 +450,13 @@ class TitleKeywordsLLM(AbstractResponse):
 
     @field_validator("abstract", mode="before")
     @classmethod
-    def abstract_blank_to_none(cls, v: str | None) -> str | None:
+    def abstract_blank_to_none(cls, v: object) -> object:
         if v is None or _is_placeholder_token(v):
             return None
+        if not isinstance(v, str):
+            # Let the str check reject it as a ValidationError, which
+            # Instructor re-asks; an AttributeError here failed the call.
+            return v
         s = v.strip()
         return s or None
 
@@ -632,10 +636,12 @@ class CoreMetadataLLM(AbstractResponse):
 
     @field_validator("abstract", mode="before")
     @classmethod
-    def abstract_blank_to_none(cls, v: str | None) -> str | None:
+    def abstract_blank_to_none(cls, v: object) -> object:
         """Mirror TitleKeywordsLLM: blank / NuExtract3 placeholder → None."""
         if v is None or _is_placeholder_token(v):
             return None
+        if not isinstance(v, str):
+            return v
         s = v.strip()
         return s or None
 
@@ -862,11 +868,14 @@ class PaperReferenceLLM(PaperReference):
 
     @field_validator("bib_type", mode="before")
     @classmethod
-    def normalize_bib_type(cls, v: str | None) -> str | None:
+    def normalize_bib_type(cls, v: object) -> object:
         """Coerce legacy/free-form bib_type strings to a canonical
-        :class:`bibr.models.BibType` value (or None if unset)."""
+        :class:`bibr.models.BibType` value (or None if unset). A non-string
+        is left for the str check to reject as a ValidationError."""
         if v is None:
             return None
+        if not isinstance(v, str):
+            return v
         return migrate_bib_type(v)
 
     @model_validator(mode="before")

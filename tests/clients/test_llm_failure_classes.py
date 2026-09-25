@@ -237,3 +237,47 @@ async def test_real_client_auth_failure_is_rejected(monkeypatch):
 def test_cancellation_is_not_wrapped():
     # Task wrappers catch ``Exception``; cancellation must stay outside that.
     assert not issubclass(asyncio.CancelledError, Exception)
+
+
+# ---------------------------------------------------------------------------
+# core-api-6: a wrong-typed value is a ValidationError, not a crash
+# ---------------------------------------------------------------------------
+
+_REFERENCE = {
+    "index": 1,
+    "title": "R",
+    "authors": "A",
+    "year": 2020,
+    "first_page": None,
+    "volume": None,
+    "container": None,
+}
+
+
+@pytest.mark.parametrize(
+    ("model", "payload"),
+    [
+        ("TitleKeywordsLLM", {"title": "T", "abstract": ["p1", "p2"]}),
+        ("TitleKeywordsLLM", {"title": "T", "abstract": 7}),
+        ("CoreMetadataLLM", {"title": "T", "authors": [], "abstract": {"text": "p"}}),
+        ("PaperReferenceLLM", {**_REFERENCE, "bib_type": 7}),
+        ("PaperReferenceLLM", {**_REFERENCE, "bib_type": ["book"]}),
+    ],
+)
+def test_wrong_typed_llm_values_raise_validation_errors(model, payload):
+    """Instructor re-asks only on a ValidationError; an AttributeError from a
+    validator failed the call at once and read as an upstream outage."""
+    from bibr import schemas
+
+    with pytest.raises(ValidationError) as raised:
+        getattr(schemas, model).model_validate(payload)
+    assert {error["loc"][0] for error in raised.value.errors()} <= {"abstract", "bib_type"}
+
+
+def test_well_typed_values_are_unchanged():
+    from bibr.schemas import PaperReferenceLLM, TitleKeywordsLLM
+
+    assert TitleKeywordsLLM.model_validate({"title": "T", "abstract": "  An abstract. "}).abstract
+    assert TitleKeywordsLLM.model_validate({"title": "T", "abstract": "  "}).abstract is None
+    reference = PaperReferenceLLM.model_validate({**_REFERENCE, "bib_type": "article"})
+    assert reference.bib_type == "journal_article"
