@@ -52,6 +52,13 @@ _MAX_LLM_AUTHORS = 64
 # lone stray blank/duplicate is trivial noise; two or more signals an anomaly.
 _AUTHOR_ANOMALY_MIN_DROP = 2
 
+# ``CoreMetadataLLM`` field -> the export's name for it, where they differ.
+_EXPORT_FIELD_NAMES = {
+    "authors": "author",
+    "oecd_domain": "oecd_l1",
+    "oecd_subdomain": "oecd_l2",
+}
+
 # Correction-notice title prefix — matches Psychological Science (and most
 # journals) corrigendum / erratum / correction / retraction front-matter.
 # The trailing-character class disambiguates real notices ("Corrigendum: ...",
@@ -1426,6 +1433,10 @@ class CoreMetadataExtractor:
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
                 return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
+            field_failures = dict(getattr(llm_metadata, "_field_failures", None) or {})
+            title_call_failed = "title" in field_failures
+            if title_call_failed:
+                self._record_field_failures(field_failures)
 
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
@@ -1464,13 +1475,21 @@ class CoreMetadataExtractor:
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
 
-            (
-                paper_type,
-                oecd_l1,
-                oecd_l2,
-                paper_type_confidence,
-                oecd_confidence,
-            ) = await self._classify_paper(title, abstract, llm_metadata, classification_context)
+            paper_type, oecd_l1, oecd_l2 = "", "", ""
+            paper_type_confidence: float | None = None
+            oecd_confidence: float | None = None
+            # The trained classifier reads the title and abstract; after a failed
+            # title/keywords call it would classify empty input.
+            if not (title_call_failed and self._settings.ml.paper_classifier_model_id):
+                (
+                    paper_type,
+                    oecd_l1,
+                    oecd_l2,
+                    paper_type_confidence,
+                    oecd_confidence,
+                ) = await self._classify_paper(
+                    title, abstract, llm_metadata, classification_context
+                )
 
             is_notice, notice_type = self._apply_correction_notice_guard(title)
             if is_notice:
@@ -1831,6 +1850,34 @@ class CoreMetadataExtractor:
             "VAL_AUTHOR_RECOVERY_DEGRADED",
             reason,
             "Empty-author recovery did not complete; the empty author list is not a refusal",
+        )
+
+    def _record_field_failures(self, field_failures: dict[str, str]) -> None:
+        """Mark metadata fields whose LLM call failed while the rest was kept.
+
+        Raised for a failed title/keywords call (or the merged core call), which
+        used to fail the whole paper. Blocking like ``VAL_REFERENCES_INCOMPLETE``:
+        the record is written but not promotable, so a checkpointed run routes it
+        to quarantine and keeps it retryable.
+        """
+
+        codes = sorted(set(field_failures.values()))
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_METADATA_FIELD_FAILED",
+                severity=IssueSeverity.ERROR,
+                message=(
+                    f"A metadata LLM call failed ({', '.join(codes)}); its fields are empty "
+                    "and the independently extracted metadata and references were kept"
+                ),
+                origin_stage="extract",
+                evidence_ids=tuple(f"reason:{code}" for code in codes)
+                + tuple(
+                    f"field:{_EXPORT_FIELD_NAMES.get(name, name)}"
+                    for name in sorted(field_failures)
+                ),
+                blocking=True,
+            )
         )
 
     def _record_degraded(self, code: str, reason: str, message: str) -> None:

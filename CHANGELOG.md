@@ -227,6 +227,27 @@ released.
   truncated or invalid response with 422 and its code, and keeps 502, now with
   the code, for the others. A post-parse failure caused by an LLM error
   records that code instead of `extraction_failed`.
+- A truncated or invalid title/keywords response no longer fails the paper.
+  That call is the anchor of the record, so its failure cancelled the
+  reference task and the file ended with no export, losing references,
+  authors and DOI that were already extracted. Its fields (title, abstract,
+  keywords and the journal, date and license fields) now stay empty, the
+  layout fallbacks fill title and abstract as they do for any null model
+  title, and the export carries a blocking `VAL_METADATA_FIELD_FAILED` error
+  naming the failed fields and the error code. Blocking, like
+  `VAL_REFERENCES_INCOMPLETE`: the record is written but not promotable, so a
+  checkpointed `bibr chew -o` run routes it to `_quarantine/blocked/` and
+  keeps it retryable. The same applies to the merged core call
+  (`LLM_MERGED_CORE_METADATA`), whose failure marks every core field. A
+  timeout, a 429/5xx, a transport failure, a rejected request or an
+  unrecognized error still fails the paper, since a retry can complete it,
+  and so does a truncated title response when another core call failed for
+  such a reason. After a failed title call the trained paper classifier is
+  skipped rather than run on empty input. Before giving up, the title/keywords
+  call now recovers a finished response that failed validation only for
+  invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
+  explanatory prose around one JSON fence; it never completes truncated JSON
+  or takes a nested value (from draft PR #8).
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

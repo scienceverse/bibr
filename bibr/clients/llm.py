@@ -443,6 +443,34 @@ def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
     return error_class(message, exc, cause=_failure_cause(error_class, exc))
 
 
+def _recover_finished_response(exc: BaseException, response_model: type) -> Any | None:
+    """Recover a finished response that Instructor rejected, or return ``None``.
+
+    Only an invalid-output failure qualifies, never a truncation, a decoder
+    abort or a service failure: the completion must be whole. The recovered
+    value goes through ``response_model``'s validation like any response.
+    """
+    if _classify_llm_failure(exc) is not LlmInvalidOutputError:
+        return None
+    completion = _find_last_completion(exc)
+    if completion is None or _finish_reason(completion) in {"abort", *_TRUNCATED_FINISH_REASONS}:
+        return None
+    from bibr.clients.structured_json import StructuredResponseError, recover_structured_object
+
+    try:
+        recovered = recover_structured_object(_completion_text(completion), response_model)
+    except StructuredResponseError as invalid:
+        logger.debug("Local %s recovery declined: %s", response_model.__name__, invalid.category)
+        return None
+    logger.warning(
+        "Recovered the %s response locally after it failed validation "
+        "(%d invalid backslash escape(s) repaired)",
+        response_model.__name__,
+        recovered.repaired_backslashes,
+    )
+    return recovered.value
+
+
 def llm_failure_code(exc: BaseException) -> str:
     """The stable error code for a failed LLM call, however it was raised.
 
@@ -2003,6 +2031,12 @@ class LLMClient:
         except ProcessingError:
             raise
         except Exception as e:
+            # The anchor call alone gets local recovery: a finished response
+            # with, say, LaTeX backslashes in the abstract otherwise loses the
+            # whole record's title/keywords fields.
+            recovered = _recover_finished_response(e, TitleKeywordsLLM)
+            if recovered is not None:
+                return cast("TitleKeywordsLLM", recovered)
             logger.error(
                 f"LLM title/keywords extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
@@ -2162,6 +2196,9 @@ class LLMClient:
         except ProcessingError:
             raise
         except Exception as e:
+            recovered = _recover_finished_response(e, CoreMetadataLLM)
+            if recovered is not None:
+                return cast("CoreMetadataLLM", recovered)
             logger.error(
                 f"Merged LLM core metadata extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
@@ -2190,7 +2227,21 @@ class LLMClient:
         Title/keywords always receives the full ``text``.
         """
         if getattr(self._settings.llm, "merged_core_metadata", False):
-            return await self.extract_core_metadata_merged(text, file_hash=file_hash)
+            try:
+                return await self.extract_core_metadata_merged(text, file_hash=file_hash)
+            except (LlmTruncatedError, LlmInvalidOutputError) as exc:
+                # The one call carries every field. Its response fails the same
+                # way on a retry, so return an empty record with every field
+                # marked failed; the extractor keeps references and the rest.
+                logger.warning(
+                    "Merged core metadata extraction failed (hash=%s); every core field "
+                    "is marked failed: %s",
+                    file_hash,
+                    exc,
+                )
+                failed = CoreMetadataLLM(authors=[])
+                failed._field_failures = dict.fromkeys(CoreMetadataLLM.model_fields, exc.error_code)
+                return failed
 
         authors_text = authors_text or text
         classification_text = classification_text or text
@@ -2227,10 +2278,52 @@ class LLMClient:
         for result in results:
             if isinstance(result, ProcessingError):
                 raise result
+        # A cancelled call is not a failed call.
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, Exception):
+                raise result
 
-        # Title/keywords is the anchor of the record — propagate its failure.
+        # Response fields of a failed call, with the failure's error code.
+        field_failures: dict[str, str] = {}
+        # Title/keywords is the anchor of the record. When the service did not
+        # answer, propagate: the paper fails, and a retry can complete it. A
+        # truncated or invalid response fails the same way on every retry, so
+        # keep what the other calls extracted and mark its fields failed.
         if isinstance(title_kw, BaseException):
-            raise llm_call_error("Failed to extract title/keywords", title_kw) from title_kw
+            typed = {
+                id(failed): (
+                    failed
+                    if isinstance(failed, LlmCallError)
+                    else llm_call_error(f"Failed to extract {task}", failed)
+                )
+                for failed, task in (
+                    (title_kw, "title/keywords"),
+                    (authors, "authors"),
+                    (classification, "paper classification"),
+                )
+                if isinstance(failed, BaseException)
+            }
+            # A partial record is kept only when no call failed for a reason a
+            # retry could fix; otherwise the paper fails as it always did.
+            for failed in (title_kw, authors, classification):
+                error = typed.get(id(failed))
+                if error is not None and not isinstance(
+                    error, (LlmTruncatedError, LlmInvalidOutputError)
+                ):
+                    if error is failed:
+                        raise error
+                    raise error from failed
+            title_error = typed[id(title_kw)]
+            logger.warning(
+                "Title/keywords extraction failed (hash=%s); keeping the other core "
+                "metadata calls: %s",
+                file_hash,
+                title_error,
+            )
+            field_failures.update(
+                dict.fromkeys(TitleKeywordsLLM.model_fields, title_error.error_code)
+            )
+            title_kw = TitleKeywordsLLM()
         # Authors failing outright (e.g. a persistent truncation the salvage
         # couldn't recover) must NOT sink the whole record — title/keywords
         # succeeded. Degrade to an empty list; the empty-author re-roll below
@@ -2242,11 +2335,14 @@ class LLMClient:
                 file_hash,
                 authors,
             )
+            field_failures["authors"] = llm_failure_code(authors)
             authors = AuthorsLLM(authors=[])
 
         # Classification is optional — degrade gracefully
+        classification_failure: str | None = None
         if isinstance(classification, BaseException):
             logger.warning(f"Paper classification failed, continuing without: {classification}")
+            classification_failure = llm_failure_code(classification)
             classification = PaperClassificationLLM()
 
         # A schema-valid empty author list is a domain result. CoreMetadataExtractor owns the
@@ -2279,6 +2375,13 @@ class LLMClient:
                 reclass = classification
             if reclass.paper_type is not None or reclass.oecd_domain is not None:
                 classification = reclass
+                classification_failure = None
+        if classification_failure is not None:
+            field_failures.update(
+                dict.fromkeys(
+                    ("paper_type", "oecd_domain", "oecd_subdomain"), classification_failure
+                )
+            )
 
         combined = CoreMetadataLLM(
             title=title_kw.title,
@@ -2300,6 +2403,7 @@ class LLMClient:
         )
 
         combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
+        combined._field_failures = field_failures
 
         logger.info(f"Successfully extracted core metadata (hash={file_hash})")
         return combined

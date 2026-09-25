@@ -612,6 +612,11 @@ class CoreMetadataLLM(AbstractResponse):
     published: str | None = Field(default=None)
     license: str | None = Field(default=None)
 
+    # Fields whose call failed, with the failure's error code, set when
+    # ``LLMClient.extract_core_metadata`` keeps the calls that succeeded. A
+    # failed field is empty, never a guess; never part of the response schema.
+    _field_failures: dict[str, str] = PrivateAttr(default_factory=dict)
+
     _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
     _canon_oecd_domain = field_validator("oecd_domain", mode="before")(_canonicalize_oecd_domain)
     _canon_oecd_subdomain = field_validator("oecd_subdomain", mode="before")(
