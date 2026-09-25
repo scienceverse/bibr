@@ -9,6 +9,7 @@ import pytest
 from bibr.extract.ref_extractor import (
     ReferenceExtractor,
     _link_dois_for_segments,
+    _strip_enum_markers,
 )
 from bibr.extract.ref_line_stream import (
     LineStream,
@@ -567,3 +568,19 @@ def test_split_reference_section_is_joined_in_front_of_the_located_rows():
         "Baker, Q. (2002). Two. J, 3, 4.",
     ]
     assert "split_section_joined" in segment_line_stream(stream).reason_flags
+
+
+# ---------------------------------------------------------------------------
+# Parser input
+# ---------------------------------------------------------------------------
+
+
+def test_roman_list_numbers_are_stripped_for_the_parser_only_in_a_roman_list():
+    roman = ["I. Kuramori, A. 2004.", "II. Chang, B. 2007.", "III. Dagan, E. 2004."]
+    assert _strip_enum_markers(roman) == [
+        "Kuramori, A. 2004.",
+        "Chang, B. 2007.",
+        "Dagan, E. 2004.",
+    ]
+    initials = ["V. Lal, S. 2003.", "Smith J. 2004.", "Jones K. 2005."]
+    assert _strip_enum_markers(initials) == initials

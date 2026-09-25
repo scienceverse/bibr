@@ -384,6 +384,9 @@ released.
   attempt is marked `superseded_by_line_stream`. The stream's spans index its
   own text (flag `stream_text_offsets`); a joined split section is flagged
   `split_section_joined`.
+- Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
+  a list numbered that way, as arabic ones already were. They were parsed into
+  the first author ("V. Lal, S. K. L.").
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.

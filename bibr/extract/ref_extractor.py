@@ -33,6 +33,7 @@ from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merge
 from bibr.extract.ref_line_stream import (
     StreamSegmentation,
     _match_key,
+    _roman_value,
     build_line_stream,
     segment_line_stream,
     segmentation_quality,
@@ -175,8 +176,35 @@ def _strip_enum_markers(ref_strings: list[str]) -> list[str]:
     """
     marked = sum(1 for s in ref_strings if _ENTRY_NUMBERING_RE.match(s))
     if marked * 2 <= len(ref_strings):
-        return ref_strings
+        return _strip_roman_markers(ref_strings)
     return [_ENTRY_NUMBERING_RE.sub("", s, count=1) for s in ref_strings]
+
+
+# A roman list number opening a reference ("IV. Bergasa, L.M., ...").
+_ROMAN_ENTRY_RE = re.compile(r"^\s*([IVXLC]{1,7}|[ivxlc]{1,7})[.)]\s+")
+
+
+def _strip_roman_markers(ref_strings: list[str]) -> list[str]:
+    """Strip roman list numbering ("I.", "II.", ...) for NER parser input.
+
+    Only for a bibliography numbered that way: a majority of segments open
+    with a roman numeral and those numerals count up from I, so a lone author
+    initial ("V. Lal") in an unnumbered list stays.
+    """
+    values = []
+    for segment in ref_strings:
+        match = _ROMAN_ENTRY_RE.match(segment)
+        values.append(_roman_value(match.group(1)) if match else None)
+    numbered = [value for value in values if value is not None]
+    if len(numbered) * 2 <= len(ref_strings) or 1 not in numbered:
+        return ref_strings
+    steps = sum(1 for a, b in zip(numbered, numbered[1:], strict=False) if b == a + 1)
+    if steps * 5 < (len(numbered) - 1) * 4:
+        return ref_strings
+    return [
+        _ROMAN_ENTRY_RE.sub("", segment, count=1) if value is not None else segment
+        for segment, value in zip(ref_strings, values, strict=True)
+    ]
 
 
 def _normalized_reference_identity(text: str) -> str:
