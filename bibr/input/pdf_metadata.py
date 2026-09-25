@@ -26,7 +26,10 @@ from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
 
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s<>()\[\]{}]+")
+# The DOI character set of ``doi_identity``: parentheses belong to Elsevier PII
+# DOIs ("10.1016/S2255-4971(15)30333-5"), and a comma ends the DOI in a
+# comma-separated Keywords field.
+_DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+")
 _JUNK_TITLE_RE = re.compile(
     r"(?i)(microsoft word|powerpoint|libreoffice|untitled"
     r"|\.docx?\b|\.tex\b|\.pdf\b|\.dvi\b|\.qxd\b|\.indd\b|\.fm\b)"

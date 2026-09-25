@@ -1189,6 +1189,69 @@ async def test_selected_block_does_not_harvest_email_from_unowned_page_one(monke
     assert metadata.authors[0].corresponding is False
 
 
+@pytest.mark.parametrize(
+    ("block_doi", "headers", "footers", "expected"),
+    [
+        # Printed only in a running-header citation line above the title.
+        (
+            None,
+            ["2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/pes.4064."],
+            [],
+            "10.1234/pes.4064",
+        ),
+        # The selected block's DOI is never overridden by the furniture's.
+        ("DOI: 10.1234/block", ["https://doi.org/10.1234/other"], [], "10.1234/block"),
+        # Furniture DOIs still pass the non-self rules.
+        (
+            None,
+            ["Supplementary DOI: 10.1234/pes.supp"],
+            ["12. Smith J. https://doi.org/10.1234/ref"],
+            "",
+        ),
+    ],
+)
+async def test_selected_block_doi_falls_back_to_page_furniture(
+    monkeypatch, block_doi, headers, footers, expected
+):
+    from bibr.extract.core_metadata import CoreMetadataExtractor
+    from bibr.schemas import AuthorLLM, CoreMetadataLLM
+
+    rows = [(1, "Selected title", 0), (2, "Alice Example", 0)]
+    candidates = [
+        _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,)),
+        _candidate("c2", "Alice Example", roles=frozenset({"byline"}), text_ids=(2,)),
+    ]
+    if block_doi is not None:
+        rows.append((3, block_doi, 0))
+        candidates.append(_candidate("c3", block_doi, roles=frozenset({"doi"}), text_ids=(3,)))
+    contents = _paper_contents([*rows, (4, "Body begins", 1)])
+    contents.detected_headers = headers
+    contents.detected_footers = footers
+    llm = mock.MagicMock()
+    llm.extract_core_metadata = mock.AsyncMock(
+        return_value=CoreMetadataLLM(
+            title="Selected title",
+            authors=[AuthorLLM(given="Alice", family="Example")],
+        )
+    )
+    extractor = CoreMetadataExtractor(
+        contents,
+        llm_client=llm,
+        front_matter_resolution=_resolution(*candidates),
+    )
+    monkeypatch.setattr(
+        extractor,
+        "_classify_paper",
+        mock.AsyncMock(return_value=("", "", "", None, None)),
+    )
+
+    metadata = await extractor.extract()
+
+    assert metadata.doi == expected
+    (full_text,), _kwargs = llm.extract_core_metadata.await_args
+    assert "Proc Example Soc" not in full_text
+
+
 async def test_extract_phase_threads_resolution_to_metadata_extractor(monkeypatch):
     from bibr.config import snapshot_settings
     from bibr.pipeline.stages import post_parse as post_parse_module

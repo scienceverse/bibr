@@ -1389,6 +1389,12 @@ class CoreMetadataExtractor:
             # outrank the paper's own DOI when it prints only bare (M2).
             if resolution is not None:
                 doi = self._find_doi(full_text, include_furniture=False)
+                if doi is None:
+                    # A DOI printed only in the page furniture (a running-header
+                    # citation line, the masthead) is still the paper's own; it
+                    # is read under the same rules, and never over the block's.
+                    furniture = self.contents.detected_headers + self.contents.detected_footers
+                    doi = self._find_doi("\n".join(furniture), include_furniture=False)
             else:
                 doi_text = self._format_meta_text(self.sentences_df.iloc[:cutoff_iloc])
                 if hf_lines:

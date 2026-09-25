@@ -140,6 +140,12 @@ def _marker_kind(text: str, start: int) -> str:
     return "bare"
 
 
+# A citation line that opens with the publication year ("2017. Proc Soc 2,
+# 20:1-15. https://doi.org/…", printed as a running header above the title) is
+# the article citing itself, not item 2017 of a numbered list.
+_YEAR_LED_CITATION_RE = re.compile(r"^\s*(?:19|20)\d{2}[.)]\s")
+
+
 def _candidate_from_match(
     text: str,
     match: re.Match[str],
@@ -169,7 +175,7 @@ def _candidate_from_match(
     rejection_reason = None
     if (
         section_value == CanonicalSection.REFERENCES.value
-        or _REFERENCE_PREFIX_RE.match(text)
+        or (_REFERENCE_PREFIX_RE.match(text) and not _YEAR_LED_CITATION_RE.match(text))
         or marker_kind == "reference_doi"
     ):
         semantic_context = "reference"

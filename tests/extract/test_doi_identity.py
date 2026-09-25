@@ -582,6 +582,36 @@ def test_www_doi_org_label_separates_journal_and_article_dois():
     assert selection.issues == ()
 
 
+def test_year_led_citation_header_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [("Title", CanonicalSection.TITLE, "A paper title", 1)],
+        headers=["2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/pes.v2i0.4064."],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/pes.v2i0.4064"
+    assert selection.selected.source_kind == "header"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["12. Smith J. Earlier work. https://doi.org/10.1234/ref", "[3] https://doi.org/10.1234/ref"],
+)
+def test_numbered_reference_line_in_furniture_is_still_rejected(line):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, "A paper title", 1)], footers=[line])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [c.rejection_reason for c in selection.candidates] == ["reference_candidate"]
+
+
 def test_marker_gated_registrant_wrap_is_bridged():
     """Live text of ``10.1016/j.lanwpc.2023.100933`` wraps between ``10.`` and ``1016``."""
 
