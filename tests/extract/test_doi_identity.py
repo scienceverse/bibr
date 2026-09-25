@@ -772,11 +772,7 @@ def test_plos_figure_doi_on_page_one_is_still_a_component():
     ],
 )
 def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
-    from bibr.extract.doi_identity import (
-        collect_doi_candidates,
-        select_doi_candidates,
-        select_doi_from_text,
-    )
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
     candidates = collect_doi_candidates(contents)
@@ -786,7 +782,6 @@ def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
         candidates,
         ExpectedIdentity(queue_record_id="record-1", expected_doi=doi, doi_required=True),
     )
-    from_text = select_doi_from_text(text)
 
     assert selection.selected is not None
     assert selection.selected.normalized == doi
@@ -794,8 +789,6 @@ def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
     assert expected.selected is not None
     assert expected.selected.normalized == doi
     assert expected.issues == ()
-    assert from_text.selected is not None
-    assert from_text.selected.normalized == doi
 
 
 @pytest.mark.parametrize(
@@ -968,22 +961,15 @@ _SICI_DOI = "10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K"
 
 
 def test_sici_doi_is_selected_whole():
-    from bibr.extract.doi_identity import (
-        collect_doi_candidates,
-        select_doi_candidates,
-        select_doi_from_text,
-    )
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     contents = _contents([("Title", CanonicalSection.TITLE, f"doi: {_SICI_DOI}", 1)])
 
     selection = select_doi_candidates(collect_doi_candidates(contents))
-    from_text = select_doi_from_text(f"doi: {_SICI_DOI}")
 
     assert selection.selected is not None
     assert selection.selected.raw == _SICI_DOI
     assert selection.selected.normalized == _SICI_DOI.casefold()
-    assert from_text.selected is not None
-    assert from_text.selected.normalized == _SICI_DOI.casefold()
 
 
 @pytest.mark.parametrize(

@@ -199,3 +199,63 @@ async def test_streaming_backhalf_runs_identity_immediately_after_post_parse():
     await stage._run_backhalf(ctx, [state], asyncio.Semaphore(1))
 
     assert events == ["parse", "extract", "identity", "enrich", "export"]
+
+
+def test_the_doi_field_source_names_the_selected_source_kind():
+    from bibr.pipeline.stages.identity import doi_field_source
+
+    assert doi_field_source("structured_metadata") == "native"
+    assert doi_field_source("sentence") == "sentence"
+    assert doi_field_source("text_layer") == "text_layer"
+
+
+def test_only_the_identity_stage_writes_the_paper_doi():
+    """No other module assigns metadata.doi or builds PaperMetadata with a DOI.
+
+    The native JATS and HTML parsers record the DOI the input declares on their
+    preparsed record, which the identity stage reads as structured evidence.
+    """
+    import ast
+
+    import bibr
+
+    evidence_writers = {"input/jats_native.py", "input/html_native.py"}
+    writers = set()
+    root = Path(bibr.__file__).parent
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        relative = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            for target in targets:
+                if (
+                    isinstance(target, ast.Attribute)
+                    and target.attr == "doi"
+                    and "meta" in ast.unparse(target.value).lower()
+                ):
+                    writers.add(relative)
+            if isinstance(node, ast.Call):
+                name = ast.unparse(node.func)
+                for keyword in node.keywords:
+                    if (
+                        name.endswith("PaperMetadata")
+                        and keyword.arg == "doi"
+                        and not (
+                            isinstance(keyword.value, ast.Constant) and keyword.value.value == ""
+                        )
+                    ):
+                        writers.add(relative)
+                if (
+                    name == "setattr"
+                    and len(node.args) > 1
+                    and ast.unparse(node.args[1]) == "'doi'"
+                ):
+                    writers.add(relative)
+                if name.endswith("model_copy") and "'doi'" in ast.unparse(node):
+                    writers.add(relative)
+
+    assert writers - evidence_writers == {"pipeline/stages/identity.py"}

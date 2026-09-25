@@ -216,6 +216,8 @@ def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
     """Merge OCR-extracted metadata as fallback into PaperMetadata.
 
     Only fills fields that are empty/missing in the LLM-extracted metadata.
+    Never the DOI: the identity stage alone chooses it, and a DOI found only in
+    the PDF's metadata is agreement evidence there, never a value.
     Mutates *metadata* in-place.
     """
     from bibr.field_states import set_field_source
@@ -226,10 +228,6 @@ def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
         metadata.title = parsed.title
         set_field_source(metadata, "title", "doc_info")
         logger.debug("OCR fallback: filled title")
-
-    if not metadata.doi and parsed.doi and parsed.doi.startswith("10."):
-        metadata.doi = parsed.doi
-        logger.debug("OCR fallback: filled DOI")
 
     if not metadata.keywords and parsed.keywords:
         metadata.keywords = parsed.keywords

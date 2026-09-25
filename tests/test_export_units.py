@@ -485,20 +485,14 @@ class TestMergeOcrMetadata:
         _merge_ocr_metadata(meta, {"title": "OCR Title"})
         assert meta.title == "LLM Title"
 
-    def test_fills_empty_doi(self):
-        meta = PaperMetadata(doi="", title="T")
-        _merge_ocr_metadata(meta, {"doi": "10.1234/ocr"})
-        assert meta.doi == "10.1234/ocr"
-
-    def test_rejects_invalid_doi(self):
-        meta = PaperMetadata(doi="", title="T")
-        _merge_ocr_metadata(meta, {"doi": "not-a-doi"})
-        assert meta.doi == ""
-
-    def test_does_not_overwrite_existing_doi(self):
-        meta = PaperMetadata(doi="10.1/existing", title="T")
-        _merge_ocr_metadata(meta, {"doi": "10.1/ocr"})
-        assert meta.doi == "10.1/existing"
+    def test_never_writes_the_doi(self):
+        # The identity stage alone writes the DOI; a doc-info DOI only agrees.
+        empty = PaperMetadata(doi="", title="T")
+        _merge_ocr_metadata(empty, {"doi": "10.1234/ocr"})
+        assert empty.doi == ""
+        existing = PaperMetadata(doi="10.1/existing", title="T")
+        _merge_ocr_metadata(existing, {"doi": "10.1/ocr"})
+        assert existing.doi == "10.1/existing"
 
     def test_fills_keywords(self):
         meta = PaperMetadata(doi="10.1/x", title="T")

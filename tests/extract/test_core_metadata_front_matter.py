@@ -1190,29 +1190,15 @@ async def test_selected_block_does_not_harvest_email_from_unowned_page_one(monke
 
 
 @pytest.mark.parametrize(
-    ("block_doi", "headers", "footers", "expected"),
+    ("block_doi", "headers"),
     [
         # Printed only in a running-header citation line above the title.
-        (
-            None,
-            ["2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/pes.4064."],
-            [],
-            "10.1234/pes.4064",
-        ),
-        # The selected block's DOI is never overridden by the furniture's.
-        ("DOI: 10.1234/block", ["https://doi.org/10.1234/other"], [], "10.1234/block"),
-        # Furniture DOIs still pass the non-self rules.
-        (
-            None,
-            ["Supplementary DOI: 10.1234/pes.supp"],
-            ["12. Smith J. https://doi.org/10.1234/ref"],
-            "",
-        ),
+        (None, ["2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/pes.4064."]),
+        ("DOI: 10.1234/block", ["https://doi.org/10.1234/other"]),
     ],
 )
-async def test_selected_block_doi_falls_back_to_page_furniture(
-    monkeypatch, block_doi, headers, footers, expected
-):
+async def test_selected_block_leaves_the_doi_to_the_identity_stage(monkeypatch, block_doi, headers):
+    # The identity stage alone writes the DOI, from every printed candidate.
     from bibr.extract.core_metadata import CoreMetadataExtractor
     from bibr.schemas import AuthorLLM, CoreMetadataLLM
 
@@ -1226,7 +1212,6 @@ async def test_selected_block_doi_falls_back_to_page_furniture(
         candidates.append(_candidate("c3", block_doi, roles=frozenset({"doi"}), text_ids=(3,)))
     contents = _paper_contents([*rows, (4, "Body begins", 1)])
     contents.detected_headers = headers
-    contents.detected_footers = footers
     llm = mock.MagicMock()
     llm.extract_core_metadata = mock.AsyncMock(
         return_value=CoreMetadataLLM(
@@ -1247,7 +1232,7 @@ async def test_selected_block_doi_falls_back_to_page_furniture(
 
     metadata = await extractor.extract()
 
-    assert metadata.doi == expected
+    assert metadata.doi == ""
     (full_text,), _kwargs = llm.extract_core_metadata.await_args
     assert "Proc Example Soc" not in full_text
 
@@ -1378,7 +1363,8 @@ async def test_untargeted_no_llm_abstention_preserves_non_llm_fallbacks(monkeypa
     )
 
     assert paper.metadata.title == "Layout fallback title"
-    assert paper.metadata.doi == "10.1234/ocr"
+    # A doc-info DOI is never filled in; the identity stage decides the DOI.
+    assert paper.metadata.doi == ""
     assert "Abstract text from an unresolved record." in paper.metadata.abstract
     assert paper.metadata.keywords == ["fallback"]
     assert [author.family for author in paper.metadata.authors] == ["Author"]

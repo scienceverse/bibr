@@ -1,10 +1,10 @@
-"""Core paper metadata extraction (title, authors, DOI, abstract, keywords).
+"""Core paper metadata extraction (title, authors, abstract, keywords).
 
 ``CoreMetadataExtractor`` builds the metadata LLM context from the rows a
-:class:`bibr.extract.ref_locator.RefLocator` selects, finds the paper's own
-DOI deterministically, calls the LLM, and applies the post-LLM guards
-(correction-notice suppression, commentary-abstract fabrication guard,
-author sanitisation, OECD/paper-type validation).
+:class:`bibr.extract.ref_locator.RefLocator` selects, calls the LLM, and
+applies the post-LLM guards (correction-notice suppression,
+commentary-abstract fabrication guard, author sanitisation, OECD/paper-type
+validation). The paper's DOI is chosen later, by the identity stage alone.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
-from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
+from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
 from bibr.field_states import set_field_source
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
@@ -1384,23 +1384,6 @@ class CoreMetadataExtractor:
             logger.info(f"Extracted {len(meta_df)} sentences for metadata.")
             logger.debug(f"Constructed input text of length {len(full_text)}")
 
-            # DOI search must not see the ORCID rows pulled from beyond the
-            # cutoff — a reference-list row carrying a doi.org URL would
-            # outrank the paper's own DOI when it prints only bare (M2).
-            if resolution is not None:
-                doi = self._find_doi(full_text, include_furniture=False)
-                if doi is None:
-                    # A DOI printed only in the page furniture (a running-header
-                    # citation line, the masthead) is still the paper's own; it
-                    # is read under the same rules, and never over the block's.
-                    furniture = self.contents.detected_headers + self.contents.detected_footers
-                    doi = self._find_doi("\n".join(furniture), include_furniture=False)
-            else:
-                doi_text = self._format_meta_text(self.sentences_df.iloc[:cutoff_iloc])
-                if hf_lines:
-                    doi_text += "\n\n[Page headers/footers]\n" + "\n".join(hf_lines)
-                doi = self._find_doi_with_fallback(doi_text)
-
             # Per-task context slices (LLM_PER_TASK_CONTEXT): the authors and
             # classification calls get narrower, task-specific text; title/
             # keywords keeps the full blob. Off => None => client uses full text.
@@ -1441,7 +1424,7 @@ class CoreMetadataExtractor:
                     "core_metadata_call_failed",
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
-                return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
+                return PaperMetadata(doi="", title="", keywords=[], authors=[])
             recorded = getattr(llm_metadata, "_field_failures", None)
             field_failures = dict(recorded) if isinstance(recorded, dict) else {}
             title_call_failed = "title" in field_failures
@@ -1562,7 +1545,7 @@ class CoreMetadataExtractor:
                 )
 
             metadata = PaperMetadata(
-                doi=doi if doi else "",
+                doi="",
                 title=title,
                 abstract=abstract,
                 keywords=keywords,
@@ -1779,70 +1762,6 @@ class CoreMetadataExtractor:
                 current_section = section
             parts.append(str(text))
         return "\n".join(parts)
-
-    def _find_doi(self, text: str, *, include_furniture: bool = True) -> str | None:
-        """Find the paper's own DOI from explicit markers or headers/footers.
-
-        The paper's own DOI is typically formatted with an explicit marker like
-        ``DOI: 10.xxxx/...`` or ``doi.org/10.xxxx/...``.  Bare DOIs appearing
-        inline in the metadata text are usually reference citations and should
-        not be used.
-
-        Selection is delegated to ``doi_identity.select_doi_from_text``, which
-        classifies candidates and breaks ties like ``select_doi_candidates``
-        (see its docstring and ``_TIE_BREAK_LADDER``): reference, component,
-        data/code and funder-registry candidates are rejected outright, the
-        highest ``selection_tier`` wins, and a tie that the provenance ladder
-        cannot reduce to one DOI **abstains** with ``VAL_DOI_AMBIGUOUS``.  The
-        text here has no page or section provenance, so unlike
-        ``select_doi_candidates`` it still selects an uncontested tier-1 DOI.
-        In the pipeline ``IdentityValidationStage`` then overwrites
-        ``metadata.doi`` with the provenance-aware selection.
-        Wrap-truncated DOIs are repaired both upstream in ``fix_ocr_artifacts``
-        (``bibr/input/consolidate_text.py``) and, for breaks falling between
-        ``10.`` and the registrant digits, by a marker-gated bridge in
-        ``doi_identity``.
-        """
-        from bibr.extract.doi_identity import normalize_candidate_doi, select_doi_from_text
-
-        selection = select_doi_from_text(text)
-        if selection.selected is not None:
-            return normalize_candidate_doi(selection.selected.raw)
-
-        if not include_furniture:
-            return None
-
-        # Fallback: headers/footers — publisher-printed, almost always the paper's own.
-        for line in self.contents.detected_footers + self.contents.detected_headers:
-            furniture_selection = select_doi_from_text(line)
-            if furniture_selection.selected is not None:
-                logger.debug("DOI found in header/footer: %s", furniture_selection.selected.raw)
-                return normalize_candidate_doi(furniture_selection.selected.raw)
-
-        return None
-
-    def _find_doi_with_fallback(self, full_text: str) -> str | None:
-        """Find DOI in *full_text*; fall back to pages 1-2 sentences if absent.
-
-        The fallback excludes rows under a references heading so a reference DOI cannot become the paper DOI. Footnote rows remain eligible, including a paper DOI printed only in an early-page footnote.
-        """
-        doi = self._find_doi(full_text)
-        if doi is None:
-            df = self.sentences_df
-            first_page = _front_page(df)
-            early_mask = df["page_number"].isin([first_page, first_page + 1])
-            if "section_name" in df.columns:
-                under_ref_heading = df["section_name"].map(
-                    lambda n: bool(_REF_HEADER_RE.match(str(n))) if pd.notna(n) else False
-                )
-                early_mask &= ~under_ref_heading
-            early_texts = df.loc[early_mask, "text"]
-            if not early_texts.empty:
-                early_blob = "\n".join(early_texts.astype(str))
-                doi = self._find_doi(early_blob)
-                if doi:
-                    logger.info("DOI found via early-page fallback: %s", doi)
-        return doi
 
     async def _recover_empty_authors(self, *, context: str) -> list[PaperAuthor] | None:
         """One extractor-owned free-JSON recovery for schema-valid empty authors.

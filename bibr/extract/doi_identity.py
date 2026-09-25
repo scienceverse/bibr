@@ -279,14 +279,6 @@ def _repair_doi_text(text: str) -> str:
     )
 
 
-def normalize_candidate_doi(raw: str) -> str | None:
-    """Normalize repaired DOI spelling while retaining source case for legacy callers."""
-
-    repaired = _repair_doi_text(raw)
-    match = _DOI_RE.search(repaired)
-    return normalize_doi(match.group(0)) if match is not None else None
-
-
 def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, int]]:
     """Map each cleaned character to its source interval for receipt provenance."""
 
@@ -762,37 +754,3 @@ def select_doi_candidates(
             blocking=True,
         )
     return replace(fallback, issues=(*fallback.issues, issue))
-
-
-def select_doi_from_text(text: str) -> DoiSelection:
-    """Select a DOI from front-matter text that has no page or section provenance.
-
-    Every unmarked DOI in such text is tier 1, so unlike ``select_doi_candidates``
-    this still selects an uncontested tier-1 DOI. Its caller passes only the
-    metadata region and the page furniture.
-    """
-
-    candidates: list[DoiCandidate] = []
-    # OCR cleanup can legitimately join a line-ending DOI with the next
-    # doi.org URL. Restore only that unmistakable identifier boundary so the
-    # following article-self candidate keeps its own context.
-    prepared = re.sub(
-        r"(?<=[-._;()/:A-Za-z0-9])(?=https?://(?:www\.)?(?:dx\.)?doi\.org/)",
-        "\n",
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    for line_number, line in enumerate(prepared.splitlines(), start=1):
-        candidates.extend(
-            _candidates_from_text(
-                line,
-                source_kind="text",
-                page=None,
-                section_id=None,
-                section_type=None,
-                region_index=None,
-                region_type=None,
-                text_id=line_number,
-            )
-        )
-    return _select_without_expected(tuple(candidates))

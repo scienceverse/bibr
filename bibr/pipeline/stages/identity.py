@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
+from bibr.field_states import set_field_source
 from bibr.validation import IssueSeverity, ValidationIssue
 
 logger = logging.getLogger(__name__)
@@ -19,6 +20,11 @@ def _source_integrity_issue(queue_record_id: str) -> ValidationIssue:
         evidence_ids=(queue_record_id,),
         blocking=True,
     )
+
+
+def doi_field_source(source_kind: str) -> str:
+    """``extraction.fields.doi.source`` for a selected candidate's source kind."""
+    return "native" if source_kind == "structured_metadata" else source_kind
 
 
 class IdentityValidationStage:
@@ -43,7 +49,10 @@ class IdentityValidationStage:
 
     @staticmethod
     def _validate(fs) -> None:
-        """Select the paper's DOI from source evidence and check the manifest identity."""
+        """Select the paper's DOI from source evidence and check the manifest identity.
+
+        This is the only step that writes ``metadata.doi``.
+        """
         paper = fs.paper
         if paper is None or paper.contents is None:
             return
@@ -56,6 +65,9 @@ class IdentityValidationStage:
         if paper.metadata is not None:
             if selection.selected is not None:
                 paper.metadata.doi = selection.selected.normalized
+                set_field_source(
+                    paper.metadata, "doi", doi_field_source(selection.selected.source_kind)
+                )
             else:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""
