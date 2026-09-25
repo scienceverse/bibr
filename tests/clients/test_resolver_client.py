@@ -371,7 +371,7 @@ async def test_lookup_doi_allows_legit_doi_with_dots_in_suffix():
     await rc.close()
 
 
-# --- Response shapes (clients-external-enrich-8) ------------------------------
+# --- Response shapes ----------------------------------------------------------
 # The client promises the resolver never fails enrichment. A proxy or another
 # service answering with other JSON used to raise AttributeError out of
 # healthy(), which failed the paper's whole reference enrichment.

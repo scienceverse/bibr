@@ -146,7 +146,7 @@ class TestMigrateBibType:
         ],
     )
     def test_crossref_work_types(self, crossref_type, expected):
-        """core-api-5: a matched Cambridge monograph came back as "other"."""
+        """A matched Cambridge monograph came back as "other"."""
         assert migrate_bib_type(crossref_type) == expected
 
     def test_non_string_returns_other(self):

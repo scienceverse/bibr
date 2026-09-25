@@ -60,7 +60,7 @@ class TestCrossrefWorkItem:
         assert item.api_score == 18.5
 
     def test_title_and_container_markup_is_dropped(self):
-        """clients-external-enrich-6: deposited tags and entities reached bib_match."""
+        """Deposited tags and entities reached bib_match."""
         from bibr.enrich.schemas import CrossrefWorkItem
 
         raw = {

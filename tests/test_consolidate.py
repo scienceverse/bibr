@@ -433,8 +433,8 @@ def test_fill_gives_a_year_only_record_its_year_as_the_date():
 
 
 def test_replace_keeps_a_printed_type_over_a_catch_all_match():
-    """core-api-5: Crossref types outside the BibType vocabulary map to "other";
-    a same-DOI match carrying it must not overwrite a printed "book"."""
+    """Crossref types outside the BibType vocabulary map to "other"; a same-DOI
+    match carrying it must not overwrite a printed "book"."""
     data = _data(
         bib=[{"bib_id": 1, "bib_type": "book", "doi": "10.1017/cbo9780511809071"}],
         bib_match=[

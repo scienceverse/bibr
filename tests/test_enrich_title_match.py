@@ -70,8 +70,8 @@ async def _crossref_match(ref, items, works_error=None):
 
 
 class TestInitialsAcrossCitationStyles:
-    """clients-external-enrich-1: the veto took "and" for a first name and cut
-    "Jeffery M. Sobal" down to {M}, rejecting the exact record."""
+    """The veto took "and" for a first name and cut "Jeffery M. Sobal" down to
+    {M}, rejecting the exact record."""
 
     @pytest.mark.parametrize(
         "authors",
@@ -137,8 +137,8 @@ class TestInitialsAcrossCitationStyles:
 
 
 class TestSurnameOverlap:
-    """clients-external-enrich-2: an exact title fell to 70 against an
-    organization author or a surname printed without its accents."""
+    """An exact title fell to 70 against an organization author or a surname
+    printed without its accents."""
 
     async def test_organization_author_is_no_evidence_against_the_match(self):
         who = _item(
@@ -189,8 +189,8 @@ class TestSurnameOverlap:
 
 
 class TestPrintedDoiAgreement:
-    """clients-external-enrich-4: after a failed DOI lookup the title search
-    accepted a different work (a preprint) with its own DOI."""
+    """After a failed DOI lookup the title search accepted a different work (a
+    preprint) with its own DOI."""
 
     PRINTED = "10.1037/dev0000123"
 
@@ -223,8 +223,8 @@ class TestPrintedDoiAgreement:
 
 
 class TestPrintedFieldsRuleOutACandidate:
-    """clients-external-enrich-5: "Introduction" by the same author in the same
-    year matched any journal article of that title."""
+    """A generic title ("Introduction") by the same author in the same year
+    matched any journal article of that title."""
 
     async def test_generic_title_in_another_container_is_rejected(self):
         article = _item(
@@ -272,8 +272,7 @@ class TestPrintedFieldsRuleOutACandidate:
 
 
 class TestDepositedTitleMarkup:
-    """clients-external-enrich-6: <sub>/<i> tags cost the fuzzy score and were
-    exported into bib_match."""
+    """<sub>/<i> tags cost the fuzzy score and were exported into bib_match."""
 
     async def test_subscript_markup_does_not_cost_the_match(self):
         title = "Effects of elevated CO2 and O3 on N2O emissions from soil"
@@ -327,8 +326,8 @@ def _resolver_settings(**overrides):
 
 
 class TestAuthoritativeResolverPrefetchFailure:
-    """clients-external-enrich-7: a failed resolver prefetch left every
-    title-searchable reference unmatched without asking Crossref."""
+    """A failed resolver prefetch left every title-searchable reference unmatched
+    without asking Crossref."""
 
     async def test_a_failed_prefetch_falls_through_to_crossref(self):
         from bibr.enrich.references import enrich_references
@@ -357,8 +356,7 @@ class TestAuthoritativeResolverPrefetchFailure:
 
 
 class TestResolverFallbackKeepsFinishedWork:
-    """clients-external-enrich-3: the fallback deadline threw away every search
-    that had already answered."""
+    """The fallback deadline threw away every search that had already answered."""
 
     async def test_answered_searches_are_applied_before_the_deadline(self):
         from bibr.enrich.references import enrich_references
@@ -397,8 +395,8 @@ class TestResolverFallbackKeepsFinishedWork:
 
 
 class TestMalformedResolverCandidates:
-    """clients-external-enrich-8: one candidate with ``"authors": null`` aborted
-    the fallback for every remaining reference."""
+    """One candidate with ``"authors": null`` aborted the fallback for every
+    remaining reference."""
 
     @pytest.mark.parametrize("malformed", [None, "not a list", [None, 3]])
     async def test_malformed_authors_cost_nothing_and_later_refs_still_match(self, malformed):
