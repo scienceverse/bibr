@@ -249,8 +249,12 @@ def ping_llm(settings: "GlobalSettings | None" = None) -> str:
     for OpenAI reasoning models, Gemini's thinking budget), capped like the
     title call, the first one every paper makes. A hand-built client that
     differs from the adapter can fail a configuration that extracts fine, or
-    pass one that does not. Raises whatever the provider raises. It runs its
-    own event loop, so call it from synchronous code only.
+    pass one that does not. Raises whatever the provider raises, and
+    ``TimeoutError`` when no reply arrives within the limit chew puts on one
+    call (twice ``LLM_TIMEOUT_SECONDS``): the SDKs' own timeouts run to
+    minutes, so a server that accepts the connection and never answers would
+    otherwise hang the caller. It runs its own event loop, so call it from
+    synchronous code only.
     """
     from pydantic import BaseModel, Field
 
@@ -258,24 +262,41 @@ def ping_llm(settings: "GlobalSettings | None" = None) -> str:
         reply: str = Field(description="Your reply")
 
     effective = settings if settings is not None else snapshot_settings()
-    provider, _ = _get_provider(effective)
+    provider, name = _get_provider(effective)
     client = provider.build_client()
     call_kwargs = provider.call_kwargs(
         None, _task_max_tokens(effective, effective.llm.title_max_tokens)
     )
+    per_request = effective.llm.timeout_seconds
+    limit = 2 * per_request  # LLMClient._invoke_structured's hard timeout
 
     async def _call() -> Any:
-        return await client.create(
-            response_model=ConnectionCheck,
-            messages=[
-                {"role": "system", "content": "You answer connection checks."},
-                {"role": "user", "content": "Reply with the single word: OK"},
-            ],
-            max_retries=_validation_retry(effective),
-            **call_kwargs,
+        return await asyncio.wait_for(
+            client.create(
+                response_model=ConnectionCheck,
+                messages=[
+                    {"role": "system", "content": "You answer connection checks."},
+                    {"role": "user", "content": "Reply with the single word: OK"},
+                ],
+                max_retries=_validation_retry(effective),
+                **call_kwargs,
+            ),
+            timeout=limit,
         )
 
-    return str(asyncio.run(_call()).reply)
+    try:
+        return str(asyncio.run(_call()).reply)
+    except TimeoutError:
+        message = (
+            f"No reply within {limit} s, the limit bibr chew sets for one LLM call "
+            f"(twice LLM_TIMEOUT_SECONDS={per_request})."
+        )
+        if name == "ollama":
+            message += (
+                " Ollama loads the model on its first request, which can take longer;"
+                " try again once it has loaded."
+            )
+        raise TimeoutError(message) from None
 
 
 def _extract_http_status(exc: BaseException) -> int | None:

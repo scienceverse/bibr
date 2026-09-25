@@ -9,6 +9,7 @@ paper failed at its first LLM call.
 import asyncio
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -120,3 +121,66 @@ def test_ollama_openai_base_url(configured, expected):
     from bibr.clients.providers.ollama import ollama_openai_base_url
 
     assert ollama_openai_base_url(configured) == expected
+
+
+def _ollama_settings(base_url):
+    from bibr.config import snapshot_settings
+
+    settings = snapshot_settings()
+    settings.llm.provider = "ollama"
+    settings.llm.model = "gpt-oss:20b"
+    settings.llm.ollama_base_url = base_url
+    return settings
+
+
+def test_ping_llm_reaches_ollama_through_the_adapter(ollama_like_server):
+    """``bibr doctor`` and the ``bibr setup`` connection test send this request."""
+    from bibr.clients.llm import ping_llm
+
+    host, paths = ollama_like_server
+
+    assert ping_llm(_ollama_settings(host)) == "OK"
+    assert paths == ["/v1/chat/completions"]
+
+
+@pytest.fixture
+def silent_server():
+    """Accepts a request and never answers, like a wedged server or a model still loading."""
+    release = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            release.wait(30)
+
+        def log_message(self, format, *args):  # noqa: A002, ARG002
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_ping_llm_gives_up_where_chew_would(silent_server):
+    """The SDK waits minutes for a reply; the ping stops at chew's limit for one call."""
+    from bibr.clients.llm import ping_llm
+
+    settings = _ollama_settings(silent_server)
+    settings.llm.timeout_seconds = 1
+
+    started = time.monotonic()
+    with pytest.raises(TimeoutError) as excinfo:
+        ping_llm(settings)
+
+    assert time.monotonic() - started < 10
+    assert str(excinfo.value) == (
+        "No reply within 2 s, the limit bibr chew sets for one LLM call "
+        "(twice LLM_TIMEOUT_SECONDS=1). Ollama loads the model on its first request, "
+        "which can take longer; try again once it has loaded."
+    )

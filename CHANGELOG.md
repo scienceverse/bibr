@@ -230,6 +230,11 @@ released.
   Ollama; it now tests it like any other provider. When the wizard's test
   fails for Ollama, it offers to change the base URL. It used to ask for an
   API key and write the answer to `.env` as a line with no name, `=<key>`.
+  Both tests now give up after twice `LLM_TIMEOUT_SECONDS`, the limit `bibr
+  chew` puts on one LLM call. A server that accepted the request and never
+  answered kept them waiting on the SDK's own timeout instead, which for the
+  OpenAI SDK that Ollama and OpenAI-compatible servers go through is 600 s per
+  attempt.
 - `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
   resolved to the backend chew would start on this machine; doctor used to
   check it as a cloud provider and ask for a key. The provider's credentials are
