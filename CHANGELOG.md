@@ -621,9 +621,10 @@ released.
   Keywords: a DOI the paper does not print is never exported. A PDF's
   document-information and XMP DOIs and its DOI link targets are
   `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
-  `pdf_info`, `pdf_xmp`, `link_annotation`). They can break a tie between
-  printed candidates of one tier, or confirm the one printed body DOI that
-  would otherwise go unselected, but never name the paper alone.
+  `pdf_info`, `pdf_xmp`, `link_annotation`). The metadata DOIs, and a link on
+  text other than the DOI itself (a journal citation line), can break a tie
+  between printed candidates of one tier, or confirm the one printed body DOI
+  that would otherwise go unselected, but never name the paper alone.
   `extraction.fields.doi.source` names the selected candidate's `source_kind`
   (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
   `native` for a JATS or HTML article-id) instead of `identity`. The export
