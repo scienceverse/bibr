@@ -73,7 +73,7 @@ Post-parse pipeline runs after structure parsing:
 
 - **Section classification** -- three-tier cascade maps headers to canonical IMRaD categories: alias lookup table, then a trained classifier model, then LLM fallback (`section_classifier.py`; see [Classifiers](classifiers.md))
 - **Study hierarchy** -- regex markers such as Study 1 and Experiment A establish separate section scopes before classification (`section_tree.py`)
-- **Metadata extraction** -- selected front-matter rows ground title, authors, abstract, DOI, and publication fields. JATS and HTML/ePub can supply preparsed metadata, avoiding the core metadata LLM call
+- **Metadata extraction** -- selected front-matter rows ground title, authors, abstract, and publication fields. JATS and HTML/ePub can supply preparsed metadata, avoiding the core metadata LLM call
 - **Paper classification** -- the default MiniLM multitask model predicts paper type and OECD domains from title/abstract; confidence gates and LLM fallback are described in [Classifiers](classifiers.md)
 - **Reference extraction** -- segmentation (default `geom`, a local geometry model, cascading through region anchors -> LLM -> CRF when geometry is absent or unconfident) locates each reference; parsing (default `ner`, a local ModernBERT-CRF model, with `llm` for opt-in batched LLM parsing) extracts structured fields
 - **Citation linking** -- 3-tier hybrid approach: numeric bracket/superscript citations, author-year citations, then LLM fallback (`citation_linker.py`)
@@ -81,7 +81,12 @@ Post-parse pipeline runs after structure parsing:
 - **IMRaD enforcement** -- deduplication of Abstract and References by classification-source trust; repeated Methods/Results/Discussion remain valid
 - **Source ownership** -- abstract spans, author grounding, and integrity-statement evidence are resolved against the selected article block. Ambiguous front matter can yield validation issues instead of metadata taken from another article in the file
 
-Identity validation and a core checkpoint run before enrichment. Extraction
+Identity validation and a core checkpoint run before enrichment. The identity
+stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
+(sentences, page furniture, the input's structured metadata and, for a PDF,
+the text layer of pages 1 and 2) and records every candidate in
+`extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
+carries can confirm a printed one but is never exported. Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:

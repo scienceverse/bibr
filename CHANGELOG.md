@@ -525,6 +525,28 @@ released.
 - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
   were cut at the `<` when read as the paper's DOI or matched against a
   manifest's expected DOI. They are kept whole.
+- A PDF whose DOI is printed only in a repository banner up the page margin
+  ("… first published as 10.…/… on 1 May 1999. Downloaded from …"), or in a
+  masthead line the layout did not turn into a region, was exported with no
+  DOI. The identity stage now also reads the text layer of pages 1 and 2, in
+  any orientation, where the parsed text does not reach, including the banner
+  a publisher stamped on a scan. A banner's "first published as" names the
+  paper. A text-layer DOI printed in a reference entry, table or figure is
+  rejected like the region's text.
+- A footer DOI with the journal's ISSN on the next line ("…04.006" over
+  "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
+  (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
+  line's end into the next printed field, or that ends in a slash, is now
+  rejected as `line_join_overrun`, and the text layer's reading stands. A
+  parsed DOI that lost its last characters gives way to the complete reading
+  of its printed line.
+- A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
+  figure note (a cited work, or the preprint of the paper) outranked the
+  paper's own DOI printed as a doi.org link on page 1, and became the DOI of a
+  paper that prints none. A labelled DOI now names the paper only in the front
+  matter and the running headers and footers. An eLife JATS or HTML file's
+  labelled figure DOIs no longer raise `VAL_DOI_AMBIGUOUS` against its
+  article-id.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
@@ -593,6 +615,19 @@ released.
 
 ### Changed
 
+- The identity stage is the only step that sets `metadata.doi`. The
+  core-metadata extractor no longer looks for a DOI, and the no-LLM
+  document-information fallback no longer fills one from a PDF's Subject or
+  Keywords: a DOI the paper does not print is never exported. A PDF's
+  document-information and XMP DOIs and its DOI link targets are
+  `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
+  `pdf_info`, `pdf_xmp`, `link_annotation`). They can break a tie between
+  printed candidates of one tier, or confirm the one printed body DOI that
+  would otherwise go unselected, but never name the paper alone.
+  `extraction.fields.doi.source` names the selected candidate's `source_kind`
+  (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
+  `native` for a JATS or HTML article-id) instead of `identity`. The export
+  schema changes only by describing the new receipt values.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
