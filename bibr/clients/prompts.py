@@ -109,11 +109,26 @@ when available; otherwise use the first complete printed version. Copy it
 verbatim; do not concatenate or translate the versions.
 """
 
+# Shared by the title/keywords and merged core-metadata prompts. Unlike the
+# abstract, a parallel-language title keeps the version printed first; a
+# translation printed after it is a variant, not the paper's title.
+_TITLE_RULES = """Title: the paper's title as written. If the title is printed in more than one
+language, return only the version printed first, verbatim in the language and
+script it is printed in, even when a later version is in English. Never
+translate it and never join two versions into one title. Ignore a title quoted
+in a citation line or a running header when deciding which version was printed
+first."""
+
+# Shared by the authors and merged core-metadata prompts: the byline follows the
+# same printed-first rule as the title.
+_PARALLEL_BYLINE_RULE = """- If the byline is printed in two scripts or languages, copy the names from the
+  byline printed first. Never transliterate, romanise or translate a name."""
+
 _TITLE_KEYWORDS_PROMPT = (
-    """The supplied fenced text is front matter from a scientific paper.
+    f"""The supplied fenced text is front matter from a scientific paper.
 Extract the title, abstract, and keywords.
 
-Title: the paper's title as written.
+{_TITLE_RULES}
 
 Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
 and sentence boundaries. Exclude everything that is not abstract content:
@@ -148,7 +163,7 @@ and never take values from a reference in the bibliography.
     + _ABSTRACT_BOUNDARY_RULES
 )
 
-_AUTHORS_PROMPT = """The supplied fenced text is the first page of a scientific paper.
+_AUTHORS_PROMPT = f"""The supplied fenced text is the first page of a scientific paper.
 Extract the authors. Preserve the original order of the authors.
 
 Author name rules:
@@ -162,6 +177,7 @@ Author name rules:
 - When a name has exactly two tokens and neither is a particle (van, de, von, etc.), the first is the given name and the second is the family name
 - Never invent, complete or substitute a name: every given/family value must be
   a verbatim span of the fenced text. If no byline is printed, return no authors.
+{_PARALLEL_BYLINE_RULE}
 - Organisation or consortium authors (e.g. "DeepSeek-AI", "The ATLAS Collaboration"):
   set given: "" and put the full name in family.
 
@@ -224,10 +240,10 @@ Paper type classification:
 """
 
 _CORE_METADATA_PROMPT = (
-    """The supplied fenced text is the first page of a scientific paper.
+    f"""The supplied fenced text is the first page of a scientific paper.
 Extract the core metadata: title, abstract, keywords, authors, and classification.
 
-Title: the paper's title as written.
+{_TITLE_RULES}
 
 Abstract: copy the abstract prose verbatim — preserve wording, punctuation,
 and sentence boundaries. Exclude everything that is not abstract content:
@@ -263,6 +279,7 @@ Authors (preserve the original order):
 - When a name has exactly two tokens and neither is a particle (van, de, von, etc.), the first is the given name and the second is the family name
 - Never invent, complete or substitute a name: every given/family value must be
   a verbatim span of the fenced text. If no byline is printed, return no authors.
+{_PARALLEL_BYLINE_RULE}
 - Organisation or consortium authors (e.g. "DeepSeek-AI", "The ATLAS Collaboration"):
   set given: "" and put the full name in family.
 - Affiliations: resolve superscript numbers/symbols to the actual institution

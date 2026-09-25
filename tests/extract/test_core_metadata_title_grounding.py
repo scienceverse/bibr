@@ -247,3 +247,41 @@ async def test_extracted_title_keeps_the_printed_leading_parenthetical():
 
     assert metadata.title == _PARENTHESIZED
     assert "VAL_TITLE_REGROUNDED" in [issue.code for issue in ext.validation_issues]
+
+
+@pytest.mark.parametrize("one_title_region", [False, True])
+async def test_bilingual_record_keeps_the_title_and_byline_printed_first(one_title_region):
+    # The original title and byline are printed first, then their translation;
+    # layout may read both titles as one region. The model's pick is final once
+    # a record is selected, so nothing after it may swap in the later version.
+    original = "Краткий обзор школьных садов"
+    translation = "A brief review of school gardens"
+    titles = (
+        [_candidate("c1", f"{original} {translation}", roles=frozenset({"title"}))]
+        if one_title_region
+        else [
+            _candidate("c1", original, roles=frozenset({"title"})),
+            _candidate("c3", translation, roles=frozenset({"title"})),
+        ]
+    )
+    bylines = [
+        _candidate("c2", "Мира Эллисон", roles=frozenset({"byline"}), text_ids=(2,)),
+        _candidate("c4", "Mira Ellison", roles=frozenset({"byline"}), text_ids=(4,)),
+    ]
+    ext = _extractor(
+        _resolution(*sorted(titles + bylines, key=lambda candidate: candidate.reading_order)),
+        CoreMetadataLLM(
+            title=original,
+            authors=[AuthorLLM(given="Мира", family="Эллисон")],
+            keywords=[],
+        ),
+    )
+
+    metadata = await ext.extract()
+
+    assert metadata.title == original
+    assert [(author.given, author.family) for author in metadata.authors] == [("Мира", "Эллисон")]
+    codes = {issue.code for issue in ext.validation_issues}
+    assert codes.isdisjoint(
+        {"VAL_TITLE_REGROUNDED", "VAL_TITLE_UNGROUNDED", "VAL_AUTHOR_FABRICATED"}
+    )
