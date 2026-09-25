@@ -954,7 +954,10 @@ def test_structured_article_doi_wins_over_component_dois_in_body_text():
     assert selection.selected is not None
     assert selection.selected.normalized == "10.7554/elife.00013"
     assert selection.selected.source_kind == "structured_metadata"
-    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    # A DOI label in the body, outside the front matter, marks a cited or
+    # component DOI: it no longer ties with the article's own.
+    assert {c.selection_tier for c in selection.candidates if c.source_kind == "sentence"} == {1}
+    assert selection.issues == ()
 
 
 _SICI_DOI = "10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K"
@@ -1134,3 +1137,43 @@ def test_a_doi_ending_in_a_slash_ran_on_into_the_next_field():
     [candidate] = selection.candidates
     assert candidate.normalized == "10.1234/jex.2026.04.0061234-5678/"
     assert candidate.rejection_reason == "line_join_overrun"
+
+
+@pytest.mark.parametrize(
+    ("section_type", "page", "tier"),
+    [
+        (CanonicalSection.INTRODUCTION, 7, 1),
+        (CanonicalSection.INTRODUCTION, 2, 3),
+        (CanonicalSection.ABSTRACT, 3, 3),
+    ],
+)
+def test_a_doi_label_names_the_paper_only_in_the_front_matter(section_type, page, tier):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _contents(
+        [("Section", section_type, "As shown before (doi: 10.1234/cited.1).", page)]
+    )
+
+    [candidate] = collect_doi_candidates(contents)
+
+    assert candidate.marker_kind == "explicit_doi"
+    assert candidate.selection_tier == tier
+
+
+def test_a_doi_label_in_the_running_footer_still_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [("Introduction", CanonicalSection.INTRODUCTION, "Body text (doi: 10.1234/cited.1).", 7)],
+        footers=["doi: 10.1234/own.9"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert (selection.selected.normalized, selection.selected.source_kind) == (
+        "10.1234/own.9",
+        "footer",
+    )
+    assert selection.selected.selection_tier == 3
+    assert selection.issues == ()

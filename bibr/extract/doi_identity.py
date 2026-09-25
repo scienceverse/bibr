@@ -187,6 +187,15 @@ def _candidate_from_match(
     # sentence still is (a Zenodo DOI beside it marks a software citation).
     context = text.replace(match.group(0), " ")
     section_value = str(section_type or "").casefold()
+    # Where a paper names itself: the page furniture, the title, abstract and
+    # keywords sections, pages 1-2, and an unpaged input's front block. A DOI
+    # label anywhere else is how a cited work's DOI is printed.
+    in_front = (
+        source_kind in {"header", "footer"}
+        or section_value in _FRONT_MATTER_SECTIONS
+        or (page is not None and page <= 2)
+        or front_block
+    )
 
     rejection_reason = None
     if (
@@ -232,7 +241,7 @@ def _candidate_from_match(
         semantic_context = "parent_or_component"
         rejection_reason = "component_candidate"
         tier = 0
-    elif marker_kind == "explicit_doi":
+    elif marker_kind == "explicit_doi" and in_front:
         semantic_context = "article_self"
         tier = EXPLICIT_SELF_ID
     elif marker_kind == "citation":
@@ -241,7 +250,7 @@ def _candidate_from_match(
     elif source_kind in {"header", "footer"}:
         semantic_context = "repeated_furniture" if repeated_count > 1 else "structural_furniture"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
-    elif section_value in _FRONT_MATTER_SECTIONS or (page is not None and page <= 2) or front_block:
+    elif in_front:
         semantic_context = "front_matter"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
     else:
