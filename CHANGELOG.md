@@ -248,6 +248,17 @@ released.
   invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
   explanatory prose around one JSON fence; it never completes truncated JSON
   or takes a nested value (from draft PR #8).
+- One bad file no longer kills its chunk or the rest of a batch. The stage
+  contract says a stage records a per-file error and never raises, but a
+  failing sentence-segmenter load, an exception in the identity stage or a
+  failed classifier startup escaped the stage, and the library's batch loop
+  (`bibr.chew(list)`, `bibr batch`) then abandoned every later chunk. The
+  segmenter failure now fails the chunk's files with `parse_failed`, an
+  identity failure fails only its file (`identity_failed`), and a classifier
+  startup failure is logged while papers fall back as they do when the
+  trained classifiers do not answer. The batch loop records a crashed chunk's
+  unfinished files as failures (`chunk_error`) and carries on, and a file that
+  finishes without an export is reported as `export_failed` instead of raising.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

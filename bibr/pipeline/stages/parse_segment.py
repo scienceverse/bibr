@@ -63,7 +63,19 @@ class ParseSegmentStage:
         ctx.progress.stage_start(self.name)
         t0 = time.monotonic()
         rm = ctx.resources
-        rm.ensure_segmenter()
+        try:
+            rm.ensure_segmenter()
+        except Exception as exc:  # noqa: BLE001 - every file needs it; record per file
+            for fs in ctx.alive():
+                fs.set_error(
+                    f"Sentence segmenter failed to load: {exc}",
+                    code="parse_failed",
+                    stage=self.name,
+                    exc=exc,
+                )
+            logger.warning("Sentence segmenter failed to load", exc_info=True)
+            ctx.progress.stage_end(self.name)
+            return
 
         async def _process_one(fs):
             try:

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, Unpack, cast
@@ -40,6 +41,8 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.export import PaperExport
     from bibr.pipeline.progress import ProgressTracker
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ChewFailure",
@@ -373,7 +376,14 @@ async def _process_batch(
         batch_size = _auto_batch_size(getattr(pipeline, "memory_mode", "balanced"))
     states = [FileState(path=f) for f in files]
     for i in range(0, len(states), batch_size):
-        await pipeline.process_chunk(states[i : i + batch_size], progress=progress)
+        chunk = states[i : i + batch_size]
+        try:
+            await pipeline.process_chunk(chunk, progress=progress)
+        except Exception as exc:  # noqa: BLE001 - a crashed chunk fails its own files only
+            logger.exception("Pipeline chunk %d crashed", i // batch_size + 1)
+            for fs in chunk:
+                if fs.error is None and fs.result_json is None:
+                    fs.set_error(f"Pipeline chunk failed: {exc}", code="chunk_error", exc=exc)
     results: list[Result | ChewFailure] = []
     for fs in states:
         if fs.error:
@@ -385,11 +395,19 @@ async def _process_batch(
                     failed_stage=fs.failed_stage,
                 )
             )
+        elif fs.result_json is None:
+            # A stage let the file through without exporting it: report that
+            # file, not abort the batch after every other file finished.
+            results.append(
+                ChewFailure(
+                    path=fs.path,
+                    error="pipeline completed without an export result",
+                    error_code="export_failed",
+                    failed_stage="export",
+                )
+            )
         else:
-            result_json = fs.result_json
-            if result_json is None:
-                raise RuntimeError(f"pipeline completed without an export result for {fs.path}")
-            results.append(Result(result_json))
+            results.append(Result(fs.result_json))
     return results
 
 
