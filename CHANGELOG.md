@@ -389,15 +389,17 @@ released.
   a scanned page reads the aggregate box and each entry box separately and the
   reads differ by a character here and there. Text the entry boxes lack keeps
   the aggregate box however small a share of it that text is, such as one
-  entry among twelve or more, a line or a DOI. This applies both to the OCR
-  stage's overlap cleanup and to the PDF parser. The OCR stage's second
-  cleanup, which empties a `reference` region whose text the page's text
-  regions already hold, uses the same comparison. It kept a region whose read
-  ran a few characters longer than the text regions' reads, so its entries
-  were emitted twice, and it emptied a region holding a line that no text
-  region had, such as the end of a reference continued from the previous page,
-  when that line was a small share of the region's text. The first is now
-  emptied and the second kept.
+  entry among twelve or more, a line or a DOI. A piece under 16 letters and
+  digits long, such as a page range alone on the last line of an entry, still
+  passes for OCR noise and is lost when the box is dropped or emptied. This
+  applies both to the OCR stage's overlap cleanup and to the PDF parser. The
+  OCR stage's second cleanup, which empties a `reference` region whose text
+  the page's text regions already hold, uses the same comparison. It kept a
+  region whose read ran a few characters longer than the text regions' reads,
+  so its entries were emitted twice, and it emptied a region holding a line
+  that no text region had, such as the end of a reference continued from the
+  previous page, when that line was a small share of the region's text. The
+  first is now emptied and the second kept.
 - The page-furniture filter on the reference lines the geometry segmenter
   reads removes only lines at the top or bottom edge of a page, as it was
   documented to. It removed every line whose text, with digits masked, matched
