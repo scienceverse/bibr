@@ -430,3 +430,30 @@ def test_fill_gives_a_year_only_record_its_year_as_the_date():
     consolidate_bibs(data, mode="fill")
     row = data["bib"][0]
     assert (row["year"], row["published_date"]) == (2020, "2020")
+
+
+def test_replace_keeps_a_printed_type_over_a_catch_all_match():
+    """core-api-5: Crossref types outside the BibType vocabulary map to "other";
+    a same-DOI match carrying it must not overwrite a printed "book"."""
+    data = _data(
+        bib=[{"bib_id": 1, "bib_type": "book", "doi": "10.1017/cbo9780511809071"}],
+        bib_match=[
+            {
+                "bib_id": 1,
+                "service": "crossref",
+                "doi": "10.1017/cbo9780511809071",
+                "bib_type": "other",
+            }
+        ],
+    )
+    assert consolidate_bibs(data, mode="replace") == 0
+    assert data["bib"][0]["bib_type"] == "book"
+
+
+def test_a_catch_all_type_still_fills_a_missing_one():
+    data = _data(
+        bib=[{"bib_id": 1, "bib_type": None, "doi": "10.1/x"}],
+        bib_match=[{"bib_id": 1, "service": "crossref", "doi": "10.1/x", "bib_type": "other"}],
+    )
+    assert consolidate_bibs(data, mode="fill") == 1
+    assert data["bib"][0]["bib_type"] == "other"

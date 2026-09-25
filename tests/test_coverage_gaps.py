@@ -129,6 +129,29 @@ class TestMigrateBibType:
         assert migrate_bib_type("techreport") == "report"
         assert migrate_bib_type("report") == "report"
 
+    @pytest.mark.parametrize(
+        ("crossref_type", "expected"),
+        [
+            ("monograph", "book"),
+            ("edited-book", "book"),
+            ("reference-book", "book"),
+            ("book-set", "book"),
+            ("book-part", "book_chapter"),
+            ("book-track", "book_chapter"),
+            ("report-component", "report"),
+            ("report-series", "report"),
+            ("database", "dataset"),
+            ("standard", "other"),
+            ("journal-issue", "other"),
+        ],
+    )
+    def test_crossref_work_types(self, crossref_type, expected):
+        """core-api-5: a matched Cambridge monograph came back as "other"."""
+        assert migrate_bib_type(crossref_type) == expected
+
+    def test_non_string_returns_other(self):
+        assert migrate_bib_type(3) == "other"  # type: ignore[arg-type]
+
     def test_preprint_variants(self):
         assert migrate_bib_type("unpublished") == "preprint"
         assert migrate_bib_type("preprint") == "preprint"

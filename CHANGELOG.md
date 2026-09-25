@@ -213,6 +213,13 @@ released.
 
 ### Fixed
 
+- A matched Crossref monograph, edited or reference book, book part, report
+  component or database came back with `bib_type` `other`, because
+  `migrate_bib_type` knew only the BibTeX names and a few Crossref ones.
+  `consolidate="replace"` then overwrote a printed `book` with it. These
+  Crossref types now map to `book`, `book_chapter`, `report` and `dataset`, a
+  match's `other` still fills a missing type but never replaces a printed one,
+  and a type that is not a string maps to `other` instead of raising.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
