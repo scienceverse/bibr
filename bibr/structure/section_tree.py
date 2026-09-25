@@ -39,6 +39,38 @@ IMRAD_ANCHORS: frozenset[CanonicalSection] = frozenset(
     }
 )
 
+# Exact alias headings that name a whole IMRaD part, as opposed to the
+# subsection names the alias table also holds ("Study design", "Statistical
+# analysis", "Limitations"). Only these outrank an earlier keyword anchor of
+# the same type in ``assign_hierarchy_from_top_level``.
+_PART_HEADINGS: frozenset[str] = frozenset(
+    {
+        "introduction",
+        "background",
+        "method",
+        "methods",
+        "methodology",
+        "materials and methods",
+        "materials & methods",
+        "experimental",
+        "experimental section",
+        "results",
+        "findings",
+        "results and discussion",
+        "results & discussion",
+        "experiments",
+        "experimental results",
+        "empirical results",
+        "experiments and results",
+        "discussion",
+        "general discussion",
+        "conclusion",
+        "conclusions",
+        "concluding remarks",
+        "summary and conclusions",
+    }
+)
+
 # "Interlude" types — top-level sections that interrupt the IMRaD flow but
 # don't represent a new IMRaD anchor (so a following UNKNOWN should still
 # attach to the previous IMRaD anchor, not the interlude).
@@ -505,11 +537,15 @@ def assign_hierarchy_from_top_level(
                 # A heading that is exactly the part's name ("Materials and
                 # methods") outranks an earlier one that only contains a
                 # keyword ("A neural implementation of ..." inside Results):
-                # it starts the anchor its own subsections fold under.
+                # it starts the anchor its own subsections fold under. Exact
+                # subsection names ("Study design") do not: under a keyword
+                # part heading such as "Patients and methods" they are its
+                # subsections.
                 outranks_first = (
                     first is not None
-                    and sec.classification_source == "exact_alias"
                     and first.classification_source == "substring_alias"
+                    and sec.classification_source == "exact_alias"
+                    and normalize_text(sec.header) in _PART_HEADINGS
                 )
                 if first_id is not None and not outranks_first:
                     # Repeat of an already-seen IMRaD type (e.g. second METHODS-

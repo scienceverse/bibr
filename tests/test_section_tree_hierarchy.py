@@ -206,20 +206,21 @@ def test_exact_alias_heading_outranks_an_earlier_keyword_anchor():
     ]
 
 
-def test_an_exact_subsection_alias_also_outranks_a_keyword_part():
-    """Known limitation: the exact alias table also holds subsection names.
-    "Statistical analysis" (exact METHODS) outranks "Methods and materials"
-    (a keyword hit), so the Results subsections after it fold under it and
-    read as METHODS. Restricting the rule to part names such as "Methods"
-    lost more than it saved on the PMC sample ("Experimental Section")."""
+def test_exact_part_name_experimental_section_outranks_a_keyword_anchor():
+    """Chemistry papers name their Methods part "Experimental Section"; an
+    earlier Results subsection read as METHODS by keyword must not swallow it
+    and its compound subsections."""
     secs = [
-        _typed_section(1, "Methods and materials", CanonicalSection.METHODS),
-        _typed_section(2, "Results", CanonicalSection.RESULTS),
-        _typed_section(3, "Statistical analysis", CanonicalSection.METHODS),
-        _typed_section(4, "Dose comparison", CanonicalSection.UNKNOWN),
+        _typed_section(1, "Results and Discussion", CanonicalSection.RESULTS),
+        _typed_section(2, "Development and Implementation of a Library", CanonicalSection.METHODS),
+        _typed_section(3, "Summary and Conclusion", CanonicalSection.DISCUSSION),
+        _typed_section(4, "Experimental Section", CanonicalSection.METHODS),
+        _typed_section(5, "Purification of Products", CanonicalSection.UNKNOWN),
     ]
     for sec, source in zip(
-        secs, ["substring_alias", "exact_alias", "exact_alias", None], strict=True
+        secs,
+        ["exact_alias", "substring_alias", "substring_alias", "exact_alias", None],
+        strict=True,
     ):
         sec.classification_source = source
     assign_hierarchy_from_top_level(secs)
@@ -227,8 +228,110 @@ def test_an_exact_subsection_alias_also_outranks_a_keyword_part():
         (1, 1, 0),
         (2, 1, 0),
         (3, 1, 0),
-        (4, 2, 3),
+        (4, 1, 0),
+        (5, 2, 4),
     ]
+
+
+def test_exact_subsection_names_stay_under_a_keyword_part_heading():
+    """Keyword part headings keep their exact-named subsections.
+
+    "Patients and methods" and "Discussion and conclusion" are keyword hits,
+    but they are the parts. "Study design", "Statistical analysis" and
+    "Limitations" are exact aliases that name subsections, so they fold under
+    the part instead of starting one and taking its later subsections."""
+    secs = [
+        _typed_section(1, "Introduction", CanonicalSection.INTRODUCTION),
+        _typed_section(2, "Patients and methods", CanonicalSection.METHODS),
+        _typed_section(3, "Study design", CanonicalSection.METHODS),
+        _typed_section(4, "Procedure", CanonicalSection.UNKNOWN),
+        _typed_section(5, "Statistical analysis", CanonicalSection.METHODS),
+        _typed_section(6, "Results", CanonicalSection.RESULTS),
+        _typed_section(7, "Discussion and conclusion", CanonicalSection.DISCUSSION),
+        _typed_section(8, "Limitations", CanonicalSection.DISCUSSION),
+        _typed_section(9, "Implications", CanonicalSection.DISCUSSION),
+    ]
+    for sec, source in zip(
+        secs,
+        [
+            "exact_alias",
+            "substring_alias",
+            "exact_alias",
+            None,
+            "exact_alias",
+            "exact_alias",
+            "substring_alias",
+            "exact_alias",
+            "exact_alias",
+        ],
+        strict=True,
+    ):
+        sec.classification_source = source
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 2, 2),
+        (4, 2, 2),
+        (5, 2, 2),
+        (6, 1, 0),
+        (7, 1, 0),
+        (8, 2, 7),
+        (9, 2, 7),
+    ]
+
+
+def test_an_exact_part_name_printed_inside_another_part_still_outranks():
+    """Known limitation: the rule reads names, not layout. A part name printed
+    as a subsection of a keyword part heading, such as "Methods" inside
+    "Subjects and methods" or "Conclusions" inside "Discussion and
+    conclusion", starts a part of its own and takes the subsections after
+    it."""
+    secs = [
+        _typed_section(1, "Subjects and methods", CanonicalSection.METHODS),
+        _typed_section(2, "Methods", CanonicalSection.METHODS),
+        _typed_section(3, "Statistics", CanonicalSection.UNKNOWN),
+        _typed_section(4, "Results", CanonicalSection.RESULTS),
+        _typed_section(5, "Discussion and conclusion", CanonicalSection.DISCUSSION),
+        _typed_section(6, "Conclusions", CanonicalSection.DISCUSSION),
+        _typed_section(7, "Practical implications", CanonicalSection.UNKNOWN),
+    ]
+    for sec, source in zip(
+        secs,
+        [
+            "substring_alias",
+            "exact_alias",
+            None,
+            "exact_alias",
+            "substring_alias",
+            "exact_alias",
+            None,
+        ],
+        strict=True,
+    ):
+        sec.classification_source = source
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 2, 2),
+        (4, 1, 0),
+        (5, 1, 0),
+        (6, 1, 0),
+        (7, 2, 6),
+    ]
+
+
+def test_part_headings_are_exact_imrad_aliases():
+    """Every outranking part name must be an exact alias of an IMRaD part,
+    or the rule could never see it (it fires on exact alias hits only)."""
+    from bibr.structure.section_classifier import _ALIAS_EXACT_LOOKUP
+    from bibr.structure.section_tree import _PART_HEADINGS, IMRAD_ANCHORS
+
+    not_parts = sorted(
+        name for name in _PART_HEADINGS if _ALIAS_EXACT_LOOKUP.get(name) not in IMRAD_ANCHORS
+    )
+    assert not_parts == []
 
 
 def test_repeat_exact_alias_heading_still_folds_under_the_first():

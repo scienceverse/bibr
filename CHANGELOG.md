@@ -390,15 +390,20 @@ released.
   heading, which anchors only the headings after it, or the reference list
   that ends the body. That is the first section typed references after a
   body section, or the first one when no body section comes before any.
-- A heading that matches a section name exactly ("Materials and methods")
-  folded under an earlier heading of the same type that only contains a
-  keyword, such as the Results subsection "A neural implementation of
-  oscillation" read as Methods. It became a subsection of that heading, and
-  the subsections printed under it were attached to the part before it
-  (Discussion, in eLife articles) and took that part's type. It now starts
-  its own part and keeps its subsections. The exact names include some
-  subsection names, such as "Statistical analysis", which in that position
-  now start a part too.
+- A heading that is exactly the name of a part ("Materials and methods",
+  "Experimental Section") folded under an earlier heading of the same type
+  that only contains a keyword, such as the Results subsection "A neural
+  implementation of oscillation" read as Methods. It became a subsection of
+  that heading, and the subsections printed under it were attached to the
+  part before it (Discussion, in eLife articles) and took that part's type.
+  It now starts its own part and keeps its subsections. Exact names of
+  subsections, such as "Study design" or "Limitations", still fold under a
+  keyword part heading such as "Patients and methods" or "Discussion and
+  conclusion". A part name printed as a subsection of such a heading, such as
+  "Conclusions" inside "Discussion and conclusion", does start a part of its
+  own. The earlier heading counts as a keyword hit only when the alias table
+  typed it, which in runs with an LLM or the trained classifier happens only
+  when the keyword covers most of the heading.
 
 ### Added
 
