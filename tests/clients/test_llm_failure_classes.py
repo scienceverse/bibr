@@ -270,18 +270,25 @@ _REFERENCE = {
         ("TitleKeywordsLLM", {"title": "T", "abstract": ["p1", "p2"]}),
         ("TitleKeywordsLLM", {"title": "T", "abstract": 7}),
         ("CoreMetadataLLM", {"title": "T", "authors": [], "abstract": {"text": "p"}}),
+        ("TitleKeywordsLLM", {"title": "T", "keywords": 5}),
+        ("CoreMetadataLLM", {"title": "T", "authors": [], "keywords": True}),
         ("PaperReferenceLLM", {**_REFERENCE, "bib_type": 7}),
         ("PaperReferenceLLM", {**_REFERENCE, "bib_type": ["book"]}),
     ],
 )
 def test_wrong_typed_llm_values_raise_validation_errors(model, payload):
-    """Instructor re-asks only on a ValidationError; an AttributeError from a
-    validator failed the call at once and read as an upstream outage."""
+    """Instructor re-asks only on a ValidationError; an AttributeError or
+    TypeError from a validator failed the call at once and read as an
+    upstream outage."""
     from bibr import schemas
 
     with pytest.raises(ValidationError) as raised:
         getattr(schemas, model).model_validate(payload)
-    assert {error["loc"][0] for error in raised.value.errors()} <= {"abstract", "bib_type"}
+    assert {error["loc"][0] for error in raised.value.errors()} <= {
+        "abstract",
+        "bib_type",
+        "keywords",
+    }
 
 
 def test_well_typed_values_are_unchanged():
@@ -291,3 +298,8 @@ def test_well_typed_values_are_unchanged():
     assert TitleKeywordsLLM.model_validate({"title": "T", "abstract": "  "}).abstract is None
     reference = PaperReferenceLLM.model_validate({**_REFERENCE, "bib_type": "article"})
     assert reference.bib_type == "journal_article"
+    # A falsy value mapped to "other" before, so it still does.
+    for falsy in (False, 0, 0.0, [], {}, ""):
+        assert PaperReferenceLLM.model_validate({**_REFERENCE, "bib_type": falsy}).bib_type == (
+            "other"
+        )

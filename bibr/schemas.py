@@ -467,6 +467,10 @@ class TitleKeywordsLLM(AbstractResponse):
         non-str items defensively, preserving the order of the rest."""
         if v is None:
             return []
+        if isinstance(v, int | float):
+            # Left for the list check to reject as a ValidationError, which
+            # Instructor re-asks; iterating it raised a TypeError instead.
+            return v
         return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
 
     @model_validator(mode="before")
@@ -652,6 +656,10 @@ class CoreMetadataLLM(AbstractResponse):
         non-str items defensively, preserving the order of the rest."""
         if v is None:
             return []
+        if isinstance(v, int | float):
+            # Left for the list check to reject as a ValidationError, which
+            # Instructor re-asks; iterating it raised a TypeError instead.
+            return v
         return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
 
     @model_validator(mode="before")
@@ -870,12 +878,13 @@ class PaperReferenceLLM(PaperReference):
     @classmethod
     def normalize_bib_type(cls, v: object) -> object:
         """Coerce legacy/free-form bib_type strings to a canonical
-        :class:`bibr.models.BibType` value (or None if unset). A non-string
-        is left for the str check to reject as a ValidationError."""
+        :class:`bibr.models.BibType` value (or None if unset). A falsy value
+        maps to "other"; any other non-string is left for the str check to
+        reject as a ValidationError."""
         if v is None:
             return None
         if not isinstance(v, str):
-            return v
+            return v if v else migrate_bib_type(None)
         return migrate_bib_type(v)
 
     @model_validator(mode="before")
