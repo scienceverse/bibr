@@ -270,6 +270,28 @@ released.
   normalized by the rendered image's own size or measured in PDF points, so
   they stay in place on a reduced page. A page that does not fit even at 72 DPI
   is still refused.
+- Fallbacks that used to leave only a log line now leave a warning in
+  `extraction.warnings`, its message starting with the error code (for
+  example `llm_timeout: …`); the extracted values are unchanged:
+  `RESEARCH_INTEGRITY_LLM_FAILED` (structured funding, author roles and
+  affiliation parts missing), `SECTION_CLASSIFIER_LLM_FAILED`,
+  `IMPLICIT_SECTIONS_LLM_FAILED`, `CITATION_LLM_FAILED` (the unresolved
+  tier-3 candidates also carry `llm_failed:<code>` in the citation receipt's
+  rejection reasons), `AUTHORS_LLM_FAILED`, `PAPER_CLASSIFICATION_FAILED`,
+  `REF_SECTION_NOT_FOUND` (the reference list is empty because no reference
+  section was found), `REF_SECTION_INFERRED` (the last unclassified section
+  was taken as the reference list), and `ROR_MATCHING_FAILED` (a ROR HTTP error,
+  transport failure or rate-limit backoff, which read as "no match").
+  `EQUATION_LLM_FALLBACK_FAILED` could not fire for an LLM failure; it now
+  reports how many fallback batches failed and why. A salvaged author list
+  says so: `AUTHORS_TRUNCATED` when the response hit the token limit,
+  `AUTHORS_PARTIAL` when it failed validation and only the leading authors
+  validated (the salvage used to report both as a truncation, in the log
+  only). `PAPER_CLASSIFIER_DEGRADED` is recorded once the LLM fallback's
+  outcome is known, and no longer claims the LLM classified the paper when
+  that call failed too. `LLMClient.resolve_citations` and
+  `extract_equations` now raise the typed error instead of returning an empty
+  list; their callers degrade as before.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

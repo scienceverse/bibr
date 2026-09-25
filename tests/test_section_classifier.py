@@ -815,11 +815,15 @@ async def test_configured_but_unloadable_model_warns(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm_answer(texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0)] * len(texts)
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm_answer)
     results = await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,
@@ -835,11 +839,15 @@ async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm_answer(texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0)] * len(texts)
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = None
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm_answer)
     await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,

@@ -1437,6 +1437,21 @@ class CoreMetadataExtractor:
             title_call_failed = "title" in field_failures
             if title_call_failed:
                 self._record_field_failures(field_failures)
+            else:
+                # The fan-out degraded these calls silently; say so.
+                if "authors" in field_failures:
+                    self._record_metadata_warning(
+                        WarningCode.AUTHORS_LLM_FAILED,
+                        f"{field_failures['authors']}: the author LLM call failed",
+                    )
+                if "paper_type" in field_failures:
+                    self._record_metadata_warning(
+                        WarningCode.PAPER_CLASSIFICATION_FAILED,
+                        f"{field_failures['paper_type']}: the paper classification LLM call failed",
+                    )
+            self._record_author_salvage(
+                getattr(llm_metadata, "_authors_salvaged_after", None), len(llm_metadata.authors)
+            )
 
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
@@ -1829,6 +1844,9 @@ class CoreMetadataExtractor:
             )
             self._record_recovery_degraded("invalid_output")
             return None
+        self._record_author_salvage(
+            getattr(recovered, "_salvaged_after", None), len(recovered.authors)
+        )
         grounded, rejected = grounded_authors_in_context(recovered.authors, context)
         if rejected:
             self.validation_issues.append(
@@ -1850,6 +1868,18 @@ class CoreMetadataExtractor:
             "VAL_AUTHOR_RECOVERY_DEGRADED",
             reason,
             "Empty-author recovery did not complete; the empty author list is not a refusal",
+        )
+
+    def _record_author_salvage(self, salvaged_after: object, count: int) -> None:
+        """Say that an author list is the salvaged head of a failed response."""
+
+        if not isinstance(salvaged_after, str) or not count:
+            return
+        self._record_metadata_warning(
+            WarningCode.AUTHORS_TRUNCATED
+            if salvaged_after == ErrorCode.LLM_TRUNCATED.value
+            else WarningCode.AUTHORS_PARTIAL,
+            f"{salvaged_after}: kept the {count} leading author(s) of an unfinished response",
         )
 
     def _record_field_failures(self, field_failures: dict[str, str]) -> None:
@@ -2246,17 +2276,7 @@ class CoreMetadataExtractor:
             result = None
             degraded_reason = type(exc).__name__
         if result is None:
-            # The exception type only — never its message, which can quote
-            # document text.
-            self._record_metadata_warning(
-                WarningCode.PAPER_CLASSIFIER_DEGRADED,
-                (
-                    f"trained classifier raised {degraded_reason}"
-                    if degraded_reason
-                    else "trained classifier unavailable"
-                )
-                + "; the LLM classified the paper",
-            )
+            fallback_failure: str | None = None
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             else:
@@ -2268,8 +2288,32 @@ class CoreMetadataExtractor:
                 except ProcessingError:
                     raise
                 except Exception as exc:
+                    from bibr.clients.llm import llm_failure_code
+
                     logger.warning("Broad paper-classification LLM fallback failed: %s", exc)
                     fallback = PaperClassificationLLM()
+                    fallback_failure = llm_failure_code(exc)
+            # The exception type only — never its message, which can quote
+            # document text. Recorded once the fallback's outcome is known.
+            self._record_metadata_warning(
+                WarningCode.PAPER_CLASSIFIER_DEGRADED,
+                (
+                    f"trained classifier raised {degraded_reason}"
+                    if degraded_reason
+                    else "trained classifier unavailable"
+                )
+                + (
+                    f"; the LLM fallback failed too ({fallback_failure})"
+                    if fallback_failure
+                    else "; the LLM classified the paper"
+                ),
+            )
+            if fallback_failure:
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFICATION_FAILED,
+                    f"{fallback_failure}: neither the trained classifier nor the LLM fallback "
+                    "answered",
+                )
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=fallback.oecd_domain,
                 oecd_subdomain=fallback.oecd_subdomain,

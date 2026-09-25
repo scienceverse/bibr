@@ -244,6 +244,8 @@ def _fake_llm_client():
                         ),
                     ]
                 )
+            if name == "ResearchIntegrityLLM":
+                return response_model(funding=[], contributions=[], affiliations=[])
             if name == "SectionClassificationResult":
                 return response_model(classifications=[])
             if name == "FrontMatterResult":

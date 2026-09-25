@@ -484,6 +484,10 @@ class AuthorsLLM(LLMResponse):
 
     authors: list[AuthorLLM] = Field(description="The authors of the paper")
 
+    # Error code of the failed call these authors were salvaged from (the
+    # leading complete objects of an unfinished response); ``None`` normally.
+    _salvaged_after: str | None = PrivateAttr(default=None)
+
 
 class PaperClassificationLLM(LLMResponse):
     """OECD domain/subdomain and paper type classification extracted by LLM.
@@ -616,6 +620,8 @@ class CoreMetadataLLM(AbstractResponse):
     # ``LLMClient.extract_core_metadata`` keeps the calls that succeeded. A
     # failed field is empty, never a guess; never part of the response schema.
     _field_failures: dict[str, str] = PrivateAttr(default_factory=dict)
+    # ``AuthorsLLM._salvaged_after`` of the author call, carried through.
+    _authors_salvaged_after: str | None = PrivateAttr(default=None)
 
     _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
     _canon_oecd_domain = field_validator("oecd_domain", mode="before")(_canonicalize_oecd_domain)

@@ -294,6 +294,11 @@ class MetadataExtractor:
                 ref_df = self._collect_reference_rows()
             except ValueError as e:
                 logger.warning(f"Reference section not found: {e}")
+                self._record_warning(
+                    ProcessingWarning(
+                        WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
+                    )
+                )
             except Exception as e:  # noqa: BLE001 — preserve core, mark incomplete below
                 ref_collection_error = e
 
@@ -383,6 +388,15 @@ class MetadataExtractor:
 
     async def _extract_references(self, ref_df) -> list[PaperReference]:
         return await self.refs.extract(ref_df)
+
+    def _record_warning(self, warning: ProcessingWarning) -> None:
+        # Real PaperContents carries a list; be defensive against test doubles /
+        # a cleared attribute so the warning is never lost.
+        warnings = getattr(self.contents, "processing_warnings", None)
+        if not isinstance(warnings, list):
+            warnings = []
+            self.contents.processing_warnings = warnings
+        warnings.append(warning)
 
     def _record_ref_extraction_failure(self, exc: BaseException) -> None:
         """Surface a swallowed reference-extraction exception on the export.

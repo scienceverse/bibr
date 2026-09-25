@@ -480,6 +480,11 @@ async def _resolve_preparsed_references(
         ref_df = extractor._collect_reference_rows()
     except ValueError as e:
         logger.warning(f"Reference section not found: {e}")
+        contents.processing_warnings.append(
+            ProcessingWarning(
+                WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
+            )
+        )
         return paper_metadata
     except ProcessingError:
         raise
@@ -656,6 +661,17 @@ async def _extract_metadata_and_equations(
         contents.equations = regex_equations
     else:
         contents.equations = results[1]
+    failed_batches = eq_extractor.llm_batch_failures
+    if failed_batches:
+        # Each failed batch kept only its regex equations; say how many and why.
+        contents.processing_warnings.append(
+            ProcessingWarning(
+                WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+                f"{len(failed_batches)} of {eq_extractor.llm_batch_count} LLM batch(es) failed "
+                f"({', '.join(sorted(set(failed_batches)))}); their sentences kept regex-only "
+                "equation extraction",
+            )
+        )
     if validation_issue_sink is not None and extractor is not None:
         validation_issue_sink.extend(extractor.validation_issues)
     return results[0]
@@ -1384,6 +1400,20 @@ async def _link_citations(
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
+    if contents.citation_receipt is not None:
+        failed = [
+            reason.removeprefix("llm_failed:")
+            for candidate in contents.citation_receipt.candidates
+            for reason in candidate.rejection_reasons
+            if reason.startswith("llm_failed:")
+        ]
+        if failed:
+            contents.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.CITATION_LLM_FAILED,
+                    f"{failed[0]}: {len(failed)} ambiguous in-text citation(s) left unlinked",
+                )
+            )
     if validation_issue_sink is not None:
         issue = xref_low_coverage_issue(
             {reference.bib_id for reference in paper_metadata.references},

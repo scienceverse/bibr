@@ -241,4 +241,12 @@ class RorEnricher:
                     f"{report.matched}/{report.attempted} affiliation/funder strings matched",
                 ),
             )
+        if report.failed:
+            warnings += (
+                ProcessingWarning(
+                    WarningCode.ROR_MATCHING_FAILED,
+                    f"{report.failed}/{report.attempted} ROR lookups failed "
+                    f"({', '.join(report.failure_reasons)}); those strings are unmatched",
+                ),
+            )
         return EnrichmentOutcome(EnrichmentStatus.COMPLETE, warnings=warnings)

@@ -237,7 +237,17 @@ async def extract_structured_integrity(
     except ProcessingError:
         raise
     except Exception as e:  # noqa: BLE001 — degrade gracefully, keep the paper
+        from bibr.clients.llm import llm_failure_code
+        from bibr.processing_warnings import ProcessingWarning, WarningCode
+
         logger.warning("Research-integrity extraction failed (hash=%s): %s", file_hash, e)
+        contents.processing_warnings.append(
+            ProcessingWarning(
+                WarningCode.RESEARCH_INTEGRITY_LLM_FAILED,
+                f"{llm_failure_code(e)}: structured funding, author roles and affiliation "
+                "parts were not parsed",
+            )
+        )
         return
 
     # Gate funding on the funding statement actually existing: when funding_text

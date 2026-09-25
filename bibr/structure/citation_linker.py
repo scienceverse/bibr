@@ -494,7 +494,9 @@ def _is_non_citation_digit_run(text: str, digits: str, end: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> list[PaperXref]:
+async def _resolve_with_llm(
+    ambiguous, references, llm_client, file_hash, failures: list[str] | None = None
+) -> list[PaperXref]:
     """Tier 3: batch unresolved citation candidates into a single LLM call.
 
     Args:
@@ -502,6 +504,7 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
         references: list of PaperReference objects
         llm_client: LlmClient instance
         file_hash: file hash for rate-limit tracking
+        failures: receives the error code of a failed call
 
     Returns gracefully with [] on any failure.
     """
@@ -548,7 +551,11 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
     except ProcessingError:
         raise
     except Exception as e:
+        from bibr.clients.llm import llm_failure_code
+
         logger.warning("Tier 3 LLM citation resolution failed: %s", e)
+        if failures is not None:
+            failures.append(llm_failure_code(e))
         return []
 
 
@@ -1346,12 +1353,26 @@ async def detect_bib_xrefs_with_receipt(
             unique_cites: dict[str, int] = {}
             for text_id, cite_text, _start, _end in ambiguous:
                 unique_cites.setdefault(_normalize_citation_text(cite_text), text_id)
+            tier3_failures: list[str] = []
             tier3 = await _resolve_with_llm(
                 [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
                 references,
                 llm_client,
                 file_hash,
+                tier3_failures,
             )
+            if tier3_failures:
+                # Record on the receipt why the candidates the call was asked
+                # about stay unresolved, instead of looking like no match.
+                reason = f"llm_failed:{tier3_failures[0]}"
+                affected = {(text_id, start, end) for text_id, _, start, end in ambiguous}
+                candidates = [
+                    replace(candidate, rejection_reasons=(*candidate.rejection_reasons, reason))
+                    if not candidate.accepted
+                    and (candidate.text_id, candidate.start, candidate.end) in affected
+                    else candidate
+                    for candidate in candidates
+                ]
             resolved_map = {_normalize_citation_text(xref.contents): xref.xref_id for xref in tier3}
             resolved_occurrences = [
                 (

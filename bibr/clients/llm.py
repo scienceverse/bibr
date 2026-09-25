@@ -2079,13 +2079,17 @@ class LLMClient:
             # its raw completion — recover them instead of losing the byline.
             salvaged = _salvage_truncated_authors(e)
             if salvaged:
+                code = llm_failure_code(e)
                 logger.warning(
-                    "Author extraction truncated; salvaged %d leading author(s) "
+                    "Author extraction failed (%s); salvaged %d leading author(s) "
                     "from the partial completion (hash=%s)",
+                    code,
                     len(salvaged),
                     file_hash,
                 )
-                return AuthorsLLM(authors=salvaged)
+                result = AuthorsLLM(authors=salvaged)
+                result._salvaged_after = code
+                return result
             logger.error(
                 f"LLM author extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
@@ -2404,6 +2408,10 @@ class LLMClient:
 
         combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
         combined._field_failures = field_failures
+        salvaged_after = getattr(authors, "_salvaged_after", None)
+        combined._authors_salvaged_after = (
+            salvaged_after if isinstance(salvaged_after, str) else None
+        )
 
         logger.info(f"Successfully extracted core metadata (hash={file_hash})")
         return combined
@@ -2694,7 +2702,8 @@ class LLMClient:
             file_hash: file hash for logging
 
         Returns:
-            list of CitationMatch objects. Returns [] on failure (graceful degradation).
+            list of CitationMatch objects. A failed call raises an
+            :class:`~bibr.exceptions.LlmCallError`; the caller degrades.
         """
         logger.debug(
             f"Starting LLM citation resolution (hash={file_hash}, "
@@ -2741,8 +2750,7 @@ class LLMClient:
         except ProcessingError:
             raise
         except Exception as e:
-            logger.warning(f"LLM citation resolution failed (hash={file_hash}): {e}")
-            return []
+            raise llm_call_error("Failed to resolve citations", e) from e
 
     @track_llm_usage
     async def extract_equations(
@@ -2757,7 +2765,8 @@ class LLMClient:
             file_hash: file hash for logging
 
         Returns:
-            list of PaperEquation objects. Returns [] on failure.
+            list of PaperEquation objects. A failed call raises an
+            :class:`~bibr.exceptions.LlmCallError`; the caller degrades.
         """
         from bibr.paper_contents import PaperEquation
 
@@ -2812,17 +2821,7 @@ class LLMClient:
         except ProcessingError:
             raise
         except Exception as e:
-            if _is_blank_completion_error(e):
-                # Local model returned an empty completion for this batch — known
-                # vllm-mlx flakiness. The regex passes already cover equations;
-                # skip this best-effort batch quietly rather than raising alarm.
-                logger.info(
-                    f"LLM equation extraction skipped (hash={file_hash}): "
-                    "model returned an empty completion"
-                )
-            else:
-                logger.warning(f"LLM equation extraction failed (hash={file_hash}): {e}")
-            return []
+            raise llm_call_error("Failed to extract equations", e) from e
 
     async def close(self):
         """Close the rate limiter and clean up resources."""
