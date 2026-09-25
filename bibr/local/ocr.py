@@ -435,3 +435,28 @@ class PaddleHttpOcrClient(BaseHttpOcrClient):
     name: ClassVar[str] = "paddle-http"
     _DEFAULT_MODEL: ClassVar[str] = "paddle-ocr-vl-1.6"
     _SERVICE_LABEL: ClassVar[str] = "Paddle OCR"
+
+    async def recognize(self, image, prompt: str) -> str:
+        """OCR one region, retrying a truncated table once at higher budget.
+
+        Shares the serve backend's recovery policy (see
+        ``bibr.ocr.table_recovery``) so local and served runs export the same
+        tables. The managed Paddle clients (vLLM, MLX-VLM, Rapid-MLX) all
+        delegate here.
+        """
+        import asyncio
+
+        from bibr.ocr.image_utils import encode_region_for_ocr
+        from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
+        from bibr.ocr.table_recovery import recover_paddle_table
+
+        image_b64 = await asyncio.to_thread(encode_region_for_ocr, image, self._profile.image)
+        result = await self._send_request(image_b64, prompt)
+        return await recover_paddle_table(
+            profile=self._profile,
+            prompt=prompt,
+            result=result,
+            retry=lambda: self._send_request(
+                image_b64, prompt, max_tokens=PADDLE_TABLE_RECOVERY_MAX_TOKENS
+            ),
+        )

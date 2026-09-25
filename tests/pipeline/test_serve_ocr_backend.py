@@ -239,6 +239,24 @@ class TestRecognize:
         assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
 
     @pytest.mark.asyncio
+    async def test_does_not_retry_malformed_but_complete_paddle_table(self, monkeypatch):
+        """A closed grid with broken spans reproduces deterministically — a
+        retry only burns a second full table generation."""
+        from bibr.ocr.backend import OcrText
+        from bibr.ocr.profiles import PADDLE_PROFILE
+
+        backend = _make_backend(_ok_transport(), profile=PADDLE_PROFILE)
+        malformed = "<fcel>A<fcel>B<nl><ucel><xcel><nl>"
+        post = AsyncMock(return_value=OcrText(malformed, finish_reason="stop"))
+        monkeypatch.setattr(backend, "_post_with_retry", post)
+        monkeypatch.setattr("bibr.ocr.image_utils.encode_region_for_ocr", lambda *args: "aW1n")
+
+        out = await backend.recognize(_tiny_image(), "Table Recognition:")
+
+        assert out == malformed
+        assert post.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_recovery_error_falls_back_to_initial_table(self, monkeypatch):
         pytest.importorskip("cv2")
         from bibr.ocr.backend import OcrText

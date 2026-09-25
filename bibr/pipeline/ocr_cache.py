@@ -96,11 +96,11 @@ def _key(
         temperature=effective.ocr.generation_temperature,
     )
     request = profile.request
-    table_recovery_limit = (
-        PADDLE_TABLE_RECOVERY_MAX_TOKENS
-        if identity.backend == "serve-http" and identity.profile == "paddle"
-        else 0
-    )
+    # The incomplete-table retry re-runs truncated Paddle tables at this
+    # higher budget on every Paddle backend (local and serve share one
+    # recovery helper), so it shapes the cached artifacts everywhere — not
+    # just behind serve-http.
+    table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if identity.profile == "paddle" else 0
     from bibr import __version__
 
     parts = [

@@ -274,7 +274,10 @@ def test_serve_paddle_key_changes_with_table_recovery_limit(monkeypatch):
     assert baseline != ocr_cache._key(fs, cfg, _identity())
 
 
-def test_non_serve_paddle_key_ignores_serve_table_recovery_limit(monkeypatch):
+def test_local_paddle_key_changes_with_table_recovery_limit(monkeypatch):
+    """Every Paddle backend retries truncated tables at the recovery budget,
+    so every Paddle cache key carries it — entries written before recovery
+    existed must not be served as recovered output."""
     fs = _fs()
     cfg = RunConfig(ocr_backend="paddle-vllm", ocr_profile="paddle")
     identity = _identity(backend="paddle-vllm")
@@ -282,7 +285,7 @@ def test_non_serve_paddle_key_ignores_serve_table_recovery_limit(monkeypatch):
 
     monkeypatch.setattr(ocr_cache, "PADDLE_TABLE_RECOVERY_MAX_TOKENS", 16384)
 
-    assert baseline == ocr_cache._key(fs, cfg, identity)
+    assert baseline != ocr_cache._key(fs, cfg, identity)
 
 
 def test_key_changes_with_effective_generation_temperature():
