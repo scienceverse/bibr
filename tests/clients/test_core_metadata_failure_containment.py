@@ -282,6 +282,8 @@ async def test_failed_title_call_skips_the_trained_classifier(monkeypatch):
 
     classify.assert_not_awaited()
     assert metadata.paper_type == ""
+    [issue] = [i for i in ext.validation_issues if i.code == "VAL_METADATA_FIELD_FAILED"]
+    assert {"field:paper_type", "field:oecd_l1", "field:oecd_l2"} <= set(issue.evidence_ids)
 
 
 async def test_successful_title_call_raises_no_field_issue(monkeypatch):

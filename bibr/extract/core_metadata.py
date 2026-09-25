@@ -1438,6 +1438,15 @@ class CoreMetadataExtractor:
                 return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
             field_failures = dict(getattr(llm_metadata, "_field_failures", None) or {})
             title_call_failed = "title" in field_failures
+            # The trained classifier reads the title and abstract; after a failed
+            # title/keywords call it would classify empty input, so its fields
+            # fail with that call.
+            skip_classifier = bool(
+                title_call_failed and self._settings.ml.paper_classifier_model_id
+            )
+            if skip_classifier:
+                for field in ("paper_type", "oecd_domain", "oecd_subdomain"):
+                    field_failures.setdefault(field, field_failures["title"])
             if title_call_failed:
                 self._record_field_failures(field_failures)
             else:
@@ -1499,9 +1508,7 @@ class CoreMetadataExtractor:
             paper_type, oecd_l1, oecd_l2 = "", "", ""
             paper_type_confidence: float | None = None
             oecd_confidence: float | None = None
-            # The trained classifier reads the title and abstract; after a failed
-            # title/keywords call it would classify empty input.
-            if not (title_call_failed and self._settings.ml.paper_classifier_model_id):
+            if not skip_classifier:
                 (
                     paper_type,
                     oecd_l1,
