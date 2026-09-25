@@ -162,6 +162,10 @@ fallbacks such as section classification and citation linking: `{{ default_llm_p
 (the default), `openai`, `anthropic`, `groq`, or `ollama` (a local Ollama
 server). `LLM_MODEL` picks the model for that provider.
 
+For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
+`http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under
+`/v1`, so both `http://localhost:11434` and `http://localhost:11434/v1` work.
+
 `LLM_BACKEND=cloud` is the default: bibr uses the configured provider/endpoint.
 That endpoint can also be your own OpenAI-compatible server:
 

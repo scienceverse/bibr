@@ -244,6 +244,32 @@ def test_fetch_models_ollama():
     assert result == ["llama3:latest", "qwen2:7b"]
 
 
+def test_fetch_models_ollama_does_not_double_v1():
+    """A base URL typed with /v1 must not list models from /v1/v1."""
+    mock_client = MagicMock()
+    mock_client.models.list.return_value = [MagicMock(id="llama3:latest")]
+
+    with patch("openai.OpenAI", return_value=mock_client) as mock_cls:
+        result = _fetch_models("ollama", "", base_url="http://localhost:11434/v1")
+
+    mock_cls.assert_called_once_with(
+        api_key="ollama",
+        base_url="http://localhost:11434/v1",
+        timeout=10.0,
+    )
+    assert result == ["llama3:latest"]
+
+
+def test_build_test_client_ollama_uses_the_v1_api():
+    """The connection test's client must reach Ollama's /v1 routes, like the adapter."""
+    mock_client = MagicMock()
+
+    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
+        _build_test_client("ollama", "gpt-oss:20b", "", "http://localhost:11434")
+
+    mock_from.assert_called_once_with("ollama/gpt-oss:20b", base_url="http://localhost:11434/v1")
+
+
 def test_fetch_models_returns_empty_on_error():
     """_fetch_models returns empty list when API call fails."""
     with patch("openai.OpenAI", side_effect=Exception("connection refused")):

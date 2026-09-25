@@ -213,6 +213,13 @@ released.
 
 ### Fixed
 
+- The Ollama provider sent every request to `/chat/completions` under
+  `LLM_OLLAMA_BASE_URL`, and Ollama answers that with 404. With the default URL,
+  `http://localhost:11434`, which is also what `bibr setup` writes, every paper
+  failed at its first LLM call, and so did the setup wizard's connection test.
+  Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
+  unless the URL already ends in it, so both forms work. The wizard no longer
+  lists models from `/v1/v1/models` when the URL is typed with `/v1`.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

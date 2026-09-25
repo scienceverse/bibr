@@ -439,7 +439,9 @@ def _build_test_client(provider: str, model: str, api_key: str, base_url: str = 
     elif provider in ("anthropic", "groq"):
         kwargs["api_key"] = api_key
     elif provider == "ollama" and base_url:
-        kwargs["base_url"] = base_url
+        from bibr.clients.providers.ollama import ollama_openai_base_url
+
+        kwargs["base_url"] = ollama_openai_base_url(base_url)
 
     return instructor.from_provider(model_string, **kwargs)
 
@@ -472,10 +474,11 @@ def _fetch_models(provider: str, api_key: str, base_url: str = "") -> list[str]:
                 filter_non_chat=True,
             )
         elif provider == "ollama":
-            host = (base_url or "http://localhost:11434").rstrip("/")
+            from bibr.clients.providers.ollama import ollama_openai_base_url
+
             return _fetch_openai_compat_models(
                 "ollama",
-                base_url=f"{host}/v1",
+                base_url=ollama_openai_base_url(base_url or "http://localhost:11434"),
                 filter_non_chat=False,
             )
         elif provider == "openai":
