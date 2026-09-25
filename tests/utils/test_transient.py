@@ -207,6 +207,21 @@ def test_timeouts_and_paper_failures_are_not_outages(exc):
     assert is_service_outage(exc) is False
 
 
+def test_without_http_status_only_a_service_that_is_gone_counts():
+    """The OCR stage fails a file only for a server that is gone: a busy
+    answer (429/502/503) is left out, through wrappers too."""
+    from bibr.utils.transient import is_service_outage
+
+    for status in (429, 502, 503):
+        assert is_service_outage(_status_error(status), http_status=False) is False
+        assert is_service_outage(_wrapped(_status_error(status)), http_status=False) is False
+    assert is_service_outage(_GenaiError(503), http_status=False) is False
+    assert is_service_outage(httpx.ConnectError("refused"), http_status=False) is True
+    assert is_service_outage(httpx.RemoteProtocolError("hung up"), http_status=False) is True
+    assert is_service_outage(_circuit_open(), http_status=False) is True
+    assert is_service_outage(httpx.ReadTimeout("read"), http_status=False) is False
+
+
 def test_an_upstream_error_alone_is_not_an_outage():
     """The LLM client wraps any failure, bad model output included, in an
     UpstreamServiceError; only a service-shaped cause makes it an outage."""

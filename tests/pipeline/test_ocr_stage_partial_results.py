@@ -196,3 +196,58 @@ async def test_a_region_that_times_out_still_ships_blank_with_a_warning():
 
     assert fs.error is None
     assert [w.code for w in fs.warnings] == [WarningCode.OCR_REGION_FAILED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 502, 503])
+async def test_a_busy_answer_for_one_region_still_ships_it_blank(status):
+    """A server that answers 429/502/503 after the transport's retries is up,
+    if busy. Failing the whole file for one region would turn a usable export
+    into a failed paper (a hard failure for `bibr chew` and the serve)."""
+    import httpx
+
+    fs = _real_pages(_make_fs(pages=3))
+    ctx = _make_ctx([fs], ocr_backend="paddle-http")
+    calls = {"n": 0}
+    request = httpx.Request("POST", "http://ocr:8080/v1/chat/completions")
+
+    async def recognize(image, prompt):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            response = httpx.Response(status, request=request)
+            raise httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+        return "text"
+
+    ctx.resources.ocr.recognize = recognize
+    await OcrStage().run(ctx)
+
+    assert fs.error is None
+    assert [w.code for w in fs.warnings] == [WarningCode.OCR_REGION_FAILED]
+
+
+@pytest.mark.asyncio
+async def test_an_open_breaker_keeps_the_upstream_error_after_a_refused_page(monkeypatch):
+    """The serve's breaker opens after page 1's refused connection. The file
+    must carry the UpstreamServiceError, which the serve answers with 502;
+    the raw transport error would come out as a 422 processing error."""
+    import httpx
+
+    from bibr.exceptions import UpstreamServiceError
+
+    fs = _make_fs(pages=3)
+    ctx = _make_ctx([fs], ocr_backend="serve-http")
+    breaker_open = UpstreamServiceError("ocr", "Circuit breaker 'ocr' is OPEN")
+
+    async def fake_ocr_page(
+        page_img, regions, idx, name, fn, sem, include_figures, settings=None, **kwargs
+    ):
+        if idx == 0:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        raise breaker_open
+
+    monkeypatch.setattr("bibr.pipeline.stages.ocr.ocr_page_regions", fake_ocr_page)
+    await OcrStage().run(ctx)
+
+    assert fs.error_code == "ocr_failed"
+    assert fs.original_error is breaker_open
+    assert fs.error_outage is True

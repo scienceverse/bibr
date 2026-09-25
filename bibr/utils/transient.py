@@ -131,7 +131,7 @@ def _http_status(exc: BaseException) -> int | None:
     return None
 
 
-def _is_outage_link(exc: BaseException) -> bool:
+def _is_outage_link(exc: BaseException, *, http_status: bool) -> bool:
     names = _names(exc)
     if "ConnectTimeout" in names:  # the host never accepted the connection
         return True
@@ -139,10 +139,10 @@ def _is_outage_link(exc: BaseException) -> bool:
         return False
     if names & _OUTAGE_EXC_NAMES:
         return True
-    return _http_status(exc) in _OUTAGE_HTTP_STATUSES
+    return http_status and _http_status(exc) in _OUTAGE_HTTP_STATUSES
 
 
-def is_service_outage(exc: BaseException | None) -> bool:
+def is_service_outage(exc: BaseException | None, *, http_status: bool = True) -> bool:
     """Did *exc*, or an error it wraps, come from a service being down?
 
     True for a connection that could not be made or was dropped, an open
@@ -152,6 +152,9 @@ def is_service_outage(exc: BaseException | None) -> bool:
     ``original_error`` attribute (:class:`bibr.exceptions.UpstreamServiceError`)
     and unsuppressed ``__context__``, because the pipeline wraps service
     errors in its own types. A timeout is not an outage.
+
+    ``http_status=False`` leaves the 429/502/503 answers out: the service
+    answered, so it is up, if busy. What is left is a service that is gone.
     """
     seen: set[int] = set()
     pending: list[BaseException] = [exc] if exc is not None else []
@@ -160,7 +163,7 @@ def is_service_outage(exc: BaseException | None) -> bool:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if _is_outage_link(current):
+        if _is_outage_link(current, http_status=http_status):
             return True
         original = getattr(current, "original_error", None)
         context = None if current.__suppress_context__ else current.__context__

@@ -47,6 +47,18 @@ REMOTE_OCR_BACKENDS = frozenset(
 CONCURRENT_MANAGED_OCR_BACKENDS = frozenset({"paddle-vllm"})
 
 
+def _ocr_server_gone(exc: BaseException) -> bool:
+    """Did an OCR request fail because the server is gone, after the
+    transport's retries: a refused or dropped connection, an open breaker?
+
+    A 429/502/503 answer is left out. The server answered, so it is up but
+    busy, and after about 1.5 s of retries one busy answer must not cost the
+    whole file: the region ships blank with a warning, as it did before, and
+    ``ocr_mostly_failed`` still catches a server that answers nothing else.
+    """
+    return is_service_outage(exc, http_status=False)
+
+
 def _local_region_limit(settings: GlobalSettings, backend: str) -> int:
     """Concurrent OCR regions allowed on the sequential-file path.
 
@@ -571,12 +583,13 @@ async def _ocr_page_regions_impl(
             if isinstance(result, asyncio.CancelledError):
                 raise result
             if isinstance(result, BaseException) and (
-                isinstance(result, BibrError) or is_service_outage(result)
+                isinstance(result, BibrError) or _ocr_server_gone(result)
             ):
                 # Systemic backend failures (auth, config, an OCR server that
                 # went down: connection refused or dropped once the transport's
                 # retries ran out) must not be silently converted to blank
-                # content — propagate to fail the page.
+                # content — propagate to fail the page. A busy answer
+                # (429/502/503) is not one of them: see _ocr_server_gone.
                 raise result
             if isinstance(result, BaseException):
                 # The region ships blank. Without an export-visible warning
@@ -1044,11 +1057,13 @@ class OcrStage:
             # A systemic upstream OCR outage (e.g. circuit breaker open, an
             # OCR server that died mid-file) on ANY page fails the whole file
             # — never emit a partial result with silently blank pages. It is
-            # an outage, so a resumed ``bibr batch`` runs the file again.
-            upstream = next(
-                (e for e in errors if isinstance(e, UpstreamServiceError) or is_service_outage(e)),
-                None,
-            )
+            # an outage, so a resumed ``bibr batch`` runs the file again. An
+            # UpstreamServiceError goes first: the serve answers 502 for it but
+            # 422 for a raw transport error, so a breaker that opened after an
+            # earlier page's refused connection must still give the 502.
+            upstream = next((e for e in errors if isinstance(e, UpstreamServiceError)), None)
+            if upstream is None:
+                upstream = next((e for e in errors if _ocr_server_gone(e)), None)
             if upstream is not None:
                 fs.set_error(
                     f"OCR upstream service failed: {upstream}",

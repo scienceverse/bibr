@@ -233,6 +233,8 @@ released.
   resume skipped, or passed with text missing. A region or page whose OCR
   request was refused or dropped once the retries ran out now fails the file
   as an outage, as an `UpstreamServiceError` from the OCR service already did.
+  A busy answer (429, 502, 503) still leaves only that region blank, with a
+  warning.
 - A crash in one chunk no longer fails every paper in it. `bibr.chew()` on a
   list or directory lost every result when any chunk raised, and `bibr batch`
   recorded the whole chunk as `chunk_error`, which resume then skipped. The
