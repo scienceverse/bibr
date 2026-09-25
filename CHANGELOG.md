@@ -213,6 +213,55 @@ released.
 
 ### Fixed
 
+- Reference enrichment (`--crossref`) rejected the correct Crossref or
+  resolver record for references printed in most citation styles. The
+  author-initials check took "and", "et" or "und" for a first name
+  ("Smith, J. and Weber, E. U." read Weber as "A."), kept only the middle
+  initial of "Jeffery M. Sobal", and vetoed a record whenever a reference cut
+  short by "et al." printed one of two co-authors who share a surname. It now
+  reads a given name on either side of the surname, treats conjunctions as
+  separators, skips the second half of a hyphenated surname and pools
+  co-authors who share one, and still rejects a different person with the same
+  surname. Surnames now also match without their diacritics or with an umlaut
+  spelled out ("González" and "Gonzalez", "Müller" and "Mueller"), and an
+  organization author no longer counts as a surname that fails to match. On
+  2,312 printed references, each paired with the recorded Crossref record its
+  printed DOI names, the title matcher rejected 798 of those records and now
+  rejects 130, mostly where the printed title differs from the deposited one.
+- A title search could accept a different work from the one the reference's
+  own DOI names. When the DOI lookup failed with a timeout or server error,
+  the Crossref title search took any record with a matching title, a preprint
+  of the article for example, and consolidation filled the reference's gaps
+  from it. A printed DOI that parses now admits only a record carrying that
+  DOI, on the Crossref title and fingerprint searches as on the resolver
+  fallback, which already had this rule. The Crossref search, the resolver
+  search and the resolver fallback now share one matcher, so their rules
+  cannot drift apart again.
+- A generic title ("Introduction", "Emotion regulation") matched any record of
+  that title by an author of the same surname in about the same year. A title
+  of three words or fewer now also needs the printed container and volume to
+  agree with the record's where both are present, and any title is rejected
+  when both the printed volume and the first page disagree with the record's.
+- Crossref titles and journal names kept their inline markup
+  (`CO<sub>2</sub>`, `<i>Drosophila</i>`, `&amp;`). The tags cost enough
+  similarity to reject the correct record, and an accepted match carried them
+  into `bib_match` and, through consolidation, into `bib`. Titles and
+  container names from Crossref and the resolver are now plain text.
+- With `BIBR_RESOLVER_AUTHORITATIVE=true`, a failed resolver prefetch left
+  every reference without a DOI unmatched and never asked Crossref, although
+  the log said it was falling back to Crossref. Those references now go to
+  Crossref. `BIBR_RESOLVER_SEARCH_CONCURRENCY` below 1, one way to make the
+  prefetch fail, is now rejected when settings load.
+- When the resolver fallback (`BIBR_RESOLVER_FALLBACK_SOURCES`) reached its
+  deadline it discarded every search that had already answered. Each
+  reference's result is now applied as it arrives, the deadline cancels only
+  the searches still outstanding, and the warning says how many were left.
+- A resolver that answered `/health` with JSON other than an object
+  (`["ok"]`) failed the paper's whole reference enrichment, and one fallback
+  candidate with `"authors": null` stopped the fallback for every remaining
+  reference. Such a health answer now means unhealthy, a non-object `/works`
+  answer is a miss, malformed authors count as none, and an error on one
+  reference costs only that reference.
 - A matched Crossref monograph, edited or reference book, book part, report
   component or database came back with `bib_type` `other`, because
   `migrate_bib_type` knew only the BibTeX names and a few Crossref ones.

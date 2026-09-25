@@ -9,9 +9,11 @@ Enriches extracted PaperReference objects with Crossref metadata:
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,7 +21,7 @@ import httpx
 from rapidfuzz import fuzz
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.enrich.schemas import CrossrefWorkItem
+from bibr.enrich.schemas import CrossrefAuthor, CrossrefWorkItem, plain_text
 from bibr.models import BibAuthor, MatchFunder, MatchOrganization, canonicalize_orcid
 from bibr.paper import ExternalMatch, MatchSource, PaperReference, migrate_bib_type
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -51,7 +53,19 @@ _RESOLVER_SOURCE_TO_MATCH = {
 
 def _resolver_match_source(cand: dict) -> MatchSource:
     """Resolve a candidate's ``source`` field to the MatchSource key for ``ref.match``."""
-    return _RESOLVER_SOURCE_TO_MATCH.get((cand.get("source") or "").lower(), MatchSource.OPENALEX)
+    return _RESOLVER_SOURCE_TO_MATCH.get(
+        str(cand.get("source") or "").lower(), MatchSource.OPENALEX
+    )
+
+
+def _printed_fields(ref: PaperReference) -> dict[str, str | None]:
+    """What the reference printed that a title match must not contradict."""
+    return {
+        "doi": ref.doi,
+        "container": ref.container,
+        "volume": ref.volume,
+        "first_page": ref.first_page,
+    }
 
 
 @dataclass
@@ -244,8 +258,13 @@ async def prefetch_enrichment(
         # cached, spending one rate-limited slot per chunk instead of one per
         # reference. An authoritative resolver answers from the same corpus and
         # its clean miss deliberately skips CrossRef, so a CrossRef prefetch
-        # there would buy nothing.
-        skip_bulk = resolver_client is not None and resolver_authoritative
+        # there would buy nothing — unless its search prefetch failed, which
+        # sends the batch to CrossRef after all (see enrich_references).
+        skip_bulk = (
+            resolver_client is not None
+            and resolver_authoritative
+            and prefetch.resolver_prefetch_error is None
+        )
         if effective.crossref.bulk_doi_lookup and not skip_bulk:
             try:
                 await crossref_client.prefetch_works_by_doi([r.doi for r in references if r.doi])
@@ -314,6 +333,10 @@ async def enrich_references(
     resolver_authoritative = effective.resolver.authoritative
     resolver_prefetch = prefetch.resolver_prefetch
     if prefetch.resolver_prefetch_error is not None:
+        # The resolver was never asked about these references, so its empty
+        # answer is not a clean miss: an authoritative resolver would otherwise
+        # skip CrossRef for every one of them.
+        resolver_authoritative = False
         for ref in references:
             if _resolver_search_eligible(ref):
                 _record_terminal_failure(
@@ -552,7 +575,11 @@ async def _fetch_crossref_item(
             if result and "message" in result and "items" in result["message"]:
                 items = result["message"]["items"]
                 match = _find_best_match(
-                    ref.title, items, ref_year=ref.year, ref_authors=ref.authors
+                    ref.title,
+                    items,
+                    ref_year=ref.year,
+                    ref_authors=ref.authors,
+                    **_printed_fields(ref),
                 )
                 if match is not None and stats is not None:
                     stats.search_matches += 1
@@ -690,6 +717,8 @@ def _find_best_fingerprint_match(ref, items: list[dict]) -> tuple[CrossrefWorkIt
     best_score = 0.0
     for item in items:
         cand = CrossrefWorkItem.from_raw(item)
+        if not _doi_agrees(ref.doi, cand.doi):
+            continue
         score = _score_fingerprint(ref, cand)
         if score is not None and score > best_score:
             best_score = score
@@ -788,36 +817,185 @@ def _container_matches(ref_container: str, cand_container: str) -> float | None:
     return None
 
 
+# Letters NFKD leaves whole because their accent is not a separable mark.
+_NAME_BASE_LETTERS = str.maketrans(
+    {"ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D", "ı": "i", "ß": "ss"}
+    | {"æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "þ": "th", "Þ": "TH"}
+)
+# The German transliteration of an umlaut: "Müller" is deposited as "Mueller" as
+# often as "Muller".
+_UMLAUT_SPELLED_OUT = str.maketrans(
+    {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "Ae", "Ö": "Oe", "Ü": "Ue"}
+)
+
+
+@functools.lru_cache(maxsize=4096)
+def _folded_name_text(text: str, umlauts_spelled_out: bool) -> tuple[str, tuple[int, ...]]:
+    """``text`` accent-folded and casefolded, with each folded character's index
+    in ``text`` so a match found in the folded form maps back to the original."""
+    out: list[str] = []
+    offsets: list[int] = []
+    for index, char in enumerate(text):
+        if umlauts_spelled_out:
+            char = char.translate(_UMLAUT_SPELLED_OUT)
+        piece = "".join(
+            c
+            for c in unicodedata.normalize("NFKD", char.translate(_NAME_BASE_LETTERS))
+            if not unicodedata.combining(c)
+        ).casefold()
+        out.append(piece)
+        offsets.extend([index] * len(piece))
+    return "".join(out), tuple(offsets)
+
+
+def _surname_spans(ref_authors: str, family: str) -> list[tuple[int, int]]:
+    """Every ``(start, end)`` in ``ref_authors`` where ``family`` is printed as a
+    word, ignoring case and diacritics ("Gonzalez" finds "González", "Mueller"
+    finds "Müller" and the reverse). Registry deposits and PDF text layers drop
+    or transliterate accents independently of each other."""
+    spans: set[tuple[int, int]] = set()
+    for spelled_out in (False, True):
+        text, offsets = _folded_name_text(ref_authors, spelled_out)
+        for family_spelled_out in (False, True):
+            needle = _folded_name_text(family, family_spelled_out)[0]
+            if not needle:
+                continue
+            for m in re.finditer(r"\b" + re.escape(needle) + r"\b", text):
+                spans.add((offsets[m.start()], offsets[m.end() - 1] + 1))
+    return sorted(spans)
+
+
+def _initial(letter: str) -> str:
+    """``letter`` as an initial: upper-cased, accent dropped ("é" and "E" agree)."""
+    return (_folded_name_text(letter, False)[0][:1] or letter).upper()
+
+
+# Where one printed name ends: punctuation, "&", the word for "and" in the
+# languages reference lists are printed in, and anything else that cannot sit
+# inside a personal name ("(Eds)", "2010", ":"). The conjunctions match
+# lower-case only, so an initial ("E.", "Y.") is never taken for Italian "e"
+# or Spanish "y".
+_NAME_BOUNDARY_RE = re.compile(
+    r"(?<![^\W\d_])(?:and|et|und|y|e|og|och|en)(?![^\W\d_]|\.)|[^\w\s.\-‐'’]|[\d_]"
+)
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_]+\.?")
+_DOTTED_INITIALS_RE = re.compile(r"\s+((?:[^\W\d_]\.\s*)+)")
+# Characters that join two halves of one surname ("Karkhoff-Schweizer").
+_SURNAME_JOINERS = frozenset("-‐'’")
+# Lower-case surname particles printed between a given name and the surname
+# ("Ludwig van Beethoven" when Crossref files the family as "Beethoven").
+_SURNAME_PARTICLES = frozenset(
+    {"van", "von", "der", "den", "de", "del", "della", "di", "da", "du", "la", "le"}
+    | {"dos", "das", "ten", "ter", "zu", "zum"}
+)
+
+
+def _initials_before_surname(before: str) -> set[str]:
+    """Initials of the given names printed directly before a surname, read back to
+    the previous name boundary: "Thomas E." in "…, Thomas E. Brownlee" gives
+    {T, E}.
+
+    Empty when that text is not a given name: nothing, a separator ("and",
+    ","), or a bare Vancouver-style initial without a period right before the
+    surname ("Smith J Weber"), which is more likely the previous author's.
+    """
+    tokens = _NAME_TOKEN_RE.findall(_NAME_BOUNDARY_RE.split(before)[-1])
+    while tokens and tokens[-1] in _SURNAME_PARTICLES:
+        tokens.pop()
+    initials: set[str] = set()
+    for position, token in enumerate(tokens):
+        letters = token.rstrip(".")
+        if len(letters) == 1 and (token.endswith(".") or position < len(tokens) - 1):
+            initials.add(_initial(letters))
+        elif len(letters) > 1 and letters[0].isupper() and not letters.isupper():
+            initials.add(_initial(letters[0]))
+        else:
+            return set()
+    return initials
+
+
+def _initials_after_surname(after: str, *, inverted: bool) -> tuple[set[str], bool]:
+    """Initials printed after a surname and its comma ("Weber, E. U."), and
+    whether they are bare initials only.
+
+    Spelled given names count too: one before any initials ("Weber, Elke U."),
+    or any number when the name is ``inverted`` — nothing printed before the
+    surname, as for the first author of a Chicago list ("Lam, Hui Kwan
+    Nicholas, John Sproule"). Otherwise a spelled word after the first is the
+    next author's surname ("Brownlee, Liam D. Harper"), and nothing is read.
+    Nothing is read either when the word after the comma is itself a surname
+    followed by its initials ("Al-Muzaini, Beg, K. R.", where Al-Muzaini's were
+    not printed). Without a comma only dotted initials count ("Emons P.A.A.").
+    """
+    comma = re.match(r"\s*,", after)
+    if comma is None:
+        # A comma-less Vancouver name with dotted initials ("Emons P.A.A.").
+        dotted = _DOTTED_INITIALS_RE.match(after)
+        if dotted is None:
+            return set(), False
+        return {_initial(c) for c in dotted.group(1) if c.isalpha()}, True
+    rest = after[comma.end() :]
+    boundary = _NAME_BOUNDARY_RE.search(rest)
+    cut = boundary.start() if boundary else len(rest)
+    initials: set[str] = set()
+    bare = True
+    for position, token in enumerate(_NAME_TOKEN_RE.findall(rest[:cut])):
+        letters = token.rstrip(".")
+        if len(letters) == 1 or (letters.isupper() and len(letters) <= 3):
+            initials.update(_initial(letter) for letter in letters)
+        elif letters[0].isupper() and (inverted or position == 0):
+            initials.add(_initial(letters[0]))
+            bare = False
+        else:
+            return set(), False
+    if not bare and _initials_after_surname(rest[cut:], inverted=True)[1]:
+        return set(), False
+    return initials, bare and bool(initials)
+
+
 def _ref_initials_for_surname(ref_authors: str, family: str) -> set[str]:
     """Every given-name initial printed alongside ``family`` in the raw ref author
     string. Empty when the reference exposes none.
 
     Returns the whole run, not just the first: a reference printing "H. N.
     Rehnqvist" is the same person as Crossref's given "N.", and comparing only
-    the leading initial rejects the correct record.
+    the leading initial rejects the correct record. A spelled given name counts
+    with the initials after it ("Eric J. Johnson" gives {E, J}).
 
     Unions across *every* occurrence of the surname. Co-authors sharing one are
     ordinary ("A. C. Klassen, D. K. Klassen"); reading only the first vetoes the
-    record whenever CrossRef happens to name the second.
+    record whenever CrossRef happens to name the second. An occurrence inside a
+    hyphenated surname ("Krolak-Salmon") is another person's name and is skipped.
+
+    The given name is read from both sides of the surname: before it ("E. U.
+    Weber") and, for an inverted name, after the comma ("Weber, E. U."). A
+    conjunction is a separator, not a first name, so "Smith, J. and Weber, E.
+    U." reads Weber as {E, U}. Both readings are kept because either can be the
+    right one: in "Wansink, B. Sobal, J." the separator after "B." is missing,
+    and in "Giraldo Peláez, Santiago" the word before the surname is part of it.
     """
     initials: set[str] = set()
-    for m in re.finditer(r"\b" + re.escape(family.lower()) + r"\b", ref_authors.lower()):
-        before = ref_authors[: m.start()]
-        # "E. U. Weber" / "J. Smith, E. U. Weber" -> the initial run adjoining the surname.
-        run = re.search(r"((?:\b[A-Za-z][.\-]\s*)+)$", before)
-        if run:
-            initials |= {c.upper() for c in run.group(1) if c.isalpha()}
+    for start, end in _surname_spans(ref_authors, family):
+        if ref_authors[start - 1 : start] in _SURNAME_JOINERS or (
+            ref_authors[end : end + 1] in _SURNAME_JOINERS
+        ):
             continue
-        # "Elke Weber" -> a spelled-out given name immediately before the surname.
-        word = re.search(r"([A-Za-z])[A-Za-z]+\s+$", before)
-        if word:
-            initials.add(word.group(1).upper())
-            continue
-        # "Weber, E. U." -> initials follow the surname.
-        after = re.match(r"\s*,\s*((?:[A-Za-z][.\-]?\s*)+)", ref_authors[m.end() :])
-        if after:
-            initials |= {c.upper() for c in after.group(1) if c.isalpha()}
+        before = _initials_before_surname(ref_authors[:start])
+        initials |= before | _initials_after_surname(ref_authors[end:], inverted=not before)[0]
     return initials
+
+
+# Titles Crossref deposits inside a given name ("Prof Haiyue", "Dr Rui").
+_HONORIFICS = frozenset({"prof", "professor", "dr", "mr", "mrs", "ms", "miss", "sir", "dame"})
+
+
+def _given_initial(given: str) -> str | None:
+    """The initial of a deposited given name, past any honorific."""
+    words = given.split()
+    while len(words) > 1 and words[0].rstrip(".").casefold() in _HONORIFICS:
+        words.pop(0)
+    letter = next((c for c in " ".join(words) if c.isalpha()), None)
+    return _initial(letter) if letter else None
 
 
 def _initials_conflict(ref_authors: str | None, cand_authors: list) -> bool:
@@ -826,35 +1004,35 @@ def _initials_conflict(ref_authors: str | None, cand_authors: list) -> bool:
 
     Surname-only validation accepts a book by *Max* Weber for a reference by
     *E. U.* Weber. Only vetoes when both sides actually expose an initial, so a
-    reference that prints bare surnames is unaffected.
+    reference that prints bare surnames is unaffected. Candidate authors who
+    share a surname are pooled: a reference cut short by "et al." prints one
+    Soltis, and the candidate's other Soltis is no evidence against it.
     """
     if not ref_authors or not cand_authors:
         return False
+    by_family: dict[str, tuple[str, set[str]]] = {}
     for author in cand_authors:
         family = author.get("family") if isinstance(author, dict) else getattr(author, "family", "")
         given = author.get("given") if isinstance(author, dict) else getattr(author, "given", "")
-        if not family or len(family) < 2 or not given:
+        if not isinstance(family, str) or len(family) < 2 or not isinstance(given, str):
             continue
-        cand_initial = next((c for c in given if c.isalpha()), None)
-        if not cand_initial:
-            continue
+        cand_initial = _given_initial(given)
+        if cand_initial:
+            key = _folded_name_text(family, False)[0]
+            by_family.setdefault(key, (family, set()))[1].add(cand_initial)
+    for family, cand_initials in by_family.values():
         ref_initials = _ref_initials_for_surname(ref_authors, family)
-        if ref_initials and cand_initial.upper() not in ref_initials:
+        if ref_initials and not ref_initials & cand_initials:
             return True
     return False
 
 
 def _families_overlap(ref_authors: str, families: list[str]) -> bool:
-    """True if any family surname (>= 2 chars) appears as a word in the ref author string."""
-    ref_lower = ref_authors.lower()
-    for family in families:
-        if (
-            family
-            and len(family) >= 2
-            and re.search(r"\b" + re.escape(family.lower()) + r"\b", ref_lower)
-        ):
-            return True
-    return False
+    """True if any family surname (>= 2 chars) appears as a word in the ref author
+    string, ignoring case and diacritics."""
+    return any(
+        family and len(family) >= 2 and _surname_spans(ref_authors, family) for family in families
+    )
 
 
 def _score_candidate(
@@ -868,12 +1046,15 @@ def _score_candidate(
     """Shared rapidfuzz scoring for one candidate, source-agnostic.
 
     token_sort_ratio on lowercased titles; year >2 apart -> x0.5; title >= threshold
-    with author surnames present but no overlap -> x0.7.
+    with author surnames present but no overlap -> x0.7. An organization author
+    (a ``name`` with no family) carries no surname to compare, so it is no
+    evidence against the match.
     """
     pre_score = fuzz.token_sort_ratio(ref_title.lower(), cand_title.lower())
     final_score = float(pre_score)
     if ref_year and ref_year > 0 and cand_year and abs(ref_year - cand_year) > 2:
         final_score *= 0.5
+    cand_families = [f for f in cand_families if f]
     if (
         ref_authors
         and pre_score >= _TITLE_MATCH_THRESHOLD
@@ -884,57 +1065,192 @@ def _score_candidate(
     return final_score
 
 
+@dataclass(frozen=True)
+class _TitleCandidate:
+    """A title-search candidate reduced to what the title matcher compares,
+    whichever service returned it: a Crossref work item or a resolver dict.
+
+    The Crossref search and the resolver (primary and fallback) used to run
+    separate copies of the matching loop, and fixes landed in one copy and not
+    the others. Both shapes now go through :func:`_best_title_candidate`.
+    """
+
+    title: str | None
+    year: int | None
+    work_type: str | None
+    doi: str | None
+    authors: tuple[CrossrefAuthor, ...]
+    container: str | None
+    volume: str | None
+    first_page: str | None
+
+    @classmethod
+    def from_crossref(cls, item: CrossrefWorkItem) -> _TitleCandidate:
+        return cls(
+            title=item.title,
+            year=item.year,
+            work_type=item.work_type,
+            doi=item.doi,
+            authors=tuple(item.authors),
+            container=item.container_title,
+            volume=item.volume,
+            first_page=_split_page_range(item.page)[0],
+        )
+
+    @classmethod
+    def from_resolver(cls, cand: object) -> _TitleCandidate | None:
+        """``None`` for a candidate that is not a JSON object. ``authors: null``
+        and non-object author entries are treated as no authors."""
+        if not isinstance(cand, dict):
+            return None
+        year = cand.get("year")
+        return cls(
+            title=plain_text(cand.get("title")),
+            year=year if isinstance(year, int) else None,
+            work_type=_str_or_none(cand.get("type")),
+            doi=_str_or_none(cand.get("doi")),
+            authors=tuple(
+                CrossrefAuthor(
+                    given=_str_or_none(a.get("given")) or "",
+                    family=_str_or_none(a.get("family")) or "",
+                )
+                for a in cand.get("authors") or []
+                if isinstance(a, dict)
+            ),
+            container=plain_text(cand.get("container")),
+            volume=_str_or_none(cand.get("volume")),
+            first_page=_str_or_none(cand.get("first_page")),
+        )
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _doi_agrees(printed_doi: str | None, candidate_doi: str | None) -> bool:
+    """A reference that prints a DOI names its work: a candidate is that work only
+    if it carries the same DOI. A printed DOI that does not parse is no evidence
+    either way — those are the references whose DOI came out of OCR mangled."""
+    printed = normalize_doi(printed_doi) if printed_doi else None
+    if printed is None:
+        return True
+    candidate = normalize_doi(candidate_doi) if candidate_doi else None
+    return candidate is not None and candidate.casefold() == printed.casefold()
+
+
+# At most this many words, a title does not identify a work on its own
+# ("Introduction", "Emotion regulation", "Capital structure").
+_GENERIC_TITLE_WORDS = 3
+
+
+def _printed_fields_conflict(
+    title: str,
+    cand: _TitleCandidate,
+    *,
+    container: str | None,
+    volume: str | None,
+    first_page: str | None,
+) -> bool:
+    """True when the printed volume, first page or container rule the candidate out.
+
+    A value missing on either side is no evidence. A volume *and* a first page
+    that both disagree name a different article whatever the title says. A
+    generic title needs more: any printed volume or container must agree too.
+    One disagreeing field alone does not veto a distinctive title, because
+    parsers misread a volume ("19:262") or a page (an article number) often
+    enough to cost correct matches.
+    """
+    volume_differs = not _fingerprint_field_match(volume, cand.volume)
+    if volume_differs and not _fingerprint_field_match(first_page, cand.first_page):
+        return True
+    if len(title.split()) > _GENERIC_TITLE_WORDS:
+        return False
+    if volume_differs:
+        return True
+    return bool(
+        container and cand.container and _container_matches(container, cand.container) is None
+    )
+
+
+def _best_title_candidate(
+    title: str,
+    candidates: list[_TitleCandidate | None],
+    ref_year: int | None = None,
+    ref_authors: str | None = None,
+    *,
+    doi: str | None = None,
+    container: str | None = None,
+    volume: str | None = None,
+    first_page: str | None = None,
+) -> tuple[int, float] | None:
+    """Index and final score of the best candidate at or above the title threshold.
+
+    Selects the candidate with the highest *final* (post-penalty) score so
+    that a strong-but-penalized candidate can't displace a weaker but
+    unpenalized one below the threshold gate. Vetoes, before scoring: works
+    *about* the cited work, a DOI other than the printed one, printed
+    bibliographic fields that rule the candidate out, and a same-surname
+    author with another initial.
+    """
+    best_index = None
+    best_score = 0.0
+    for index, cand in enumerate(candidates):
+        if cand is None or not cand.title:
+            continue
+        if cand.work_type in _VETOED_WORK_TYPES:
+            continue
+        if _about_the_work(title, cand.title):
+            continue
+        if not _doi_agrees(doi, cand.doi):
+            continue
+        if _printed_fields_conflict(
+            title, cand, container=container, volume=volume, first_page=first_page
+        ):
+            continue
+        if _initials_conflict(ref_authors, list(cand.authors)):
+            continue
+        score = _score_candidate(
+            title, cand.title, ref_year, cand.year, ref_authors, [a.family for a in cand.authors]
+        )
+        if score > best_score:
+            best_score = score
+            best_index = index
+    if best_score >= _TITLE_MATCH_THRESHOLD and best_index is not None:
+        return best_index, best_score
+    return None
+
+
 def _find_best_match(
     title: str,
     items: list[dict],
     ref_year: int | None = None,
     ref_authors: str | None = None,
+    *,
+    doi: str | None = None,
+    container: str | None = None,
+    volume: str | None = None,
+    first_page: str | None = None,
 ) -> tuple[CrossrefWorkItem, float] | None:
-    """Find the best-matching Crossref item by fuzzy title comparison.
-
-    Selects the candidate with the highest *final* (post-penalty) score so
-    that a strong-but-penalized candidate can't displace a weaker but
-    unpenalized one below the threshold gate.
+    """Find the best-matching Crossref search item (see :func:`_best_title_candidate`).
 
     Returns:
         (CrossrefWorkItem, final_score) tuple or None if no match above threshold.
     """
-    best_item = None
-    best_final_score = 0.0
-
-    for item in items:
-        cr_titles = item.get("title", [])
-        if not cr_titles:
-            continue
-        if item.get("type") in _VETOED_WORK_TYPES:
-            continue
-        cr_title = cr_titles[0]
-        if _about_the_work(title, cr_title):
-            continue
-        cand_year = _extract_year_from_item(item)
-        if _initials_conflict(ref_authors, item.get("author", [])):
-            continue
-        cand_families = [a.get("family", "") for a in item.get("author", [])]
-        final_score = _score_candidate(
-            title, cr_title, ref_year, cand_year, ref_authors, cand_families
-        )
-
-        if final_score > best_final_score:
-            best_final_score = final_score
-            best_item = item
-
-    if best_final_score >= _TITLE_MATCH_THRESHOLD and best_item is not None:
-        return CrossrefWorkItem.from_raw(best_item), best_final_score
-    return None
-
-
-def _extract_year_from_item(item: dict) -> int | None:
-    """Extract publication year from a raw Crossref item dict."""
-    issued = item.get("issued", {})
-    date_parts = issued.get("date-parts", [[]])
-    if date_parts and date_parts[0] and date_parts[0][0]:
-        return int(date_parts[0][0])
-    return None
+    parsed = [CrossrefWorkItem.from_raw(item) for item in items]
+    best = _best_title_candidate(
+        title,
+        [_TitleCandidate.from_crossref(item) for item in parsed],
+        ref_year,
+        ref_authors,
+        doi=doi,
+        container=container,
+        volume=volume,
+        first_page=first_page,
+    )
+    if best is None:
+        return None
+    index, score = best
+    return parsed[index], score
 
 
 def _build_match(cr_item: CrossrefWorkItem, score: float) -> ExternalMatch:
@@ -1004,37 +1320,28 @@ def _build_match_from_candidate(cand: dict, score: float) -> ExternalMatch:
     work_type = cand.get("type")
     bib_type = migrate_bib_type(work_type) if work_type else None
 
-    authors = None
-    if cand.get("authors"):
-        author_list = [
-            BibAuthor(given=a.get("given", ""), family=a.get("family", ""))
-            for a in cand["authors"]
-            if a.get("family")
+    def people(key: str) -> list[BibAuthor] | None:
+        # ``"authors": null`` and non-object entries are no people, not a crash.
+        listed = [
+            BibAuthor(given=p.get("given") or "", family=p["family"])
+            for p in cand.get(key) or []
+            if isinstance(p, dict) and p.get("family")
         ]
-        authors = author_list or None
-
-    editors = None
-    if cand.get("editors"):
-        editor_list = [
-            BibAuthor(given=e.get("given", ""), family=e.get("family", ""))
-            for e in cand["editors"]
-            if e.get("family")
-        ]
-        editors = editor_list or None
+        return listed or None
 
     return ExternalMatch(
         id=cand.get("doi") or cand.get("id"),
         score=score,
-        title=cand.get("title"),
-        authors=authors,
+        title=plain_text(cand.get("title")),
+        authors=people("authors"),
         year=cand.get("year"),
-        container=cand.get("container"),
+        container=plain_text(cand.get("container")),
         volume=cand.get("volume"),
         issue=cand.get("issue"),
         first_page=cand.get("first_page"),
         last_page=cand.get("last_page"),
         publisher=cand.get("publisher"),
-        editors=editors,
+        editors=people("editors"),
         doi=cand.get("doi"),
         bib_type=bib_type,
         url=cand.get("url"),
@@ -1047,29 +1354,27 @@ def _best_resolver_match(
     candidates: list[dict],
     ref_year: int | None = None,
     ref_authors: str | None = None,
+    *,
+    doi: str | None = None,
+    container: str | None = None,
+    volume: str | None = None,
+    first_page: str | None = None,
 ) -> tuple[dict, float] | None:
-    """Pick the highest-scoring resolver candidate at or above the title threshold."""
-    best_cand = None
-    best_score = 0.0
-    for cand in candidates:
-        cand_title = cand.get("title")
-        if not cand_title:
-            continue
-        if cand.get("type") in _VETOED_WORK_TYPES:
-            continue
-        if _about_the_work(title, cand_title):
-            continue
-        cand_year = cand.get("year")
-        if _initials_conflict(ref_authors, cand.get("authors", [])):
-            continue
-        cand_families = [a.get("family", "") for a in cand.get("authors", [])]
-        score = _score_candidate(title, cand_title, ref_year, cand_year, ref_authors, cand_families)
-        if score > best_score:
-            best_score = score
-            best_cand = cand
-    if best_score >= _TITLE_MATCH_THRESHOLD and best_cand is not None:
-        return best_cand, best_score
-    return None
+    """Pick the best resolver candidate (see :func:`_best_title_candidate`)."""
+    best = _best_title_candidate(
+        title,
+        [_TitleCandidate.from_resolver(cand) for cand in candidates],
+        ref_year,
+        ref_authors,
+        doi=doi,
+        container=container,
+        volume=volume,
+        first_page=first_page,
+    )
+    if best is None:
+        return None
+    index, score = best
+    return candidates[index], score
 
 
 def _resolver_query_eligible(ref) -> bool:
@@ -1103,24 +1408,6 @@ def _resolver_fallback_eligible(ref: PaperReference) -> bool:
     return not ref.match and bool(ref.title) and len(ref.title) >= 10
 
 
-def _doi_coherent_candidates(ref: PaperReference, candidates: list[dict]) -> list[dict]:
-    """Require a printed DOI to agree with a fallback candidate after normalization."""
-    if not ref.doi:
-        return candidates
-    printed = normalize_doi(ref.doi)
-    if printed is None:
-        # An unparseable printed DOI is no evidence either way. Returning []
-        # killed the fallback for precisely the references most in need of it:
-        # the ones whose DOI came out of OCR mangled.
-        return candidates
-    coherent: list[dict] = []
-    for candidate in candidates:
-        candidate_doi = normalize_doi(candidate.get("doi"))
-        if candidate_doi is not None and candidate_doi.casefold() == printed.casefold():
-            coherent.append(candidate)
-    return coherent
-
-
 async def _enrich_resolver_fallback(
     references: list[PaperReference],
     resolver_client,
@@ -1128,60 +1415,72 @@ async def _enrich_resolver_fallback(
     *,
     settings: GlobalSettings,
 ) -> None:
-    """Resolve primary misses through separately configured resolver sources."""
+    """Resolve primary misses through separately configured resolver sources.
+
+    Each reference's search is applied as soon as it answers, so the
+    whole-paper deadline cancels only the searches still outstanding. A single
+    batched call returned nothing until its slowest query had, and a timeout
+    threw away every search that had already come back.
+    """
     sources = _effective_fallback_sources(settings)
     eligible = [ref for ref in references if _resolver_fallback_eligible(ref)]
     if not sources or not eligible:
         return
 
     stats.fallback_attempts += len(eligible)
-    queries = [
-        {"title": ref.title, "year": ref.year, "limit": settings.resolver.limit} for ref in eligible
-    ]
-    try:
-        async with asyncio.timeout(settings.resolver.fallback_timeout):
-            results = await resolver_client.search_many(
-                queries,
-                concurrency=settings.resolver.fallback_search_concurrency,
-                sources=sources,
-                raise_on_error=True,
-            )
-    except TimeoutError:
-        stats.fallback_timeouts += 1
-        detail = (
-            "resolver fallback timed out after "
-            f"{settings.resolver.fallback_timeout:g}s for {len(eligible)} refs"
-        )
-        logger.warning(detail)
-        _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)
-        return
+    semaphore = asyncio.Semaphore(settings.resolver.fallback_search_concurrency)
+    answered = 0
 
-    for ref, candidates in zip(eligible, results, strict=True):
-        if isinstance(candidates, Exception):
+    async def resolve(ref: PaperReference) -> None:
+        nonlocal answered
+        try:
+            async with semaphore:
+                candidates = await resolver_client.search(
+                    ref.title,
+                    ref.year,
+                    settings.resolver.limit,
+                    sources=sources,
+                    raise_on_error=True,
+                )
+            best = _best_resolver_match(
+                ref.title,
+                candidates,
+                ref_year=ref.year,
+                ref_authors=ref.authors,
+                **_printed_fields(ref),
+            )
+        except Exception as e:  # noqa: BLE001 — one bad answer costs only its own reference
+            answered += 1
             stats.fallback_errors += 1
-            diagnostic = " ".join(str(candidates).split())
+            diagnostic = " ".join(str(e).split())
             _record_fallback_warning(
                 stats,
                 WarningCode.RESOLVER_FALLBACK_FAILED,
                 f"bib_id={ref.bib_id} resolver fallback failed"
                 + (f": {diagnostic}" if diagnostic else ""),
             )
-            continue
-        coherent = _doi_coherent_candidates(ref, candidates)
-        best = _best_resolver_match(
-            ref.title,
-            coherent,
-            ref_year=ref.year,
-            ref_authors=ref.authors,
-        )
+            return
+        answered += 1
         if best is None:
             stats.fallback_misses += 1
-            continue
+            return
         candidate, score = best
         if ref.match:
-            continue
+            return
         ref.match[_resolver_match_source(candidate)] = _build_match_from_candidate(candidate, score)
         stats.fallback_matches += 1
+
+    try:
+        async with asyncio.timeout(settings.resolver.fallback_timeout):
+            await asyncio.gather(*(resolve(ref) for ref in eligible))
+    except TimeoutError:
+        stats.fallback_timeouts += 1
+        detail = (
+            f"resolver fallback timed out after {settings.resolver.fallback_timeout:g}s "
+            f"with {len(eligible) - answered} of {len(eligible)} refs unanswered"
+        )
+        logger.warning(detail)
+        _record_fallback_warning(stats, WarningCode.RESOLVER_FALLBACK_TIMEOUT, detail)
 
 
 async def _prefetch_resolver_searches(
@@ -1275,7 +1574,11 @@ async def _try_resolver(
                 raise_on_error=raise_on_error,
             )
         best = _best_resolver_match(
-            ref.title, candidates, ref_year=ref.year, ref_authors=ref.authors
+            ref.title,
+            candidates,
+            ref_year=ref.year,
+            ref_authors=ref.authors,
+            **_printed_fields(ref),
         )
         if best is not None:
             cand, score = best

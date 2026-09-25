@@ -6,6 +6,7 @@ consumes, catching upstream API changes at the parsing boundary.
 
 from __future__ import annotations
 
+import html
 import re
 
 from pydantic import BaseModel
@@ -15,6 +16,59 @@ _FUNDER_DOI = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/)?(?P<doi>10\.13039/\S
 # The license of the article itself, best first. "tdm" licenses grant text
 # mining, not reuse of the work, so they never stand for the article's license.
 _LICENSE_VERSIONS = ("vor", "unspecified", "am")
+# An inline element of a deposited title: JATS/HTML face markup (<i>, <sub>,
+# <scp>) and MathML (<mml:msub>). Its text is part of the title; the tag is not.
+_INLINE_TAG = re.compile(r"(</?[A-Za-z][\w.:-]*(?:\s[^<>]*)?/?>)")
+_SCRIPT_TAG = re.compile(r"</?su[bp]\b", re.IGNORECASE)
+# Pretty-printed deposits put a line break and an indent around every inline
+# element, whether or not the title had a space there.
+_LEADING_LAYOUT = re.compile(r"^\s*\n\s*")
+_TRAILING_LAYOUT = re.compile(r"\s*\n\s*$")
+# An element symbol that continues a formula after a subscript ("N<sub>2</sub>O").
+_FORMULA_SYMBOL = re.compile(r"[A-Z][a-z]?(?![^\W\d_])")
+
+
+def plain_text(value: object) -> str | None:
+    """A Crossref title as plain text: inline tags dropped (their text kept),
+    character entities decoded, whitespace collapsed.
+
+    Crossref returns titles as deposited, e.g. ``Effects of CO<sub>2</sub>``
+    or ``Genes &amp; Development``. Scored as-is the tags cost enough fuzzy
+    similarity to lose the correct record, and an accepted match exported them
+    into ``bib_match`` and, through consolidation, into ``bib``.
+
+    The line break a pretty-printed deposit puts around an element becomes a
+    space only where the title had one: not inside the element, not before a
+    sub- or superscript ("CO" + newline + "<sub>2</sub>"), not between an
+    element and punctuation next to it, and not before an element symbol that
+    continues a formula ("C<sub>2</sub>" + newline + "H<sub>6</sub>").
+    """
+    if not isinstance(value, str):
+        return None
+    pieces = _INLINE_TAG.split(value)
+    out: list[str] = []
+    for index in range(0, len(pieces), 2):
+        text = pieces[index]
+        opened_by = pieces[index - 1] if index else ""
+        closed_by = pieces[index + 1] if index + 1 < len(pieces) else ""
+        if opened_by and _LEADING_LAYOUT.match(text):
+            text = _LEADING_LAYOUT.sub("", text)
+            joined = (
+                not opened_by.startswith("</")
+                or (text[:1] != "" and not text[0].isalnum())
+                or bool(_SCRIPT_TAG.match(opened_by) and _FORMULA_SYMBOL.match(text))
+            )
+            text = text if joined else " " + text
+        if closed_by and _TRAILING_LAYOUT.search(text):
+            text = _TRAILING_LAYOUT.sub("", text)
+            joined = (
+                closed_by.startswith("</")
+                or bool(_SCRIPT_TAG.match(closed_by))
+                or (text[-1:] != "" and not text[-1].isalnum())
+            )
+            text = text if joined else text + " "
+        out.append(text)
+    return " ".join(html.unescape("".join(out)).split()) or None
 
 
 def canonical_ror(value: object) -> str | None:
@@ -137,10 +191,10 @@ class CrossrefWorkItem(BaseModel):
     def from_raw(cls, raw: dict) -> CrossrefWorkItem:
         """Parse a raw Crossref API work item dict into a typed model."""
         titles = raw.get("title", [])
-        title = titles[0] if titles else None
+        title = plain_text(titles[0]) if titles else None
 
         containers = raw.get("container-title", [])
-        container_title = containers[0] if containers else None
+        container_title = plain_text(containers[0]) if containers else None
 
         authors = [
             CrossrefAuthor(
