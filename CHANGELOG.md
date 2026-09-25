@@ -328,6 +328,12 @@ released.
   validation re-asks are enabled (cloud providers by default; a custom
   OpenAI-compatible endpoint makes one attempt), and otherwise an
   `llm_invalid_output` failure.
+- One network blip while loading the default front-role classifier no longer
+  turns it off for the rest of the process. The loader cached any load failure
+  as "unavailable" and the resource manager pinned it, so after a Hub timeout a
+  long-running `bibr serve` worker or `bibr batch` ran every later paper on
+  front-matter heuristics alone. A network failure is now retried by the next
+  paper; a missing or invalid bundle is still given up after one attempt.
 - Serve no longer caches a result shaped by a failure a retry could avoid. Every
   successful response was cached for 24 hours, so one Crossref timeout, OCR
   blip or failed LLM call was replayed to every later request for the same
