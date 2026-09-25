@@ -390,6 +390,13 @@ released.
   heading, which anchors only the headings after it, or the reference list
   that ends the body. That is the first section typed references after a
   body section, or the first one when no body section comes before any.
+- A heading that is exactly the name of a paper part ("Materials and
+  methods") folded under an earlier heading of the same type that only
+  contains a keyword, such as the Results subsection "A neural implementation
+  of oscillation" read as Methods. It became a subsection of that heading,
+  and the subsections printed under it were attached to the part before it
+  (Discussion, in eLife articles) and took that part's type. It now starts
+  its own part and keeps its subsections.
 
 ### Added
 

@@ -175,6 +175,49 @@ def test_repeat_imrad_type_folds_under_first():
     assert secs[3].level == 1 and secs[3].parent_section_id == 0
 
 
+def test_exact_alias_heading_outranks_an_earlier_keyword_anchor():
+    """eLife prints a Results subsection "A neural implementation of ..."
+    that reads as METHODS by keyword. The later "Materials and methods" is
+    exactly the part's name: it starts its own anchor, and its subsections
+    fold under it instead of under Discussion."""
+    secs = [
+        _typed_section(1, "Results", CanonicalSection.RESULTS),
+        _typed_section(2, "A neural implementation of oscillation", CanonicalSection.METHODS),
+        _typed_section(3, "Discussion", CanonicalSection.DISCUSSION),
+        _typed_section(4, "Materials and methods", CanonicalSection.METHODS),
+        _typed_section(5, "Strains and culture conditions", CanonicalSection.UNKNOWN),
+        _typed_section(6, "Statistical analysis", CanonicalSection.METHODS),
+    ]
+    for sec, source in zip(
+        secs,
+        ["exact_alias", "substring_alias", "exact_alias", "exact_alias", None, "substring_alias"],
+        strict=True,
+    ):
+        sec.classification_source = source
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 1, 0),
+        (5, 2, 4),
+        # A later keyword heading folds under the exact one.
+        (6, 2, 4),
+    ]
+
+
+def test_repeat_exact_alias_heading_still_folds_under_the_first():
+    secs = [
+        _typed_section(1, "Methods", CanonicalSection.METHODS),
+        _typed_section(2, "Results", CanonicalSection.RESULTS),
+        _typed_section(3, "Methods", CanonicalSection.METHODS),
+    ]
+    for sec in secs:
+        sec.classification_source = "exact_alias"
+    assign_hierarchy_from_top_level(secs)
+    assert (secs[2].level, secs[2].parent_section_id) == (2, 1)
+
+
 def test_explicit_is_top_overrides_type_based_rule():
     """is_top_level_predicted=True wins over UNKNOWN-type fold."""
     secs = [

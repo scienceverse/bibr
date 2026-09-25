@@ -434,6 +434,7 @@ def assign_hierarchy_from_top_level(
     # appendix roots as top-level siblings and returns the ids it fully handled
     # so the main loop leaves them alone (like numbered headings).
     appendix_ids = repair_appendix_hierarchy(sections)
+    by_id = {sec.section_id: sec for sec in sections}
     for sec in sections:
         if sec.level == 0:
             continue
@@ -499,12 +500,23 @@ def assign_hierarchy_from_top_level(
         else:
             # is_top unknown — fall back to type-based positional rule.
             if sec.section_type in IMRAD_ANCHORS:
-                if sec.section_type in state.first_of_type:
+                first_id = state.first_of_type.get(sec.section_type)
+                first = by_id.get(first_id) if first_id is not None else None
+                # A heading that is exactly the part's name ("Materials and
+                # methods") outranks an earlier one that only contains a
+                # keyword ("A neural implementation of ..." inside Results):
+                # it starts the anchor its own subsections fold under.
+                outranks_first = (
+                    first is not None
+                    and sec.classification_source == "exact_alias"
+                    and first.classification_source == "substring_alias"
+                )
+                if first_id is not None and not outranks_first:
                     # Repeat of an already-seen IMRaD type (e.g. second METHODS-
                     # typed heading like "Statistical Analysis") — fold under
                     # the first occurrence rather than starting a new anchor.
                     sec.level = 2
-                    sec.parent_section_id = state.first_of_type[sec.section_type]
+                    sec.parent_section_id = first_id
                 else:
                     sec.level = 1
                     sec.parent_section_id = 0
