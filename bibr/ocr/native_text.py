@@ -313,6 +313,11 @@ def get_native_text_in_bbox(
 #     figures/tables with fuzzy bbox boundaries — OCR is safer.
 #   - formula_number: short inline text (typically 1-3 chars) that is better
 #     handled by OCR than by the min_chars threshold.
+# Header and footer ARE eligible: their only consumers (detected_headers /
+# detected_footers feeding DOI furniture candidates and front-matter
+# masthead checks) need plain text, which the native layer returns exactly
+# on born-digital PDFs — they are about half of all OCR calls there. The
+# printable-ratio corruption gate still applies.
 DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     {
         "text",
@@ -327,11 +332,15 @@ DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
         "vision_footnote",
         "algorithm",
         "seal",
+        "header",
+        "footer",
     }
 )
 
 
-_SHORT_NATIVE_TEXT_LABELS: frozenset[str] = frozenset({"doc_title", "paragraph_title"})
+_SHORT_NATIVE_TEXT_LABELS: frozenset[str] = frozenset(
+    {"doc_title", "paragraph_title", "header", "footer"}
+)
 _SHORT_NATIVE_TEXT_MIN_CHARS = 3
 
 _FONT_SAMPLE_SIZE = 15

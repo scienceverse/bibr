@@ -1055,5 +1055,10 @@ class TestEligibleLabels:
             "vision_footnote",
             "algorithm",
             "seal",
+            # Running headers/footers read from native text (x-performance-3):
+            # their only consumers need plain text, which born-digital PDFs
+            # already contain.
+            "header",
+            "footer",
         }
         assert expected == DEFAULT_ELIGIBLE_LABELS

@@ -210,6 +210,20 @@ async def _classify_trained_batch(
 # Valid canonical section values for LLM response validation
 _VALID_SECTION_VALUES = {s.value for s in CanonicalSection}
 
+
+def _collapsed_below_threshold(canonical: CanonicalSection, is_top_level: bool | None) -> bool:
+    """True when an UNKNOWN prediction is a below-threshold collapse.
+
+    :func:`_classify_trained_batch` sets ``is_top_level`` to ``None`` only
+    for that case; the model's genuine ``unknown`` class predictions carry a
+    real ``is_top_level`` bool (confidently unknown). The two need different
+    handling — collapses lost information the LLM can recover, while a
+    confident unknown is itself a prediction — but escalation currently
+    covers both (see below), so this only labels them for now.
+    """
+    return canonical == CanonicalSection.UNKNOWN and is_top_level is None
+
+
 # Single source of truth for the section types the LLM classifier may return,
 # with the prompt-facing description of each. Drives both the pydantic field
 # description and the prompt's "Valid section types" block so the two can't
@@ -722,11 +736,27 @@ async def classify_headers_batch_async(
                 for j, key in enumerate(unique_keys)
             }
             # Low-confidence predictions collapsed to UNKNOWN by
-            # _classify_trained_batch. Discarding them loses information the
-            # LLM tier can recover (rare classes like ethics are exactly
-            # where the trained model is weakest), so escalate the misses.
+            # _classify_trained_batch, alongside the model's own confident
+            # 'unknown' class predictions (see _collapsed_below_threshold).
+            # Discarding the collapsed ones loses information the LLM tier
+            # can recover (rare classes like ethics are exactly where the
+            # trained model is weakest), so the misses are escalated — and
+            # the confident unknowns escalate with them for now: narrowing
+            # escalation to collapses-only needs a val-set measurement
+            # showing it does not lose section types, which this change
+            # does not attempt.
             if effective.ml.section_classifier_llm_escalation:
                 esc_keys = [k for k in unique_keys if unique_map[k][0] == CanonicalSection.UNKNOWN]
+                n_collapsed = sum(
+                    1
+                    for k in esc_keys
+                    if _collapsed_below_threshold(unique_map[k][0], unique_map[k][2])
+                )
+                logger.debug(
+                    "Section LLM escalation: %d collapsed below threshold, %d confidently unknown",
+                    n_collapsed,
+                    len(esc_keys) - n_collapsed,
+                )
                 if esc_keys:
                     # Dedupe by plain header text within the LLM sub-call —
                     # the LLM prompt has no use for position/neighbor context,
@@ -751,7 +781,10 @@ async def classify_headers_batch_async(
                     for k in esc_keys:
                         canon, score = text_result_map[esc_text_for_key[k]]
                         if canon != CanonicalSection.UNKNOWN:
-                            unique_map[k] = (canon, score, None, "llm")
+                            # Keep the trained model's is_top_level: it is the
+                            # signal the trained tier exists to provide, and
+                            # the LLM tier does not predict hierarchy.
+                            unique_map[k] = (canon, score, unique_map[k][2], "llm")
 
             # Last-resort fallback: model and LLM both said UNKNOWN, but the
             # header did contain a known alias — better a weak alias signal

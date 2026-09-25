@@ -189,6 +189,97 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# LLM-fallback candidate filter — skip sentences whose parenthesized digits
+# are only citations or figure/table references
+# ---------------------------------------------------------------------------
+
+# Digit-bearing parenthesized groups: the fallback's candidate pre-filter.
+_PAREN_WITH_NUMS_RE = re.compile(r"\([^)]*\d[^)]*\)")
+
+# A digit-bearing parenthetical that may carry a statistic the LLM could
+# extract shows a comparison/approximation operator. Groups without one that
+# match the citation/reference patterns below cannot ground an equation
+# component (the fallback drops ungrounded answers anyway), so they only
+# burn prompt budget — and serialize ahead of the metadata calls on managed
+# local backends. Checked first so a group like "(see Figure 3, t = 5.2)"
+# stays a candidate.
+_STAT_HINT_RE = re.compile(r"[=<>~≤≥≈≠±]")
+
+# Four-digit publication years: 1800-2099 with an optional letter suffix.
+_PAREN_YEAR = r"(?:18|19|20)\d{2}[a-z]?"
+
+# Author-year citations: a capitalized name (or organisation) plus a year,
+# optionally several separated by semicolons/commas, with an optional
+# "see"/"e.g." lead and an optional trailing page span. Examples:
+# "(Teckchandani et al., 2014)", "(Smith & Jones, 2020)",
+# "(Smith, 2020; Jones et al., 2019)", "(WHO, 2021)".
+_CITATION_PAREN_RE = re.compile(
+    r"^\s*(?:see|cf\.?|e\.g\.?|i\.e\.?)?\.?\s*,?\s*"
+    r"[A-ZÀ-Þ][^()]*?" + _PAREN_YEAR + r"(?:\s*[;,]\s*[^()]*?" + _PAREN_YEAR + r")*"
+    r"(?:\s*[,;:]\s*(?:pp?\.?\s*)?\d+(?:\s*[–—-]\s*\d+)?)?"
+    r"\s*$"
+)
+
+# Bare year mentions: "(2020)", "(2019, 2020)", "(2004–2008)". A year is not
+# a statistic, so these groups never ground an equation component.
+_BARE_YEAR_PAREN_RE = re.compile(
+    r"^\s*" + _PAREN_YEAR + r"(?:\s*[,;/–—-]\s*" + _PAREN_YEAR + r")*\s*$"
+)
+
+# Figure/table/supplement/equation/section references: "(Figure 3c,d)",
+# "(Tables 1 and 2)", "(Supplementary Table S1)", "(Eq. 3)",
+# "(Section 2.3)", "(§2.3)". The lookahead keeps words that merely start
+# with a keyword ("Tablet 5mg", "Equal variances") out.
+_REF_PAREN_RE = re.compile(
+    r"^\s*(?:see|cf\.?|e\.g\.?)?\s*"
+    r"(?:fig(?:ure)?s?|tables?|tab\.|suppl(?:ement(?:ary)?)?"
+    r"|eq(?:uation)?s?|sections?|sect?\.|§|chapters?|appendix|appendices)"
+    r"(?=[\s.)\]\d]|$)"
+    r"[^()]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_nonstatistical_paren(group: str) -> bool:
+    """True when a parenthesized group carries no statistic for the LLM.
+
+    ``group`` includes its parentheses. Returns True for author-year
+    citations, bare year mentions, and figure/table/supplement/equation/
+    section references — unless the group shows a statistic operator
+    (``=``, ``<``, ``>``, ...), which always keeps it a candidate.
+    """
+    inner = group[1:-1] if len(group) >= 2 else group
+    if _STAT_HINT_RE.search(inner):
+        return False
+    return bool(
+        _CITATION_PAREN_RE.match(inner)
+        or _BARE_YEAR_PAREN_RE.match(inner)
+        or _REF_PAREN_RE.match(inner)
+    )
+
+
+def _has_statistical_paren(text: str) -> bool:
+    """True when any digit-bearing parenthetical may carry a statistic.
+
+    A sentence is an LLM-fallback candidate only if at least one
+    digit-bearing group is NOT a citation-only / reference-only group (see
+    :func:`_is_nonstatistical_paren`) — or if the prose around those groups
+    carries digits of its own ("mean was 7.86", "PCC of 0.921"): the regex
+    pass already found nothing there, but the LLM can still ground a prose
+    statistic, so such sentences stay queued. Sentences without any
+    digit-bearing group return False, matching the previous bare-presence
+    check.
+    """
+    groups = _PAREN_WITH_NUMS_RE.findall(text)
+    if not groups:
+        return False
+    if any(not _is_nonstatistical_paren(group) for group in groups):
+        return True
+    body = _PAREN_WITH_NUMS_RE.sub(" ", text)
+    return bool(re.search(r"\d", body))
+
+
+# ---------------------------------------------------------------------------
 # Equation Extractor
 # ---------------------------------------------------------------------------
 
@@ -326,9 +417,12 @@ class EquationExtractor:
             s.section_id for s in sections if s.section_type in target_section_types
         }
 
-        # Detect parenthesized groups with numbers but no regex hits
-        _paren_with_nums = re.compile(r"\([^)]*\d[^)]*\)")
+        # Sentences whose digit-bearing parentheticals are all citations or
+        # figure/table references, with no digits in the surrounding
+        # prose, carry no statistic the LLM could ground (see
+        # _has_statistical_paren), so they never become candidates.
         candidates: list[tuple[int, str]] = []
+        n_filtered = 0
         for sent in sentences:
             if sent.text_id in extracted_text_ids:
                 continue
@@ -339,8 +433,15 @@ class EquationExtractor:
             # re-decomposes content the parser already captured losslessly.
             if sent.is_display_formula:
                 continue
-            if _paren_with_nums.search(sent.text):
+            if _has_statistical_paren(sent.text):
                 candidates.append((sent.text_id, sent.text))
+            elif _PAREN_WITH_NUMS_RE.search(sent.text):
+                n_filtered += 1
+        if n_filtered:
+            logger.debug(
+                "LLM equation fallback: %d citation/reference-only sentences skipped",
+                n_filtered,
+            )
 
         if not candidates:
             return equations

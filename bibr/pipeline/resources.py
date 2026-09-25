@@ -218,6 +218,18 @@ class ResourceManager:
     def segmenter(self):
         return self._segmenter
 
+    def unload_ner_parser(self) -> None:
+        """Release the NER reference-parser singleton, if one is loaded.
+
+        The parser lives in ``bibr.extract.ref_extractor`` outside the
+        layout/segmenter lifecycle, so aggressive mode never unloads it
+        without this hook (``PostParseStage`` calls it after post-parse).
+        Reload is lazy on next use.
+        """
+        from bibr.extract.ref_extractor import unload_ner_parser
+
+        unload_ner_parser()
+
     async def close_models(self) -> None:
         """Release resident models even when the closed manager stays reachable."""
         models = (self._layout, self._segmenter)
@@ -231,6 +243,9 @@ class ResourceManager:
         self._front_role_resolved = False
         if not self._owns_models:
             return
+        # The NER parser singleton is process-global rather than an owned
+        # model object, so it is released directly instead of via the loop.
+        self.unload_ner_parser()
         for model in models:
             if model is None:
                 continue

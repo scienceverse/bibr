@@ -309,12 +309,31 @@ def enable_cuda_for(device: str | None) -> bool:
     return str(device).split(":", 1)[0].strip().lower() != "cpu"
 
 
+def cpu_ort_session_options():
+    """``SessionOptions`` with ORT's CPU memory arena disabled, if available.
+
+    The CPU arena keeps its peak allocation for the life of the session
+    (audit-measured: layout ~5 GB at batch 8, SaT ~2.8 GB after one paper),
+    so CPU-only sessions for those models opt out and return freed blocks to
+    the OS. Returns ``None`` when onnxruntime cannot be imported, so callers
+    that build ``ort_kwargs`` for wtpsplit's ``SaT`` can skip the option.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    options = ort.SessionOptions()
+    options.enable_cpu_mem_arena = False
+    return options
+
+
 def create_session(
     model_path: str | Path,
     *,
     device: str | None = None,
     model_name: str = "",
     gpu_mem_limit: int | None = None,
+    disable_cpu_arena: bool = False,
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
@@ -323,6 +342,13 @@ def create_session(
     back wrapped by :func:`shrink_arena_after_runs`. Graph optimisations are
     left at ORT's default (all), which is what the wtpsplit segmenter already
     runs with.
+
+    ``disable_cpu_arena`` opts a CPU-only session out of ORT's CPU memory
+    arena (see :func:`cpu_ort_session_options`). It is a no-op for sessions
+    whose provider chain includes CUDA: the CUDA EP has its own arena
+    (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
+    there is unverified. Only pass it for models where the arena cost was
+    measured (layout, SaT), not blindly for every model.
     """
     try:
         import onnxruntime as ort
@@ -338,6 +364,8 @@ def create_session(
     )
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
+    if disable_cpu_arena and selected_device(providers) != "cuda":
+        options.enable_cpu_mem_arena = False
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
     device = session_device(session, providers, model_name=model_name)
     return shrink_arena_after_runs(session), device

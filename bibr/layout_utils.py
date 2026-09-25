@@ -100,6 +100,29 @@ _CAPTION_LABELS: set[str] = {"figure_title"}
 DEFAULT_THRESHOLD = _DEFAULT_SETTINGS.layout.detection_threshold
 _MAX_BATCH_SIZE = _DEFAULT_SETTINGS.layout.batch_size
 
+# Effective page batch for layout inference on CPU-only devices. A CPU batch
+# of 8 buys no throughput (audit-measured ~275 ms/page at batch 1 vs
+# ~312 ms/page at batch 8) but grows the ORT CPU arena to several GB, so CPU
+# inference runs one page at a time unless the operator set
+# ``LAYOUT_BATCH_SIZE`` explicitly.
+_CPU_LAYOUT_BATCH_SIZE = 1
+
+
+def effective_layout_batch_size(settings, device_type: str | None = None) -> int:
+    """Page batch size for layout inference given the resolved device.
+
+    An explicitly configured ``LAYOUT_BATCH_SIZE`` always wins. Otherwise CPU
+    resolves to :data:`_CPU_LAYOUT_BATCH_SIZE` and anything else (CUDA, MPS,
+    or an unknown device) keeps the configured default of 8.
+    """
+    layout = settings.layout
+    if "batch_size" in layout.model_fields_set:
+        return layout.batch_size
+    if device_type is not None and str(device_type).lower() == "cpu":
+        return _CPU_LAYOUT_BATCH_SIZE
+    return layout.batch_size
+
+
 # NMS thresholds (from vendored SDK config.yaml → layout.layout_nms settings).
 _NMS_IOU_SAME = _DEFAULT_SETTINGS.layout.nms_iou_same
 _NMS_IOU_DIFF = _DEFAULT_SETTINGS.layout.nms_iou_diff

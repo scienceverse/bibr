@@ -894,3 +894,154 @@ class TestLlmFallbackStatsGate:
         )
 
         assert called is False
+
+
+class TestLlmFallbackCitationFilter:
+    """x-performance-2: sentences whose digit-bearing parentheticals are only
+    citations or figure/table references must not burn LLM calls."""
+
+    def _sections(self):
+        from bibr.paper_contents import CanonicalSection
+
+        return [
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+            PaperSection(
+                section_id=1,
+                header="Results",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.RESULTS,
+            ),
+        ]
+
+    async def test_citation_and_reference_only_sentences_skipped(self):
+        sents = [
+            _make_sentence(10, "This replicates prior findings (Teckchandani et al., 2014)."),
+            _make_sentence(11, "Earlier work agrees (Smith, 2020; Jones et al., 2019)."),
+            _make_sentence(12, "The layout follows (Figure 3c,d) with values in (Table 2)."),
+            _make_sentence(13, "Derived in (Eq. 3) and reviewed in (Section 2.3)."),
+            _make_sentence(14, "The cohort was recruited in (2020) with follow-up in (2021)."),
+            _make_sentence(15, "Odd layout (KMO measure of 0.764, adequacy) regex misses."),
+        ]
+        seen: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                seen.extend(text_id for text_id, _ in batch)
+                return []
+
+        await EquationExtractor().extract_with_llm_fallback(
+            sents, self._sections(), llm_client=FakeLLM()
+        )
+
+        # Only the genuine prose candidate reaches the LLM.
+        assert seen == [15]
+
+    async def test_mixed_citation_and_stat_sentence_still_sent(self):
+        sents = [
+            _make_sentence(
+                10,
+                "Prior work disagrees (Smith, 2020) but odd layout (values 12 versus 17) persists.",
+            ),
+        ]
+        seen: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                seen.extend(text_id for text_id, _ in batch)
+                return []
+
+        await EquationExtractor().extract_with_llm_fallback(
+            sents, self._sections(), llm_client=FakeLLM()
+        )
+
+        assert seen == [10]
+
+    async def test_prose_stat_with_reference_paren_still_sent(self):
+        """Guard from real gate192 exports: prose statistics ("grand mean of
+        56.14", "PCC of 0.921") co-occur with reference parentheticals, and
+        the regex pass misses them — the LLM must still see them."""
+        sents = [
+            _make_sentence(
+                10, "The grand mean of 56.14 was observed for all 196 entries (Tab. 1)."
+            ),
+            _make_sentence(
+                11,
+                "Model fit was acceptable if CFI and TLI were above 0.90 (Byrne, 2012).",
+            ),
+            _make_sentence(12, "The compound achieved a PCC of 0.921 (Fig. 3a)."),
+        ]
+        seen: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                seen.extend(text_id for text_id, _ in batch)
+                return []
+
+        await EquationExtractor().extract_with_llm_fallback(
+            sents, self._sections(), llm_client=FakeLLM()
+        )
+
+        assert seen == [10, 11, 12]
+
+    async def test_keywordless_digit_group_is_kept(self):
+        """Guard against overreach: a digit group that matches neither the
+        citation nor the reference pattern stays a candidate."""
+        sents = [_make_sentence(10, "Responses (3c,d) were excluded from analysis.")]
+        seen: list[int] = []
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                seen.extend(text_id for text_id, _ in batch)
+                return []
+
+        await EquationExtractor().extract_with_llm_fallback(
+            sents, self._sections(), llm_client=FakeLLM()
+        )
+
+        assert seen == [10]
+
+    def test_has_statistical_paren_unit_table(self):
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        skipped = [
+            "The effect replicated prior work (Teckchandani et al., 2014).",
+            "As shown before (Smith, 2020; Jones et al., 2019).",
+            "See the design (Figure 3c,d) for details.",
+            "Values are in (Table 2) and (Supplementary Table S1).",
+            "Derived in (Eq. 3) and discussed in (Section 2.3).",
+            "Published in (2020) with follow-up (2021).",
+            "Equal variances (Equal variances assumed, 2020) noted.",
+        ]
+        for text in skipped:
+            assert _has_statistical_paren(text) is False, text
+
+        kept = [
+            "The difference was significant (t(28) = 3.42, p = .003).",
+            "Sample size was set (n = 100) per group.",
+            "Means differed (M = 4.2, SD = 1.1).",
+            "KMO measure was 0.764 (>0.60) adequate.",
+            "The model (n=50) showed improvement.",
+            "Ambiguous (data 123) result.",
+            "Mixed result (Smith, 2020) with (t(28) = 3.42).",
+            "Kept safe (see Figure 3, t = 5.2) case.",
+            "Tablet counts (Tablet 5mg, n = 30) recorded.",
+            "No digits here at all.",  # no candidate either way
+        ]
+        for text in kept[:-1]:
+            assert _has_statistical_paren(text) is True, text
+        assert _has_statistical_paren(kept[-1]) is False
+
+    def test_body_digits_rescue_reference_only_sentence(self):
+        """A sentence whose digit groups are all references is still queued
+        when the prose around them carries digits (real export cases)."""
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        rescued = [
+            "The grand mean of 56.14 was observed for all 196 entries (Tab. 1).",
+            "Model fit was acceptable if CFI and TLI were above 0.90 (Byrne, 2012).",
+            "The compound achieved a PCC of 0.921 (Fig. 3a).",
+            "The mean ages were 49.6±13.6 for outpatients (Table 1).",
+        ]
+        for text in rescued:
+            assert _has_statistical_paren(text) is True, text

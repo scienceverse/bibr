@@ -341,6 +341,32 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- The equation LLM fallback no longer queues methods/results sentences whose
+  digit-bearing parentheticals are only author-year citations, bare years, or
+  figure, table, supplement, equation or section references — unless the prose
+  around them carries digits of its own ("grand mean of 56.14", "PCC of
+  0.921"), which the regex pass also misses and the LLM can still ground.
+  Measured on the JATS corpora and the gate192 exports, roughly a fifth fewer
+  fallback candidates, every dropped one citation/reference-only; no exported
+  equation came from a dropped sentence.
+- Header and footer regions are now read from the PDF text layer instead of
+  OCR on born-digital PDFs, under the same printable-ratio gate as body text.
+  Their only consumers need plain text. Short running heads ("Cell Biology")
+  use the existing short-text allowance.
+- On CPU-only machines the layout detector now runs one page at a time unless
+  `LAYOUT_BATCH_SIZE` is set explicitly; batching pages on CPU only grows
+  ONNX Runtime's CPU arena without speeding anything up. CPU sessions for the
+  layout detector and the sentence segmenter now also disable the CPU arena,
+  which otherwise keeps its peak allocation for the session's life (the
+  auditor's RSS figures were not re-measured here). CUDA behavior is unchanged.
+- The NER reference parser now loads on CPU in aggressive memory mode and is
+  released after post-parse; `ResourceManager` also releases it when models
+  close. Balanced mode and CUDA behavior are unchanged.
+- The section classifier now distinguishes a below-threshold collapse from a
+  confident 'unknown' prediction in the code, and keeps the trained model's
+  `is_top_level` when the LLM escalation supplies a section type. Which
+  headings are escalated is unchanged: narrowing escalation to collapses only
+  needs a val-set measurement that cannot run without model weights.
 
 ### Added
 
