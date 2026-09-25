@@ -262,6 +262,18 @@ released.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
+- A subtitle or a numbered series part printed on its own row under the title,
+  such as "Careers in garden design" followed by "4. Planting schemes", is now
+  part of the title. The metadata LLM sees both rows but often returned only the
+  first, and title grounding accepted that because the first row is printed
+  verbatim. When the model title is exactly the selected record's title row or
+  rows, the row printed directly under them is now appended, joined with ": "
+  (with a space when the title already ends in punctuation such as "?" or ":"),
+  and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_subtitle_row_dropped`. The row must be short and on the same
+  page. It is left out when it reads as a byline or an extracted author's name,
+  an affiliation, a date, citation or DOI line, an article-type label or section
+  heading, or a parallel title in another language or script.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title
