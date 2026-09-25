@@ -385,20 +385,15 @@ def _finish_reason(completion: Any) -> str | None:
 def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
     """Pick the :class:`~bibr.exceptions.LlmCallError` class for a failed call.
 
-    The order encodes precedence: a truncated response stays a truncation even
-    when Instructor wrapped it, a status anywhere in the chain beats the
-    wrapper's missing one, and only a failure with no service signal counts as
-    invalid output.
+    The order encodes precedence: a status anywhere in the chain beats the
+    wrapper's missing one, a service signal beats a stop reason, and only a
+    failure with no service signal counts as invalid output.
     """
     if isinstance(exc, LlmCallError):
         return type(exc)
     chain = _failure_chain(exc)
-    for error in chain:
-        if "IncompleteOutputException" in _exc_names(error):
-            return LlmTruncatedError
-        completion = getattr(error, "last_completion", None)
-        if completion is not None and _finish_reason(completion) in _TRUNCATED_FINISH_REASONS:
-            return LlmTruncatedError
+    if any("IncompleteOutputException" in _exc_names(error) for error in chain):
+        return LlmTruncatedError
     # The host never accepted the connection: down, not slow.
     if any("ConnectTimeout" in _exc_names(error) for error in chain):
         return LlmUnreachableError
@@ -415,6 +410,14 @@ def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
         return LlmUnreachableError
     if any(is_transient_network_error(error) for error in chain):
         return LlmServiceError
+    # Instructor keeps the last completion that failed to parse even when a
+    # re-ask then failed on the service, so its stop reason counts only here.
+    if any(
+        (completion := getattr(error, "last_completion", None)) is not None
+        and _finish_reason(completion) in _TRUNCATED_FINISH_REASONS
+        for error in chain
+    ):
+        return LlmTruncatedError
     if any(_exc_names(error) & _INVALID_OUTPUT_EXC_NAMES for error in chain):
         return LlmInvalidOutputError
     return LlmCallError

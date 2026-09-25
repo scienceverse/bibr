@@ -77,6 +77,9 @@ def _completion(finish_reason: str):
         (httpx.ReadTimeout("read timed out"), LlmTimeoutError),
         (_retry_wrapping(_StatusError(408)), LlmTimeoutError),
         (_retry_wrapping(_StatusError(503)), LlmServiceError),
+        # Instructor keeps the completion of an earlier attempt that failed to
+        # parse; the re-ask that ended the call failed on the service.
+        (_retry_wrapping(_StatusError(503), _completion("length")), LlmServiceError),
         (_retry_wrapping(_StatusError(429)), LlmServiceError),
         (httpx.ConnectError("connection refused"), LlmUnreachableError),
         (httpx.RemoteProtocolError("server disconnected"), LlmUnreachableError),
