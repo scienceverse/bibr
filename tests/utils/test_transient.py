@@ -123,6 +123,34 @@ def _wrapped(cause: BaseException) -> BaseException:
         return exc
 
 
+def _raised_from(cause: BaseException) -> BaseException:
+    """A plain wrapper with only ``__cause__`` (no ``original_error``)."""
+    try:
+        raise RuntimeError("OCR page failed") from cause
+    except RuntimeError as exc:
+        return exc
+
+
+def _raised_while_handling(context: BaseException, *, suppress: bool) -> BaseException:
+    try:
+        try:
+            raise context
+        except type(context):
+            if suppress:
+                raise ValueError("no JSON object in the completion") from None
+            raise ValueError("no JSON object in the completion")  # noqa: B904
+    except ValueError as exc:
+        return exc
+
+
+class _GenaiError(Exception):
+    """Stand-in for google-genai's APIError, which keeps the int status in ``code``."""
+
+    def __init__(self, code: int):
+        super().__init__(f"{code} error")
+        self.code = code
+
+
 def _circuit_open() -> BaseException:
     from bibr.exceptions import UpstreamServiceError
     from bibr.utils.circuit_breaker import CircuitOpenError
@@ -143,7 +171,10 @@ OUTAGES = [
     _status_error(502),
     _status_error(429),
     _wrapped(httpx.ConnectError("refused")),
+    _raised_from(httpx.ConnectError("[Errno 111] Connection refused")),
+    _raised_while_handling(httpx.ConnectError("refused"), suppress=False),
     _circuit_open(),
+    _GenaiError(503),
 ]
 
 NOT_OUTAGES = [
@@ -156,6 +187,8 @@ NOT_OUTAGES = [
     _status_error(400),
     _wrapped(ValueError("no JSON object in the completion")),
     _wrapped(TimeoutError("slow")),
+    _raised_while_handling(httpx.ConnectError("refused"), suppress=True),
+    _GenaiError(404),
     ValueError("bad value"),
 ]
 

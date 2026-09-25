@@ -5,11 +5,11 @@ failure, so the run is auditable even for papers that produced no export.
 Resume semantics read the *latest* line per ``paper_id``:
 
 * ``ok`` → skipped (unless ``--force``);
-* ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except a
-  failure that says nothing about the paper (:func:`reruns_by_default`): the
-  run was interrupted, a service it needed was down, or the serve refused the
-  token — that paper is picked up again by default. A crash
-  (``chunk_error``) is picked up again once.
+* ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except
+  (:func:`reruns_by_default`) a paper that never got a verdict — the run was
+  interrupted, or the serve refused the token — which is always picked up
+  again, and a crash or a service outage, which is picked up again until the
+  paper has failed that way :data:`MAX_UNSETTLED_FAILURES` times.
 
 Schema (see ``docs/guides/batch.md`` for the table):
 
@@ -43,28 +43,37 @@ WARNING_TEXT_LIMIT = 200
 INTERRUPTED = "interrupted"
 UPSTREAM_UNAVAILABLE = "upstream_unavailable"
 CHUNK_ERROR = "chunk_error"
-# Failed lines whose cause lies outside the paper: the run was stopped, a
-# service it needed (OCR, LLM, the serve) was down or could not start, or the
-# serve refused the token. The paper never got a verdict, so resume runs it
-# again by default. Remote lines whose transient retries ran out carry
-# ``transient_exhausted`` and count too. Timeouts are not here: a paper can
-# be too slow on its own, and re-running it by default would never finish.
-RERUN_ERROR_CODES = frozenset({INTERRUPTED, UPSTREAM_UNAVAILABLE, "http_401", "http_403"})
-# A crash can be the machine's (a CUDA fault, a pipeline that could not be
-# built) or the paper's (a bug its content triggers). Resume retries it once;
-# a paper that crashed this many times is left to ``--retry-failed``.
-MAX_CRASHES = 2
+# Failed lines that say nothing about the paper, which never got a verdict:
+# the run was stopped, or the serve refused the token. Resume always runs the
+# paper again.
+NEVER_RAN_CODES = frozenset({INTERRUPTED, "http_401", "http_403"})
+# A crash or a service outage (``upstream_unavailable``, or a remote line whose
+# transient retries ran out) is usually the machine's or the service's, but it
+# can be the paper's: a bug its content triggers, a prompt that brings an LLM
+# server down, a model reply the serve reports as a 502. Resume runs such a
+# paper again until it has failed this way this many times since its last
+# success; then it waits for ``--retry-failed``, so a batch still converges.
+# Timeouts are not here at all: a paper can be too slow on its own.
+MAX_UNSETTLED_FAILURES = 3
 
 
-def reruns_by_default(entry: Mapping[str, Any], *, crashes: int = 1) -> bool:
+def is_unsettled_failure(entry: Mapping[str, Any]) -> bool:
+    """Is this ledger line a crash or a service outage (see ``MAX_UNSETTLED_FAILURES``)?"""
+    return (
+        entry.get("error_code") in (UPSTREAM_UNAVAILABLE, CHUNK_ERROR)
+        or entry.get("transient_exhausted") is True
+    )
+
+
+def reruns_by_default(entry: Mapping[str, Any], *, unsettled: int = 1) -> bool:
     """Does a resumed run pick up this failed ledger line without ``--retry-failed``?
 
-    *crashes* is how many ``chunk_error`` lines the paper has in the ledger.
+    *unsettled* is how many crash or outage lines the paper has had since its
+    last ``ok`` line, this one included.
     """
-    code = entry.get("error_code")
-    if code in RERUN_ERROR_CODES or entry.get("transient_exhausted") is True:
+    if entry.get("error_code") in NEVER_RAN_CODES:
         return True
-    return code == CHUNK_ERROR and crashes < MAX_CRASHES
+    return is_unsettled_failure(entry) and unsettled < MAX_UNSETTLED_FAILURES
 
 
 def utc_now_iso() -> str:
@@ -317,11 +326,13 @@ class Ledger:
         entries = self.read() if entries is None else entries
         latest = self.latest(entries)
         self._attempts = self.attempts(entries)
-        crashes: dict[str, int] = {}
+        unsettled: dict[str, int] = {}
         for entry in entries:
-            if entry.get("error_code") == CHUNK_ERROR:
-                pid = str(entry["paper_id"])
-                crashes[pid] = crashes.get(pid, 0) + 1
+            pid = str(entry["paper_id"])
+            if entry.get("status") == "ok":
+                unsettled.pop(pid, None)
+            elif is_unsettled_failure(entry):
+                unsettled[pid] = unsettled.get(pid, 0) + 1
         plan = ResumePlan(to_run=[], skipped_ok=[], skipped_failed=[])
         for item in items:
             last = latest.get(item.paper_id)
@@ -331,7 +342,7 @@ class Ledger:
             status = last.get("status")
             if status == "ok":
                 plan.skipped_ok.append(item)
-            elif retry_failed or reruns_by_default(last, crashes=crashes.get(item.paper_id, 0)):
+            elif retry_failed or reruns_by_default(last, unsettled=unsettled.get(item.paper_id, 0)):
                 plan.to_run.append(item)
             else:
                 plan.skipped_failed.append(item)

@@ -38,7 +38,13 @@ from bibr.batch.ledger import (
     summarize_export,
     utc_now_iso,
 )
-from bibr.batch.manifest import BatchItem, Discovery, assign_paper_ids, discover_inputs
+from bibr.batch.manifest import (
+    RESERVED_IDS,
+    BatchItem,
+    Discovery,
+    assign_paper_ids,
+    discover_inputs,
+)
 from bibr.batch.remote import RemoteAuthError, RemoteExecutor, RemoteOptions, configured_value
 from bibr.batch.report import compute_report, render_report
 from bibr.utils.transient import is_service_outage
@@ -124,7 +130,7 @@ def build_plan(options: BatchOptions, ledger: Ledger) -> BatchPlan:
     """Discover inputs, assign ids, apply resume rules, shuffle and limit."""
     discovery = discover_inputs(options.inputs)
     entries = ledger.read()
-    items = assign_paper_ids(discovery.files, recorded=entries)
+    items = assign_paper_ids(discovery.files, recorded=entries, reserved=RESERVED_IDS)
     resume = ledger.plan(
         items, force=options.force, retry_failed=options.retry_failed, entries=entries
     )
@@ -215,7 +221,7 @@ def write_batch_tables(
     would otherwise fail the whole rebuild on every run.
     """
     from bibr.export.schema_artifact import SCHEMA_MAJOR
-    from bibr.export.tables import write_tables
+    from bibr.export.tables import ExportFile, write_tables
     from bibr.local.cli import ui
     from bibr.local.cli.tables import report_tables
 
@@ -240,7 +246,7 @@ def write_batch_tables(
             elif version.split(".")[0] != SCHEMA_MAJOR:
                 other_major.append((path.name, version))
             else:
-                yield payload
+                yield ExportFile(path, payload)  # named by its file in any error
 
     exports = current_major()
     first = next(exports, None)

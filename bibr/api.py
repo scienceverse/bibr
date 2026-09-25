@@ -151,9 +151,9 @@ class ChewFailure:
     """Order-aligned placeholder for a file that failed in a batch chew().
 
     ``[r for r in results if r.ok]`` filters a batch down to successes.
-    ``outage`` is True when the failure says nothing about the file: a
-    service or model the pipeline needs was down, unreachable or could not
-    start, so the same file may well succeed on a later run.
+    ``outage`` is True when a service or model the pipeline needs was down,
+    unreachable or could not start: the failure most likely says nothing
+    about the file, which may well succeed on a later run.
     """
 
     ok = False
@@ -373,7 +373,17 @@ _CRASH_ERROR_CODE = "chunk_error"
 
 
 def _crash(fs: Any, exc: BaseException) -> None:
-    fs.set_error(f"{type(exc).__name__}: {exc}", code=_CRASH_ERROR_CODE, exc=exc)
+    # Classified now rather than kept as ``original_error``: the exception's
+    # traceback holds the crashed call's frames, and with them its pages.
+    from bibr.utils.transient import is_service_outage
+
+    fs.set_error(
+        f"{type(exc).__name__}: {exc}", code=_CRASH_ERROR_CODE, outage=is_service_outage(exc)
+    )
+
+
+def _settled(fs: Any) -> bool:
+    return bool(fs.error) or fs.result_json is not None
 
 
 async def _process_batch(
@@ -406,23 +416,26 @@ async def _process_batch(
         try:
             await pipeline.process_chunk(chunk, progress=progress)
         except Exception as exc:  # noqa: BLE001 — a crashed chunk is per-file failures
-            logger.warning(
-                "chunk of %d file(s) crashed; running its unfinished files one by one",
-                len(chunk),
-                exc_info=True,
-            )
-            for offset, fs in enumerate(chunk):
-                if fs.error or fs.result_json is not None:
-                    continue  # settled before the crash
-                if len(chunk) == 1:
-                    _crash(fs, exc)
-                    continue
-                alone = FileState(path=fs.path, paper_id=fs.paper_id)
-                try:
-                    await pipeline.process_chunk([alone], progress=progress)
-                except Exception as solo_exc:  # noqa: BLE001
-                    _crash(alone, solo_exc)
-                states[start + offset] = alone
+            logger.warning("chunk of %d file(s) crashed", len(chunk), exc_info=True)
+            if len(chunk) == 1 and not _settled(chunk[0]):
+                _crash(chunk[0], exc)  # it crashed on its own already
+        else:
+            continue
+        # Out of the except block, so the crash's traceback, and the frames
+        # holding the chunk's pages, are released before its files run again;
+        # a file that runs again starts over, so its pages go too.
+        for fs in chunk:
+            fs.free_all()
+        for offset, fs in enumerate(chunk):
+            if _settled(fs):
+                continue
+            alone = FileState(path=fs.path, paper_id=fs.paper_id)
+            states[start + offset] = alone
+            try:
+                await pipeline.process_chunk([alone], progress=progress)
+            except Exception as solo_exc:  # noqa: BLE001
+                _crash(alone, solo_exc)
+                alone.free_all()
     results: list[Result | ChewFailure] = []
     for fs in states:
         if not fs.error and fs.result_json is None:
@@ -536,6 +549,12 @@ async def achew(
         return await _chew_on(pipeline, path, paper_id=paper_id, batch_size=batch_size)
     finally:
         await pipeline.aclose()
+
+
+def _private_runner() -> asyncio.Runner:
+    # A loop factory keeps the Runner from installing its loop as the thread's
+    # current loop, and from unsetting the caller's when it closes.
+    return asyncio.Runner(loop_factory=asyncio.new_event_loop)
 
 
 class Chewer:
@@ -657,7 +676,7 @@ class Chewer:
             # loop: Ctrl-C cancels the call's task and waits for it to unwind,
             # where run_until_complete left it pending, to resume inside the
             # teardown that close() runs on the same loop.
-            self._runner = asyncio.Runner()
+            self._runner = _private_runner()
         return self._runner.run(
             self.achew(path, paper_id=paper_id, batch_size=batch_size, progress=progress)
         )
@@ -700,19 +719,24 @@ class Chewer:
         """Sync :meth:`aclose`; also closes the private event loop. Idempotent."""
         if self._closed:
             return
-        try:
-            if self._pipeline is not None:
-                runner = self._runner or asyncio.Runner()
-                try:
-                    runner.run(self.aclose())
-                finally:
-                    if runner is not self._runner:
-                        runner.close()
-        finally:
+        if self._pipeline is None and self._runner is None:
             self._closed = True
-            if self._runner is not None:
-                runner, self._runner = self._runner, None
-                runner.close()  # cancels and drains anything still pending
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            # Before touching any state, so 'await chewer.aclose()' still works.
+            raise RuntimeError(
+                "Chewer.close() cannot run inside an active event loop "
+                "(e.g. Jupyter) — use 'await chewer.aclose()' instead."
+            )
+        runner, self._runner = self._runner or _private_runner(), None
+        try:
+            runner.run(self.aclose())
+        finally:
+            runner.close()  # cancels and drains anything still pending
 
     def __enter__(self) -> Chewer:
         return self

@@ -147,14 +147,39 @@ def test_unrecorded_inputs_keep_the_stem_rules(tmp_path):
     assert [i.paper_id for i in assign_paper_ids([a], recorded=recorded)] == ["a"]
 
 
-def test_the_run_info_stem_is_reserved(tmp_path):
-    """<out>/run_info.json is the runner's own file."""
+def test_the_run_info_stem_is_reserved_for_bibr_batch(tmp_path):
+    """<out>/run_info.json is the runner's own file; the library writes none."""
+    from bibr.batch.manifest import RESERVED_IDS
     from bibr.batch.runner import RUN_INFO_FILENAME
 
     info = _pdf(tmp_path / "Run_Info.pdf", b"paper")
-    items = assign_paper_ids([info], recorded=[{"paper_id": "Run_Info", "path": str(info)}])
+    recorded = [{"paper_id": "Run_Info", "path": str(info)}]
+    items = assign_paper_ids([info], recorded=recorded, reserved=RESERVED_IDS)
     assert [i.paper_id for i in items] == [f"Run_Info-{sha256_file(info)[:8]}"]
-    assert Path(RUN_INFO_FILENAME).stem == "run_info"
+    assert Path(RUN_INFO_FILENAME).stem in RESERVED_IDS
+    assert [i.paper_id for i in assign_paper_ids([info])] == ["Run_Info"]
+
+
+def test_a_recorded_id_is_kept_by_the_first_input_that_claims_it(tmp_path):
+    """Two paths recorded under one id (each ran alone once) would overwrite
+    each other's export: the first keeps it, the other gets a suffix."""
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    b = _pdf(tmp_path / "b" / "Paper.pdf", b"b")
+    recorded = [
+        {"paper_id": "paper", "path": str(a), "status": "ok"},
+        {"paper_id": "PAPER", "path": str(b), "status": "ok"},
+    ]
+    items = assign_paper_ids([a, b], recorded=recorded)
+    assert [i.paper_id for i in items] == ["paper", f"Paper-{sha256_file(b)[:8]}"]
+
+
+def test_the_latest_recorded_id_of_a_path_wins(tmp_path):
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    recorded = [
+        {"paper_id": "paper", "path": str(a), "status": "failed"},
+        {"paper_id": "paper-0badc0de", "path": str(a), "status": "ok"},
+    ]
+    assert [i.paper_id for i in assign_paper_ids([a], recorded=recorded)] == ["paper-0badc0de"]
 
 
 def test_an_unreadable_colliding_file_still_gets_a_unique_id(tmp_path):

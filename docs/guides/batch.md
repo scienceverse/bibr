@@ -53,22 +53,24 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 | none | run | run | run |
 | `ok` | skip | skip | run |
 | `failed` | skip | run | run |
-| `failed` for a reason outside the paper: `error_code` `interrupted`, `upstream_unavailable`, `http_401` or `http_403`, or `transient_exhausted: true` | run | run | run |
-| `failed` with `error_code: chunk_error` (a crash) | run once, then skip | run | run |
+| `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
+| `failed` on a crash or a service outage: `error_code` `chunk_error` or `upstream_unavailable`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
 
-A failure is re-run by default when it says nothing about the paper, which
-never got a verdict: the run was interrupted (Ctrl-C), a service it needed was
-down (the OCR or LLM server unreachable or unable to start, a serve that kept
-answering 502/503 until the retries ran out), or the serve refused the token.
-A timeout is not in that list: a paper can be too slow on its own, and
-re-running it by default would never finish. A crash can be the machine's (a
-CUDA fault, a pipeline that could not be built) or the paper's (a bug its
-content triggers), so it is retried on the next run once; a paper that
-crashed twice waits for `--retry-failed`. Every attempt appends a new line
-with an incremented `attempt` counter — nothing is ever rewritten, so
-`outcomes.jsonl` is a full history. A run killed mid-write (out of memory, a
-full disk) can leave a torn last line; it is skipped with a warning and the
-next run starts on a fresh line.
+A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
+because of the token, never got a verdict, so it always runs again. A crash or
+a service outage — the OCR or LLM server unreachable or unable to start, a
+serve that kept answering 502/503 until the retries ran out — is usually the
+machine's or the service's, so it runs again too. It can also be the paper's
+own: a bug its content triggers, a prompt that brings the LLM server down, a
+model reply the serve reports as a 502. So a paper that has failed this way
+three times since its last success waits for `--retry-failed`, and a batch
+still finishes. A timeout is in neither group: a paper can be too slow on its
+own, and re-running it by default would never finish.
+
+Every attempt appends a new line with an incremented `attempt` counter —
+nothing is ever rewritten, so `outcomes.jsonl` is a full history. A run killed
+mid-write (out of memory, a full disk) can leave a torn last line; it is
+skipped with a warning and the next run starts on a fresh line.
 
 Ctrl-C is graceful in both executors: the local executor records the chunk
 that was running as `interrupted`; the remote executor stops submitting,

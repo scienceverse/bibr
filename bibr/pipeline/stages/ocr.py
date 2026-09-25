@@ -25,6 +25,7 @@ from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
+from bibr.utils.transient import is_service_outage
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -569,9 +570,13 @@ async def _ocr_page_regions_impl(
             finish_reason: str | None = None
             if isinstance(result, asyncio.CancelledError):
                 raise result
-            if isinstance(result, BibrError):
-                # Systemic backend failures (auth, config) must not be silently
-                # converted to blank content — propagate to fail the page.
+            if isinstance(result, BaseException) and (
+                isinstance(result, BibrError) or is_service_outage(result)
+            ):
+                # Systemic backend failures (auth, config, an OCR server that
+                # went down: connection refused or dropped once the transport's
+                # retries ran out) must not be silently converted to blank
+                # content — propagate to fail the page.
                 raise result
             if isinstance(result, BaseException):
                 # The region ships blank. Without an export-visible warning
@@ -1036,10 +1041,14 @@ class OcrStage:
             fs.ocr_pages_attempted = len(page_results)
             fs.ocr_pages_failed = len(errors)
 
-            # A systemic upstream OCR outage (e.g. circuit breaker open) on ANY
-            # page fails the whole file — never emit a partial result with
-            # silently blank pages.
-            upstream = next((e for e in errors if isinstance(e, UpstreamServiceError)), None)
+            # A systemic upstream OCR outage (e.g. circuit breaker open, an
+            # OCR server that died mid-file) on ANY page fails the whole file
+            # — never emit a partial result with silently blank pages. It is
+            # an outage, so a resumed ``bibr batch`` runs the file again.
+            upstream = next(
+                (e for e in errors if isinstance(e, UpstreamServiceError) or is_service_outage(e)),
+                None,
+            )
             if upstream is not None:
                 fs.set_error(
                     f"OCR upstream service failed: {upstream}",

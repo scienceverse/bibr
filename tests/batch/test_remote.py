@@ -522,6 +522,33 @@ def test_papers_failed_by_a_rejected_token_run_again_once_it_is_fixed(tmp_path, 
     }
 
 
+def test_a_paper_that_keeps_failing_as_an_outage_stops_being_resubmitted(tmp_path, monkeypatch):
+    """The serve answers 502 for an LLM failure the paper itself triggers.
+    Resume runs an outage again, but only until the paper has failed that way
+    three times, so re-running the command converges."""
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: None)
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    for stem in ("bad", "good"):
+        (papers / f"{stem}.pdf").write_bytes(b"%PDF-1.4\n" + stem.encode())
+    serve = FakeServe(fail={"bad": ({"detail": "Error in LLM: Failed to extract references"}, 502)})
+    remote = RemoteOptions(
+        serve_url="http://serve",
+        token="tok",  # noqa: S106
+        poll_interval=0.001,
+        concurrency=1,
+        retries=0,
+    )
+    options = BatchOptions(inputs=[str(papers)], out=tmp_path / "out", remote=remote, tables=False)
+
+    codes = [run_batch(options, transport=httpx.MockTransport(serve.handler)) for _ in range(4)]
+
+    assert codes == [1, 1, 1, 0]
+    assert [name for name, _ in serve.submits] == ["bad.pdf", "good.pdf", "bad.pdf", "bad.pdf"]
+    latest = Ledger(tmp_path / "out" / LEDGER_FILENAME).latest()["bad"]
+    assert (latest["error_code"], latest["transient_exhausted"]) == ("upstream_unavailable", True)
+
+
 def test_run_batch_remote_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: "unused-locally")
     serve = FakeServe(fail={"bad": ({"message": "no text", "error_code": "OCR_EMPTY"}, 422)})

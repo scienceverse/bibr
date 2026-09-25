@@ -187,19 +187,44 @@ def test_plan_reruns_failures_that_say_nothing_about_the_paper(tmp_path):
     assert [i.paper_id for i in plan.skipped_failed] == ["ocr", "slow", "rejected"]
 
 
-def test_plan_retries_a_crash_once(tmp_path):
-    """A crash can be the machine's or the paper's: one more try, then skip."""
-    ledger = Ledger(tmp_path / "outcomes.jsonl")
-    ledger.append({"paper_id": "p", "status": "failed", "error_code": "chunk_error"})
-    assert [i.paper_id for i in ledger.plan(_items(tmp_path, ["p"])).to_run] == ["p"]
+def _run_ids(ledger: Ledger, tmp_path, ids=("p",), **kwargs) -> list[str]:
+    return [i.paper_id for i in ledger.plan(_items(tmp_path, list(ids)), **kwargs).to_run]
 
+
+def test_plan_reruns_a_crash_or_an_outage_until_the_paper_failed_that_way_three_times(tmp_path):
+    """A crash or an outage is usually the machine's, but it can be the
+    paper's own: retried by default, but not forever, whatever the mix."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    ledger.append({"paper_id": "p", "status": "failed", "error_code": "upstream_unavailable"})
+    assert _run_ids(ledger, tmp_path) == ["p"]
     ledger.append({"paper_id": "p", "status": "failed", "error_code": "chunk_error"})
+    assert _run_ids(ledger, tmp_path) == ["p"]
+
+    ledger.append(
+        {"paper_id": "p", "status": "failed", "error_code": "http_502", "transient_exhausted": True}
+    )
     plan = ledger.plan(_items(tmp_path, ["p"]))
     assert plan.to_run == []
     assert [i.paper_id for i in plan.skipped_failed] == ["p"]
-    assert [i.paper_id for i in ledger.plan(_items(tmp_path, ["p"]), retry_failed=True).to_run] == [
-        "p"
-    ]
+    assert _run_ids(ledger, tmp_path, retry_failed=True) == ["p"]
+
+
+def test_other_failures_do_not_count_toward_the_rerun_limit(tmp_path):
+    """Only crash and outage lines since the paper's last success count; an
+    interruption or a rejected token always runs again."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    for code in ("interrupted", "http_401", "ocr_failed", "upstream_unavailable"):
+        ledger.append({"paper_id": "p", "status": "failed", "error_code": code})
+    assert _run_ids(ledger, tmp_path) == ["p"]  # one outage so far
+    for _ in range(2):
+        ledger.append({"paper_id": "p", "status": "failed", "error_code": "chunk_error"})
+    assert _run_ids(ledger, tmp_path) == []  # three
+    ledger.append({"paper_id": "p", "status": "failed", "error_code": "interrupted"})
+    assert _run_ids(ledger, tmp_path) == ["p"]
+
+    ledger.append({"paper_id": "p", "status": "ok"})
+    ledger.append({"paper_id": "p", "status": "failed", "error_code": "upstream_unavailable"})
+    assert _run_ids(ledger, tmp_path) == ["p"]  # counting starts over after a success
 
 
 def test_a_torn_last_line_does_not_swallow_the_next_record(tmp_path):

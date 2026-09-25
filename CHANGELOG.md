@@ -213,23 +213,32 @@ released.
 
 ### Fixed
 
-- Resuming a `bibr batch` run now runs again the papers whose failure said
-  nothing about the paper; they used to wait for `--retry-failed`, which also
-  re-runs every genuine failure. A local OCR or LLM server that went down or
-  could not start failed each later paper with the pipeline's own code
-  (`ocr_failed`, `layout_failed`, …), and the next run skipped them all. Those
-  papers are now recorded as `upstream_unavailable`, the code the remote
-  executor uses for the same outage, and `ChewFailure.outage` tells library
-  users the same. Remote papers whose transient retries ran out, and papers
-  failed with 401/403 when the serve rejected the token, are also picked up
-  again. Timeouts are not: a paper can be too slow on its own.
+- Resuming a `bibr batch` run now runs again the papers that failed because
+  of the run or a service rather than the paper; they used to wait for
+  `--retry-failed`, which also re-runs every genuine failure. A local OCR or
+  LLM server that went down or could not start failed each later paper with
+  the pipeline's own code (`ocr_failed`, `layout_failed`, …), and the next run
+  skipped them all. Those papers are now recorded as `upstream_unavailable`,
+  the code the remote executor uses for the same outage, and
+  `ChewFailure.outage` tells library users the same. Papers failed with
+  401/403 when the serve rejected the token are always picked up again. A
+  paper that crashed, hit an outage, or ran out of remote transient retries
+  is picked up again until it has failed that way three times, since the
+  cause can still be the paper (a prompt that brings the LLM server down, a
+  model reply the serve reports as a 502); after that it waits for
+  `--retry-failed`, so a batch still finishes. Timeouts are not picked up: a
+  paper can be too slow on its own.
+- An OCR server that stopped answering mid-file left the regions it refused
+  blank with a warning, so the file failed as `ocr_mostly_failed`, which
+  resume skipped, or passed with text missing. A region or page whose OCR
+  request was refused or dropped once the retries ran out now fails the file
+  as an outage, as an `UpstreamServiceError` from the OCR service already did.
 - A crash in one chunk no longer fails every paper in it. `bibr.chew()` on a
   list or directory lost every result when any chunk raised, and `bibr batch`
   recorded the whole chunk as `chunk_error`, which resume then skipped. The
-  papers a crashed chunk left unfinished now run again one by one, and only a
-  paper that crashes on its own fails with `chunk_error`. A resumed run
-  retries a crash once, since it can be the machine's; a paper that crashed
-  twice waits for `--retry-failed`.
+  papers a crashed chunk left unfinished now run again one by one, with the
+  crashed chunk's pages released first, and only a paper that crashes on its
+  own fails with `chunk_error`.
 - A job the serve failed with 504 (`PIPELINE_TIMEOUT`) was treated as an OCR/LLM
   outage: it was resubmitted up to `--retries` times, each run cost a full
   timeout of a serve slot, in-flight shrank each time, and the paper was
@@ -257,8 +266,9 @@ released.
 - Ctrl-C during `Chewer.chew()`, which `bibr batch` uses locally, left the call
   running on the Chewer's event loop, and `close()` then resumed it alongside
   the teardown, where it could start an OCR server after the OCR shutdown had
-  run. The Chewer now drives its loop through `asyncio.Runner`, so Ctrl-C
-  cancels the call and waits for it to unwind before anything is closed.
+  run. The Chewer now drives its own loop through `asyncio.Runner`, so Ctrl-C
+  cancels the call and waits for it to unwind before anything is closed; the
+  thread's current event loop is left alone.
 - `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
   not the `paper_id` twice.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its

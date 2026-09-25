@@ -411,6 +411,16 @@ def test_no_tables_option_skips_them(corpus, tmp_path, monkeypatch):
 # --- resume after outages and crashes (real Chewer, stub pipeline) ----------------
 
 
+def _valid_export(paper_id: str) -> dict:
+    """A real 12.0 export (the shared demo paper) under *paper_id*."""
+    from bibr.export.json_export import _export_paper_payload
+    from tests.export.conftest import _demo_paper
+
+    data = _export_paper_payload(_demo_paper(with_refs=False))
+    data["paper_id"] = paper_id
+    return data
+
+
 class _StubLocalPipeline:
     """Stands in for ``LocalPipeline`` under the real ``WarmChewMany``/``Chewer``.
 
@@ -425,8 +435,6 @@ class _StubLocalPipeline:
         pass
 
     async def process_chunk(self, file_states, progress=None, config=None):
-        from tests.test_api import _export_fixture
-
         stems = [fs.path.stem for fs in file_states]
         _StubLocalPipeline.calls.append(stems)
         failures = _StubLocalPipeline.script(stems)
@@ -437,9 +445,7 @@ class _StubLocalPipeline:
                     f"OCR failed for all pages: {exc}", code="ocr_failed", stage="ocr", exc=exc
                 )
             else:
-                data = _export_fixture()
-                data["paper_id"] = fs.paper_id or fs.path.stem
-                fs.result_json = data
+                fs.result_json = _valid_export(fs.paper_id or fs.path.stem)
 
     async def aclose(self):
         pass
@@ -494,11 +500,11 @@ def test_an_ocr_outage_is_recorded_as_upstream_unavailable_and_resumed(
     assert {row[0] for row in _latest_codes(out).values()} == {"ok"}
 
 
-def test_a_crashed_chunk_runs_its_papers_alone_and_a_crash_is_retried_once(
+def test_a_crashed_chunk_runs_its_papers_alone_and_resume_retries_a_crash_twice(
     corpus, tmp_path, stub_pipeline
 ):
     """bad1 crashes the pipeline whenever it is in a chunk; its neighbour must
-    not fail with it, and resume retries the crash once, not forever."""
+    not fail with it, and resume retries the crash, but not forever."""
     out = tmp_path / "out"
 
     def crash_on_bad1(stems):
@@ -518,9 +524,10 @@ def test_a_crashed_chunk_runs_its_papers_alone_and_a_crash_is_retried_once(
     }
     assert Ledger(out / LEDGER_FILENAME).latest()["bad1"]["error"] == "KeyError: 'level'"
 
-    stub_pipeline.calls = []
-    assert run_batch(_real_options(corpus, out)) == 1
-    assert stub_pipeline.calls == [["bad1"]]
+    for _ in range(2):
+        stub_pipeline.calls = []
+        assert run_batch(_real_options(corpus, out)) == 1
+        assert stub_pipeline.calls == [["bad1"]]
 
     stub_pipeline.calls = []
     assert run_batch(_real_options(corpus, out)) == 0
@@ -542,6 +549,28 @@ def test_a_pipeline_that_cannot_be_built_is_retried_on_the_next_run(corpus, tmp_
     _install(monkeypatch, fake)
     run_batch(_options(corpus, out))
     assert sum(len(paths) for paths, _ in fake.calls) == 4
+
+
+def test_a_chunk_that_dies_on_a_dead_service_is_an_outage(corpus, tmp_path, monkeypatch):
+    """chew_many itself raising a refused connection says nothing about the
+    papers in the chunk: upstream_unavailable, picked up by the next run."""
+    import httpx
+
+    out = tmp_path / "out"
+    refused = httpx.ConnectError("[Errno 111] Connection refused")
+    _install(monkeypatch, _FakeChewMany(raise_on_call=2, exc=refused))
+    assert run_batch(_options(corpus, out)) == 1
+    assert _latest_codes(out) == {
+        "bad1": ("failed", "OCR_FAILED"),
+        "good1": ("ok", None),
+        "good2": ("failed", "upstream_unavailable"),
+        "good3": ("failed", "upstream_unavailable"),
+    }
+
+    again = _FakeChewMany()
+    _install(monkeypatch, again)
+    assert run_batch(_options(corpus, out)) == 0
+    assert [[p.stem for p in paths] for paths, _ in again.calls] == [["good2", "good3"]]
 
 
 def test_an_input_named_run_info_keeps_its_export(tmp_path, monkeypatch):
@@ -598,6 +627,32 @@ def test_tables_leave_out_exports_of_another_schema_major(corpus, tmp_path, monk
 
     papers = pq.read_table(out / "tables" / "paper.parquet").column("paper_id").to_pylist()
     assert papers == ["good1", "good2", "good3"]
+    printed = capsys.readouterr()
+    assert (
+        "1 export(s) of another schema major left out of the tables (old.json: 11.0)"
+        in " ".join((printed.out + printed.err).split())
+    )
+
+
+def test_a_duplicate_paper_id_in_the_tables_names_both_export_files(tmp_path):
+    from rich.console import Console
+
+    from bibr.batch.runner import write_batch_tables
+
+    out = tmp_path / "out"
+    out.mkdir()
+    ledger = Ledger(out / LEDGER_FILENAME)
+    for name in ("paper", "paper-copy"):
+        (out / f"{name}.json").write_text(json.dumps(_valid_export("paper")), encoding="utf-8")
+        ledger.append({"paper_id": name, "status": "ok"})
+    console = Console(file=io.StringIO(), width=400)
+
+    write_batch_tables(out, ledger, ledger.read(), console=console)
+
+    assert (
+        f"paper_id 'paper' appears in both {out / 'paper.json'} and {out / 'paper-copy.json'}"
+        in " ".join(console.file.getvalue().split())
+    )
 
 
 def test_tables_of_an_older_major_stay_when_no_current_export_exists(tmp_path, capsys):

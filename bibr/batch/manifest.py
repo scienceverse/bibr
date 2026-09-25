@@ -23,8 +23,8 @@ from typing import Any
 from bibr.input.supported_files import SUPPORTED_EXTENSIONS
 
 _HASH_CHUNK = 1024 * 1024
-# Stems a paper cannot use as its id: ``<out>/<paper_id>.json`` would be the
-# runner's own ``run_info.json``.
+# Stems ``bibr batch`` does not give a paper as its id: ``<out>/<paper_id>.json``
+# would be the runner's own ``run_info.json``.
 RESERVED_IDS = frozenset({"run_info"})
 
 
@@ -157,34 +157,36 @@ def _sha8(path: Path) -> str | None:
 
 
 def assign_paper_ids(
-    files: Sequence[Path], *, recorded: Iterable[Mapping[str, Any]] = ()
+    files: Sequence[Path],
+    *,
+    recorded: Iterable[Mapping[str, Any]] = (),
+    reserved: Iterable[str] = (),
 ) -> list[BatchItem]:
     """Map files to ``paper_id`` = stem, disambiguating stem collisions.
 
     Exports are written as ``<out>/<paper_id>.json``, so two inputs sharing a
     stem (compared case-insensitively — the default macOS/Windows filesystems
-    fold case) would overwrite each other. Colliding files get
+    fold case) would overwrite each other. Colliding files, and a file whose
+    stem is in *reserved* (``bibr batch`` passes :data:`RESERVED_IDS`), get
     ``<stem>-<sha256[:8]>``; identical bytes under the same stem additionally
-    get an ordinal so every id is unique, and so does a stem the runner's own
-    files use (``run_info``). Deterministic for a given input order.
+    get an ordinal so every id is unique. Deterministic for a given input
+    order.
 
     *recorded* are the ledger lines of earlier runs. A file whose path has a
-    line keeps the id recorded there, so adding inputs never renames a paper
-    that was already processed; only the newcomer that collides with it gets
-    a suffix.
+    line keeps the id recorded there (a later line wins), so adding inputs
+    never renames a paper that was already processed; only the newcomer that
+    collides with it gets a suffix.
     """
     by_path: dict[str, str] = {}
     for entry in recorded:
         path_text, recorded_id = entry.get("path"), entry.get("paper_id")
-        if (
-            isinstance(path_text, str)
-            and isinstance(recorded_id, str)
-            and recorded_id
-            and recorded_id.casefold() not in RESERVED_IDS
-        ):
-            by_path[path_text] = recorded_id  # later lines win
+        if isinstance(path_text, str) and isinstance(recorded_id, str) and recorded_id:
+            by_path[path_text] = recorded_id
 
-    used: set[str] = set(RESERVED_IDS)
+    reserved_ids = {stem.casefold() for stem in reserved}
+    # A recorded id is kept only while no earlier input, and no reserved stem,
+    # has it.
+    used: set[str] = set(reserved_ids)
     kept: dict[int, str] = {}
     for index, path in enumerate(files):
         recorded_id = by_path.get(str(path))
@@ -201,7 +203,7 @@ def assign_paper_ids(
         stem = path.stem
         paper_id = kept.get(index)
         if paper_id is None:
-            collides = len(by_stem[stem.casefold()]) > 1 or stem.casefold() in RESERVED_IDS
+            collides = len(by_stem[stem.casefold()]) > 1 or stem.casefold() in reserved_ids
             sha8 = _sha8(path) if collides else None
             paper_id = f"{stem}-{sha8}" if sha8 else stem
             base = paper_id
