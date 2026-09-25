@@ -25,6 +25,7 @@ from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, Author
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
+from bibr.extract.title_subtitle import fold_printed_subtitle
 from bibr.field_states import set_field_source
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
@@ -1660,6 +1661,9 @@ class CoreMetadataExtractor:
             )
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
+            title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=authors)
+            if subtitle_issue is not None:
+                self.validation_issues.append(subtitle_issue)
             abstract = (llm_metadata.abstract or "").strip()
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
