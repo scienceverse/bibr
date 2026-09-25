@@ -64,8 +64,12 @@ class RefSegmenter:
         text = strip_lone_surrogates(text)
         # Tokenize WITH special tokens to match training input distribution
         # (training script re-tokenized with default add_special_tokens=True).
-        # Then offset+pred extraction strips them and applies the same
-        # +1 shift as the parser does — see RefParser.parse().
+        # The shift below is NOT inherited from the parser (RefParser parses
+        # with add_special_tokens=False and applies no shift): it compensates
+        # this checkpoint's own output alignment — one tag per input position,
+        # each position emitting its predecessor's tag — so it applies
+        # uniformly to EVERY window, first and overlapping alike. Shifting
+        # only the first window would misalign every later window by one.
         enc = self.tokenizer(
             text,
             truncation=False,

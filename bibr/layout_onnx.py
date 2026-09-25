@@ -40,7 +40,9 @@ and ``successor_order_logits``. Either way the result dicts feed
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -63,6 +65,12 @@ _GRAPH_OUTPUTS: dict[str, tuple[str, ...]] = {
 
 # PyTorch's bicubic coefficient (torch/csrc/api/... UpSampleBicubic2d: A = -0.75).
 _CUBIC_A = -0.75
+
+# Column scaling is the slow pass (strided gathers): split it into row blocks
+# across at most this many threads. Each block runs the exact per-tap loop,
+# so threaded output is bit-identical to the serial one.
+_RESIZE_THREADS = min(8, os.cpu_count() or 1)
+_RESIZE_ROWS_PER_THREAD = 256
 
 
 def _cubic_coefficients(t: np.ndarray) -> np.ndarray:
@@ -147,15 +155,45 @@ def _bicubic_passes(src: np.ndarray, out_h: int, out_w: int, *, round_between: b
     c, h, w = src.shape
     ix, wx = _resize_plan(w, out_w, float_kernel=not round_between)
     iy, wy = _resize_plan(h, out_h, float_kernel=not round_between)
-    tmp = np.zeros((c, h, out_w), dtype=np.float32)
-    for k in range(4):
-        tmp += src[:, :, ix[:, k]] * wx[None, None, :, k]
+    tmp = _x_pass(src, out_w, ix, wx)
     if round_between:
         tmp = _to_uint8(tmp)
     out = np.zeros((c, out_h, out_w), dtype=np.float32)
     for k in range(4):
         out += tmp[:, iy[:, k], :] * wy[None, :, k, None]
     return out
+
+
+def _x_pass(
+    src: np.ndarray, out_w: int, ix: np.ndarray, wx: np.ndarray
+) -> np.ndarray:
+    """Column scaling, row blocks across threads when the image is tall.
+
+    Blocks write disjoint row slices and each runs the same per-tap loop the
+    serial code ran, so the result is bit-identical — threads only overlap
+    the strided gathers, which is where the time goes.
+    """
+    c, h, _w = src.shape
+    workers = min(_RESIZE_THREADS, max(1, h // _RESIZE_ROWS_PER_THREAD))
+    tmp = np.empty((c, h, out_w), dtype=np.float32)
+    bounds = [round(h * i / workers) for i in range(workers + 1)]
+
+    def block(b: int) -> None:
+        lo, hi = bounds[b], bounds[b + 1]
+        part = src[:, lo:hi, :]
+        acc = np.zeros((c, hi - lo, out_w), dtype=np.float32)
+        for k in range(4):
+            acc += part[:, :, ix[:, k]] * wx[None, None, :, k]
+        tmp[:, lo:hi, :] = acc
+
+    if workers == 1:
+        block(0)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="bibr-resize"
+        ) as pool:
+            list(pool.map(block, range(workers)))
+    return tmp
 
 
 def resize_bicubic_no_antialias(chw: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
