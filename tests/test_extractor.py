@@ -1343,6 +1343,9 @@ class TestNormalizeDoi:
         assert normalize_doi("10.1093///brain/110.3.747") == "10.1093/brain/110.3.747"
 
 
+# The LLM reference path falls back to the NER parser for segments the LLM
+# skipped, and these tests load the real checkpoint from the Hub for it.
+@pytest.mark.network
 class TestRefExtractionStrategy:
     """Tests for LLM reference extraction in extract_all_metadata."""
 
@@ -3558,6 +3561,7 @@ class TestSequenceReferences:
         assert [r.bib_id for r in out] == [1, 2]
 
 
+@pytest.mark.network  # loads the real NER checkpoint for skipped segments
 class TestLLMPathContiguousBibIds:
     """A junk ref the LLM emits (no title, no authors) must not leave a gap in
     bib_ids: filter first, then sequence — same contract as the NER path."""

@@ -410,6 +410,8 @@ class TestTrainedClassifierBranch:
             "section_classifier_min_confidence",
             0.5,
         )
+        # The collapse itself is under test, not the LLM tier it escalates to.
+        monkeypatch.setattr(Settings.ml, "section_classifier_llm_escalation", False)
 
         results = await section_classifier.classify_headers_batch_async(
             ["Mysterious Header"], body_snippets=["body..."]
