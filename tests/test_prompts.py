@@ -246,3 +246,33 @@ class TestBuilders:
         content = prompt_text(parts)
         assert "--- BNDRY BEGIN ---" in content
         assert "--- BNDRY END ---" in content
+
+
+class TestParallelLanguageFrontMatter:
+    """A title or byline printed in two languages keeps the version printed
+    first; the abstract keeps its preference for the printed English version."""
+
+    @staticmethod
+    def _instruction(task: str) -> str:
+        parts = PROMPTS[task].build_user(boundary="BNDRY", text="DOC-TEXT")
+        text = " ".join(p["text"] for p in parts if p["nuextract_role"] == "instructions")
+        return " ".join(text.split())
+
+    @pytest.mark.parametrize("task", ["title_keywords", "core_metadata"])
+    def test_title_prompts_keep_the_title_printed_first(self, task):
+        instruction = self._instruction(task)
+        assert "return only the version printed first" in instruction
+        assert "even when a later version is in English" in instruction
+        assert "Never translate it and never join two versions into one title" in instruction
+        # The rule belongs to the title, not to the abstract rules that follow.
+        assert instruction.index("printed first") < instruction.index("Abstract:")
+
+    @pytest.mark.parametrize("task", ["authors", "core_metadata"])
+    def test_author_prompts_copy_the_byline_printed_first(self, task):
+        instruction = self._instruction(task)
+        assert "copy the names from the byline printed first" in instruction
+        assert "Never transliterate, romanise or translate a name" in instruction
+
+    @pytest.mark.parametrize("task", ["title_keywords", "core_metadata"])
+    def test_abstract_keeps_its_english_preference(self, task):
+        assert "prefer the printed English version" in self._instruction(task)

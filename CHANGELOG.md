@@ -416,6 +416,20 @@ released.
   `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
   "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
   still left out.
+- A paper that prints its title in two languages, the original and then a
+  translation, now gets the title printed first. The title prompts had no rule
+  for parallel titles, so the metadata LLM often returned the English
+  translation, or joined both versions into one title. The authors prompts had
+  no such rule either, so a byline printed in two scripts could come back
+  romanised, and the title and the authors could come from different language
+  versions of the same front matter. The title/keywords and merged
+  core-metadata prompts now ask for the version printed first, verbatim in the
+  language and script it is printed in, never translated and never joined to
+  the other version. A title quoted in a citation line or a running header does
+  not count. The authors prompts now copy the byline printed first when it is
+  printed in two scripts or languages, and never transliterate or romanise a
+  name. The abstract rule is unchanged: of parallel abstracts, the printed
+  English version is still preferred.
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
