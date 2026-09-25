@@ -254,7 +254,11 @@ def decide_value(name: str, candidate: FieldCandidate | None) -> FieldDecision:
             producer=candidate.source,
         )
     return FieldDecision(
-        name, candidate.value, candidate, "extracted", (Verdict(candidate, True, "extracted"),)
+        name,
+        candidate.value,
+        candidate,
+        _incumbent_rule(candidate),
+        (Verdict(candidate, True, "extracted"),),
     )
 
 
