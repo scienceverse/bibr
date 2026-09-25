@@ -26,6 +26,25 @@ def test_inspection_maps_links_into_the_layout_frame():
     ]
 
 
+def test_links_keep_the_pdf_page_number_under_a_page_slice():
+    pdf = _pdf_with_links(
+        [((10, 20, 110, 40), "https://doi.org/10.1234/abc.5")], blank_pages_before=1
+    )
+    inspection = inspect_pdf(
+        pdf,
+        [[]],
+        page_indices=[1],
+        fill_native_text=False,
+        include_outline=False,
+        include_ref_geometry=True,
+        min_chars=10,
+        min_printable_ratio=0.85,
+    )
+
+    # Region summaries number pages from the start of the PDF, not the slice.
+    assert [link["page"] for link in inspection.uri_links] == [2]
+
+
 @pytest.mark.parametrize("rotation", [0, 90, 180, 270])
 def test_point_to_layout_conversion_inverts_layout_to_point(rotation):
     crop_box = (12.0, 30.0, 612.0, 822.0)

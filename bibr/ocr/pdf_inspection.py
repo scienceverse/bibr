@@ -48,10 +48,11 @@ class PdfInspection:
     reference_lines: list[dict[str, Any]]
     component_errors: dict[str, str] = field(default_factory=dict)
     # Every text-layer line of every page, each with its box in the 0..1000
-    # layout space as ``bbox`` and ``page`` as the 1-based layout page number
-    # (the one region summaries carry), plus the PDF-point geometry the geom
-    # features read. The reference line stream selects the lines inside the
-    # located section's layout regions from these. Captured with
+    # layout space as ``bbox``, ``page`` as the 1-based PDF page number (the
+    # one region summaries carry, also under ``--start-page``) and the page's
+    # ``rotation``, plus the PDF-point geometry the geom features read (in the
+    # unrotated page frame). The reference line stream selects the lines
+    # inside the located section's layout regions from these. Captured with
     # ``include_ref_geometry``.
     page_lines: list[dict[str, Any]] = field(default_factory=list)
     # URI link annotations (``page``, layout-space ``bbox``, ``uri``), same
@@ -158,7 +159,7 @@ def inspect_pdf(
                                             group_chars_into_lines(
                                                 _break_wrapped_lines(chars), page_index
                                             ),
-                                            layout_slot + 1,
+                                            page_index + 1,
                                             crop_box,
                                             rotation,
                                         )
@@ -174,7 +175,7 @@ def inspect_pdf(
                             uri_links.extend(
                                 _uri_link_dicts(
                                     page_uri_links(doc, page, page_index),
-                                    layout_slot + 1,
+                                    page_index + 1,
                                     crop_box,
                                     rotation,
                                 )
@@ -273,6 +274,7 @@ def _page_line_dicts(
             for key, value in record_to_dict(record).items()
         }
         line["page"] = page_number
+        line["rotation"] = rotation
         line["bbox"] = _layout_box(
             (record.x0, record.y_bottom, record.x1, record.y_top), crop_box, rotation
         )
