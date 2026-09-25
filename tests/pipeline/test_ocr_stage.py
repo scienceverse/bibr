@@ -837,6 +837,40 @@ def test_dedup_still_removes_reference_overlapping_reference_content():
     assert labels == ["reference_content"]
 
 
+def test_dedup_keeps_reference_region_holding_entries_its_children_miss():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+
+    entries = [
+        "Adams, A. (2001). One. J, 1.",
+        "Baker, B. (2002). Two. J, 2.",
+        "Clark, C. (2003). Three. J, 3.",
+        "Dunn, D. (2004). Four. J, 4.",
+    ]
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": "\n".join(entries),
+        "bbox_2d": [100, 150, 900, 500],
+    }
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": entries[i],
+            "bbox_2d": [100, 150 + 45 * i, 900, 190 + 45 * i],
+        }
+        for i in range(2)
+    ]
+
+    result = _deduplicate_reference_regions([[envelope, *children]])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference", "\n".join(entries)),
+        ("reference_content", entries[0]),
+        ("reference_content", entries[1]),
+    ]
+
+
 # --- per-chunk OCR teardown heuristic (balanced keeps OCR across chunks) -----
 # balanced mode reloaded OCR weights every chunk; with a cloud/remote LLM there
 # is no GPU consumer for the freed VRAM, so OCR now stays resident across chunks

@@ -116,6 +116,54 @@ def test_reference_envelope_with_one_child_is_not_shadowed():
     ]
 
 
+_ENTRIES = [
+    "Adams, A. (2001). One. J, 1.",
+    "Baker, B. (2002). Two. J, 2.",
+    "Clark, C. (2003). Three. J, 3.",
+    "Dunn, D. (2004). Four. J, 4.",
+]
+
+
+def test_reference_envelope_with_entry_boxes_for_only_some_entries_keeps_every_entry():
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 100, 300, 130]),
+                _region(1, "reference", "\n".join(_ENTRIES), [100, 150, 900, 500]),
+                _region(2, "reference_content", _ENTRIES[0], [100, 150, 900, 190]),
+                _region(3, "reference_content", _ENTRIES[1], [100, 195, 900, 235]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == ["\n".join(_ENTRIES)]
+    # The shadowed entry boxes still feed the layout-anchor tiers.
+    assert [(summary.label, summary.content) for summary in contents.region_summaries[1:]] == [
+        ("reference", "\n".join(_ENTRIES)),
+        ("reference_content", _ENTRIES[0]),
+        ("reference_content", _ENTRIES[1]),
+    ]
+
+
+def test_reference_envelope_keeps_entry_boxes_it_does_not_hold():
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 100, 300, 130]),
+                # truncated aggregate read: holds the first two entries only
+                _region(1, "reference", "\n".join(_ENTRIES[:2]), [100, 150, 900, 500]),
+                _region(2, "reference_content", _ENTRIES[1], [100, 195, 900, 235]),
+                _region(3, "reference_content", _ENTRIES[2], [100, 240, 900, 280]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [
+        "\n".join(_ENTRIES[:2]),
+        _ENTRIES[2],
+    ]
+
+
 def test_noncontained_reference_children_do_not_shadow_envelope():
     contents = _parse(
         [

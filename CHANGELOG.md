@@ -375,6 +375,12 @@ released.
   such as a transliterated copy of the bibliography or supplementary
   references, made the check decline a correct geometry result and the region
   tier decline as well, so the list went to the LLM segmenter.
+- An aggregate `reference` layout box is dropped only when the entry boxes
+  inside it hold all of its text. When the layout model returned entry boxes
+  for only some of the entries in it, the entries without a box of their own
+  were lost from the reference list. The aggregate box now stays and the entry
+  boxes it repeats are hidden instead; they still count as layout onsets. This
+  applies both to the OCR stage's overlap cleanup and to the PDF parser.
 
 ### Added
 

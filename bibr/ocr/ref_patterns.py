@@ -122,3 +122,36 @@ def _looks_like_author_date_start(text: str) -> bool:
     if match is None:
         return False
     return bool(_YEAR.search(match.group("tail")))
+
+
+def alnum_key(text: str) -> str:
+    """Lowercased alphanumeric-only projection of *text* for coverage checks."""
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+# Fuzzy score at which one region's normalized text counts as already present in
+# other regions' text, and the needle length below which only exact containment
+# is trusted (short needles fuzzy-match too easily).
+_COVERED_MIN_SCORE = 95
+_COVERED_MIN_CHARS = 30
+
+
+def alnum_text_covered(needle: str, haystack: str) -> bool:
+    """Whether *needle* is already contained in *haystack* (both ``alnum_key`` output).
+
+    Exact containment, or a fuzzy partial match of at least 95 for needles of 30
+    or more characters, which absorbs OCR noise between two reads of the same
+    text. A needle longer than the haystack is never covered: whatever it holds
+    beyond the haystack would be lost if the needle's region were dropped.
+    """
+    if not needle:
+        return True
+    if len(needle) > len(haystack):
+        return False
+    if needle in haystack:
+        return True
+    if len(needle) < _COVERED_MIN_CHARS:
+        return False
+    from rapidfuzz import fuzz
+
+    return fuzz.partial_ratio(needle, haystack) >= _COVERED_MIN_SCORE
