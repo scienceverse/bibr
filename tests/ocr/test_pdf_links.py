@@ -7,22 +7,33 @@ import pytest
 from bibr.ocr.pdf_links import PdfUriLink, doi_from_uri, read_uri_links
 
 
-def _pdf_with_links(links: list[tuple[tuple[int, int, int, int], str]]) -> bytes:
-    """A one-page 200 x 200 pt PDF carrying the given URI link annotations.
+def _pdf_with_links(
+    links: list[tuple[tuple[int, int, int, int], str]], *, blank_pages_before: int = 0
+) -> bytes:
+    """A 200 x 200 pt PDF whose last page carries the given URI link annotations.
 
-    Written by hand, with a correct cross-reference table, so the test needs
-    no PDF writer.
+    ``blank_pages_before`` blank pages come first. Written by hand, with a
+    correct cross-reference table, so the test needs no PDF writer.
     """
-    annots = " ".join(f"{5 + i} 0 R" for i in range(len(links)))
+    # Objects: 1 catalog, 2 pages, 3 font, 4.. blank pages, then the linked
+    # page, then its annotations.
+    page_numbers = list(range(4, 4 + blank_pages_before + 1))
+    first_annot = page_numbers[-1] + 1
+    annots = " ".join(f"{first_annot + i} 0 R" for i in range(len(links)))
+    kids = " ".join(f"{number} 0 R" for number in page_numbers)
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
-            f"/Resources << /Font << /F1 4 0 R >> >> /Annots [{annots}] >>"
-        ).encode(),
+        f"<< /Type /Pages /Kids [{kids}] /Count {len(page_numbers)} >>".encode(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
+    for _ in range(blank_pages_before):
+        objects.append(b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>")
+    objects.append(
+        (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Annots [{annots}] >>"
+        ).encode()
+    )
     for (x0, y0, x1, y1), uri in links:
         objects.append(
             (
@@ -71,6 +82,14 @@ def test_reader_returns_each_uri_link_with_its_page_and_rectangle():
         ("http://dx.doi.org/10.1037/0022-3514.59.5.899", "10.1037/0022-3514.59.5.899"),
         ("doi:10.1002/acp.1722", "10.1002/acp.1722"),
         ("https://doi.org/10.1002%2F%28SICI%291097", "10.1002/(SICI)1097"),
+        # Entities escaped twice, as one publisher writes them.
+        (
+            "https://doi.org/10.1002/(SICI)1097:1&amp;lt;55&amp;gt;3.0",
+            "10.1002/(SICI)1097:1<55>3.0",
+        ),
+        ("https://doi.org/10.1234/ab%00cd", None),
+        ("https://doi.org/10.1234/ab\ufffdcd", None),
+        ("https://doi.org/not-a-doi", None),
         ("https://www.mdpi.com/2409-515X/7/1/17/s1", None),
         ("https://www.tandfonline.com/doi/full/10.1080/1", None),
         ("", None),

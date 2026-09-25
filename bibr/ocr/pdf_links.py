@@ -13,6 +13,7 @@ the frame the text layer's character boxes use.
 from __future__ import annotations
 
 import ctypes
+import html
 from dataclasses import dataclass
 from urllib.parse import unquote
 
@@ -92,16 +93,28 @@ def read_uri_links(
     return links
 
 
+# HTML entities a publisher left in the URI, sometimes escaped twice
+# ("&amp;lt;" for "<"), are undone this many times at most.
+_MAX_UNESCAPES = 3
+
+
 def doi_from_uri(uri: str | None) -> str | None:
     """The DOI a link targets, or None.
 
     Accepts doi.org / dx.doi.org URLs (http or https) and ``doi:`` URIs, with
-    percent-encoding undone. Any other URL, including a publisher page whose
-    path merely contains a DOI, returns None.
+    HTML entities and percent-encoding undone. Any other URL, including a
+    publisher page whose path merely contains a DOI, returns None, and so
+    does a target holding a NUL or a replacement character or that is not
+    DOI-shaped once decoded.
     """
     if not uri:
         return None
     text = uri.strip()
+    for _ in range(_MAX_UNESCAPES):
+        unescaped = html.unescape(text)
+        if unescaped == text:
+            break
+        text = unescaped
     lower = text.lower()
     if lower.startswith("doi:"):
         candidate = text[4:]
@@ -119,5 +132,7 @@ def doi_from_uri(uri: str | None) -> str | None:
                 break
         else:
             return None
-    candidate = candidate.split("#", 1)[0].split("?", 1)[0]
-    return normalize_doi(unquote(candidate).strip())
+    candidate = unquote(candidate.split("#", 1)[0].split("?", 1)[0]).strip()
+    if "\x00" in candidate or "\ufffd" in candidate:
+        return None
+    return normalize_doi(candidate)
