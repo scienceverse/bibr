@@ -80,6 +80,7 @@ Post-parse pipeline runs after structure parsing:
 - **Equation extraction** -- regex + LLM fallback for statistical reporting decomposition (`equation_extractor.py`)
 - **IMRaD enforcement** -- deduplication of Abstract and References by classification-source trust; repeated Methods/Results/Discussion remain valid
 - **Source ownership** -- abstract spans, author grounding, and integrity-statement evidence are resolved against the selected article block. Ambiguous front matter can yield validation issues instead of metadata taken from another article in the file
+- **Field decisions** -- every metadata field other than the DOI is decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates its producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`
 
 Identity validation and a core checkpoint run before enrichment. Extraction
 and enrichment have separate completion evidence, so a failed or delayed
