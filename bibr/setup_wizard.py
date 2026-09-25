@@ -23,7 +23,7 @@ from typing import Literal
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from bibr.env_utils import _format_env_value
+from bibr.env_utils import _format_env_value, write_env_text
 from bibr.env_utils import merge_env as _merge_env  # re-exported for tests
 from bibr.local.cli import ui
 from bibr.local.llm_models import (
@@ -624,7 +624,7 @@ def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
             lines.append(f"{k}={_format_env_value(v)}")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_env_text(path, "\n".join(lines))
 
 
 def _project_name(cwd: Path) -> str | None:

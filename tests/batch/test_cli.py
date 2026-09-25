@@ -431,3 +431,41 @@ def test_chew_and_batch_share_pipeline_options():
     assert chew.refs == batch.refs == "off"
     for name in ("ocr", "llm", "memory", "pages", "device", "batch_size", "preset", "consolidate"):
         assert hasattr(batch, name), name
+
+
+@pytest.mark.parametrize(
+    ("serve_url", "extra", "code"),
+    [
+        ("http://bibr.example.org:8000", [], 2),
+        ("http://bibr.example.org:8000", ["--allow-insecure-http"], 0),
+        ("https://bibr.example.org", [], 0),
+        ("http://gpu-box:8000", [], 0),
+        ("http://127.0.0.1:8000", [], 0),
+    ],
+)
+def test_remote_refuses_to_send_the_token_to_a_public_http_host(
+    serve_url, extra, code, tmp_path, capsys, monkeypatch
+):
+    """x-security-9: the bearer token rides every submit and poll."""
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(_pdf(tmp_path)),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            serve_url,
+            "--token",
+            "serve-token-placeholder",
+            *extra,
+        ]
+    )
+
+    assert _run_batch(args) == code
+    captured = capsys.readouterr()
+    refused = "Refusing to send the serve bearer token over plain HTTP" in (
+        captured.out + captured.err
+    )
+    assert refused is (code == 2)

@@ -156,18 +156,23 @@ def _remote_options(args: Any, console: Any) -> Any:
             "no bearer token — set AUTH_API_KEY / BIBR_SERVE_TOKEN or pass --token "
             "(fine only if the serve runs without auth)",
         )
-    return RemoteOptions(
-        serve_url=args.serve_url,
-        token=token,
-        concurrency=args.concurrency,
-        min_concurrency=args.min_concurrency,
-        max_concurrency=args.max_concurrency,
-        poll_timeout=args.poll_timeout,
-        poll_interval=args.poll_interval,
-        retries=args.retries,
-        ready_timeout=args.ready_timeout,
-        form=form,
-    )
+    try:
+        return RemoteOptions(
+            serve_url=args.serve_url,
+            token=token,
+            concurrency=args.concurrency,
+            min_concurrency=args.min_concurrency,
+            max_concurrency=args.max_concurrency,
+            poll_timeout=args.poll_timeout,
+            poll_interval=args.poll_interval,
+            retries=args.retries,
+            ready_timeout=args.ready_timeout,
+            form=form,
+            allow_insecure_http=bool(getattr(args, "allow_insecure_http", False)),
+        )
+    except ValueError as e:
+        ui.error(console, str(e))
+        return None
 
 
 def _local_options(args: Any, console: Any) -> Any:

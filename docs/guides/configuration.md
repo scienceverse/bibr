@@ -104,6 +104,12 @@ bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
 
+An `LLM_BASE_URL` (or `OCR_VISION_BASE_URL`) that receives an API key may use
+plain `http://` for loopback and private-network hosts — a local vLLM or
+Ollama, a GPU box on the LAN or tailnet. For a public host bibr refuses to
+send the key over plain HTTP unless `LLM_ALLOW_INSECURE_HTTP=true`
+(`OCR_ALLOW_INSECURE_HTTP=true` for the vision endpoint).
+
 ### Model and profile overrides
 
 The automatic Paddle-first selector is:

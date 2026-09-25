@@ -307,3 +307,32 @@ async def test_fetch_allowlist_enforced_before_any_network():
             _resolve=_resolve_fixed,
             _transport=httpx.MockTransport(handler),
         )
+
+
+@pytest.mark.parametrize(
+    ("disposition", "url", "expected"),
+    [
+        ('attachment; filename="D:evil.pdf"', "https://x.org/y", "D_evil.pdf"),
+        ('attachment; filename="C:\\\\Windows\\\\evil.pdf"', "https://x.org/y", "evil.pdf"),
+        ('attachment; filename="\\\\\\\\server\\\\share\\\\p.pdf"', "https://x.org/y", "p.pdf"),
+        ('attachment; filename="NUL.pdf"', "https://x.org/y", "_NUL.pdf"),
+        ('attachment; filename="com1.pdf"', "https://x.org/y", "_com1.pdf"),
+        ('attachment; filename="paper.pdf:stream"', "https://x.org/y", "paper.pdf_stream.pdf"),
+        ('attachment; filename="paper.pdf. "', "https://x.org/y", "paper.pdf"),
+        ('attachment; filename=".."', "https://x.org/files/p.pdf", "p.pdf"),
+        (None, "https://x.org/files/D:evil.pdf", "D_evil.pdf"),
+    ],
+)
+def test_filename_stays_one_component_inside_a_windows_directory(disposition, url, expected):
+    """x-security-2: bibr mcp's chew_url joins this name to a temp directory, and
+    on Windows a drive-relative "D:evil.pdf" discards the directory."""
+    from pathlib import PureWindowsPath
+
+    from bibr.utils.safe_fetch import _pick_filename
+
+    headers = httpx.Headers({"content-disposition": disposition} if disposition else {})
+    name = _pick_filename(headers, url, "application/pdf")
+    tmp = PureWindowsPath(r"C:\Users\me\AppData\Local\Temp\bibr-mcp-url-ab12")
+
+    assert name == expected
+    assert (tmp / name).parent == tmp

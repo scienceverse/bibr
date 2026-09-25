@@ -145,6 +145,14 @@ class CloudOcrClient:
             if api_key is not None:
                 kwargs["api_key"] = api_key
             if cfg.base_url:
+                if api_key and not settings.ocr.allow_insecure_http:
+                    from bibr.utils.hosts import refuse_public_plaintext
+
+                    refuse_public_plaintext(
+                        cfg.base_url,
+                        credential="vision OCR API key",
+                        opt_out="set OCR_ALLOW_INSECURE_HTTP=true",
+                    )
                 kwargs["base_url"] = cfg.base_url
 
             self._client = instructor.from_provider(model_string, **kwargs)

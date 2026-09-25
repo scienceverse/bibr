@@ -162,9 +162,19 @@ class RemoteOptions:
     submit_wait_budget: float = 3600.0
     grace: float = 30.0
     form: dict[str, str] = field(default_factory=dict)
+    allow_insecure_http: bool = False
 
     def __post_init__(self) -> None:
         self.serve_url = self.serve_url.rstrip("/")
+        if self.token and not self.allow_insecure_http:
+            from bibr.utils.hosts import refuse_public_plaintext
+
+            # Every submit and poll carries the bearer token.
+            refuse_public_plaintext(
+                self.serve_url,
+                credential="serve bearer token",
+                opt_out="pass --allow-insecure-http",
+            )
         self.min_concurrency = max(1, self.min_concurrency)
         self.max_concurrency = max(self.min_concurrency, self.max_concurrency)
         self.concurrency = min(max(self.concurrency, self.min_concurrency), self.max_concurrency)

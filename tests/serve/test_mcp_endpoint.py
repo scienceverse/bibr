@@ -685,3 +685,75 @@ async def test_http_upload_above_sdk_default_body_limit():
             )
             assert result["paper_id"] == FIXTURE_ID
             assert len(tracker.descriptors) == 1
+
+
+# ---------------------------------------------------------------------------
+# Keyless (loopback-only) serve: DNS-rebinding protection (x-security-7)
+# ---------------------------------------------------------------------------
+
+_INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {
+        "protocolVersion": "2025-06-18",
+        "capabilities": {},
+        "clientInfo": {"name": "t", "version": "0"},
+    },
+}
+
+
+@asynccontextmanager
+async def _keyless_mounted_app(tracker: _FakeTracker):
+    from bibr.config import Settings
+
+    Settings.auth.api_key = None
+    app = FastAPI()
+    store = UploadStore.create(max_size=1_000_000, spool_memory_bytes=1024, stale_after_seconds=60)
+    try:
+        mount_mcp(app, Settings, upload_store=store, tracker=tracker)
+        async with app.router.lifespan_context(app):
+            yield app
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    ("base_url", "origin", "status"),
+    [
+        ("http://evil.example:8000", None, 421),  # a rebinding page's own host name
+        ("http://127.0.0.1:8000", "https://evil.example", 403),
+        ("http://127.0.0.1:8000", None, 200),
+        ("http://localhost:8000", "http://localhost:8000", 200),
+    ],
+)
+async def test_keyless_mount_admits_only_loopback_hosts_and_origins(base_url, origin, status):
+    async with _keyless_mounted_app(_FakeTracker()) as app:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url=base_url
+        ) as client:
+            headers = {"Accept": "application/json, text/event-stream"}
+            if origin:
+                headers["Origin"] = origin
+            resp = await client.post("/mcp", json=_INITIALIZE, headers=headers)
+            assert resp.status_code == status
+
+
+async def test_keyless_mount_serves_a_local_mcp_client_end_to_end():
+    async with _keyless_mounted_app(_FakeTracker()) as app:
+        async with (
+            httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000"
+            ) as http_client,
+            streamable_http_client("http://127.0.0.1:8000/mcp", http_client=http_client) as streams,
+        ):
+
+            @asynccontextmanager
+            async def transport():
+                yield streams
+
+            async with Client(transport()) as session:
+                res = await session.call_tool(
+                    "chew_paper", {"filename": "p.pdf", "content_base64": PDF_B64}
+                )
+                assert res.structured_content["paper_id"] == FIXTURE_ID

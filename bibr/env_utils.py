@@ -1,5 +1,8 @@
 """Shared .env file read/write helpers."""
 
+import os
+import stat
+import tempfile
 from pathlib import Path
 
 
@@ -41,6 +44,31 @@ def _format_env_value(value: str) -> str:
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def write_env_text(path: Path, text: str) -> None:
+    """Replace *path* with *text* atomically, readable by its owner only when new.
+
+    A ``.env`` holds API keys, so a new file is created 0600 whatever the
+    umask, the way ``bibr config set`` (python-dotenv) creates one; an existing
+    file keeps its mode. The text goes to a temporary file beside the target
+    and is renamed over it, so an interrupted write never leaves half a file.
+    A symlinked ``.env`` is followed, and its target is rewritten.
+    """
+    target = Path(os.path.realpath(path))
+    try:
+        mode = stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        mode = 0o600
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".env.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.chmod(tmp, mode)
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -85,4 +113,4 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
             out_lines.append(f"{k}={_format_env_value(v)}")
 
     out_lines.append("")
-    path.write_text("\n".join(out_lines), encoding="utf-8")
+    write_env_text(path, "\n".join(out_lines))

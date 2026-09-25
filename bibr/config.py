@@ -155,6 +155,38 @@ def _is_secret_name(name: str) -> bool:
     return str(name).lower().endswith(_SECRET_NAME_MARKERS)
 
 
+def _redacted_url(name: str, value):
+    """A ``*url`` field's value with its user-info password and query secrets
+    masked (``REDIS_PASSWORD`` is URL-encoded into ``redis.url``); else unchanged."""
+    if isinstance(value, str) and str(name).lower().endswith("url"):
+        from bibr.utils.redact import redact_url_secrets
+
+        return redact_url_secrets(value)
+    return value
+
+
+def _with_redis_password(url: str, password: str) -> str:
+    """*url* with URL-encoded *password* in its user-info, unless it carries one.
+
+    A user name is kept (``redis://default@host`` for a Redis 6 ACL user), and
+    a password containing ``@ : / ? #`` still authenticates.
+    """
+    parsed = urlparse(url)
+    if parsed.password is not None or not parsed.hostname:
+        return url
+    user, _, hostport = parsed.netloc.rpartition("@")
+    netloc = f"{user}:{_url_quote(password, safe='')}@{hostport}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _same_redis_server(url: str, other: str) -> bool:
+    a, b = urlparse(url), urlparse(other)
+    return a.hostname is not None and (a.hostname, a.port or 6379) == (
+        b.hostname,
+        b.port or 6379,
+    )
+
+
 def _split_csv_env(value, *, lower: bool = False):
     """Accept a comma-separated env string or a list; normalize to tokens.
 
@@ -190,8 +222,9 @@ class _BibrSettings(BaseSettings):
     ``${VAR}`` in ``.env`` values is never shell-interpolated on load.
 
     ``repr()`` and ``model_dump()`` mask secret-named fields (API keys, passwords,
-    tokens) so a stray ``logger.debug(settings)`` / ``model_dump()`` can't leak
-    plaintext credentials (audit M3). The stored value is untouched — only its
+    tokens), and the password inside ``*url`` fields, so a stray
+    ``logger.debug(settings)`` / ``model_dump()`` can't leak plaintext
+    credentials (audit M3). The stored value is untouched — only its
     serialized/printed form is redacted.
     """
 
@@ -200,7 +233,7 @@ class _BibrSettings(BaseSettings):
             if value is not None and _is_secret_name(name):
                 yield name, "***"
             else:
-                yield name, value
+                yield name, _redacted_url(str(name), value)
 
     @model_serializer(mode="wrap")
     def _redact_secrets_on_dump(self, handler):
@@ -209,6 +242,8 @@ class _BibrSettings(BaseSettings):
             for key, value in data.items():
                 if value is not None and not isinstance(value, dict) and _is_secret_name(key):
                     data[key] = "***"
+                else:
+                    data[key] = _redacted_url(key, value)
         return data
 
     def __init__(self, **kwargs):
@@ -268,6 +303,12 @@ class LlmOptions(_BibrSettings):
     )
     base_url: str | None = Field(
         None, description="Base URL override for custom OpenAI-compatible endpoints."
+    )
+    allow_insecure_http: bool = Field(
+        False,
+        description="Send LLM_API_KEY over plain http:// to a public LLM_BASE_URL host. "
+        "Loopback and private-network hosts (RFC 1918 or tailnet addresses, single-label "
+        "names, .local/.internal/.lan) never need it; public hosts default to HTTPS-only.",
     )
     chat_template_kwargs: dict[str, Any] = Field(
         default_factory=dict,
@@ -997,7 +1038,8 @@ class CrossrefOptions(_BibrSettings):
     # job data (which needs noeviction). Env: CROSSREF_CACHE_REDIS_URL
     cache_redis_url: str | None = Field(
         None,
-        description="Redis URL for the shared Crossref response cache. Falls back to REDIS_URL when unset.",
+        description="Redis URL for the shared Crossref response cache. Falls back to REDIS_URL "
+        "when unset; REDIS_PASSWORD is added when it names the same Redis host and port.",
     )
     # TTL for shared-cache entries, seconds (default 30 days). allkeys-lru
     # handles memory pressure; the TTL bounds staleness from upstream
@@ -1756,7 +1798,8 @@ class JobsOptions(_BibrSettings):
     redis_url: str | None = Field(
         None,
         description="Redis URL for JOBS_STORE=redis. Falls back to REDIS_URL (the cache's "
-        "Redis) when unset; startup fails if neither is set.",
+        "Redis) when unset; startup fails if neither is set. REDIS_PASSWORD is added when it "
+        "names the same Redis host and port.",
     )
     key_prefix: str = Field(
         "bibr:jobs",
@@ -2281,7 +2324,12 @@ class GlobalSettings(_BibrSettings):
 
     @model_validator(mode="after")
     def set_redis_url(self) -> "GlobalSettings":
-        """Set a default redis.url if not provided, using redis.password."""
+        """Set a default redis.url if not provided, using redis.password.
+
+        The password also goes into JOBS_REDIS_URL and CROSSREF_CACHE_REDIS_URL
+        when they name the same Redis server (another database on it, say); a
+        separate server keeps whatever credentials its own URL carries.
+        """
         import logging
 
         logger = logging.getLogger("bibr.config")
@@ -2293,12 +2341,17 @@ class GlobalSettings(_BibrSettings):
             #       must check before initializing.
         elif self.redis.password:
             try:
-                parsed = urlparse(self.redis.url)
-                if parsed.password is None and "@" not in parsed.netloc:
-                    new_netloc = f":{_url_quote(self.redis.password, safe='')}@{parsed.netloc}"
-                    self.redis.url = urlunparse(parsed._replace(netloc=new_netloc))
+                self.redis.url = _with_redis_password(self.redis.url, self.redis.password)
             except (ValueError, AttributeError) as e:
                 logger.warning(f"Failed to inject redis.password into redis.url: {e}")
+        if self.redis.password and self.redis.url:
+            for section, field in ((self.jobs, "redis_url"), (self.crossref, "cache_redis_url")):
+                url = getattr(section, field)
+                try:
+                    if url and _same_redis_server(url, self.redis.url):
+                        setattr(section, field, _with_redis_password(url, self.redis.password))
+                except (ValueError, AttributeError) as e:
+                    logger.warning(f"Failed to inject redis.password into {field}: {e}")
         return self
 
 

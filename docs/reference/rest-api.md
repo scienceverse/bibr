@@ -138,8 +138,10 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving;
-network-visible binds require a key at least 32 characters long.
+header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+and the server then refuses non-loopback `Host` headers (`421`) and
+state-changing requests from other sites (`403`); network-visible binds
+require a key at least 32 characters long.
 See [Authentication](../guides/deployment.md#authentication) in the
 deployment guide for the production-hardening checks (`ENVIRONMENT=production`)
 that force it on.
@@ -147,7 +149,8 @@ that force it on.
 ## Caching
 
 When `CACHE_ENABLED=true` (the default) and Redis is configured, the API caches
-successful extraction responses. Keys distinguish file content, page range,
+successful extraction responses. Keys distinguish file content (its full
+SHA-256), the file extension (which picks the parser), page range,
 figure/region output, consolidation, and reference-strategy overrides. The
 cache namespace also includes a settings fingerprint and code version.
 Identical concurrent cache misses are coalesced; failed Redis operations are

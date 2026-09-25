@@ -1,4 +1,10 @@
+import os
+import stat
+
+import pytest
+
 from bibr.env_utils import merge_env, parse_env
+from bibr.setup_wizard import _write_env_fresh
 
 
 def test_parse_env(tmp_path):
@@ -66,3 +72,45 @@ def test_merge_env_round_trip_through_parse(tmp_path):
     pw = 'p#a"s\\s'
     merge_env(env_path, {"REDIS_PASSWORD": pw})
     assert parse_env(env_path)["REDIS_PASSWORD"] == pw
+
+
+# --- file mode: a .env holds API keys (x-security-8) -------------------------
+
+_POSIX_MODES = pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+
+
+@_POSIX_MODES
+def test_wizard_writes_a_new_env_owner_only_whatever_the_umask(tmp_path):
+    env_path = tmp_path / ".env"
+    previous = os.umask(0o022)
+    try:
+        _write_env_fresh(env_path, {"GEMINI_API_KEY": "gemini-key-placeholder"})
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    assert "GEMINI_API_KEY=gemini-key-placeholder" in env_path.read_text(encoding="utf-8")
+
+
+@_POSIX_MODES
+def test_rewrites_keep_the_existing_mode_and_leave_no_temp_file(tmp_path):
+    env_path = tmp_path / ".env"
+    env_path.write_text("A=1\n", encoding="utf-8")
+    os.chmod(env_path, 0o640)
+    merge_env(env_path, {"B": "2"})
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o640
+    _write_env_fresh(env_path, {"C": "3"})
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o640
+    assert sorted(p.name for p in tmp_path.iterdir()) == [".env"]
+
+
+@_POSIX_MODES
+def test_a_symlinked_env_is_rewritten_through_the_link(tmp_path):
+    from bibr.env_utils import write_env_text
+
+    target = tmp_path / "shared.env"
+    target.write_text("A=1\n", encoding="utf-8")
+    link = tmp_path / ".env"
+    link.symlink_to(target)
+    write_env_text(link, "A=2\n")
+    assert link.is_symlink()
+    assert target.read_text(encoding="utf-8") == "A=2\n"

@@ -432,8 +432,11 @@ class TestNonInferenceRoutesGated:
 
         # raise_server_exceptions=False: endpoints touching LitServe worker
         # state (/health, /info) raise before launch; these tests only care
-        # about the auth gate in front of them.
-        return TestClient(build_server().app, raise_server_exceptions=False)
+        # about the auth gate in front of them. The loopback base URL is what
+        # a keyless (loopback-only) server's clients send as Host.
+        return TestClient(
+            build_server().app, base_url="http://127.0.0.1:8000", raise_server_exceptions=False
+        )
 
     def test_openapi_requires_auth_when_configured(self, monkeypatch):
         client = self._server_client(monkeypatch, "sk_int")
@@ -532,3 +535,95 @@ def test_short_loopback_key_warns_but_does_not_raise(caplog):
     with caplog.at_level(logging.WARNING):
         validate_bind_auth("127.0.0.1", "short-key")  # must not raise
     assert any("32 char" in r.message or "strong key" in r.message for r in caplog.records)
+
+
+class TestKeylessLoopbackGate:
+    """serve-7 / x-security-7: without AUTH_API_KEY, loopback is the only
+    boundary, and a web page in the operator's browser can cross it — a
+    cross-site form POST needs no preflight, a DNS-rebinding page arrives under
+    its own Host. Legitimate local clients must keep working."""
+
+    _CROSS_SITE = {"detail": "Cross-site request refused: bibr serve has no AUTH_API_KEY"}
+    _BAD_HOST = {
+        "detail": "Host not allowed: without AUTH_API_KEY bibr serve answers only loopback names"
+    }
+
+    @pytest.fixture
+    def server(self, monkeypatch):
+        pytest.importorskip("litserve")
+        import asyncio
+
+        from bibr.config import Settings
+        from bibr.serve.app import build_server
+
+        monkeypatch.setattr(Settings.auth, "api_key", None)
+        monkeypatch.setattr(Settings.cors, "origins", ["https://ui.example.org"])
+        server = build_server()
+        yield server
+        asyncio.run(server.app.state.inference_tracker.close())
+        asyncio.run(server.app.state.upload_store.close())
+
+    @staticmethod
+    def _client(server, base_url="http://127.0.0.1:8000"):
+        return TestClient(server.app, base_url=base_url, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+            {"Origin": "null"},
+            {"Sec-Fetch-Site": "cross-site"},
+        ],
+    )
+    def test_cross_site_form_post_is_refused(self, server, headers):
+        resp = self._client(server).post("/papers/extract", data={"refs": "llm"}, headers=headers)
+        assert (resp.status_code, resp.json()) == (403, self._CROSS_SITE)
+
+    @pytest.mark.parametrize("path", ["/openapi.json", "/health", "/papers/jobs/abc"])
+    def test_rebound_host_is_refused_on_every_path(self, server, path):
+        resp = self._client(server, "http://evil.example:8000").get(path)
+        assert (resp.status_code, resp.json()) == (421, self._BAD_HOST)
+
+    @pytest.mark.parametrize(
+        ("host", "origin"),
+        [
+            ("127.0.0.1:8000", "http://127.0.0.1:8000"),  # /docs "Try it out"
+            ("localhost:8000", "http://localhost:8000"),
+            ("[::1]:8000", "http://[::1]:8000"),
+            ("127.0.0.1:8000", "https://ui.example.org"),  # listed in CORS_ORIGINS
+            ("localhost", None),  # curl, scripts
+        ],
+    )
+    def test_the_operators_own_clients_pass_the_gate(self, server, host, origin):
+        headers = {"Host": host, **({"Origin": origin} if origin else {})}
+        resp = self._client(server).post("/papers/extract", data={"refs": "llm"}, headers=headers)
+        # Past the gate: the ingress itself rejects the empty upload.
+        assert (resp.status_code, resp.json()) == (400, {"detail": "Invalid multipart body"})
+
+    def test_bibr_batch_client_passes_the_gate(self, server):
+        import asyncio
+
+        import httpx
+
+        from bibr.batch.remote import RemoteExecutor, RemoteOptions
+
+        async def poll_unknown_job():
+            executor = RemoteExecutor(
+                RemoteOptions(serve_url="http://127.0.0.1:8000"),
+                transport=httpx.ASGITransport(app=server.app),
+            )
+            async with executor.client() as client:
+                return await client.get("/papers/jobs/0123456789abcdef")
+
+        resp = asyncio.run(poll_unknown_job())
+        assert (resp.status_code, resp.json()) == (404, {"detail": "job not found"})
+
+    def test_a_key_makes_the_bearer_token_the_boundary(self, server, monkeypatch):
+        from bibr.config import Settings
+
+        monkeypatch.setattr(Settings.auth, "api_key", "k" * 32)
+        resp = self._client(server, "https://bibr.example.org").get(
+            "/openapi.json",
+            headers={"Authorization": f"Bearer {'k' * 32}", "Origin": "https://evil.example"},
+        )
+        assert resp.status_code == 200

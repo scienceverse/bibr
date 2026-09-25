@@ -76,7 +76,11 @@ pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
 `GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from
 `--token`, else `AUTH_API_KEY` / `BIBR_SERVE_TOKEN` in the environment, else
-`AUTH_API_KEY` in bibr's `.env`. The run waits for `GET /ready` first (up to
+`AUTH_API_KEY` in bibr's `.env`. The token rides every request, so a plain
+`http://` serve URL is accepted only for a loopback or private-network host
+(a LAN or tailnet address, a single-label name such as `gpu-box`, or a
+`.local`/`.internal`/`.lan` name); a public host needs `https://` or an
+explicit `--allow-insecure-http`. The run waits for `GET /ready` first (up to
 `--ready-timeout`) and records the serve's `build_sha` in every ledger line.
 The options the job API accepts are passed through — `--refs`, `--ref-seg`,
 `--consolidate`, `--pages` (as `start_page`/`end_page`), `--figure-images`,

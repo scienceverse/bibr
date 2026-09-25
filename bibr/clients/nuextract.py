@@ -589,6 +589,14 @@ class NuExtractNativeBackend:
                 "timeout": self._settings.llm.timeout_seconds * 2,
             }
             if self._settings.llm.base_url:
+                if self._settings.llm.api_key and not self._settings.llm.allow_insecure_http:
+                    from bibr.utils.hosts import refuse_public_plaintext
+
+                    refuse_public_plaintext(
+                        self._settings.llm.base_url,
+                        credential="LLM API key",
+                        opt_out="set LLM_ALLOW_INSECURE_HTTP=true",
+                    )
                 kwargs["base_url"] = self._settings.llm.base_url
             self._client = AsyncOpenAI(**kwargs)
             self._client_sig = sig

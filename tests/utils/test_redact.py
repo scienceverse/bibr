@@ -154,3 +154,81 @@ def test_installed_handler_scrubs_exc_traceback():
     except RuntimeError:
         log.error("upstream failed", exc_info=True)
     assert key not in stream.getvalue()
+
+
+# --- exception arguments and password-only user-info (x-security-5) ----------
+
+
+def _scrubbed_output(message: str, *args) -> str:
+    import io
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    handler.addFilter(SecretScrubbingFilter())
+    log = logging.getLogger("bibr.test.scrub_args")
+    log.propagate = False
+    log.handlers = [handler]
+    log.warning(message, *args)
+    return stream.getvalue().rstrip("\n")
+
+
+def test_filter_scrubs_an_exception_passed_as_argument():
+    """``logger.warning("...: %s", e)`` renders ``str(e)`` after the filter ran."""
+    key = "AIzaSy" + "A" * 30
+    err = RuntimeError(f"call failed at https://x/generate?key={key}")
+    assert _scrubbed_output("upstream failed: %s", err) == (
+        "upstream failed: call failed at https://x/generate?key=***"
+    )
+
+
+def test_filter_leaves_a_clean_record_and_its_arguments_alone():
+    rec = logging.LogRecord("bibr.test", logging.INFO, __file__, 1, "%s %d", ("GET /", 200), None)
+    SecretScrubbingFilter().filter(rec)
+    assert (rec.msg, rec.args) == ("%s %d", ("GET /", 200))
+
+
+def test_filter_survives_a_malformed_record():
+    rec = logging.LogRecord("bibr.test", logging.INFO, __file__, 1, "%d", ("token=abc",), None)
+    assert SecretScrubbingFilter().filter(rec) is True
+    assert rec.args == ("token=abc",)
+
+
+def test_scrub_secrets_masks_password_only_user_info():
+    assert scrub_secrets("redis://:hunter2hunter2@redis:6379/0") == "redis://***@redis:6379/0"
+
+
+# --- text shown outside the process (x-security-1, config-12) -----------------
+
+
+def test_describe_error_names_only_the_status_of_an_http_error():
+    import httpx
+
+    from bibr.utils.redact import describe_error
+
+    url = "https://ocruser:ocr-s3cret@sglang.internal.corp:30000/v1/chat/completions"
+    response = httpx.Response(400, request=httpx.Request("POST", url))
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        assert describe_error(exc) == "HTTPStatusError: HTTP 400 Bad Request"
+
+
+def test_describe_error_replaces_urls_in_other_messages():
+    from bibr.utils.redact import describe_error
+
+    exc = ConnectionError("connect to https://svc:pw@ocr.internal:8002/v1 refused")
+    assert describe_error(exc) == "ConnectionError: connect to <url> refused"
+    assert describe_error(TimeoutError()) == "TimeoutError"
+
+
+def test_redact_url_secrets_masks_the_password_and_keeps_the_user():
+    from bibr.utils.redact import redact_url_secrets
+
+    assert redact_url_secrets("redis://default:hunter2@redis:6379/0") == (
+        "redis://default:***@redis:6379/0"
+    )
+    assert redact_url_secrets("https://llm.example/v1?api_key=abc") == (
+        "https://llm.example/v1?api_key=***"
+    )
+    assert redact_url_secrets("redis://redis:6379/0") == "redis://redis:6379/0"

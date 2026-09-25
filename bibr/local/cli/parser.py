@@ -469,6 +469,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     remote.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Send the bearer token over plain http:// to a public host. Loopback and "
+            "private-network hosts (LAN, tailnet, single-label names) never need it."
+        ),
+    )
+    remote.add_argument(
         "--concurrency",
         type=int,
         default=2,

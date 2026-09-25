@@ -1245,6 +1245,71 @@ class TestExportUrlSanity:
         result = export_paper_to_json(paper)
         assert [u["href"] for u in result["url"]] == ["https://openai.com/research"]
 
+    def test_drops_script_capable_schemes_and_keeps_the_rest(self):
+        """x-security-4: link targets come from untrusted markup and readers
+        render url[].href as an anchor, so a click must never run script."""
+        urls = [
+            "javascript:alert(1)",
+            " JaVaScRiPt:alert(1)",
+            "java\nscript:alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "https://osf.io/abcde/",
+            "mailto:author@example.org",
+            "info:doi/10.1371/journal.pone.0000001",
+            "ftp://ftp.example.org/data.csv",
+            "#fig1",
+        ]
+        paper = self._paper_with_links(urls)
+        result = export_paper_to_json(paper)
+        assert [u["href"] for u in result["url"]] == [
+            "https://osf.io/abcde/",
+            "mailto:author@example.org",
+            "info:doi/10.1371/journal.pone.0000001",
+            "ftp://ftp.example.org/data.csv",
+            "#fig1",
+        ]
+        assert [u["url_id"] for u in result["url"]] == [1, 2, 3, 4, 5]
+
+    def test_drops_a_script_capable_reference_url(self):
+        refs = [
+            PaperReference(
+                bib_id=i,
+                title="R",
+                first_page=None,
+                volume=None,
+                authors=None,
+                year=2020,
+                container=None,
+                url=url,
+            )
+            for i, url in enumerate(
+                [
+                    "javascript:alert(2)",
+                    "https://osf.io/x",
+                    "javascript://[%0aalert(1)",  # urlsplit raises on this netloc
+                    "http://www.example.org]",  # malformed, but no script: kept
+                ],
+                start=1,
+            )
+        ]
+        refs[1].match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/x", score=99.0, url="javascript:alert(3)"
+            )
+        }
+        paper = _minimal_paper(
+            metadata=PaperMetadata(doi="10.1234/test", title="Test Paper", references=refs)
+        )
+        result = export_paper_to_json(paper)
+        assert [b.get("url") for b in result["bib"]] == [
+            None,
+            "https://osf.io/x",
+            None,
+            "http://www.example.org]",
+        ]
+        assert [m.get("url") for m in result["bib_match"]] == [None]
+
 
 # ── JSON export: top-level fields ──────────────────────────────────────
 

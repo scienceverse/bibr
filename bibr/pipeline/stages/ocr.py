@@ -23,6 +23,7 @@ from bibr.ocr.profiles import (
 )
 from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.redact import describe_error, redact_urls
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
 
@@ -576,14 +577,17 @@ async def _ocr_page_regions_impl(
             if isinstance(result, BaseException):
                 # The region ships blank. Without an export-visible warning
                 # three failed regions in a 40-page paper look like missing
-                # paragraphs behind a clean receipt.
+                # paragraphs behind a clean receipt. The export names the
+                # error but not the OCR endpoint; the log keeps the raw text.
+                where = f"page {page_idx + 1}, region {orig_idx}, task {task_type}"
                 warning = ProcessingWarning(
                     WarningCode.OCR_REGION_FAILED,
-                    "OCR failed for a region; its text is missing "
-                    f"(page {page_idx + 1}, region {orig_idx}, task {task_type}): "
-                    f"{type(result).__name__}: {result}",
+                    f"OCR failed for a region; its text is missing ({where}): "
+                    f"{describe_error(result)}",
                 )
-                logger.warning(warning.message)
+                logger.warning(
+                    "OCR failed for a region (%s): %s: %s", where, type(result).__name__, result
+                )
                 if warning_sink is not None:
                     warning_sink(warning)
             else:
@@ -1018,8 +1022,15 @@ class OcrStage:
                         ProcessingWarning(
                             WarningCode.OCR_PAGE_FAILED,
                             "OCR failed for a page; its text is missing "
-                            f"(page {page_idx + 1}): {type(r).__name__}: {r}",
+                            f"(page {page_idx + 1}): {describe_error(r)}",
                         )
+                    )
+                    logger.warning(
+                        "OCR failed for page %d of %s: %s: %s",
+                        page_idx + 1,
+                        fs.path.name,
+                        type(r).__name__,
+                        r,
                     )
                     clean_pages.append([])
                 else:
@@ -1033,7 +1044,7 @@ class OcrStage:
             upstream = next((e for e in errors if isinstance(e, UpstreamServiceError)), None)
             if upstream is not None:
                 fs.set_error(
-                    f"OCR upstream service failed: {upstream}",
+                    f"OCR upstream service failed: {redact_urls(str(upstream))}",
                     code="ocr_failed",
                     stage=self.name,
                     exc=upstream,
@@ -1043,7 +1054,7 @@ class OcrStage:
             # Only fail the file if ALL pages failed.
             if errors and len(errors) == len(page_results):
                 fs.set_error(
-                    f"OCR failed for all pages: {errors[0]}",
+                    f"OCR failed for all pages: {describe_error(errors[0])}",
                     code="ocr_failed",
                     stage=self.name,
                     exc=errors[0],
@@ -1066,7 +1077,9 @@ class OcrStage:
             # exported timings alongside the local path.
             fs.stage_times["ocr"] = time.monotonic() - fs_t0
         except Exception as e:  # noqa: BLE001
-            fs.set_error(f"OCR failed: {e}", code="ocr_failed", stage=self.name, exc=e)
+            fs.set_error(
+                f"OCR failed: {describe_error(e)}", code="ocr_failed", stage=self.name, exc=e
+            )
             logger.warning("OCR failed for %s", fs.path.name, exc_info=True)
 
     async def _run_remote(self, ctx, ocr_fn) -> None:
