@@ -8,6 +8,8 @@ multi-record page that must keep abstaining.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 import bibr.extract.front_matter as front_matter
@@ -566,6 +568,31 @@ def test_surnames_match_across_scripts_and_citation_order(printed, transliterate
     assert all(any(front_matter._same_surname(a, b) for b in right) for a in left)
 
 
+def _identity(
+    title: str,
+    *,
+    citations: tuple[str, ...] = (),
+    language: str | None = None,
+    surnames: frozenset[str] = frozenset(),
+    dois: frozenset[str] = frozenset(),
+):
+    return front_matter._RecordIdentity(
+        block=front_matter.FrontMatterBlock(block_id="b", candidate_ids=(), title_candidate_ids=()),
+        order=0,
+        titles=(title,),
+        citations=citations,
+        language=language,
+        surnames=surnames,
+        dois=dois,
+        byline=True,
+        abstract=False,
+        anatomy=False,
+        doc_title=False,
+        detected=None,
+        cover=False,
+    )
+
+
 @pytest.mark.parametrize(
     ("left", "right", "agree"),
     [
@@ -577,13 +604,8 @@ def test_surnames_match_across_scripts_and_citation_order(printed, transliterate
             "Young Witnesses in Court: Wait-\ning Rooms and Rights",
             True,
         ),
-        # A duplicated text layer still carries the whole title in order.
-        (
-            "Delayed recall of hou Delayed recall of household l ses losses after regional "
-            "fl ing after regional flooding",
-            TITLE,
-            True,
-        ),
+        # One letter misread by OCR in a long word.
+        (TITLE, "Delayed Recall of Househo1d Losses After Regional Flooding", True),
         ("First Study of Community Health", "Second Study of Community Health", False),
         (
             "Effects of mindfulness training on anxiety among adults",
@@ -591,8 +613,28 @@ def test_surnames_match_across_scripts_and_citation_order(printed, transliterate
             False,
         ),
         (
+            "Effects of exercise on sleep quality in older adults with insomnia",
+            "Effects of exercise on sleep quality in younger adults with insomnia",
+            False,
+        ),
+        # One letter apart, but in a short word: a different animal.
+        (
+            "Effects of chronic noise exposure in rats",
+            "Effects of chronic noise exposure in cats",
+            False,
+        ),
+        (
             "Effects of training on anxiety: Study 1",
             "Effects of training on anxiety: Study 2",
+            False,
+        ),
+        # A title plus words is a different title, and so is a duplicated,
+        # garbled text layer: neither can be told from "... with autism".
+        ("Social anxiety in adolescents", "Social anxiety in adolescents with autism", False),
+        (
+            "Delayed recall of hou Delayed recall of household l ses losses after regional "
+            "fl ing after regional flooding",
+            TITLE,
             False,
         ),
         # A shared subtitle is not a shared title.
@@ -604,26 +646,35 @@ def test_surnames_match_across_scripts_and_citation_order(printed, transliterate
     ],
 )
 def test_title_agreement_tolerates_layout_but_not_different_titles(left, right, agree):
-    def identity(title: str):
-        return front_matter._RecordIdentity(
-            block=front_matter.FrontMatterBlock(
-                block_id="b", candidate_ids=(), title_candidate_ids=()
-            ),
-            order=0,
-            titles=(title,),
-            text_keys=(front_matter._identity_key(title),),
-            language=None,
-            surnames=frozenset(),
-            dois=frozenset(),
-            byline=True,
-            abstract=False,
-            anatomy=False,
-            doc_title=False,
-            detected_title=False,
-            cover=False,
-        )
+    assert front_matter._titles_agree(_identity(left), _identity(right)) is agree
 
-    assert front_matter._titles_agree(identity(left), identity(right)) is agree
+
+@pytest.mark.parametrize(
+    ("citation", "agree"),
+    [
+        (
+            "To cite this article: Example, A. J. (1991). Delayed recall of household losses "
+            "after regional flooding. Journal of Invented Studies, 4, 575-590.",
+            True,
+        ),
+        (
+            'Recommended Citation: Example, Alma J., "Delayed Recall of Household Losses After '
+            'Regional Flooding" (1991).',
+            True,
+        ),
+        # The cited title runs on: it is a longer, different title.
+        (
+            "Example, A. J. (1991). Delayed recall of household losses after regional flooding "
+            "in coastal towns. Journal of Invented Studies.",
+            False,
+        ),
+    ],
+)
+def test_citation_line_agrees_only_when_it_prints_the_whole_title(citation, agree):
+    record = _identity(TITLE)
+    cover = _identity("Household Losses Journal Supplement", citations=(citation,))
+
+    assert front_matter._titles_agree(record, cover) is agree
 
 
 @pytest.mark.parametrize(
@@ -639,3 +690,535 @@ def test_title_agreement_tolerates_layout_but_not_different_titles(left, right, 
 )
 def test_title_language_reads_function_words_and_script_letters(title, language):
     assert front_matter._title_language(title) == language
+
+
+# Wrong-merge guards: two different papers must never be read as one record.
+
+LONELINESS = "Loneliness Among Older Immigrants in Urban Neighbourhoods"
+
+
+def _two_articles(
+    second_title: str,
+    *,
+    second_byline: str = "Anna Example, Ben Sample",
+    label: str = "doc_title",
+    detected: str | None = None,
+    first_extra: tuple[str, ...] = (),
+    second_extra: tuple[str, ...] = (),
+) -> PaperContents:
+    """Two complete records with different titles; the second is the PDF's own."""
+
+    rows = [
+        _row(1, LONELINESS, y=60.0, label=label),
+        _row(2, "Mei Lin, Jordan Smith", y=100.0),
+        _row(3, "We interviewed older immigrants about loneliness.", y=140.0, label="abstract"),
+        *(_row(10 + index, text, y=170.0) for index, text in enumerate(first_extra)),
+        _row(20, second_title, y=300.0, label=label),
+        _row(21, second_byline, y=340.0),
+        _row(22, "We surveyed students about their mental health.", y=380.0, label="abstract"),
+        *(_row(30 + index, text, y=410.0) for index, text in enumerate(second_extra)),
+    ]
+    return _contents(rows, detected_title=second_title if detected is None else detected)
+
+
+def _assert_abstains(contents: PaperContents, flag: str) -> None:
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id is None
+    assert "multiple_plausible_blocks" in resolution.reason_flags
+    assert flag in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+@pytest.mark.parametrize(
+    "own_title",
+    [
+        "Mental Health of University Students During the Pandemic",
+        "School Belonging and Academic Achievement in Early Adolescence",
+        "25 Years of Research on Sleep and Mental Health in Students",
+        "Mindful Parenting",
+        "城市老年人孤独感与社会支持研究",
+    ],
+)
+def test_a_layout_title_that_looks_like_furniture_is_still_a_competing_record(own_title):
+    # Named institutions, a leading number, two words or an unspaced script do
+    # not make layout's own title furniture that could attach to another paper.
+    contents = _two_articles(own_title)
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id is None
+    assert any(
+        flag.startswith("conflicting_records:front-matter-block-1:front-matter-block-2:")
+        for flag in resolution.reason_flags
+    )
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+def test_a_block_with_its_own_byline_and_abstract_must_name_the_records_authors():
+    # Without layout evidence the heading names a university, so it is no
+    # identity title and its block is no record; its own byline and abstract
+    # still make it another paper.
+    contents = _contents(
+        [
+            _row(1, LONELINESS, y=60.0, label="paragraph_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, "We interviewed older immigrants about loneliness.", y=140.0, label="abstract"),
+            _row(4, "Anna Example, Ben Sample", y=340.0, section_id=2),
+            _row(5, "We surveyed students about sleep.", y=380.0, label="abstract", section_id=2),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(
+                2,
+                "Mental Health of University Students During the Pandemic",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 300.0, 460.0, 330.0),
+            ),
+        ],
+    )
+
+    _assert_abstains(contents, "unlinked_block:front-matter-block-2")
+
+
+def test_a_block_naming_the_records_authors_still_attaches():
+    # The same shape under a furniture heading, but the second byline repeats
+    # the record's authors: a correspondence box, not another paper.
+    contents = _contents(
+        [
+            _row(1, LONELINESS, y=60.0, label="doc_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, "Mei Lin, Jordan Smith", y=340.0, section_id=2),
+            _row(
+                4,
+                "We interviewed older immigrants about loneliness.",
+                y=380.0,
+                label="abstract",
+                section_id=2,
+            ),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(
+                2,
+                "CITATION",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 300.0, 460.0, 330.0),
+            ),
+        ],
+        detected_title=LONELINESS,
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "attached_block:front-matter-block-2" in resolution.reason_flags
+    assert issues == ()
+
+
+SECOND = "Social Technology Use and Loneliness During the Pandemic"
+# U+2010 HYPHEN, as typeset DOIs print it; the DOI pattern stops at it.
+HYPHEN = chr(0x2010)
+
+
+@pytest.mark.parametrize(
+    ("first_doi", "second_doi", "flag"),
+    [
+        # A DOI that prefixes another is a different DOI.
+        ("10.1000/abc1", "10.1000/abc12", "doi"),
+        # Typeset hyphens once cut both DOIs down to "10.1000/0033".
+        (f"10.1000/0033{HYPHEN}2909.126.1.3", f"10.1000/0033{HYPHEN}2909.127.4.5", "doi"),
+        # A proceedings volume's DOI, printed with every abstract, does not
+        # join two titles that differ in one language.
+        ("10.1000/meeting.2020", "10.1000/meeting.2020", "doi_title"),
+    ],
+)
+def test_dois_join_records_only_when_equal_and_titles_do_not_conflict(first_doi, second_doi, flag):
+    contents = _two_articles(
+        SECOND,
+        first_extra=(f"DOI: {first_doi}",),
+        second_extra=(f"DOI: {second_doi}",),
+    )
+
+    _assert_abstains(
+        contents, f"conflicting_records:front-matter-block-1:front-matter-block-2:{flag}"
+    )
+
+
+def test_a_typeset_hyphen_does_not_hide_an_equal_doi():
+    contents = _cover_page_and_article(cover_doi=DOI.replace("recall.", f"recall{HYPHEN}"))
+    contents.sentences[-1].text = f"DOI: {DOI.replace('recall.', 'recall-')}"
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-2"
+    assert "agreeing_record:front-matter-block-1:doi" in resolution.reason_flags
+    assert issues == ()
+
+
+def test_funder_dois_are_not_paper_identity():
+    # Both abstracts thank the same funder; the funder DOI is no shared DOI,
+    # so the different titles decide.
+    funder = "Funded by grant https://doi.org/10.13039/501100000780"
+    _assert_abstains(
+        _two_articles(SECOND, first_extra=(funder,), second_extra=(funder,)),
+        "conflicting_records:front-matter-block-1:front-matter-block-2:title",
+    )
+
+
+def test_a_title_contained_in_a_longer_title_is_a_different_paper():
+    _assert_abstains(
+        _contents(
+            [
+                _row(1, "Social anxiety in adolescents with autism", y=60.0, label="doc_title"),
+                _row(2, "Mei Lin, Jordan Smith", y=100.0),
+                _row(3, "Adolescents with autism reported anxiety.", y=140.0, label="abstract"),
+                _row(4, "Social anxiety in adolescents", y=300.0, label="doc_title"),
+                _row(5, "Anna Example, Ben Sample", y=340.0),
+                _row(6, "Adolescents reported social anxiety.", y=380.0, label="abstract"),
+            ],
+            detected_title="Social anxiety in adolescents",
+        ),
+        "conflicting_records:front-matter-block-1:front-matter-block-2:title",
+    )
+
+
+def test_translated_records_sharing_one_common_surname_stay_unlinked():
+    # Two small teams share one surname: not enough to call the Portuguese and
+    # English records one paper.
+    contents = _contents(
+        [
+            _row(
+                1,
+                "Efeitos da ansiedade no desempenho escolar de crianças",
+                y=60.0,
+                label="doc_title",
+            ),
+            _row(2, "João Silva, Maria Santos", y=100.0),
+            _row(3, "Avaliamos a ansiedade em crianças.", y=140.0, label="abstract"),
+            _row(
+                4,
+                "Working memory training in older adults: a pilot study",
+                y=300.0,
+                label="doc_title",
+            ),
+            _row(5, "Ana Silva, Pedro Costa", y=340.0),
+            _row(6, "We trained working memory in older adults.", y=380.0, label="abstract"),
+        ],
+        detected_title="Working memory training in older adults: a pilot study",
+    )
+
+    _assert_abstains(contents, "unlinked_records")
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "same"),
+    [
+        ("zhang", "zhong", False),
+        ("liang", "jiang", False),
+        ("paida", "payda", True),
+        ("sinyachkin", "sinjachkin", True),
+        ("hernandez", "hernandes", True),
+    ],
+)
+def test_short_surnames_compare_exactly_across_romanizations(left, right, same):
+    assert front_matter._same_surname(left, right) is same
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "agree"),
+    [
+        ({"silva", "santos"}, {"silva", "costa"}, False),
+        ({"ivanov"}, {"ivanov", "petrova"}, True),
+        ({"ivanov", "petrova", "sidorov"}, {"ivanov", "petrova", "orlov"}, True),
+    ],
+)
+def test_translated_bylines_agree_on_every_or_at_least_two_surnames(left, right, agree):
+    assert front_matter._surnames_agree(frozenset(left), frozenset(right)) is agree
+
+
+def test_detected_title_on_a_block_outside_the_record_abstains():
+    # The parser's title belongs to a block that is not in the agreeing group,
+    # so a null metadata title would later be filled from another paper.
+    contents = _contents(
+        [
+            _row(1, LONELINESS, y=60.0, label="doc_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, "We interviewed older immigrants about loneliness.", y=140.0, label="abstract"),
+            _row(4, "DOI: 10.1000/students.2021.4", y=340.0, section_id=2),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(
+                2,
+                "Mental Health of University Students During the Pandemic",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 300.0, 460.0, 330.0),
+            ),
+        ],
+        detected_title="Mental Health of University Students",
+    )
+
+    _assert_abstains(contents, "detected_title_outside_record:front-matter-block-2")
+
+
+def test_detected_title_on_a_translated_presentation_is_allowed():
+    title = "Jovens testemunhas em tribunal: salas de espera e direitos de participação"
+    contents = _contents(
+        [
+            _row(1, title, y=60.0, label="doc_title"),
+            _row(2, "Clara Example, Maria Sample", y=100.0),
+            _row(3, "As salas de espera foram desenhadas por adultos.", y=140.0, label="abstract"),
+            _row(
+                4,
+                "Court waiting rooms were designed by adults.",
+                y=340.0,
+                label="abstract",
+                section_id=2,
+            ),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(
+                2,
+                "School Witnesses in Court: Waiting Rooms and Participation Rights",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 300.0, 460.0, 330.0),
+            ),
+        ],
+        detected_title="School Witnesses in Court",
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "attached_block:front-matter-block-2" in resolution.reason_flags
+    assert issues == ()
+
+
+def test_the_selected_record_must_hold_a_byline():
+    # The original's title page prints its author on an untyped line; the
+    # only byline is on the translated summary, which never stands in for it.
+    contents = _contents(
+        [
+            _row(1, RU_TITLE, y=60.0, label="doc_title"),
+            _row(2, "Иван Петров", y=100.0),
+            _row(3, "Сравнили два метода реабилитации.", y=140.0, label="abstract"),
+            _row(4, "DOI: 10.1000/rehab.2024.1", y=180.0),
+            _row(5, EN_TITLE, y=60.0, label="doc_title", page=6),
+            _row(6, "Ivan Petrov, Olga Sidorova", y=100.0, page=6),
+            _row(7, "Two rehabilitation methods were compared.", y=140.0, label="abstract", page=6),
+            _row(8, "DOI: 10.1000/rehab.2024.1", y=180.0, page=6),
+        ],
+        detected_title=RU_TITLE,
+    )
+
+    _assert_abstains(contents, "record_without_byline:front-matter-block-1")
+
+
+def test_a_cover_page_without_a_byline_hands_selection_to_the_title_page():
+    # The cover carries the parser's exact title but no byline; the title page
+    # (title plus subtitle, same language) has one.
+    contents = _contents(
+        [
+            _row(1, TITLE, y=60.0, label="doc_title"),
+            _row(2, f"DOI: {DOI}", y=100.0),
+            _row(3, f"{TITLE}: A Two-Wave Study", y=60.0, label="doc_title", page=2),
+            _row(4, BYLINE, y=100.0, page=2),
+            _row(5, "Households were asked about their losses.", y=140.0, label="abstract", page=2),
+            _row(6, f"DOI: {DOI}", y=200.0, page=2),
+        ],
+        detected_title=TITLE,
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-2"
+    assert issues == ()
+
+
+def test_blocks_without_an_identity_title_abstain():
+    contents = _contents(
+        [
+            _row(1, BYLINE, y=100.0, section_id=1),
+            _row(2, f"DOI: {DOI}", y=140.0, section_id=1),
+            _row(
+                3,
+                "Households were asked about their losses.",
+                y=340.0,
+                label="abstract",
+                section_id=2,
+            ),
+        ],
+        sections=[
+            _section(0, "Root"),
+            _section(
+                1,
+                "a r t i c l e i n f o",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 60.0, 460.0, 90.0),
+            ),
+            _section(
+                2,
+                "August 2020",
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 300.0, 460.0, 330.0),
+            ),
+        ],
+    )
+
+    _assert_abstains(contents, "no_record_identity")
+
+
+def test_a_translation_without_a_byline_cannot_be_linked_to_the_record():
+    contents = _contents(
+        [
+            _row(
+                1,
+                "Young witnesses in court: waiting rooms and participation rights",
+                y=60.0,
+                label="doc_title",
+            ),
+            _row(2, "Clara Example, Maria Sample", y=100.0),
+            _row(3, "Court waiting rooms were designed by adults.", y=140.0, label="abstract"),
+            _row(
+                4,
+                "Jovens testemunhas em tribunal: salas de espera e direitos",
+                y=300.0,
+                label="doc_title",
+            ),
+            _row(5, "As salas de espera foram desenhadas por adultos.", y=340.0, label="abstract"),
+        ]
+    )
+
+    _assert_abstains(contents, "unlinked_records")
+
+
+def test_an_agreement_error_abstains_as_before(monkeypatch, caplog):
+    def broken(*args, **kwargs):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(front_matter, "_select_agreeing_record", broken)
+    with caplog.at_level("WARNING", logger="bibr.extract.front_matter"):
+        resolution, issues = resolve_front_matter(_cover_page_and_article(), target_required=True)
+
+    assert resolution.selected_block_id is None
+    assert resolution.selection_method == "abstained"
+    assert "multiple_plausible_blocks" in resolution.reason_flags
+    assert "record_agreement_error" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+    assert "record agreement failed" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("text", "tail"),
+    [
+        (
+            "NEIGHBOURHOOD WALKING GROUPS IN LATER LIFE Morgan Example, Mei Lin",
+            "Morgan Example, Mei Lin",
+        ),
+        ("NEIGHBOURHOOD WALKING GROUPS IN LATER LIFE", None),
+        ("INTRODUCTORY REMARKS ON 6r COLIFORM DEBRIS", None),
+        ("Running head: WALKING GROUPS IN LATER LIFE", None),
+        ("NEIGHBOURHOOD WALKING GROUPS (Freely available open access)", None),
+    ],
+)
+def test_composite_name_tail_reads_names_after_an_uppercase_title(text, tail):
+    assert front_matter._composite_name_tail(text) == tail
+
+
+def _candidate(text: str, roles: set[str], *, label: str = "paragraph_title"):
+    return front_matter.FrontMatterCandidate(
+        candidate_id="c1",
+        source_kind="heading",
+        reading_order=0,
+        page=1,
+        bbox=None,
+        region_label=label,
+        font_size=None,
+        font_bold=None,
+        section_id=1,
+        text_ids=(),
+        paragraph_id=None,
+        raw_text=text,
+        normalized_text=front_matter._normalize_text(text),
+        roles=frozenset(roles),
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "roles", "label", "detected", "identity"),
+    [
+        # An institution line is not a title, unless layout or the parser says so.
+        (
+            "Mental Health of University Students",
+            {"title", "affiliation"},
+            "paragraph_title",
+            None,
+            False,
+        ),
+        ("Mental Health of University Students", {"title", "affiliation"}, "doc_title", None, True),
+        (
+            "Mental Health of University Students",
+            {"title", "affiliation"},
+            "paragraph_title",
+            "Mental health of university students",
+            True,
+        ),
+        (
+            "UNIVERSITY OF EXAMPLE INSTITUTE OF SAMPLES",
+            {"title", "affiliation"},
+            "text",
+            None,
+            False,
+        ),
+        ("2. MATERIALS AND METHODS", {"title"}, "paragraph_title", None, False),
+        ("CITATION", {"title"}, "paragraph_title", None, False),
+        ("Yan Example: y.example@example.ac.uk", {"title"}, "doc_title", None, False),
+        ("城市老年人孤独感与社会支持研究", {"title"}, "paragraph_title", None, True),
+    ],
+)
+def test_identity_titles_exclude_furniture_but_trust_layout(text, roles, label, detected, identity):
+    candidate = _candidate(text, roles, label=label)
+
+    assert front_matter._is_identity_title(candidate, detected) is identity
+
+
+@pytest.mark.parametrize(
+    ("title", "language"),
+    [
+        ("Μελέτη της εργαζόμενης μνήμης σε ηλικιωμένους", "greek"),
+        ("城市老年人孤独感与社会支持研究", "cjk"),
+        ("دراسة الذاكرة العاملة لدى كبار السن", "arabic"),
+        ("מחקר על זיכרון עבודה אצל מבוגרים", "hebrew"),
+    ],
+)
+def test_title_language_names_other_scripts(title, language):
+    assert front_matter._title_language(title) == language
+
+
+def test_pathological_rows_stay_fast():
+    started = time.perf_counter()
+    front_matter._URL_OR_EMAIL_RE.search("城市老年人孤独感" * 8_000)
+    words = "social anxiety in adolescents with autism and loneliness among older adults "
+    long_title = "SURVEY OF SOCIAL CONTACT " + words * 250
+    contents = _contents(
+        [
+            _row(1, long_title, y=60.0, label="doc_title"),
+            _row(2, "Mei Lin, Jordan Smith", y=100.0),
+            _row(3, "We surveyed retirees.", y=140.0, label="abstract"),
+            _row(4, long_title + " again", y=300.0, label="doc_title"),
+            _row(5, "Anna Example, Ben Sample", y=340.0),
+            _row(6, "Retirees kept diaries.", y=380.0, label="abstract"),
+        ]
+    )
+    resolve_front_matter(contents, target_required=True)
+
+    # Quadratic, these took seconds; bounded, they are instant.
+    assert time.perf_counter() - started < 1.0

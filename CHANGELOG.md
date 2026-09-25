@@ -219,13 +219,15 @@ released.
   abstract text used to block selection, even a publisher cover page, a
   repository landing page, a citation box, a translated title and abstract, an
   email list, a date line or an "article info" sidebar. Where that check
-  abstains, bibr now compares what each block prints about its paper: the DOI,
-  the title, and for a title in another language or script the authors'
-  surnames. It selects the paper's own record when all records agree and
-  prefers the article's title page over a cover page or citation box. Records
-  that disagree still abstain, so compiled abstract books and proceedings pages
-  still fail closed. Pages the old check resolved are selected exactly as
-  before.
+  abstains, bibr now compares what each block prints about its paper: the DOI
+  (exactly), the title, and for a title in another language or script the
+  authors' surnames (all of them, or at least two). It selects the paper's own
+  record when all records agree and prefers the article's title page over a
+  cover page or citation box. The selected block must print a byline, and the
+  parser's detected title must belong to the selected paper or a translation of
+  it. Records that disagree still abstain, and so does a DOI shared by two
+  different titles, so compiled abstract books and proceedings pages still fail
+  closed. Pages the old check resolved are selected exactly as before.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
