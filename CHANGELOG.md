@@ -348,11 +348,11 @@ released.
   blip or failed LLM call was replayed to every later request for the same
   PDF, including async jobs and `bibr batch --remote` re-runs. A response with
   a blocking issue other than a front-matter abstention, incomplete
-  enrichment, a `failed` field state or a
-  warning in `bibr.processing_warnings.NOT_FINAL_CODES` (OCR, LLM-task,
-  enrichment and resolver failures and timeouts) is returned but not cached.
-  This matters more now that a failed title/keywords response exports a
-  partial record instead of failing.
+  enrichment, a `failed` field state or a warning in
+  `bibr.processing_warnings.NOT_FINAL_CODES` (OCR, LLM-task, enrichment and
+  resolver failures and timeouts) is returned but not cached. This matters
+  more now that a failed title/keywords response exports a partial record
+  instead of failing.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
