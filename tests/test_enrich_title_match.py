@@ -145,6 +145,14 @@ class TestInitialsAcrossCitationStyles:
 
         assert _initials_conflict(authors, [{"given": "Max", "family": "Weber"}]) is True
 
+    @pytest.mark.parametrize("authors", ["Rossi, A. e E. U. Weber", "García, A. y E. U. Weber"])
+    def test_a_one_letter_conjunction_is_not_an_initial(self, authors):
+        """Italian "e" and Spanish "y" separate two names. Read as initials,
+        they would carry the previous author's "A." over to Weber."""
+        from bibr.enrich.references import _initials_conflict
+
+        assert _initials_conflict(authors, [{"given": "Anna", "family": "Weber"}]) is True
+
     def test_a_long_list_of_spelled_names_is_read(self):
         """Reading a spelled given name looks one author ahead; it used to
         recurse once per author and raised RecursionError past ~950."""
