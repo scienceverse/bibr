@@ -388,8 +388,8 @@ released.
   subsections such as "A specific requirement for …" and "C. elegans strains"
   into appendices. A lettered run now needs a real anchor: an "Appendix"
   heading, which anchors only the headings after it, or the reference list
-  that ends the body, the first section typed references after a body
-  section.
+  that ends the body. That is the first section typed references after a
+  body section, or the first one when no body section comes before any.
 
 ### Added
 

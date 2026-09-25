@@ -353,7 +353,9 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
     # The anchor is the reference list that ends the body: the first
     # REFERENCES section after a core body section. A pre-body panel typed
     # REFERENCES (a Frontiers "Citation" box above the title) anchors nothing.
-    # A paper with no typed body section falls back to its first one.
+    # With no body section typed before any REFERENCES section (an essay whose
+    # headings name no IMRaD part, or Methods printed after the references),
+    # the first REFERENCES section anchors.
     references_idx: int | None = None
     first_references_idx: int | None = None
     body_seen = False
@@ -366,7 +368,7 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
             if body_seen:
                 references_idx = i
                 break
-    if not body_seen:
+    if references_idx is None:
         references_idx = first_references_idx
 
     # Level-0 sections (title/root) never participate; treat them as gaps that

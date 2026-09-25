@@ -262,6 +262,15 @@ class TestAppendixNeedsARealAnchor:
             1,
             0,
         )
+        # Known limitation of the positional hierarchy, not of this repair:
+        # "B. Implementation Details" reads as METHODS by keyword and folds
+        # under the first METHODS heading, "III. METHOD", not under
+        # "IV. EXPERIMENTS" where it is printed.
+        assert (by[11].section_type, by[11].level, by[11].parent_section_id) == (
+            CanonicalSection.METHODS,
+            2,
+            6,
+        )
 
     def test_lettered_subsections_of_results_and_discussion_untouched(self):
         secs = [
@@ -347,6 +356,46 @@ class TestAppendixNeedsARealAnchor:
         assert [(s.section_type, s.level, s.parent_section_id) for s in secs[3:]] == [
             (CanonicalSection.APPENDIX, 1, 0),
             (CanonicalSection.APPENDIX, 1, 0),
+        ]
+
+    def test_references_anchor_when_body_words_appear_only_after_it(self):
+        # An essay whose headings name no IMRaD part: the first heading typed
+        # as body is an appendix after the references ("A. Methods of the
+        # vignette survey"), and the reference list still anchors the run.
+        secs = [
+            _sec(1, "The Problem", level=1),
+            _sec(2, "Three Replies", level=1),
+            _sec(3, "References", CanonicalSection.REFERENCES, level=1),
+            _sec(4, "A. Methods of the vignette survey", CanonicalSection.METHODS),
+            _sec(5, "B. Robustness checks"),
+        ]
+        secs[3].classification_source = "substring_alias"
+
+        assert repair_appendix_hierarchy(secs) == {4, 5}
+        assert [(s.section_type, s.level, s.parent_section_id) for s in secs[3:]] == [
+            (CanonicalSection.APPENDIX, 1, 0),
+            (CanonicalSection.APPENDIX, 1, 0),
+        ]
+
+    def test_references_anchor_when_methods_follow_them(self):
+        # Methods printed after the reference list, then lettered
+        # supplementary notes: no body section comes before the references.
+        secs = [
+            _sec(1, "Main", level=1),
+            _sec(2, "References", CanonicalSection.REFERENCES, level=1),
+            _sec(3, "Methods", CanonicalSection.METHODS, level=1),
+            _sec(4, "A. Supplementary Note"),
+            _sec(5, "B. Supplementary Tables"),
+        ]
+        secs[2].classification_source = "exact_alias"
+
+        assert repair_appendix_hierarchy(secs) == {4, 5}
+        assert [s.section_type for s in secs] == [
+            CanonicalSection.UNKNOWN,
+            CanonicalSection.REFERENCES,
+            CanonicalSection.METHODS,
+            CanonicalSection.APPENDIX,
+            CanonicalSection.APPENDIX,
         ]
 
 
