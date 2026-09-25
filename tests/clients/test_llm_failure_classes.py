@@ -26,6 +26,7 @@ from bibr.exceptions import (
     LlmServiceError,
     LlmTimeoutError,
     LlmTruncatedError,
+    LlmUnreachableError,
     ProcessingError,
     UpstreamServiceError,
 )
@@ -77,8 +78,12 @@ def _completion(finish_reason: str):
         (_retry_wrapping(_StatusError(408)), LlmTimeoutError),
         (_retry_wrapping(_StatusError(503)), LlmServiceError),
         (_retry_wrapping(_StatusError(429)), LlmServiceError),
-        (httpx.ConnectError("connection refused"), LlmServiceError),
-        (CircuitOpenError("llm", 12.0), LlmServiceError),
+        (httpx.ConnectError("connection refused"), LlmUnreachableError),
+        (httpx.RemoteProtocolError("server disconnected"), LlmUnreachableError),
+        (httpx.ConnectTimeout("connect timed out"), LlmUnreachableError),
+        (ConnectionResetError("reset by peer"), LlmUnreachableError),
+        (CircuitOpenError("llm", 12.0), LlmUnreachableError),
+        (httpx.DecodingError("garbled body"), LlmServiceError),
         (_retry_wrapping(_StatusError(401)), LlmRejectedError),
         (_retry_wrapping(_StatusError(400)), LlmRejectedError),
         (_validation_error(), LlmInvalidOutputError),
@@ -106,7 +111,9 @@ def test_error_codes_are_stable():
     assert LlmTimeoutError.error_code == "llm_timeout"
     assert LlmTruncatedError.error_code == "llm_truncated"
     assert LlmInvalidOutputError.error_code == "llm_invalid_output"
+    assert LlmUnreachableError.error_code == "llm_failed"
     assert issubclass(LlmTimeoutError, LlmServiceError)
+    assert issubclass(LlmUnreachableError, LlmServiceError)
 
 
 def test_invalid_output_cause_names_locations_but_never_model_output():

@@ -251,7 +251,10 @@ released.
   names the error locations only, never the model's text. Serve answers a
   truncated or invalid response with 422 and its code, and keeps 502, now with
   the code, for the others. A post-parse failure caused by an LLM error
-  records that code instead of `extraction_failed`.
+  records that code instead of `extraction_failed`. `LlmUnreachableError`, an
+  `LlmServiceError`, marks a service that could not be reached at all (a
+  refused, dropped or never-accepted connection, or an open circuit breaker),
+  the same failures the batch resume's service-outage rule names.
 - A truncated or invalid title/keywords response no longer fails the paper.
   That call is the anchor of the record, so its failure cancelled the
   reference task and the file ended with no export, losing references,

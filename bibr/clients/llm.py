@@ -23,6 +23,7 @@ from bibr.exceptions import (
     LlmServiceError,
     LlmTimeoutError,
     LlmTruncatedError,
+    LlmUnreachableError,
     ProcessingError,
     SafeLlmDiagnostics,
     UpstreamServiceError,
@@ -308,6 +309,20 @@ _FAILURE_CHAIN_DEPTH = 8
 _TIMEOUT_EXC_NAMES = frozenset(
     {"TimeoutError", "TimeoutException", "APITimeoutError", "DeadlineExceeded"}
 )
+# A connection refused, dropped or never accepted, or the breaker open: the
+# service is down, whatever the input. The same names as the batch resume's
+# service-outage rule, so that rule can count ``LlmUnreachableError`` too.
+_UNREACHABLE_EXC_NAMES = frozenset(
+    {
+        "ConnectionError",
+        "NetworkError",
+        "RemoteProtocolError",
+        "ProxyError",
+        "APIConnectionError",
+        "ClientConnectionError",
+        "CircuitOpenError",
+    }
+)
 _INVALID_OUTPUT_EXC_NAMES = frozenset(
     {"ValidationError", "JSONDecodeError", "ResponseParsingError", "AsyncValidationError"}
 )
@@ -372,6 +387,9 @@ def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
         completion = getattr(error, "last_completion", None)
         if completion is not None and _finish_reason(completion) in _TRUNCATED_FINISH_REASONS:
             return LlmTruncatedError
+    # The host never accepted the connection: down, not slow.
+    if any("ConnectTimeout" in _exc_names(error) for error in chain):
+        return LlmUnreachableError
     if any(_exc_names(error) & _TIMEOUT_EXC_NAMES for error in chain):
         return LlmTimeoutError
     status = next(
@@ -383,10 +401,9 @@ def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
         return LlmServiceError
     if status is not None and 400 <= status < 500:
         return LlmRejectedError
-    if any(
-        "CircuitOpenError" in _exc_names(error) or is_transient_network_error(error)
-        for error in chain
-    ):
+    if any(_exc_names(error) & _UNREACHABLE_EXC_NAMES for error in chain):
+        return LlmUnreachableError
+    if any(is_transient_network_error(error) for error in chain):
         return LlmServiceError
     if any(_exc_names(error) & _INVALID_OUTPUT_EXC_NAMES for error in chain):
         return LlmInvalidOutputError

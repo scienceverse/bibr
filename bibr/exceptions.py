@@ -10,7 +10,8 @@ distinguish at HTTP / CLI boundaries:
 
 A failed LLM task call raises an ``LlmCallError``, an ``UpstreamServiceError``
 subclass whose class and ``error_code`` say how it failed: the service did not
-answer (``LlmServiceError``, ``LlmTimeoutError``), refused the request
+answer (``LlmServiceError``; ``LlmUnreachableError`` when it could not be
+reached at all; ``LlmTimeoutError``), refused the request
 (``LlmRejectedError``), or answered with a truncated or invalid response
 (``LlmTruncatedError``, ``LlmInvalidOutputError``). Serve maps the last two to
 422, because retrying the same request cannot help.
@@ -301,8 +302,14 @@ class LlmCallError(UpstreamServiceError):
 
 
 class LlmServiceError(LlmCallError):
-    """The LLM service did not answer: a 429 or 5xx status, a transport failure
-    or an open circuit breaker. Retrying later can succeed."""
+    """The LLM service did not answer usefully: a 429 or 5xx status, a transport
+    failure or an unreachable service. Retrying later can succeed."""
+
+
+class LlmUnreachableError(LlmServiceError):
+    """The LLM service could not be reached: the connection was refused, dropped
+    or never accepted, or the client's circuit breaker is open. The failure
+    says nothing about the input — the service is down."""
 
 
 class LlmTimeoutError(LlmServiceError):

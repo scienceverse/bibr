@@ -350,6 +350,7 @@ class TestErrorTranslation:
             ("LlmInvalidOutputError", "processing", "llm_invalid_output", 422),
             ("LlmTimeoutError", "upstream_service", "llm_timeout", 502),
             ("LlmServiceError", "upstream_service", "llm_failed", 502),
+            ("LlmUnreachableError", "upstream_service", "llm_failed", 502),
             ("LlmRejectedError", "upstream_service", "llm_failed", 502),
             ("LlmCallError", "upstream_service", "llm_failed", 502),
         ],
