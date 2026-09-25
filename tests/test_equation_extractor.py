@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from bibr.extract.equation_extractor import EquationExtractor
 from bibr.paper_contents import PaperSection, PaperSentence
 
@@ -15,6 +17,14 @@ def _make_sections() -> list[PaperSection]:
         PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
         PaperSection(section_id=1, header="Results", level=1, parent_section_id=0),
     ]
+
+
+def _components(eqs) -> list[tuple[str, str, str, str]]:
+    return [(eq.lhs, eq.df, eq.comp, eq.rhs) for eq in eqs]
+
+
+def _extract(text: str):
+    return EquationExtractor().extract_from_sentences([_make_sentence(1, text)], _make_sections())
 
 
 class TestStatisticalExtraction:
@@ -80,11 +90,7 @@ class TestStatisticalExtraction:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert len(eqs) == 1
-        eq = eqs[0]
-        assert "CI" in eq.lhs
-        assert eq.comp == "="
-        assert "[2.0, 4.7]" in eq.rhs
+        assert _components(eqs) == [("95% CI", "", "=", "[2.0, 4.7]")]
 
     def test_effect_sizes(self):
         """Multiple effect sizes: (d = 0.45), (η² = .03), (R² = .42)."""
@@ -340,12 +346,12 @@ class TestBroadEquationDetection:
     """Test the broad regex pass (pass 4) that catches missed equations."""
 
     def test_cohens_d(self):
-        """Cohen's d = 0.8 should be caught by the broad pass."""
+        """Cohen's d = 0.8 keeps its full name, once (not also as a bare d)."""
         sent = _make_sentence(1, "The effect was large, Cohen\u2019s d = 0.8.")
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert any(eq.lhs == "Cohen\u2019s d" and eq.rhs == "0.8" for eq in eqs)
+        assert _components(eqs) == [("Cohen\u2019s d", "", "=", "0.8")]
 
     def test_bayes_factor(self):
         """BF10 = 12.4 should be caught by the broad pass."""
@@ -353,27 +359,23 @@ class TestBroadEquationDetection:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert any(eq.lhs == "BF10" and eq.rhs == "12.4" for eq in eqs)
+        assert _components(eqs) == [("BF10", "", "=", "12.4")]
 
     def test_scientific_notation(self):
-        """p = 3.2 e -5 should capture the scientific notation suffix."""
+        """p = 3.2 e -5 is one component with the whole value, not also p = 3.2."""
         sent = _make_sentence(1, "The result was significant, p = 3.2 e -5.")
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        p_eqs = [eq for eq in eqs if eq.lhs == "p"]
-        assert len(p_eqs) >= 1
-        assert "3.2" in p_eqs[0].rhs
+        assert _components(eqs) == [("p", "", "=", "3.2 e -5")]
 
     def test_power_of_10_notation(self):
-        """p = 2.1 x 10^-4 should capture the power-of-10 suffix."""
+        """p = 2.1 x 10^-4 is one component with the power-of-10 suffix."""
         sent = _make_sentence(1, "We found p = 2.1 x 10^-4 in the analysis.")
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        p_eqs = [eq for eq in eqs if eq.lhs == "p"]
-        assert len(p_eqs) >= 1
-        assert "2.1" in p_eqs[0].rhs
+        assert _components(eqs) == [("p", "", "=", "2.1 x 10^-4")]
 
     def test_tilde_operator(self):
         """β ~ 0.45 with tilde as approximate operator."""
@@ -381,7 +383,7 @@ class TestBroadEquationDetection:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert any(eq.comp == "~" and eq.rhs == "0.45" for eq in eqs)
+        assert _components(eqs) == [("beta", "", "~", "0.45")]
 
     def test_icc_stat(self):
         """ICC = 0.85 should be caught by the broad pass."""
@@ -389,7 +391,7 @@ class TestBroadEquationDetection:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert any(eq.lhs == "ICC" and eq.rhs == "0.85" for eq in eqs)
+        assert _components(eqs) == [("ICC", "", "=", "0.85")]
 
     def test_broad_no_duplicate_with_structured(self):
         """Broad pass should not duplicate equations already found by structured passes."""
@@ -406,7 +408,7 @@ class TestBroadEquationDetection:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert any("[1.2, 3.4]" in eq.rhs for eq in eqs)
+        assert _components(eqs) == [("5% CI", "", "=", "[1.2, 3.4]")]
 
     def test_table_legend_color_threshold_is_not_an_equation(self):
         sent = _make_sentence(
@@ -476,8 +478,7 @@ class TestEdgeCases:
         extractor = EquationExtractor()
         eqs = extractor.extract_from_sentences([sent], _make_sections())
 
-        assert len(eqs) == 1
-        assert "-0.32" in eqs[0].rhs or "−0.32" in eqs[0].rhs
+        assert _components(eqs) == [("β", "", "=", "-0.32")]
 
     def test_less_than_or_equal(self):
         """p ≤ .05 with Unicode operator."""
@@ -510,6 +511,294 @@ class TestEdgeCases:
         # The bare-stats pass may legitimately find "p = .05" even in noisy
         # text — the important thing is that extraction completes without hanging.
         assert len(eqs) <= 1
+
+
+class TestCompleteValues:
+    """A value is captured whole: cutting it gives a different number.
+
+    ``p = 2.3 × 10−5`` exported as ``p = 2.3``, ``p < 1e-10`` as ``p < 1``
+    (which passes any p <= 1 check) and ``p = 0,05`` as ``p = 0``.
+    """
+
+    @pytest.mark.parametrize(
+        ("value", "note"),
+        [
+            ("2.3 × 10−5", "JATS/PDF text layer: superscript flattened, U+2212"),
+            ("2.3 × 10⁻⁵", "Unicode superscripts"),
+            ("2.3 x 10^-5", "ASCII caret"),
+            ("3.4 · 10−6", "middle dot"),
+            ("2.3e-5", "e notation"),
+            ("3.16E-20", "E notation"),
+            ("3.43e–7", "e notation, en dash (native PDF text)"),
+            ("1.45E − 09", "spaced e notation"),
+            ("2.3 \\times 10^{-5}", "OCR LaTeX before late clean-up"),
+            ("10⁻⁵", "bare power of ten"),
+            ("10^{-10}", "bare power of ten, OCR LaTeX"),
+            ("10−8", "bare power of ten, flattened superscript"),
+        ],
+    )
+    def test_scientific_notation_in_parentheses(self, value, note):
+        eqs = _extract(f"The effect was significant (t(28) = 5.10, p = {value}).")
+
+        assert _components(eqs) == [("t", "28", "=", "5.10"), ("p", "", "=", value)], note
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_mantissa_of_one_is_not_a_valid_looking_p(self):
+        eqs = _extract("The effect was significant (t(28) = 5.10, p < 1e-10).")
+
+        assert ("p", "", "<", "1e-10") in _components(eqs)
+        assert ("p", "", "<", "1") not in _components(eqs)
+
+    def test_bare_value_is_one_component_not_a_truncated_pair(self):
+        assert _components(_extract("The effect was significant, p = 2.3e-5.")) == [
+            ("p", "", "=", "2.3e-5")
+        ]
+
+    def test_single_digit_mantissa_is_not_dropped_as_a_small_integer(self):
+        # "p = 5" alone looks like an index and is filtered; the whole value is not.
+        assert _components(_extract("Genome-wide, p = 5 × 10−8 was the threshold.")) == [
+            ("p", "", "=", "5 × 10−8")
+        ]
+
+    def test_latex_value_is_extracted_once(self):
+        eqs = _extract("It held ($p = 2.3 \\times 10^{-5}$).")
+
+        assert _components(eqs) == [("p", "", "=", "2.3 \\times 10^{-5}")]
+
+    def test_export_locates_the_whole_printed_value(self):
+        from bibr.export.spans import equation_pattern
+
+        text = "The effect was significant (t(28) = 5.10, p = 2.3 × 10−5)."
+        p = next(eq for eq in _extract(text) if eq.lhs == "p")
+        match = equation_pattern(p.lhs, p.df, p.comp, p.rhs).search(text)
+
+        assert match is not None
+        assert match.group() == "p = 2.3 × 10−5"
+
+    def test_decimal_commas(self):
+        eqs = _extract("Mittelwert (M = 3,45, SD = 1,20, p = 0,05).")
+
+        assert _components(eqs) == [
+            ("M", "", "=", "3,45"),
+            ("SD", "", "=", "1,20"),
+            ("p", "", "=", "0,05"),
+        ]
+
+    def test_decimal_commas_outside_parentheses(self):
+        eqs = _extract("Es zeigte sich t(28) = 2,45, p = 0,02.")
+
+        assert _components(eqs) == [("t", "28", "=", "2,45"), ("p", "", "=", "0,02")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_decimal_comma_with_four_fraction_digits(self):
+        # "0,000" matched as a thousands group, dropping the last digit.
+        assert _components(_extract("It held (p = 0,0001).")) == [("p", "", "=", "0,0001")]
+
+    def test_commas_that_are_not_decimal(self):
+        # df pairs belong to the LHS, APA value lists put a space after the
+        # comma, and a run of comma-joined digits is a list, not "1,2".
+        assert _components(_extract("The ANOVA (F(1,23) = 4,5, p = .04) held.")) == [
+            ("F", "1,23", "=", "4,5"),
+            ("p", "", "=", ".04"),
+        ]
+        assert _components(_extract("Values (p = .03, .04) were both small.")) == [
+            ("p", "", "=", ".03")
+        ]
+        assert "1,2" not in [eq.rhs for eq in _extract("Indices (n = 1,2,3) were used.")]
+
+    def test_ranges(self):
+        assert _components(_extract("The measures were intercorrelated with r = .85–.94.")) == [
+            ("r", "", "=", ".85–.94")
+        ]
+        assert _components(_extract("Fits were good (RMSEA = 0.08, 90% CI = 0.06–0.09).")) == [
+            ("90% CI", "", "=", "0.06–0.09"),
+            ("RMSEA", "", "=", "0.08"),
+        ]
+
+
+class TestStatisticNames:
+    """A statistic's name is not cut at a Greek letter, superscript or Δ.
+
+    ``η²p`` (partial eta squared) exported as a p-value, and ``ΔR²`` as R².
+    """
+
+    @pytest.mark.parametrize("name", ["η²p", "ηp²", "ηp2", "η2p", "η2 p", "ηₚ²", "ω²p", "ηG²"])
+    def test_partial_eta_squared_is_not_a_p_value(self, name):
+        eqs = _extract(f"A main effect, F(1, 40) = 5.2, p = .03, {name} = .12.")
+
+        assert _components(eqs) == [
+            ("F", "1, 40", "=", "5.2"),
+            ("p", "", "=", ".03"),
+            (name, "", "=", ".12"),
+        ]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_partial_eta_squared_in_parentheses(self):
+        eqs = _extract("A main effect (F(1, 40) = 5.2, p = .03, η²p = .12).")
+
+        assert [eq.lhs for eq in eqs] == ["F", "p", "η²p"]
+
+    def test_delta_prefix(self):
+        assert _components(_extract("(ΔR² = .05, F(1, 96) = 6.2, p = .01)")) == [
+            ("ΔR²", "", "=", ".05"),
+            ("F", "1, 96", "=", "6.2"),
+            ("p", "", "=", ".01"),
+        ]
+        assert _components(_extract("The fit improved, Δχ²(1) = 5.2, p = .02.")) == [
+            ("Δχ²", "1", "=", "5.2"),
+            ("p", "", "=", ".02"),
+        ]
+        assert _components(_extract("Model B was preferred (ΔAIC = 4.1).")) == [
+            ("ΔAIC", "", "=", "4.1")
+        ]
+
+    def test_greek_subscripted_name_is_not_a_bare_statistic(self):
+        # τp is a time constant, not a p-value; τd is not Cohen's d.
+        assert _extract("The barostat kept pressure at 1 bar with τp = 1.0 ps.") == []
+        assert _extract("We set τg = 1 ms and τd = 20 ms.") == []
+
+    def test_name_flush_against_cjk_text_still_matches(self):
+        assert _components(_extract("结果显著t(28) = 2.1，p < .05。")) == [
+            ("t", "28", "=", "2.1"),
+            ("p", "", "<", ".05"),
+        ]
+
+    def test_df_owner_must_be_a_whole_name(self):
+        # "accident (n = 1)" is not the df of a t: the group used to be skipped
+        # and its small n then filtered.
+        eqs = _extract("Seizures followed a motor vehicle accident (n = 1).")
+
+        assert _components(eqs) == [("n", "", "=", "1")]
+
+
+class TestSharedParentheses:
+    """Statistics sharing parentheses with a recognised one are not dropped.
+
+    The structured pass recorded the whole parenthesis as extracted, so the
+    broad pass skipped the parts it had not recognised.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("(r(98) = .32, p = .001)", [("r", "98", "=", ".32"), ("p", "", "=", ".001")]),
+            ("(Z = 2.31, p = .02)", [("Z", "", "=", "2.31"), ("p", "", "=", ".02")]),
+            ("(H(2) = 8.10, p = .02)", [("H", "2", "=", "8.10"), ("p", "", "=", ".02")]),
+            ("(χ² = 3.84, p = .05)", [("χ²", "", "=", "3.84"), ("p", "", "=", ".05")]),
+            ("(p < .001, BF10 = 12.3)", [("p", "", "<", ".001"), ("BF10", "", "=", "12.3")]),
+            ("(ICC = 0.85, p < .001)", [("p", "", "<", ".001"), ("ICC", "", "=", "0.85")]),
+            ("(OR = 1.2, P < 0.001)", [("OR", "", "=", "1.2"), ("P", "", "<", "0.001")]),
+            (
+                "(t(28) = 2.1, p = .04, g = 0.45)",
+                [("t", "28", "=", "2.1"), ("p", "", "=", ".04"), ("g", "", "=", "0.45")],
+            ),
+        ],
+    )
+    def test_every_statistic_is_kept_in_the_group(self, text, expected):
+        eqs = _extract(f"It differed {text}.")
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_correlation_with_df_outside_parentheses_groups_with_its_p(self):
+        eqs = _extract("Correlation was positive, r(98) = .32, p = .001.")
+
+        assert _components(eqs) == [("r", "98", "=", ".32"), ("p", "", "=", ".001")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_second_component_of_one_part_is_kept(self):
+        eqs = _extract("It held (p = 0.85 in 1 mM TEA and p = 0.95 in 5 mM TEA).")
+
+        assert _components(eqs) == [("p", "", "=", "0.85"), ("p", "", "=", "0.95")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_repeated_value_is_not_merged(self):
+        eqs = _extract("Both rose (p < 0.001 and p < 0.001), respectively.")
+
+        assert _components(eqs) == [("p", "", "<", "0.001"), ("p", "", "<", "0.001")]
+
+    def test_broad_match_reaching_into_a_group_is_not_taken(self):
+        eqs = _extract("It had minimal effect on the PPR (0.97 ± 0.05; t(d.f.16)=1.58, p=0.251).")
+
+        assert all("PPR" not in eq.lhs for eq in eqs)
+
+
+class TestDuplicates:
+    """Each printed expression is exported once, in one group."""
+
+    def test_inline_latex_statistics(self):
+        eqs = _extract("The difference was significant ($t(28) = 2.10$, $p < .05$).")
+
+        assert _components(eqs) == [("t", "28", "=", "2.10"), ("p", "", "<", ".05")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_inline_latex_statistics_outside_parentheses_share_a_group(self):
+        eqs = _extract("Effects were reliable, $d = 0.45$, $p = .003$.")
+
+        assert _components(eqs) == [("d", "", "=", "0.45"), ("p", "", "=", ".003")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_cohens_d_in_a_group(self):
+        eqs = _extract("The effect was large (t(28) = 2.1, p = .04, Cohen’s d = 0.45).")
+
+        assert _components(eqs) == [
+            ("t", "28", "=", "2.1"),
+            ("p", "", "=", ".04"),
+            ("Cohen’s d", "", "=", "0.45"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("latex", "comp"), [("\\leq", "≤"), ("\\le", "≤"), ("\\geq", "≥"), ("\\neq", "≠")]
+    )
+    def test_latex_comparators(self, latex, comp):
+        assert _components(_extract(f"It held ($p {latex} 0.05$).")) == [("p", "", comp, "0.05")]
+
+    def test_latex_statistic_splits_its_df(self):
+        assert _components(_extract("The model fit ($\\chi^2(1) = 3.84$).")) == [
+            ("\\chi^2", "1", "=", "3.84")
+        ]
+
+    def test_latex_relation_inside_parentheses_is_an_argument(self):
+        eqs = EquationExtractor().extract_from_sentences(
+            [
+                PaperSentence(
+                    text_id=1,
+                    text="P(X \\geq x) = 1 - F(x)",
+                    section_id=1,
+                    paragraph_id=1,
+                    is_display_formula=True,
+                )
+            ],
+            _make_sections(),
+        )
+
+        assert _components(eqs) == [("P(X \\geq x)", "", "=", "1 - F(x)")]
+
+    def test_currency_is_not_inline_math(self):
+        eqs = _extract(
+            "Costs rose from US$26.3 billion for those with CD4 <200 to US$42.5 billion."
+        )
+
+        assert _components(eqs) == [("CD4", "", "<", "200")]
+
+
+class TestGroupIds:
+    def test_filtered_group_does_not_use_up_an_id(self):
+        sentences = [
+            _make_sentence(1, "Each group had n = 5 animals."),
+            _make_sentence(2, "It held (t(10) = 2.1, p = .05)."),
+        ]
+        eqs = EquationExtractor().extract_from_sentences(sentences, _make_sections())
+
+        assert {eq.grp_id for eq in eqs} == {1}
+
+    def test_broad_match_never_starts_inside_a_token(self):
+        # Starting at every character of a long token made the broad pass
+        # quadratic in its length; such a start never adds a match.
+        from bibr.extract.equation_extractor import _BROAD_EQUATION_RE
+
+        assert _BROAD_EQUATION_RE.search("xyzd = 5", 1) is None
+        assert _BROAD_EQUATION_RE.search("xyzd = 5").group(1) == "xyzd"
 
 
 class TestLlmFallbackGrouping:
@@ -559,6 +848,36 @@ class TestLlmFallbackGrouping:
         assert len(groups_by_text[11]) == 1
         # …and different sentences get different groups.
         assert groups_by_text[10] != groups_by_text[11]
+
+    async def test_groups_continue_after_regex_results_handed_in(self):
+        """Regex results from another extractor keep their grp_ids to themselves."""
+        from bibr.paper_contents import CanonicalSection, PaperEquation
+
+        sections = [
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+            PaperSection(
+                section_id=1,
+                header="Results",
+                level=1,
+                parent_section_id=0,
+                section_type=CanonicalSection.RESULTS,
+            ),
+        ]
+        sents = [
+            _make_sentence(9, "The effect was reliable (t(28) = 3.42)."),
+            _make_sentence(10, "Weird stat layout (t: 3.42, p: .003) regex misses."),
+        ]
+        regex_equations = EquationExtractor().extract_from_sentences(sents, sections)
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                return [PaperEquation(text_id=10, grp_id=0, lhs="p", df="", comp="=", rhs=".003")]
+
+        eqs = await EquationExtractor().extract_with_llm_fallback(
+            sents, sections, llm_client=FakeLLM(), regex_equations=regex_equations
+        )
+
+        assert [(eq.text_id, eq.grp_id) for eq in eqs] == [(9, 1), (10, 2)]
 
 
 class TestLlmFallbackFilterDedupe:

@@ -341,6 +341,33 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- Statistics in `eq[]` keep their whole printed value. The structured passes
+  read only plain decimals, so `p = 2.3 × 10−5` exported as `p = 2.3`,
+  `p < 1e-10` as `p < 1` (a value that passes any p ≤ 1 check), `p = 0,05` as
+  `p = 0` and `r = .85–.94` as `r = .85`. `rhs` now holds scientific notation in
+  every spelling the extractor sees (`e-5`, `E−06`, `× 10−5` and `× 103` where a
+  JATS or PDF text layer flattened the superscript, `× 10⁻⁵`, `10^{-5}` and
+  `\times 10^{-5}` from OCR), decimal commas (a comma that does not group
+  thousands and does not continue a list such as `i = 1,2,3`) and ranges.
+- A Greek letter, superscript or Δ now belongs to the statistic's name:
+  `η²p = .12` (partial eta squared) exported as a p-value, `ηp2` (as JATS
+  prints ηp²) was dropped, `ΔR²` exported as `R²`, and a subscripted symbol
+  such as `τp` or `τd` as a p-value or a d. `r(df)`, `H(df)`, `Z`, `g`, `χ²`
+  without df and `90% CI` are now recognised names.
+- Statistics sharing parentheses with a recognised one are no longer dropped.
+  The structured pass marked the whole parenthesis as extracted, so the other
+  passes skipped `BF10` in `(p < .001, BF10 = 12.3)`, and likewise `ICC`,
+  `P`, `t` without df and any second component of one part. They now join the
+  parenthesis's group.
+- Each printed expression is exported once. Inline LaTeX (`$t(28) = 2.10$`)
+  was exported again by the LaTeX pass under a new group, and `Cohen's d` as
+  both `d` and `Cohen's d`, while two identical printed values, as in
+  `(p < .001 and p < .001)`, were merged into one. Duplicates are now found by
+  where they are printed. LaTeX comparators (`\leq`, `\geq`, `\neq`,
+  `\approx`, `\sim`) are read, a `$` before a digit is currency rather than
+  math, groups no longer skip ids, and the LLM fallback continues the group
+  ids of regex results it is handed. The broad pass also stops rescanning
+  inside a token, which was quadratic in the token's length.
 
 ### Added
 

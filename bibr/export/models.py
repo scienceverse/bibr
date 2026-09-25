@@ -347,7 +347,8 @@ MatchServiceLiteral = Literal[
 # reads) or TEI (what GROBID writes, for converters into this format).
 InputFormatLiteral = Literal["pdf", "docx", "jats", "tei", "html", "epub", "unknown"]
 
-# ``bibr.extract.equation_extractor._COMP_PATTERN`` after ``_normalize_comp``.
+# ``bibr.extract.equation_extractor._COMP_PATTERN`` after ``_normalize_comp``, which
+# maps the LaTeX relations it also reads (``_LATEX_COMPS``) into the same set.
 EqCompLiteral = Literal["=", "<", ">", "≤", "≥", "≈", "≠", "≪", "≫", "~"]
 
 SeverityLiteral = Literal["error", "warning"]
