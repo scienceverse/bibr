@@ -134,24 +134,38 @@ def alnum_key(text: str) -> str:
 # is trusted (short needles fuzzy-match too easily).
 _COVERED_MIN_SCORE = 95
 _COVERED_MIN_CHARS = 30
+# Longest needle searched as a substring of the haystack. partial_ratio grows
+# with the square of the needle length on noisy text (seconds at 16k chars,
+# tens of seconds at 50k, as an OCR repetition loop can produce); a longer
+# needle is compared with the whole haystack instead.
+_COVERED_MAX_PARTIAL_CHARS = 10_000
 
 
 def alnum_text_covered(needle: str, haystack: str) -> bool:
     """Whether *needle* is already contained in *haystack* (both ``alnum_key`` output).
 
-    Exact containment, or a fuzzy partial match of at least 95 for needles of 30
-    or more characters, which absorbs OCR noise between two reads of the same
-    text. A needle longer than the haystack is never covered: whatever it holds
-    beyond the haystack would be lost if the needle's region were dropped.
+    Exact containment, or, for needles of 30 or more characters, a fuzzy score
+    of at least 95 that absorbs OCR noise between two reads of the same text.
+    Two reads of one aggregate box and of its entry boxes differ by "rn" for
+    "m", "l" for "1" and the like, and either read can be the longer one, so
+    the two are first compared whole (``ratio``, symmetric, and fast even on
+    equal lengths, where ``partial_ratio`` is not). A needle shorter than the
+    haystack is then also searched as a substring (``partial_ratio``). A needle
+    that runs past the haystack by more than about a tenth of its length scores
+    under 95 either way, so an aggregate box holding four entries is not
+    covered by boxes for two or three of them.
     """
     if not needle:
         return True
-    if len(needle) > len(haystack):
-        return False
     if needle in haystack:
         return True
     if len(needle) < _COVERED_MIN_CHARS:
         return False
     from rapidfuzz import fuzz
 
-    return fuzz.partial_ratio(needle, haystack) >= _COVERED_MIN_SCORE
+    if fuzz.ratio(needle, haystack) >= _COVERED_MIN_SCORE:
+        return True
+    if len(needle) >= len(haystack) or len(needle) > _COVERED_MAX_PARTIAL_CHARS:
+        return False
+    score = fuzz.partial_ratio(needle, haystack, score_cutoff=_COVERED_MIN_SCORE)
+    return score >= _COVERED_MIN_SCORE

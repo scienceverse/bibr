@@ -839,6 +839,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         text. Otherwise it stays and only the entry boxes whose text it holds
         are shadowed, so an entry without a box of its own is not lost and no
         entry is emitted twice. Shadowed regions keep their region summaries.
+
+        Only entry boxes inside the aggregate box take part. They replace it at
+        its place in reading order, where it keys the References section even
+        when the OCR stage blanked its text, and a separate short entry
+        elsewhere on the page ("PubMed") is never hidden because the aggregate
+        box's text happens to contain it.
         """
         for page_idx, regions in enumerate(self.json_result):
             children = [

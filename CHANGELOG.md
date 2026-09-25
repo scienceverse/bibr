@@ -379,8 +379,11 @@ released.
   inside it hold all of its text. When the layout model returned entry boxes
   for only some of the entries in it, the entries without a box of their own
   were lost from the reference list. The aggregate box now stays and the entry
-  boxes it repeats are hidden instead; they still count as layout onsets. This
-  applies both to the OCR stage's overlap cleanup and to the PDF parser.
+  boxes it repeats are hidden instead; they still count as layout onsets. The
+  texts are compared with a tolerance for OCR noise in either direction, since
+  a scanned page reads the aggregate box and each entry box separately and the
+  reads differ by a character here and there. This applies both to the OCR
+  stage's overlap cleanup and to the PDF parser.
 - The page-furniture filter on the reference lines the geometry segmenter
   reads removes only lines at the top or bottom edge of a page, as it was
   documented to. It removed every line whose text, with digits masked, matched

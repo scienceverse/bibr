@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 
 def _region(index: int, label: str, content: str, bbox: list[int]) -> dict:
     return {
@@ -89,7 +91,7 @@ def test_reference_envelope_without_children_remains_text_source():
     ]
 
 
-def test_reference_envelope_with_one_child_is_not_shadowed():
+def test_reference_envelope_and_one_child_with_different_texts_are_both_kept():
     contents = _parse(
         [
             [
@@ -114,6 +116,21 @@ def test_reference_envelope_with_one_child_is_not_shadowed():
         "Lau, Ernst 1927. The aggregate reference.",
         "Lau, Ernst 1927. The child reference.",
     ]
+
+
+def test_reference_envelope_with_one_child_holding_its_text_is_emitted_once():
+    entry = "Lau, Ernst 1927. The sole detected reference."
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 100, 300, 130]),
+                _region(1, "reference", entry, [100, 150, 900, 240]),
+                _region(2, "reference_content", entry, [100, 150, 900, 200]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [entry]
 
 
 _ENTRIES = [
@@ -162,6 +179,58 @@ def test_reference_envelope_keeps_entry_boxes_it_does_not_hold():
         "\n".join(_ENTRIES[:2]),
         _ENTRIES[2],
     ]
+
+
+def _noisy(text: str) -> str:
+    """A second OCR read of *text*: "rn" for "m", which makes it one char longer."""
+    return text.replace("m", "rn", 1)
+
+
+@pytest.mark.parametrize(
+    ("envelope", "children"),
+    [
+        ("\n".join(_noisy(e) for e in _ENTRIES), _ENTRIES),
+        ("\n".join(_ENTRIES), [_noisy(e) for e in _ENTRIES]),
+    ],
+    ids=["envelope-read-longer", "entry-reads-longer"],
+)
+def test_reference_envelope_read_apart_from_its_entry_boxes_is_emitted_once(envelope, children):
+    # A scanned page OCRs every box on its own, so the aggregate read and the
+    # entry reads differ by a character here and there, in either direction.
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 100, 300, 130]),
+                _region(1, "reference", envelope, [100, 150, 900, 500]),
+                *(
+                    _region(
+                        2 + i, "reference_content", child, [100, 150 + 45 * i, 900, 190 + 45 * i]
+                    )
+                    for i, child in enumerate(children)
+                ),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == children
+
+
+def test_entry_box_outside_the_envelope_is_not_judged_by_its_text():
+    # "PubMed" is an entry of its own in the other column. The aggregate box's
+    # text contains the word, but only the entry boxes inside it are its copies.
+    envelope = "Adams, A. (2001). One. J, 1.\nDoe, J. (2020). Searching PubMed. J, 2, 3-4."
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 100, 300, 130]),
+                _region(1, "reference", envelope, [100, 150, 480, 400]),
+                _region(2, "reference_content", _ENTRIES[0], [100, 150, 480, 190]),
+                _region(3, "reference_content", "PubMed", [520, 150, 900, 190]),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [envelope, "PubMed"]
 
 
 def test_noncontained_reference_children_do_not_shadow_envelope():
