@@ -63,6 +63,14 @@ def _completion(finish_reason: str):
     return SimpleNamespace(choices=[SimpleNamespace(finish_reason=finish_reason)])
 
 
+def _blank_error() -> ValidationError:
+    try:
+        AuthorsLLM.model_validate_json("")
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a validation error")
+
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -92,6 +100,12 @@ def _completion(finish_reason: str):
         (_validation_error(), LlmInvalidOutputError),
         (_retry_wrapping(_validation_error(), _completion("stop")), LlmInvalidOutputError),
         (json.JSONDecodeError("Expecting value", "x", 0), LlmInvalidOutputError),
+        # A blank or aborted completion is the server failing to answer; a
+        # blank one cut at the token limit is still a truncation.
+        (_blank_error(), LlmServiceError),
+        (_retry_wrapping(_blank_error(), _completion("stop")), LlmServiceError),
+        (_retry_wrapping(_validation_error(), _completion("abort")), LlmServiceError),
+        (_retry_wrapping(_blank_error(), _completion("length")), LlmTruncatedError),
         (AttributeError("'NoneType' object has no attribute 'text'"), LlmCallError),
     ],
 )
@@ -303,3 +317,34 @@ def test_well_typed_values_are_unchanged():
         assert PaperReferenceLLM.model_validate({**_REFERENCE, "bib_type": falsy}).bib_type == (
             "other"
         )
+
+
+async def test_real_client_blank_completion_is_a_service_failure(monkeypatch):
+    async def respond(request):
+        return httpx.Response(200, json=_chat(""))
+
+    error = await _title_call(monkeypatch, respond)
+    assert type(error) is LlmServiceError
+    assert error.cause == "the completion was blank"
+
+
+@pytest.mark.parametrize(
+    ("recovery", "finish_reason"),
+    [('{"title": ["not", "a", "string"]}', "stop"), ('{"title": "A printed ti', "length")],
+)
+async def test_real_client_abort_with_a_failed_recovery_is_a_service_failure(
+    monkeypatch, recovery, finish_reason
+):
+    # The unconstrained recovery answers, but invalidly or cut short: the
+    # abort, not that answer, decides the class.
+    calls = []
+
+    async def respond(request):
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json=_chat('{"ti', "abort"))
+        return httpx.Response(200, json=_chat(recovery, finish_reason))
+
+    error = await _title_call(monkeypatch, respond)
+    assert len(calls) == 2
+    assert type(error) is LlmServiceError

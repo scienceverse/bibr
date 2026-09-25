@@ -382,6 +382,23 @@ def _finish_reason(completion: Any) -> str | None:
     return str(getattr(reason, "name", reason)).lower()
 
 
+def _stop_reasons(chain: list[BaseException]) -> set[str | None]:
+    return {
+        _finish_reason(completion)
+        for error in chain
+        if (completion := getattr(error, "last_completion", None)) is not None
+    }
+
+
+def _unanswered(chain: list[BaseException]) -> str | None:
+    """Why the completion was no answer at all (aborted or blank), or ``None``."""
+    if "abort" in _stop_reasons(chain):
+        return "the completion was aborted"
+    if any(_is_blank_completion_error(error) for error in chain):
+        return "the completion was blank"
+    return None
+
+
 def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
     """Pick the :class:`~bibr.exceptions.LlmCallError` class for a failed call.
 
@@ -412,12 +429,13 @@ def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
         return LlmServiceError
     # Instructor keeps the last completion that failed to parse even when a
     # re-ask then failed on the service, so its stop reason counts only here.
-    if any(
-        (completion := getattr(error, "last_completion", None)) is not None
-        and _finish_reason(completion) in _TRUNCATED_FINISH_REASONS
-        for error in chain
-    ):
+    if _stop_reasons(chain) & _TRUNCATED_FINISH_REASONS:
         return LlmTruncatedError
+    # A blank or aborted completion is the server failing to answer, not an
+    # answer that fails validation: a retry can succeed, so it stays a
+    # service failure the paper is not completed without.
+    if _unanswered(chain):
+        return LlmServiceError
     if any(_exc_names(error) & _INVALID_OUTPUT_EXC_NAMES for error in chain):
         return LlmInvalidOutputError
     return LlmCallError
@@ -462,7 +480,9 @@ def _failure_cause(error_class: type[LlmCallError], exc: BaseException) -> str:
     # organization id, a masked key) into serve responses and exported
     # warnings. The error class and status say what failed.
     status = _extract_http_status(root)
-    return f"{type(root).__name__}: HTTP {status}" if status is not None else type(root).__name__
+    if status is not None:
+        return f"{type(root).__name__}: HTTP {status}"
+    return _unanswered(chain) or type(root).__name__
 
 
 def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
@@ -1847,16 +1867,30 @@ class LLMClient:
             logger.warning("Local JSON decoder aborted; retrying with validated unconstrained JSON")
             self._record_label_metric("decoder_abort_fallbacks", 1)
             await self._acquire_rate_limit()
-            recovered = await self._invoke_protocol_with_retries(
-                self._make_recovery_instructor_backend(),
-                protocol="instructor",
-                response_model=response_model,
-                messages=messages,
-                system_prompt=system_prompt,
-                reasoning_effort=None,
-                client_override=self._get_markdown_json_client(),
-                max_tokens=max_tokens,
-            )
+            try:
+                recovered = await self._invoke_protocol_with_retries(
+                    self._make_recovery_instructor_backend(),
+                    protocol="instructor",
+                    response_model=response_model,
+                    messages=messages,
+                    system_prompt=system_prompt,
+                    reasoning_effort=None,
+                    client_override=self._get_markdown_json_client(),
+                    max_tokens=max_tokens,
+                )
+            except Exception as recovery_error:
+                # The abort is the failure, not the recovery's output: a retry
+                # of the call can succeed, so it stays a service failure.
+                if _classify_llm_failure(recovery_error) in {
+                    LlmTruncatedError,
+                    LlmInvalidOutputError,
+                }:
+                    raise LlmServiceError(
+                        "Local JSON decoder abort recovery failed",
+                        recovery_error,
+                        cause="the JSON decoder aborted and the unconstrained retry failed",
+                    ) from recovery_error
+                raise
             self._record_label_metric("decoder_abort_fallbacks_recovered", 1)
             return recovered
 

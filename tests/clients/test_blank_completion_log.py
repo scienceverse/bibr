@@ -16,7 +16,7 @@ import pytest
 from pydantic import ValidationError
 
 from bibr.clients.llm import LLMClient, _is_blank_completion_error
-from bibr.exceptions import LlmInvalidOutputError
+from bibr.exceptions import LlmServiceError
 from bibr.schemas import EquationExtractionResult
 
 
@@ -74,11 +74,12 @@ def _client_with_limiter() -> LLMClient:
 
 
 async def test_extract_equations_raises_the_typed_failure():
-    """The call raises; the equation extractor decides how loudly to log."""
+    """The call raises; the equation extractor decides how loudly to log. A
+    blank completion is the server failing to answer, so a service failure."""
     client = _client_with_limiter()
     client._invoke_structured = mock.AsyncMock(side_effect=_blank_json_error())
 
-    with pytest.raises(LlmInvalidOutputError):
+    with pytest.raises(LlmServiceError):
         await client.extract_equations([(1, "a sentence")], file_hash="h")
 
 
@@ -121,7 +122,7 @@ async def test_equation_fallback_soft_logs_blank_completion(caplog):
     # but the failed batch is still recorded for the export's warning.
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     assert any("failed for batch" in r.getMessage() for r in caplog.records)
-    assert extractor.llm_batch_failures == ["llm_invalid_output"]
+    assert extractor.llm_batch_failures == ["llm_failed"]
 
 
 async def test_equation_fallback_still_warns_on_real_failure(caplog):
