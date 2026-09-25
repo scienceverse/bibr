@@ -213,6 +213,54 @@ released.
 
 ### Fixed
 
+- Resuming a `bibr batch` run now runs again the papers whose failure said
+  nothing about the paper; they used to wait for `--retry-failed`, which also
+  re-runs every genuine failure. A local OCR or LLM server that went down or
+  could not start failed each later paper with the pipeline's own code
+  (`ocr_failed`, `layout_failed`, …), and the next run skipped them all. Those
+  papers are now recorded as `upstream_unavailable`, the code the remote
+  executor uses for the same outage, and `ChewFailure.outage` tells library
+  users the same. Remote papers whose transient retries ran out, and papers
+  failed with 401/403 when the serve rejected the token, are also picked up
+  again. Timeouts are not: a paper can be too slow on its own.
+- A crash in one chunk no longer fails every paper in it. `bibr.chew()` on a
+  list or directory lost every result when any chunk raised, and `bibr batch`
+  recorded the whole chunk as `chunk_error`, which resume then skipped. The
+  papers a crashed chunk left unfinished now run again one by one, and only a
+  paper that crashes on its own fails with `chunk_error`. A resumed run
+  retries a crash once, since it can be the machine's; a paper that crashed
+  twice waits for `--retry-failed`.
+- A job the serve failed with 504 (`PIPELINE_TIMEOUT`) was treated as an OCR/LLM
+  outage: it was resubmitted up to `--retries` times, each run cost a full
+  timeout of a serve slot, in-flight shrank each time, and the paper was
+  recorded as `upstream_unavailable`. It is now retried once without shrinking
+  in-flight and then recorded as `pipeline_timeout`, and "timed out" in a
+  failed job's text no longer marks it as an outage.
+- Adding a file to a `bibr batch` input set could rename a paper already
+  processed. Ids were disambiguated only within one run, so a second
+  `paper.pdf` turned the existing `paper` into `paper-<sha8>`: both files were
+  processed again, and the stale `paper.json` stayed in the ledger and the
+  tables as a third paper. A file now keeps the id the ledger recorded for its
+  path, and only the newcomer gets a suffix. An input named `run_info` gets
+  one too; its export used to replace `run_info.json` mid-run and was then
+  overwritten by it, while the ledger said `ok`. `bibr.chew()` on a list or
+  directory gives stem collisions the same `<stem>-<sha8>` ids, where all of
+  them got the bare stem and `bibr.write_tables()` refused the batch.
+- A `bibr batch` run killed mid-write (out of memory, a full disk) left the
+  ledger's last line without a newline, and the next run's first record was
+  glued onto it and lost, so that paper ran again. The first record of a run
+  now starts on a line of its own.
+- `bibr batch` rebuilt no Parquet tables at all once its out dir held an export
+  of an older schema major, as after resuming a 0.5.x run with 12.0: the whole
+  rebuild failed on every later run. Such exports are now left out of the
+  tables with a warning.
+- Ctrl-C during `Chewer.chew()`, which `bibr batch` uses locally, left the call
+  running on the Chewer's event loop, and `close()` then resumed it alongside
+  the teardown, where it could start an OCR server after the OCR shutdown had
+  run. The Chewer now drives its loop through `asyncio.Runner`, so Ctrl-C
+  cancels the call and waits for it to unwind before anything is closed.
+- `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
+  not the `paper_id` twice.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

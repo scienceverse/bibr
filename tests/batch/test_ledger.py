@@ -158,6 +158,70 @@ def test_plan_force_reruns_everything(tmp_path):
     assert [i.paper_id for i in plan.to_run] == ["ok1", "bad1"]
 
 
+def test_plan_reruns_failures_that_say_nothing_about_the_paper(tmp_path):
+    """Outage, rejected token, exhausted transient retries: the paper never
+    got a verdict. A paper's own failure and a timeout stay skipped."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    lines = [
+        {"paper_id": "outage", "error_code": "upstream_unavailable"},
+        {"paper_id": "token401", "error_code": "http_401", "http_status": 401},
+        {"paper_id": "token403", "error_code": "http_403", "http_status": 403},
+        {"paper_id": "gateway", "error_code": "http_503", "transient_exhausted": True},
+        {"paper_id": "lost", "error_code": "job_lost", "transient_exhausted": True},
+        {"paper_id": "ocr", "error_code": "ocr_failed", "failed_stage": "ocr"},
+        {"paper_id": "slow", "error_code": "pipeline_timeout", "http_status": 504},
+        {"paper_id": "rejected", "error_code": "http_413", "http_status": 413},
+    ]
+    for line in lines:
+        ledger.append({**line, "status": "failed"})
+
+    plan = ledger.plan(_items(tmp_path, [line["paper_id"] for line in lines]))
+
+    assert [i.paper_id for i in plan.to_run] == [
+        "outage",
+        "token401",
+        "token403",
+        "gateway",
+        "lost",
+    ]
+    assert [i.paper_id for i in plan.skipped_failed] == ["ocr", "slow", "rejected"]
+
+
+def test_plan_retries_a_crash_once(tmp_path):
+    """A crash can be the machine's or the paper's: one more try, then skip."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    ledger.append({"paper_id": "p", "status": "failed", "error_code": "chunk_error"})
+    assert [i.paper_id for i in ledger.plan(_items(tmp_path, ["p"])).to_run] == ["p"]
+
+    ledger.append({"paper_id": "p", "status": "failed", "error_code": "chunk_error"})
+    plan = ledger.plan(_items(tmp_path, ["p"]))
+    assert plan.to_run == []
+    assert [i.paper_id for i in plan.skipped_failed] == ["p"]
+    assert [i.paper_id for i in ledger.plan(_items(tmp_path, ["p"]), retry_failed=True).to_run] == [
+        "p"
+    ]
+
+
+def test_a_torn_last_line_does_not_swallow_the_next_record(tmp_path):
+    """A run killed mid-append leaves a line with no newline; the next run's
+    first record must land on a line of its own."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    ledger.append({"paper_id": "p", "status": "ok"})
+    with ledger.path.open("a") as fh:
+        fh.write('{"paper_id": "q", "status": "ok", "attem')
+
+    resumed = Ledger(tmp_path / "outcomes.jsonl")
+    resumed.append({"paper_id": "z", "status": "ok"})
+    resumed.append({"paper_id": "y", "status": "ok"})
+
+    assert sorted(resumed.latest()) == ["p", "y", "z"]
+    assert resumed.path.read_text().splitlines()[1:] == [
+        '{"paper_id": "q", "status": "ok", "attem',
+        '{"paper_id": "z", "status": "ok"}',
+        '{"paper_id": "y", "status": "ok"}',
+    ]
+
+
 def test_plan_uses_the_latest_line_per_paper(tmp_path):
     ledger = Ledger(tmp_path / "outcomes.jsonl")
     ledger.append({"paper_id": "p", "status": "ok"})

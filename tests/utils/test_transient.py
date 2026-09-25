@@ -97,3 +97,90 @@ def test_self_referential_cause_chain_terminates():
     exc.__cause__ = exc
 
     assert not is_transient_network_error(exc)
+
+
+# --- is_service_outage: does a failure say nothing about the input? ----------
+
+
+class APITimeoutError(APIConnectionError):
+    """Stand-in for the openai SDK class: a timeout, though it subclasses the
+    connection error."""
+
+
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://ocr:8080/v1/chat/completions")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+
+
+def _wrapped(cause: BaseException) -> BaseException:
+    """What the LLM client does: a catch-all UpstreamServiceError around the cause."""
+    from bibr.exceptions import UpstreamServiceError
+
+    try:
+        raise UpstreamServiceError("LLM", "Failed to extract authors", cause) from cause
+    except UpstreamServiceError as exc:
+        return exc
+
+
+def _circuit_open() -> BaseException:
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.utils.circuit_breaker import CircuitOpenError
+
+    opened = CircuitOpenError("ocr", 30.0)
+    return UpstreamServiceError("ocr", str(opened), original_error=opened)
+
+
+OUTAGES = [
+    ConnectionRefusedError("refused"),
+    httpx.ConnectError("[Errno 111] Connection refused"),
+    httpx.ConnectTimeout("never connected"),
+    httpx.ReadError("server went away"),
+    httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    APIConnectionError("connection"),
+    LocalEntryNotFoundError("offline"),
+    _status_error(503),
+    _status_error(502),
+    _status_error(429),
+    _wrapped(httpx.ConnectError("refused")),
+    _circuit_open(),
+]
+
+NOT_OUTAGES = [
+    None,
+    TimeoutError("LLM call timed out after 600s"),
+    httpx.ReadTimeout("read"),
+    APITimeoutError("timed out"),
+    _status_error(504),
+    _status_error(500),
+    _status_error(400),
+    _wrapped(ValueError("no JSON object in the completion")),
+    _wrapped(TimeoutError("slow")),
+    ValueError("bad value"),
+]
+
+
+@pytest.mark.parametrize("exc", OUTAGES, ids=lambda e: type(e).__name__)
+def test_service_outages_are_recognised_through_wrappers(exc):
+    from bibr.utils.transient import is_service_outage
+
+    assert is_service_outage(exc) is True
+
+
+@pytest.mark.parametrize("exc", NOT_OUTAGES, ids=lambda e: type(e).__name__)
+def test_timeouts_and_paper_failures_are_not_outages(exc):
+    from bibr.utils.transient import is_service_outage
+
+    assert is_service_outage(exc) is False
+
+
+def test_an_upstream_error_alone_is_not_an_outage():
+    """The LLM client wraps any failure, bad model output included, in an
+    UpstreamServiceError; only a service-shaped cause makes it an outage."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.utils.transient import is_service_outage
+
+    assert (
+        is_service_outage(UpstreamServiceError("LLM", "All 3 reference parse batches failed"))
+        is False
+    )

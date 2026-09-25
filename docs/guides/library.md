@@ -65,6 +65,15 @@ for r in results:
         print(r.path, r.error, r.failed_stage)
 ```
 
+`ChewFailure.outage` is `True` when the failure says nothing about the file:
+an OCR or LLM service was down or unreachable, or a model or server could not
+start, so the same file may well succeed later. If the pipeline crashes on a
+chunk of files, the files it left unfinished run again one by one, and only a
+file that crashes it on its own fails, with `error_code="chunk_error"`. Files
+that share a stem (`a/paper.pdf`, `b/paper.pdf`, `paper.xml`) get the ids
+`bibr batch` gives them, `<stem>-<sha256[:8]>`, so a batch's results can be
+joined and passed to `bibr.write_tables()`.
+
 For a list input, results keep the input order. For a directory input,
 files are processed in sorted order and anything that isn't
 {{ supported_extensions }} is skipped. An empty list returns `[]`; a directory

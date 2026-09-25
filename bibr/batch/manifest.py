@@ -15,13 +15,17 @@ recorded in :attr:`Discovery.missing` and the caller decides how loud to be.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from bibr.input.supported_files import SUPPORTED_EXTENSIONS
 
 _HASH_CHUNK = 1024 * 1024
+# Stems a paper cannot use as its id: ``<out>/<paper_id>.json`` would be the
+# runner's own ``run_info.json``.
+RESERVED_IDS = frozenset({"run_info"})
 
 
 @dataclass(frozen=True)
@@ -145,33 +149,66 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def assign_paper_ids(files: Sequence[Path]) -> list[BatchItem]:
+def _sha8(path: Path) -> str | None:
+    try:
+        return sha256_file(path)[:8]
+    except OSError:  # unreadable: the run reports it; the id only has to be unique
+        return None
+
+
+def assign_paper_ids(
+    files: Sequence[Path], *, recorded: Iterable[Mapping[str, Any]] = ()
+) -> list[BatchItem]:
     """Map files to ``paper_id`` = stem, disambiguating stem collisions.
 
     Exports are written as ``<out>/<paper_id>.json``, so two inputs sharing a
     stem (compared case-insensitively — the default macOS/Windows filesystems
     fold case) would overwrite each other. Colliding files get
     ``<stem>-<sha256[:8]>``; identical bytes under the same stem additionally
-    get an ordinal so every id is unique. Deterministic for a given input
-    order.
+    get an ordinal so every id is unique, and so does a stem the runner's own
+    files use (``run_info``). Deterministic for a given input order.
+
+    *recorded* are the ledger lines of earlier runs. A file whose path has a
+    line keeps the id recorded there, so adding inputs never renames a paper
+    that was already processed; only the newcomer that collides with it gets
+    a suffix.
     """
+    by_path: dict[str, str] = {}
+    for entry in recorded:
+        path_text, recorded_id = entry.get("path"), entry.get("paper_id")
+        if (
+            isinstance(path_text, str)
+            and isinstance(recorded_id, str)
+            and recorded_id
+            and recorded_id.casefold() not in RESERVED_IDS
+        ):
+            by_path[path_text] = recorded_id  # later lines win
+
+    used: set[str] = set(RESERVED_IDS)
+    kept: dict[int, str] = {}
+    for index, path in enumerate(files):
+        recorded_id = by_path.get(str(path))
+        if recorded_id is not None and recorded_id.casefold() not in used:
+            kept[index] = recorded_id
+            used.add(recorded_id.casefold())
+
     by_stem: dict[str, list[Path]] = {}
     for path in files:
         by_stem.setdefault(path.stem.casefold(), []).append(path)
 
     items: list[BatchItem] = []
-    used: set[str] = set()
-    for path in files:
+    for index, path in enumerate(files):
         stem = path.stem
-        if len(by_stem[stem.casefold()]) == 1:
-            paper_id = stem
-        else:
-            paper_id = f"{stem}-{sha256_file(path)[:8]}"
-        base = paper_id
-        ordinal = 2
-        while paper_id.casefold() in used:
-            paper_id = f"{base}-{ordinal}"
-            ordinal += 1
-        used.add(paper_id.casefold())
+        paper_id = kept.get(index)
+        if paper_id is None:
+            collides = len(by_stem[stem.casefold()]) > 1 or stem.casefold() in RESERVED_IDS
+            sha8 = _sha8(path) if collides else None
+            paper_id = f"{stem}-{sha8}" if sha8 else stem
+            base = paper_id
+            ordinal = 2
+            while paper_id.casefold() in used:
+                paper_id = f"{base}-{ordinal}"
+                ordinal += 1
+            used.add(paper_id.casefold())
         items.append(BatchItem(path=path, paper_id=paper_id, stem=stem))
     return items

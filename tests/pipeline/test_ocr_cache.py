@@ -784,6 +784,7 @@ async def test_interleaved_init_failure_spares_native_files_in_mixed_chunk(enabl
 
     assert pending == []
     assert pdf.error_code == "ocr_failed"
+    assert pdf.error_outage is True
     assert docx.error is None
 
 

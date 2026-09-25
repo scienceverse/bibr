@@ -751,6 +751,7 @@ class OcrStage:
                     code="ocr_failed",
                     stage=self.name,
                     exc=prior_init_error,
+                    outage=True,
                 )
             return
         if (
@@ -771,7 +772,11 @@ class OcrStage:
                 ctx.signals.ocr_init_error = e
                 for fs in ctx.alive():
                     fs.set_error(
-                        f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
+                        f"OCR backend init failed: {e}",
+                        code="ocr_failed",
+                        stage=self.name,
+                        exc=e,
+                        outage=True,
                     )
                 logger.warning("OCR backend init failed", exc_info=True)
                 return
@@ -836,7 +841,11 @@ class OcrStage:
                 ctx.signals.ocr_init_error = e
                 for fs in ctx.alive():
                     fs.set_error(
-                        f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
+                        f"OCR backend init failed: {e}",
+                        code="ocr_failed",
+                        stage=self.name,
+                        exc=e,
+                        outage=True,
                     )
                 logger.warning("OCR backend init failed", exc_info=True)
                 return
@@ -1037,6 +1046,7 @@ class OcrStage:
                     code="ocr_failed",
                     stage=self.name,
                     exc=upstream,
+                    outage=True,
                 )
                 return
 

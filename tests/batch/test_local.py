@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import random
 from pathlib import Path
@@ -405,3 +406,217 @@ def test_no_tables_option_skips_them(corpus, tmp_path, monkeypatch):
     out = tmp_path / "out"
     run_batch(_options(corpus, out, tables=False))
     assert not (out / "tables").exists()
+
+
+# --- resume after outages and crashes (real Chewer, stub pipeline) ----------------
+
+
+class _StubLocalPipeline:
+    """Stands in for ``LocalPipeline`` under the real ``WarmChewMany``/``Chewer``.
+
+    ``script(stems)`` runs per ``process_chunk`` call: it may raise (a crash)
+    or return ``{stem: exception}`` for files the OCR stage should fail.
+    """
+
+    script = staticmethod(lambda stems: {})
+    calls: list[list[str]] = []
+
+    def __init__(self, **kwargs):
+        pass
+
+    async def process_chunk(self, file_states, progress=None, config=None):
+        from tests.test_api import _export_fixture
+
+        stems = [fs.path.stem for fs in file_states]
+        _StubLocalPipeline.calls.append(stems)
+        failures = _StubLocalPipeline.script(stems)
+        for fs in file_states:
+            exc = failures.get(fs.path.stem)
+            if exc is not None:
+                fs.set_error(
+                    f"OCR failed for all pages: {exc}", code="ocr_failed", stage="ocr", exc=exc
+                )
+            else:
+                data = _export_fixture()
+                data["paper_id"] = fs.paper_id or fs.path.stem
+                fs.result_json = data
+
+    async def aclose(self):
+        pass
+
+
+@pytest.fixture
+def stub_pipeline(monkeypatch):
+    _StubLocalPipeline.calls = []
+    _StubLocalPipeline.script = staticmethod(lambda stems: {})
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _StubLocalPipeline)
+    return _StubLocalPipeline
+
+
+def _real_options(corpus: Path, out: Path, **overrides) -> BatchOptions:
+    local = LocalOptions(chew_options={"memory_mode": "balanced", "no_llm": True}, batch_size=2)
+    return _options(corpus, out, local=local, tables=False, **overrides)
+
+
+def _latest_codes(out: Path) -> dict[str, tuple[str, str | None]]:
+    latest = Ledger(out / LEDGER_FILENAME).latest()
+    return {pid: (row["status"], row["error_code"]) for pid, row in sorted(latest.items())}
+
+
+def test_an_ocr_outage_is_recorded_as_upstream_unavailable_and_resumed(
+    corpus, tmp_path, stub_pipeline
+):
+    """The OCR server dies after the first chunk: those papers never got a
+    verdict, so the next run picks them up without --retry-failed."""
+    import httpx
+
+    out = tmp_path / "out"
+    refused = httpx.ConnectError("[Errno 111] Connection refused")
+    stub_pipeline.script = staticmethod(
+        lambda stems: dict.fromkeys(stems, refused) if len(stub_pipeline.calls) > 1 else {}
+    )
+
+    assert run_batch(_real_options(corpus, out)) == 1
+    assert _latest_codes(out) == {
+        "bad1": ("ok", None),
+        "good1": ("ok", None),
+        "good2": ("failed", "upstream_unavailable"),
+        "good3": ("failed", "upstream_unavailable"),
+    }
+    failed = Ledger(out / LEDGER_FILENAME).latest()["good2"]
+    assert failed["failed_stage"] == "ocr"
+    assert failed["error"] == "OCR failed for all pages: [Errno 111] Connection refused"
+
+    stub_pipeline.calls = []
+    stub_pipeline.script = staticmethod(lambda stems: {})
+    assert run_batch(_real_options(corpus, out)) == 0
+    assert stub_pipeline.calls == [["good2", "good3"]]
+    assert {row[0] for row in _latest_codes(out).values()} == {"ok"}
+
+
+def test_a_crashed_chunk_runs_its_papers_alone_and_a_crash_is_retried_once(
+    corpus, tmp_path, stub_pipeline
+):
+    """bad1 crashes the pipeline whenever it is in a chunk; its neighbour must
+    not fail with it, and resume retries the crash once, not forever."""
+    out = tmp_path / "out"
+
+    def crash_on_bad1(stems):
+        if "bad1" in stems:
+            raise KeyError("level")
+        return {}
+
+    stub_pipeline.script = staticmethod(crash_on_bad1)
+
+    assert run_batch(_real_options(corpus, out)) == 1
+    assert stub_pipeline.calls == [["bad1", "good1"], ["bad1"], ["good1"], ["good2", "good3"]]
+    assert _latest_codes(out) == {
+        "bad1": ("failed", "chunk_error"),
+        "good1": ("ok", None),
+        "good2": ("ok", None),
+        "good3": ("ok", None),
+    }
+    assert Ledger(out / LEDGER_FILENAME).latest()["bad1"]["error"] == "KeyError: 'level'"
+
+    stub_pipeline.calls = []
+    assert run_batch(_real_options(corpus, out)) == 1
+    assert stub_pipeline.calls == [["bad1"]]
+
+    stub_pipeline.calls = []
+    assert run_batch(_real_options(corpus, out)) == 0
+    assert stub_pipeline.calls == []
+
+
+def test_a_pipeline_that_cannot_be_built_is_retried_on_the_next_run(corpus, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+
+    class Broken:
+        def __init__(self, **kwargs):
+            raise RuntimeError("CUDA driver initialization failed")
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", Broken)
+    assert run_batch(_real_options(corpus, out)) == 1
+    assert {row[1] for row in _latest_codes(out).values()} == {"chunk_error"}
+
+    fake = _FakeChewMany()
+    _install(monkeypatch, fake)
+    run_batch(_options(corpus, out))
+    assert sum(len(paths) for paths, _ in fake.calls) == 4
+
+
+def test_an_input_named_run_info_keeps_its_export(tmp_path, monkeypatch):
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    for name in ("run_info", "other"):
+        (papers / f"{name}.pdf").write_bytes(b"%PDF-1.4\n" + name.encode())
+    _install(monkeypatch, _FakeChewMany())
+    out = tmp_path / "out"
+
+    assert run_batch(_options(papers, out)) == 0
+
+    ids = sorted(Ledger(out / LEDGER_FILENAME).latest())
+    assert ids[0] == "other" and ids[1].startswith("run_info-") and len(ids) == 2
+    assert json.loads((out / f"{ids[1]}.json").read_text(encoding="utf-8"))["paper_id"] == ids[1]
+    assert json.loads((out / RUN_INFO_FILENAME).read_text(encoding="utf-8"))["n_ok"] == 2
+
+
+def test_a_same_named_newcomer_does_not_rename_a_processed_paper(tmp_path, monkeypatch):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "paper.pdf").write_bytes(b"%PDF-1.4\na")
+    manifest = tmp_path / "manifest.txt"
+    manifest.write_text("a/paper.pdf\n")
+    out = tmp_path / "out"
+    _install(monkeypatch, _FakeChewMany())
+    run_batch(_options(tmp_path, out, inputs=[str(manifest)]))
+
+    (tmp_path / "b" / "paper.pdf").write_bytes(b"%PDF-1.4\nb")
+    manifest.write_text("a/paper.pdf\nb/paper.pdf\n")
+    second = _FakeChewMany()
+    _install(monkeypatch, second)
+    run_batch(_options(tmp_path, out, inputs=[str(manifest)]))
+
+    assert [[p.parent.name for p in paths] for paths, _ in second.calls] == [["b"]]
+    exports = sorted(p.stem for p in out.glob("*.json") if p.name != RUN_INFO_FILENAME)
+    assert exports == sorted(Ledger(out / LEDGER_FILENAME).latest())
+    assert len(exports) == 2 and exports[0] == "paper"
+
+
+def test_tables_leave_out_exports_of_another_schema_major(corpus, tmp_path, monkeypatch, capsys):
+    """A resumed out dir that still holds a v11 export must not lose its tables."""
+    import pyarrow.parquet as pq
+
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "old.json").write_text(
+        json.dumps({"paper_id": "old", "schema_version": "11.0", "bib": []}), encoding="utf-8"
+    )
+    Ledger(out / LEDGER_FILENAME).append({"paper_id": "old", "status": "ok"})
+    _install(monkeypatch, _RealExports())
+
+    run_batch(_options(corpus, out))
+
+    papers = pq.read_table(out / "tables" / "paper.parquet").column("paper_id").to_pylist()
+    assert papers == ["good1", "good2", "good3"]
+
+
+def test_tables_of_an_older_major_stay_when_no_current_export_exists(tmp_path, capsys):
+    from rich.console import Console
+
+    from bibr.batch.runner import write_batch_tables
+
+    out = tmp_path / "out"
+    (out / "tables").mkdir(parents=True)
+    (out / "tables" / "paper.parquet").write_bytes(b"written by bibr 0.5")
+    (out / "old.json").write_text(json.dumps({"paper_id": "old", "schema_version": "11.0"}))
+    ledger = Ledger(out / LEDGER_FILENAME)
+    ledger.append({"paper_id": "old", "status": "ok"})
+    console = Console(file=io.StringIO(), width=200)
+
+    write_batch_tables(out, ledger, ledger.read(), console=console)
+
+    assert (out / "tables" / "paper.parquet").read_bytes() == b"written by bibr 0.5"
+    assert " ".join(console.file.getvalue().split()) == (
+        "! 1 export(s) of another schema major left out of the tables (old.json: 11.0); "
+        "re-run them with --force to include them"
+    )

@@ -249,7 +249,12 @@ def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] |
             continue
         data = getattr(source, "data", None)
         if isinstance(data, Mapping):
-            yield str(getattr(source, "paper_id", "<result>")), data, None
+            # Name the input file: two results sharing a paper_id share it as
+            # a label too, and the duplicate error must say which files clash.
+            origin = data.get("source")
+            file_name = origin.get("file_name") if isinstance(origin, Mapping) else None
+            label = str(getattr(source, "paper_id", "<result>"))
+            yield f"{label} ({file_name})" if file_name else label, data, None
             continue
         path = Path(source)
         try:

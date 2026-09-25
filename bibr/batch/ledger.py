@@ -5,9 +5,11 @@ failure, so the run is auditable even for papers that produced no export.
 Resume semantics read the *latest* line per ``paper_id``:
 
 * ``ok`` → skipped (unless ``--force``);
-* ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except an
-  ``error_code`` of ``interrupted`` — that paper never really ran and is
-  picked up again by default.
+* ``failed`` → skipped unless ``--retry-failed`` (or ``--force``), except a
+  failure that says nothing about the paper (:func:`reruns_by_default`): the
+  run was interrupted, a service it needed was down, or the serve refused the
+  token — that paper is picked up again by default. A crash
+  (``chunk_error``) is picked up again once.
 
 Schema (see ``docs/guides/batch.md`` for the table):
 
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -38,6 +41,30 @@ ERROR_TEXT_LIMIT = 800
 WARNING_SAMPLE = 3
 WARNING_TEXT_LIMIT = 200
 INTERRUPTED = "interrupted"
+UPSTREAM_UNAVAILABLE = "upstream_unavailable"
+CHUNK_ERROR = "chunk_error"
+# Failed lines whose cause lies outside the paper: the run was stopped, a
+# service it needed (OCR, LLM, the serve) was down or could not start, or the
+# serve refused the token. The paper never got a verdict, so resume runs it
+# again by default. Remote lines whose transient retries ran out carry
+# ``transient_exhausted`` and count too. Timeouts are not here: a paper can
+# be too slow on its own, and re-running it by default would never finish.
+RERUN_ERROR_CODES = frozenset({INTERRUPTED, UPSTREAM_UNAVAILABLE, "http_401", "http_403"})
+# A crash can be the machine's (a CUDA fault, a pipeline that could not be
+# built) or the paper's (a bug its content triggers). Resume retries it once;
+# a paper that crashed this many times is left to ``--retry-failed``.
+MAX_CRASHES = 2
+
+
+def reruns_by_default(entry: Mapping[str, Any], *, crashes: int = 1) -> bool:
+    """Does a resumed run pick up this failed ledger line without ``--retry-failed``?
+
+    *crashes* is how many ``chunk_error`` lines the paper has in the ledger.
+    """
+    code = entry.get("error_code")
+    if code in RERUN_ERROR_CODES or entry.get("transient_exhausted") is True:
+        return True
+    return code == CHUNK_ERROR and crashes < MAX_CRASHES
 
 
 def utc_now_iso() -> str:
@@ -231,6 +258,7 @@ class Ledger:
     def __init__(self, path: Path):
         self.path = Path(path)
         self._attempts: dict[str, int] | None = None
+        self._tail_checked = False
 
     # -- reading ---------------------------------------------------------
 
@@ -280,11 +308,20 @@ class Ledger:
         *,
         force: bool = False,
         retry_failed: bool = False,
+        entries: Sequence[Mapping[str, Any]] | None = None,
     ) -> ResumePlan:
-        """Split *items* into run / skip buckets from the latest line per paper."""
-        entries = self.read()
+        """Split *items* into run / skip buckets from the latest line per paper.
+
+        *entries* are the ledger lines when the caller has read them already.
+        """
+        entries = self.read() if entries is None else entries
         latest = self.latest(entries)
         self._attempts = self.attempts(entries)
+        crashes: dict[str, int] = {}
+        for entry in entries:
+            if entry.get("error_code") == CHUNK_ERROR:
+                pid = str(entry["paper_id"])
+                crashes[pid] = crashes.get(pid, 0) + 1
         plan = ResumePlan(to_run=[], skipped_ok=[], skipped_failed=[])
         for item in items:
             last = latest.get(item.paper_id)
@@ -294,7 +331,7 @@ class Ledger:
             status = last.get("status")
             if status == "ok":
                 plan.skipped_ok.append(item)
-            elif last.get("error_code") == INTERRUPTED or retry_failed:
+            elif retry_failed or reruns_by_default(last, crashes=crashes.get(item.paper_id, 0)):
                 plan.to_run.append(item)
             else:
                 plan.skipped_failed.append(item)
@@ -304,9 +341,27 @@ class Ledger:
 
     def append(self, entry: Mapping[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(dict(entry), ensure_ascii=False, default=str) + "\n"
+        if not self._tail_checked:
+            # A run killed mid-append (OOM, SIGKILL, a full disk) leaves a
+            # last line with no newline; appending straight after it would
+            # glue this record onto the fragment and lose both.
+            self._tail_checked = True
+            if self._ends_mid_line():
+                line = "\n" + line
         with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(dict(entry), ensure_ascii=False, default=str) + "\n")
+            handle.write(line)
             handle.flush()
+
+    def _ends_mid_line(self) -> bool:
+        try:
+            with self.path.open("rb") as handle:
+                if handle.seek(0, os.SEEK_END) == 0:
+                    return False
+                handle.seek(-1, os.SEEK_END)
+                return handle.read(1) != b"\n"
+        except OSError:
+            return False
 
     def next_attempt(self, paper_id: str) -> int:
         if self._attempts is None:
