@@ -1119,3 +1119,18 @@ def test_doi_candidate_regex_does_not_backtrack_on_an_unclosed_bracket():
     for text in ("doi: 10.1234/<" + ":" * 100_000, "doi: 10.1234/<" + "a::" * 33_000):
         assert DOI_CANDIDATE_RE.search(text) is None
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_doi_ending_in_a_slash_ran_on_into_the_next_field():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [], footers=["https://doi.org/10.1234/jex.2026.04.0061234-5678/\u00a9 2026 The Authors."]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.normalized == "10.1234/jex.2026.04.0061234-5678/"
+    assert candidate.rejection_reason == "line_join_overrun"

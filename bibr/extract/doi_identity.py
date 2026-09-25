@@ -251,6 +251,13 @@ def _candidate_from_match(
     if marker_kind == "journal_doi" and rejection_reason is None:
         semantic_context = "journal_identity"
         tier = UNCONTESTED_UNTYPED
+    # No DOI ends in a slash. One that does ran on into the next field, as when
+    # a line join glues the ISSN line under a DOI onto it ("…04.006" +
+    # "1234-5678/© 2026 The Authors").
+    if rejection_reason is None and normalized.endswith("/"):
+        semantic_context = "line_join_overrun"
+        rejection_reason = LINE_JOIN_OVERRUN
+        tier = 0
 
     return DoiCandidate(
         raw=raw,
