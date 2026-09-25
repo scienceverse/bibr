@@ -27,8 +27,9 @@ The receipts ride the metadata record (:class:`FieldDecisions`) and end up on
 
 from __future__ import annotations
 
+import functools
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -110,6 +111,8 @@ class FieldDecision:
     # The step responsible for the field when no candidate was used; a failed
     # call is reported against it.
     producer: str | None = None
+    # The gating inputs the rule was given (scope, abstention, notice, ...).
+    flags: tuple[tuple[str, Any], ...] = ()
 
     @property
     def source(self) -> str | None:
@@ -221,6 +224,22 @@ def incumbent_candidate(metadata: Any, name: str, *, source: str | None) -> Fiel
 # ── Rules ────────────────────────────────────────────────────────────────
 
 
+def _with_flags(decide: Callable[..., FieldDecision]) -> Callable[..., FieldDecision]:
+    """Keep the rule's keyword flags (booleans, a notice type) on its receipt."""
+
+    @functools.wraps(decide)
+    def wrapper(*args: Any, **kwargs: Any) -> FieldDecision:
+        decision = decide(*args, **kwargs)
+        flags = tuple(
+            (name, value)
+            for name, value in kwargs.items()
+            if isinstance(value, bool) or name == "notice"
+        )
+        return replace(decision, flags=flags) if flags else decision
+
+    return wrapper
+
+
 def decide_value(name: str, candidate: FieldCandidate | None) -> FieldDecision:
     """A field with one producer: its value, empty or not."""
     if candidate is None:
@@ -248,6 +267,7 @@ _AUTHOR_RULES = {
 }
 
 
+@_with_flags
 def decide_authors(
     candidates: Sequence[FieldCandidate], *, notice: str | None = None
 ) -> FieldDecision:
@@ -293,6 +313,7 @@ def decide_authors(
     )
 
 
+@_with_flags
 def decide_abstract(
     incumbent: FieldCandidate | None,
     *,
@@ -345,6 +366,7 @@ def decide_abstract(
     return FieldDecision("abstract", "", None, "none", tuple(considered), producer)
 
 
+@_with_flags
 def decide_keywords(
     incumbent: FieldCandidate | None,
     *,
@@ -391,6 +413,7 @@ _CLASSIFICATION_RULES = {
 }
 
 
+@_with_flags
 def decide_classification(
     candidates: Sequence[FieldCandidate], *, notice: str | None = None
 ) -> FieldDecision:
@@ -439,6 +462,7 @@ def decide_classification(
     )
 
 
+@_with_flags
 def decide_statement(
     name: str,
     incumbent: FieldCandidate | None,
@@ -471,6 +495,7 @@ def decide_statement(
     return FieldDecision(name, rendered.value, rendered, "integrity_resolution", tuple(considered))
 
 
+@_with_flags
 def decide_title(
     incumbent: FieldCandidate | None,
     *,

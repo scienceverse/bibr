@@ -448,6 +448,12 @@ def _heading(header):
 def test_title_keeps_the_extracted_title():
     decision = _title("A Model Title", detected_title="Some Layout Title")
     assert (decision.value, decision.source, decision.rule) == ("A Model Title", "llm", "extracted")
+    # The receipt keeps the gating inputs the rule was given.
+    assert dict(decision.flags) == {
+        "scoped": True,
+        "abstained": False,
+        "prefer_byline_adjacent": False,
+    }
 
 
 def test_title_null_recovers_the_one_selected_title_row():
