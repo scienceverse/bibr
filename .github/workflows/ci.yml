@@ -275,6 +275,15 @@ jobs:
             exit 1
           fi
 
+      # The default torch-free ONNX runtime is what a core install actually
+      # runs. These tests use the committed bundles under tests/fixtures/onnx
+      # (no torch needed to build them), so they execute here — not just in
+      # the full-torch job. Kept as an explicit step (they also run inside
+      # the suite below) so a skip/deselect elsewhere cannot silently drop
+      # the only core coverage of the default runtime.
+      - name: Run the torch-free ONNX runtime tests
+        run: uv run --locked pytest -q tests/test_onnx_runtime_core.py tests/test_no_torch_on_http_path.py
+
       - name: Run the core-compatible suite
         run: uv run --locked pytest -m "not slow" -q
 

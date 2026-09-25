@@ -815,11 +815,18 @@ async def test_configured_but_unloadable_model_warns(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm(header_texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0) for _ in header_texts]
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    # Hermetic: the alias-free path calls the LLM tier unconditionally when
+    # no model loads (escalation only gates the trained-model branch), so
+    # without this stub the test POSTs header text to the real LLM API.
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm)
     results = await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,
@@ -835,11 +842,16 @@ async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm(header_texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0) for _ in header_texts]
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = None
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    # Same hermetic stub as above: no model means the LLM tier is reached.
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm)
     await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,

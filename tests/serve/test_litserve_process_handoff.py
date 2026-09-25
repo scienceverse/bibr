@@ -101,7 +101,6 @@ def test_descriptor_handoff_rejects_inline_decode_in_api_process(tmp_path):
     assert stored_path.exists()
 
 
-@pytest.mark.slow
 def test_descriptor_crosses_spawned_litserve_worker_and_file_is_consumed(tmp_path):
     """Catches queueing upload bytes/paths or reading outside LitServe's real worker."""
     content = b"%PDF-1.7\nreal LitServe process handoff\n%%EOF"
@@ -152,7 +151,6 @@ def test_descriptor_crosses_spawned_litserve_worker_and_file_is_consumed(tmp_pat
                 raise
 
 
-@pytest.mark.slow
 def test_default_worker_death_fail_stops_without_replacement(tmp_path, monkeypatch):
     """Catches replacing a dead worker while its API request remains stranded."""
     from bibr.config import GlobalSettings

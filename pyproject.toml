@@ -105,8 +105,8 @@ dev = [
     "fakeredis[lua]>=2.30.0", # RedisJobStore tests (Lua scripts need the lua extra)
     # torch.onnx.export needs the `onnx` package to write the graph, and the
     # ONNX runtime tests export tiny models in-process (scripts/export_onnx_*.py,
-    # tests/onnx_fixtures.py). Not a runtime dependency: inference only needs
-    # onnxruntime, which is core.
+    # scripts/generate_onnx_test_bundles.py, tests/onnx_fixtures.py). Not a
+    # runtime dependency: inference only needs onnxruntime, which is core.
     "onnx>=1.17.0",
 ]
 docs = [
