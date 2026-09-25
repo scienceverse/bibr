@@ -328,6 +328,9 @@ released.
   validation re-asks are enabled (cloud providers by default; a custom
   OpenAI-compatible endpoint makes one attempt), and otherwise an
   `llm_invalid_output` failure.
+- The NuExtract native backend's Instructor recovery request now takes its own
+  rate-limit slot, as the decoder-abort recovery already did; it was a further
+  physical request that the shared limiter never saw.
 - Cloud OCR (`--ocr gemini|openai|anthropic`) now sees the HTTP status of a
   failed call. Instructor wraps the provider's error in its own exception,
   which carries no status, so a bad key (401/403/404) returned blank regions

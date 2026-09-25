@@ -1801,6 +1801,9 @@ class LLMClient:
             try:
                 recovery_backend = self._make_recovery_instructor_backend()
                 recovery_client = self._get_json_mode_client()
+                # A further physical request: it takes its own limiter slot,
+                # as the decoder-abort recovery below does.
+                await self._acquire_rate_limit()
                 recovered = await self._invoke_protocol_with_retries(
                     recovery_backend,
                     protocol="instructor",
