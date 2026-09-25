@@ -381,6 +381,14 @@ released.
   were lost from the reference list. The aggregate box now stays and the entry
   boxes it repeats are hidden instead; they still count as layout onsets. This
   applies both to the OCR stage's overlap cleanup and to the PDF parser.
+- The page-furniture filter on the reference lines the geometry segmenter
+  reads removes only lines at the top or bottom edge of a page, as it was
+  documented to. It removed every line whose text, with digits masked, matched
+  a line repeated at the edges of two pages, so reference text inside a page
+  was dropped when the same short text also opened or closed two pages: a
+  wrapped year or page range matching a page number, a wrapped "Polish)." line,
+  or a reference label printed on its own line ("2." matching a "4." at the top
+  of the next page).
 
 ### Added
 
