@@ -356,6 +356,13 @@ released.
   as reference numbers, and the export typed a body section as references. The
   reference receipt records `classifier_references_demoted`. A section whose
   own heading names references, such as a second list, keeps its type.
+- Reference strings from a JATS `<ref-list>` are parsed as given, one per
+  `<ref>`. The filter for non-reference fragments dropped short entries without
+  a year (a classic such as "Aristotle. Nicomachean Ethics.", or an entry whose
+  year abuts its journal name), and the merged-reference splitter cut single
+  entries in two, so every later entry shifted. HTML reference lists still go
+  through both, because the HTML reader also collects other lists under a
+  references heading, such as page navigation.
 
 ### Added
 

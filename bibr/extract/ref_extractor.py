@@ -1247,8 +1247,9 @@ class ReferenceExtractor:
         raw_ref_strings = await self._segment_references(ref_text, seg_strategy)
         raw_spans = self._selected_segmentation_spans
         ref_strings = raw_ref_strings
-        ref_strings = drop_non_reference_segments(ref_strings)
-        ref_strings = self._maybe_split_merged(ref_strings)
+        if not self._authoritative_native_selected():
+            ref_strings = drop_non_reference_segments(ref_strings)
+            ref_strings = self._maybe_split_merged(ref_strings)
         if ref_strings == raw_ref_strings and len(raw_spans) == len(ref_strings):
             located_spans: tuple[tuple[int, int] | None, ...] = raw_spans
         else:
@@ -1803,6 +1804,21 @@ class ReferenceExtractor:
                 f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
+
+    def _authoritative_native_selected(self) -> bool:
+        """Whether the selected segmentation is a JATS ref-list taken verbatim.
+
+        Each ``<ref>`` is one reference by construction, so the junk filter
+        (which drops short entries without a year) and the merge splitter
+        (which cuts at in-title citations and bare years) can only lose or
+        split real entries, shifting every later bib_id.
+        """
+        if getattr(self.contents, "native_ref_strings_authoritative", False) is not True:
+            return False
+        return any(
+            attempt.strategy == "native" and attempt.selected
+            for attempt in self._segmentation_attempts
+        )
 
     def _maybe_split_merged(self, ref_strings: list[str]) -> list[str]:
         """Split merged reference strings when REF_SPLIT_MERGED_REFS is on.

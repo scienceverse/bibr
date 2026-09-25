@@ -764,6 +764,13 @@ class PaperContents:
     # each entry is one full reference. Consumed by the ``native`` segmentation
     # branch so LLM/geom segmentation is skipped, then parsed as configured.
     native_ref_strings: list[str] | None = None
+    # True when every ``native_ref_strings`` entry is exactly one reference by
+    # construction (one JATS <ref> each), so reference extraction keeps them
+    # verbatim: no junk filter, no merge split. HTML leaves it False because
+    # its walker also collects non-reference lists and text blocks under a
+    # references heading (navigation, "Download BibTeX"), which the filter
+    # still has to drop.
+    native_ref_strings_authoritative: bool = False
     # Internal diagnostics appended at the tail to preserve positional callers.
     reference_yield_receipt: ReferenceYieldReceipt | None = None
     reference_boundary_reason_flags: list[str] = field(default_factory=list)
