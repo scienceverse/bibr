@@ -67,8 +67,10 @@ def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
         sentence.page_number for sentence in getattr(contents, "sentences", None) or ()
     )
     pages = [page for page in _EVIDENCE_PAGES if page in processed]
+    if not pages:
+        return None
     data = _processed_bytes(fs)
-    if not pages or data is None or not is_pdf(data):
+    if data is None or not is_pdf(data):
         return None
     try:
         return read_pdf_doi_evidence(data, pages)
