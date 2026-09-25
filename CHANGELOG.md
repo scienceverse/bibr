@@ -580,6 +580,40 @@ released.
   or "under a Creative Commons Attribution 4.0 licence") and the date an
   approval was received ended the statement as if they were publisher
   boilerplate.
+- The byline check that reports authors missing from the extracted list
+  (`VAL_AUTHOR_MISSING`) read a byline joined with French "et", Dutch "en",
+  German "und", Danish or Norwegian "og", Swedish "och" or Indonesian "dan"
+  as one fewer name than it prints. It split names only on ";", "&" and
+  "and". Spanish "y", Portuguese and Italian "e", and Catalan and Polish "i"
+  also separate two names now, but only in lower case and only when the words
+  on both sides are full names of two or more words, so one person's two
+  surnames, as in "Ramón y Cajal", stay together.
+- A translator credited under the byline, as in "Traducido del inglés por …",
+  "Translated by …" or "Übersetzt von …", was extracted as an author. A name
+  printed only right after such a credit in the front matter is now dropped
+  from the author list, with a `VAL_AUTHOR_TRANSLATOR_DROPPED` warning
+  (evidence `reason:translator_credit`). A translator who is also printed in
+  the byline stays.
+- When a PDF positions a word instead of printing a space before it, the text
+  layer glues the two together, and a byline such as "Kerem B.Yalcin, Selin
+  DenizAksoy" came back with family names "B.Yalcin" and "DenizAksoy". Initials
+  glued to the family name now move back to the given name. A family name
+  joined at a lower-to-upper case step is split, and its first part moved to
+  the given name, when the paper prints the spaced form elsewhere, for example
+  in its contribution statement. Both repairs add a
+  `VAL_AUTHOR_PARTITION_REPAIRED` warning with evidence
+  `reason:glued_family_name`. Author grounding also reads such a join as two
+  words, so a correctly spaced name still matches the glued byline, while
+  surname prefixes such as "McDonald" or "DeKay" stay one word.
+- The metadata LLM can romanise a byline printed in another script, returning
+  "N. O. Petrova" for a Cyrillic byline, even though it is asked for verbatim
+  names. When every extracted name is in a script the selected byline barely
+  uses (under a fifth of its letters, ignoring email addresses and URLs) and
+  none of them is printed in the extraction context, the list is now
+  discarded like a fabricated one: `VAL_AUTHOR_FABRICATED` with evidence
+  `reason:authors_script_mismatch`, then the empty-author recovery retries
+  against the byline alone. Papers that also print the romanised names keep
+  them.
 
 ### Added
 

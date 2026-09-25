@@ -345,7 +345,52 @@ def build_byline_group(resolution: FrontMatterResolution) -> BylineGroup:
 
 
 _NAME_TOKEN_RE = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
-_BYLINE_SUFFIX_STOP_WORDS = frozenset(
+# A translator credit printed under the byline ("Traducido del inglés por …",
+# "Translated by …", "Übersetzt von …") names someone who is not an author.
+# Folded tokens, as ``_name_tokens`` emits them.
+_TRANSLATOR_CREDIT_WORDS = frozenset(
+    {
+        "translated",
+        "translation",
+        "translator",
+        "traduccion",
+        "traducido",
+        "traducida",
+        "traductor",
+        "traductora",
+        "traduit",
+        "traduite",
+        "traduction",
+        "traducteur",
+        "traductrice",
+        "ubersetzt",
+        "ubersetzung",
+        "ubersetzer",
+        "ubersetzerin",
+        "traducao",
+        "traduzido",
+        "traduzida",
+        "tradutor",
+        "tradutora",
+        "vertaald",
+        "vertaling",
+        "vertaler",
+        "tradotto",
+        "tradotta",
+        "traduzione",
+        "traduttore",
+        "traduttrice",
+    }
+)
+# The word that hands the credit to the translator's name: "… by", "… de",
+# "… por", "… par", "… von", "… door", "… da", "… di".
+_TRANSLATOR_CREDIT_PREPOSITIONS = frozenset(
+    {"by", "de", "del", "por", "par", "von", "door", "da", "di", "dal"}
+)
+# How far back from a name the credit word may sit: "translated from the
+# original French by" is six tokens.
+_TRANSLATOR_CREDIT_WINDOW = 8
+_BYLINE_SUFFIX_STOP_WORDS = _TRANSLATOR_CREDIT_WORDS | frozenset(
     {
         "abstract",
         "affiliation",
@@ -483,12 +528,83 @@ def _fold_broken_diacritics(value: str) -> str:
     return without_marks.translate(_LATIN_BASE_TRANSLATION)
 
 
+# Surname prefixes printed with an inner capital ("McDonald", "DeKay",
+# "VanderWeele", "AlQahtani"). Any other lower-to-upper step inside a word is
+# two words whose space the PDF text layer never emitted: it positions the
+# next word instead of printing a space glyph, so "Selin Deniz Aksoy"
+# extracts as "Selin DenizAksoy".
+_CASE_JOIN_PREFIXES = frozenset(
+    {
+        "abd",
+        "abdel",
+        "abdul",
+        "abu",
+        "al",
+        "ben",
+        "bin",
+        "da",
+        "dal",
+        "das",
+        "de",
+        "del",
+        "della",
+        "des",
+        "di",
+        "do",
+        "dos",
+        "du",
+        "el",
+        "fitz",
+        "ibn",
+        "la",
+        "le",
+        "lo",
+        "mac",
+        "mc",
+        "ni",
+        "st",
+        "te",
+        "ten",
+        "ter",
+        "van",
+        "vande",
+        "vanden",
+        "vander",
+        "von",
+    }
+)
+_LETTER_RUN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _case_join_words(word: str) -> list[str]:
+    """Split *word* at every lower-to-upper step not owned by a surname prefix."""
+
+    words: list[str] = []
+    start = 0
+    for index in range(1, len(word) - 1):
+        if not (word[index - 1].islower() and word[index].isupper() and word[index + 1].islower()):
+            continue
+        if word[start:index].casefold() in _CASE_JOIN_PREFIXES:
+            continue
+        words.append(word[start:index])
+        start = index
+    words.append(word[start:])
+    return words
+
+
+def _split_case_joins(value: str) -> str:
+    return _LETTER_RUN_RE.sub(lambda match: " ".join(_case_join_words(match.group(0))), value)
+
+
 def _name_tokens(value: str) -> tuple[str, ...]:
     # Marker stripping happens here, before casefolding, so that every name
     # comparison in this module is symmetric: printed byline text and extracted
     # author values are folded the same way, whichever side carries the marker.
-    normalized = _strip_attached_markers(
-        _fold_broken_diacritics(value).translate(_NAME_PUNCTUATION_TRANSLATION)
+    # Case joins split after it, once "Aksoy1" has lost its marker.
+    normalized = _split_case_joins(
+        _strip_attached_markers(
+            _fold_broken_diacritics(value).translate(_NAME_PUNCTUATION_TRANSLATION)
+        )
     )
     return tuple(token.casefold() for token in _NAME_TOKEN_RE.findall(normalized))
 
@@ -640,9 +756,71 @@ def grounded_authors_in_context(
     return grounded, rejected
 
 
+def _follows_translator_credit(preceding: tuple[str, ...]) -> bool:
+    window = preceding[-_TRANSLATOR_CREDIT_WINDOW:]
+    return bool(
+        window
+        and window[-1] in _TRANSLATOR_CREDIT_PREPOSITIONS
+        and not _TRANSLATOR_CREDIT_WORDS.isdisjoint(window[:-1])
+    )
+
+
+def _is_translator_credit(author: PaperAuthor, context_tokens: tuple[str, ...]) -> bool:
+    """Whether *author* is printed only as the name a translator credit hands off to.
+
+    A translator who is also an author is printed in the byline as well, and
+    that occurrence keeps them.
+    """
+
+    starts = [
+        start
+        for variant in _author_token_variants(author)
+        for start, _ in _find_token_sequences(context_tokens, variant)
+    ]
+    return bool(starts) and all(
+        _follows_translator_credit(context_tokens[:start]) for start in starts
+    )
+
+
+# Initials the text layer glued to the surname after them: "Kerem B.Yalcin"
+# comes back as given "Kerem", family "B.Yalcin".
+_GLUED_INITIALS_RE = re.compile(r"((?:[^\W\d_]\.)+)(?=[^\W\d_]{2})", re.UNICODE)
+
+
+def _unglue_leading_initials(given: str, family: str) -> tuple[str, str] | None:
+    match = _GLUED_INITIALS_RE.match(family)
+    if match is None or not family[match.end()].isupper():
+        return None
+    initials = match.group(1)
+    if not all(char.isupper() for char in initials if char != "."):
+        return None
+    return f"{given} {initials}".strip(), family[match.end() :]
+
+
+# Email addresses, URLs and their labels in a byline row are Latin whatever
+# script the names are printed in.
+_ADDRESS_FRAGMENT_RE = re.compile(r"\S*(?:@|://|www\.)\S*|\b(?:e-?mail|orcid)\b", re.IGNORECASE)
+# A script with less of the byline's letters than this is not the script the
+# byline prints its names in.
+_BYLINE_SCRIPT_MIN_SHARE = 0.2
+
+
+def _letter_scripts(value: str) -> dict[str, int]:
+    """Count the letters of *value* by Unicode script ("LATIN", "CYRILLIC", "CJK")."""
+
+    counts: dict[str, int] = {}
+    for char in value:
+        if not char.isalpha():
+            continue
+        script = unicodedata.name(char, "").split(" ", 1)[0]
+        if script and script != "MODIFIER":
+            counts[script] = counts.get(script, 0) + 1
+    return counts
+
+
 def _has_name_like_residual(tokens: list[str] | tuple[str, ...]) -> bool:
     residual = list(tokens)
-    while residual and (residual[0] in {"and", "et"} or residual[0].isdigit()):
+    while residual and (residual[0] in _BYLINE_CONJUNCTION_TOKENS or residual[0].isdigit()):
         residual.pop(0)
     bounded: list[str] = []
     for token in residual:
@@ -677,11 +855,42 @@ def _has_unmatched_author_evidence(
     return _has_name_like_residual(suffix)
 
 
+# The word a byline joins its last two names with: "and", French "et", Dutch
+# "en", German "und", Danish/Norwegian "og", Swedish "och", Indonesian "dan".
+# The new words match in lower or upper case only, so a capitalised given name
+# ("Dan", "En") is never taken for one.
+_BYLINE_CONJUNCTION_RE = re.compile(
+    r"\s*(?:;|&|\b(?i:and)\b|\b(?:et|en|und|og|och|dan|ET|EN|UND|OG|OCH)\b)\s*"
+)
+# Spanish "y", Portuguese/Italian "e" and Catalan/Polish "i" also join one
+# person's two surnames ("Ramón y Cajal", "Puig i Cadafalch"). They split only
+# in lower case (an upper-case letter is an initial) and only between two
+# names of at least two words each.
+_BYLINE_SURNAME_JOINER_RE = re.compile(r"(\s+[yei]\s+)")
+_BYLINE_CONJUNCTION_TOKENS = frozenset(
+    {"and", "et", "en", "und", "og", "och", "dan", "y", "e", "i"}
+)
+
+
+def _split_surname_joiners(chunk: str) -> list[str]:
+    pieces = _BYLINE_SURNAME_JOINER_RE.split(chunk)
+    merged = [pieces[0]]
+    for joiner, piece in zip(pieces[1::2], pieces[2::2], strict=True):
+        left_name = merged[-1].rsplit(",", 1)[-1]
+        right_name = piece.split(",", 1)[0]
+        if len(_name_tokens(left_name)) >= 2 and len(_name_tokens(right_name)) >= 2:
+            merged.append(piece)
+        else:
+            merged[-1] += joiner + piece
+    return merged
+
+
 def _split_byline_entries(value: str) -> tuple[tuple[str, ...], ...]:
     chunks = [
-        chunk.strip()
-        for chunk in re.split(r"\s*(?:;|&|\band\b)\s*", value, flags=re.IGNORECASE)
-        if chunk.strip()
+        piece.strip()
+        for chunk in _BYLINE_CONJUNCTION_RE.split(value)
+        for piece in _split_surname_joiners(chunk)
+        if piece.strip()
     ]
     entries: list[tuple[str, ...]] = []
     for chunk in chunks:
@@ -1626,8 +1835,11 @@ class CoreMetadataExtractor:
 
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
+            authors = self._drop_translator_credits(authors, full_text)
+            self._repair_glued_names(authors)
             if resolution is not None:
                 authors = self._drop_fabricated_authors(authors, full_text, resolution)
+                authors = self._drop_transliterated_authors(authors, full_text, resolution)
 
             author_source = "llm"
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
@@ -1639,6 +1851,8 @@ class CoreMetadataExtractor:
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
                     authors = self._convert_llm_authors(llm_metadata.authors)
+                    authors = self._drop_translator_credits(authors, full_text)
+                    self._repair_glued_names(authors)
                     author_source = "llm_recovery"
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
@@ -1874,6 +2088,140 @@ class CoreMetadataExtractor:
             f"discarded {len(authors)} author(s) absent from the extraction context",
         )
         return []
+
+    def _drop_transliterated_authors(
+        self,
+        authors: list[PaperAuthor],
+        context: str,
+        resolution: FrontMatterResolution,
+    ) -> list[PaperAuthor]:
+        """Delete an author list the model romanised instead of copying.
+
+        A byline printed in Cyrillic came back as "N. O. Petrova". The
+        fabrication guard stands aside once a byline is printed, because a name
+        that fails to match it is usually a script, OCR or marker difference.
+        This case has positive evidence instead: each name is written in a
+        script the byline hardly uses, and none of them is printed in the
+        extraction context, where a paper that prints both forms carries the
+        romanised one. All-or-nothing, like the fabrication guard; the
+        empty-author recovery then retries against the byline alone.
+        """
+
+        if not authors:
+            return authors
+        byline = build_byline_group(resolution)
+        printed = _letter_scripts(_ADDRESS_FRAGMENT_RE.sub(" ", " ".join(byline.raw_texts)))
+        total = sum(printed.values())
+        if not total:
+            return authors
+        for author in authors:
+            scripts = _letter_scripts(f"{author.given} {author.family}")
+            if len(scripts) != 1:
+                return authors
+            (script,) = scripts
+            if printed.get(script, 0) / total >= _BYLINE_SCRIPT_MIN_SHARE:
+                return authors
+        grounded, _ = grounded_authors_in_context(authors, context)
+        if grounded:
+            return authors
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_AUTHOR_FABRICATED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"Discarded {len(authors)} extracted author(s): written in a script the "
+                    "selected byline does not print them in"
+                ),
+                origin_stage="extract",
+                evidence_ids=(
+                    "reason:authors_script_mismatch",
+                    *(f"author:{author.author_id}" for author in authors),
+                    *byline.candidate_ids,
+                ),
+                count=len(authors),
+            )
+        )
+        self._record_metadata_warning(
+            WarningCode.AUTHORS_FABRICATED,
+            f"discarded {len(authors)} author(s) romanised from the printed byline",
+        )
+        return []
+
+    def _drop_translator_credits(
+        self,
+        authors: list[PaperAuthor],
+        context: str,
+    ) -> list[PaperAuthor]:
+        """Remove people the front matter credits only as the translator.
+
+        A "Traducido del inglés por …" line under the byline made the
+        translator a second author.
+        """
+
+        context_tokens = _name_tokens(context)
+        kept: list[PaperAuthor] = []
+        dropped: list[PaperAuthor] = []
+        for author in authors:
+            (dropped if _is_translator_credit(author, context_tokens) else kept).append(author)
+        if not dropped:
+            return authors
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_AUTHOR_TRANSLATOR_DROPPED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"Discarded {len(dropped)} extracted author(s) printed only as the translator"
+                ),
+                origin_stage="extract",
+                evidence_ids=(
+                    "reason:translator_credit",
+                    *(f"author:{author.author_id}" for author in dropped),
+                ),
+                count=len(dropped),
+            )
+        )
+        for author_id, author in enumerate(kept, start=1):
+            author.author_id = author_id
+        return kept
+
+    def _repair_glued_names(self, authors: list[PaperAuthor]) -> None:
+        """Split a family name glued to the word printed before it.
+
+        PDFs often position the next word instead of printing a space glyph,
+        and the text layer then reads "Kerem B.Yalcin1, Selin DenizAksoy1".
+        The model copies that verbatim, so the given name loses its initial or
+        middle name to the family name. Glued initials move back to the given
+        name unconditionally: an initial is never part of a surname. A
+        lower-to-upper join splits only when the paper prints the spaced form
+        somewhere, such as a contribution statement; otherwise the join may be
+        the printed spelling, as in "DeLaCruz".
+        """
+
+        printed: str | None = None
+        for author in authors:
+            if not author.family or "organization" in (author.role or []):
+                continue
+            repaired = _unglue_leading_initials(author.given, author.family)
+            if repaired is None and _LETTER_RUN_RE.fullmatch(author.family):
+                words = _case_join_words(author.family)
+                if len(words) > 1:
+                    if printed is None:
+                        printed = " ".join(self.sentences_df["text"].dropna().astype(str))
+                    spaced = r"\s+".join(re.escape(word) for word in words)
+                    if re.search(rf"(?<![^\W\d_]){spaced}(?![^\W\d_])", printed):
+                        repaired = (f"{author.given} {' '.join(words[:-1])}".strip(), words[-1])
+            if repaired is None:
+                continue
+            author.given, author.family = repaired
+            self.validation_issues.append(
+                ValidationIssue(
+                    code="VAL_AUTHOR_PARTITION_REPAIRED",
+                    severity=IssueSeverity.WARNING,
+                    message="Split a family name glued to the given name printed before it",
+                    origin_stage="extract",
+                    evidence_ids=(f"author:{author.author_id}", "reason:glued_family_name"),
+                )
+            )
 
     def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
         """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
