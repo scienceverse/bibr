@@ -114,11 +114,12 @@ def test_an_existing_env_is_rewritten_in_place(tmp_path):
     env_path.write_text("A=1\n", encoding="utf-8")
     other_name = tmp_path / "linked.env"
     os.link(env_path, other_name)
+    project_mode = project.stat().st_mode
     os.chmod(project, 0o500)
     try:
         merge_env(env_path, {"B": "2"})
     finally:
-        os.chmod(project, 0o700)
+        os.chmod(project, project_mode)
     assert parse_env(other_name) == {"A": "1", "B": "2"}
 
 
