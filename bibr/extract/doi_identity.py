@@ -31,7 +31,6 @@ TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
 PDF_INFO = "pdf_info"
 PDF_XMP = "pdf_xmp"
-_AGREEMENT_SOURCES = frozenset({LINK_ANNOTATION, PDF_INFO, PDF_XMP})
 AGREEMENT_ONLY = "agreement_only"
 LINE_JOIN_OVERRUN = "line_join_overrun"
 
@@ -772,7 +771,7 @@ def _with_pdf_evidence(
         if region.page is not None:
             regions_by_page[region.page].append(region)
     rows = _agreement_rows(evidence)
-    agreeing = {row.normalized for row in rows}
+    agreeing = _agreeing_dois(rows)
 
     readings = [
         (candidate, tail, line)
@@ -943,10 +942,19 @@ def _tie_break_ladder(agreeing: frozenset[str]):
     )
 
 
-def _agreeing_dois(candidates: tuple[DoiCandidate, ...]) -> frozenset[str]:
-    """DOIs named by an agreement-only source: a link target or the document metadata."""
+def _agreeing_dois(candidates) -> frozenset[str]:
+    """DOIs the PDF names outside its printed text.
+
+    The document metadata counts, and a link whose text is not the DOI itself
+    (a journal citation line, a "cite this" button). A link over a printed DOI
+    only repeats that print, and front pages link a cited work's DOI as
+    readily as the paper's own.
+    """
     return frozenset(
-        c.normalized.casefold() for c in candidates if c.source_kind in _AGREEMENT_SOURCES
+        c.normalized.casefold()
+        for c in candidates
+        if c.source_kind in (PDF_INFO, PDF_XMP)
+        or (c.source_kind == LINK_ANNOTATION and c.semantic_context == "link_target")
     )
 
 

@@ -255,6 +255,33 @@ def test_agreement_breaks_a_tie_between_printed_rivals():
     assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
 
 
+@pytest.mark.parametrize(
+    ("printed_text", "resolved"),
+    [
+        # A link over the DOI's own print repeats it; it does not agree.
+        ("https://doi.org/10.1234/second.2", False),
+        # A link on the journal's citation line names the paper's DOI.
+        ("Example Journal 11 (2026) 1-12", True),
+    ],
+)
+def test_only_a_link_whose_text_is_not_the_doi_agrees(printed_text, resolved):
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "See https://doi.org/10.1234/first.1 for the data.", 1),
+            (CanonicalSection.TITLE, "https://doi.org/10.1234/second.2", 1),
+        ]
+    )
+    link = LinkDoi(
+        1, "10.1234/second.2", "https://doi.org/10.1234/second.2", (0, 0, 1, 1), printed_text
+    )
+
+    _candidates, selection = _select(contents, _evidence(links=[link]))
+
+    assert (selection.selected is not None) is resolved
+    if resolved:
+        assert selection.selected.normalized == "10.1234/second.2"
+
+
 def test_link_and_metadata_dois_are_never_selected_alone():
     links = [
         LinkDoi(1, "10.1234/abc.5", "https://doi.org/10.1234/abc.5", (0, 0, 1, 1), "Example J 1"),
