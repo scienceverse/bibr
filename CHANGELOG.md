@@ -346,8 +346,9 @@ released.
 - Serve no longer caches a result shaped by a failure a retry could avoid. Every
   successful response was cached for 24 hours, so one Crossref timeout, OCR
   blip or failed LLM call was replayed to every later request for the same
-  PDF, including async jobs and `bibr batch --remote` re-runs. A response that
-  is not promotable, has incomplete enrichment, a `failed` field state or a
+  PDF, including async jobs and `bibr batch --remote` re-runs. A response with
+  a blocking issue other than a front-matter abstention, incomplete
+  enrichment, a `failed` field state or a
   warning in `bibr.processing_warnings.NOT_FINAL_CODES` (OCR, LLM-task,
   enrichment and resolver failures and timeouts) is returned but not cached.
   This matters more now that a failed title/keywords response exports a

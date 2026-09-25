@@ -119,20 +119,30 @@ def _emit_singleflight_metric(
     )
 
 
+# A blocking issue that is a decision about the input, not a failure: the same
+# input and code make it again, so the result is final.
+_FINAL_BLOCKING_CODES = frozenset({"VAL_METADATA_MULTI_ITEM"})
+
+
 def _is_final_result(payload: dict) -> bool:
     """Whether an export is a final answer for its input, safe to cache.
 
     Not when a failure a retry could avoid shaped it: a blocking validation
-    issue (a failed title call, incomplete references), incomplete
-    enrichment, a failed field, or a warning in ``NOT_FINAL_CODES``. Caching
-    such a result would replay one timeout or outage to every request for
-    the TTL.
+    issue other than a front-matter abstention (a failed title call,
+    incomplete references), incomplete enrichment, a failed field, or a
+    warning in ``NOT_FINAL_CODES``. Caching such a result would replay one
+    timeout or outage to every request for the TTL.
     """
     from bibr.processing_warnings import NOT_FINAL_CODES
     from bibr.validation import payload_validation
 
     validation = payload_validation(payload) or {}
-    if validation.get("promotable") is False:
+    if any(
+        isinstance(issue, dict)
+        and issue.get("blocking")
+        and issue.get("code") not in _FINAL_BLOCKING_CODES
+        for issue in validation.get("issues") or ()
+    ):
         return False
     extraction = payload.get("extraction")
     if not isinstance(extraction, dict):

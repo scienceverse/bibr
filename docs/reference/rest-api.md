@@ -149,8 +149,8 @@ that force it on.
 When `CACHE_ENABLED=true` (the default) and Redis is configured, the API caches
 successful extraction responses that are final: a response shaped by a failure
 a retry could avoid is not cached, so the next request runs the extraction
-again. That covers a response that is not promotable (a blocking validation
-issue), incomplete enrichment, a field whose `extraction.fields` state is
+again. That covers a blocking validation issue other than a front-matter
+abstention (`VAL_METADATA_MULTI_ITEM`), incomplete enrichment, a field whose `extraction.fields` state is
 `failed`, and warnings such as `OCR_REGION_FAILED`, `CROSSREF_ENRICHMENT_TIMEOUT`
 or an LLM task's `*_LLM_FAILED`. Keys distinguish file content, page range,
 figure/region output, consolidation, and reference-strategy overrides. The

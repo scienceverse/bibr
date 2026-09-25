@@ -60,7 +60,34 @@ async def test_degraded_result_is_not_cached_and_the_next_request_reruns(tmp_pat
         (_payload(warnings=[{"code": "LOW_TEXT_QUALITY", "message": "m"}]), True),
         (_payload(warnings=[{"code": "OCR_REGION_FAILED", "message": "m"}]), False),
         (_payload(warnings=[{"code": "CITATION_LLM_FAILED", "message": "m"}]), False),
-        (_payload(validation={"promotable": False, "issues": []}), False),
+        (
+            _payload(
+                validation={
+                    "promotable": False,
+                    "issues": [{"code": "VAL_METADATA_FIELD_FAILED", "blocking": True}],
+                }
+            ),
+            False,
+        ),
+        (
+            _payload(
+                validation={
+                    "promotable": False,
+                    "issues": [{"code": "VAL_REFERENCES_INCOMPLETE", "blocking": True}],
+                }
+            ),
+            False,
+        ),
+        # A front-matter abstention is a decision the same input makes again.
+        (
+            _payload(
+                validation={
+                    "promotable": False,
+                    "issues": [{"code": "VAL_METADATA_MULTI_ITEM", "blocking": True}],
+                }
+            ),
+            True,
+        ),
         (_payload(validation={"promotable": True, "issues": []}), True),
         (_payload(enrichment={"complete": False, "refs_enriched": 1, "refs_total": 3}), False),
         (_payload(fields={"title": {"state": "failed", "source": "llm", "issues": []}}), False),
