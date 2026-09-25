@@ -53,3 +53,31 @@ def test_override_never_keeps_loaded(monkeypatch):
     monkeypatch.setattr(Settings.ocr, "unload_between_chunks", "never", raising=False)
     assert _should_unload_ocr_after_chunk("aggressive", "local") is False
     assert _should_unload_ocr_after_chunk("balanced", "local") is False
+
+
+# ---------------------------------------------------------------------------
+# local-runtimes sweep: cloud vision OCR never unloads between chunks (2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai", "anthropic"])
+def test_cloud_vision_ocr_never_unloads_between_chunks(backend):
+    """Cloud vision OCR holds no local weights: teardown only churns (2).
+
+    Even with a local LLM backend following (the balanced unload trigger),
+    tearing down a thin HTTPS client reclaims no VRAM.
+    """
+    assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx", None, backend) is False
+    assert _should_unload_ocr_after_chunk("aggressive", "vllm-mlx", None, backend) is False
+
+
+def test_cloud_vision_skip_yields_to_explicit_always(monkeypatch):
+    """OCR_UNLOAD_BETWEEN_CHUNKS=always still forces the teardown (2 guard)."""
+    monkeypatch.setattr(Settings.ocr, "unload_between_chunks", "always", raising=False)
+    assert _should_unload_ocr_after_chunk("balanced", "cloud", None, "gemini") is True
+
+
+def test_local_ocr_still_unloads_with_local_llm():
+    """Non-cloud backends keep the old balanced/local unload behaviour (2 guard)."""
+    assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx", None, "paddle") is True
+    assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx", None, None) is True

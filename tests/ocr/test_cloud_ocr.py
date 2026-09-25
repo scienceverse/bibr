@@ -243,6 +243,97 @@ async def test_aget_client_uses_instance_settings(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# local-runtimes sweep: vision key resolution without cross-contamination (2)
+# ---------------------------------------------------------------------------
+
+
+def _vision_settings(**overrides):
+    """GlobalSettings with vision/LLM key fields set directly."""
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    for dotted, value in overrides.items():
+        if "." in dotted:
+            section, field = dotted.split(".", 1)
+            setattr(getattr(settings, section), field, value)
+        else:
+            setattr(settings, dotted, value)
+    return settings
+
+
+def test_api_key_ignores_cross_provider_llm_key():
+    """LLM on OpenAI + OCR on Gemini must use GOOGLE_API_KEY, not the OpenAI key (2)."""
+    from bibr.local.ocr_cloud import _api_key_for_provider
+
+    settings = _vision_settings(
+        **{
+            "llm.provider": "openai",
+            "llm.api_key": "sk-test-openai-key-placeholder",
+            "GOOGLE_API_KEY": "sk-test-google-key-placeholder",
+        }
+    )
+    assert _api_key_for_provider("google", settings) == "sk-test-google-key-placeholder"
+    assert _api_key_for_provider("gemini", settings) == "sk-test-google-key-placeholder"
+
+
+def test_api_key_ignores_managed_local_placeholders():
+    """Managed-local placeholder LLM keys are never forwarded as vision keys (2)."""
+    from bibr.local.ocr_cloud import _api_key_for_provider
+
+    for placeholder in ("not-needed", "lm-studio"):
+        settings = _vision_settings(
+            **{
+                "llm.provider": "openai",
+                "llm.base_url": "http://127.0.0.1:8770/v1",
+                "llm.api_key": placeholder,
+                "GOOGLE_API_KEY": "sk-test-google-key-placeholder",
+            }
+        )
+        assert _api_key_for_provider("google", settings) == "sk-test-google-key-placeholder"
+        # OpenAI vision with no matching LLM key: leave unset for SDK env fallback.
+        assert _api_key_for_provider("openai", settings) is None
+
+
+def test_api_key_uses_llm_key_for_same_provider():
+    """LLM and vision on the same cloud provider share the LLM key (2 guard)."""
+    from bibr.local.ocr_cloud import _api_key_for_provider
+
+    settings = _vision_settings(
+        **{
+            "llm.provider": "google",
+            "llm.api_key": "sk-test-shared-key-placeholder",
+            "GOOGLE_API_KEY": "sk-test-google-key-placeholder",
+        }
+    )
+    assert _api_key_for_provider("google", settings) == "sk-test-shared-key-placeholder"
+
+
+async def test_aget_client_drops_placeholder_llm_key(monkeypatch):
+    """End to end: a managed-local snapshot never sends its placeholder to Google (2)."""
+    import instructor
+
+    from bibr.config import GlobalSettings
+
+    custom = GlobalSettings()
+    custom.llm.provider = "openai"
+    custom.llm.base_url = "http://127.0.0.1:8770/v1"
+    custom.llm.api_key = "not-needed"
+    custom.GOOGLE_API_KEY = "sk-test-google-key-placeholder"
+
+    captured: dict[str, object] = {}
+
+    def fake_from_provider(model_string: str, **kwargs: object):
+        captured["kwargs"] = kwargs
+        return "fake-client"
+
+    monkeypatch.setattr(instructor, "from_provider", fake_from_provider)
+
+    client = CloudOcrClient(provider="google", settings=custom)
+    assert await client._aget_client() == "fake-client"
+    assert captured["kwargs"]["api_key"] == "sk-test-google-key-placeholder"
+
+
+# ---------------------------------------------------------------------------
 # Error handling — graceful degradation
 # ---------------------------------------------------------------------------
 

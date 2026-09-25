@@ -437,7 +437,11 @@ class _ManagedRapidMlxOcrClient:
         **_kw: object,
     ) -> None:
         self._settings = settings if settings is not None else snapshot_settings()
-        self._model = model_path or model or getattr(self._settings.ocr, self._model_option)
+        # The factory passes the winning candidate's model as `model` and the
+        # raw requested model as `model_path`: prefer the candidate, so a
+        # fallback-chain winner serves its own model (same fix as
+        # PaddleMlxVlmOcrClient).
+        self._model = model or model_path or getattr(self._settings.ocr, self._model_option)
         self._profile = profile
         self._server, self._http_client = self._start_generation()
         # rapid-mlx's MLLM vision-embedding cache (vllm_mlx MLLMBatchGenerator ->
@@ -455,6 +459,9 @@ class _ManagedRapidMlxOcrClient:
         self._recycle_lock = asyncio.Lock()
         self._drain_event = asyncio.Event()
         self._drain_event.set()
+        # Last restart failure, for waiters parked on the drain while a
+        # recycle fails beneath them (cleared by every successful start).
+        self._restart_error: Exception | None = None
 
     def _spawn_server(self) -> RapidMlxServer:
         return RapidMlxServer(
@@ -481,6 +488,7 @@ class _ManagedRapidMlxOcrClient:
             base_url=server.base_url,
             model=self._model,
             max_tokens=_RAPID_MLX_OCR_MAX_TOKENS,
+            settings=self._settings,
         )
 
     def _start_generation(self) -> tuple[RapidMlxServer, HttpOcrClient]:
@@ -516,11 +524,21 @@ class _ManagedRapidMlxOcrClient:
                 ) from exc
             self._server, self._http_client = server, http_client
             self._request_count = 0
+            self._restart_error = None
 
     async def recognize(self, image, prompt: str) -> str:
         await self._ensure_generation()
         await self._drain_event.wait()
-        assert self._http_client is not None  # noqa: S101 - ensured above
+        if self._http_client is None:
+            # Parked on the drain while a recycle failed beneath us: the
+            # recycler already surfaced the failure, and no generation is
+            # usable — fail loudly instead of the old bare AssertionError.
+            from bibr.exceptions import UpstreamServiceError
+
+            raise UpstreamServiceError(
+                "rapid-mlx",
+                f"OCR restart failed while parked: {self._restart_error}",
+            )
         self._inflight += 1
         try:
             result = await self._http_client.recognize(image, prompt)
@@ -528,6 +546,9 @@ class _ManagedRapidMlxOcrClient:
             self._inflight -= 1
         self._request_count += 1
         if self._recycle_after and self._request_count >= self._recycle_after:
+            # The regions already transcribed stay valid even if the restart
+            # below fails: recycle first, then return OUR result. A failed
+            # restart leaves no usable generation, so only that case raises.
             await self._recycle()
         return result
 
@@ -560,13 +581,18 @@ class _ManagedRapidMlxOcrClient:
                 except Exception as exc:
                     from bibr.exceptions import UpstreamServiceError
 
-                    raise UpstreamServiceError(
+                    failure = UpstreamServiceError(
                         "rapid-mlx",
                         f"OCR restart failed: {exc}",
                         original_error=exc,
-                    ) from exc
+                    )
+                    # Parked waiters wake to a None client; stash the failure
+                    # so they can name it instead of hitting a bare assert.
+                    self._restart_error = failure
+                    raise failure from exc
                 self._server, self._http_client = server, http_client
                 self._request_count = 0
+                self._restart_error = None
             finally:
                 self._drain_event.set()
 
@@ -597,6 +623,12 @@ class PaddleRapidMlxOcrClient(_ManagedRapidMlxOcrClient):
 
     name: ClassVar[str] = "paddle-rapid-mlx"
     _model_option = "paddle_rapid_mlx_model"
+    # NOTE: the port/extra-args options below are shared with MlxVlmOcrServer's
+    # own server (paddle-mlx-vlm backend): both read paddle_mlx_port /
+    # paddle_mlx_extra_args, so running both backends in one process collides
+    # on the port. Separate PADDLE_RAPID_MLX_* settings are deferred to an
+    # owner decision (new knobs need docs + wizard surfacing pre-freeze); the
+    # pipeline never selects both backends in one run today.
     _port_option = "paddle_mlx_port"
     _extra_args_option = "paddle_mlx_extra_args"
     _strict_ocr_smoke = True

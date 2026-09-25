@@ -534,6 +534,174 @@ async def test_rapid_mlx_recycle_failure_recovers_on_next_request(monkeypatch):
     assert spawn_count == 3
 
 
+# ---------------------------------------------------------------------------
+# local-runtimes sweep: recycle result preservation + parked-waiter error (8)
+# ---------------------------------------------------------------------------
+
+
+def _recycle_test_client(monkeypatch, mod, *, fail_restarts=0, recognize_delay=0.0):
+    """_ManagedRapidMlxOcrClient with a fake server; the first *fail_restarts*
+    recycle restarts raise, later ones succeed. *recognize_delay* stalls fake
+    OCR so concurrent callers overlap inside a recycle."""
+    import asyncio as _asyncio
+
+    from bibr.config import Settings
+
+    calls = {"n": 0}
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:1"
+
+        @property
+        def loaded(self):
+            return True
+
+        def shutdown(self):
+            return None
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            self.gen = calls["n"]
+
+        async def recognize(self, image, prompt):
+            if recognize_delay:
+                await _asyncio.sleep(recognize_delay)
+            return f"text-gen{self.gen}"
+
+        async def shutdown(self):
+            return None
+
+    def start_generation():
+        calls["n"] += 1
+        if calls["n"] > 1 and calls["n"] - 1 <= fail_restarts:
+            raise RuntimeError("Metal OOM")
+        return FakeServer(), FakeHttp()
+
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_model", "mlx-community/GLM-OCR-8bit")
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_port", 8772)
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_extra_args", "")
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_recycle_after", 1)
+    client = mod.RapidMlxOcrClient.__new__(mod.RapidMlxOcrClient)
+    # Bypass __init__ (spawns a real server): install the async state directly.
+    import asyncio
+
+    client._settings = Settings
+    client._model = "m"
+    client._profile = None
+    client._server, client._http_client = start_generation()
+    client._start_generation = start_generation
+    client._recycle_after = 1
+    client._request_count = 0
+    client._inflight = 0
+    client._recycle_lock = asyncio.Lock()
+    client._drain_event = asyncio.Event()
+    client._drain_event.set()
+    client._restart_error = None
+    return client, calls
+
+
+async def test_recycler_returns_result_despite_successful_recycle(monkeypatch):
+    """The threshold-triggering caller gets its own result back (8 guard)."""
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    assert await client.recognize(None, "Text Recognition:") == "text-gen1"
+    assert client._request_count == 0  # recycled onto a fresh generation
+
+
+async def test_recycler_fails_loudly_when_restart_fails(monkeypatch):
+    """No usable generation after a failed restart: the caller raises (8)."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod, fail_restarts=99)
+    with pytest.raises(UpstreamServiceError, match="OCR restart failed"):
+        await client.recognize(None, "Text Recognition:")
+
+
+async def test_parked_waiter_gets_named_error_on_failed_restart(monkeypatch):
+    """A caller parked on the drain gets UpstreamServiceError, not assert (8).
+
+    Worker 0 triggers the recycle and stalls in the in-flight drain while
+    worker 1 is still transcribing; worker 2 slips in after the drain clears
+    but before the failed restart completes, so it parks — and must wake to a
+    named error rather than the old bare AssertionError.
+    """
+    import asyncio
+
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod, fail_restarts=99, recognize_delay=0.6)
+    results = {}
+
+    async def worker(i, delay=0):
+        await asyncio.sleep(delay)
+        try:
+            results[i] = ("ok", await client.recognize(None, "Text Recognition:"))
+        except Exception as e:  # noqa: BLE001
+            results[i] = ("err", f"{type(e).__name__}: {e}")
+
+    await asyncio.gather(worker(0), worker(1, delay=0.05), worker(2, delay=0.61))
+    assert results[0][0] == "err" and "UpstreamServiceError" in results[0][1]
+    assert results[1][0] == "err" and "UpstreamServiceError" in results[1][1]
+    assert results[2][0] == "err" and "UpstreamServiceError" in results[2][1]
+    assert "while parked" in results[2][1]
+
+
+def test_spawned_http_client_inherits_pipeline_settings(monkeypatch):
+    """The recycled HTTP client gets the pipeline settings, not globals (9)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    settings = GlobalSettings()
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(mod, "HttpOcrClient", fake_http)
+    client = mod.RapidMlxOcrClient.__new__(mod.RapidMlxOcrClient)
+    client._settings = settings
+    client._model = "candidate/model"
+
+    server = MagicMock(base_url="http://127.0.0.1:8772")
+    client._spawn_http_client(server)
+
+    assert captured["settings"] is settings
+    assert captured["model"] == "candidate/model"
+
+
+def test_candidate_model_beats_requested_model_path(monkeypatch):
+    """The factory's per-candidate `model` wins over the raw `model_path` (16).
+
+    Same fallback-chain fix as PaddleMlxVlmOcrClient: the winning candidate's
+    resolved model must be served, not the raw requested one.
+    """
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    captured = {}
+
+    def fake_server(**kwargs):
+        captured.update(kwargs)
+        server = MagicMock(base_url="http://127.0.0.1:8772")
+        server.loaded = True
+        return server
+
+    monkeypatch.setattr(mod, "RapidMlxServer", fake_server)
+    monkeypatch.setattr(mod, "HttpOcrClient", MagicMock())
+
+    client = mod.RapidMlxOcrClient(
+        model="candidate/model",
+        model_path="requested/model",
+        settings=GlobalSettings(),
+    )
+
+    assert client._model == "candidate/model"
+    assert captured["served_model_name"] == "candidate/model"
+
+
 def test_rapid_mlx_llm_server_configures_qwen_no_think_defaults(monkeypatch):
     from bibr.config import GlobalSettings
     from bibr.local import rapid_mlx as mod

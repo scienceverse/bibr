@@ -58,16 +58,36 @@ class OcrResult(BaseModel):
 # API key resolution per provider
 # ---------------------------------------------------------------------------
 
+# Placeholder API keys the managed local LLM backends write into
+# settings.llm.api_key ("not-needed": llama_cpp/llm/rapid_mlx/vllm_llm;
+# "lm-studio": llmster). They authenticate nothing — never forward one as a
+# cloud vision credential.
+_MANAGED_LOCAL_PLACEHOLDER_KEYS = frozenset({"not-needed", "lm-studio"})
+
 
 def _api_key_for_provider(provider: str, settings: Any) -> str | None:
-    if provider in ("google", "gemini"):
-        return settings.llm.api_key or settings.GOOGLE_API_KEY
-    if provider == "anthropic":
+    """Credential for a vision provider, without cross-provider contamination.
+
+    ``settings.llm.api_key`` is used only when it is a real key for the SAME
+    cloud provider that serves both the LLM and vision calls (e.g. LLM on
+    Gemini + OCR on Gemini). A managed-local placeholder, or a key belonging
+    to a different provider (LLM on OpenAI + OCR on Gemini), falls through to
+    the vision provider's own key — a cross-provider key is always a 401, and
+    a placeholder is never a credential.
+    """
+    vision = _PROVIDER_STRINGS.get(provider, provider)
+    llm_key = settings.llm.api_key
+    if llm_key in _MANAGED_LOCAL_PLACEHOLDER_KEYS:
+        llm_key = None
+    if llm_key:
+        llm_provider = _PROVIDER_STRINGS.get(settings.llm.provider, settings.llm.provider)
+        if llm_provider == vision:
+            return llm_key
+    if vision == "google":
+        return settings.GOOGLE_API_KEY
+    if vision == "anthropic":
         return settings.ANTHROPIC_API_KEY
-    if provider == "openai":
-        # Preserve the env-driven path when no explicit key is configured, but
-        # let injected settings own credentials for per-pipeline isolation.
-        return settings.llm.api_key
+    # OpenAI: leave unset so the Instructor SDK falls back to OPENAI_API_KEY.
     return None
 
 
