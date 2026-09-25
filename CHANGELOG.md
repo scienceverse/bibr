@@ -341,6 +341,49 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- Reference lists are also segmented as one stream of printed lines, with the
+  evidence for where each entry starts pooled instead of tried tier by tier. The
+  cascade reconciled two readings of the list (layout rows with their line
+  breaks flattened, and text-layer lines captured from the first "References"
+  heading to the end of the file) through exact text probes under one gate, and
+  a declined tier's evidence was thrown away, so a list crossing a page break
+  with a running head in it, a list the geometry model labelled well but whose
+  lines did not align, or a list of short entries came out merged, cut short or
+  dropped. The stream reads the text-layer lines inside the located section's
+  layout boxes, page after page (a box without usable text-layer lines, such as
+  an OCR'd or scanned page, contributes its text line by line), drops page
+  furniture (lines in header, footer and page-number boxes, running heads
+  repeated at a page edge on two or more pages with the digits ignored,
+  standalone page numbers) and manuscript line numbers, reads a box that repeats
+  an aggregate box's text once, and stops at a heading that ends the list
+  (Acknowledgements, Funding, Appendix, Data availability and the like). Each
+  line's start is voted by the geometry model's per-line probability,
+  author/year, Vancouver, all-caps and corporate onsets, "same author" dashes,
+  the first line of a layout box, hanging indent, a vertical gap and the
+  previous line ending in a DOI, a URL or a DOI link. A printed sequence
+  counting up by one ("[n]", "n.", "(n)", roman numerals), bullets or bracketed
+  labels decide instead when the list has them, an entry printed out of order
+  included, and a numbered list ends with its last entry's box. A fragment that
+  opens in lower case with no date or DOI rejoins the entry before it, an entry
+  holding two DOIs is split after the first, and a numbered entry is never
+  dropped as a short fragment without a year. A reference list split into two
+  sections, a non-English heading ("Referencias") over the first page and a
+  synthetic "References" section for the reference boxes on the next, is read
+  whole. Parsing is unchanged.
+- The cascade still runs, and its result is kept unless it fell back (region
+  recovery, CRF, marker split) or found nothing, most of its entries came from
+  the merged-reference splitter, or it under-yielded against the section's rows
+  or credible starts; then the line stream's result is used unless its quality
+  is lower by more than 0.05. A selected geometry or LLM-anchor result gives way
+  only to a stream whose quality is higher by 0.15. Quality is the share of the
+  section's text the entries cover (furniture and the text after the list left
+  out) times the share of entries that look like one complete reference, neither
+  a fragment nor a merge. `extraction.diagnostics.reference_yield.attempts`
+  records the stream as a `line_stream` attempt with the reason for the decision
+  and both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
+  attempt is marked `superseded_by_line_stream`. The stream's spans index its
+  own text (flag `stream_text_offsets`); a joined split section is flagged
+  `split_section_joined`.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
@@ -389,6 +432,13 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- `bibr.ocr.pdf_links.read_uri_links()` reads a PDF's URI link annotations
+  (page, rectangle, target), and `doi_from_uri()` the DOI a doi.org or `doi:`
+  link targets. The PDF inspection now captures every page's text-layer lines
+  and its URI links in the layout frame. A reference whose text prints no DOI
+  takes the one the link over its lines targets, as MDPI, BMJ and IOP print it
+  only behind a "[CrossRef]" label; the reference yield receipt records
+  `doi_from_link_annotation`. This applies with the NER parser, the default.
 
 ### Changed
 
