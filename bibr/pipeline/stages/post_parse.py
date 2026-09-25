@@ -677,7 +677,7 @@ async def _extract_metadata_and_equations(
 
 
 def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None) -> None:
-    """Decide the fields the core extractor decides when it ran, when it did not.
+    """Decide the fields the core extractor decides, when it did not run.
 
     An input that declares its front matter (JATS, HTML) supplies its own
     authors, publication date, journal and publisher; a run without an LLM has
@@ -695,22 +695,18 @@ def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None
     )
 
     ledger = field_decisions_of(paper_metadata)
-    if ledger is None or "author" in ledger:
+    if ledger is not None and "author" in ledger:
         return
     source = "native" if native else None
     authors = [incumbent_candidate(paper_metadata, "author", source=source)]
     if doc_info_authors is not None:
         authors.append(doc_info_authors)
     apply_decision(paper_metadata, decide_authors(authors))
-    for name in ("published", "journal"):
+    for name in ("published", "journal", "publisher"):
         apply_decision(
             paper_metadata,
             decide_value(name, incumbent_candidate(paper_metadata, name, source=source)),
         )
-    apply_decision(
-        paper_metadata,
-        decide_value("publisher", incumbent_candidate(paper_metadata, "publisher", source=None)),
-    )
     apply_decision(
         paper_metadata,
         FieldDecision(
