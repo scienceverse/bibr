@@ -1,6 +1,6 @@
 {
   "paper_id": "10.1234/example.5678",
-  "schema_version": "12.0",
+  "schema_version": "12.1",
   "source": {
     "file_name": "example.pdf",
     "sha256": "6ca13d52ca70c883e0f0bb101e425a89e8624de51db2d2392593af6a84118090",
