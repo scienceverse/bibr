@@ -15,9 +15,12 @@ from bibr.ocr.native_text import (
     _fill_page_regions_from_textpage,
     _page_crop_box,
     _page_rotation,
+    _pdf_points_to_normalized_bbox,
     _sample_page_font_metadata,
 )
+from bibr.ocr.pdf_links import PdfUriLink, page_uri_links
 from bibr.ocr.ref_geometry import (
+    LineRecord,
     _extract_page_chars,
     group_chars_into_lines,
     record_to_dict,
@@ -44,6 +47,16 @@ class PdfInspection:
     outline: list[OutlineItem]
     reference_lines: list[dict[str, Any]]
     component_errors: dict[str, str] = field(default_factory=dict)
+    # Every text-layer line of every page, each with its box in the 0..1000
+    # layout space as ``bbox`` and ``page`` as the 1-based layout page number
+    # (the one region summaries carry), plus the PDF-point geometry the geom
+    # features read. The reference line stream selects the lines inside the
+    # located section's layout regions from these. Captured with
+    # ``include_ref_geometry``.
+    page_lines: list[dict[str, Any]] = field(default_factory=list)
+    # URI link annotations (``page``, layout-space ``bbox``, ``uri``), same
+    # frame and capture condition as ``page_lines``.
+    uri_links: list[dict[str, Any]] = field(default_factory=list)
 
 
 def inspect_pdf(
@@ -67,6 +80,8 @@ def inspect_pdf(
     component_errors: dict[str, str] = {}
     page_lines = {}
     header_page: int | None = None
+    stream_lines: list[dict[str, Any]] = []
+    uri_links: list[dict[str, Any]] = []
     docinfo: dict[str, Any] = {}
     outline: list[OutlineItem] = []
 
@@ -133,16 +148,39 @@ def inspect_pdf(
                                     full_text = textpage.get_text_range() or ""
                                     if header_page is None and _REF_HEADER_RE.search(full_text):
                                         header_page = page_index
+                                    chars = _extract_page_chars(textpage)
                                     if header_page is not None:
                                         page_lines[page_index] = group_chars_into_lines(
-                                            _extract_page_chars(textpage), page_index
+                                            chars, page_index
                                         )
+                                    stream_lines.extend(
+                                        _page_line_dicts(
+                                            group_chars_into_lines(
+                                                _break_wrapped_lines(chars), page_index
+                                            ),
+                                            layout_slot + 1,
+                                            crop_box,
+                                            rotation,
+                                        )
+                                    )
                                 except Exception as exc:  # noqa: BLE001
                                     component_errors[f"ref_geometry:{page_index}"] = _error_text(
                                         exc
                                     )
                         finally:
                             textpage.close()
+                    if include_ref_geometry:
+                        try:
+                            uri_links.extend(
+                                _uri_link_dicts(
+                                    page_uri_links(doc, page, page_index),
+                                    layout_slot + 1,
+                                    crop_box,
+                                    rotation,
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001 - best-effort component
+                            component_errors[f"uri_links:{page_index}"] = _error_text(exc)
                     pages.append(
                         PdfPageInspection(
                             index=page_index,
@@ -177,11 +215,81 @@ def inspect_pdf(
         outline=outline,
         reference_lines=reference_lines,
         component_errors=component_errors,
+        page_lines=stream_lines,
+        uri_links=uri_links,
     )
 
 
 def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _break_wrapped_lines(
+    chars: list[tuple[str, tuple[float, float, float, float]]],
+) -> list[tuple[str, tuple[float, float, float, float]]]:
+    """Insert a line break where the text wraps to a new baseline without one.
+
+    PDFium joins a line that ends in a hyphen (which it reads as U+FFFE) to
+    the next, and on line-numbered manuscripts the next line's margin number
+    sits between the two halves of the word. A glyph wholly below the
+    previous glyph and to its left starts a new printed line; U+FFFE is read
+    as the hyphen it prints.
+    """
+    out: list[tuple[str, tuple[float, float, float, float]]] = []
+    previous: tuple[float, float, float, float] | None = None
+    for char, box in chars:
+        if char in ("\n", "\r"):
+            previous = None
+        else:
+            if char == "\ufffe":
+                char = "-"
+            if not char.isspace():
+                if previous is not None and box[3] <= previous[1] and box[0] < previous[0]:
+                    out.append(("\n", box))
+                previous = box
+        out.append((char, box))
+    return out
+
+
+def _layout_box(
+    box_pts: tuple[float, float, float, float],
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+) -> list[float]:
+    return [round(v, 2) for v in _pdf_points_to_normalized_bbox(box_pts, crop_box, rotation)]
+
+
+def _page_line_dicts(
+    records: list[LineRecord],
+    page_number: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+) -> list[dict[str, Any]]:
+    """Serialize one page's text-layer lines for the reference line stream."""
+    lines: list[dict[str, Any]] = []
+    for record in records:
+        line = {
+            key: round(value, 2) if isinstance(value, float) else value
+            for key, value in record_to_dict(record).items()
+        }
+        line["page"] = page_number
+        line["bbox"] = _layout_box(
+            (record.x0, record.y_bottom, record.x1, record.y_top), crop_box, rotation
+        )
+        lines.append(line)
+    return lines
+
+
+def _uri_link_dicts(
+    links: list[PdfUriLink],
+    page_number: int,
+    crop_box: tuple[float, float, float, float],
+    rotation: int,
+) -> list[dict[str, Any]]:
+    return [
+        {"page": page_number, "bbox": _layout_box(link.rect, crop_box, rotation), "uri": link.uri}
+        for link in links
+    ]
 
 
 def inspection_to_dict(inspection: PdfInspection | None) -> dict[str, Any] | None:

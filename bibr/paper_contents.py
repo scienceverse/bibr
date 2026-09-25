@@ -752,6 +752,13 @@ class PaperContents:
     # the OCR-stage native-text pass; consumed by the geom segmenter in extract.
     # None for DOCX / non-native / no-text-layer input (→ LLM cascade).
     ref_line_geometry: list[dict] | None = None
+    # Every page's text-layer lines (``bbox`` in the 0..1000 layout frame,
+    # ``page`` the 1-based layout page) and URI link annotations, captured
+    # with the geometry above. The reference line stream keeps the lines
+    # inside the located reference section's layout regions and maps DOI links
+    # onto them. None when not captured (no text layer, non-geom strategy).
+    ref_page_lines: list[dict] | None = None
+    pdf_uri_links: list[dict] | None = None
     # Front-matter metadata parsed natively from a structured input format
     # (JATS XML); when set, post-parse uses it as the PaperMetadata base and
     # skips the core LLM extraction. None for PDF/DOCX (→ LLM extraction).

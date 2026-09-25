@@ -60,6 +60,8 @@ class InterleavedRenderOcrStage:
         "page_indices",
         "layout_results",
         "ref_line_geometry",
+        "ref_page_lines",
+        "pdf_uri_links",
         "native_metadata",
         "pdf_outline",
         "ocr_regions",

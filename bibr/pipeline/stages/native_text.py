@@ -41,7 +41,13 @@ class NativeTextStage:
     name = "native_text"
     # FileState fields consumed / populated (see validate_stage_contracts).
     requires = ("pdf_bytes", "page_indices", "layout_results")
-    produces = ("ref_line_geometry", "native_metadata", "pdf_outline")
+    produces = (
+        "ref_line_geometry",
+        "ref_page_lines",
+        "pdf_uri_links",
+        "native_metadata",
+        "pdf_outline",
+    )
 
     async def run(self, ctx: PipelineContext) -> None:
         ctx.progress.stage_start(self.name)
@@ -86,6 +92,8 @@ class NativeTextStage:
             fs.native_metadata = inspection.metadata or None
             fs.pdf_outline = inspection.outline or None
             fs.ref_line_geometry = inspection.reference_lines or None
+            fs.ref_page_lines = inspection.page_lines or None
+            fs.pdf_uri_links = inspection.uri_links or None
             native_skip_total += sum(
                 1
                 for page in inspection.layout_results

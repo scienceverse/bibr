@@ -92,6 +92,8 @@ class ParseSegmentStage:
                 # Hand captured reference-line geometry to the extract stage.
                 if contents is not None:
                     contents.ref_line_geometry = getattr(fs, "ref_line_geometry", None)
+                    contents.ref_page_lines = getattr(fs, "ref_page_lines", None)
+                    contents.pdf_uri_links = getattr(fs, "pdf_uri_links", None)
 
                 # Score every OCR region's front-matter role while the raw
                 # regions are still resident (they are freed after this

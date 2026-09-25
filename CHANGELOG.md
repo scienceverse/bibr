@@ -341,6 +341,9 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
+  printed line. The page lines the reference line stream reads break there
+  again; the geometry segmenter's own line capture is unchanged.
 
 ### Added
 
@@ -389,6 +392,9 @@ released.
 
 ### Changed
 
+- The OCR cache format is version 11: a bundle also holds the page text lines
+  and URI links the reference line stream reads. Older bundles are re-run
+  rather than read without them.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

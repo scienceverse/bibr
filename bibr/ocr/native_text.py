@@ -119,6 +119,39 @@ def _normalized_bbox_to_pdf_points(
     return (left, bottom_pts, right, top_pts)
 
 
+def _pdf_points_to_normalized_bbox(
+    box_pts: tuple[float, float, float, float],
+    crop_box: tuple[float, float, float, float],
+    rotation: int = 0,
+) -> tuple[float, float, float, float]:
+    """Inverse of :func:`_normalized_bbox_to_pdf_points`.
+
+    Maps a ``(left, bottom, right, top)`` box in PDF points (the text layer's
+    frame) into the 0..1000 rendered-image space layout boxes use, as
+    ``(x1, y1, x2, y2)``, applying the page's ``/Rotate`` the way
+    ``page.render()`` does.
+    """
+    cx0, cy0, cx1, cy1 = crop_box
+    crop_w = (cx1 - cx0) or 1.0
+    crop_h = (cy1 - cy0) or 1.0
+    left, bottom, right, top = box_pts
+    u1 = (left - cx0) / crop_w * 1000.0
+    u2 = (right - cx0) / crop_w * 1000.0
+    v1 = (cy1 - top) / crop_h * 1000.0
+    v2 = (cy1 - bottom) / crop_h * 1000.0
+    if rotation == 90:
+        corners = ((1000.0 - v1, u1), (1000.0 - v2, u2))
+    elif rotation == 180:
+        corners = ((1000.0 - u1, 1000.0 - v1), (1000.0 - u2, 1000.0 - v2))
+    elif rotation == 270:
+        corners = ((v1, 1000.0 - u1), (v2, 1000.0 - u2))
+    else:
+        return (min(u1, u2), min(v1, v2), max(u1, u2), max(v1, v2))
+    xs = [corner[0] for corner in corners]
+    ys = [corner[1] for corner in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
 def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
