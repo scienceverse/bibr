@@ -675,9 +675,9 @@ def _text_layer_candidates(
                 selection_tier=EXPLICIT_SELF_ID,
             )
         # The line after the DOI, including punctuation normalization dropped.
-        end = cleaned.casefold().find(candidate.normalized, match.start())
-        end = end + len(candidate.normalized) if end >= 0 else match.end()
-        found.append((candidate, cleaned[end:]))
+        doi_end = cleaned.casefold().find(candidate.normalized, match.start())
+        doi_end = doi_end + len(candidate.normalized) if doi_end >= 0 else match.end()
+        found.append((candidate, cleaned[doi_end:]))
     return found
 
 
