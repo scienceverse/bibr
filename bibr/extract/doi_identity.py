@@ -585,7 +585,7 @@ def collect_doi_candidates(
 _REFERENCE_LABELS = frozenset({"reference", "reference_content"})
 _FIGURE_LABELS = frozenset({"image", "chart", "figure_title", "header_image", "footer_image"})
 # Characters that may follow a DOI without being part of the token after it.
-_DOI_CLOSERS = frozenset(".,;:)]}>\"'’”")
+_DOI_CLOSERS = frozenset(".,;:)]}>\"'\u2019\u201d")
 _BANNER_RE = re.compile(r"\bfirst\s+published\s+as\b", re.IGNORECASE)
 
 

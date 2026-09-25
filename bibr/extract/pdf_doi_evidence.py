@@ -57,10 +57,10 @@ _MAX_XMP_PACKETS = 4
 
 # Hyphen and dash look-alikes some typesetters use inside DOIs, mapped one to
 # one so character positions stay aligned with the text layer.
-_HYPHEN_LOOKALIKES = str.maketrans({"‐": "-", "‑": "-", "‒": "-", "−": "-"})
+_HYPHEN_LOOKALIKES = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2212": "-"})
 # Invisible characters that split a DOI in the text layer without printing
 # anything (a zero-width space after each hyphen in BMC DOIs).
-_INVISIBLE = frozenset({"​", "‌", "‍", "⁠", "﻿"})
+_INVISIBLE = frozenset({"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"})
 
 # How far around a link rectangle, in points, the printed DOI may sit: a link on
 # the first line of a wrapped resolver URL covers only that line.
