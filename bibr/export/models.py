@@ -34,8 +34,9 @@ _SCHEMA_VERSION = "12.1"
 #   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
 #     ``abstract``, ``keywords``, ``doi``, ``published``, ``journal``,
 #     ``funding_statement``, ``funding``, ``paper_type``, ``bib``) a record
-#     ``{state, source, issues}``, where ``state`` is ``extracted``,
-#     ``absent``, ``abstained``, ``failed`` or ``not_attempted``. Omitted when
+#     ``{state, source, issues, rule}``, where ``state`` is ``extracted``,
+#     ``absent``, ``abstained``, ``failed`` or ``not_attempted`` and ``rule``
+#     names the field decision's rule (optional for readers). Omitted when
 #     the export was made outside the pipeline, so every 12.0 export is still
 #     a valid 12.1 reader input.
 #
