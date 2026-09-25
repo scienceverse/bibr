@@ -1,6 +1,6 @@
 """Managed-server tests must not depend on bibr's production ports being free.
 
-The managed runtimes (rapid-mlx on :8772/:8773, vllm-mlx on :8766, vllm-llm,
+The managed runtimes (rapid-mlx on :8772/:8773, vllm-mlx on :8767, vllm-llm,
 llama.cpp) pre-flight their port with a real TCP probe
 (``bibr.local.http_runtime._port_is_held``) and a real ``/v1/models`` HTTP
 probe before spawning. Tests stub the subprocess but (mostly) never these
@@ -26,6 +26,8 @@ _MANAGED_MODULES = (
     "bibr.local.vllm_llm",
     "bibr.local.llama_cpp",
     "bibr.local.ocr",
+    "bibr.local.vllm_ocr",
+    "bibr.local.mlx_vlm_ocr",
 )
 
 _UNSTUBBED = ("test_server_port_guard", "test_http_runtime")

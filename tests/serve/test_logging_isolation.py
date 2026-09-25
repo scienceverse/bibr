@@ -10,7 +10,9 @@ handlers/level and every logger's level per test.
 Runs in definition order: the first test reproduces the CLI logging setup,
 the second proves it is gone. On the pre-fix tree the second test fails
 (``bibr.pipeline`` still at INFO, 'not shown' leaks through); with the
-fixture both pass in any order.
+fixture both pass in any order. A second pair repeats the exercise with a
+bare root-handler add plus level moves (no ``monkeypatch`` to hide behind),
+covering handler removal and the restore of a pre-existing logger's level.
 """
 
 from __future__ import annotations
@@ -18,6 +20,17 @@ from __future__ import annotations
 import io
 import logging
 from types import SimpleNamespace
+
+import pytest
+
+# A dedicated pre-existing logger: created at import, so the fixture must
+# restore its level (not reset it as a mid-test creation).
+_PROBE_LOGGER = logging.getLogger("bibr.iso_probe")
+_PROBE_LOGGER.setLevel(logging.WARNING)
+
+_ADDED_HANDLER: logging.Handler | None = None
+_ROOT_LEVEL: int | None = None
+_PROBE_LEVEL: int | None = None
 
 
 def test_cli_logging_setup_pins_bibr_loggers_to_info():
@@ -45,7 +58,26 @@ def test_serve_warning_level_hides_bibr_info_after_cli_test():
 
 
 def test_no_extra_root_handlers_leak():
-    """Guard: a CLI-style basicConfig handler must not accumulate on root."""
-    count = len(logging.getLogger().handlers)
-    logging.basicConfig(level=logging.WARNING, handlers=[logging.StreamHandler()])
-    assert len(logging.getLogger().handlers) >= count
+    """Pollute logging without ``monkeypatch``: only the fixture cleans up.
+
+    Adds a root handler the way ``basicConfig`` does and moves a
+    pre-existing logger plus the root level. Runs in definition order
+    before the verify test below.
+    """
+    global _ADDED_HANDLER, _ROOT_LEVEL, _PROBE_LEVEL
+    _ROOT_LEVEL = logging.getLogger().level
+    _PROBE_LEVEL = _PROBE_LOGGER.level
+    _PROBE_LOGGER.setLevel(logging.DEBUG)
+    logging.getLogger().setLevel(logging.DEBUG)
+    _ADDED_HANDLER = logging.StreamHandler()
+    logging.getLogger().addHandler(_ADDED_HANDLER)
+    assert _ADDED_HANDLER in logging.getLogger().handlers
+
+
+def test_root_handler_and_levels_are_restored():
+    """The previous test's handler is removed and levels are put back."""
+    if _ADDED_HANDLER is None:
+        pytest.skip("polluting test did not run first")
+    assert _ADDED_HANDLER not in logging.getLogger().handlers
+    assert logging.getLogger().level == _ROOT_LEVEL
+    assert _PROBE_LOGGER.level == _PROBE_LEVEL

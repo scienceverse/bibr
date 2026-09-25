@@ -11,8 +11,10 @@ afterwards.
 
 These tests run in definition order: the first deliberately pollutes the
 global the way the old suite did, the second proves the pollution is gone.
-On the pre-fix tree the second test fails (``max_concurrency`` still marked,
-value 1); with the fixture both pass in any order.
+A later pair repeats the exercise with bare direct assignment (no
+``monkeypatch`` undo to hide behind) and proves the section object itself
+survives the in-place restore. On the pre-fix tree the verify tests fail;
+with the fixture all pass in any order.
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock
 
 from bibr.config import GlobalSettings, Settings
+
+_SEEN_LLM_ID: int | None = None
 
 
 def test_polluting_test_marks_max_concurrency_user_set(monkeypatch):
@@ -38,8 +42,32 @@ def test_previous_test_leak_is_gone():
 
 
 def test_section_identity_survives_isolation():
-    """In-place restore: modules holding ``Settings.llm`` keep one object."""
-    assert Settings.llm is Settings.llm
+    """Pollute without ``monkeypatch``: only the fixture can clean this up.
+
+    Bare ``Settings.x = y`` has no undo at all, so if the autouse snapshot
+    stops restoring section values, root values or ``fields_set``, the next
+    test observes the leak. Runs in definition order after this test.
+    """
+    global _SEEN_LLM_ID
+    _SEEN_LLM_ID = id(Settings.llm)
+    Settings.llm.max_concurrency = 7
+    Settings.ocr.backend = "paddle"
+    Settings.EQUATION_EXTRACTION = False
+    assert "max_concurrency" in Settings.llm.model_fields_set
+
+
+def test_direct_assignment_pollution_is_gone():
+    """The previous test's direct assignments are restored, in place."""
+    defaults = GlobalSettings()
+    assert Settings.llm.max_concurrency == defaults.llm.max_concurrency
+    assert "max_concurrency" not in Settings.llm.model_fields_set
+    assert Settings.ocr.backend == defaults.ocr.backend
+    assert "backend" not in Settings.ocr.model_fields_set
+    assert Settings.EQUATION_EXTRACTION == defaults.EQUATION_EXTRACTION
+    assert "EQUATION_EXTRACTION" not in Settings.model_fields_set
+    if _SEEN_LLM_ID is not None:
+        # In-place restore: modules holding ``Settings.llm`` keep one object.
+        assert id(Settings.llm) == _SEEN_LLM_ID
 
 
 def test_explicit_mark_is_still_honored_within_a_test(monkeypatch):

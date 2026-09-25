@@ -260,7 +260,8 @@ def test_check_ocr_backend_paddle_rapid_candidate_is_unverified_not_ready(monkey
     _pin_apple_silicon_paddle_chain(monkeypatch)
     monkeypatch.setattr("bibr.local.rapid_mlx.rapid_mlx_unavailable_reason", lambda: None)
     # doctor calls its own module-level helper, so patching the re-export on
-    # bibr.local.cli is a no-op here (same reason as test line ~476).
+    # bibr.local.cli is a no-op here (same reason as in
+    # test_check_ocr_backend_glm_llama_vulkan_on_nvidia_warns).
     monkeypatch.setattr("bibr.local.cli.doctor._opencv_unavailable_reason", lambda: None)
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
