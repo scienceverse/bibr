@@ -119,6 +119,38 @@ def _emit_singleflight_metric(
     )
 
 
+def _is_final_result(payload: dict) -> bool:
+    """Whether an export is a final answer for its input, safe to cache.
+
+    Not when a failure a retry could avoid shaped it: a blocking validation
+    issue (a failed title call, incomplete references), incomplete
+    enrichment, a failed field, or a warning in ``NOT_FINAL_CODES``. Caching
+    such a result would replay one timeout or outage to every request for
+    the TTL.
+    """
+    from bibr.processing_warnings import NOT_FINAL_CODES
+    from bibr.validation import payload_validation
+
+    validation = payload_validation(payload) or {}
+    if validation.get("promotable") is False:
+        return False
+    extraction = payload.get("extraction")
+    if not isinstance(extraction, dict):
+        return True
+    enrichment = extraction.get("enrichment")
+    if isinstance(enrichment, dict) and enrichment.get("complete") is False:
+        return False
+    fields = extraction.get("fields")
+    if isinstance(fields, dict) and any(
+        isinstance(record, dict) and record.get("state") == "failed" for record in fields.values()
+    ):
+        return False
+    return not any(
+        isinstance(warning, dict) and warning.get("code") in NOT_FINAL_CODES
+        for warning in extraction.get("warnings") or ()
+    )
+
+
 _ERROR_KIND_TO_HTTP = {
     "input_validation": 400,
     "upstream_service": 502,
@@ -875,11 +907,13 @@ class BibrPipelineAPI(ls.LitAPI):
             return failure
 
         run_duration_ms = int((time.perf_counter() - run_start) * 1000)
-        if self._cache:
+        if self._cache and _is_final_result(result_json):
             # Serialize off-loop: a multi-MB json.dumps shouldn't stall other
             # in-flight requests on the worker's event loop.
             encoded = await asyncio.to_thread(lambda: json.dumps(result_json).encode())
             await self._bounded_cache_call(self._cache.set(cache_key, encoded), what="set")
+        elif self._cache:
+            logger.info("[%s] not caching a result shaped by a failure", filename)
 
         _emit_extract_metric(
             file_hash=file_hash,

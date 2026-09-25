@@ -184,6 +184,36 @@ DESCRIPTIONS: dict[WarningCode, str] = {
 }
 
 
+# Codes that record a failure a later run of the same input may not repeat: a
+# timeout, an outage, or a call that failed. An export carrying one is not a
+# final answer, so serve does not cache it. Decide for each new code whether
+# it belongs here.
+NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
+    {
+        WarningCode.OCR_REGION_FAILED,
+        WarningCode.OCR_PAGE_FAILED,
+        WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
+        WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
+        WarningCode.PAPER_CLASSIFICATION_FAILED,
+        WarningCode.AUTHORS_LLM_FAILED,
+        WarningCode.RESEARCH_INTEGRITY_LLM_FAILED,
+        WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
+        WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+        WarningCode.CITATION_LLM_FAILED,
+        WarningCode.REF_EXTRACTION_ERROR,
+        WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
+        WarningCode.CROSSREF_ENRICHMENT_FAILED,
+        WarningCode.ENRICHMENT_LOOKUP_FAILED,
+        WarningCode.RESOLVER_FALLBACK_TIMEOUT,
+        WarningCode.RESOLVER_FALLBACK_FAILED,
+        WarningCode.ROR_MATCHING_TIMEOUT,
+        WarningCode.ROR_MATCHING_FAILED,
+        WarningCode.ENRICHER_FAILED,
+        WarningCode.ENRICHMENT_INCOMPLETE,
+    }
+)
+
+
 @dataclass(frozen=True)
 class ProcessingWarning:
     """One non-fatal processing warning: a stable code and a readable message.
