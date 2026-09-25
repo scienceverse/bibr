@@ -2568,12 +2568,9 @@ class ReferenceExtractor:
             return None
 
         typical = typical_entry_length(ref_strings, entries)
-        cascade_quality = segmentation_quality(
-            ref_strings, segmentation.section_key, typical_length=typical
-        )
-        stream_quality = segmentation_quality(
-            entries, segmentation.section_key, typical_length=typical
-        )
+        section_text = segmentation.section_key
+        cascade_quality = segmentation_quality(ref_strings, section_text, typical_length=typical)
+        stream_quality = segmentation_quality(entries, section_text, typical_length=typical)
         tier, tier_spans = self._cascade_selected_tier()
         if ref_strings and len(entries) < _distinct_count(ref_strings):
             trigger, selected = "fewer_entries", False
