@@ -226,6 +226,152 @@ def test_title_rows_that_disagree_on_the_parenthetical_abstain():
     assert issue is None
 
 
+_UNLABELLED = "Garden plots as outdoor classrooms in rural schools"
+
+
+@pytest.mark.parametrize(
+    "printed",
+    [
+        f"Research Report: {_UNLABELLED}",
+        f"Case report. {_UNLABELLED}",
+        f"Opinion: {_UNLABELLED}",
+        f"Stage 2 Registered Report: {_UNLABELLED}",
+        f"GARDEN NOTES – {_UNLABELLED}",
+        f"Dr. Mira Ellison: {_UNLABELLED}",
+    ],
+)
+def test_dropped_leading_label_is_restored(printed):
+    # A label printed inside the title heading is title text, even when it
+    # names the article type. The rest is still printed verbatim, so the
+    # verbatim test alone would accept the truncated title.
+    title, issue = ground_title_to_printed_text(_UNLABELLED, _titles(printed), printed)
+
+    assert title == printed
+    assert issue is not None
+    assert issue.code == "VAL_TITLE_REGROUNDED"
+    assert issue.evidence_ids == ("c1", "reason:title_leading_label_dropped")
+    assert not issue.blocking
+
+
+def test_restored_label_keeps_a_subtitle_printed_on_another_row():
+    subtitle = "A Survey of Twelve Districts"
+    printed = f"Research Report: {_UNLABELLED}"
+
+    title, issue = ground_title_to_printed_text(
+        f"{_UNLABELLED}: {subtitle}",
+        _titles(printed, subtitle),
+        f"{printed}\n{subtitle}",
+    )
+
+    assert title == f"Research Report: {_UNLABELLED}: {subtitle}"
+    assert issue is not None
+    assert issue.code == "VAL_TITLE_REGROUNDED"
+
+
+def test_label_row_ending_in_a_colon_is_restored():
+    # "Review:" is printed on a row of its own; the colon says the title
+    # continues on the next row, whatever role that row was given.
+    resolution = _resolution(
+        _candidate("c1", "Review:", roles=frozenset({"title"}), source_kind="heading"),
+        _candidate("c2", _UNLABELLED, roles=frozenset({"byline"}), text_ids=(2,)),
+    )
+
+    title, issue = ground_title_to_printed_text(_UNLABELLED, resolution, f"Review:\n{_UNLABELLED}")
+
+    assert title == f"Review: {_UNLABELLED}"
+    assert issue is not None
+    assert issue.evidence_ids == ("c1", "reason:title_leading_label_dropped")
+
+
+def test_kicker_row_above_the_title_stays_dropped():
+    # An article-type kicker printed above the title carries no colon: it is
+    # page furniture, not the first row of the title.
+    resolution = _resolution(
+        _candidate("c1", "Case report", roles=frozenset({"title"}), source_kind="heading"),
+        _candidate("c2", _UNLABELLED, roles=frozenset({"title"}), source_kind="heading"),
+    )
+
+    title, issue = ground_title_to_printed_text(
+        _UNLABELLED, resolution, f"Case report\n{_UNLABELLED}"
+    )
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "1.",
+        "2.1.",
+        "IV.",
+        "b.",
+        "Title:",
+        "Running title:",
+        "To cite this article:",
+        "Cómo citar:",
+        "Open access:",
+        "Ellison et al.:",
+        "Ellison, M. (2021).",
+        "An opening remark that runs far too long to be a label:",
+    ],
+)
+def test_numbering_field_labels_and_citations_stay_dropped(prefix):
+    printed = f"{prefix} {_UNLABELLED}"
+
+    title, issue = ground_title_to_printed_text(_UNLABELLED, _titles(printed), printed)
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
+def test_field_label_row_above_the_title_stays_dropped():
+    resolution = _resolution(
+        _candidate("c1", "Title:", roles=frozenset({"title"}), source_kind="heading"),
+        _candidate("c2", _UNLABELLED, roles=frozenset({"title"}), text_ids=(2,)),
+    )
+
+    title, issue = ground_title_to_printed_text(_UNLABELLED, resolution, f"Title:\n{_UNLABELLED}")
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
+def test_label_stays_dropped_when_another_title_row_prints_the_title_bare():
+    # The record prints the title without the label elsewhere, so the label
+    # may be a kicker merged into one row.
+    printed = (f"Case report. {_UNLABELLED}", _UNLABELLED)
+
+    title, issue = ground_title_to_printed_text(_UNLABELLED, _titles(*printed), "\n".join(printed))
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
+def test_title_rows_that_disagree_on_the_label_abstain():
+    printed = (f"Opinion: {_UNLABELLED}", f"Commentary: {_UNLABELLED}")
+
+    title, issue = ground_title_to_printed_text(_UNLABELLED, _titles(*printed), "\n".join(printed))
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
+def test_label_is_restored_only_from_the_selected_title_rows():
+    labelled = f"Research Report: {_UNLABELLED}"
+    abstract = _candidate("c1", labelled, roles=frozenset({"abstract"}))
+    other_record = _candidate("c2", labelled, roles=frozenset({"title"}))
+    own_title = _candidate("c3", f"Plot notes. {_UNLABELLED}", roles=frozenset({"byline"}))
+    resolution = _resolution(abstract, other_record, own_title, selected_ids=("c1", "c3"))
+
+    title, issue = ground_title_to_printed_text(
+        _UNLABELLED, resolution, f"{labelled}\n{_UNLABELLED}"
+    )
+
+    assert title == _UNLABELLED
+    assert issue is None
+
+
 async def test_extracted_title_keeps_the_printed_leading_parenthetical():
     # With a selected front-matter record, the model title is final: the
     # layout-title preference in post_parse does not run, so a truncated model

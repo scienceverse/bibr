@@ -867,6 +867,154 @@ def _restore_leading_parenthetical(
     return next(iter(restorations.values())) if len(restorations) == 1 else None
 
 
+# A short label set off from the rest of a printed title row by a colon, full
+# stop or dash: "Research Report: ...", "Case report. ...", "FIELD NOTES – ...".
+# A full stop counts only before a space, so "e.g." and decimals do not split a
+# row.
+_TITLE_LABEL_SEPARATOR_RE = re.compile(r"\s*[:.]\s+|\s*[–—]\s*|\s+-\s+")
+# The same label printed as a row of its own above the title: "Review:". Only a
+# colon marks such a row as continuing into the next one; an article-type kicker
+# ("ORIGINAL PAPER", "Case report") prints no colon.
+_TITLE_LABEL_ROW_RE = re.compile(r"(?P<label>[^:]+?)\s*:")
+_TITLE_LABEL_MAX_CHARS = 40
+_TITLE_LABEL_MAX_WORDS = 5
+# A comma, bracket, quote, slash, year or "et al." makes a prefix a citation or
+# a running head ("Smith, J. (2020).", "Zhao et al.:"), and so does a word that
+# introduces one ("To cite this version:", "Cómo citar:", "Для цитирования:").
+_NOT_A_TITLE_LABEL_RE = re.compile(
+    r"[,;()\[\]{}\"“”„‘’«»|/]|\d{4}|\bet\.?\s+al\b"
+    r"|\b(?:cite|citation|citer|citar|citare|zitier\w*|cytow\w*|цитир\w*|цитат\w*)\b",
+    re.IGNORECASE,
+)
+# Field labels name the row instead of belonging to it: "Title: ...".
+_TITLE_FIELD_LABELS = frozenset(
+    {
+        "title",
+        "article title",
+        "paper title",
+        "full title",
+        "short title",
+        "running title",
+        "running head",
+        "titel",
+        "titre",
+        "titolo",
+        "título",
+        "tytuł",
+        "název",
+        "название",
+        "abstract",
+        "summary",
+        "highlights",
+        "key points",
+        "keywords",
+        "key words",
+        "doi",
+        "source",
+        "article type",
+        "special issue",
+    }
+)
+
+
+def _is_title_label(label: str) -> bool:
+    """Whether a short prefix of the printed title row is title text.
+
+    The title is what the heading prints, so a label printed inside the title
+    heading ("Research Report:", "Case report.", "Opinion:") belongs to it even
+    when it names the article type. Numbering, citation and running-head
+    prefixes, field labels and page furniture ("Open access") do not.
+    """
+
+    stripped = label.strip()
+    if (
+        not stripped
+        or len(stripped) > _TITLE_LABEL_MAX_CHARS
+        or len(stripped.split()) > _TITLE_LABEL_MAX_WORDS
+        or not any(character.isalpha() for character in stripped)
+        or _NOT_A_TITLE_LABEL_RE.search(stripped)
+        or _ENUMERATOR_RE.fullmatch(stripped)
+    ):
+        return False
+    normalized = _normalize_for_grounding(stripped)
+    return normalized not in _TITLE_FIELD_LABELS and normalized not in FRONT_MATTER_FURNITURE_LABELS
+
+
+def _continues_into_title(normalized_title: str, printed: str) -> bool:
+    """Whether the model title is exactly *printed*, or *printed* then a subtitle row."""
+
+    rest = _normalize_for_grounding(printed)
+    return len(rest) >= _TITLE_GROUNDING_MIN_LENGTH and (
+        normalized_title == rest or normalized_title.startswith(f"{rest} ")
+    )
+
+
+def _restore_leading_label(
+    title: str,
+    resolution: FrontMatterResolution,
+    printed_rows: Mapping[int, str] | None,
+) -> tuple[str, str] | None:
+    """Put back a leading label the model dropped from the printed title.
+
+    Two printed shapes: the label opens the title row ("Research Report: ...")
+    or is a row of its own ending in a colon, directly above the row where the
+    model title starts ("Review:" over the rest). Only the selected record's
+    title rows can supply a label. Abstains when rows
+    disagree on the label, or when another title row of the record prints the
+    title without it: then the label may be a kicker the model was right to
+    drop. Returns the restored title and the candidate the label came from.
+    """
+
+    normalized = _normalize_for_grounding(title)
+    selected = _selected_block_candidates(resolution)
+    restorations: dict[str, tuple[str, str]] = {}
+    label_sources: set[str] = set()
+    for index, candidate in enumerate(selected):
+        if "title" not in candidate.roles:
+            continue
+        for source in _grounding_sources((candidate,), printed_rows):
+            printed = source.strip()
+            for separator in _TITLE_LABEL_SEPARATOR_RE.finditer(printed):
+                if separator.start() > _TITLE_LABEL_MAX_CHARS:
+                    break
+                if not _continues_into_title(normalized, printed[separator.end() :]):
+                    continue
+                if _is_title_label(printed[: separator.start()]):
+                    label = printed[: separator.end()].strip()
+                    # A dash fused to the next word stays fused.
+                    space = " " if printed[separator.end() - 1].isspace() else ""
+                    restorations.setdefault(
+                        _normalize_for_grounding(label),
+                        (f"{label}{space}{title.strip()}", candidate.candidate_id),
+                    )
+                    label_sources.add(candidate.candidate_id)
+                break
+        row = _TITLE_LABEL_ROW_RE.fullmatch(candidate.raw_text.strip())
+        if (
+            row is not None
+            and index + 1 < len(selected)
+            and _is_title_label(row.group("label"))
+            and _continues_into_title(normalized, selected[index + 1].raw_text)
+        ):
+            label = candidate.raw_text.strip()
+            restorations.setdefault(
+                _normalize_for_grounding(label),
+                (f"{label} {title.strip()}", candidate.candidate_id),
+            )
+            label_sources.update((candidate.candidate_id, selected[index + 1].candidate_id))
+    if len(restorations) != 1:
+        return None
+    for candidate in selected:
+        if "title" not in candidate.roles or candidate.candidate_id in label_sources:
+            continue
+        if any(
+            _normalize_for_grounding(source) == normalized
+            for source in _grounding_sources((candidate,), printed_rows)
+        ):
+            return None
+    return next(iter(restorations.values()))
+
+
 def ground_title_to_printed_text(
     title: str,
     resolution: FrontMatterResolution | None,
@@ -882,25 +1030,31 @@ def ground_title_to_printed_text(
     deliberately narrow — it fires only on a near-copy of a single printed row —
     because the model legitimately joins a title split across regions, and a
     loose rule would truncate those. Everything ungrounded that is not a
-    near-copy is reported and left alone. The one exception is a leading
-    parenthetical such as "(Rural)", which a model drops as if it were an
-    annotation: the rest still occurs verbatim, so it is restored from the
-    selected title row unless it is numbering or an article-type label.
+    near-copy is reported and left alone. The exceptions are a leading
+    parenthetical such as "(Rural)" and a leading label such as "Research
+    Report:", which a model drops as if they were annotations: the rest still
+    occurs verbatim, so they are restored from the selected title rows unless
+    they are numbering, a field label or page furniture (a parenthetical
+    article type such as "(Review)" stays dropped too).
     """
 
     normalized = _normalize_for_grounding(title)
     if len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
         return title, None
 
-    restored = (
-        _restore_leading_parenthetical(title, resolution, printed_rows)
-        if resolution is not None
-        else None
-    )
-    if restored is not None:
+    for restore, what in (
+        (_restore_leading_parenthetical, "parenthetical"),
+        (_restore_leading_label, "label"),
+    ):
+        if resolution is None:
+            break
+        restored = restore(title, resolution, printed_rows)
+        if restored is None:
+            continue
         restored_title, candidate_id = restored
         logger.info(
-            "Title regrounded to its printed leading parenthetical: %r -> %r",
+            "Title regrounded to its printed leading %s: %r -> %r",
+            what,
             title[:80],
             restored_title[:80],
         )
@@ -908,11 +1062,11 @@ def ground_title_to_printed_text(
             code="VAL_TITLE_REGROUNDED",
             severity=IssueSeverity.WARNING,
             message=(
-                "Extracted title dropped the leading parenthetical printed in the "
+                f"Extracted title dropped the leading {what} printed in the "
                 "selected title row; restored it"
             ),
             origin_stage="extract",
-            evidence_ids=(candidate_id, "reason:title_leading_parenthetical_dropped"),
+            evidence_ids=(candidate_id, f"reason:title_leading_{what}_dropped"),
             count=1,
         )
 
