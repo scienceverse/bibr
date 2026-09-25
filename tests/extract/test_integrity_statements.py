@@ -1098,6 +1098,62 @@ def test_strong_funding_heading_cannot_override_failed_author_grounding(
 
 
 @pytest.mark.parametrize(
+    "text",
+    [
+        "This project has received funding from the European Union's Horizon 2020 research "
+        "and innovation programme under grant agreement No 101000000.",
+        "The research leading to these results has received funding from the European "
+        "Research Council under grant agreement No 123456.",
+        "Preparation of this article was supported by NIH grant R01-MH123456.",
+        "We gratefully acknowledge funding from the German Research Foundation (DFG, grant 12345).",
+        "The authors gratefully acknowledge financial support from the Swiss National "
+        "Science Foundation (grant 100019).",
+        "The first author was supported by a doctoral fellowship from the Studienstiftung.",
+    ],
+)
+def test_standard_funding_wording_without_a_named_author_is_owned(text: str):
+    """These subjects name no person, so author grounding must not reject them."""
+
+    contents = _contents([(1, "Funding", CanonicalSection.FUNDING, "exact_alias", 1.0, [text])])
+    authors = _paper_authors(("Jane", "Doe"), ("Alice", "Roe"))
+
+    shadow_resolution, shadow = _resolve_apply(contents, "shadow", authors=authors)
+    _active_resolution, active = _resolve_apply(contents, "active", authors=authors)
+
+    # Shadow mode sends the bounded selection, not the scalar, to structured funding.
+    assert (
+        _resolver_module().render_selected_integrity_statement(
+            contents, shadow_resolution, "funding_statement"
+        )
+        == text
+    )
+    assert shadow.funding_statement == text
+    assert shadow_resolution.issues == ()
+    assert active.funding_statement == text
+
+
+@pytest.mark.parametrize(
+    ("authors", "expected"),
+    [
+        (_paper_authors(("Alice", "Roe")), None),
+        (
+            _paper_authors(("Jane", "Doe")),
+            "Jane Doe has received funding from the Wellcome Trust (grant 206194).",
+        ),
+    ],
+)
+def test_perfect_tense_named_funding_is_grounded_on_the_name(
+    authors: tuple[PaperAuthor, ...], expected: str | None
+):
+    text = "Jane Doe has received funding from the Wellcome Trust (grant 206194)."
+    contents = _contents([(1, "Funding", CanonicalSection.FUNDING, "exact_alias", 1.0, [text])])
+
+    _resolution, metadata = _resolve_apply(contents, "active", authors=authors)
+
+    assert metadata.funding_statement == expected
+
+
+@pytest.mark.parametrize(
     ("text", "authors", "expected"),
     [
         (
@@ -1497,6 +1553,120 @@ def test_data_corresponding_author_contact_constructions_are_not_clipped(text: s
     _resolution, metadata = _resolve_apply(contents, "active")
 
     assert metadata.data_availability == text
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "field", "text"),
+    [
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "The data are available upon reasonable request to the corresponding author.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "The datasets can be obtained from the corresponding author on request.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "Data and analysis scripts are available at https://osf.io/abcde/.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "All data and materials are openly available on OSF (https://osf.io/abcde) "
+            "under a CC-BY 4.0 license.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "The raw data supporting the conclusions of this article will be made available "
+            "by the authors, without undue reservation.",
+        ),
+        (
+            "Ethics",
+            CanonicalSection.ETHICS,
+            "ethics_statement",
+            "Ethical approval was received from the local ethics committee (ref. 2020-17).",
+        ),
+        (
+            "Ethics",
+            CanonicalSection.ETHICS,
+            "ethics_statement",
+            "Ethical approval was received on 12 March 2020 from the University Ethics "
+            "Committee (ref. 2020-17).",
+        ),
+        (
+            "Conflict of Interest",
+            CanonicalSection.COI,
+            "coi_statement",
+            "The authors declare that the research was conducted in the absence of any "
+            "commercial or financial relationships that could be construed as a potential "
+            "conflict of interest.",
+        ),
+        (
+            "Conflict of Interest",
+            CanonicalSection.COI,
+            "coi_statement",
+            "The authors declare that they have no known competing financial interests or "
+            "personal relationships that could have appeared to influence the work reported "
+            "in this paper.",
+        ),
+    ],
+)
+def test_standard_declarations_under_generic_headings_are_kept_whole(
+    heading: str, section_type: CanonicalSection, field: str, text: str
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, [text])])
+
+    shadow_resolution, _shadow = _resolve_apply(contents, "shadow")
+    _active_resolution, active = _resolve_apply(contents, "active")
+
+    assert getattr(active, field) == text
+    assert shadow_resolution.issues == ()
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "field", "rows"),
+    [
+        (
+            "Ethics",
+            CanonicalSection.ETHICS,
+            "ethics_statement",
+            [
+                ("Ethical approval was obtained from the University Ethics Committee.", 7),
+                ("Received 12 March 2020; accepted 3 June 2020.", 7),
+            ],
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            [
+                ("Data are available at https://osf.io/abcde/.", 7),
+                ("This article is distributed under a Creative Commons license.", 7),
+            ],
+        ),
+    ],
+)
+def test_publisher_history_and_license_sentences_still_end_a_declaration(
+    heading: str,
+    section_type: CanonicalSection,
+    field: str,
+    rows: list[tuple[str, int]],
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, rows)])
+
+    _resolution, active = _resolve_apply(contents, "active")
+
+    assert getattr(active, field) == rows[0][0]
 
 
 def test_prefers_research_ethics_over_publication_consent_decoy():

@@ -369,6 +369,23 @@ released.
   - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
     were cut at the `<` when read as the paper's DOI or matched against a
     manifest's expected DOI. They are kept whole.
+- Standard funding wording reached neither structured funding (`funding`, and
+  so `funding_match`) in the default shadow integrity-statement mode nor
+  `funding_statement` in active mode: "This project has received funding from
+  the European Union's Horizon 2020 …", "The research leading to these results
+  has received funding …", "We gratefully acknowledge funding from …",
+  "Preparation of this article was supported by …" and "The first author was
+  supported by …". Their subjects were checked as if they named authors, and
+  failed. A named author who "has received funding" is now matched on the name.
+- Active integrity-statement mode rejected or cut short standard declarations
+  under a generic heading, and the default shadow mode raised
+  `VAL_STATEMENT_SUSPECT` for each. "Available upon reasonable request to the
+  corresponding author" was cut after "to the". "Data and analysis scripts are
+  available at …", "… will be made available by the authors", Frontiers'
+  "conducted in the absence of any commercial or financial relationships …"
+  conflict-of-interest statement and "Ethical approval was received …" were
+  rejected. A data licence and the date an approval was received ended the
+  statement as if they were publisher boilerplate.
 
 ### Added
 
