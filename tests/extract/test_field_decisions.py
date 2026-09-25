@@ -39,7 +39,11 @@ _PACKAGE = Path(bibr.__file__).parent
 # The writer, and the JATS/HTML readers, which build the record they hand over.
 _WRITERS = {"extract/field_decisions.py", "input/jats_native.py", "input/html_native.py"}
 # The same attribute names on objects that are not the paper's metadata.
-_OTHER_OBJECTS = {("extract/ref_extractor.py", "ref.authors")}
+_OTHER_OBJECTS = {
+    ("extract/ref_extractor.py", "ref.authors"),
+    # The model's response, before any candidate is built from it.
+    ("extract/core_metadata.py", "llm_metadata.model_copy"),
+}
 _MUTATORS = {"append", "extend", "insert", "remove", "clear", "pop", "sort", "reverse"}
 _METADATA_NAME = re.compile(r"meta(?:data)?$|preparsed$")
 
@@ -71,6 +75,21 @@ def _writes_in(relative, source):
             and func.value.attr in DECIDED_ATTRIBUTES
         ):
             yield relative, node.lineno, ast.unparse(func)
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "model_copy"
+            and (relative, ast.unparse(func)) not in _OTHER_OBJECTS
+            and any(
+                keyword.arg == "update"
+                and isinstance(keyword.value, ast.Dict)
+                and any(
+                    isinstance(key, ast.Constant) and key.value in DECIDED_ATTRIBUTES
+                    for key in keyword.value.keys
+                )
+                for keyword in node.keywords
+            )
+        ):
+            yield relative, node.lineno, ast.unparse(func)
         if isinstance(func, ast.Name) and func.id == "setattr" and node.args:
             owner = ast.unparse(node.args[0])
             attribute = node.args[1] if len(node.args) > 1 else None
@@ -96,6 +115,7 @@ def test_the_scan_sees_every_kind_of_write():
         "    paper_metadata.title = 'x'\n"
         "    meta.keywords.append('y')\n"
         "    setattr(meta, field, None)\n"
+        "    meta = meta.model_copy(update={'abstract': ''})\n"
         "    ref.authors = []\n"
     )
     writes = [text for _, _, text in _writes_in("extract/ref_extractor.py", source)]
@@ -103,6 +123,7 @@ def test_the_scan_sees_every_kind_of_write():
         "paper_metadata.title",
         "meta.keywords.append",
         "setattr(meta, field, None)",
+        "meta.model_copy",
     ]
 
 
