@@ -341,6 +341,21 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- A section whose heading merely contains the word "reference", such as
+  "Revealed Preferences", "Reference standard" or "Reference values", is no
+  longer taken for the bibliography when no other reference section is found.
+  Its prose was parsed into references and the section was exported as
+  `references`. The heading fallback now needs a whole references heading, in
+  any language the reference-line capture recognises, so it also finds
+  headings it used to miss, such as "Literaturverzeichnis" or "Daftar Pustaka".
+- When a printed "References" heading overrides the section the classifier had
+  typed `references`, that section now gets the type its heading looks up to
+  ("General Discussion" becomes `discussion`, a heading with no known alias
+  `unknown`). It kept `references`, so a bibliography entry could point its
+  `text_id` at a body sentence, the citation linker read the section's numbers
+  as reference numbers, and the export typed a body section as references. The
+  reference receipt records `classifier_references_demoted`. A section whose
+  own heading names references, such as a second list, keeps its type.
 
 ### Added
 
