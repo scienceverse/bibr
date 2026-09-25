@@ -489,6 +489,9 @@ def _recover_finished_response(exc: BaseException, response_model: type) -> Any 
     except StructuredResponseError as invalid:
         logger.debug("Local %s recovery declined: %s", response_model.__name__, invalid.category)
         return None
+    except Exception:  # noqa: BLE001 - a validator bug must not replace the typed error
+        logger.debug("Local %s recovery failed", response_model.__name__, exc_info=True)
+        return None
     logger.warning(
         "Recovered the %s response locally after it failed validation "
         "(%d invalid backslash escape(s) repaired)",

@@ -305,7 +305,9 @@ _LATEX_TITLE_RESPONSE = (
 )
 
 
-async def _title_over_http(monkeypatch, content: str, finish_reason: str = "stop"):
+async def _title_over_http(
+    monkeypatch, content: str, finish_reason: str = "stop", *, merged: bool = False
+):
     requests = []
 
     async def respond(request):
@@ -339,11 +341,18 @@ async def _title_over_http(monkeypatch, content: str, finish_reason: str = "stop
 
         monkeypatch.setattr(llm, "_create_client", create_client)
         client = LLMClient(
-            settings=GlobalSettings(llm={"provider": "openai", "base_url": "http://localhost/v1"})
+            settings=GlobalSettings(
+                llm={
+                    "provider": "openai",
+                    "base_url": "http://localhost/v1",
+                    "merged_core_metadata": merged,
+                }
+            )
         )
         monkeypatch.setattr(client, "_acquire_rate_limit", AsyncMock())
+        call = client.extract_core_metadata if merged else client.extract_title_keywords
         try:
-            return await client.extract_title_keywords("A printed study", file_hash="h"), requests
+            return await call("A printed study", file_hash="h"), requests
         except LlmCallError as exc:
             return exc, requests
 
@@ -370,3 +379,33 @@ async def test_nested_value_in_a_malformed_envelope_is_not_recovered(monkeypatch
         monkeypatch, '{"title": ["bad"], "payload": {"title": "Nested substitute"}}'
     )
     assert type(result) is LlmInvalidOutputError
+
+
+def _recovery_crashes(monkeypatch):
+    from bibr.clients import structured_json
+
+    def crash(*_args, **_kwargs):
+        raise TypeError("a validator bug")
+
+    monkeypatch.setattr(structured_json, "recover_structured_object", crash)
+
+
+async def test_a_crashing_recovery_keeps_the_typed_error(monkeypatch):
+    _recovery_crashes(monkeypatch)
+
+    result, _ = await _title_over_http(monkeypatch, _LATEX_TITLE_RESPONSE)
+
+    assert type(result) is LlmInvalidOutputError
+
+
+async def test_a_crashing_merged_recovery_is_still_contained(monkeypatch):
+    # A raw error here used to reach the extractor's broad except, which
+    # exports an empty record without the blocking field-failed issue.
+    _recovery_crashes(monkeypatch)
+
+    result, _ = await _title_over_http(monkeypatch, _LATEX_TITLE_RESPONSE, merged=True)
+
+    assert isinstance(result, CoreMetadataLLM)
+    assert result._field_failures == dict.fromkeys(
+        CoreMetadataLLM.model_fields, "llm_invalid_output"
+    )
