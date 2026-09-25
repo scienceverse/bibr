@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bibr.config import Settings
 from bibr.input.file import InputFile
@@ -286,6 +286,24 @@ async def test_identity_stage_reads_an_upload_that_has_no_file():
 
     assert state.paper is not None and state.paper.metadata is not None
     assert state.paper.metadata.doi == "10.1234/banner.7"
+
+
+async def test_process_file_keeps_upload_bytes_past_ocr_for_identity():
+    from bibr.pipeline.pipeline import Pipeline
+
+    pipeline = Pipeline(stages=[], resources=MagicMock(), config=RunConfig(), settings=Settings)
+    seen = {}
+
+    async def _chunk(file_states, progress=None, config=None):
+        state = file_states[0]
+        state.free_pre_ocr()
+        seen["pdf_bytes"], seen["caller_bytes"] = state.pdf_bytes, state.caller_bytes
+        state.result_json = {}
+
+    with patch.object(pipeline, "process_chunk", side_effect=_chunk):
+        await pipeline.process_file(Path("upload.pdf"), content=b"%PDF-1.4 upload")
+
+    assert seen == {"pdf_bytes": None, "caller_bytes": b"%PDF-1.4 upload"}
 
 
 async def test_an_unreadable_pdf_leaves_the_parsed_text_pool(monkeypatch):
