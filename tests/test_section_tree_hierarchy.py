@@ -206,6 +206,31 @@ def test_exact_alias_heading_outranks_an_earlier_keyword_anchor():
     ]
 
 
+def test_an_exact_subsection_alias_also_outranks_a_keyword_part():
+    """Known limitation: the exact alias table also holds subsection names.
+    "Statistical analysis" (exact METHODS) outranks "Methods and materials"
+    (a keyword hit), so the Results subsections after it fold under it and
+    read as METHODS. Restricting the rule to part names such as "Methods"
+    lost more than it saved on the PMC sample ("Experimental Section")."""
+    secs = [
+        _typed_section(1, "Methods and materials", CanonicalSection.METHODS),
+        _typed_section(2, "Results", CanonicalSection.RESULTS),
+        _typed_section(3, "Statistical analysis", CanonicalSection.METHODS),
+        _typed_section(4, "Dose comparison", CanonicalSection.UNKNOWN),
+    ]
+    for sec, source in zip(
+        secs, ["substring_alias", "exact_alias", "exact_alias", None], strict=True
+    ):
+        sec.classification_source = source
+    assign_hierarchy_from_top_level(secs)
+    assert [(s.section_id, s.level, s.parent_section_id) for s in secs] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 1, 0),
+        (4, 2, 3),
+    ]
+
+
 def test_repeat_exact_alias_heading_still_folds_under_the_first():
     secs = [
         _typed_section(1, "Methods", CanonicalSection.METHODS),
