@@ -430,6 +430,20 @@ released.
   printed in two scripts or languages, and never transliterate or romanise a
   name. The abstract rule is unchanged: of parallel abstracts, the printed
   English version is still preferred.
+- A title that opens with a printed label, such as "Research Report: …",
+  "Case report. …" or "Opinion: …", keeps it; so does a title whose label is
+  printed on a row of its own ending in a colon, such as "Review:" above the
+  rest of the title. The metadata LLM dropped such labels the same way it
+  dropped a leading parenthetical, and grounding accepted the rest because it is
+  still printed verbatim. Grounding now restores a label of up to five words
+  that is set off by a colon, full stop or dash in the selected record's title
+  row, and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_label_dropped`. Numbering ("1.", "IV."), field labels
+  ("Title:", "Running title:"), citation lines ("To cite this article:",
+  "Smith et al.:"), page furniture ("Open access") and an article-type kicker
+  printed above the title without a colon are still left out, and nothing is
+  restored when another title row of the record prints the title without the
+  label.
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
