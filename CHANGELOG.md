@@ -224,10 +224,7 @@ released.
   co-authors who share one, and still rejects a different person with the same
   surname. Surnames now also match without their diacritics or with an umlaut
   spelled out ("González" and "Gonzalez", "Müller" and "Mueller"), and an
-  organization author no longer counts as a surname that fails to match. On
-  2,312 printed references, each paired with the recorded Crossref record its
-  printed DOI names, the title matcher rejected 798 of those records and now
-  rejects 130, mostly where the printed title differs from the deposited one.
+  organization author no longer counts as a surname that fails to match.
 - A title search could accept a different work from the one the reference's
   own DOI names. When the DOI lookup failed with a timeout or server error,
   the Crossref title search took any record with a matching title, a preprint
@@ -239,14 +236,22 @@ released.
   cannot drift apart again.
 - A generic title ("Introduction", "Emotion regulation") matched any record of
   that title by an author of the same surname in about the same year. A title
-  of three words or fewer now also needs the printed container and volume to
-  agree with the record's where both are present, and any title is rejected
-  when both the printed volume and the first page disagree with the record's.
+  of three words or fewer is now rejected when the printed volume disagrees
+  with the record's, or when the printed container does, unless the printed
+  volume and first page both agree with the record's: those identify the
+  article even when the container is an abbreviation the matcher cannot
+  expand, such as "PNAS". Any title is rejected when both the printed volume
+  and the first page disagree with the record's. A value missing on either
+  side counts for nothing.
 - Crossref titles and journal names kept their inline markup
   (`CO<sub>2</sub>`, `<i>Drosophila</i>`, `&amp;`). The tags cost enough
   similarity to reject the correct record, and an accepted match carried them
   into `bib_match` and, through consolidation, into `bib`. Titles and
   container names from Crossref and the resolver are now plain text.
+- On 2,312 printed references, each paired with the recorded Crossref record
+  its printed DOI names, the title matcher with all of the changes above
+  rejects 130 of those records, down from 798, mostly where the printed title
+  differs from the deposited one.
 - With `BIBR_RESOLVER_AUTHORITATIVE=true`, a failed resolver prefetch left
   every reference without a DOI unmatched and never asked Crossref, although
   the log said it was falling back to Crossref. Those references now go to

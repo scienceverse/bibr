@@ -9,6 +9,8 @@ out, and deposited title markup neither costs the match nor leaks into it.
 """
 
 import asyncio
+import itertools
+import string
 from unittest import mock
 
 import httpx
@@ -99,6 +101,10 @@ class TestInitialsAcrossCitationStyles:
             ("Beg, M.U., Saeed, T., Al-Muzaini, Beg, K.R.", "Al-Muzaini", set()),
             ("Choi KH, Karkhoff-Schweizer RR, Schweizer HP", "Schweizer", set()),
             ("Boer H. Emons P.A.A.", "Emons", {"B", "H", "P", "A"}),
+            ("Weber, EU, Johnson, EJ", "Weber", {"E", "U"}),
+            ("SMITH J. WEBER E.", "WEBER", {"E"}),
+            ("Ludwig van Beethoven", "Beethoven", {"L"}),
+            ("Anna Karkhoff-Schweizer and Bob Karkhoff", "Karkhoff", {"B"}),
         ],
     )
     def test_initials_read_for_the_surname(self, authors, family, expected):
@@ -113,6 +119,8 @@ class TestInitialsAcrossCitationStyles:
             ("Mohr, M. and Krolak-Salmon, P.", [("M.", "Mohr"), ("Eric", "Salmon")]),
             ("Liu, H. and Xue, R.", [("Prof Haiyue", "Liu"), ("Dr Rui", "Xue")]),
             ("Giraldo Peláez, Santiago", [("SANTIAGO GIRALDO", "PELÁEZ")]),
+            ("Smith J Weber", [("Elke", "Weber")]),
+            ("Durkheim, É.", [("Emile", "Durkheim")]),
         ],
     )
     def test_same_person_is_not_a_conflict(self, authors, cand):
@@ -128,12 +136,26 @@ class TestInitialsAcrossCitationStyles:
             "Smith, J. and Weber, E. U.",
             "Smith, J., Weber, E. U., & Jones, K.",
             "Weber, Elke U., and Eric J. Johnson",
+            "Smith, J. und E. U. Weber",
+            "Dupont, J. et E. U. Weber",
         ],
     )
     def test_a_different_same_surname_author_is_still_vetoed(self, authors):
         from bibr.enrich.references import _initials_conflict
 
         assert _initials_conflict(authors, [{"given": "Max", "family": "Weber"}]) is True
+
+    def test_a_long_list_of_spelled_names_is_read(self):
+        """Reading a spelled given name looks one author ahead; it used to
+        recurse once per author and raised RecursionError past ~950."""
+        from bibr.enrich.references import _initials_conflict, _ref_initials_for_surname
+
+        tags = ("".join(t) for t in itertools.product(string.ascii_lowercase, repeat=3))
+        names = [f"Given{tag} Family{tag}" for tag in itertools.islice(tags, 1500)]
+        assert len(names) == 1500
+        authors = "Wansink, Brian, " + ", ".join(names)
+        assert _ref_initials_for_surname(authors, "Wansink") == {"B"}
+        assert _initials_conflict(authors, [{"given": "Brian", "family": "Wansink"}]) is False
 
 
 class TestSurnameOverlap:
@@ -226,22 +248,66 @@ class TestPrintedFieldsRuleOutACandidate:
     """A generic title ("Introduction") by the same author in the same year
     matched any journal article of that title."""
 
-    async def test_generic_title_in_another_container_is_rejected(self):
+    @pytest.mark.parametrize("title", ["Introduction", "Theories of emotion"])
+    async def test_generic_title_in_another_container_is_rejected(self, title):
         article = _item(
             doi="10.1000/unrelated",
-            title="Introduction",
+            title=title,
             authors=[{"given": "John", "family": "Smith"}],
             year=2015,
             **{"container-title": ["Journal of Unrelated Studies"], "volume": "3"},
         )
         ref = _ref(
-            title="Introduction",
+            title=title,
             authors="Smith, J.",
             year=2015,
             container="Handbook of Emotion Regulation",
             first_page="1",
         )
         assert await _crossref_match(ref, [article]) is None
+
+    async def test_generic_title_in_another_volume_is_rejected(self):
+        article = _item(
+            doi="10.1000/unrelated",
+            title="Introduction",
+            authors=[{"given": "John", "family": "Smith"}],
+            year=2015,
+            volume="12",
+        )
+        ref = _ref(title="Introduction", authors="Smith, J.", year=2015, volume="3")
+        assert await _crossref_match(ref, [article]) is None
+
+    @pytest.mark.parametrize(
+        ("printed", "deposited"),
+        [
+            ("PNAS", "Proceedings of the National Academy of Sciences"),
+            ("Proc Natl Acad Sci USA", "Proceedings of the National Academy of Sciences"),
+            ("Br Med J", "BMJ"),
+        ],
+    )
+    @pytest.mark.parametrize(("page", "expected"), [("1-5", "10.1000/pnas"), ("99-104", None)])
+    async def test_generic_title_pinned_by_volume_and_page(
+        self, printed, deposited, page, expected
+    ):
+        """A container abbreviation the matcher cannot expand is no evidence
+        against a record whose volume and first page both agree; without the
+        page agreement it still rules the record out."""
+        article = _item(
+            doi="10.1000/pnas",
+            title="Cultural evolution",
+            authors=[{"given": "John", "family": "Smith"}],
+            year=2011,
+            **{"container-title": [deposited], "volume": "108", "page": page},
+        )
+        ref = _ref(
+            title="Cultural evolution",
+            authors="Smith, J.",
+            year=2011,
+            container=printed,
+            volume="108",
+            first_page="1",
+        )
+        assert await _crossref_match(ref, [article]) == expected
 
     async def test_generic_title_in_the_printed_container_is_accepted(self):
         chapter = _item(
@@ -270,6 +336,32 @@ class TestPrintedFieldsRuleOutACandidate:
         ref = _ref(authors="Wansink, B., & Sobal, J.", volume="39", first_page="106")
         assert await _crossref_match(ref, [record]) == "10.1000/exact"
 
+    @pytest.mark.parametrize(
+        ("volume", "first_page", "expected"),
+        [("80", "1105", False), ("39", "106", True)],
+    )
+    async def test_the_resolver_primary_search_obeys_the_printed_fields(
+        self, volume, first_page, expected
+    ):
+        from bibr.enrich.references import _try_resolver
+
+        cand = {
+            "title": TITLE,
+            "year": 2007,
+            "doi": "10.1000/exact",
+            "volume": volume,
+            "first_page": first_page,
+            "authors": [{"given": "Brian", "family": "Wansink"}],
+        }
+        resolver = mock.AsyncMock()
+        resolver.search = mock.AsyncMock(return_value=[cand])
+        ref = _ref(authors="Wansink, B., & Sobal, J.", volume="39", first_page="106")
+
+        result = await _try_resolver(ref, resolver, settings=GlobalSettings(_env_file=None))
+
+        resolver.search.assert_awaited_once()
+        assert (result is not None) is expected
+
 
 class TestDepositedTitleMarkup:
     """<sub>/<i> tags cost the fuzzy score and were exported into bib_match."""
@@ -283,6 +375,14 @@ class TestDepositedTitleMarkup:
         item = _item(title=deposited, authors=[{"given": "A.", "family": "Smith"}], year=2010)
         ref = _ref(title=title, authors="Smith, A.", year=2010)
         assert await _crossref_match(ref, [item]) == "10.1000/exact"
+
+    @pytest.mark.parametrize("position", [0, 1])
+    async def test_a_search_row_that_does_not_parse_costs_only_itself(self, position):
+        malformed = _item(doi="10.1000/malformed", authors=[{"given": None, "family": "Wansink"}])
+        items = [_item()]
+        items.insert(position, malformed)
+        ref = _ref(authors="Wansink, B., & Sobal, J.")
+        assert await _crossref_match(ref, items) == "10.1000/exact"
 
     async def test_match_carries_plain_title_and_container(self):
         from bibr.enrich.references import enrich_references
@@ -307,10 +407,14 @@ class TestDepositedTitleMarkup:
         from bibr.enrich.references import _build_match_from_candidate
 
         match = _build_match_from_candidate(
-            {"title": "Global C\n  <sub>2</sub>\n  H\n  <sub>6</sub>\n  maps", "doi": "10.1/x"},
+            {
+                "title": "Global C\n  <sub>2</sub>\n  H\n  <sub>6</sub>\n  maps",
+                "container": "Genes &amp; Development",
+                "doi": "10.1/x",
+            },
             100.0,
         )
-        assert match.title == "Global C2H6 maps"
+        assert (match.title, match.container) == ("Global C2H6 maps", "Genes & Development")
 
 
 def _resolver_settings(**overrides):
@@ -347,6 +451,29 @@ class TestAuthoritativeResolverPrefetchFailure:
         crossref.search.assert_awaited_once()
         assert ref.match[MatchSource.CROSSREF].doi == "10.1000/exact"
         assert (report.matched, report.failed) == (1, 0)
+
+    async def test_a_failed_prefetch_keeps_the_crossref_bulk_doi_lookup(self):
+        """The batch goes to Crossref after all, so its DOI-bearing references
+        are fetched in one bulk query as without an authoritative resolver."""
+        from bibr.enrich.references import prefetch_enrichment
+
+        refs = [_ref(bib_id=1, doi="10.1000/exact"), _ref(bib_id=2)]
+        crossref = _crossref([])
+        resolver = mock.AsyncMock()
+        resolver.healthy = mock.AsyncMock(return_value=True)
+        resolver.search_many = mock.AsyncMock(side_effect=RuntimeError("search down"))
+
+        prefetch = await prefetch_enrichment(
+            refs,
+            settings=_resolver_settings(fallback_sources=[]),
+            crossref_client=crossref,
+            resolver_client=resolver,
+        )
+        try:
+            assert isinstance(prefetch.resolver_prefetch_error, RuntimeError)
+            crossref.prefetch_works_by_doi.assert_awaited_once_with(["10.1000/exact"])
+        finally:
+            await prefetch.aclose()
 
     def test_search_concurrency_below_one_is_rejected_at_load(self):
         from pydantic import ValidationError

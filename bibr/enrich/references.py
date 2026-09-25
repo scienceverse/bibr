@@ -711,12 +711,24 @@ def _score_fingerprint(ref, cand: CrossrefWorkItem) -> float | None:
     return float(csim)
 
 
+def _parse_search_items(items: list[dict]) -> list[CrossrefWorkItem]:
+    """Search rows as work items. A row that does not parse is skipped: every
+    row is parsed before scoring, and one malformed record must not fail the
+    reference's whole search."""
+    parsed: list[CrossrefWorkItem] = []
+    for item in items:
+        try:
+            parsed.append(CrossrefWorkItem.from_raw(item))
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.debug("Skipping a Crossref search row that does not parse: %s", e)
+    return parsed
+
+
 def _find_best_fingerprint_match(ref, items: list[dict]) -> tuple[CrossrefWorkItem, float] | None:
     """Pick the highest-scoring candidate that clears every fingerprint gate."""
     best_item = None
     best_score = 0.0
-    for item in items:
-        cand = CrossrefWorkItem.from_raw(item)
+    for cand in _parse_search_items(items):
         if not _doi_agrees(ref.doi, cand.doi):
             continue
         score = _score_fingerprint(ref, cand)
@@ -829,7 +841,9 @@ _UMLAUT_SPELLED_OUT = str.maketrans(
 )
 
 
-@functools.lru_cache(maxsize=4096)
+# Small on purpose: the keys include whole reference-author strings, and one
+# reference's string stays hot while its candidates' surnames are compared.
+@functools.lru_cache(maxsize=256)
 def _folded_name_text(text: str, umlauts_spelled_out: bool) -> tuple[str, tuple[int, ...]]:
     """``text`` accent-folded and casefolded, with each folded character's index
     in ``text`` so a match found in the folded form maps back to the original."""
@@ -848,17 +862,24 @@ def _folded_name_text(text: str, umlauts_spelled_out: bool) -> tuple[str, tuple[
     return "".join(out), tuple(offsets)
 
 
+@functools.lru_cache(maxsize=256)
+def _umlaut_spellings(text: str) -> tuple[bool, ...]:
+    """The ``umlauts_spelled_out`` values worth folding ``text`` with: spelling
+    out changes nothing in a text without an umlaut."""
+    return (False, True) if text != text.translate(_UMLAUT_SPELLED_OUT) else (False,)
+
+
 def _surname_spans(ref_authors: str, family: str) -> list[tuple[int, int]]:
     """Every ``(start, end)`` in ``ref_authors`` where ``family`` is printed as a
     word, ignoring case and diacritics ("Gonzalez" finds "González", "Mueller"
     finds "Müller" and the reverse). Registry deposits and PDF text layers drop
     or transliterate accents independently of each other."""
     spans: set[tuple[int, int]] = set()
-    for spelled_out in (False, True):
+    for spelled_out in _umlaut_spellings(ref_authors):
         text, offsets = _folded_name_text(ref_authors, spelled_out)
-        for family_spelled_out in (False, True):
+        for family_spelled_out in _umlaut_spellings(family):
             needle = _folded_name_text(family, family_spelled_out)[0]
-            if not needle:
+            if not needle or needle not in text:
                 continue
             for m in re.finditer(r"\b" + re.escape(needle) + r"\b", text):
                 spans.add((offsets[m.start()], offsets[m.end() - 1] + 1))
@@ -914,7 +935,9 @@ def _initials_before_surname(before: str) -> set[str]:
     return initials
 
 
-def _initials_after_surname(after: str, *, inverted: bool) -> tuple[set[str], bool]:
+def _initials_after_surname(
+    after: str, *, inverted: bool, look_ahead: bool = True
+) -> tuple[set[str], bool]:
     """Initials printed after a surname and its comma ("Weber, E. U."), and
     whether they are bare initials only.
 
@@ -925,7 +948,9 @@ def _initials_after_surname(after: str, *, inverted: bool) -> tuple[set[str], bo
     next author's surname ("Brownlee, Liam D. Harper"), and nothing is read.
     Nothing is read either when the word after the comma is itself a surname
     followed by its initials ("Al-Muzaini, Beg, K. R.", where Al-Muzaini's were
-    not printed). Without a comma only dotted initials count ("Emons P.A.A.").
+    not printed): with ``look_ahead`` the next comma-separated segment is read,
+    one segment only, to find out. Without a comma only dotted initials count
+    ("Emons P.A.A.").
     """
     comma = re.match(r"\s*,", after)
     if comma is None:
@@ -948,7 +973,11 @@ def _initials_after_surname(after: str, *, inverted: bool) -> tuple[set[str], bo
             bare = False
         else:
             return set(), False
-    if not bare and _initials_after_surname(rest[cut:], inverted=True)[1]:
+    if (
+        look_ahead
+        and not bare
+        and _initials_after_surname(rest[cut:], inverted=True, look_ahead=False)[1]
+    ):
         return set(), False
     return initials, bare and bool(initials)
 
@@ -1155,18 +1184,24 @@ def _printed_fields_conflict(
 
     A value missing on either side is no evidence. A volume *and* a first page
     that both disagree name a different article whatever the title says. A
-    generic title needs more: any printed volume or container must agree too.
+    generic title needs more: any printed volume must agree too, and so must
+    any printed container, unless the volume and first page are both printed
+    and agree, which pins the article even when the container is an
+    abbreviation :func:`_container_matches` cannot expand ("PNAS", "Br Med J").
     One disagreeing field alone does not veto a distinctive title, because
     parsers misread a volume ("19:262") or a page (an article number) often
     enough to cost correct matches.
     """
     volume_differs = not _fingerprint_field_match(volume, cand.volume)
-    if volume_differs and not _fingerprint_field_match(first_page, cand.first_page):
+    page_differs = not _fingerprint_field_match(first_page, cand.first_page)
+    if volume_differs and page_differs:
         return True
     if len(title.split()) > _GENERIC_TITLE_WORDS:
         return False
     if volume_differs:
         return True
+    if volume and cand.volume and first_page and cand.first_page and not page_differs:
+        return False
     return bool(
         container and cand.container and _container_matches(container, cand.container) is None
     )
@@ -1236,7 +1271,7 @@ def _find_best_match(
     Returns:
         (CrossrefWorkItem, final_score) tuple or None if no match above threshold.
     """
-    parsed = [CrossrefWorkItem.from_raw(item) for item in items]
+    parsed = _parse_search_items(items)
     best = _best_title_candidate(
         title,
         [_TitleCandidate.from_crossref(item) for item in parsed],
