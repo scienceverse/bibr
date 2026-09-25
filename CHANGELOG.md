@@ -213,6 +213,19 @@ released.
 
 ### Fixed
 
+- Front matter no longer abstains (`VAL_METADATA_MULTI_ITEM`, no title, authors
+  or abstract) on a paper whose first pages print its record twice or whose
+  furniture starts a second block. Any second block with a byline, a DOI or
+  abstract text used to block selection, even a publisher cover page, a
+  repository landing page, a citation box, a translated title and abstract, an
+  email list, a date line or an "article info" sidebar. Where that check
+  abstains, bibr now compares what each block prints about its paper: the DOI,
+  the title, and for a title in another language or script the authors'
+  surnames. It selects the paper's own record when all records agree and
+  prefers the article's title page over a cover page or citation box. Records
+  that disagree still abstain, so compiled abstract books and proceedings pages
+  still fail closed. Pages the old check resolved are selected exactly as
+  before.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
