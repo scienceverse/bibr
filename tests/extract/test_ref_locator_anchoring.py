@@ -82,6 +82,26 @@ def test_heading_that_only_contains_reference_is_not_the_bibliography(heading):
     assert contents.sections[2].section_type == CanonicalSection.UNKNOWN
 
 
+@pytest.mark.parametrize("heading", ["Selected References", "Appendix B. References"])
+def test_header_text_fallback_accepts_a_reference_word_after_a_prefix(heading):
+    contents = _contents(
+        [
+            ("Discussion", CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+            (heading, CanonicalSection.UNKNOWN),
+        ],
+        [
+            (1, "We found an effect."),
+            (2, "Kahneman, D. (1973). Attention and effort. Prentice-Hall."),
+            (2, "Posner, M. I. (1980). Orienting of attention. QJEP, 32, 3-25."),
+        ],
+    )
+
+    rows = RefLocator(contents).collect_reference_rows()
+
+    assert list(rows["text_id"]) == [2, 3]
+    assert contents.sections[2].section_type == CanonicalSection.REFERENCES
+
+
 def test_header_text_fallback_accepts_a_whole_non_english_heading():
     contents = _contents(
         [
@@ -105,25 +125,28 @@ def test_header_alias_override_retypes_the_misclassified_body_section():
     contents = _contents(
         [
             ("Introduction", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
-            # exp #2: the classifier typed a body section REFERENCES ...
+            # exp #2: the classifier typed body sections REFERENCES ...
             ("General Discussion", CanonicalSection.REFERENCES, 0.6, "model"),
+            ("Limitations of the study", CanonicalSection.REFERENCES, 0.55, "model"),
             # ... and left the printed references heading UNKNOWN.
             ("References", CanonicalSection.UNKNOWN),
         ],
         [
             (1, "We study attention."),
             (2, "Our results extend Attention and effort (Kahneman, 1973) to new tasks."),
-            (3, "Kahneman, D. (1973). Attention and effort. Prentice-Hall."),
-            (3, "Posner, M. I. (1980). Orienting of attention. QJEP, 32, 3-25."),
+            (3, "Attention and effort (Kahneman, 1973) did not test older adults."),
+            (4, "Kahneman, D. (1973). Attention and effort. Prentice-Hall."),
+            (4, "Posner, M. I. (1980). Orienting of attention. QJEP, 32, 3-25."),
         ],
     )
 
     rows = RefLocator(contents).collect_reference_rows()
 
-    assert list(rows["text_id"]) == [3, 4]
+    assert list(rows["text_id"]) == [4, 5]
     assert _types(contents) == [
         ("Introduction", CanonicalSection.INTRODUCTION, 1.0, "exact_alias"),
         ("General Discussion", CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+        ("Limitations of the study", CanonicalSection.DISCUSSION, 0.95, "substring_alias"),
         ("References", CanonicalSection.REFERENCES, 0.0, None),
     ]
     assert contents.reference_boundary_reason_flags == ["classifier_references_demoted"]
@@ -138,7 +161,7 @@ def test_header_alias_override_retypes_the_misclassified_body_section():
         container=None,
     )
     _map_bib_text_ids([ref], contents)
-    assert ref.text_id == 3
+    assert ref.text_id == 4
 
 
 def test_header_alias_override_keeps_a_second_reference_list_typed():
@@ -160,6 +183,53 @@ def test_header_alias_override_keeps_a_second_reference_list_typed():
         ("Supplementary References", CanonicalSection.REFERENCES, 0.95, "substring_alias"),
         ("References", CanonicalSection.REFERENCES, 0.0, None),
     ]
+    assert contents.reference_boundary_reason_flags == []
+
+
+@pytest.mark.parametrize(
+    ("heading", "entries"),
+    [
+        # a second list whose heading names no references, read from its rows,
+        # one of them split over two rows
+        (
+            "Studies Included in the Meta-Analysis",
+            [
+                "Adams, A. (2001). One. J, 1.",
+                "Baker, B. (2002). Two studies of attention in older adults.",
+                "Journal of Aging, 2, 3-4.",
+            ],
+        ),
+        # a second list headed in another language, with rows that open on a
+        # bare surname and initial (no comma, so they do not read as entries)
+        (
+            "Piśmiennictwo",
+            ["Kowalski J. Psychologia. Warszawa: PWN; 2019.", "Nowak A. Pamięć. Kraków: UJ; 2018."],
+        ),
+        # a heading that looks up to REFERENCES without naming them
+        (
+            "Citations",
+            ["Kowalski J. Psychologia. Warszawa: PWN; 2019.", "Nowak A. Pamięć. Kraków: UJ; 2018."],
+        ),
+    ],
+)
+def test_header_alias_override_keeps_a_second_list_typed(heading, entries):
+    contents = _contents(
+        [
+            ("Discussion", CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+            (heading, CanonicalSection.REFERENCES, 0.6, "model"),
+            ("References", CanonicalSection.UNKNOWN),
+        ],
+        [
+            (1, "We found an effect."),
+            *((2, entry) for entry in entries),
+            (3, "Kahneman, D. (1973). Attention and effort. Prentice-Hall."),
+        ],
+    )
+
+    rows = RefLocator(contents).collect_reference_rows()
+
+    assert list(rows["text_id"]) == [len(entries) + 2]
+    assert _types(contents)[1] == (heading, CanonicalSection.REFERENCES, 0.6, "model")
     assert contents.reference_boundary_reason_flags == []
 
 

@@ -345,17 +345,22 @@ released.
   "Revealed Preferences", "Reference standard" or "Reference values", is no
   longer taken for the bibliography when no other reference section is found.
   Its prose was parsed into references and the section was exported as
-  `references`. The heading fallback now needs a whole references heading, in
-  any language the reference-line capture recognises, so it also finds
-  headings it used to miss, such as "Literaturverzeichnis" or "Daftar Pustaka".
-- When a printed "References" heading overrides the section the classifier had
-  typed `references`, that section now gets the type its heading looks up to
-  ("General Discussion" becomes `discussion`, a heading with no known alias
-  `unknown`). It kept `references`, so a bibliography entry could point its
+  `references`. The heading fallback now needs "references", "bibliography",
+  "works cited", "literature cited" or "reference list" as whole words
+  ("Selected References" and "Appendix B. References" still count), or a whole
+  references heading in any language the reference-line capture recognises, so
+  it also finds headings it used to miss, such as "Literaturverzeichnis" or
+  "Daftar Pustaka".
+- When a printed "References" heading overrides the sections the classifier
+  had typed `references`, each of them now gets the type its heading looks up
+  to ("General Discussion" becomes `discussion`, a heading with no known alias
+  `unknown`). They kept `references`, so a bibliography entry could point its
   `text_id` at a body sentence, the citation linker read the section's numbers
   as reference numbers, and the export typed a body section as references. The
-  reference receipt records `classifier_references_demoted`. A section whose
-  own heading names references, such as a second list, keeps its type.
+  reference receipt records `classifier_references_demoted`. A second list
+  keeps its type when its heading names references or looks up to them, or
+  when at least half of its rows open like a dated reference entry, as under
+  "Studies Included in the Meta-Analysis".
 - Reference strings from a JATS `<ref-list>` are parsed as given, one per
   `<ref>`. The filter for non-reference fragments dropped short entries without
   a year (a classic such as "Aristotle. Nicomachean Ethics.", or an entry whose

@@ -34,17 +34,25 @@ _REF_HEADER_RE = re.compile(
 )
 
 
-def _is_reference_heading(header: str) -> bool:
-    """True when *header* as a whole reads as a references heading.
+# The plural reference-list words anywhere in a heading, as whole words:
+# "Selected References", "Appendix B. References", "Annotated Bibliography".
+_REF_HEADER_WORD_RE = re.compile(
+    r"\b(?:references|bibliography|works cited|literature cited|reference list)\b",
+    re.IGNORECASE,
+)
 
-    The English start-anchored form above, or the multilingual grammar in
-    ``bibr.ocr.ref_patterns`` that must span the whole heading (optional
-    numbering and decoration only). A heading that merely contains the word,
-    such as "Revealed Preferences", "Reference standard" or "Reference values",
-    never qualifies.
+
+def _is_reference_heading(header: str) -> bool:
+    """True when *header* reads as a references heading.
+
+    A reference-list word as a whole word anywhere in it, or the multilingual
+    grammar in ``bibr.ocr.ref_patterns`` spanning the whole heading (optional
+    numbering and decoration only). A heading that only contains the letters
+    or the singular, such as "Revealed Preferences", "Reference standard",
+    "Reference values" or "Self-reference effects", never qualifies.
     """
     text = header.strip()
-    return bool(_REF_HEADER_RE.match(text) or _WHOLE_REF_HEADER_RE.match(text))
+    return bool(_REF_HEADER_WORD_RE.search(text) or _WHOLE_REF_HEADER_RE.match(text))
 
 
 # Recognize parenthesized, dash-delimited, whitespace-separated, and period-delimited reference
@@ -441,46 +449,63 @@ class RefLocator:
         return pd.concat([orphan, ref_df]).sort_values("text_id")
 
     def _demote_overridden_references(self, chosen: str) -> None:
-        """Retype the classifier's REFERENCES section when a heading overrides it.
+        """Retype the classifier's REFERENCES sections when a heading overrides them.
 
         Steps 0 and 0b take the printed (or model-scored) references heading
-        over the canonical map. The body section the classifier typed
-        REFERENCES would otherwise keep that type, and everything that trusts
+        over the classifier. A body section the classifier typed REFERENCES
+        would otherwise keep that type, and everything that trusts
         ``section_type`` (``_map_bib_text_ids``, the citation linker's
         printed-number scan, the exported section types) reads its sentences
-        as bibliography. It gets the heading-lookup type instead (UNKNOWN when
-        no alias matches). A section whose own heading names references, such
-        as a second list, keeps its type.
+        as bibliography. Every such section gets its heading-lookup type
+        instead (UNKNOWN when no alias matches). A section keeps REFERENCES
+        when its heading names references or looks up to them, or when most of
+        its rows read as reference entries, as in a second list headed
+        "Studies Included in the Meta-Analysis".
         """
-        mapped = self._canonical_map.get(CanonicalSection.REFERENCES)
-        if mapped is None or mapped == chosen or _is_reference_heading(str(mapped)):
-            return
         from bibr.structure.section_classifier import _classify_lookup
 
-        section_type, score = _classify_lookup(normalize_text(str(mapped)))
-        if section_type == CanonicalSection.REFERENCES:
-            return
-        if section_type == CanonicalSection.UNKNOWN:
-            source = None
-        else:
-            source = "exact_alias" if score >= 1.0 else "substring_alias"
-        demoted = 0
+        demoted: list[str] = []
         for section in self.contents.sections:
-            if section.header == mapped and section.section_type == CanonicalSection.REFERENCES:
-                section.section_type = section_type
-                section.classification_score = score
-                section.classification_source = source
-                demoted += 1
+            if section.section_type != CanonicalSection.REFERENCES:
+                continue
+            header = str(section.header or "")
+            if header == chosen or _is_reference_heading(header):
+                continue
+            section_type, score = _classify_lookup(normalize_text(header))
+            if section_type == CanonicalSection.REFERENCES:
+                continue
+            if self._rows_read_as_reference_entries(section.section_id):
+                continue
+            section.section_type = section_type
+            section.classification_score = score
+            if section_type == CanonicalSection.UNKNOWN:
+                section.classification_source = None
+            else:
+                section.classification_source = "exact_alias" if score >= 1.0 else "substring_alias"
+            demoted.append(f"{header!r} -> {section_type.name}")
         if not demoted:
             return
-        self._canonical_map[CanonicalSection.REFERENCES] = chosen
         logger.info(
-            "Retyped %d section(s) '%s' from REFERENCES to %s after the heading override",
-            demoted,
-            mapped,
-            section_type.name,
+            "Retyped %d section(s) from REFERENCES after the heading override: %s",
+            len(demoted),
+            ", ".join(demoted),
         )
         self.contents.reference_boundary_reason_flags.append("classifier_references_demoted")
+
+    def _rows_read_as_reference_entries(self, section_id: int) -> bool:
+        """Whether at least half of a section's rows open like a dated reference entry."""
+        if "section_id" not in self.sentences_df.columns:
+            return False
+        rows = self.sentences_df.loc[self.sentences_df["section_id"] == section_id, "text"]
+        texts = [str(text) for text in rows if isinstance(text, str) and text.strip()]
+        if not texts:
+            return False
+        entries = sum(
+            1
+            for text in texts
+            if _looks_like_terminal_reference_start(text) and YEARISH_RE.search(text)
+        )
+        return 2 * entries >= len(texts)
 
     def _reclassify_as_references(self, ref_df: pd.DataFrame) -> None:
         """Promote sections covered by *ref_df* to REFERENCES in contents.sections.
