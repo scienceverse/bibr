@@ -33,6 +33,7 @@ class WarningCode(StrEnum):
     OCR_CONTROL_CHARS = "OCR_CONTROL_CHARS"
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
+    PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
     SECTION_CLASSIFIER_DEGRADED = "SECTION_CLASSIFIER_DEGRADED"
     PAPER_CLASSIFIER_DEGRADED = "PAPER_CLASSIFIER_DEGRADED"
@@ -87,6 +88,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK: "Embedded PDF text used private-use characters; "
     "those regions were read with OCR instead.",
     WarningCode.LOW_TEXT_QUALITY: "The text-quality score is below the warning threshold.",
+    WarningCode.PAGE_DPI_REDUCED: "A page too large for the render budget at the configured "
+    "DPI was rendered at a lower DPI for layout and OCR.",
     WarningCode.SECTION_CLASSIFIER_DEGRADED: "The trained section classifier did not answer; "
     "the LLM classified the section headers.",
     WarningCode.PAPER_CLASSIFIER_DEGRADED: "The trained paper classifier did not answer; the "

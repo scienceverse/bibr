@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import logging
 import math
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.ocr.utils import pdfium_lock
@@ -16,6 +17,10 @@ if TYPE_CHECKING:
     from PIL import Image
 
 logger = logging.getLogger(__name__)
+
+# Lowest DPI a page is rendered at to fit the render budget: one pixel per PDF
+# point. A page that does not fit even there is refused as before.
+MIN_REDUCED_RENDER_DPI = 72
 
 
 def pil_to_bytes(img, fmt: str = "JPEG") -> bytes:
@@ -62,6 +67,42 @@ def pil_to_base64_glmocr(img, fmt: str = "JPEG") -> str:
     return encode_region_for_ocr(img, GLM_IMAGE_GEOMETRY, fmt=fmt)
 
 
+def _render_size(width_points: float, height_points: float, dpi: int) -> tuple[int, int]:
+    scale = dpi / 72
+    return math.ceil(width_points * scale), math.ceil(height_points * scale)
+
+
+def _fits(width: int, height: int, max_pixels: int, max_dimension: int) -> bool:
+    return width <= max_dimension and height <= max_dimension and width * height <= max_pixels
+
+
+def fitting_render_dpi(
+    width_points: float,
+    height_points: float,
+    dpi: int,
+    max_pixels: int,
+    max_dimension: int,
+) -> int:
+    """The largest whole DPI, at most *dpi*, at which a page fits the render budget.
+
+    ``0`` when the page does not fit even at 1 DPI.
+    """
+    if width_points <= 0 or height_points <= 0:
+        return dpi
+    ceiling = 72 * min(
+        max_dimension / width_points,
+        max_dimension / height_points,
+        math.sqrt(max_pixels / (width_points * height_points)),
+    )
+    candidate = min(dpi, math.floor(ceiling))
+    # The render size is rounded up, so the float ceiling can overshoot by a pixel.
+    while candidate > 0 and not _fits(
+        *_render_size(width_points, height_points, candidate), max_pixels, max_dimension
+    ):
+        candidate -= 1
+    return max(candidate, 0)
+
+
 def iter_pdf_pages_with_index(
     pdf_bytes: bytes,
     dpi: int = 200,
@@ -69,8 +110,17 @@ def iter_pdf_pages_with_index(
     end_page: int | None = None,
     max_pixels: int = 25_000_000,
     max_dimension: int = 10_000,
+    *,
+    min_dpi: int | None = None,
+    on_reduced_dpi: Callable[[int, int], None] | None = None,
 ):
     """Yield ``(page_index, PIL.Image)`` one page at a time.
+
+    A page too large for the render budget at *dpi* raises ``ValueError``,
+    unless *min_dpi* is set: then it renders at the largest DPI that fits, if
+    that is at least *min_dpi*, and ``on_reduced_dpi(page_index, dpi)`` is
+    called. Only the pixel density changes; every box downstream is in page
+    coordinates normalized by the image's own size, so it stays in place.
 
     Holds :data:`bibr.ocr.utils.pdfium_lock` for the full document lifetime.
     PDFium maintains global mutable C state, so concurrent operations on
@@ -98,14 +148,22 @@ def iter_pdf_pages_with_index(
             # Same guard the sibling renderer in ``bibr.ocr.utils`` already has.
             if start < 0 or start > end:
                 raise ValueError(f"Invalid page range: start={start}, end={end}, total={total}")
-            scale = dpi / 72
 
             for page_idx in range(start, end + 1):
                 page = doc[page_idx]
                 try:
                     width_points, height_points = page.get_size()
-                    width = math.ceil(width_points * scale)
-                    height = math.ceil(height_points * scale)
+                    page_dpi = dpi
+                    width, height = _render_size(width_points, height_points, dpi)
+                    if min_dpi is not None and not _fits(width, height, max_pixels, max_dimension):
+                        reduced = fitting_render_dpi(
+                            width_points, height_points, dpi, max_pixels, max_dimension
+                        )
+                        if reduced >= min_dpi:
+                            page_dpi = reduced
+                            width, height = _render_size(width_points, height_points, page_dpi)
+                            if on_reduced_dpi is not None:
+                                on_reduced_dpi(page_idx, page_dpi)
                     if width > max_dimension or height > max_dimension:
                         raise ValueError(
                             f"PDF page {page_idx + 1} renders to {width}x{height} pixels, "
@@ -117,7 +175,7 @@ def iter_pdf_pages_with_index(
                             f"exceeding the {max_pixels:,}-pixel limit"
                         )
 
-                    bitmap = page.render(scale=scale)
+                    bitmap = page.render(scale=page_dpi / 72)
                     try:
                         pil_img = bitmap.to_pil()
                     finally:

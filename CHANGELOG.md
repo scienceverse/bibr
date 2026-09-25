@@ -259,6 +259,17 @@ released.
   trained classifiers do not answer. The batch loop records a crashed chunk's
   unfinished files as failures (`chunk_error`) and carries on, and a file that
   finishes without an export is reported as `export_failed` instead of raising.
+- A page too large for the render budget no longer fails its paper. Layout
+  rendered every page at one DPI and refused a page above
+  `LAYOUT_MAX_RENDER_PIXELS` or `LAYOUT_MAX_RENDER_DIMENSION`, so a 2420×3205 pt
+  poster page (59.9 MP at 200 DPI) failed the whole paper as `layout_failed`.
+  That page now renders at the largest DPI that fits (129 DPI for the poster),
+  down to 72, and the export carries a `PAGE_DPI_REDUCED` warning naming the
+  page and DPI; other pages keep the configured DPI. Layout boxes, OCR and
+  figure crops, native-text lookups and exported coordinates are all
+  normalized by the rendered image's own size or measured in PDF points, so
+  they stay in place on a reduced page. A page that does not fit even at 72 DPI
+  is still refused.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
