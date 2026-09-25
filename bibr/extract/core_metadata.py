@@ -1893,6 +1893,15 @@ class CoreMetadataExtractor:
                         self._convert_llm_authors(llm_metadata.authors), full_text
                     )
                     author_trail.append(_AuthorProposal("llm_recovery", usable, transforms))
+                else:
+                    author_trail.append(
+                        _AuthorProposal(
+                            "llm_recovery",
+                            [],
+                            [],
+                            None if recovered is not None else "recovery did not complete",
+                        )
+                    )
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
             if not usable:

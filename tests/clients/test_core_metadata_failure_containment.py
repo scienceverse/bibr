@@ -312,6 +312,7 @@ async def test_failed_author_call_without_a_credit_statement_keeps_the_llm_sourc
     assert decision.source == "llm"
     assert [(v.candidate.source, v.accepted) for v in decision.considered] == [
         ("llm", False),
+        ("llm_recovery", False),
         ("credit_statement", False),
     ]
 
