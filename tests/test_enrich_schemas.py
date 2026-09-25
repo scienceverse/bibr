@@ -253,6 +253,27 @@ class TestPlainText:
                 "H2O",
             ),
             ("p < 0.05 &amp; beyond", "p < 0.05 & beyond"),
+            # A comma or period before an element and a "(" after one keep the
+            # deposit's space; the multiplication sign is a word of its own.
+            (
+                "Stink Bug,\n  <i>Halyomorpha halys</i>\n  (St\u00e5l), in orchards",
+                "Stink Bug, Halyomorpha halys (St\u00e5l), in orchards",
+            ),
+            (
+                "<i>Puccinia graminis</i>\n  f. sp.\n  <i>tritici</i>\n  isolates",
+                "Puccinia graminis f. sp. tritici isolates",
+            ),
+            (
+                "grasses (\n  <i>Festuca</i>\n  \u00d7\n  <i>Lolium</i>\n  ) display",
+                "grasses (Festuca \u00d7 Lolium) display",
+            ),
+            (
+                '<mml:math xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+                "<mml:mi>x</mml:mi></mml:math> values",
+                "x values",
+            ),
+            ("x <y and z>", "x <y and z>"),
+            ("Title<br/>Subtitle", "Title Subtitle"),
             ("Plain title", "Plain title"),
             ("<i></i>", None),
             (None, None),

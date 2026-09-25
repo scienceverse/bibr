@@ -18,14 +18,26 @@ _FUNDER_DOI = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/)?(?P<doi>10\.13039/\S
 _LICENSE_VERSIONS = ("vor", "unspecified", "am")
 # An inline element of a deposited title: JATS/HTML face markup (<i>, <sub>,
 # <scp>) and MathML (<mml:msub>). Its text is part of the title; the tag is not.
-_INLINE_TAG = re.compile(r"(</?[A-Za-z][\w.:-]*(?:\s[^<>]*)?/?>)")
+# Attributes must be name="value", as XML requires, so a title's own "<y and z>"
+# is text, not a tag.
+_INLINE_TAG = re.compile(
+    r"(</?[A-Za-z][\w.:-]*(?:\s+[\w.:-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*\s*/?>)"
+)
+# A line break inside a title separates the words on either side of it.
+_LINE_BREAK_TAG = re.compile(r"<(?:br|break)\s*/?>", re.IGNORECASE)
 _SCRIPT_TAG = re.compile(r"</?su[bp]\b", re.IGNORECASE)
-# Pretty-printed deposits put a line break and an indent around every inline
-# element, whether or not the title had a space there.
-_LEADING_LAYOUT = re.compile(r"^\s*\n\s*")
-_TRAILING_LAYOUT = re.compile(r"\s*\n\s*$")
 # An element symbol that continues a formula after a subscript ("N<sub>2</sub>O").
 _FORMULA_SYMBOL = re.compile(r"[A-Z][a-z]?(?![^\W\d_])")
+# Punctuation that attaches to the word before it, so it follows a closing tag
+# without a space ("<i>R</i> + newline + ': An'"), and punctuation that attaches
+# to the word after it, so it precedes an opening tag without one ("(" + newline
+# + "<i>Festuca</i>"). Dashes and slashes attach on both sides. A comma or
+# period before an element and a "(" after one keep their space ("Stink Bug,
+# <i>Halyomorpha halys</i> (Stål)"), and so does a straight double quote, which
+# may open or close.
+_JOINING_MARKS = "-‐‑‒–—―/"
+_ATTACHES_BEFORE = frozenset(",.;:!?)]}’”»'" + _JOINING_MARKS)
+_ATTACHES_AFTER = frozenset("([{‘“«'" + _JOINING_MARKS)
 
 
 def plain_text(value: object) -> str | None:
@@ -40,35 +52,35 @@ def plain_text(value: object) -> str | None:
     The line break a pretty-printed deposit puts around an element becomes a
     space only where the title had one: not inside the element, not before a
     sub- or superscript ("CO" + newline + "<sub>2</sub>"), not between an
-    element and punctuation next to it, and not before an element symbol that
-    continues a formula ("C<sub>2</sub>" + newline + "H<sub>6</sub>").
+    element and punctuation that attaches to it, and not before an element
+    symbol that continues a formula ("C<sub>2</sub>" + newline + "H<sub>6</sub>").
     """
     if not isinstance(value, str):
         return None
-    pieces = _INLINE_TAG.split(value)
+    pieces = _INLINE_TAG.split(_LINE_BREAK_TAG.sub(" ", value))
     out: list[str] = []
     for index in range(0, len(pieces), 2):
-        text = pieces[index]
+        text = html.unescape(pieces[index])
         opened_by = pieces[index - 1] if index else ""
         closed_by = pieces[index + 1] if index + 1 < len(pieces) else ""
-        if opened_by and _LEADING_LAYOUT.match(text):
-            text = _LEADING_LAYOUT.sub("", text)
+        body = text.lstrip()
+        if opened_by and "\n" in text[: len(text) - len(body)]:
             joined = (
                 not opened_by.startswith("</")
-                or (text[:1] != "" and not text[0].isalnum())
-                or bool(_SCRIPT_TAG.match(opened_by) and _FORMULA_SYMBOL.match(text))
+                or body[:1] in _ATTACHES_BEFORE
+                or bool(_SCRIPT_TAG.match(opened_by) and _FORMULA_SYMBOL.match(body))
             )
-            text = text if joined else " " + text
-        if closed_by and _TRAILING_LAYOUT.search(text):
-            text = _TRAILING_LAYOUT.sub("", text)
+            text = body if joined else " " + body
+        body = text.rstrip()
+        if closed_by and "\n" in text[len(body) :]:
             joined = (
                 closed_by.startswith("</")
                 or bool(_SCRIPT_TAG.match(closed_by))
-                or (text[-1:] != "" and not text[-1].isalnum())
+                or body[-1:] in _ATTACHES_AFTER
             )
-            text = text if joined else text + " "
+            text = body if joined else body + " "
         out.append(text)
-    return " ".join(html.unescape("".join(out)).split()) or None
+    return " ".join("".join(out).split()) or None
 
 
 def canonical_ror(value: object) -> str | None:
