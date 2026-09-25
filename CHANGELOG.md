@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.1 (additive)
+
+The export moves to schema `12.1`, which adds one optional block; every 12.0
+export is still valid input for the 12.x reader, `bibr.validation`'s
+`payload_validation()` and the evaluator.
+
+- `extraction.fields` gives the state of each tracked field, so a consumer can
+  tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
+  declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
+  `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
+  `bib` it records `{state, source, issues}`. `state` is `extracted` (a value
+  was exported), `absent` (the extractor ran and found none), `abstained`
+  (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
+  `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
+  `not_attempted` (no LLM, references off). `source` names the step that
+  produced the value (`llm`, `title_grounding`, `front_matter_candidate`,
+  `layout_title`, `section_header`, `byline_adjacent`, `doc_info`,
+  `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
+  `classifier`, `llm_label`, `correction_notice`, `identity`,
+  `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
+  and `issues` the codes of the warnings and validation issues that explain the
+  state. The block is built from facts the pipeline already records and is
+  omitted for a Paper exported outside the pipeline. The conformance fixtures
+  gain a 12.0 reader example and an invalid field record.
+
 ### Changed — export schema 12.0 (breaking)
 
 The JSON export moves to schema `12.0`. It separates what the paper says from

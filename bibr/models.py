@@ -286,6 +286,9 @@ class PaperMetadata(_Base):
     # Bounded, non-schema diagnostic carried until Paper assembly turns it into
     # a typed validation issue. It is never serialized as metadata directly.
     _references_incomplete_diagnostic: str = PrivateAttr(default="")
+    # Tracked field -> the write site that produced its value
+    # (``bibr.field_states.set_field_source``); feeds ``extraction.fields``.
+    _field_sources: dict[str, str] = PrivateAttr(default_factory=dict)
     # The paper's OWN bibliographic self-identity, verbatim from the front
     # matter (journal-issue line, footers, copyright/license lines). Null when
     # not printed — never inferred or backfilled from enrichment.

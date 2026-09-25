@@ -25,6 +25,7 @@ from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, Author
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
+from bibr.field_states import set_field_source
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -1315,6 +1316,8 @@ class CoreMetadataExtractor:
         self._explicit_classifier_runtime = settings is not None or classifier_resources is not None
         self._front_matter_resolution = front_matter_resolution
         self.validation_issues: list[ValidationIssue] = []
+        # Which step decided paper_type, for ``extraction.fields``.
+        self._paper_type_source = "llm"
         self.locator = locator or RefLocator(contents, settings=self._settings)
         if email_harvester is not None:
             self._email_harvester = email_harvester
@@ -1458,6 +1461,7 @@ class CoreMetadataExtractor:
             if resolution is not None:
                 authors = self._drop_fabricated_authors(authors, full_text, resolution)
 
+            author_source = "llm"
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
             if not authors:
@@ -1467,10 +1471,12 @@ class CoreMetadataExtractor:
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
                     authors = self._convert_llm_authors(llm_metadata.authors)
+                    author_source = "llm_recovery"
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
             if not authors:
                 authors = self._harvest_credit_authors()
+                author_source = "credit_statement"
             # Keep the complete frame so affiliation footnotes and repeated-name reconciliation
             # can inspect evidence on later pages.
             self._reconcile_numbered_affiliations(authors, self.sentences_df)
@@ -1480,9 +1486,9 @@ class CoreMetadataExtractor:
             # Title/abstract must resolve BEFORE classification: the trained
             # classifier consumes them as input. Order is behavior-neutral for
             # the LLM-validation path (which ignores title/abstract).
-            title = strip_affiliation_markers(llm_metadata.title or "")
+            model_title = strip_affiliation_markers(llm_metadata.title or "")
             title, title_issue = ground_title_to_printed_text(
-                title, resolution, full_text, printed_rows=self._printed_rows()
+                model_title, resolution, full_text, printed_rows=self._printed_rows()
             )
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
@@ -1559,6 +1565,16 @@ class CoreMetadataExtractor:
                 license=llm_metadata.license,
             )
             metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
+            for field, source in (
+                ("title", "llm" if title == model_title else "title_grounding"),
+                ("abstract", "llm"),
+                ("keywords", "llm"),
+                ("published", "llm"),
+                ("journal", "llm"),
+                ("author", author_source),
+                ("paper_type", "correction_notice" if is_notice else self._paper_type_source),
+            ):
+                set_field_source(metadata, field, source)
 
             self._email_harvester.harvest(metadata.authors)
             self.validation_issues.extend(
@@ -2248,6 +2264,7 @@ class CoreMetadataExtractor:
         id set to null, the LLM validation path runs verbatim and confidences
         stay ``None``.
         """
+        self._paper_type_source = "llm"
         if not self._settings.ml.paper_classifier_model_id:
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=llm_metadata.oecd_domain,
@@ -2322,6 +2339,7 @@ class CoreMetadataExtractor:
             return pt, l1, l2, None, None
 
         oecd_l1, l1_score, oecd_l2, l2_score, paper_type, pt_score = result
+        self._paper_type_source = "classifier"
         paper_type_confidence: float | None = pt_score
         oecd_confidence: float | None = l1_score
 
@@ -2368,6 +2386,7 @@ class CoreMetadataExtractor:
             if label is not None and getattr(label, "paper_type", None):
                 paper_type = label.paper_type
                 paper_type_confidence = label.confidence
+                self._paper_type_source = "llm_label"
 
         return paper_type, oecd_l1, oecd_l2, paper_type_confidence, oecd_confidence
 

@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 # "3" (v12) adds the ROR ``affiliation_match`` and ``funding_match`` rows.
 # "4" stores warnings as ``{code, message}`` objects instead of prose.
 ENRICHMENT_SIDECAR_SCHEMA_VERSION = "4"
-CORE_SCHEMA_VERSION = "12.0"
+CORE_SCHEMA_VERSION = "12.1"
 # Each major is a clean break: a v11 core cannot be replayed into a v12
 # payload, so the gate accepts exactly one version.
 SUPPORTED_CORE_SCHEMA_VERSIONS = frozenset({CORE_SCHEMA_VERSION})

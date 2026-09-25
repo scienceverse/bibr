@@ -14,7 +14,7 @@ from bibr.api import Records, Result, _pipeline_kwargs
 def _export_fixture() -> dict:
     return {
         "paper_id": "10.1234/example",
-        "schema_version": "12.0",
+        "schema_version": "12.1",
         "source": {
             "file_name": "paper.pdf",
             "sha256": "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12",
@@ -274,7 +274,7 @@ def _next_minor_export_fixture() -> dict:
     """A valid export as a later 12.x writer might emit it: the next minor
     ``schema_version`` plus fields this bibr does not know, at several depths."""
     data = _export_fixture()
-    data["schema_version"] = "12.1"
+    data["schema_version"] = "12.2"
     data["future_block"] = {"enabled": True, "items": [1, 2]}
     data["metadata"]["subtitle"] = "A sequel"
     data["section"][0]["numbering"] = "1."
@@ -332,7 +332,7 @@ def test_result_loads_a_newer_minor_export_with_unknown_fields():
 
     model = result.model
     assert isinstance(model, PaperExport)
-    assert model.schema_version == "12.1"
+    assert model.schema_version == "12.2"
     assert model.metadata.title == "A Paper"
     assert model.section[0].section_type == "intro"
     assert model.bib[0].title == "Ref One"
@@ -414,7 +414,7 @@ def test_result_still_rejects_a_known_field_of_the_wrong_type():
         ("section", lambda d: d["section"][0].update(numbering="1.")),
         ("bib", lambda d: d["bib"][0].update(raw="Doe J.")),
         ("extraction", lambda d: d["extraction"]["settings"].update(future_knob="on")),
-        ("schema_version", lambda d: d.update(schema_version="12.1")),
+        ("schema_version", lambda d: d.update(schema_version="12.2")),
     ],
 )
 def test_producer_models_still_reject_fields_they_do_not_define(location, mutate):

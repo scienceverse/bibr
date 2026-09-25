@@ -4,8 +4,9 @@
 
 - ``valid/``: exports the strict schema (what bibr writes) must accept;
 - ``invalid/``: each breaks exactly one rule, and both schemas must reject it;
-- ``reader_valid/``: exports from a later 12.x writer, which the strict schema
-  rejects and the reader schema must accept.
+- ``reader_valid/``: exports from another 12.x writer (a 12.0 export without
+  ``extraction.fields``, a later minor with keys this bibr does not know), which
+  the strict schema rejects and the reader schema must accept.
 
 Each file is checked against the published JSON Schema documents and the
 Python models, so the two stay in agreement.
@@ -31,7 +32,7 @@ _STRICT_ONLY = {
     "root_validation_block",
     "removed_author_affiliation",
     "section_type_off_vocabulary",
-    # A 12.0 writer always writes every column; the reader leaves keys optional
+    # A 12.1 writer always writes every column; the reader leaves keys optional
     # so it can read a later minor's output, which may add columns.
     "dropped_column",
 }
@@ -89,6 +90,7 @@ def test_the_full_example_has_every_root_key_in_order():
     assert list(example) == list(PaperExport.model_fields)
     # carries every v12 feature
     assert example["xref"][0]["start"] is not None
+    assert example["extraction"]["fields"]["title"]["state"] == "extracted"
     assert example["extraction"]["pages"] and example["affiliation_match"]
     assert example["funding_match"] and example["metadata_match"][0]["funder"]
     assert example["extraction"]["warnings"][0]["code"] == "STATEMENT_LEXICAL_FALLBACK"
@@ -99,11 +101,20 @@ def _regenerate_full_example() -> None:
     """Rewrite ``valid/full.json`` from the shared demo paper (run this module)."""
     from bibr.export.json_export import _export_paper_payload
     from bibr.extract.statement_scan import lexical_fallback_warning
+    from bibr.field_states import FieldScope, set_field_source
     from bibr.paper_contents import PaperFigurePart
     from tests.export.conftest import _demo_paper, as_parsed
 
     paper = _demo_paper(with_refs=True)
     as_parsed(paper)
+    # A pipeline run's field states (12.1): what the run attempted, and the
+    # steps that wrote the demo values.
+    paper.field_scope = FieldScope()
+    for field in ("title", "abstract", "keywords", "author", "published", "journal"):
+        set_field_source(paper.metadata, field, "llm")
+    set_field_source(paper.metadata, "paper_type", "classifier")
+    set_field_source(paper.metadata, "funding", "llm")
+    set_field_source(paper.metadata, "bib", "llm")
     paper.contents.sentences[
         1
     ].text = "It replicated prior work [1], t(28) = 3.42, see Table 1 and data."

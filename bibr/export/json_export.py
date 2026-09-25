@@ -37,6 +37,7 @@ from bibr.export.models import (
     EnrichmentExport,
     EqCompLiteral,
     EqExport,
+    FieldStatesExport,
     FigureExport,
     FloatPartExport,
     FundingExport,
@@ -555,6 +556,29 @@ def append_payload_warning(payload: dict, warning: ProcessingWarning) -> dict:
         warnings.append(row)
     extraction["warnings"] = warnings
     return payload
+
+
+def _field_states(paper: Paper, *, present: dict[str, bool], warnings: list) -> FieldStatesExport:
+    """``extraction.fields``: the state of each tracked field of *paper*.
+
+    *present* says which fields have an exported value; *warnings* are the
+    export's merged warning rows.
+    """
+    from bibr.field_states import FieldScope, build_field_states
+
+    meta = paper.metadata
+    selection = paper.doi_selection
+    records = build_field_states(
+        present=present,
+        sources=getattr(meta, "_field_sources", None) or {},
+        scope=paper.field_scope or FieldScope(),
+        issues=paper.validation_issues,
+        warnings=[ProcessingWarning.from_dict(row) for row in warnings],
+        doi_selected=selection is not None and selection.selected is not None,
+    )
+    return FieldStatesExport.model_validate(
+        {field: record.to_dict() for field, record in records.items()}
+    )
 
 
 def _sanitize_json_strings(value):
@@ -1116,6 +1140,25 @@ def _export_paper_payload(
         FundingExport(funding_id=position, funder=f.funder, award_ids=f.award_ids)
         for position, f in enumerate(meta.funding if meta else [], start=1)
     ]
+    exported_doi = _export_doi(meta.doi if meta else None, "metadata.doi")
+    if extraction_data is not None and paper.field_scope is not None:
+        extraction_data["fields"] = _field_states(
+            paper,
+            present={
+                "title": bool(meta and meta.title),
+                "author": bool(meta and meta.authors),
+                "abstract": bool(abstract_text),
+                "keywords": bool(exported_keywords),
+                "doi": bool(exported_doi),
+                "published": bool(meta and meta.published),
+                "journal": bool(meta and meta.journal),
+                "funding_statement": bool(meta and meta.funding_statement),
+                "funding": bool(funding_data),
+                "paper_type": bool(paper_type),
+                "bib": bool(bib_data),
+            },
+            warnings=extraction_data.get("warnings") or [],
+        )
     # ROR matches are keyed by the printed string, so a string that occurs once
     # in the table gets its match whatever position it ended up at.
     affiliation_match_data = [
@@ -1164,7 +1207,7 @@ def _export_paper_payload(
             title=(meta.title or None) if meta else None,
             abstract=abstract_text,
             keywords=exported_keywords,
-            doi=_export_doi(meta.doi if meta else None, "metadata.doi"),
+            doi=exported_doi,
             pmid=(meta.pmid or None) if meta else None,
             pmcid=(meta.pmcid or None) if meta else None,
             arxiv=(

@@ -419,7 +419,6 @@
     },
     "fields": {
       "title": {
-        "state": "extracted",
         "source": "llm",
         "issues": []
       },

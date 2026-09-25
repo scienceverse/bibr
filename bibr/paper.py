@@ -32,6 +32,7 @@ from bibr.processing_warnings import ProcessingWarning
 from bibr.validation import ValidationIssue, references_incomplete_issue
 
 if TYPE_CHECKING:
+    from bibr.field_states import FieldScope
     from bibr.pipeline.identity import DoiSelection, ExpectedIdentity
 
 # Re-export data classes so that ``from bibr.paper import PaperAuthor`` still works.
@@ -217,10 +218,13 @@ def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
     Only fills fields that are empty/missing in the LLM-extracted metadata.
     Mutates *metadata* in-place.
     """
+    from bibr.field_states import set_field_source
+
     parsed = OcrFallbackMetadata.from_raw(ocr)
 
     if not metadata.title and parsed.title:
         metadata.title = parsed.title
+        set_field_source(metadata, "title", "doc_info")
         logger.debug("OCR fallback: filled title")
 
     if not metadata.doi and parsed.doi and parsed.doi.startswith("10."):
@@ -229,6 +233,7 @@ def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
 
     if not metadata.keywords and parsed.keywords:
         metadata.keywords = parsed.keywords
+        set_field_source(metadata, "keywords", "doc_info")
         logger.debug("OCR fallback: filled keywords")
 
     if not metadata.authors and parsed.authors:
@@ -259,6 +264,7 @@ def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
                     )
                 )
         if metadata.authors:
+            set_field_source(metadata, "author", "doc_info")
             logger.debug("OCR fallback: filled %d authors", len(metadata.authors))
 
 
@@ -306,6 +312,10 @@ class Paper:
     # Typed semantic findings emitted while source provenance still exists.
     # Export merges these with payload-replay validation issues.
     validation_issues: list[ValidationIssue] = field(default_factory=list)
+    # What the run attempted (no LLM, references off, front matter declared by
+    # the input), set by post_parse; with it the export builds
+    # ``extraction.fields``. ``None`` for a Paper built outside the pipeline.
+    field_scope: "FieldScope | None" = None
     # Manifest caller evidence remains distinct from ``paper_id`` and the
     # source-selected scalar DOI. Both are serialized only in the additive
     # extraction receipt.

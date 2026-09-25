@@ -11,7 +11,7 @@ from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 def _core_payload(*, title: str = "Café") -> dict:
     return {
-        "schema_version": "12.0",
+        "schema_version": "12.1",
         "metadata": {"title": title},
         "bib": [{"bib_id": 1}],
         "bib_match": [],
