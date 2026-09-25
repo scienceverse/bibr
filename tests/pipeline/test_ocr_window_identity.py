@@ -166,8 +166,12 @@ async def test_scan_first_window_control_uses_concrete_identity():
 @pytest.mark.asyncio
 async def test_engine_start_adopts_concrete_identity_over_stale_static():
     """A window needing the engine adopts the started runtime's identity even
-    when scratch already holds the static fallback (e.g. seeded by an older
-    revision's native-only window)."""
+    when scratch already holds a stale static fallback.
+
+    Defensive: current code never persists a static fallback for the
+    automatic chain, so this seeds one by hand to pin the adoption safety
+    net for any stale static that reaches the engine start (e.g. via the
+    injected-client compatibility seam or a future caller)."""
     calls = {"starts": 0, "prompts": []}
     rm = _chain_rm(calls)
     ctx = _ctx([], resources=rm)
@@ -294,6 +298,86 @@ async def test_prior_init_error_spares_native_parses():
     assert pdf.error_code == "ocr_failed"
     assert docx.error is None
     rm.await_ocr.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_backend_init_failure_not_retried_within_chunk():
+    """An explicit backend must fast-fail later windows without re-running
+    the doomed engine constructor — the same chunk-scoped guarantee the
+    automatic chain has."""
+    from dataclasses import replace
+
+    for backend in ("paddle-vllm", "paddle-http", "glm-llama"):
+        rm = SimpleNamespace(
+            ocr=None,
+            ocr_runtime_identity=None,
+            await_ocr=AsyncMock(side_effect=RuntimeError("model not found")),
+            shutdown_ocr=AsyncMock(return_value=None),
+        )
+        signals = StageSignals(any_needs_ocr=True, preloading_ocr=False)
+        cfg = RunConfig(ocr_backend=backend)
+        scratch: dict = {}
+        windows = [_pdf_needing_ocr(f"{backend}-{i}.pdf") for i in range(2)]
+        base = _ctx([], resources=rm, config=cfg, signals=signals, scratch=scratch)
+        for fs in windows:
+            sub = replace(base, file_states=[fs])
+            sub.scratch = scratch
+            await OcrStage().run(sub)
+
+        assert rm.await_ocr.await_count == 1, backend
+        assert signals.ocr_init_error is not None
+        for fs in windows:
+            assert fs.error_code == "ocr_failed"
+
+
+@pytest.mark.asyncio
+async def test_retained_automatic_wait_failure_not_retried_within_chunk():
+    """An automatic window arriving with a retained loaded client whose
+    readiness wait fails must fast-fail later windows without re-waiting."""
+    from dataclasses import replace
+
+    waits = AsyncMock(side_effect=RuntimeError("server did not become ready"))
+    client = SimpleNamespace(loaded=True, wait_for_server=waits)
+    rm = SimpleNamespace(
+        ocr=client,
+        ocr_runtime_identity=GLM_IDENTITY,
+        await_ocr=AsyncMock(),
+        shutdown_ocr=AsyncMock(return_value=None),
+    )
+    signals = StageSignals(any_needs_ocr=True, preloading_ocr=False)
+    scratch: dict = {}
+    windows = [_pdf_needing_ocr(f"w{i}.pdf") for i in range(2)]
+    base = _ctx(
+        [], resources=rm, config=RunConfig(ocr_backend="paddle"), signals=signals, scratch=scratch
+    )
+    for fs in windows:
+        sub = replace(base, file_states=[fs])
+        sub.scratch = scratch
+        await OcrStage().run(sub)
+
+    assert waits.await_count == 1
+    assert signals.ocr_init_error is not None
+    for fs in windows:
+        assert fs.error_code == "ocr_failed"
+
+
+@pytest.mark.asyncio
+async def test_fail_ocr_targets_keeps_earlier_error_and_stage():
+    """Files that already carry an error keep it when a later init failure
+    runs — the first failure stays the provenance."""
+    from bibr.pipeline.stages.ocr import fail_ocr_targets
+
+    first = _pdf_needing_ocr("first.pdf")
+    first.set_error("earlier boom", code="ocr_failed", stage="render_ocr")
+    second = _pdf_needing_ocr("second.pdf")
+
+    fail_ocr_targets([first, second], RuntimeError("later boom"), stage="ocr", log=False)
+
+    assert first.error_code == "ocr_failed"
+    assert first.failed_stage == "render_ocr"
+    assert "earlier boom" in (first.error or "")
+    assert second.error_code == "ocr_failed"
+    assert second.failed_stage == "ocr"
 
 
 @pytest.mark.asyncio

@@ -352,13 +352,17 @@ released.
   OCR instead of files already served from the OCR cache.
 - Truncated Paddle tables are now retried once at a higher token budget on
   every Paddle backend through one shared helper; previously only `bibr serve`
-  retried. Only truncation is retried — a closed grid whose spans are
-  malformed reproduces deterministically and no longer costs a second
-  generation. The OCR cache key carries the recovery budget for every Paddle
-  backend, not just serve. Whitespace after OTSL continuation markers no
-  longer destroys spans, stray text after a row terminator opens the next
-  row, and blank table output decodes to empty content so the OCR
-  success-rate gate still catches a silently degraded engine.
+  retried. Only generations the provider cut short are retried
+  (`finish_reason == \"length\"`, or structural truncation when no finish reason
+  is reported) — a stop-terminated ragged or unterminated grid at temperature 0
+  reproduces deterministically, as does a closed grid whose spans are
+  malformed, so neither costs a second generation. The OCR cache key carries
+  the recovery budget for every Paddle backend, not just serve. Whitespace
+  after OTSL continuation markers no longer destroys spans, stray text after
+  a row terminator opens the next row, and blank table output decodes to empty
+  content so the OCR success-rate gate still catches a silently degraded engine
+  (blank tables are then reported only through OCR_TABLE_INCOMPLETE, no longer
+  also as a parse-level OCR_TABLE_DROPPED).
 
 ### Added
 

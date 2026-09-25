@@ -47,12 +47,17 @@ def otsl_looks_truncated(completeness: OtslCompleteness, finish_reason: str | No
     """Whether a Paddle table result deserves a higher-budget retry.
 
     ``finish_reason == \"length\"`` is the provider saying it ran out of
-    budget. Otherwise only structural truncation signals (an unterminated
-    grid, ragged rows from a cut-off tail) qualify — a closed grid whose
-    spans are malformed decodes the same way twice.
+    budget. A ``\"stop\"`` (or any other reported reason) means the model
+    ended on EOS: at temperature 0 the same greedy decode reproduces
+    identically, so even a ragged or unterminated grid is not worth a
+    second generation. The structural truncation signals (an unterminated
+    grid, ragged rows from a cut-off tail) only qualify when the provider
+    reports no finish reason at all.
     """
     if finish_reason == "length":
         return True
+    if finish_reason is not None:
+        return False
     return any(reason in _TRUNCATION_REASONS for reason in completeness.reasons)
 
 

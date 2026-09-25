@@ -116,8 +116,9 @@ class InterleavedRenderOcrStage:
             return []
         identity = resolution.identity
         if identity is None:
-            # Startup failed above (targets already failed); with no bundle
-            # to look up there is nothing else to do here.
+            # resolve_ocr_identity returns None only after a startup failure
+            # (the targets were already failed and the chunk marker recorded),
+            # so there is no bundle to look up here.
             return []
         if cache_on:
             for fs in pending:

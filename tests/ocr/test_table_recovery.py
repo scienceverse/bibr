@@ -53,8 +53,31 @@ class TestRecoverPaddleTable:
         retry.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_retries_ragged_and_unterminated_stopped_tables(self):
+    async def test_retries_ragged_and_unterminated_tables_without_finish_reason(self):
+        """Structural truncation signals retry only when the provider reports
+        no finish reason. A ``stop``-terminated ragged grid at temperature 0
+        reproduces identically (see below)."""
         for raw in ("<fcel>A<fcel>B<nl><fcel>C<nl>", "<fcel>A<fcel>B"):
+            retry = AsyncMock(return_value=_text(COMPLETE, "stop"))
+            out = await recover_paddle_table(
+                profile=PADDLE_PROFILE,
+                prompt=PADDLE_PROFILE.prompts["table"],
+                result=_text(raw, None),
+                retry=retry,
+            )
+            assert out == COMPLETE
+            retry.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_stop_terminated_ragged_or_unterminated_tables(self):
+        """A generation that ended on EOS was not cut short: a retry at a
+        higher budget is the same greedy decode and only burns a generation."""
+        for raw in (
+            "<fcel>A<fcel>B<nl><fcel>C<nl>",
+            "<fcel>A<fcel>B",
+            "<fcel>a<fcel>b<nl><fcel>c<nl><fcel>d<fcel>e<nl>",
+            "<fcel>a<fcel>b<nl><fcel>c<fcel>d<nl>Note: n=12",
+        ):
             retry = AsyncMock(return_value=_text(COMPLETE, "stop"))
             out = await recover_paddle_table(
                 profile=PADDLE_PROFILE,
@@ -62,8 +85,8 @@ class TestRecoverPaddleTable:
                 result=_text(raw, "stop"),
                 retry=retry,
             )
-            assert out == COMPLETE
-            retry.assert_awaited_once()
+            assert out == raw
+            retry.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_does_not_retry_complete_table(self):
@@ -157,7 +180,7 @@ async def test_local_client_retries_truncated_table_at_8192():
     payloads: list[dict] = []
     client = _local_client(payloads, [(TRUNCATED, "length"), (COMPLETE, "stop")])
 
-    with patch("bibr.ocr.image_utils.encode_region_for_ocr", return_value="aW1n"):
+    with patch("bibr.local.ocr.encode_region_for_ocr", return_value="aW1n"):
         out = await client.recognize(Image.new("RGB", (8, 8)), PADDLE_PROFILE.prompts["table"])
 
     assert out == COMPLETE
@@ -169,11 +192,42 @@ async def test_local_client_retries_truncated_table_at_8192():
 
 
 @pytest.mark.asyncio
+async def test_local_client_does_not_retry_stop_terminated_ragged_table():
+    """A stop-terminated ragged grid reproduces identically — no 8192 retry."""
+    payloads: list[dict] = []
+    ragged_stop = "<fcel>A<fcel>B<nl><fcel>C<nl>"
+    client = _local_client(payloads, [(ragged_stop, "stop"), (COMPLETE, "stop")])
+
+    with patch("bibr.local.ocr.encode_region_for_ocr", return_value="aW1n"):
+        out = await client.recognize(Image.new("RGB", (8, 8)), PADDLE_PROFILE.prompts["table"])
+
+    assert out == ragged_stop
+    assert [payload["max_tokens"] for payload in payloads] == [4096]
+
+
+@pytest.mark.asyncio
+async def test_local_client_retries_truncation_without_finish_reason():
+    """Structural truncation without a reported finish reason still retries."""
+    payloads: list[dict] = []
+    ragged = "<fcel>A<fcel>B<nl><fcel>C<nl>"
+    client = _local_client(payloads, [(ragged, None), (COMPLETE, "stop")])
+
+    with patch("bibr.local.ocr.encode_region_for_ocr", return_value="aW1n"):
+        out = await client.recognize(Image.new("RGB", (8, 8)), PADDLE_PROFILE.prompts["table"])
+
+    assert out == COMPLETE
+    assert [payload["max_tokens"] for payload in payloads] == [
+        4096,
+        PADDLE_TABLE_RECOVERY_MAX_TOKENS,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_local_client_does_not_retry_malformed_complete_table():
     payloads: list[dict] = []
     client = _local_client(payloads, [(MALFORMED_COMPLETE, "stop")])
 
-    with patch("bibr.ocr.image_utils.encode_region_for_ocr", return_value="aW1n"):
+    with patch("bibr.local.ocr.encode_region_for_ocr", return_value="aW1n"):
         out = await client.recognize(Image.new("RGB", (8, 8)), PADDLE_PROFILE.prompts["table"])
 
     assert out == MALFORMED_COMPLETE
@@ -185,7 +239,7 @@ async def test_local_client_does_not_retry_complete_table():
     payloads: list[dict] = []
     client = _local_client(payloads, [(COMPLETE, "stop")])
 
-    with patch("bibr.ocr.image_utils.encode_region_for_ocr", return_value="aW1n"):
+    with patch("bibr.local.ocr.encode_region_for_ocr", return_value="aW1n"):
         out = await client.recognize(Image.new("RGB", (8, 8)), PADDLE_PROFILE.prompts["table"])
 
     assert out == COMPLETE

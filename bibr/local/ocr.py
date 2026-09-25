@@ -5,6 +5,7 @@ manages llama.cpp. ``VllmMlxServer`` supports the managed LLM
 backend, while its retired OCR client only reports an actionable error.
 """
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -16,7 +17,10 @@ from typing import ClassVar
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
 from bibr.local.ocr_transport import BaseHttpOcrClient
+from bibr.ocr.image_utils import encode_region_for_ocr
+from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
 from bibr.ocr.registry import register
+from bibr.ocr.table_recovery import recover_paddle_table
 
 logger = logging.getLogger(__name__)
 
@@ -444,12 +448,6 @@ class PaddleHttpOcrClient(BaseHttpOcrClient):
         tables. The managed Paddle clients (vLLM, MLX-VLM, Rapid-MLX) all
         delegate here.
         """
-        import asyncio
-
-        from bibr.ocr.image_utils import encode_region_for_ocr
-        from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
-        from bibr.ocr.table_recovery import recover_paddle_table
-
         image_b64 = await asyncio.to_thread(encode_region_for_ocr, image, self._profile.image)
         result = await self._send_request(image_b64, prompt)
         return await recover_paddle_table(

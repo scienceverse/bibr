@@ -894,6 +894,15 @@ class OcrStage:
         # regions were all filled natively never pays for OCR startup.
         total_regions = _backend_region_count(pending)
         engine_needed = total_regions > 0
+        if engine_needed and not resolution.engine_ready and ctx.signals.ocr_init_error is not None:
+            # Chunk-scoped fast-fail for every backend. resolve_ocr_identity
+            # covers the automatic chain before its startup; explicit backends
+            # (and an automatic window arriving with a retained or static
+            # identity) reach the engine start below, so check here — after
+            # the regions-cache probe — that only pending files fail while
+            # cache hits and native parses survive.
+            fail_ocr_targets(pending, ctx.signals.ocr_init_error, stage=self.name, log=False)
+            return
         if engine_needed:
             try:
                 if not resolution.engine_ready:
@@ -906,10 +915,12 @@ class OcrStage:
                 return
             if automatic_backend:
                 # The engine that actually started selects the concrete
-                # runtime: adopt it even when this window arrived with a
-                # static fallback (e.g. an earlier native-only window that
-                # never started the engine). Prompts, profile, region limit,
-                # cache key and provenance below must describe this runtime.
+                # runtime: adopt it when this window arrived with a stale
+                # static fallback. Defensive — current code no longer persists
+                # one, but the injected-client compatibility seam (or a future
+                # caller) could still hand one to the engine start. Prompts,
+                # profile, region limit, cache key and provenance below must
+                # describe this runtime.
                 started = getattr(rm, "ocr_runtime_identity", None)
                 if isinstance(started, OcrRuntimeIdentity) and started != identity:
                     identity = started

@@ -11,16 +11,19 @@ Both the local HTTP client (``PaddleHttpOcrClient``) and the serve backend
 (``BibrServeOcrBackend``) implement the retry through
 :func:`recover_paddle_table`: the transports differ (circuit breaker,
 semaphores, payload shape), but the decision of *when* to retry and the
-fallback of *what* to keep are one implementation. Only truncation is
-retried — a closed grid whose spans are malformed, an empty result, or plain
-non-grid text reproduces deterministically (see ``otsl_looks_truncated``).
+fallback of *what* to keep are one implementation. Only a generation the
+provider cut short (``finish_reason == \"length\"``, or structural truncation
+signals when the provider reports no finish reason) is retried — a
+stop-terminated ragged or unterminated grid at temperature 0 reproduces
+deterministically, as does a closed grid whose spans are malformed, an empty
+result, or plain non-grid text (see ``otsl_looks_truncated``).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from bibr.ocr.otsl import check_otsl_completeness, otsl_looks_truncated
 from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
@@ -30,14 +33,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+#: Result type preserved through recovery (``str`` or the ``OcrText`` subclass).
+T = TypeVar("T", bound=str)
+
 
 async def recover_paddle_table(
     *,
     profile: OcrProfile,
     prompt: str,
-    result,
-    retry: Callable[[], Awaitable],
-):
+    result: T,
+    retry: Callable[[], Awaitable[T]],
+) -> T:
     """Retry a truncated Paddle table once; otherwise return *result* as-is.
 
     Args:
@@ -55,8 +61,6 @@ async def recover_paddle_table(
         return result
     completeness = check_otsl_completeness(result)
     finish_reason = getattr(result, "finish_reason", None)
-    if completeness.complete and finish_reason != "length":
-        return result
     if not otsl_looks_truncated(completeness, finish_reason):
         return result
     logger.warning(

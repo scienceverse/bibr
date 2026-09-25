@@ -43,7 +43,7 @@ def _capture_transport(captured: dict):
     return httpx.MockTransport(handler)
 
 
-def _sequence_transport(responses: list[tuple[str, str]], payloads: list[dict]):
+def _sequence_transport(responses: list[tuple[str, str | None]], payloads: list[dict]):
     """Return successive OCR choices while recording every request payload."""
     calls = 0
 
@@ -158,7 +158,31 @@ class TestRecognize:
         assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
 
     @pytest.mark.asyncio
-    async def test_retries_structurally_incomplete_stopped_paddle_table(self):
+    async def test_retries_structurally_incomplete_table_without_finish_reason(self):
+        """Structural truncation retries only when no finish reason is reported."""
+        pytest.importorskip("cv2")
+        from bibr.ocr.profiles import PADDLE_PROFILE
+
+        payloads: list[dict] = []
+        backend = _make_backend(
+            _sequence_transport(
+                [
+                    ("<fcel>A<fcel>B<nl><fcel>C<nl>", None),
+                    ("<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>", "stop"),
+                ],
+                payloads,
+            ),
+            profile=PADDLE_PROFILE,
+        )
+
+        out = await backend.recognize(_tiny_image(), "Table Recognition:")
+
+        assert out == "<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>"
+        assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_stop_terminated_ragged_paddle_table(self):
+        """A stop-terminated ragged grid reproduces identically at temperature 0."""
         pytest.importorskip("cv2")
         from bibr.ocr.profiles import PADDLE_PROFILE
 
@@ -176,8 +200,8 @@ class TestRecognize:
 
         out = await backend.recognize(_tiny_image(), "Table Recognition:")
 
-        assert out == "<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>"
-        assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+        assert out == "<fcel>A<fcel>B<nl><fcel>C<nl>"
+        assert [payload["max_tokens"] for payload in payloads] == [4096]
 
     @pytest.mark.asyncio
     async def test_does_not_retry_complete_paddle_table(self):
