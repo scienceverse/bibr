@@ -24,7 +24,9 @@ the components of the later passes are grouped by where they are printed:
 adjacent ones share a group, and one inside a pass-1 parenthesis joins its
 group. Values are captured whole, as printed: scientific notation
 (``2.3 × 10−5``, ``1e-10``), decimal commas (``0,05``) and ranges
-(``.85–.94``).
+(``.85–.94``). The passes read a line break as one character, and names and
+values are exported on one line (``_single_char_line_breaks``,
+``_print_on_one_line``).
 
 Optional LLM fallback for sentences in methods/results sections that contain
 parenthesized numeric groups but where regex extraction found nothing.
@@ -417,6 +419,46 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Line breaks
+# ---------------------------------------------------------------------------
+
+
+def _single_char_line_breaks(text: str) -> str:
+    """*text* with each line break, ``"\\r\\n"`` or ``"\\r"``, as one ``"\\n"``.
+
+    The passes read the text before late clean-up, where pdfium ends each
+    line of a PDF text layer with "\\r\\n", also the lines of stacked sub-
+    and superscripts: partial eta squared is "η\\r\\n2\\r\\np = 0.11"
+    (Frontiers) or "ηp\\r\\n2 = .61" (SAGE). A name allows one whitespace
+    character between a symbol and its scripts ("η 2 p"), so the p of the
+    first was a p-value and the second was not read at all. The passes'
+    offsets are into this text and stay inside the extractor: the export
+    locates each component in the final sentence text.
+    """
+    if "\r" not in text:
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# A name, df or value printed across lines is exported on one, as late
+# clean-up prints the sentence: "Cohen’s \r\ndz" is "Cohen’s dz" and "[0.30,
+# \r\n0.42]" "[0.30, 0.42]", which a consumer folding names or reading values
+# would miss. A display formula's LaTeX, where a line break is a space too,
+# is exported on one line as well. Otherwise they stay as printed.
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _print_on_one_line(eq: PaperEquation) -> None:
+    """Collapse each whitespace run in *eq*'s lhs, df and rhs to one space."""
+    if eq.lhs:
+        eq.lhs = _WHITESPACE_RUN_RE.sub(" ", eq.lhs)
+    if eq.df:
+        eq.df = _WHITESPACE_RUN_RE.sub(" ", eq.df)
+    if eq.rhs:
+        eq.rhs = _WHITESPACE_RUN_RE.sub(" ", eq.rhs)
+
+
+# ---------------------------------------------------------------------------
 # Equation Extractor
 # ---------------------------------------------------------------------------
 
@@ -460,25 +502,29 @@ class EquationExtractor:
         equations: list[PaperEquation] = []
 
         for sent in sentences:
+            text = _single_char_line_breaks(sent.text)
             # Each pass marks the characters of the components it emitted,
             # and a later pass skips any match overlapping them. Only those
             # characters: a statistic the structured patterns do not know,
             # such as "BF10" in "(p < .001, BF10 = 12.3)", stays available to
             # the broad pass and joins the group of its parenthesis.
-            taken = bytearray(len(sent.text))
-            parens = _ParenGroups(sent.text)
+            taken = bytearray(len(text))
+            parens = _ParenGroups(text)
             # Pass 1: parenthesized statistical groups
-            equations.extend(self._extract_stat_groups(sent, taken, parens))
+            found = self._extract_stat_groups(sent, text, taken, parens)
             # Pass 2: bare statistical expressions
-            loose = self._extract_bare_stats(sent, taken, parens)
+            loose = self._extract_bare_stats(sent, text, taken, parens)
             # Pass 3: LaTeX-delimited equations the structured passes did not
             # already decompose ("$t(28) = 2.10$" is pass 1's t)
-            loose += self._extract_latex_equations(sent, taken)
+            loose += self._extract_latex_equations(sent, text, taken)
             # Pass 4: broad equation detection for missed cases
-            loose += self._extract_broad_equations(sent, taken, parens)
+            loose += self._extract_broad_equations(sent, text, taken, parens)
             # Grouped together, by where they are printed: "Z = 2.84; P =
             # 0.035" is one result though pass 2 reads Z and pass 4 P.
-            equations.extend(self._group_by_position(sent.text, loose, parens))
+            found += self._group_by_position(text, loose, parens)
+            for eq in found:
+                _print_on_one_line(eq)
+            equations.extend(found)
 
         logger.info(
             "Regex equation extraction: %d components from %d sentences",
@@ -633,6 +679,7 @@ class EquationExtractor:
                         eq.rhs,
                     )
                     continue
+                _print_on_one_line(eq)
                 # Dedupe on (text_id, lhs, comp, rhs), within this LLM batch
                 # and against everything already extracted. The regex passes
                 # dedupe by where a component is printed, which the LLM's
@@ -649,17 +696,17 @@ class EquationExtractor:
         return equations
 
     def _extract_stat_groups(
-        self, sent: PaperSentence, taken: bytearray, parens: "_ParenGroups"
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
     ) -> list[PaperEquation]:
         """Extract statistical equations from parenthesized groups in a sentence.
 
-        Marks each emitted component's characters in *taken*, which later
-        passes must not extract again, and records in *parens* each group
-        that produced equations, whose group a later pass's match inside it
-        joins.
+        *text* is the sentence's text as the passes read it (see
+        _single_char_line_breaks). Marks each emitted component's characters
+        in *taken*, which later passes must not extract again, and records in
+        *parens* each group that produced equations, whose group a later
+        pass's match inside it joins.
         """
         results: list[PaperEquation] = []
-        text = sent.text
 
         for inner, paren_start, paren_end in _iter_parenthesized_groups(text):
             # Validate: must contain a comparison operator and a digit
@@ -705,7 +752,7 @@ class EquationExtractor:
         return results
 
     def _extract_bare_stats(
-        self, sent: PaperSentence, taken: bytearray, parens: "_ParenGroups"
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
     ) -> list[tuple[Span, PaperEquation]]:
         """Extract stat expressions the parenthesized-group pass did not.
 
@@ -715,7 +762,6 @@ class EquationExtractor:
         *taken*.
         """
         results: list[tuple[Span, PaperEquation]] = []
-        text = sent.text
 
         for m in _COMPONENT_RE.finditer(text):
             if _is_taken(taken, m.start(), m.end()) or parens.in_df_argument(m.start(), m.end()):
@@ -744,7 +790,7 @@ class EquationExtractor:
         return results
 
     def _extract_latex_equations(
-        self, sent: PaperSentence, taken: bytearray
+        self, sent: PaperSentence, text: str, taken: bytearray
     ) -> list[tuple[Span, PaperEquation]]:
         """Extract equations from LaTeX-delimited content in a sentence.
 
@@ -755,7 +801,6 @@ class EquationExtractor:
         span in *taken*.
         """
         results: list[tuple[Span, PaperEquation]] = []
-        text = sent.text
 
         # Collect all LaTeX spans (display math first, then inline):
         # (content, format, formula span, content span)
@@ -794,7 +839,7 @@ class EquationExtractor:
         return results
 
     def _extract_broad_equations(
-        self, sent: PaperSentence, taken: bytearray, parens: "_ParenGroups"
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
     ) -> list[tuple[Span, PaperEquation]]:
         """Broad regex pass to catch equations missed by the structured passes.
 
@@ -804,7 +849,6 @@ class EquationExtractor:
         exported. Returns each equation with its span, ungrouped.
         """
         results: list[tuple[Span, PaperEquation]] = []
-        text = sent.text
         if not _BROAD_OP_PRESCAN_RE.search(text):
             return results
 

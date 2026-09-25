@@ -67,17 +67,23 @@ _COMPARATORS = {
 _VALUE_CONTINUES = r"(?!\d|\.\d|[−–-]\d)"
 
 
-def equation_pattern(lhs: str, df: str | None, comp: str, rhs: str) -> re.Pattern[str] | None:
+def equation_pattern(
+    lhs: str, df: str | None, comp: str, rhs: str, *, fused_lhs: bool = False
+) -> re.Pattern[str] | None:
     """Pattern for one parsed expression as it may be printed, e.g. ``t(28) = 2.10``.
 
     The rhs's tokens may be printed closer together than parsed: late
-    clean-up prints the "10 − 6" of "9.62 × 10 − 6" as "10 −6".
+    clean-up prints the "10 − 6" of "9.62 × 10 − 6" as "10 −6". With
+    *fused_lhs*, so may the lhs's, but not all as far apart as parsed: late
+    clean-up prints the "η p 2" that the extractor read from MathML as "ηp2".
     """
-    parts = [_whitespace_flexible(v) for v in (lhs, comp)]
+    lhs_tokens = lhs.split()
     rhs_tokens = rhs.split()
-    if any(p is None for p in parts) or not rhs_tokens:
+    if not lhs_tokens or not comp.strip() or not rhs_tokens:
         return None
-    lhs_p = parts[0]
+    lhs_p = r"\s+".join(re.escape(token) for token in lhs_tokens)
+    if fused_lhs:
+        lhs_p = rf"(?!{lhs_p})" + r"\s*".join(re.escape(token) for token in lhs_tokens)
     rhs_p = r"\s*".join(re.escape(token) for token in rhs_tokens)
     comp_p = _COMPARATORS.get(comp.strip(), re.escape(comp.strip()))
     df_p = ""
@@ -86,7 +92,7 @@ def equation_pattern(lhs: str, df: str | None, comp: str, rhs: str) -> re.Patter
         if df_inner is None:
             return None
         df_p = rf"\s*[(\[]\s*{df_inner.pattern}\s*[)\]]"
-    return re.compile(rf"{lhs_p.pattern}{df_p}\s*{comp_p}\s*{rhs_p}{_VALUE_CONTINUES}")  # type: ignore[union-attr]
+    return re.compile(rf"{lhs_p}{df_p}\s*{comp_p}\s*{rhs_p}{_VALUE_CONTINUES}")
 
 
 class SpanLocator:
@@ -151,6 +157,18 @@ def url_span(locator: SpanLocator, link, href: str) -> Span | None:
 
 
 def equation_span(locator: SpanLocator, eq) -> Span | None:
-    """Span of one parsed expression located by its printed components."""
+    """Span of one parsed expression located by its printed components.
+
+    A name with spaces that is not printed with them is looked for printed
+    closer together (see ``equation_pattern``), among the places where it is
+    not printed with them, so a row placed as parsed keeps its place.
+    """
     key = "\x1f".join((eq.lhs, eq.df or "", eq.comp, eq.rhs))
-    return locator.locate(eq.text_id, key, lambda: equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs))
+    span = locator.locate(eq.text_id, key, lambda: equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs))
+    if span is None and len(eq.lhs.split()) > 1:
+        span = locator.locate(
+            eq.text_id,
+            key + "\x1ffused",
+            lambda: equation_pattern(eq.lhs, eq.df, eq.comp, eq.rhs, fused_lhs=True),
+        )
+    return span

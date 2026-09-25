@@ -356,11 +356,19 @@ released.
 - Statistic names are read whole and exported as printed. A Greek letter,
   superscript or Δ (also ∆, U+2206) belongs to the name, so `η²p = .12` and
   `η 2 p` (partial eta squared) are no longer p-values, `ΔR²` is no longer
-  `R²` and `τp` no longer a p. `p-value` and `P value`, `χ 2` (χ² as text layers
-  print it), `r(df)`, `H(df)`, `Z`, `g`, `χ²` without df, `90% CI`, `r s` and
-  `rs` (Spearman) and `d z` are recognised. A subscript printed after a space,
-  such as the `h` of a Holm-adjusted `p h`, is no longer a statistic of its
-  own. Consumers matching `p`, `χ²` or `ηp²` have to fold these spellings.
+  `R²` and `τp` no longer a p. That holds where a PDF text layer puts the
+  stacked scripts on lines of their own, `η\r\n2\r\np = 0.11` (a p-value
+  before) and `ηp\r\n2 = .61` (not read at all before), as the extractor now
+  reads each line break as one character. `p-value` and `P value`, `χ 2` (χ²
+  as text layers print it), `r(df)`, `H(df)`, `Z`, `g`, `χ²` without df,
+  `90% CI`, `r s` and `rs` (Spearman) and `d z` are recognised. A subscript
+  printed after a space, such as the `h` of a Holm-adjusted `p h`, is no
+  longer a statistic of its own. Consumers matching `p`, `χ²` or `ηp²` have to
+  fold these spellings.
+- `lhs`, `df` and `rhs` in `eq[]` are exported on one line: a run of
+  whitespace, line breaks included, is one space, as in the sentence text.
+  PDF text layers gave the lhs `Cohen’s \r\ndz`, the df `1, \r\n19` and the rhs
+  `[0.30, \r\n0.42]`.
 - Statistics that share parentheses or a formula with a recognised one are no
   longer dropped: `BF10` in `(p < .001, BF10 = 12.3)`, a second count in one
   clause, `\chi^2(1)` in `$\chi^2(1) = 3.84, p = .05$`. Statistics printed
@@ -374,8 +382,9 @@ released.
   longer rescans a long token from each of its characters.
 - `eq[]` spans no longer place a value at a longer one that begins with it
   (`n = 1` at the `n = 16` earlier in the sentence), and locate a value that
-  late clean-up respaced (`10 − 6` printed as `10 −6`). Late clean-up prints
-  `\leqslant` and `\geqslant` as `≤` and `≥`, not `≤slant`.
+  late clean-up respaced (`10 − 6` printed as `10 −6`) and a name it printed
+  without its spaces (`η p 2`, read from MathML, printed as `ηp2`). Late
+  clean-up prints `\leqslant` and `\geqslant` as `≤` and `≥`, not `≤slant`.
 
 ### Added
 

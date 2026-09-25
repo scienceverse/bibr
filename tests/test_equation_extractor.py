@@ -1035,6 +1035,122 @@ class TestStatisticNames:
         assert _components(eqs) == [("n", "", "=", "1")]
 
 
+class TestTextLayerLineBreaks:
+    """pdfium ends each line of a PDF text layer with "\\r\\n", also the lines
+    of the stacked sub- and superscripts of partial eta squared.
+
+    The sentences are from PDF text layers, before late clean-up.
+    """
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # Frontiers: the p of η²p was a p-value
+            (
+                "was significant, F(1,56) = 6.85, p = 0.011, η\r\n2\r\np = 0.11, the risk\r\nrate",
+                [("F", "1,56", "=", "6.85"), ("p", "", "=", "0.011"), ("η 2 p", "", "=", "0.11")],
+            ),
+            # SAGE: η²p was not read at all
+            (
+                "audiovisual cues, F(1, \r\n19) = 29.57, p < .001, ηp\r\n2 = .61.",
+                [("F", "1, 19", "=", "29.57"), ("p", "", "<", ".001"), ("ηp 2", "", "=", ".61")],
+            ),
+            (
+                "direction, F(1, 19) < 0.01, p = .948, ηp\r\n2 <\r\n.01, and the",
+                [("F", "1, 19", "<", "0.01"), ("p", "", "=", ".948"), ("ηp 2", "", "<", ".01")],
+            ),
+            # Not from a text layer: a lone carriage return is a line break too
+            (
+                "It held, p = .01, η\r2\rp = .11.",
+                [("p", "", "=", ".01"), ("η 2 p", "", "=", ".11")],
+            ),
+        ],
+    )
+    def test_partial_eta_squared_printed_over_lines(self, text, expected):
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "for angry stimuli, t(196) = 3.73, p < .001, Cohen’s \r\ndz = 0.27.",
+                [
+                    ("t", "196", "=", "3.73"),
+                    ("p", "", "<", ".001"),
+                    ("Cohen’s dz", "", "=", "0.27"),
+                ],
+            ),
+            (
+                "estimate = 0.19), 95% \r\nCI = [0.16, 0.21], d = 0.59, t(3160) = 13.0",
+                [
+                    ("95% CI", "", "=", "[0.16, 0.21]"),
+                    ("d", "", "=", "0.59"),
+                    ("t", "3160", "=", "13.0"),
+                ],
+            ),
+            (
+                "(Fig. 1a), slope = 0.36, 95% CI = [0.30, \r\n0.42], t(32.3) = 12.4",
+                [("95% CI", "", "=", "[0.30, 0.42]"), ("t", "32.3", "=", "12.4")],
+            ),
+            (
+                "failed to reach significance, F(1, \r\n19) = 0.34, p = .567, ηp\r\n2 = .02.",
+                [("F", "1, 19", "=", "0.34"), ("p", "", "=", ".567"), ("ηp 2", "", "=", ".02")],
+            ),
+        ],
+    )
+    def test_names_and_values_are_exported_on_one_line(self, text, expected):
+        # As late clean-up prints the sentence: a consumer folding "Cohen’s dz"
+        # missed "Cohen’s \r\ndz".
+        assert _components(_extract(text)) == expected
+
+    def test_export_locates_them_after_late_clean_up(self):
+        from bibr.export.spans import SpanLocator, equation_span
+        from bibr.input.consolidate_text import clean_text_content_late
+
+        raw = "F(1,56) = 6.85, p = 0.011, η\r\n2\r\np = 0.11, and Cohen’s \r\ndz = 0.27."
+        text = clean_text_content_late(raw)
+        locator = SpanLocator({1: text}, shared=False)
+        spans = [equation_span(locator, eq) for eq in _extract(raw)]
+
+        assert [text[a:b] for a, b in spans] == [
+            "F(1,56) = 6.85",
+            "p = 0.011",
+            "η 2 p = 0.11",
+            "Cohen’s dz = 0.27",
+        ]
+
+    async def test_llm_fallback_components_are_exported_on_one_line(self):
+        from bibr.paper_contents import CanonicalSection, PaperEquation
+
+        sections = [
+            PaperSection(
+                section_id=1,
+                header="Results",
+                level=1,
+                parent_section_id=None,
+                section_type=CanonicalSection.RESULTS,
+            )
+        ]
+        sents = [_make_sentence(10, "An odd layout (slope: 0.36, 95% \r\nCI: [0.30, \r\n0.42]).")]
+
+        class FakeLLM:
+            async def extract_equations(self, batch, file_hash="x"):
+                return [
+                    PaperEquation(
+                        text_id=10, grp_id=0, lhs="95% \r\nCI", comp="=", rhs="[0.30, \r\n0.42]"
+                    )
+                ]
+
+        eqs = await EquationExtractor().extract_with_llm_fallback(
+            sents, sections, llm_client=FakeLLM()
+        )
+
+        assert _components(eqs) == [("95% CI", "", "=", "[0.30, 0.42]")]
+
+
 class TestSharedParentheses:
     """Statistics sharing parentheses with a recognised one are not dropped.
 
