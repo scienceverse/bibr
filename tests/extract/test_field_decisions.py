@@ -476,6 +476,39 @@ def _heading(header):
     )
 
 
+_PARAPHRASE = "An Unprinted Paraphrase"
+_GENERIC = "Research Article"
+_LAYOUT = "A Layout Title Row"
+
+
+@pytest.mark.parametrize(
+    ("scoped", "abstained", "incumbent", "detected", "value", "rule"),
+    [
+        # Ownership scope: the null-title safety net, then the generic-label rule.
+        (True, False, "", None, _PRINTED, "selected_record_title"),
+        (True, False, "", _LAYOUT, _PRINTED, "selected_record_title"),
+        (True, False, "", _GENERIC, _PRINTED, "grounded_over_generic_label"),
+        (True, False, _PRINTED, _GENERIC, _PRINTED, "grounded_over_generic_label"),
+        (True, False, _PARAPHRASE, _GENERIC, _GENERIC, "layout_title"),
+        (True, False, _PARAPHRASE, _LAYOUT, _PARAPHRASE, "extracted"),
+        (True, False, _PARAPHRASE, None, _PARAPHRASE, "extracted"),
+        # An abstained record: only the generic-label rule runs.
+        (True, True, "", None, "", "abstained"),
+        (True, True, "", _LAYOUT, "", "abstained"),
+        (True, True, "", _GENERIC, _GENERIC, "layout_title"),
+        # Outside ownership scope the layout title wins unless it yields.
+        (False, False, "", None, "", "none"),
+        (False, False, "", _LAYOUT, _LAYOUT, "layout_title"),
+        (False, False, _PARAPHRASE, _LAYOUT, _LAYOUT, "layout_title"),
+        (False, False, _PARAPHRASE, _GENERIC, _GENERIC, "layout_title"),
+        (False, False, _PRINTED, _GENERIC, _PRINTED, "grounded_over_generic_label"),
+    ],
+)
+def test_title_rule_table(scoped, abstained, incumbent, detected, value, rule):
+    decision = _title(incumbent, scoped=scoped, abstained=abstained, detected_title=detected)
+    assert (decision.value, decision.rule) == (value, rule)
+
+
 def test_title_keeps_the_extracted_title():
     decision = _title("A Model Title", detected_title="Some Layout Title")
     assert (decision.value, decision.source, decision.rule) == ("A Model Title", "llm", "extracted")
