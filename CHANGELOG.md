@@ -322,13 +322,14 @@ released.
   `extract_equations` now raise the typed error instead of returning an empty
   list; their callers degrade as before.
 - A wrong-typed value in an LLM response (an abstract sent as a list of
-  paragraphs, a reference `bib_type` sent as a number) raised an
-  `AttributeError` from a validator, which skipped Instructor's re-ask and
-  failed the call as an upstream error. The validators now leave a non-string
-  to the schema's type check, so it is a `ValidationError`: re-asked where
-  validation re-asks are enabled (cloud providers by default; a custom
-  OpenAI-compatible endpoint makes one attempt), and otherwise an
-  `llm_invalid_output` failure.
+  paragraphs, a reference `bib_type` or the keywords sent as a number) raised
+  an `AttributeError` or `TypeError` from a validator, which skipped
+  Instructor's re-ask and failed the call as an upstream error. The validators
+  now leave such a value to the schema's type check, so it is a
+  `ValidationError`: re-asked where validation re-asks are enabled (cloud
+  providers by default; a custom OpenAI-compatible endpoint makes one
+  attempt), and otherwise an `llm_invalid_output` failure. A falsy `bib_type`
+  (`false`, `0`, `[]`) still maps to `other`.
 - The NuExtract native backend's Instructor recovery request now takes its own
   rate-limit slot, as the decoder-abort recovery already did; it was a further
   physical request that the shared limiter never saw.
