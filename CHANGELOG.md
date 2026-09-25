@@ -341,6 +341,34 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- The paper's DOI (`metadata.doi`, which also keys self-DOI enrichment) is
+  chosen more carefully:
+  - A supplement's DOI no longer competes with the article's. APA's
+    "Supplemental materials: https://doi.org/….supp", Copernicus
+    `-supplement`, MDPI `/s1`, PeerJ `/supp-1` and PLOS `.s001` DOIs are now
+    components, like PLOS figure and table DOIs. They could replace the
+    article DOI or make the selection abstain.
+  - BMJ articles from 2013 and 2014 (`10.1136/bmj.f1049`, `bmj.g2276`) and a
+    citation line naming a supplement issue ("(Supplement 5)") were taken for
+    components, and the paper was exported with no DOI. A component suffix now
+    needs PLOS's zero-padded number (`.g001`).
+  - Preprints hosted on OSF (PsyArXiv `10.31234/osf.io/…`, SocArXiv, OSF
+    Preprints) were rejected as data deposits because "osf" is part of the
+    DOI. Only the text around a DOI counts now. OSF project, Zenodo, Figshare
+    and Dryad DOIs are still rejected by their registrant.
+  - An unmarked DOI in the body text no longer becomes the paper's DOI unless
+    it matches the manifest's expected DOI. In a manuscript with no DOI of its
+    own it was a cited work, and a lone "Journal DOI" is not the article's.
+  - A DOI cited in a page-1 or page-2 footnote no longer replaces the paper's
+    DOI when the running header repeats it. The conflict is reported and no
+    DOI is selected.
+  - A JATS or HTML article's own DOI (its `article-id` or `citation_doi`) now
+    wins over DOIs printed in its body text. eLife figure DOIs extend the
+    article DOI with a number, so many eLife JATS and HTML files exported no
+    DOI, and one a figure's.
+  - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
+    were cut at the `<` when read as the paper's DOI or matched against a
+    manifest's expected DOI. They are kept whole.
 
 ### Added
 

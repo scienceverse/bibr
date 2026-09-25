@@ -423,7 +423,7 @@ def test_truncated_journal_prefix_loses_to_full_article_doi():
 
 
 def test_supplement_path_extension_never_displaces_the_article_doi():
-    """Rule 1 must not treat an ``/s1`` supplement as a longer spelling."""
+    """An MDPI ``/s1`` supplement is a component, never a longer spelling."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -436,8 +436,11 @@ def test_supplement_path_extension_never_displaces_the_article_doi():
 
     selection = select_doi_candidates(collect_doi_candidates(contents))
 
-    assert selection.selected is None
-    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.3390/ijerph19148408"
+    assert selection.issues == ()
+    rejected = {c.normalized: c.rejection_reason for c in selection.candidates}
+    assert rejected["10.3390/ijerph19148408/s1"] == "component_candidate"
 
 
 def test_funder_registry_doi_is_rejected_before_selection():
@@ -614,3 +617,341 @@ def test_unmarked_ten_dot_break_is_never_bridged(text):
     contents = _contents([("Body", CanonicalSection.RESULTS, text, 4)])
 
     assert collect_doi_candidates(contents) == ()
+
+
+_APA_MASTHEAD = (
+    "Journal of Experimental Psychology: General 2023, Vol. 152, No. 1, 1-20 "
+    "© 2022 American Psychological Association ISSN: 0096-3445 "
+    "https://doi.org/10.1037/xge0001234"
+)
+_APA_SUPPLEMENT_NOTE = "Supplemental materials: https://doi.org/10.1037/xge0001234.supp"
+
+
+@pytest.mark.parametrize("masthead_in_header", [True, False])
+def test_apa_supplemental_materials_doi_never_names_the_paper(masthead_in_header):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    rows = [("Footnote 1", CanonicalSection.FOOTNOTE, _APA_SUPPLEMENT_NOTE, 1)]
+    if not masthead_in_header:
+        rows.insert(0, ("Title", CanonicalSection.TITLE, _APA_MASTHEAD, 1))
+    contents = _contents(rows, headers=[_APA_MASTHEAD] if masthead_in_header else None)
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1037/xge0001234"
+    assert selection.issues == ()
+    [supplement] = [c for c in selection.candidates if c.normalized.endswith(".supp")]
+    assert supplement.marker_kind == "component_doi"
+    assert supplement.rejection_reason == "component_candidate"
+
+
+@pytest.mark.parametrize(
+    "supplement_doi",
+    [
+        "10.1037/xge0001234.supp",
+        "10.5194/acp-16-8389-2016-supplement",
+        "10.1371/journal.pone.0130688.s003",
+        "10.7717/peerj.5478/supp-1",
+    ],
+)
+def test_supplement_suffix_doi_is_a_component_candidate(supplement_doi):
+    """Receipt shape of ``10.5194/acp-16-8389-2016``: the page-13 supplement won."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            (
+                "Appendix",
+                CanonicalSection.APPENDIX,
+                f"The supplement related to this article is available online at doi:{supplement_doi}.",
+                13,
+            )
+        ],
+        headers=["Atmos. Chem. Phys., 16, 8389-8403, 2016 doi:10.5194/acp-16-8389-2016"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.5194/acp-16-8389-2016"
+    assert selection.issues == ()
+    [supplement] = [c for c in selection.candidates if c.normalized == supplement_doi]
+    assert supplement.rejection_reason == "component_candidate"
+
+
+@pytest.mark.parametrize(
+    ("text", "doi"),
+    [
+        ("BMJ 2013;346:f1049 doi: 10.1136/bmj.f1049", "10.1136/bmj.f1049"),
+        ("Cite this as: BMJ 2014;348:g2276 doi: 10.1136/bmj.g2276", "10.1136/bmj.g2276"),
+        (
+            "Annals of Oncology 30 (Supplement 5): v1-v10, 2019. doi:10.1093/annonc/mdz239",
+            "10.1093/annonc/mdz239",
+        ),
+    ],
+)
+def test_article_doi_resembling_a_component_is_selected(text, doi):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
+    candidates = collect_doi_candidates(contents)
+
+    selection = select_doi_candidates(candidates)
+    expected = select_doi_candidates(
+        candidates, ExpectedIdentity(queue_record_id="record-1", expected_doi=doi)
+    )
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == doi
+    assert selection.selected.selection_tier == 3
+    assert selection.issues == ()
+    assert expected.selected is not None
+    assert expected.selected.normalized == doi
+    assert expected.issues == ()
+
+
+def test_plos_figure_doi_on_page_one_is_still_a_component():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [("Title", CanonicalSection.TITLE, "https://doi.org/10.1371/journal.pone.0130688.g001", 1)]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.rejection_reason == "component_candidate"
+
+
+@pytest.mark.parametrize(
+    ("text", "doi"),
+    [
+        ("DOI: 10.31234/osf.io/abc12", "10.31234/osf.io/abc12"),
+        ("https://doi.org/10.31235/osf.io/xyz98", "10.31235/osf.io/xyz98"),
+        ("DOI: 10.31219/osf.io/qwe45", "10.31219/osf.io/qwe45"),
+        ("DOI: 10.31234/osf.io/abc12_v1", "10.31234/osf.io/abc12_v1"),
+    ],
+)
+def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
+    from bibr.extract.doi_identity import (
+        collect_doi_candidates,
+        select_doi_candidates,
+        select_doi_from_text,
+    )
+
+    contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
+    candidates = collect_doi_candidates(contents)
+
+    selection = select_doi_candidates(candidates)
+    expected = select_doi_candidates(
+        candidates,
+        ExpectedIdentity(queue_record_id="record-1", expected_doi=doi, doi_required=True),
+    )
+    from_text = select_doi_from_text(text)
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == doi
+    assert selection.selected.rejection_reason is None
+    assert expected.selected is not None
+    assert expected.selected.normalized == doi
+    assert expected.issues == ()
+    assert from_text.selected is not None
+    assert from_text.selected.normalized == doi
+
+
+@pytest.mark.parametrize(
+    "doi",
+    [
+        "10.17605/OSF.IO/ABCDE",
+        "10.6084/m9.figshare.1234567",
+        "10.5061/dryad.abc123",
+        "10.5281/zenodo.123",
+    ],
+)
+def test_data_repository_registrant_doi_is_still_rejected(doi):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, f"DOI: {doi}", 1)])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.rejection_reason == "data_or_code_candidate"
+
+
+def test_repository_doi_beside_a_cited_doi_still_marks_a_software_citation():
+    """eLife 79461: a Zenodo DOI next to Cutadapt's article DOI in Methods."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _contents(
+        [
+            (
+                "Methods",
+                CanonicalSection.METHODS,
+                "Reads were trimmed using TrimGalore (ver. 0.6.0, Cutadapt ver. 1.18; "
+                "DOI:10.5281/zenodo.5127899, DOI:10.14806/ej.17.1.200).",
+                6,
+            )
+        ]
+    )
+
+    rejected = {c.normalized: c.rejection_reason for c in collect_doi_candidates(contents)}
+
+    assert rejected == {
+        "10.5281/zenodo.5127899": "data_or_code_candidate",
+        "10.14806/ej.17.1.200": "data_or_code_candidate",
+    }
+
+
+def test_repeated_running_header_doi_is_not_displaced_by_early_footnote_citation():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of things", 1),
+            (
+                "Notes",
+                CanonicalSection.FOOTNOTE,
+                "1 See Smith (2019), https://doi.org/10.2222/cited.1 for details.",
+                2,
+            ),
+        ],
+        headers=["https://doi.org/10.1111/own.123", "https://doi.org/10.1111/own.123"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    assert selection.issues[0].message == "Conflicting source-visible DOI candidates at tier 2"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [
+            (
+                "Methods",
+                CanonicalSection.METHODS,
+                "We used the stimuli of Smith et al. (2019; https://doi.org/10.1037/xge0000123).",
+                5,
+            )
+        ],
+        [
+            (
+                "Literatur",
+                CanonicalSection.UNKNOWN,
+                "Smith, J. (2019). A title. Journal, 1, 1-2. https://doi.org/10.1037/xge0000123",
+                20,
+            ),
+            (
+                "Literatur",
+                CanonicalSection.UNKNOWN,
+                "Doe, J. (2020). Other. Journal, 2, 3-4. "
+                "https://doi.org/10.1016/j.cognition.2020.104",
+                21,
+            ),
+        ],
+    ],
+    ids=["one-cited-doi", "unclassified-reference-list"],
+)
+def test_untyped_body_doi_never_names_a_manuscript_without_its_own_doi(rows):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    candidates = collect_doi_candidates(_contents(rows))
+
+    selection = select_doi_candidates(candidates)
+    required = select_doi_candidates(
+        candidates, ExpectedIdentity(queue_record_id="record-1", doi_required=True)
+    )
+    mismatched = select_doi_candidates(
+        candidates,
+        ExpectedIdentity(
+            queue_record_id="record-1", expected_doi="10.9999/own.1", doi_required=True
+        ),
+    )
+
+    assert {c.selection_tier for c in candidates} == {1}
+    assert selection.selected is None
+    assert selection.issues == ()
+    assert required.selected is None
+    assert [(i.code, i.blocking) for i in required.issues] == [("VAL_EXPECTED_ID_MISSING", True)]
+    assert mismatched.selected is None
+    assert [(i.code, i.blocking) for i in mismatched.issues] == [("VAL_EXPECTED_ID_MISSING", True)]
+
+
+def test_lone_journal_doi_does_not_name_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([], headers=["Journal DOI: www.doi.org/10.46654/RJMP"])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.semantic_context == "journal_identity"
+
+
+def test_structured_article_doi_wins_over_component_dois_in_body_text():
+    """eLife JATS: figure DOIs extend the article DOI with a number."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+    from bibr.models import PaperMetadata
+
+    contents = _contents(
+        [
+            ("Figure 1", CanonicalSection.UNKNOWN, "DOI: 10.7554/eLife.00013.005", None),
+            ("Figure 2", CanonicalSection.UNKNOWN, "DOI: 10.7554/eLife.00013.006", None),
+        ]
+    )
+    contents.preparsed_metadata = PaperMetadata(doi="10.7554/eLife.00013", title="")
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.7554/elife.00013"
+    assert selection.selected.source_kind == "structured_metadata"
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+_SICI_DOI = "10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K"
+
+
+def test_sici_doi_is_selected_whole():
+    from bibr.extract.doi_identity import (
+        collect_doi_candidates,
+        select_doi_candidates,
+        select_doi_from_text,
+    )
+
+    contents = _contents([("Title", CanonicalSection.TITLE, f"doi: {_SICI_DOI}", 1)])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+    from_text = select_doi_from_text(f"doi: {_SICI_DOI}")
+
+    assert selection.selected is not None
+    assert selection.selected.raw == _SICI_DOI
+    assert selection.selected.normalized == _SICI_DOI.casefold()
+    assert from_text.selected is not None
+    assert from_text.selected.normalized == _SICI_DOI.casefold()
+
+
+@pytest.mark.parametrize(
+    ("text", "doi"),
+    [
+        ("https://doi.org/10.1234/abc.5<sup>1</sup>", "10.1234/abc.5"),
+        ("<https://doi.org/10.1234/abc.5>", "10.1234/abc.5"),
+        ("doi: 10.1016/S0140-6736(20)30183-5", "10.1016/s0140-6736(20)30183-5"),
+    ],
+)
+def test_angle_brackets_join_a_doi_only_in_the_sici_shape(text, doi):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
+
+    assert [c.normalized for c in collect_doi_candidates(contents)] == [doi]
