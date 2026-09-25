@@ -341,34 +341,41 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
-- The paper's DOI (`metadata.doi`, which also keys self-DOI enrichment) is
-  chosen more carefully:
-  - A supplement's DOI no longer competes with the article's. APA's
-    "Supplemental materials: https://doi.org/….supp", Copernicus
-    `-supplement`, MDPI `/s1`, PeerJ `/supp-1` and PLOS `.s001` DOIs are now
-    components, like PLOS figure and table DOIs. They could replace the
-    article DOI or make the selection abstain.
-  - BMJ articles from 2013 and 2014 (`10.1136/bmj.f1049`, `bmj.g2276`) and a
-    citation line naming a supplement issue ("(Supplement 5)") were taken for
-    components, and the paper was exported with no DOI. A component suffix now
-    needs PLOS's zero-padded number (`.g001`).
-  - Preprints hosted on OSF (PsyArXiv `10.31234/osf.io/…`, SocArXiv, OSF
-    Preprints) were rejected as data deposits because "osf" is part of the
-    DOI. Only the text around a DOI counts now. OSF project, Zenodo, Figshare
-    and Dryad DOIs are still rejected by their registrant.
-  - An unmarked DOI in the body text no longer becomes the paper's DOI unless
-    it matches the manifest's expected DOI. In a manuscript with no DOI of its
-    own it was a cited work, and a lone "Journal DOI" is not the article's.
-  - A DOI cited in a page-1 or page-2 footnote no longer replaces the paper's
-    DOI when the running header repeats it. The conflict is reported and no
-    DOI is selected.
-  - A JATS or HTML article's own DOI (its `article-id` or `citation_doi`) now
-    wins over DOIs printed in its body text. eLife figure DOIs extend the
-    article DOI with a number, so many eLife JATS and HTML files exported no
-    DOI, and one a figure's.
-  - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
-    were cut at the `<` when read as the paper's DOI or matched against a
-    manifest's expected DOI. They are kept whole.
+- A supplement's DOI no longer becomes the paper's DOI (`metadata.doi`, which
+  also keys self-DOI enrichment) or makes its selection abstain. APA's
+  "Supplemental materials: https://doi.org/….supp", Copernicus `-supplement`,
+  MDPI `/s1`, PeerJ `/supp-1`, `/fig-1` and `/table-1`, and PLOS `.s001` DOIs
+  are now components, like PLOS figure and table DOIs.
+- BMJ articles from 2013 and 2014 (`10.1136/bmj.f1049`, `bmj.g2276`) and
+  articles whose citation line names a supplement issue ("30 (Supplement 5)",
+  "Volume 30, Supplement 5") were exported with no DOI, because their DOI was
+  taken for a component's. A component suffix now needs PLOS's zero-padded
+  number (`.g001`), and a supplement issue is not a component label.
+- Preprints hosted on OSF (PsyArXiv `10.31234/osf.io/…`, SocArXiv, OSF
+  Preprints) were exported with no DOI: "osf" inside the DOI marked it as a
+  data deposit. Only the text around a DOI counts now. OSF project, Zenodo,
+  Figshare and Dryad DOIs are still rejected by their registrant.
+- A DOI that no label names the article's (a bare DOI or a doi.org link),
+  printed outside the front matter and the running headers and footers, no
+  longer becomes the paper's DOI unless it matches the manifest's expected DOI.
+  Neither does a lone "Journal DOI". In a manuscript with no DOI of its own such
+  a DOI was a cited work. When it is the only candidate, a manifest that
+  requires a DOI now gets `VAL_EXPECTED_ID_MISSING`; before, the cited DOI was
+  selected, and reported as `VAL_EXPECTED_ID_MISMATCH` when an expected DOI was
+  given. The front matter is the title, abstract and keywords sections and
+  pages 1 and 2. DOCX, ePub, HTML and JATS inputs have no pages, so for them it
+  is the unclassified block before the first classified section (usually the
+  Abstract), and a DOCX title page's doi.org link still names the paper.
+- A DOI cited in a page-1 or page-2 footnote no longer replaces the paper's DOI
+  when the running header repeats the paper's own. The conflict is reported and
+  no DOI is selected.
+- A JATS or HTML article's own DOI (its `article-id` or `citation_doi`) now
+  wins over DOIs printed in its body text. eLife figure DOIs extend the article
+  DOI with a number, so many eLife JATS and HTML files exported no DOI, and one
+  a figure's.
+- Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
+  were cut at the `<` when read as the paper's DOI or matched against a
+  manifest's expected DOI. They are kept whole.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from

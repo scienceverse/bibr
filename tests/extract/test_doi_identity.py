@@ -398,7 +398,7 @@ def test_candidate_receipt_preserves_exact_raw_spelling_while_normalizing(raw_do
 
 
 def test_truncated_journal_prefix_loses_to_full_article_doi():
-    """Ladder rule 1 — receipt shape of ``10.30574/wjarr.2022.14.3.0574``."""
+    """Ladder, drop truncated prefixes — receipt shape of ``10.30574/wjarr.2022.14.3.0574``."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -469,7 +469,7 @@ def test_funder_registry_doi_is_rejected_before_selection():
 
 
 def test_bare_co_tier_doi_loses_to_marked_front_matter_doi():
-    """Ladder rule 2 — an unlabelled front-matter DOI never outranks a marked one."""
+    """Ladder, prefer marked — an unlabelled front-matter DOI never outranks a marked one."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -493,7 +493,7 @@ def test_bare_co_tier_doi_loses_to_marked_front_matter_doi():
 
 
 def test_footer_ocr_twin_does_not_suppress_page_one_sentence_doi():
-    """Ladder rule 3 — receipt shape of ``10.3390/ijerph19148408``."""
+    """Ladder, prefer body sources — receipt shape of ``10.3390/ijerph19148408``."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -510,7 +510,7 @@ def test_footer_ocr_twin_does_not_suppress_page_one_sentence_doi():
 
 
 def test_reference_dois_in_headers_do_not_suppress_front_matter_doi():
-    """Ladder rule 3 — receipt shape of ``10.1007/s12671-023-02077-9``."""
+    """Ladder, prefer body sources — receipt shape of ``10.1007/s12671-023-02077-9``."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -529,7 +529,7 @@ def test_reference_dois_in_headers_do_not_suppress_front_matter_doi():
 
 
 def test_footnote_reference_dois_lose_to_lowest_page_article_doi():
-    """Ladder rule 4 — receipt shape of ``10.3389/fpsyg.2022.890524``."""
+    """Ladder, prefer the lowest page — receipt shape of ``10.3389/fpsyg.2022.890524``."""
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
@@ -653,6 +653,8 @@ def test_apa_supplemental_materials_doi_never_names_the_paper(masthead_in_header
         "10.5194/acp-16-8389-2016-supplement",
         "10.1371/journal.pone.0130688.s003",
         "10.7717/peerj.5478/supp-1",
+        "10.7717/peerj.5478/fig-1",
+        "10.7717/peerj.5478/table-2",
     ],
 )
 def test_supplement_suffix_doi_is_a_component_candidate(supplement_doi):
@@ -689,6 +691,10 @@ def test_supplement_suffix_doi_is_a_component_candidate(supplement_doi):
         (
             "Annals of Oncology 30 (Supplement 5): v1-v10, 2019. doi:10.1093/annonc/mdz239",
             "10.1093/annonc/mdz239",
+        ),
+        (
+            "Annals of Oncology, Volume 30, Supplement 5, October 2019, doi:10.1093/annonc/mdz394",
+            "10.1093/annonc/mdz394",
         ),
     ],
 )
@@ -857,8 +863,17 @@ def test_repeated_running_header_doi_is_not_displaced_by_early_footnote_citation
                 21,
             ),
         ],
+        [
+            (
+                "A Theory of Attention",
+                CanonicalSection.UNKNOWN,
+                "We build on Smith et al. (2019; https://doi.org/10.1037/xge0000123).",
+                3,
+            ),
+            ("Method", CanonicalSection.METHODS, "Participants were 120 adults.", 4),
+        ],
     ],
-    ids=["one-cited-doi", "unclassified-reference-list"],
+    ids=["one-cited-doi", "unclassified-reference-list", "unclassified-intro-on-page-3"],
 )
 def test_untyped_body_doi_never_names_a_manuscript_without_its_own_doi(rows):
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
@@ -955,3 +970,136 @@ def test_angle_brackets_join_a_doi_only_in_the_sici_shape(text, doi):
     contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
 
     assert [c.normalized for c in collect_doi_candidates(contents)] == [doi]
+
+
+@pytest.mark.parametrize(
+    "caption",
+    [
+        "Figure 1. Rosette development in S. rosetta. DOI: 10.7554/eLife.00013.003",
+        "Figure supplement 1. Frequency of rosette colonies. DOI: 10.7554/eLife.00013.004",
+    ],
+)
+def test_labelled_caption_doi_stays_a_component(caption):
+    """eLife PDFs print a numbered DOI under each figure; the suffix rule cannot see it."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    footer = "Alegado et al. eLife 2012;1:e00013. DOI: 10.7554/eLife.00013"
+    contents = _contents(
+        [("Results", CanonicalSection.RESULTS, caption, 3)], footers=[footer, footer]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.7554/elife.00013"
+    assert selection.issues == ()
+    [caption_candidate] = [c for c in selection.candidates if c.source_kind == "sentence"]
+    assert caption_candidate.marker_kind == "explicit_doi"
+    assert caption_candidate.rejection_reason == "component_candidate"
+
+
+def _docx_contents(front: list[str], body_heading: str, body: list[str]):
+    """Parse a DOCX and type its headings the way the no-LLM PostParse does."""
+
+    import io
+
+    docx = pytest.importorskip("docx")
+
+    from bibr.input.docx_native import DocxParser
+    from bibr.structure.section_classifier import classify_headers_batch
+
+    document = docx.Document()
+    for line in front:
+        document.add_paragraph(line)
+    document.add_heading("Abstract", level=1)
+    document.add_paragraph("We studied attention in older adults.")
+    document.add_heading(body_heading, level=1)
+    for line in body:
+        document.add_paragraph(line)
+    buffer = io.BytesIO()
+    document.save(buffer)
+
+    parser = DocxParser(buffer.getvalue())
+    contents = parser.parse()
+    parser.apply_segmentation(contents, [[entry.text] for entry in parser.assembler.entries])
+    contents.sentences = parser.sentences
+    headed = [section for section in contents.sections if section.level > 0]
+    for section, (section_type, _score) in zip(
+        headed, classify_headers_batch([section.header for section in headed]), strict=True
+    ):
+        section.section_type = section_type
+    return contents
+
+
+_DOCX_TITLE_PAGE = ["Running head: ATTENTION", "Attention in Older Adults", "Jane Doe"]
+
+
+@pytest.mark.parametrize(
+    "doi_line",
+    [
+        "https://doi.org/10.1037/xge0001234",
+        "10.1037/xge0001234",
+        "This is the accepted manuscript of https://doi.org/10.1037/xge0001234",
+    ],
+)
+def test_pageless_title_page_doi_names_the_paper(doi_line):
+    """DOCX sentences have no page, so the block before the Abstract is the front matter."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _docx_contents(
+        [*_DOCX_TITLE_PAGE, doi_line], "Method", ["Participants were 120 adults."]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1037/xge0001234"
+    assert selection.selected.page is None
+    assert selection.selected.semantic_context == "front_matter"
+    assert selection.selected.selection_tier == 2
+
+
+def test_pageless_body_doi_still_abstains():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _docx_contents(
+        _DOCX_TITLE_PAGE,
+        "Method",
+        ["We used the stimuli of Smith et al. (2019; https://doi.org/10.1037/xge0000123)."],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert (candidate.semantic_context, candidate.selection_tier) == ("untyped", 1)
+
+
+def test_pageless_input_without_a_classified_section_has_no_front_block():
+    """Without a classified section nothing bounds the front block, so nothing counts."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _contents(
+        [
+            ("Root text", CanonicalSection.UNKNOWN, "https://doi.org/10.1037/xge0001234", None),
+            ("Body", CanonicalSection.UNKNOWN, "Participants were adults.", None),
+        ]
+    )
+
+    [candidate] = collect_doi_candidates(contents)
+
+    assert candidate.selection_tier == 1
+
+
+def test_doi_candidate_regex_does_not_backtrack_on_an_unclosed_bracket():
+    import time
+
+    from bibr.utils.text import DOI_CANDIDATE_RE
+
+    started = time.perf_counter()
+    for text in ("doi: 10.1234/<" + ":" * 100_000, "doi: 10.1234/<" + "a::" * 33_000):
+        assert DOI_CANDIDATE_RE.search(text) is None
+    assert time.perf_counter() - started < 2.0

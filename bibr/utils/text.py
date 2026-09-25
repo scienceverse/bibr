@@ -90,8 +90,12 @@ DOI_BODY = r"10\.\d{4,9}/"
 # ("10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K") also carry an
 # angle-bracketed ``item::AID-code`` segment. Brackets are accepted only in that
 # ``::`` shape, so an inline tag such as ``<sup>`` never becomes part of a DOI.
+# Both parts are bounded and the first excludes ``:``, so a long unclosed
+# ``<:::`` run (OCR separator lines) cannot make the match backtrack.
 DOI_CANDIDATE_RE = re.compile(
-    r"\b" + DOI_BODY + r"(?:[-._;()/:A-Za-z0-9]|<[-._;()/:A-Za-z0-9]*::[-._;()/:A-Za-z0-9]*>)+",
+    r"\b"
+    + DOI_BODY
+    + r"(?:[-._;()/:A-Za-z0-9]|<[-._;()/A-Za-z0-9]{0,40}::[-._;()/:A-Za-z0-9]{0,60}>)+",
     re.IGNORECASE,
 )
 

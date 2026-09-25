@@ -33,6 +33,13 @@ _COMPONENT_SUFFIX_RE = re.compile(
     r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$",
     re.IGNORECASE,
 )
+# A sentence that labels a figure, table or supplement is a caption, and a DOI in
+# it is the component's (eLife PDFs print "DOI: 10.7554/eLife.00013.003" under
+# each figure, a number the suffix rule cannot tell from an article's).
+_COMPONENT_LABEL_RE = re.compile(r"\b(?:fig(?:ure)?|table|component|supplement)\s*\d+")
+# A supplement issue in a citation line ("30 (Supplement 5)", "Volume 30,
+# Supplement 5") is the journal's issue, not such a label.
+_SUPPLEMENT_ISSUE_RE = re.compile(r"(?:\(\s*|\bvol(?:ume)?\.?\s*\d+\s*,?\s*)supplement\s*\d+")
 _NON_SELF_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"reference\s+doi\s*[:.]?\s*$", re.IGNORECASE), "reference_doi"),
     (re.compile(r"parent(?:\s+article)?\s+doi\s*[:.]?\s*$", re.IGNORECASE), "parent_doi"),
@@ -93,6 +100,13 @@ _REPOSITORY_CONTEXT_RE = re.compile(
     r"|\brepository\s+(?:doi|record|link|url)\s*[:.]?",
     re.IGNORECASE,
 )
+_FRONT_MATTER_SECTIONS = frozenset(
+    {
+        CanonicalSection.TITLE.value,
+        CanonicalSection.ABSTRACT.value,
+        CanonicalSection.KEYWORDS.value,
+    }
+)
 
 
 def _canonical_doi(value: str | None) -> str | None:
@@ -139,6 +153,7 @@ def _candidate_from_match(
     region_type: str | None,
     text_id: int | None,
     repeated_count: int = 0,
+    front_block: bool = False,
 ) -> DoiCandidate | None:
     normalized = _canonical_doi(match.group(0))
     if normalized is None:
@@ -190,8 +205,7 @@ def _candidate_from_match(
     elif (
         section_value in {CanonicalSection.FIGURE.value, CanonicalSection.TABLE.value}
         or _COMPONENT_SUFFIX_RE.search(normalized)
-        # "(Supplement 5)" in a citation line is a journal issue, not a label.
-        or re.search(r"\b(?:fig(?:ure)?|table|component)\s*\d+|(?<!\()\bsupplement\s*\d+", lowered)
+        or _COMPONENT_LABEL_RE.search(_SUPPLEMENT_ISSUE_RE.sub(" ", lowered))
     ):
         semantic_context = "parent_or_component"
         rejection_reason = "component_candidate"
@@ -205,11 +219,7 @@ def _candidate_from_match(
     elif source_kind in {"header", "footer"}:
         semantic_context = "repeated_furniture" if repeated_count > 1 else "structural_furniture"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
-    elif section_value in {
-        CanonicalSection.TITLE.value,
-        CanonicalSection.ABSTRACT.value,
-        CanonicalSection.KEYWORDS.value,
-    } or (page is not None and page <= 2):
+    elif section_value in _FRONT_MATTER_SECTIONS or (page is not None and page <= 2) or front_block:
         semantic_context = "front_matter"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
     else:
@@ -439,10 +449,35 @@ def _sentence_region_index(sentence) -> int | None:
     return region_meta.get("region_index")
 
 
+_UNCLASSIFIED_FRONT_SECTIONS = frozenset({None, CanonicalSection.UNKNOWN, CanonicalSection.TITLE})
+
+
+def _pageless_front_block_end(contents, section_map) -> int | None:
+    """First text id after the front block of an input without pages.
+
+    Native parses (DOCX, ePub, HTML, JATS) give no sentence a page, so "page 1
+    or 2" cannot mark their title page. The front block is the unclassified
+    text (the Root section, a title heading) before the first sentence of a
+    classified section, usually the Abstract. Without a classified section
+    there is no bound, and nothing counts.
+    """
+
+    if not contents.sentences or any(s.page_number is not None for s in contents.sentences):
+        return None
+    classified = [
+        sentence.text_id
+        for sentence in contents.sentences
+        if (section := section_map.get(sentence.section_id)) is not None
+        and section.section_type not in _UNCLASSIFIED_FRONT_SECTIONS
+    ]
+    return min(classified, default=None)
+
+
 def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
     """Collect every source-visible DOI with sentence or furniture provenance."""
 
     section_map = {section.section_id: section for section in contents.sections}
+    front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
     for sentence in contents.sentences:
         section = section_map.get(sentence.section_id)
@@ -459,6 +494,7 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
                 region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
+                front_block=front_block_end is not None and sentence.text_id < front_block_end,
             )
         )
 
@@ -642,10 +678,16 @@ def select_doi_candidates(
     candidate only when the provenance ladder in ``_select_without_expected``
     collapses it to a single DOI, and abstains otherwise.
 
-    Without an expected DOI only tiers 2 and 3 can name the paper. A tier-1
-    candidate is an unmarked DOI in body text: in a manuscript with no DOI of
-    its own it is a cited work, and a journal-level DOI is not the article's.
-    It becomes the paper's DOI only when it matches the expected identity.
+    Without a matching expected DOI only tiers 2 and 3 can name the paper. A
+    tier-1 candidate is a DOI that no label names the article's (a bare DOI or
+    a doi.org link) printed outside the front matter and the running
+    furniture, or a journal-level DOI. In a manuscript with no DOI of its own
+    such a DOI is a cited work. It becomes the paper's DOI only when it matches
+    the expected identity; when only tier-1 candidates remain, a required or
+    mismatched expected DOI reports ``VAL_EXPECTED_ID_MISSING``. The front
+    matter is the title, abstract and keywords sections, pages 1-2, and in an
+    input without pages the unclassified block before its first classified
+    section.
     """
 
     candidate_tuple = tuple(candidates)
