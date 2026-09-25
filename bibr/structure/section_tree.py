@@ -264,31 +264,33 @@ def _mark_appendix_block(
     infos: list[tuple[str | None, str | None]],
     block: list[int],
     references_idx: int | None,
-    in_zone,
     handled: set[int],
 ) -> None:
     """Validate one contiguous appendix-shaped block and, if it qualifies,
     pin its roots to top level (siblings, parent=0) and nest dotted children.
 
-    Level/parent only — section_type stays untouched here (the APPENDIX type is
-    assigned by chunk 4a). Adds every mutated section id to ``handled``.
+    A block qualifies only with a real appendix anchor: an "Appendix" marker
+    heading, or the reference list that ends the body before it. A lettered
+    run with no anchor is left alone however late it sits: IEEE/ACM papers and
+    many regional journals letter the subsections of their last body section
+    ("IV. EXPERIMENTS" / "A. Datasets" / "B. Results", "Results and Discussion"
+    / "A. ..." / "B. ..."), and a Roman "V. CONCLUSION" reads as root letter V.
+
+    Also re-types qualifying roots APPENDIX (see below). Adds every mutated
+    section id to ``handled``.
     """
     root_positions = [k for k in block if infos[k][0] in ("root_letter", "appendix_marker")]
     if not root_positions:
         return
 
     letters = [infos[k][1] for k in root_positions if infos[k][1] is not None]
-    distinct = list(dict.fromkeys(letters))
     non_decreasing = all(letters[i] <= letters[i + 1] for i in range(len(letters) - 1))
     has_marker = any(infos[k][0] == "appendix_marker" for k in block)
-    in_back = any(in_zone(k) for k in root_positions)
     after_refs = references_idx is not None and block[0] > references_idx
 
     qualifies = (
-        # A coherent A, B, C, ... run in the back matter.
-        (non_decreasing and len(distinct) >= 2 and distinct[0] == "A" and in_back)
         # An explicit "Appendix" marker heading anchors even a single letter.
-        or (has_marker and len(root_positions) >= 1)
+        (has_marker and len(root_positions) >= 1)
         # Lettered headings directly following the References section.
         or (after_refs and bool(letters) and non_decreasing)
     )
@@ -333,43 +335,55 @@ def repair_appendix_hierarchy(sections: list[PaperSection]) -> set[int]:
 
     Lettered appendix headings ("A Additional Results", "Appendix B", "A.1")
     carry no digit numbering, so the generic reparent rules fold B and C under
-    A, or the whole run under References. This pass finds a coherent run of
-    appendix-shaped headings in the back matter (last ~40% of the section list,
-    or after the References section) and re-pins the roots as top-level siblings
+    A, or the whole run under References. This pass finds a run of
+    appendix-shaped headings anchored by an "Appendix" marker or by the
+    References section before it, and re-pins the roots as top-level siblings
     (parent=0), nesting each dotted "X.n" child under its root "X".
 
-    Conservative by construction: a lone early "A Framework for X" with no
-    sibling run and no Appendix/References anchor never qualifies. Mutates
-    ``sections`` in place (level/parent only).
+    Conservative by construction: a lettered run with no Appendix/References
+    anchor never qualifies, whether it is a lone early "A Framework for X" or
+    the lettered subsections of a paper's last body section. Mutates
+    ``sections`` in place (level/parent, and the roots' type).
     """
     handled: set[int] = set()
     n = len(sections)
     if n < 2:
         return handled
 
-    zone_start = int(n * 0.6)
+    # The anchor is the reference list that ends the body: the first
+    # REFERENCES section after a core body section. A pre-body panel typed
+    # REFERENCES (a Frontiers "Citation" box above the title) anchors nothing.
+    # A paper with no typed body section falls back to its first one.
     references_idx: int | None = None
+    first_references_idx: int | None = None
+    body_seen = False
     for i, s in enumerate(sections):
-        if s.section_type == CanonicalSection.REFERENCES:
-            references_idx = i
-            break
+        if s.section_type in IMRAD_ANCHORS:
+            body_seen = True
+        elif s.section_type == CanonicalSection.REFERENCES:
+            if first_references_idx is None:
+                first_references_idx = i
+            if body_seen:
+                references_idx = i
+                break
+    if not body_seen:
+        references_idx = first_references_idx
 
     # Level-0 sections (title/root) never participate; treat them as gaps that
     # break an appendix block.
     infos = [_appendix_head_info(s.header) if s.level > 0 else (None, None) for s in sections]
-
-    def in_zone(i: int) -> bool:
-        return i >= zone_start or (references_idx is not None and i > references_idx)
 
     i = 0
     while i < n:
         if infos[i][0] not in ("root_letter", "dotted", "appendix_marker"):
             i += 1
             continue
-        j = i
-        while j < n and infos[j][0] in ("root_letter", "dotted", "appendix_marker"):
+        # An "Appendix" heading anchors the lettered headings after it, not the
+        # ones before it, so it always opens a block of its own.
+        j = i + 1
+        while j < n and infos[j][0] in ("root_letter", "dotted"):
             j += 1
-        _mark_appendix_block(sections, infos, list(range(i, j)), references_idx, in_zone, handled)
+        _mark_appendix_block(sections, infos, list(range(i, j)), references_idx, handled)
         i = j
 
     return handled

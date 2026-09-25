@@ -372,6 +372,20 @@ released.
   the page test for input without pages. On the eLife HTML sample it now
   selects exactly the printed Abstract section in 841 of 984 articles, where it
   selected nothing.
+- The lettered-appendix repair re-typed ordinary headings as top-level
+  `appendix` sections. A run of "A. …", "B. …" headings in the last 40% of the
+  section list qualified with no anchor at all, which caught the lettered
+  subsections of IEEE-style papers ("IV. EXPERIMENTS", "A. Datasets", "C.
+  Results") and of many regional journals ("Results and Discussion", "A. …",
+  "B. …"), and a Roman "V. CONCLUSION", which reads as letter V. Any lettered
+  heading after the first section typed references also qualified, so a
+  Frontiers "Citation" panel above the title, or the navigation "References"
+  at the top of an eLife HTML page, turned the title "A protocol for …" or
+  subsections such as "A specific requirement for …" and "C. elegans strains"
+  into appendices. A lettered run now needs a real anchor: an "Appendix"
+  heading, which anchors only the headings after it, or the reference list
+  that ends the body, the first section typed references after a body
+  section.
 
 ### Added
 

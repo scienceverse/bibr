@@ -196,6 +196,160 @@ class TestRepairAppendixHierarchy:
         assert by[5].classification_source == "exact_alias"  # untouched
 
 
+class TestAppendixNeedsARealAnchor:
+    """A lettered run is re-pinned and re-typed only after an "Appendix"
+    marker or after the reference list that ends the body."""
+
+    def test_ieee_lettered_subsections_and_roman_conclusion_are_not_appendices(self):
+        import asyncio
+
+        from bibr.paper_contents import PaperContents
+        from bibr.pipeline.stages.post_parse import _classify_sections
+
+        heads = [
+            "Deep Nets for X",
+            "Abstract",
+            "I. INTRODUCTION",
+            "II. RELATED WORK",
+            "A. Object Detection",
+            "B. Segmentation",
+            "III. METHOD",
+            "A. Architecture",
+            "B. Loss Function",
+            "IV. EXPERIMENTS",
+            "A. Datasets",
+            "B. Implementation Details",
+            "C. Results",
+            "D. Ablation Study",
+            "V. CONCLUSION",
+            "ACKNOWLEDGMENT",
+            "REFERENCES",
+        ]
+        secs = [
+            PaperSection(
+                section_id=i,
+                header=h,
+                level=0 if i == 0 else 1,
+                parent_section_id=None if i == 0 else 0,
+            )
+            for i, h in enumerate(heads)
+        ]
+        contents = PaperContents(
+            sentences=[],
+            sections=secs,
+            tables=[],
+            links=[],
+            sections_text={},
+            detected_title="Deep Nets for X",
+        )
+
+        asyncio.run(_classify_sections(contents, [], True, None))
+
+        by = _by_id(secs)
+        assert [s.section_id for s in secs if s.classification_source == "appendix_repair"] == []
+        assert [s.section_id for s in secs if s.section_type == CanonicalSection.APPENDIX] == []
+        assert (by[12].section_type, by[12].classification_source) == (
+            CanonicalSection.RESULTS,
+            "substring_alias",
+        )
+        assert [(by[sid].level, by[sid].parent_section_id) for sid in (10, 12, 13)] == [
+            (2, 9),
+            (2, 9),
+            (2, 9),
+        ]
+        assert (by[14].section_type, by[14].level, by[14].parent_section_id) == (
+            CanonicalSection.DISCUSSION,
+            1,
+            0,
+        )
+
+    def test_lettered_subsections_of_results_and_discussion_untouched(self):
+        secs = [
+            _sec(1, "INTRODUCTION", CanonicalSection.INTRODUCTION, level=1),
+            _sec(2, "METHOD", CanonicalSection.METHODS, level=1),
+            _sec(3, "RESULTS AND DISCUSSION", CanonicalSection.RESULTS, level=1),
+            _sec(4, "A. State Defense Regulation"),
+            _sec(5, "B. The Ideal Concept of State Defense"),
+            _sec(6, "CONCLUSION", CanonicalSection.DISCUSSION, level=1),
+            _sec(7, "REFERENCES", CanonicalSection.REFERENCES, level=1),
+        ]
+        secs[3].classification_source = "llm"
+        secs[4].classification_source = "llm"
+
+        assert repair_appendix_hierarchy(secs) == set()
+        by = _by_id(secs)
+        assert [(by[sid].section_type, by[sid].level) for sid in (4, 5)] == [
+            (CanonicalSection.UNKNOWN, 2),
+            (CanonicalSection.UNKNOWN, 2),
+        ]
+
+    def test_appendix_marker_anchors_only_the_headings_after_it(self):
+        secs = [
+            _sec(1, "I. INTRODUCTION", CanonicalSection.INTRODUCTION, level=1),
+            _sec(2, "IV. EXPERIMENTS", CanonicalSection.RESULTS, level=1),
+            _sec(3, "A. Datasets"),
+            _sec(4, "B. Results", CanonicalSection.RESULTS),
+            _sec(5, "V. CONCLUSION", CanonicalSection.DISCUSSION, level=1),
+            _sec(6, "APPENDIX A PROOF OF LEMMA 1"),
+            _sec(7, "A.1 Preliminaries"),
+            _sec(8, "REFERENCES", CanonicalSection.REFERENCES, level=1),
+        ]
+        for sec in secs:
+            sec.classification_source = "substring_alias"
+
+        assert repair_appendix_hierarchy(secs) == {6, 7}
+        assert [(s.section_id, s.section_type) for s in secs] == [
+            (1, CanonicalSection.INTRODUCTION),
+            (2, CanonicalSection.RESULTS),
+            (3, CanonicalSection.UNKNOWN),
+            (4, CanonicalSection.RESULTS),
+            (5, CanonicalSection.DISCUSSION),
+            (6, CanonicalSection.APPENDIX),
+            (7, CanonicalSection.UNKNOWN),
+            (8, CanonicalSection.REFERENCES),
+        ]
+        assert _by_id(secs)[7].parent_section_id == 6
+
+    def test_pre_body_citation_panel_is_not_a_references_anchor(self):
+        # Frontiers prints a "Citation" box above the title; the classifier can
+        # type it REFERENCES. The title that follows ("A protocol for ...")
+        # reads as root letter A but is no appendix.
+        secs = [
+            _sec(1, "OPEN ACCESS"),
+            _sec(2, "CITATION", CanonicalSection.REFERENCES, level=1),
+            _sec(3, "COPYRIGHT"),
+            _sec(4, "A protocol for mobilising novel finance models", CanonicalSection.TITLE),
+            _sec(5, "Abstract", CanonicalSection.ABSTRACT, level=1),
+            _sec(6, "Background", CanonicalSection.INTRODUCTION, level=1),
+            _sec(7, "Methods", CanonicalSection.METHODS, level=1),
+            _sec(8, "Discussion", CanonicalSection.DISCUSSION, level=1),
+            _sec(9, "References", CanonicalSection.REFERENCES, level=1),
+        ]
+        secs[3].classification_source = "title"
+
+        assert repair_appendix_hierarchy(secs) == set()
+        assert (secs[3].section_type, secs[3].classification_source) == (
+            CanonicalSection.TITLE,
+            "title",
+        )
+
+    def test_references_anchor_without_typed_body_sections(self):
+        # No heading typed as IMRaD body: the first reference list still anchors.
+        secs = [
+            _sec(1, "The Problem", level=1),
+            _sec(2, "Our Argument", level=1),
+            _sec(3, "References", CanonicalSection.REFERENCES, level=1),
+            _sec(4, "A Proofs"),
+            _sec(5, "B Extra Tables"),
+        ]
+
+        assert repair_appendix_hierarchy(secs) == {4, 5}
+        assert [(s.section_type, s.level, s.parent_section_id) for s in secs[3:]] == [
+            (CanonicalSection.APPENDIX, 1, 0),
+            (CanonicalSection.APPENDIX, 1, 0),
+        ]
+
+
 class TestTocAnchorGuard:
     def test_contents_never_becomes_anchor(self):
         # A "CONTENTS" TOC heading must not capture the following headings.
