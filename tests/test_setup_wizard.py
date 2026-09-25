@@ -1516,6 +1516,7 @@ def test_main_advanced_runs_advanced_wizard(monkeypatch):
 
 
 @pytest.mark.slow
+@pytest.mark.network  # real chew: downloads the GLM-OCR GGUF weights by design; opts out of the socket guard.
 def test_smoke_test_real_extraction_no_llm():
     """Real end-to-end chew() over the packaged sample PDF — no API keys needed.
 

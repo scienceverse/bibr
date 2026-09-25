@@ -120,3 +120,25 @@ def test_managed_request_bytes_stub_holds_against_responding_server(
         module = importlib.import_module(module_name)
         with pytest.raises(LocalHttpError):
             module.request_bytes(url, timeout=5)
+
+
+@pytest.mark.slow
+def test_slow_tests_see_the_real_probes(responding_loopback_server):
+    """Pin the slow opt-out: opt-in real-server tests skip both stubs.
+
+    A ``slow``-marked test under ``tests/local/`` must see the real
+    ``request_bytes`` (it reads the answering server) and the real
+    ``_port_is_held`` (it sees the held port). Without the opt-out this
+    fails with ``LocalHttpError``/``False`` — the vLLM-integration
+    regression, where the health poll never saw the real server.
+    """
+    import importlib
+
+    from tests.local.conftest import _MANAGED_MODULES
+
+    url = f"http://127.0.0.1:{responding_loopback_server}/v1/models"
+    for module_name in _MANAGED_MODULES:
+        module = importlib.import_module(module_name)
+        status, _reason, _body = module.request_bytes(url, timeout=5)
+        assert status == 200
+    assert http_runtime._port_is_held(url) is True

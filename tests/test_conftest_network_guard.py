@@ -88,3 +88,27 @@ def test_network_mark_sees_the_real_sockets():
     assert "guarded" not in socket.create_connection.__qualname__
     assert "guarded" not in socket.socket.connect.__qualname__
     assert "guarded" not in socket.socket.connect_ex.__qualname__
+
+
+def _mark_names(obj) -> set[str]:
+    """Mark names from a test function or module's ``pytestmark``."""
+    marks = getattr(obj, "pytestmark", [])
+    if not isinstance(marks, (list, tuple)):
+        marks = [marks]
+    return {mark.name for mark in marks}
+
+
+def test_weight_downloading_slow_tests_are_marked_network():
+    """Slow tests that download weights must opt out of the socket guard.
+
+    On a cold Hub cache the guard's ``pytest.fail`` (a BaseException)
+    escapes the ``except Exception`` fallbacks around the download, so an
+    unmarked slow download test fails where it should download and pass.
+    """
+    import tests.local.test_vllm_llm_integration as vllm_integration
+    import tests.test_setup_wizard as setup_wizard
+
+    assert {"slow", "network"} <= _mark_names(setup_wizard.test_smoke_test_real_extraction_no_llm)
+    assert "network" in _mark_names(
+        vllm_integration.test_vllm_server_launch_and_shutdown
+    ) | _mark_names(vllm_integration)

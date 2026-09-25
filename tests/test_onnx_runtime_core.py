@@ -214,8 +214,8 @@ def test_section_classifier_predicts_golden_labels_torch_free():
     assert [(p.canonical_type.value, p.is_top_level, round(p.score, 4)) for p in first] == (
         SECTION_GOLDEN
     )
-    # The bundle is input-dependent, not a constant function: zeroing the
-    # token ids must move at least one prediction off its golden label.
+    # Repeat runs are deterministic: the same inputs give identical outputs.
+    # (Input-dependence itself is pinned by the golden assertion above.)
     second = model.classify_batch(CONTEXTS, max_length=32)
     assert [(p.canonical_type, p.score) for p in first] == [
         (p.canonical_type, p.score) for p in second
