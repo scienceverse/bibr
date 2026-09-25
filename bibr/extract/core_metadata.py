@@ -1465,6 +1465,9 @@ class CoreMetadataExtractor:
             self._record_author_salvage(
                 getattr(llm_metadata, "_authors_salvaged_after", None), len(llm_metadata.authors)
             )
+            repair_note = getattr(llm_metadata, "_repair_note", None)
+            if isinstance(repair_note, str):
+                self._record_metadata_warning(WarningCode.LLM_RESPONSE_REPAIRED, repair_note)
 
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)

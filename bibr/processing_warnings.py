@@ -47,6 +47,7 @@ class WarningCode(StrEnum):
     AUTHORS_LLM_FAILED = "AUTHORS_LLM_FAILED"
     AUTHORS_TRUNCATED = "AUTHORS_TRUNCATED"
     AUTHORS_PARTIAL = "AUTHORS_PARTIAL"
+    LLM_RESPONSE_REPAIRED = "LLM_RESPONSE_REPAIRED"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
     RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
@@ -124,6 +125,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "complete leading authors were kept, and the list may be incomplete.",
     WarningCode.AUTHORS_PARTIAL: "The author response failed validation; the leading authors "
     "that validated were kept, and the list may be incomplete.",
+    WarningCode.LLM_RESPONSE_REPAIRED: "A finished core-metadata LLM response failed validation "
+    "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
+    "repaired response passed the same validation.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
     WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "

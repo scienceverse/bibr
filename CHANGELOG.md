@@ -277,7 +277,8 @@ released.
   call now recovers a finished response that failed validation only for
   invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
   explanatory prose around one JSON fence; it never completes truncated JSON
-  or takes a nested value (from draft PR #8).
+  or takes a nested value (from draft PR #8). A repaired response adds a
+  non-blocking `LLM_RESPONSE_REPAIRED` warning naming the call and the repair.
 - One bad file no longer kills its chunk or the rest of a batch. The stage
   contract says a stage records a per-file error and never raises, but a
   failing sentence-segmenter load, an exception in the identity stage or a

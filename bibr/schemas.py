@@ -235,6 +235,10 @@ class AbstractResponse(LLMResponse):
     """Retain an explicit JSON null separately from sanitized blank output."""
 
     _abstract_explicitly_absent: bool = PrivateAttr(default=False)
+    # Set when the response failed validation and was repaired locally
+    # (``bibr.clients.llm._recover_finished_response``): what the repair did,
+    # for the export's ``LLM_RESPONSE_REPAIRED`` warning. ``None`` otherwise.
+    _repair_note: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod

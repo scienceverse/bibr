@@ -495,7 +495,9 @@ def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
     return error_class(message, exc, cause=_failure_cause(error_class, exc))
 
 
-def _recover_finished_response(exc: BaseException, response_model: type) -> Any | None:
+def _recover_finished_response(
+    exc: BaseException, response_model: type, *, task: str
+) -> Any | None:
     """Recover a finished response that Instructor rejected, or return ``None``.
 
     Only an invalid-output failure qualifies, never a truncation, a decoder
@@ -522,6 +524,15 @@ def _recover_finished_response(exc: BaseException, response_model: type) -> Any 
         "(%d invalid backslash escape(s) repaired)",
         response_model.__name__,
         recovered.repaired_backslashes,
+    )
+    repaired = recovered.repaired_backslashes
+    detail = (
+        f"{repaired} invalid backslash escape(s) fixed"
+        if repaired
+        else "prose around its JSON removed"
+    )
+    recovered.value._repair_note = (
+        f"the {task} response failed validation and was repaired locally ({detail})"
     )
     return recovered.value
 
@@ -2106,7 +2117,7 @@ class LLMClient:
             # The anchor call alone gets local recovery: a finished response
             # with, say, LaTeX backslashes in the abstract otherwise loses the
             # whole record's title/keywords fields.
-            recovered = _recover_finished_response(e, TitleKeywordsLLM)
+            recovered = _recover_finished_response(e, TitleKeywordsLLM, task="title/keywords")
             if recovered is not None:
                 return cast("TitleKeywordsLLM", recovered)
             logger.error(
@@ -2272,7 +2283,7 @@ class LLMClient:
         except ProcessingError:
             raise
         except Exception as e:
-            recovered = _recover_finished_response(e, CoreMetadataLLM)
+            recovered = _recover_finished_response(e, CoreMetadataLLM, task="core metadata")
             if recovered is not None:
                 return cast("CoreMetadataLLM", recovered)
             logger.error(
@@ -2478,6 +2489,7 @@ class LLMClient:
         )
 
         combined._abstract_explicitly_absent = title_kw._abstract_explicitly_absent
+        combined._repair_note = title_kw._repair_note
         combined._field_failures = field_failures
         salvaged_after = getattr(authors, "_salvaged_after", None)
         combined._authors_salvaged_after = (

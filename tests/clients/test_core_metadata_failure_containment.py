@@ -380,6 +380,10 @@ async def test_invalid_backslash_escapes_are_recovered_from_the_finished_respons
     assert result.abstract == r"Measured \(7 \pm 2\) units."
     assert result.keywords == ["growth"]
     assert len(requests) == 1
+    assert result._repair_note == (
+        "the title/keywords response failed validation and was repaired locally "
+        "(2 invalid backslash escape(s) fixed)"
+    )
 
 
 async def test_truncated_response_is_never_completed_locally(monkeypatch):
@@ -424,3 +428,26 @@ async def test_a_crashing_merged_recovery_is_still_contained(monkeypatch):
     assert result._field_failures == dict.fromkeys(
         CoreMetadataLLM.model_fields, "llm_invalid_output"
     )
+
+
+async def test_a_repaired_title_response_is_kept_with_a_warning(monkeypatch):
+    repaired = TitleKeywordsLLM(title="A printed title")
+    repaired._repair_note = "the title/keywords response failed validation and was repaired"
+    ext = _extractor(_client(monkeypatch, title=repaired))
+    ext._extract_references = AsyncMock(return_value=[])
+
+    metadata = await ext.extract_all_metadata()
+
+    assert metadata.title == "A printed title"
+    assert [(w.code, w.message) for w in ext.contents.processing_warnings] == [
+        ("LLM_RESPONSE_REPAIRED", repaired._repair_note)
+    ]
+    assert not [i for i in ext.validation_issues if i.blocking]
+
+
+async def test_a_repaired_merged_response_names_its_task(monkeypatch):
+    merged = _LATEX_TITLE_RESPONSE.replace('{"title"', '{"authors":[],"title"', 1)
+    result, _ = await _title_over_http(monkeypatch, merged, merged=True)
+
+    assert isinstance(result, CoreMetadataLLM)
+    assert result._repair_note.startswith("the core metadata response failed validation")
