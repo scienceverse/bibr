@@ -1,5 +1,9 @@
 """Tests for bibr.input.consolidate_text module."""
 
+import time
+
+import pytest
+
 from bibr.input.consolidate_text import (
     clean_formula_text,
     clean_text_content,
@@ -536,3 +540,50 @@ class TestLateCleanupScope:
         text = "Pay US$ 20 by writing to john_smith@uni.edu, then $ back."
         assert "john_smith@uni.edu" in clean_text_content_late(text)
         assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_math_spans_the_parser_wrote_are_unwrapped_where_a_word_touches_them(self):
+        """DOCX writes each inline equation as ``$…$`` with no regard for its
+        neighbours, so "the $n$th" fails the tight-delimiter rule; the spans the
+        parser lists are unwrapped wherever they sit."""
+        text = "For the $n$th participant, each item$i$ and the $k$s counted."
+        spans = ("$n$", "$i$", "$k$")
+        assert clean_text_content_late(text, from_ocr=False, inline_math=spans) == (
+            "For the nth participant, each itemi and the ks counted."
+        )
+        assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_only_the_listed_spans_are_unwrapped(self):
+        text = "We recoded df$age_group$ before the $k$s were counted."
+        assert clean_text_content_late(text, from_ocr=False, inline_math=("$k$",)) == (
+            "We recoded df$age_group$ before the ks were counted."
+        )
+
+    def test_listed_spans_are_matched_left_to_right(self):
+        """Two equations around a plain letter must not pair up as another
+        listed span: "$a$x$b$" holds "$x$" as a substring."""
+        text = "Both $a$x$b$ and $x$ hold."
+        spans = ("$x$", "$a$", "$b$")
+        assert clean_text_content_late(text, from_ocr=False, inline_math=spans) == (
+            "Both axb and x hold."
+        )
+
+
+PATHOLOGICAL = {
+    "long token": "ACGT" * 12_500,
+    "email-like run": "a@b" + "-" * 50_000,
+    "dollars around words": "($a)" * 12_500,
+    "currency": "$5, " * 12_500,
+    "dollar words": "$a " * 16_667,
+    "unclosed paren math": "\\(a " * 12_500,
+}
+
+
+@pytest.mark.parametrize("from_ocr", [True, False], ids=["ocr", "document"])
+@pytest.mark.parametrize("text", PATHOLOGICAL.values(), ids=PATHOLOGICAL.keys())
+def test_late_cleanup_is_linear_on_long_inputs(text, from_ocr):
+    """Nothing caps sentence length, so an unanchored email pattern or a span
+    pattern that retried from every dollar sign made a 50k-character token
+    cost seconds (quadratic); each case now takes a few milliseconds."""
+    start = time.perf_counter()
+    clean_text_content_late(f"Seq: {text} end.", from_ocr=from_ocr)
+    assert time.perf_counter() - start < 0.5

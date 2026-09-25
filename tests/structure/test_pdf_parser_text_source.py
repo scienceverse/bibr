@@ -251,3 +251,25 @@ def test_carry_over_flushed_after_a_section_change_keeps_its_source():
 
     (flushed,) = [e for e in parser.assembler.entries if "without an end" in e.text]
     assert (flushed.section_id, flushed.from_ocr) == (1, False)
+
+
+@pytest.mark.parametrize("ocr_first", [True, False], ids=["ocr-first", "text-layer-first"])
+def test_caption_text_shared_with_an_ocr_candidate_is_ocr_text(ocr_first):
+    """Two candidates with the same text, one OCR and one text-layer: the
+    caption cannot tell which it came from, so it keeps the OCR repairs."""
+    caption = "Figure 1. Items 1 2 3 by age_group."
+    contents = _parse(
+        [
+            [
+                _region("paragraph_title", "Results", 50, native=True),
+                _region("image", "", 100, native=False),
+                _region("text", caption, 300, native=not ocr_first),
+                _region("image", "", 500, native=False),
+                _region("text", caption, 800, native=ocr_first),
+            ]
+        ]
+    )
+
+    captions = [s for s in contents.sentences if s.text == caption]
+    assert len(captions) == 2
+    assert all(s.from_ocr is True for s in captions)

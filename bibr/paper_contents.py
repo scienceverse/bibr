@@ -523,6 +523,12 @@ class PaperSentence:
     # paragraphs built only from the embedded text layer set False; unknown
     # provenance keeps the default, so it still gets the OCR repairs.
     from_ocr: bool = True
+    # The ``$…$`` spans the parser itself wrote into ``text`` (DOCX inline
+    # equations). ``finalize_text`` unwraps these wherever they sit, glued to a
+    # word included ("the $n$th"); other dollar signs in document text are
+    # mostly literal, so only a tightly delimited pair of them counts as math.
+    # Like ``from_ocr`` it lives only here: no export or checkpoint reads it.
+    inline_math: tuple[str, ...] = ()
 
 
 @dataclass
@@ -807,7 +813,9 @@ class PaperContents:
         """
         for sent in self.sentences:
             if not sent.is_display_formula:
-                sent.text = clean_text_content_late(sent.text, from_ocr=sent.from_ocr)
+                sent.text = clean_text_content_late(
+                    sent.text, from_ocr=sent.from_ocr, inline_math=sent.inline_math
+                )
         self.invalidate_text_caches()
 
     @cached_property

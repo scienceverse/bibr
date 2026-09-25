@@ -222,12 +222,17 @@ released.
   literal dollar signs as a math span and deleted them along with the
   underscores between (`df$age_group`, "US$ 60 to US$ 1,419", `$SAMPLE_R1`).
   Each sentence now records whether any of its text came from OCR, and only
-  OCR text gets those repairs. In document text only a tightly delimited
-  `$…$`, the way DOCX writes its inline equations, is still unwrapped and
-  flattened; two literal dollars that happen to fit that shape still are. In
-  OCR text, `_x` and `^x` are now flattened only inside `$…$` and `\(…\)`
-  math, email addresses are protected like URLs, and "2 x 2" and "2 × 2" are
-  no longer fused. The PDF text layer sometimes extracts a superscript or
+  OCR text gets those repairs. DOCX inline equations are still unwrapped and
+  flattened, one glued to a word included ("the $n$th" reads "the nth"),
+  because each sentence also records the `$…$` spans the parser wrote.
+  Elsewhere in document text only a tightly delimited `$…$` counts as math,
+  as JATS tex-math writes it; two literal dollars that happen to fit that
+  shape are still unwrapped. In OCR text, `_x` and `^x` are now flattened only
+  inside `$…$` and `\(…\)` math, email addresses are protected like URLs, and
+  "2 x 2" and "2 × 2" are no longer fused. OCR text keeps the spaced-run
+  collapse, which repairs OCR's character spacing ("1 7. 9 0 6"), so an OCR'd
+  "Items 1 2 3" still reads "Items 123"; narrowing it further waits on data
+  from a GLM-OCR run. The PDF text layer sometimes extracts a superscript or
   subscript as a separate token ("R 2 ,", "r 2 ¼"). The old clean-up fused
   those by accident; they are now kept as extracted.
 - The per-region OCR clean-up no longer touches the PDF text layer, and it no

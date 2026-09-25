@@ -66,6 +66,9 @@ class DeferredText:
     # False only when no OCR output contributed to :attr:`text`; copied onto
     # every sentence split from it (``PaperSentence.from_ocr``).
     from_ocr: bool = True
+    # The ``$…$`` spans the parser wrote into :attr:`text` itself; each
+    # sentence keeps those it holds (``PaperSentence.inline_math``).
+    inline_math: tuple[str, ...] = ()
 
     def page_for_offset(self, offset: int) -> int | None:
         """Page on which the text at ``offset`` was printed.
@@ -114,6 +117,7 @@ class DocumentAssembler:
         region_meta: dict | None = None,
         page_spans: list[tuple[int, int]] | None = None,
         from_ocr: bool = True,
+        inline_math: tuple[str, ...] = (),
     ) -> int:
         """Append a deferred entry and return its index in the buffer."""
         normalized = normalize_unicode(text)
@@ -135,6 +139,7 @@ class DocumentAssembler:
                 region_meta=region_meta,
                 page_spans=list(page_spans) if page_spans else [],
                 from_ocr=from_ocr,
+                inline_math=tuple(normalize_unicode(span) for span in inline_math),
             )
         )
         return len(self.entries) - 1

@@ -622,3 +622,86 @@ def test_docx_captions_and_footnotes_are_not_ocr_text():
     for expected in (figure_caption, table_caption, note):
         assert any(expected in text for text in texts), (expected, texts)
     assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def _inline_math_paragraph(doc, *pieces: str) -> None:
+    """A paragraph of alternating text and inline equations (``m:oMath``
+    children of ``w:p``, as Word writes them): text, math, text, ..."""
+    from lxml import etree
+
+    math_ns = _NS["m"]
+    paragraph = doc.add_paragraph()
+    for index, piece in enumerate(pieces):
+        if index % 2 == 0:
+            if piece:
+                paragraph.add_run(piece)
+            continue
+        omath = etree.SubElement(paragraph._p, f"{{{math_ns}}}oMath")
+        run = etree.SubElement(omath, f"{{{math_ns}}}r")
+        etree.SubElement(run, f"{{{math_ns}}}t").text = piece
+
+
+def test_inline_equations_glued_to_a_word_are_unwrapped():
+    """Only a tightly delimited ``$…$`` counts as math in document text, and
+    "the $n$th" is not one, so the late clean-up exported DOCX's own
+    delimiters. The sentence now lists the equations the parser wrote."""
+
+    def build(doc):
+        doc.add_heading("Method", level=1)
+        _inline_math_paragraph(doc, "For the ", "n", "th participant, df$age_group was kept.")
+        _inline_math_paragraph(doc, "Each item", "i", " was scored, as was ", "β_i=0", ".")
+
+    parser = DocxParser(_make_docx_bytes(build))
+    contents = parser.parse()
+    parser.apply_segmentation(
+        contents, [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+    contents.finalize_text()
+
+    assert [s.text for s in contents.sentences] == [
+        "For the nth participant, df$age_group was kept.",
+        "Each itemi was scored, as was βi=0.",
+    ]
+
+
+def test_each_sentence_keeps_the_inline_equations_it_holds():
+    """Segmentation splits a paragraph after the parser recorded its
+    equations; each sentence keeps the ones it holds, so literal dollars in
+    another sentence still get the tight-delimiter rule."""
+
+    def build(doc):
+        doc.add_heading("Method", level=1)
+        _inline_math_paragraph(
+            doc,
+            "For the ",
+            "n",
+            "th case we stop. Each item",
+            "i",
+            " was scored. Pay US$ 5 per $k$th.",
+        )
+
+    parser = DocxParser(_make_docx_bytes(build))
+    contents = parser.parse()
+    (entry,) = [e for e in parser.assembler.entries if e.needs_segmentation and "$" in e.text]
+    assert entry.inline_math == ("$n$", "$i$")
+    parser.apply_segmentation(
+        contents,
+        [
+            entry.text.split(". ") if e is entry else [e.text]
+            for e in parser.assembler.entries
+            if e.needs_segmentation
+        ],
+    )
+    held = {s.text: s.inline_math for s in contents.sentences if "$" in s.text}
+    assert held == {
+        "For the $n$th case we stop": ("$n$",),
+        "Each item$i$ was scored": ("$i$",),
+        "Pay US$ 5 per $k$th.": (),
+    }
+    contents.finalize_text()
+    assert [s.text for s in contents.sentences][-3:] == [
+        "For the nth case we stop",
+        "Each itemi was scored",
+        "Pay US$ 5 per $k$th.",
+    ]

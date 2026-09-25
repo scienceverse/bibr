@@ -6,7 +6,7 @@ in text content.
 
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 
 from bibr.utils.text import CONTROL_CHAR_RE, DOI_BODY, URL_RE, normalize_unicode
 
@@ -582,11 +582,17 @@ _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)\s*(.+?)\s*\$(?!\$)")
 # are literal: currency ("US$ 5", "35 MJ/$, while"), R's ``df$age_group``,
 # shell ``file:$ADAPTER``. There neither delimiter may face a space (Pandoc's
 # rule), a word character may touch neither from outside, and the opening one
-# may not be followed by closing punctuation. DOCX inline equations
-# (``$β_i=0$``) and JATS tex-math (``}$\textbf{q}$\end``) still match.
-_STRICT_INLINE_MATH_RE = re.compile(r"(?<![\w$\\])\$(?![\s$,;:!?)\]}])(.+?)(?<![\s$\\])\$(?![\w$])")
-# Paddle-OCR-VL writes inline math in text regions as ``\( ... \)``.
-_PAREN_INLINE_MATH_RE = re.compile(r"\\\((.+?)\\\)")
+# may not be followed by closing punctuation. JATS tex-math
+# (``}$\textbf{q}$\end``) still matches; DOCX inline equations need no rule
+# (see ``clean_text_content_late``'s ``inline_math``). The span never crosses
+# an unescaped ``$``: one that cannot close it ends the attempt, so a sentence
+# full of currency amounts is scanned once, not once per dollar sign.
+_STRICT_INLINE_MATH_RE = re.compile(
+    r"(?<![\w$\\])\$(?![\s$,;:!?)\]}])((?:[^$\\\n]|\\.)+?)(?<![\s$\\])\$(?![\w$])"
+)
+# Paddle-OCR-VL writes inline math in text regions as ``\( ... \)``. The span
+# stops at the next ``\(`` for the same reason.
+_PAREN_INLINE_MATH_RE = re.compile(r"\\\(((?:[^\\\n]|\\[^()\n])+?)\\\)")
 
 # Matches LaTeX superscript affiliation markers that may leak into author names:
 #   ^{1}  ^{1,2}  ^{1, 2, 3}  ^{†}  ^{*}  $ ^{1} $  $ ^{1,2} $
@@ -920,8 +926,10 @@ def clean_text_content(text: str) -> str | None:
 
 
 # Email addresses: masked like URLs, since the local part is exactly where
-# identifiers put underscores (``john_smith@uni.edu``).
-_EMAIL_PATTERN = r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"
+# identifiers put underscores (``john_smith@uni.edu``). The local part starts
+# where a run of its characters starts: unanchored, a long token without an
+# ``@`` was rescanned from every position, quadratic in its length.
+_EMAIL_PATTERN = r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"
 _PROTECTED_SPAN_RE = re.compile(f"{URL_RE.pattern}|{_EMAIL_PATTERN}", re.IGNORECASE)
 
 # Mask placeholders: NUL-delimited indices survive every late-phase transform
@@ -929,15 +937,26 @@ _PROTECTED_SPAN_RE = re.compile(f"{URL_RE.pattern}|{_EMAIL_PATTERN}", re.IGNOREC
 _PROTECTED_MASK_RE = re.compile("\x00(\\d+)\x00")
 
 
-def _mask_protected_spans(text: str) -> tuple[str, list[str]]:
-    """Replace URL and email spans with ``\\x00<i>\\x00`` placeholders."""
+def _mask_protected_spans(text: str, math: Iterable[str] = ()) -> tuple[str, list[str]]:
+    """Replace URL and email spans with ``\\x00<i>\\x00`` placeholders.
+
+    Each ``$…$`` span in *math* is replaced by a placeholder for its flattened
+    content (see ``clean_text_content_late``'s ``inline_math``).
+    """
     spans: list[str] = []
 
-    def _mask(m: re.Match[str]) -> str:
-        spans.append(m.group(0))
+    def _hold(value: str) -> str:
+        spans.append(value)
         return f"\x00{len(spans) - 1}\x00"
 
-    return _PROTECTED_SPAN_RE.sub(_mask, text), spans
+    masked = _PROTECTED_SPAN_RE.sub(lambda m: _hold(m.group(0)), text)
+    wanted = sorted({span for span in math if len(span) > 1}, key=len, reverse=True)
+    if wanted:
+        # One left-to-right pass, longest span first at each position: two
+        # equations around a plain letter ("$a$x$b$") never pair up as "$x$".
+        spans_re = re.compile("|".join(map(re.escape, wanted)))
+        masked = spans_re.sub(lambda m: _hold(strip_latex_commands(m.group(0)[1:-1])), masked)
+    return masked, spans
 
 
 def _restore_protected_spans(text: str, spans: list[str]) -> str:
@@ -964,7 +983,9 @@ def _flatten_ocr_prose(text: str) -> str:
     return "".join(parts)
 
 
-def clean_text_content_late(text: str, *, from_ocr: bool = True) -> str:
+def clean_text_content_late(
+    text: str, *, from_ocr: bool = True, inline_math: Iterable[str] = ()
+) -> str:
     """Late-phase cleaning — strips inline math delimiters and LaTeX commands.
 
     Must run **after** citation linking, equation extraction, and xref
@@ -976,10 +997,13 @@ def clean_text_content_late(text: str, *, from_ocr: bool = True) -> str:
     :func:`strip_inline_math` finds. Text a parser read from the document
     itself (``from_ocr=False``: DOCX, JATS, HTML, ePub, the PDF text layer)
     uses literal dollar signs, so only a tightly delimited span counts there
-    (:data:`_STRICT_INLINE_MATH_RE`): DOCX writes its inline equations that
-    way, while ``df$age_group`` and "US$ 5" are left alone. A pair of literal
-    dollars that happens to meet that rule ("$/cap/yr … MJ/$") is still
-    unwrapped.
+    (:data:`_STRICT_INLINE_MATH_RE`): JATS tex-math is written that way, while
+    ``df$age_group`` and "US$ 5" are left alone. A pair of literal dollars
+    that happens to meet that rule ("$/cap/yr … MJ/$") is still unwrapped.
+    ``inline_math`` lists the ``$…$`` spans the parser itself wrote into the
+    text (DOCX inline equations, ``PaperSentence.inline_math``); these are
+    unwrapped wherever they sit, glued to a word included ("the $n$th" ->
+    "the nth").
 
     Outside those spans only OCR text is touched: OCR leaks ``^{3}``,
     ``\\alpha`` and ``\\mathrm{…}`` into prose and spaces out characters
@@ -992,7 +1016,7 @@ def clean_text_content_late(text: str, *, from_ocr: bool = True) -> str:
     otherwise corrupt them (the single-character subscript rule flattens
     ``…/to_err_is_human`` to ``…/toerrishuman``).
     """
-    masked, protected = _mask_protected_spans(text)
+    masked, protected = _mask_protected_spans(text, inline_math)
     parts: list[str] = []
     pos = 0
     for m in _inline_math_spans(masked, strict=not from_ocr):
