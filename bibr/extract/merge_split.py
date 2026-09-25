@@ -79,6 +79,20 @@ _NUM_ABBREV_BEFORE = re.compile(
     re.IGNORECASE,
 )
 
+# Edition/volume words printed AFTER the number ("2. Aufl.", "4. Auflage",
+# "3. udg.", "2. uppl.", "2. ed.", "5. baskı") in German, Nordic, Slavic,
+# Hungarian, Turkish and Romance bibliographies. An interior "M. " followed by
+# one of these continues the same reference even when M is the next entry
+# number.
+_NUM_EDITION_AFTER = re.compile(
+    r"(?:aufl(?:age)?|ausg(?:abe)?|udg(?:ave)?|utg(?:ave)?|uppl(?:aga)?|oppl(?:ag)?"
+    r"|painos|ed|edn|izd|изд|vyd|wyd|kiad(?:ás)?|bask[ıi]|bd|jg|jahrg(?:ang)?|hrsg)\b",
+    re.IGNORECASE,
+)
+
+# Any letter: the title text that separates two references' date anchors.
+_LETTER = re.compile(r"[^\W\d_]")
+
 
 @dataclass(frozen=True)
 class MergeCandidate:
@@ -145,10 +159,11 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
     date and under-splits. The unambiguous delimiter is instead the sequential
     "N." marker. Anchored on a leading "N.", an interior "M." is an onset only when
     it sits at a ref-ending boundary (``_NUM_ONSET``), is not an abbreviation
-    (``_NUM_ABBREV_BEFORE``, e.g. "Vol. 2."), and continues the sequence
-    (``M == previous + 1``). The strict increment is the precision safeguard:
-    volume/page/year integers don't form a run, so they can't be onsets.
-    Empty unless the string starts with a number followed by a letter."""
+    (``_NUM_ABBREV_BEFORE``, e.g. "Vol. 2."), is not an edition or volume
+    number (``_NUM_EDITION_AFTER``, e.g. "2. Aufl."), and continues the
+    sequence (``M == previous + 1``). The strict increment is the precision
+    safeguard: volume/page/year integers don't form a run, so they can't be
+    onsets. Empty unless the string starts with a number followed by a letter."""
     m0 = _NUMBERED_ENTRY_START.match(ref_string)
     if m0 is None:
         return []
@@ -158,6 +173,8 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
         if int(m.group(1)) != expected:
             continue
         if _NUM_ABBREV_BEFORE.search(ref_string[: m.start()]):
+            continue
+        if _NUM_EDITION_AFTER.match(ref_string, m.end()):
             continue
         offsets.append(m.start(1))
         expected += 1
@@ -170,7 +187,12 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
     onset is a date anchor (``_DATE_ANCHOR``) whose preceding text is an
     author/org lead (``_lead_start``), skipping second dates that are reference
     metadata (``_META_BEFORE``) or an in-title citation (``_INTITLE_CITE``).
-    Empty unless the string carries at least two parenthesized dates."""
+    Empty unless the string carries at least two parenthesized dates.
+
+    A merge puts reference 1's title (and container) between its date and
+    reference 2's author lead. A lead that opens right after the previous date,
+    as in "Brown, T. (2018). Beyond Kahneman and Tversky (1979): ...", is the
+    start of a title that cites another work, so it is not an onset."""
     anchors = list(_DATE_ANCHOR.finditer(ref_string))
     if len(anchors) < 2:
         return []
@@ -182,8 +204,11 @@ def _parendate_interior_onsets(ref_string: str) -> list[int]:
         if _INTITLE_CITE.search(ref_string[: anchors[i].start()]):
             continue
         start = _lead_start(ref_string, anchors[i].start())
-        if start is not None and start > 0 and start not in offsets:
-            offsets.append(start)
+        if start is None or start <= 0 or start in offsets:
+            continue
+        if not _LETTER.search(ref_string[anchors[i - 1].end() : start]):
+            continue
+        offsets.append(start)
     return sorted(offsets)
 
 
