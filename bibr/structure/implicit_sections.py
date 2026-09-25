@@ -15,13 +15,7 @@ from typing import TYPE_CHECKING
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError
-from bibr.paper_contents import (
-    CanonicalSection,
-    PaperContents,
-    PaperSection,
-    PaperSentence,
-    sections_in_document_order,
-)
+from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
 from bibr.schemas import FrontMatterResult
 
 if TYPE_CHECKING:
@@ -317,6 +311,9 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 or not owned
                 or not before_body
                 or not valid_page
+                # Defensive: with no sentence pages (front_page None) every
+                # page passes, and a candidate's page comes from its
+                # provenance, which one candidate may carry and the next lack.
                 or (
                     previous_page is not None
                     and candidate.page is not None
@@ -620,7 +617,9 @@ def _apply_boundaries(
             classification_source="implicit",
             header_is_synthetic=True,
         )
-        contents.sections.append(new_sec)
+        _insert_after_source(
+            contents.sections, new_sec, seg_sentences[0].section_id, new_section_ids
+        )
         existing_types.add(canon)
         new_section_ids.add(next_section_id)
         next_section_id += 1
@@ -640,35 +639,34 @@ def _apply_boundaries(
         return False
 
     _rebuild_sections_text(contents, affected_old_sids | new_section_ids)
-    _reorder_sections_by_document_position(contents)
     return True
 
 
-def _reorder_sections_by_document_position(contents: PaperContents) -> None:
-    """Reorder sections to match the document's body-text flow.
+def _insert_after_source(
+    sections: list[PaperSection],
+    new_section: PaperSection,
+    source_section_id: int,
+    placed_ids: set[int],
+) -> None:
+    """Insert a synthesized section where its text is; nothing else moves.
 
-    Synthesized sections (e.g. an Introduction created from front-matter text
-    that had no explicit heading) are appended with the highest section_id but
-    contain low-text_id sentences.  This shuffles the section list so each
-    section sits where its text starts in the document.
-
-    A section without sentences takes its place from its first descendant
-    (a numbered parent heading whose prose sits in its subsections) or, when
-    nothing below it holds text, stays right after the section created before
-    it (the title section once its sentences moved into the new Abstract).
-    ``enforce_section_sanity`` reads this list's order as document order, so a
-    heading sent to the end would put References before the body.
+    The section goes right after the section its first sentence came from
+    (usually the title), behind any section already placed there
+    (``placed_ids``), so an Abstract and an Introduction cut from the same title
+    keep their order. The other sections keep their parse order, which is
+    document order, and ``enforce_section_sanity`` reads the list that way. A
+    sort by first sentence cannot place a heading that holds no text, such as
+    the title once its sentences move here or a "Method" heading whose
+    paragraphs sit in its subsections. A source missing from the list appends
+    the section.
     """
-    first_text_id_by_section: dict[int, int] = {}
-    for sent in contents.sentences:
-        sid = sent.section_id
-        if sid is None:
-            continue
-        prev = first_text_id_by_section.get(sid)
-        if prev is None or sent.text_id < prev:
-            first_text_id_by_section[sid] = sent.text_id
-
-    contents.sections[:] = sections_in_document_order(contents.sections, first_text_id_by_section)
+    position = next(
+        (i + 1 for i, section in enumerate(sections) if section.section_id == source_section_id),
+        len(sections),
+    )
+    while position < len(sections) and sections[position].section_id in placed_ids:
+        position += 1
+    sections.insert(position, new_section)
 
 
 def _trim_bloated_abstract(contents: PaperContents) -> None:

@@ -349,19 +349,23 @@ released.
   as document position, so it then reset that printed Abstract heading to
   `unknown`, and reset References to `unknown` with score 0 whenever body
   sections now followed it in the first half of the list (reference location
-  put the type back, not the score). A section without text now sits where
-  its first subsection's text starts, or right after the section before it,
-  which is the order the export already used; the pipeline and the export now
-  share that code. Replayed on the stored gate192 exports of main 50bef42,
-  the sanity check no longer resets References in 6 of 193 papers or a
-  printed Abstract heading in 3. Where a printed heading
-  ("LITERATURE CITED") and the reference section bibr created for the rows
-  both classify as references, the printed heading now comes first and keeps
-  the type, as the tie-break by document order intends.
+  put the type back, not the score). Each new section is now inserted right
+  after the section its text came from, usually the title, and no other
+  section moves. Where a printed heading ("LITERATURE CITED") and the
+  reference section bibr created for the rows both classify as references,
+  the printed heading now comes first and keeps the type, as the tie-break by
+  document order intends.
+- The export placed a heading without text of its own right after the
+  section with the next lower id. A "Method" heading whose subsections were
+  not nested under it therefore came before the Abstract and Introduction
+  that implicit-section detection cut from the title's text, since those are
+  created last. It now follows the section listed before it.
 - The section sanity check also counted the root and the figure, table and
   footnote sections added at the end of the list, so enough floats could
   place a terminal References section in the "first half" and reset it. Only
-  body sections count now.
+  body sections count now, and References is reset only when more body
+  sections follow it than precede it, the threshold a paper without floats
+  already had.
 - The printed abstract span opened only on absolute page 1 and continued only
   onto page 2. A PDF processed with `--pages` or serve `start_page` keeps its
   absolute page numbers, and DOCX, HTML and ePub input has no pages, so none

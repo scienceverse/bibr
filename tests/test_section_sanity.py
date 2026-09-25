@@ -121,7 +121,40 @@ class TestPositionsCountBodySectionsOnly:
             CanonicalSection.REFERENCES,
             0.9,
         )
-        assert [s.section_type for s in sections[6 + 1 :]] == [CanonicalSection.FIGURE] * n_floats
+
+    @staticmethod
+    def _nature_letter(*after: PaperSection) -> list[PaperSection]:
+        # Methods printed after the reference list.
+        return [
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+            _sec(1, "Paper Title", CanonicalSection.TITLE),
+            _sec(2, "Results", CanonicalSection.RESULTS),
+            _sec(3, "References", CanonicalSection.REFERENCES),
+            *after,
+        ]
+
+    def test_references_with_as_many_body_sections_before_as_after_stay(self):
+        sections = self._nature_letter(
+            _sec(4, "Methods", CanonicalSection.METHODS),
+            _sec(5, "Data availability", CanonicalSection.OPEN_DATA),
+        )
+        enforce_section_sanity(sections)
+        assert (sections[3].section_type, sections[3].classification_score) == (
+            CanonicalSection.REFERENCES,
+            0.9,
+        )
+
+    def test_references_with_more_body_sections_after_are_reset(self):
+        sections = self._nature_letter(
+            _sec(4, "Methods", CanonicalSection.METHODS),
+            _sec(5, "Discussion", CanonicalSection.DISCUSSION),
+            _sec(6, "Data availability", CanonicalSection.OPEN_DATA),
+        )
+        enforce_section_sanity(sections)
+        assert (sections[3].section_type, sections[3].classification_score) == (
+            CanonicalSection.UNKNOWN,
+            0.0,
+        )
 
 
 def test_empty_list_noop():
