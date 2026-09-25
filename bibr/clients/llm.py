@@ -2358,9 +2358,9 @@ class LLMClient:
             )
             title_kw = TitleKeywordsLLM()
         # Authors failing outright (e.g. a persistent truncation the salvage
-        # couldn't recover) must NOT sink the whole record — title/keywords
-        # succeeded. Degrade to an empty list; the empty-author re-roll below
-        # gets one more recovery shot before we accept it.
+        # couldn't recover) must NOT sink the whole record. Degrade to an
+        # empty list; the empty-author re-roll below gets one more recovery
+        # shot before we accept it.
         if isinstance(authors, BaseException):
             logger.warning(
                 "Author extraction failed (hash=%s); keeping title/keywords and "
