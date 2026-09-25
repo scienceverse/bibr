@@ -325,6 +325,43 @@ released.
 - "Supplementary Table 4" and "Supplementary Figure 4" give one
   `supplementary` xref; they also gave a `table` or `figure` xref to the
   paper's own Table 4 or Figure 4.
+- The citation linker no longer turns test statistics, equation references,
+  locators and unit exponents into bibliography links. In a paper with a
+  numbered reference list, the degrees of freedom in "F(3, 84) = 4.49", "t(45)
+  = 2.10" or "χ 2 (6) = 22.03" linked references 3, 84, 45 and 6, as did "Eq.
+  (5)" and "Equation (6)". A parenthetical group glued to a one-letter or
+  Greek statistic symbol, or followed by a comparison, is no longer a
+  citation; a bracket group needs both ("F[2, 9] = 5.20"). "Fig.3", "Eq.5",
+  "Tab.2", "Vol.12", "No.5", "pp.14-16" and "Exp.1" are no longer flattened
+  superscript citations, and no longer switch that style on in a paper that
+  cites with brackets. "25 cm^{2}" and "3 g cm $ ^{3} $" linked references 2
+  and 3 and lost the exponent from the text; a length unit (cm, mm, km, µm,
+  nm, ft) or "ms" before a superscript now keeps it as an exponent.
+- Two distant numbers in one bracket, such as "[11, 33]" or "[91, 108]", are
+  citations again in a paper that cites with brackets. They were taken for a
+  confidence interval and dropped with no fallback; on 973 PLOS and 1,922 PMC
+  JATS articles that cost 2,608 citation links. They stay intervals in a
+  paper without bracket citations and after "CI", "IQR", "range" or
+  "interval".
+- A superscript citation group with a number the reference parser dropped
+  links its other numbers, as a bracket group does. "form^{3-5}" with
+  reference 4 missing linked nothing and was flattened into "form3-5"; it now
+  links 3 and 5 and the marker is removed. A number past the last reference
+  still rejects the group.
+- The LLM citation step no longer re-offers citations the author-year
+  matcher already linked. The matcher links "In Smith (2020)"; "Smith (2020)"
+  went to the LLM again, and a different answer added a second, conflicting
+  link. A group such as "(Smith, 2020; Jones, 2019; Brown, 2016)" is offered
+  work by work, and every reference the LLM names for one citation is kept;
+  before, the unresolved works were folded into the whole group and only one
+  answer survived. The LLM may break a same-surname, same-year tie only with
+  a reference that carries that surname and year: it could pick any
+  reference, and the receipt kept the surname and year evidence for it.
+- The LLM citation step sends at most 40 citations per request, run
+  concurrently under the client's concurrency limit. All candidates went into
+  one request whose answer had to fit the 8192-token `citation_max_tokens`
+  cap; a paper with about a hundred candidate citations hit the cap and got
+  no LLM link at all. A failed request now loses only its own citations.
 - DOCX tables get their captions: a Caption-styled paragraph directly above
   or below a table is its caption and leaves the body text, as figure
   captions do; the table had none and the caption stayed in the body. A style
