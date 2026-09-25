@@ -9,6 +9,10 @@ dependencies so importers pay nothing to load them.
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from rapidfuzz.distance import MatchingBlock
 
 # A missing reference heading bypasses geometry segmentation. Accept translated, singular,
 # numbered, and decorated heading forms through an explicit multilingual grammar.
@@ -134,6 +138,21 @@ def alnum_key(text: str) -> str:
 # is trusted (short needles fuzzy-match too easily).
 _COVERED_MIN_SCORE = 95
 _COVERED_MIN_CHARS = 30
+# A needle with 16 or more characters without a copy in the haystack within any
+# 24 consecutive characters is not covered. OCR noise between two reads of the
+# same text is scattered ("rn" for "m", "l" for "1", at most a dropped word);
+# text the haystack lacks, such as an entry without a box of its own, a line or
+# a DOI, is one stretch. In the entry boxes of the lfm25 OCR caches, 99% of
+# lines other than an entry's last hold 22 or more alphanumeric characters.
+_COVERED_STRETCH = 24
+_COVERED_MAX_MISSING = 16
+# Matching blocks shorter than this are not a copy of needle text: an alignment
+# with unrelated text pairs single letters and pairs of letters by chance.
+_COVERED_MIN_BLOCK = 3
+# Matching blocks at least this long locate the needle's copy in the haystack,
+# and the room left around that copy for noise at its edges.
+_COVERED_ANCHOR_BLOCK = 8
+_COVERED_MARGIN = 8
 # Longest needle searched as a substring of the haystack. partial_ratio grows
 # with the square of the needle length on noisy text (seconds at 16k chars,
 # tens of seconds at 50k, as an OCR repetition loop can produce); a longer
@@ -141,19 +160,61 @@ _COVERED_MIN_CHARS = 30
 _COVERED_MAX_PARTIAL_CHARS = 10_000
 
 
+def _matching_blocks(needle: str, haystack: str, min_size: int) -> list[MatchingBlock]:
+    from rapidfuzz.distance import Levenshtein
+
+    blocks = Levenshtein.opcodes(needle, haystack).as_matching_blocks()
+    return [block for block in blocks if block.size >= min_size]
+
+
+def _missing_chars(needle: str, haystack: str, start: int = 0, end: int | None = None) -> int:
+    """Most characters without a copy in ``haystack[start:end]`` in any stretch of *needle*.
+
+    A stretch is 24 consecutive characters; a character has a copy when it is
+    in a matching block of three or more characters. The needle is aligned
+    twice. The first alignment locates its copy by the long matching blocks,
+    and the second aligns it with only that copy and a margin for noise: spare
+    haystack text around the copy lets the aligner pair a noisy edge of the
+    needle letter by letter with unrelated text, at no more cost than matching
+    it to its copy. A word the unrelated text happens to share does not hide a
+    missing stretch either, since the stretch keeps its other characters.
+    """
+    end = len(haystack) if end is None else end
+    anchors = _matching_blocks(needle, haystack[start:end], _COVERED_ANCHOR_BLOCK)
+    stretch = min(_COVERED_STRETCH, len(needle))
+    if not anchors:
+        return stretch
+    head = anchors[0].a
+    tail = len(needle) - anchors[-1].a - anchors[-1].size
+    lo = max(0, start + anchors[0].b - head - head // 10 - _COVERED_MARGIN)
+    hi = start + anchors[-1].b + anchors[-1].size + tail + tail // 10 + _COVERED_MARGIN
+    copied = bytearray(len(needle))
+    for block in _matching_blocks(needle, haystack[lo:hi], _COVERED_MIN_BLOCK):
+        copied[block.a : block.a + block.size] = b"\x01" * block.size
+    missing = most = stretch - sum(copied[:stretch])
+    for i in range(stretch, len(needle)):
+        missing += copied[i - stretch] - copied[i]
+        most = max(most, missing)
+    return most
+
+
 def alnum_text_covered(needle: str, haystack: str) -> bool:
     """Whether *needle* is already contained in *haystack* (both ``alnum_key`` output).
 
-    Exact containment, or, for needles of 30 or more characters, a fuzzy score
-    of at least 95 that absorbs OCR noise between two reads of the same text.
+    Exact containment, or, for needles of 30 or more characters, a match that
+    absorbs OCR noise between two reads of the same text: a fuzzy score of at
+    least 95, and no 24 consecutive needle characters of which 16 or more have
+    no copy in the haystack. The score bounds the total noise. The second test
+    keeps a needle that holds text the haystack lacks, however small a share of
+    a long needle that text is: an entry without a box of its own, a line, a
+    DOI.
+
     Two reads of one aggregate box and of its entry boxes differ by "rn" for
     "m", "l" for "1" and the like, and either read can be the longer one, so
     the two are first compared whole (``ratio``, symmetric, and fast even on
     equal lengths, where ``partial_ratio`` is not). A needle shorter than the
-    haystack is then also searched as a substring (``partial_ratio``). A needle
-    that runs past the haystack by more than about a tenth of its length scores
-    under 95 either way, so an aggregate box holding four entries is not
-    covered by boxes for two or three of them.
+    haystack is then also searched as a substring (``partial_ratio``), and the
+    second test is applied where it matched.
     """
     if not needle:
         return True
@@ -163,9 +224,16 @@ def alnum_text_covered(needle: str, haystack: str) -> bool:
         return False
     from rapidfuzz import fuzz
 
-    if fuzz.ratio(needle, haystack) >= _COVERED_MIN_SCORE:
+    if (
+        fuzz.ratio(needle, haystack) >= _COVERED_MIN_SCORE
+        and _missing_chars(needle, haystack) < _COVERED_MAX_MISSING
+    ):
         return True
     if len(needle) >= len(haystack) or len(needle) > _COVERED_MAX_PARTIAL_CHARS:
         return False
-    score = fuzz.partial_ratio(needle, haystack, score_cutoff=_COVERED_MIN_SCORE)
-    return score >= _COVERED_MIN_SCORE
+    alignment = fuzz.partial_ratio_alignment(needle, haystack, score_cutoff=_COVERED_MIN_SCORE)
+    if alignment is None:
+        return False
+    start = max(0, alignment.dest_start - _COVERED_MARGIN)
+    end = alignment.dest_end + _COVERED_MARGIN
+    return _missing_chars(needle, haystack, start, end) < _COVERED_MAX_MISSING

@@ -201,6 +201,11 @@ def _deduplicate_reference_regions(
     content is blanked.  The region itself is KEPT, because it still keys the
     References section (``_handle_section_hint``) and emits the layout hint
     used by section-classification fallbacks.
+
+    Both passes tolerate OCR noise between the two reads, but not a run of
+    text the other regions lack (``alnum_text_covered``): a region holding a
+    line or a DOI that no text region has, such as the end of a reference
+    continued from the previous page, keeps its content.
     """
     containment_threshold = _effective_settings(settings).layout.containment_threshold
 

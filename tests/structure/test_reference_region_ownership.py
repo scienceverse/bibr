@@ -233,6 +233,32 @@ def test_entry_box_outside_the_envelope_is_not_judged_by_its_text():
     assert _section_texts(contents, "References") == [envelope, "PubMed"]
 
 
+def test_long_reference_envelope_keeps_the_one_entry_without_a_box():
+    from tests.reference_fixtures import REFERENCE_LIST, read_again
+
+    # Eleven of twelve entries have a box. The aggregate read, noisier than the
+    # entry reads, holds the twelfth, so it stays and the entry boxes it
+    # repeats are hidden: every entry is emitted once.
+    envelope = "\n".join(read_again(entry) for entry in REFERENCE_LIST)
+    contents = _parse(
+        [
+            [
+                _region(0, "paragraph_title", "References", [100, 60, 300, 90]),
+                _region(1, "reference", envelope, [100, 100, 900, 100 + 45 * len(REFERENCE_LIST)]),
+                *(
+                    _region(
+                        2 + i, "reference_content", entry, [100, 100 + 45 * i, 900, 140 + 45 * i]
+                    )
+                    for i, entry in enumerate(REFERENCE_LIST)
+                    if i != 2
+                ),
+            ]
+        ]
+    )
+
+    assert _section_texts(contents, "References") == [envelope]
+
+
 def test_noncontained_reference_children_do_not_shadow_envelope():
     contents = _parse(
         [

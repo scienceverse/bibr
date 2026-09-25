@@ -960,6 +960,74 @@ def test_dedup_decides_a_long_near_equal_reference_region_quickly():
     assert elapsed < 5
 
 
+def test_dedup_keeps_a_long_reference_region_whose_entry_boxes_miss_one_entry():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+    from tests.reference_fixtures import REFERENCE_LIST
+
+    # One entry of twelve has no box of its own. It is under 5% of the region's
+    # text, so a fuzzy score over the whole text takes the region as covered.
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": "\n".join(REFERENCE_LIST),
+        "bbox_2d": [100, 100, 900, 100 + 45 * len(REFERENCE_LIST)],
+    }
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": entry,
+            "bbox_2d": [100, 100 + 45 * i, 900, 140 + 45 * i],
+        }
+        for i, entry in enumerate(REFERENCE_LIST)
+        if i != 2
+    ]
+
+    result = _deduplicate_reference_regions([[envelope, *children]])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference", "\n".join(REFERENCE_LIST)),
+        *(("reference_content", child["content"]) for child in children),
+    ]
+
+
+def test_dedup_keeps_reference_region_text_that_no_text_region_has():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+    from tests.reference_fixtures import BODY_TEXT, REFERENCE_LIST
+
+    # The region opens with the end of a reference continued from the previous
+    # page, which the page's text regions lack. The page also holds body text,
+    # so the region is shorter than the text regions together.
+    region_text = "\n".join(["Psychological Review, 94(2), 115-147.", *REFERENCE_LIST])
+    page = [
+        {
+            "native_label": "text",
+            "label": "text",
+            "content": BODY_TEXT,
+            "bbox_2d": [100, 100, 900, 200],
+        },
+        {
+            "native_label": "reference",
+            "label": "text",
+            "content": region_text,
+            "bbox_2d": [100, 220, 900, 900],
+        },
+        *(
+            {
+                "native_label": "text",
+                "label": "text",
+                "content": entry,
+                "bbox_2d": [100, 260 + 50 * i, 900, 300 + 50 * i],
+            }
+            for i, entry in enumerate(REFERENCE_LIST)
+        ),
+    ]
+
+    result = _deduplicate_reference_regions([page])
+
+    assert [r["content"] for r in result[0] if r["native_label"] == "reference"] == [region_text]
+
+
 # --- per-chunk OCR teardown heuristic (balanced keeps OCR across chunks) -----
 # balanced mode reloaded OCR weights every chunk; with a cloud/remote LLM there
 # is no GPU consumer for the freed VRAM, so OCR now stays resident across chunks
