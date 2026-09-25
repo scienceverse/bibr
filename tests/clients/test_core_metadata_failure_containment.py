@@ -296,6 +296,21 @@ async def test_successful_title_call_raises_no_field_issue(monkeypatch):
     assert not [i for i in ext.validation_issues if i.code == "VAL_METADATA_FIELD_FAILED"]
 
 
+async def test_failed_author_call_without_a_credit_statement_keeps_the_llm_source(monkeypatch):
+    client = _client(
+        monkeypatch, authors=LlmTimeoutError("Failed to extract authors", cause="timed out")
+    )
+    ext = _extractor(client)
+    ext.core._recover_empty_authors = AsyncMock(return_value=[])
+    ext._extract_references = AsyncMock(return_value=[])
+
+    metadata = await ext.extract_all_metadata()
+
+    # The CRediT harvest found nothing, so it is not the source of the field.
+    assert metadata.authors == []
+    assert metadata._field_sources["author"] == "llm"
+
+
 # ---------------------------------------------------------------------------
 # Local recovery of a finished title/keywords response (ported from PR #8)
 # ---------------------------------------------------------------------------

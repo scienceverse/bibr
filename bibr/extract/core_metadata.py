@@ -1486,7 +1486,8 @@ class CoreMetadataExtractor:
             # replace or reorder anything the extraction already found.
             if not authors:
                 authors = self._harvest_credit_authors()
-                author_source = "credit_statement"
+                if authors:
+                    author_source = "credit_statement"
             # Keep the complete frame so affiliation footnotes and repeated-name reconciliation
             # can inspect evidence on later pages.
             self._reconcile_numbered_affiliations(authors, self.sentences_df)
