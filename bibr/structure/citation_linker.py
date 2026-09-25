@@ -13,6 +13,7 @@ import unicodedata
 from dataclasses import replace
 
 from bibr.exceptions import ProcessingError
+from bibr.models import PaperReference
 from bibr.paper_contents import (
     CanonicalSection,
     CitationCandidate,
@@ -51,14 +52,25 @@ def _citation_span_is_resolved(
     )
 
 
-def _inside_linked_work(
-    works: list[tuple[int, int, set[str]]], cite_text: str, start: int, end: int
-) -> bool:
-    """Return whether a span lies inside a linked author-year span for the same year."""
-    cited_years = set(re.findall(r"\d{4}", cite_text))
+_YEAR_TOKEN_RE = re.compile(r"\d{4}")
+
+
+def _inside_linked_work(spans: list[tuple[int, int]], text: str, start: int, end: int) -> bool:
+    """Return whether a span restates a linked author-year span that contains it.
+
+    A linked span that names no year outside the span cites one work, so the
+    span is that work: the matcher's narrative span absorbs a preceding word
+    or name list ("In Smith (2020)", "De Vos (2020)", "Sanchez, Mayo, and
+    Rodriguez (2012)"). A linked parenthetical that names other years holds
+    other works ("NumPy [Harris et al., 2020], SciPy [Virtanen et al.,
+    2020]"), so the spans inside it stay on offer.
+    """
     return any(
-        work_start <= start and end <= work_end and (not years or bool(years & cited_years))
-        for work_start, work_end, years in works
+        span_start <= start
+        and end <= span_end
+        and not _YEAR_TOKEN_RE.search(text, span_start, start)
+        and not _YEAR_TOKEN_RE.search(text, end, span_end)
+        for span_start, span_end in spans
     )
 
 
@@ -73,7 +85,28 @@ def _every_work_overlaps(spans: list[tuple[int, int]], cite_text: str, start: in
     )
 
 
-def _llm_pick_fits_candidate(candidate: CitationCandidate, reference) -> bool:
+# A year suffix list cites several works of one year: "Oddo et al., 2011a, b",
+# "Anderson et al. 1991a b".
+_YEAR_SUFFIX_LIST_RE = re.compile(r"\d{4}[a-z](?:\s*,\s*|\s+)[a-z]\b")
+
+
+def _names_one_work(cite_text: str) -> bool:
+    """Return whether an author-year citation text cites exactly one work.
+
+    Its only number is one year ("(Smith, 2020)", "Oddo et al. (2011b)"),
+    unlike "(Smith, 2019, 2020)", "2011a, b", "(A, 2019; B, n.d.)" or a
+    numeric bracket such as "[e.g., 8, 11]".
+    """
+    numbers = re.findall(r"\d+", cite_text)
+    return (
+        len(numbers) == 1
+        and len(numbers[0]) == 4
+        and ";" not in cite_text
+        and _YEAR_SUFFIX_LIST_RE.search(cite_text) is None
+    )
+
+
+def _llm_pick_fits_candidate(candidate: CitationCandidate, reference: PaperReference) -> bool:
     """Return whether a Tier-3 pick may break a same-surname/year tie.
 
     The pick must be on the matcher's shortlist or, like every shortlisted
@@ -84,8 +117,6 @@ def _llm_pick_fits_candidate(candidate: CitationCandidate, reference) -> bool:
     matcher found no reference for usually means that reference was parsed
     badly, so its family name and year cannot vouch for the pick.
     """
-    if reference is None:
-        return False
     if "ambiguous_same_surname_year" not in candidate.rejection_reasons:
         return True
     if reference.bib_id in candidate.bib_ids:
@@ -104,7 +135,7 @@ def _llm_pick_fits_candidate(candidate: CitationCandidate, reference) -> bool:
     listed = {
         key for family in extract_families(reference.authors) for key in _family_keys_for(family)
     }
-    return bool(cited & listed) and str(reference.year) in re.findall(r"\d{4}", candidate.raw)
+    return bool(cited & listed) and str(reference.year) in _YEAR_TOKEN_RE.findall(candidate.raw)
 
 
 # Bracketed content that LOOKS like a citation but isn't.  Used as a Tier 3
@@ -169,8 +200,13 @@ _PROCEDURAL_LABEL_BEFORE_RE = re.compile(
     r"(?:^|\b)(?:step|phase|stage|criterion|criteria|option|item)\s*$",
     re.IGNORECASE,
 )
-# "Eq. (3)", "Eqs (4)", "Equation (5)" name an equation, never a reference.
-_EQUATION_LABEL_BEFORE_RE = re.compile(r"\b(?:eqs?|eqns?|equations?)\.?\s*$", re.IGNORECASE)
+# "Eq. (3)", "Eqs (4)", "Equation (5)" name an equation, never a reference, and
+# so does every later label of "Eqs. (5) and (6)" or "Equations (8)-(9)".
+_EQUATION_LABEL_BEFORE_RE = re.compile(
+    r"\b(?:eqs?|eqns?|equations?)\.?\s*"
+    r"(?:\(\d{1,3}[a-z]?\)\s*(?:[,\u2013-]|,?\s*(?:and|or|to)\b)\s*)*$",
+    re.IGNORECASE,
+)
 _AGGREGATE_COUNT_CUE_RE = re.compile(
     r"\b(?:many|majority|minority|half|total|number|count)\b|\bn\s*=\s*$",
     re.IGNORECASE,
@@ -629,8 +665,8 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
         llm_client: LlmClient instance
         file_hash: file hash for rate-limit tracking
 
-    Batches run concurrently under the client's own concurrency limit; a
-    failed batch yields no matches without affecting the others.
+    Batches run concurrently within the client's own concurrency and rate
+    limits; a failed batch yields no matches without affecting the others.
     """
     if not ambiguous or not llm_client:
         return []
@@ -1099,7 +1135,7 @@ def _parenthetical_local_reasons(
     match: re.Match,
     sentence_matches: list[re.Match],
 ) -> tuple[str, ...]:
-    """Reject locally evidenced list, count, and label parentheses.
+    """Reject locally evidenced list, count, label, equation and statistic parentheses.
 
     Bare ``(N)`` syntax is shared by citations, procedure numbering, sample
     counts, and entity/version labels. These guards use only the candidate's
@@ -1141,6 +1177,11 @@ def _parenthetical_local_reasons(
     if re.search(r"(?:[A-Za-z]{2,}[)\]]?\d+|[A-Z][A-Z0-9-]{2,}\s+\d+)\s*$", before):
         reasons.append("adjacent_numeric_label")
 
+    if _EQUATION_LABEL_BEFORE_RE.search(window):
+        reasons.append("equation_tag")
+    if _is_statistic_group(text, match.start(), match.end()):
+        reasons.append("statistic_context")
+
     return tuple(reasons)
 
 
@@ -1160,14 +1201,10 @@ def _parenthetical_candidates(
                 reasons.append("empty_numeric_marker")
             if any(num >= 1900 for num in nums):
                 reasons.append("year")
-            if any(num in equation_tags for num in nums) or _EQUATION_LABEL_BEFORE_RE.search(
-                sent.text, 0, match.start()
-            ):
+            if any(num in equation_tags for num in nums):
                 reasons.append("equation_tag")
             if _has_numeric_context(sent.text, match.start(), match.end()):
                 reasons.append("math_or_measurement_context")
-            if _is_statistic_group(sent.text, match.start(), match.end()):
-                reasons.append("statistic_context")
             if any(num not in valid_bib_ids for num in nums):
                 reasons.append("unknown_bib_id")
             candidates.append(
@@ -1501,12 +1538,10 @@ async def detect_bib_xrefs_with_receipt(
             if candidate.accepted
         }
         # By position as well as by text: the matcher's narrative span absorbs
-        # a preceding word or name list ("In Smith (2020)", "De Vos (2020)"),
-        # so a regex span for the same year inside it is already linked. The
-        # year check keeps other works that share one unsplit parenthetical
-        # ("(... [Gordon et al., 1966] and [Hill, 1938] ...)") on offer.
+        # a preceding word or name list ("In Smith (2020)"), so a regex span
+        # for the same work inside it is already linked.
         references_by_id = {reference.bib_id: reference for reference in references}
-        linked_works: dict[int, list[tuple[int, int, set[str]]]] = {}
+        linked_spans: dict[int, list[tuple[int, int]]] = {}
         # The matcher splits a group "(A, 2020; B, 2019)" into one span per
         # work. Those spans are offered on their own (the unresolved ones), so
         # a regex span whose every work the matcher saw adds nothing.
@@ -1516,16 +1551,8 @@ async def detect_bib_xrefs_with_receipt(
                 continue
             tier2_spans.setdefault(candidate.text_id, []).append((candidate.start, candidate.end))
             if candidate.accepted:
-                linked_works.setdefault(candidate.text_id, []).append(
-                    (
-                        candidate.start,
-                        candidate.end,
-                        {
-                            str(references_by_id[bib_id].year)
-                            for bib_id in candidate.bib_ids
-                            if bib_id in references_by_id and references_by_id[bib_id].year
-                        },
-                    )
+                linked_spans.setdefault(candidate.text_id, []).append(
+                    (candidate.start, candidate.end)
                 )
         ambiguous: list[tuple[int, str, int, int]] = []
         for candidate in candidates:
@@ -1540,7 +1567,7 @@ async def detect_bib_xrefs_with_receipt(
             ):
                 ambiguous.append((candidate.text_id, candidate.raw, candidate.start, candidate.end))
         for sent in body_sents:
-            sent_linked = linked_works.get(sent.text_id, [])
+            sent_linked = linked_spans.get(sent.text_id, [])
             for match in re.finditer(r"\[([^\]]+)\]", sent.text):
                 match_text = match.group(1)
                 if NUMERIC_CITE_RE.fullmatch(f"[{match_text.strip()}]"):
@@ -1550,7 +1577,7 @@ async def detect_bib_xrefs_with_receipt(
                 cite_text = match.group(0)
                 if not _citation_span_is_resolved(
                     sent.text_id, cite_text, resolved_pairs
-                ) and not _inside_linked_work(sent_linked, cite_text, match.start(), match.end()):
+                ) and not _inside_linked_work(sent_linked, sent.text, match.start(), match.end()):
                     ambiguous.append((sent.text_id, cite_text, match.start(), match.end()))
             for pattern in (PAREN_AUTHOR_YEAR_RE, NARRATIVE_AUTHOR_YEAR_RE):
                 for match in pattern.finditer(sent.text):
@@ -1558,7 +1585,7 @@ async def detect_bib_xrefs_with_receipt(
                     if (
                         not _citation_span_is_resolved(sent.text_id, cite_text, resolved_pairs)
                         and not _inside_linked_work(
-                            sent_linked, cite_text, match.start(), match.end()
+                            sent_linked, sent.text, match.start(), match.end()
                         )
                         and not _every_work_overlaps(
                             tier2_spans.get(sent.text_id, []), cite_text, match.start()
@@ -1613,7 +1640,8 @@ async def detect_bib_xrefs_with_receipt(
                 llm_client,
                 file_hash,
             )
-            # One citation text can name several works, so keep every match.
+            # One citation text can name several works, so keep every match;
+            # a text that names one work takes one (a hedge links nothing).
             resolved_map: dict[str, list[int]] = {}
             for xref in tier3:
                 matches = resolved_map.setdefault(_normalize_citation_text(xref.contents), [])
@@ -1625,6 +1653,7 @@ async def detect_bib_xrefs_with_receipt(
                 picks = resolved_map.get(normalized_contents, [])
                 if not picks:
                     continue
+                one_work = _names_one_work(normalized_contents)
                 linked: set[int] = set()
                 matched_candidate = False
                 for index, candidate in enumerate(candidates):
@@ -1640,15 +1669,17 @@ async def detect_bib_xrefs_with_receipt(
                     fitting = tuple(
                         bib_id
                         for bib_id in picks
-                        if _llm_pick_fits_candidate(candidate, references_by_id.get(bib_id))
+                        if _llm_pick_fits_candidate(candidate, references_by_id[bib_id])
                     )
+                    refusal = None
                     if not fitting:
+                        refusal = "llm_outside_shortlist"
+                    elif len(fitting) > 1 and one_work:
+                        refusal = "llm_ambiguous"
+                    if refusal:
                         candidates[index] = replace(
                             candidate,
-                            rejection_reasons=(
-                                *candidate.rejection_reasons,
-                                "llm_outside_shortlist",
-                            ),
+                            rejection_reasons=(*candidate.rejection_reasons, refusal),
                         )
                         continue
                     linked.update(fitting)
@@ -1662,7 +1693,7 @@ async def detect_bib_xrefs_with_receipt(
                         accepted=True,
                         rejection_reasons=(),
                     )
-                if not matched_candidate:
+                if not matched_candidate and (len(picks) == 1 or not one_work):
                     linked.update(picks)
                     source = source_by_id.get(text_id, "")
                     candidates.append(

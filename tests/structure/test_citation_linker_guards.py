@@ -124,23 +124,48 @@ async def test_statistic_degrees_of_freedom_are_not_parenthetical_citations():
             "The interaction was not, F (1, 35) = 2.85.",
             "Substituting Eq. (5) into the bound gives the rate.",
             "Equation (6) then follows.",
+            "Both effects were small, Fs(1, 44) and more.",
+            "The model had df(12) there.",
+            "The estimates (13) \u2264 0.5 held.",
+            "Using Eqs. (7) and (8) we bound it.",
+            "Equations (9)-(10) give it.",
+            "Prior trials(16) agree.",
+            "It is HIV(17) related.",
+            "The path gave \u03b2(18) and more.",
         ],
         100,
     )
 
-    assert _links(xrefs, "paren-numeric") == [(1, 12), (2, 13), (2, 14), (3, 15)]
+    assert _links(xrefs, "paren-numeric") == [
+        (1, 12),
+        (2, 13),
+        (2, 14),
+        (3, 15),
+        (15, 16),
+        (16, 17),
+    ]
     rejected = {
-        candidate.raw: candidate.rejection_reasons
+        (candidate.text_id, candidate.raw): candidate.rejection_reasons
         for candidate in receipt.candidates
-        if candidate.style == "paren-numeric" and candidate.text_id >= 4
+        if candidate.style == "paren-numeric"
+        and candidate.text_id >= 4
+        and candidate.text_id not in (15, 16)
     }
     assert rejected == {
-        "(3, 84)": ("statistic_context",),
-        "(45)": ("statistic_context",),
-        "(58)": ("statistic_context",),
-        "(1, 35)": ("statistic_context",),
-        "(5)": ("equation_tag",),
-        "(6)": ("equation_tag",),
+        (4, "(3, 84)"): ("statistic_context",),
+        (5, "(45)"): ("statistic_context",),
+        (6, "(58)"): ("statistic_context",),
+        (7, "(1, 35)"): ("statistic_context",),
+        (8, "(5)"): ("equation_tag",),
+        (9, "(6)"): ("equation_tag",),
+        (10, "(1, 44)"): ("statistic_context",),
+        (11, "(12)"): ("statistic_context",),
+        (12, "(13)"): ("statistic_context",),
+        (13, "(7)"): ("equation_tag",),
+        (13, "(8)"): ("equation_tag",),
+        (14, "(9)"): ("equation_tag",),
+        (14, "(10)"): ("equation_tag",),
+        (17, "(18)"): ("statistic_context",),
     }
 
 
@@ -172,16 +197,21 @@ async def test_wide_two_number_bracket_is_a_citation_in_a_bracket_citing_paper()
             "They had comparable risk perception [11, 33].",
             "The 95% CI [12, 45] excluded zero.",
             "Participants were adults (range [18, 45]).",
+            "The effect held, F[1, 44] = 5.92.",
         ],
         58,
         row="[{n}] ",
     )
 
     assert _links(xrefs) == [(0, 1), (1, 2), (2, 3), (3, 11), (3, 33)]
-    rejected = {c.raw: c.rejection_reasons for c in receipt.candidates if c.text_id in (4, 5)}
+    [lifted] = [c for c in receipt.candidates if c.raw == "[11, 33]"]
+    assert (lifted.accepted, lifted.bib_ids, lifted.confidence) == (True, (11, 33), 1.0)
+    assert "bracket_citation_style" in lifted.evidence
+    rejected = {c.raw: c.rejection_reasons for c in receipt.candidates if c.text_id in (4, 5, 6)}
     assert rejected == {
         "[12, 45]": ("numeric_interval_guard",),
         "[18, 45]": ("numeric_interval_guard",),
+        "[1, 44]": ("numeric_interval_guard", "statistic_context"),
     }
     assert cited_reference_numbers(receipt) == {1, 2, 3, 11, 33}
 
@@ -198,6 +228,26 @@ async def test_wide_two_number_bracket_stays_an_interval_without_bracket_citatio
     assert interval.rejection_reasons == ("numeric_interval_guard",)
 
 
+async def test_bracket_style_counts_sentences_with_accepted_markers():
+    # Three accepted markers in one sentence, and three sentences whose only
+    # brackets are wide pairs, do not make a bracket-citing paper.
+    xrefs, receipt, _ = await _link_numbered(
+        [
+            "Prior work [1], [2] and [3] exists.",
+            "The estimate was [4, 37] early.",
+            "It was [5, 38] later.",
+            "It ended at [6, 39].",
+        ],
+        40,
+        row="[{n}] ",
+    )
+
+    assert _links(xrefs) == [(0, 1), (0, 2), (0, 3)]
+    assert [c.rejection_reasons for c in receipt.candidates if c.text_id > 0] == [
+        ("numeric_interval_guard",)
+    ] * 3
+
+
 # ---------------------------------------------------------------------------
 # Superscript markers
 # ---------------------------------------------------------------------------
@@ -209,6 +259,8 @@ async def test_superscript_group_with_a_dropped_reference_links_like_a_bracket()
             "Bracket form [3-5] here.",
             "Superscript form^{3-5} here.",
             "Beyond the list^{41} here.",
+            "Across the end^{39-41} here.",
+            "From zero^{0-2} here.",
         ],
         40,
         missing=(4,),
@@ -216,15 +268,21 @@ async def test_superscript_group_with_a_dropped_reference_links_like_a_bracket()
     )
 
     assert _links(xrefs) == [(0, 3), (0, 5), (1, 3), (1, 5)]
-    [beyond] = [c for c in receipt.candidates if c.raw == "^{41}"]
-    assert beyond.rejection_reasons == ("unknown_bib_id",)
-    assert cited_reference_numbers(receipt) == {3, 4, 5, 41}
+    rejected = {c.raw: c.rejection_reasons for c in receipt.candidates if c.text_id >= 2}
+    assert rejected == {
+        "^{41}": ("unknown_bib_id",),
+        "^{39-41}": ("unknown_bib_id",),
+        "^{0-2}": ("unknown_bib_id",),
+    }
+    assert cited_reference_numbers(receipt) == {3, 4, 5, 39, 40, 41}
 
     strip_citation_superscripts(sentences, _sections(), receipt)
-    assert [s.text for s in sentences[:3]] == [
+    assert [s.text for s in sentences[:5]] == [
         "Bracket form [3-5] here.",
         "Superscript form here.",
         "Beyond the list^{41} here.",
+        "Across the end^{39-41} here.",
+        "From zero^{0-2} here.",
     ]
 
 
@@ -287,6 +345,7 @@ async def test_locator_abbreviations_are_not_flattened_citations():
             "Results are listed in Tab.2 and Exp.1 of the report.",
             "The value in Vol.12 was reported on pp.14-16 of it.",
             "It is the state of the art.5 today.",
+            "Clone No.6 was used.",
         ],
         30,
     )
@@ -302,8 +361,20 @@ async def test_locator_abbreviations_are_not_flattened_citations():
 async def test_citation_linked_by_the_matcher_is_not_offered_again():
     llm = RecordingLLM(_every([2]))
     xrefs, _receipt = await _link_author_year(
-        ["In Smith (2020), the effect was large.", "Following Brown (2020) we test this."],
-        [_ref(1, "Smith, J.", 2020), _ref(2, "Brown, K.", 2020)],
+        [
+            "In Smith (2020), the effect was large.",
+            "Following Brown (2020) we test this.",
+            "Sanchez, Mayo, and Rodriguez (2012) found it too.",
+            "Indeed, De Vos (2019) agreed.",
+            "The effect was large (see [Smith, 2020] for details).",
+        ],
+        [
+            _ref(1, "Smith, J.", 2020),
+            _ref(2, "Brown, K.", 2020),
+            _ref(3, "Sanchez, A.; Mayo, B.; Rodriguez, C.", 2012),
+            _ref(4, "De Vos, D.", 2019),
+            _ref(5, "Rodriguez, E.", 2012),
+        ],
         llm,
     )
 
@@ -311,24 +382,31 @@ async def test_citation_linked_by_the_matcher_is_not_offered_again():
     assert sorted((x.text_id, x.xref_id, x.tier) for x in xrefs) == [
         (0, 1, "author-year"),
         (1, 2, "author-year"),
+        (2, 3, "author-year"),
+        (3, 4, "author-year"),
+        (4, 1, "author-year"),
     ]
 
 
-async def test_other_year_inside_a_linked_parenthetical_is_still_offered():
+@pytest.mark.parametrize("hill_year", [1938, 1966])
+async def test_works_inside_a_linked_multi_work_parenthetical_are_offered(hill_year):
+    # The matcher links the whole parenthetical to Gordon; it names another
+    # year, so it holds another work, even when that work shares the year.
     llm = RecordingLLM(
         lambda batch: [
-            CitationMatch(text_id=text_id, citation_text=text, bib_id=2)
+            CitationMatch(text_id=text_id, citation_text=text, bib_id=2 if "Hill" in text else 1)
             for text_id, text in batch
-            if "Hill" in text
         ]
     )
     xrefs, _receipt = await _link_author_year(
-        ["Force (per the length [Gordon et al., 1966] and velocity [Hill, 1938] curves) fell."],
-        [_ref(1, "Gordon, A.; Huxley, A.; Julian, F.", 1966), _ref(2, None, 1938)],
+        [
+            f"Force (per the length [Gordon et al., 1966] and velocity [Hill, {hill_year}] curves) fell."
+        ],
+        [_ref(1, "Gordon, A.; Huxley, A.; Julian, F.", 1966), _ref(2, None, hill_year)],
         llm,
     )
 
-    assert llm.calls == [[(0, "[Hill, 1938]")]]
+    assert llm.calls == [[(0, "[Gordon et al., 1966]"), (0, f"[Hill, {hill_year}]")]]
     assert sorted((x.text_id, x.xref_id, x.tier) for x in xrefs) == [
         (0, 1, "author-year"),
         (0, 2, "llm"),
@@ -342,10 +420,15 @@ _TIED_REFS = [
 ]
 
 
-async def test_llm_pick_outside_a_same_surname_tie_is_rejected():
+@pytest.mark.parametrize(
+    "pick",
+    [_ref(3, "Taylor, M.", 2015), _ref(3, "Smith, M.", 2015), _ref(3, "Taylor, M.", 2020)],
+    ids=["other-surname-other-year", "same-surname-other-year", "other-surname-same-year"],
+)
+async def test_llm_pick_outside_a_same_surname_tie_is_rejected(pick):
     llm = RecordingLLM(_every([3]))
     xrefs, receipt = await _link_author_year(
-        ["As shown (Smith, 2020) this works."], _TIED_REFS, llm
+        ["As shown (Smith, 2020) this works."], [*_TIED_REFS[:2], pick], llm
     )
 
     assert xrefs == []
@@ -356,6 +439,44 @@ async def test_llm_pick_outside_a_same_surname_tie_is_rejected():
         ("ambiguous_same_surname_year", "llm_outside_shortlist"),
     )
     assert candidate.evidence == ("family_match", "year_match")
+
+
+async def test_llm_hedge_between_tied_references_links_nothing():
+    llm = RecordingLLM(_every([1, 2]))
+    xrefs, receipt = await _link_author_year(
+        ["As shown (Smith, 2020) this works."], _TIED_REFS, llm
+    )
+
+    assert xrefs == []
+    [candidate] = receipt.candidates
+    assert (candidate.accepted, candidate.rejection_reasons) == (
+        False,
+        ("ambiguous_same_surname_year", "llm_ambiguous"),
+    )
+
+
+async def test_llm_hedge_on_one_unmatched_work_links_nothing():
+    # The parsed years are wrong, so the matcher finds no reference for Kim 2017.
+    llm = RecordingLLM(_every([1, 2]))
+    xrefs, receipt = await _link_author_year(
+        ["Prior work (Kim, 2017) agrees."],
+        [_ref(1, "Kim, J.", 2015), _ref(2, "Kim, S.", 2016)],
+        llm,
+    )
+
+    assert xrefs == []
+    [candidate] = receipt.candidates
+    assert candidate.rejection_reasons == ("no_reference_match", "llm_ambiguous")
+
+
+async def test_llm_picks_off_the_shortlist_are_dropped_from_the_link():
+    llm = RecordingLLM(_every([2, 4]))
+    xrefs, receipt = await _link_author_year(
+        ["As shown (Smith, 2020) this works."], [*_TIED_REFS, _ref(4, "Taylor, M.", 2020)], llm
+    )
+
+    assert [(x.xref_id, x.tier) for x in xrefs] == [(2, "llm")]
+    assert [(c.accepted, c.bib_ids) for c in receipt.candidates] == [(True, (2,))]
 
 
 async def test_llm_pick_inside_a_same_surname_tie_is_accepted():
@@ -419,15 +540,19 @@ async def test_unresolved_works_of_a_group_are_offered_and_linked_one_by_one():
     ]
 
 
-async def test_every_llm_match_for_one_citation_text_is_kept():
+@pytest.mark.parametrize(
+    "citation",
+    ["[Jones 2019; Brown 2016]", "[Jones 2019; Brown, in press]", "[Jones et al., 2019a, b]"],
+)
+async def test_every_llm_match_for_one_citation_text_is_kept(citation):
     llm = RecordingLLM(_every([2, 3]))
     xrefs, receipt = await _link_author_year(
-        ["Both were shown before [Jones 2019; Brown 2016]."],
+        [f"Both were shown before {citation}."],
         [_ref(1, "Smith, J.", 2020), _ref(2, "Jones, K.", 2019), _ref(3, "Brown, L.", 2016)],
         llm,
     )
 
-    assert llm.calls == [[(0, "[Jones 2019; Brown 2016]")]]
+    assert llm.calls == [[(0, citation)]]
     assert sorted((x.text_id, x.xref_id, x.tier) for x in xrefs) == [(0, 2, "llm"), (0, 3, "llm")]
     assert [(c.style, c.bib_ids, c.accepted) for c in receipt.candidates] == [("llm", (2, 3), True)]
 
