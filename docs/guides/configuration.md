@@ -51,6 +51,12 @@ machine is too weak but privacy still matters, use the private-server path:
 run the Docker OCR/API stack on a GPU machine and point your laptop's `.env`
 at that server.
 
+Re-running `bibr setup` merges into an existing `.env` by default and keeps
+values it does not ask about. When you choose an LLM provider, it also writes
+`LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
+entered none, so that a key or server left by an earlier setup, in `./.env`
+or `~/.bibr/.env`, cannot override the one you entered.
+
 ## Namespaces
 
 There's no global `BIBR_` prefix. Instead, each settings group has its own

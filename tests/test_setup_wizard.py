@@ -237,7 +237,6 @@ class _FakeInstructor:
         self.requests: list[dict] = []
 
     def __call__(self, model, **kwargs):
-        kwargs.pop("api_key", None)
         self.clients.append((model, kwargs))
         return self
 
@@ -260,7 +259,7 @@ def test_connection_test_sends_ollama_requests_to_the_v1_api(monkeypatch):
     wizard.env_vars = {
         "LLM_PROVIDER": "ollama",
         "LLM_MODEL": "gpt-oss:20b",
-        "LLM_OLLAMA_BASE_URL": "http://localhost:11434",
+        "LLM_OLLAMA_BASE_URL": "http://gpu-box:11434",
     }
     fake = _FakeInstructor()
     monkeypatch.setattr("instructor.from_provider", fake)
@@ -268,8 +267,8 @@ def test_connection_test_sends_ollama_requests_to_the_v1_api(monkeypatch):
 
     wizard._offer_llm_connection_test()
 
-    assert [base_url for _model, kw in fake.clients if (base_url := kw.get("base_url"))] == [
-        "http://localhost:11434/v1"
+    assert fake.clients == [
+        ("ollama/gpt-oss:20b", {"async_client": True, "base_url": "http://gpu-box:11434/v1"})
     ]
     assert "Connected — LLM responded: OK" in wizard.console.export_text()
 
@@ -303,30 +302,193 @@ def test_connection_test_retry_for_ollama_asks_for_the_url_not_a_key(monkeypatch
         "LLM_MODEL": "gpt-oss:20b",
         "LLM_OLLAMA_BASE_URL": "http://gpu-box:11434",
     }
+    # The retry tests the URL just typed, not the first one again.
+    assert [kw["base_url"] for _model, kw in fake.clients] == [
+        "http://localhost:11434/v1",
+        "http://gpu-box:11434/v1",
+    ]
     assert len(fake.requests) == 2
 
 
 def test_connection_test_sends_the_google_adapter_request(monkeypatch):
     """The recommended cloud setup tests gemini-3.5-flash-lite, which cannot turn
-    thinking off: the test must send the adapter's thinking budget, as chew does."""
+    thinking off: the test must send the adapter's thinking budget, as chew does.
+
+    It must also test the key just typed. The current settings hold another
+    GOOGLE_API_KEY and an LLM_API_KEY, which the Google adapter would send in
+    its place; the wizard writes LLM_API_KEY blank, so chew will not send it.
+    """
+    import bibr.config
+
     wizard = _recording_wizard()
     wizard.env_vars = {
         "LLM_PROVIDER": "google",
         "LLM_MODEL": "gemini-3.5-flash-lite",
         "GOOGLE_API_KEY": "AIza-typed-key-1234567890",
     }
+    monkeypatch.setattr(bibr.config.Settings, "GOOGLE_API_KEY", "AIza-older-key-placeholder")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", "sk-older-openai-key-1234")
     fake = _FakeInstructor()
     monkeypatch.setattr("instructor.from_provider", fake)
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
 
     wizard._offer_llm_connection_test()
 
+    assert fake.clients == [
+        (
+            "google/gemini-3.5-flash-lite",
+            {"async_client": True, "api_key": "AIza-typed-key-1234567890"},
+        )
+    ]
     assert fake.requests == [
         {
             "generation_config": {"temperature": 0.0, "max_tokens": 4096},
             "thinking_config": {"thinking_budget": 1},
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("typed_url", "expected_url"),
+    [("http://gpu-box:8000/v1", "http://gpu-box:8000/v1"), ("", None)],
+)
+def test_connection_test_uses_the_typed_openai_key_and_server(monkeypatch, typed_url, expected_url):
+    """An older LLM_API_KEY or LLM_BASE_URL must not replace what was typed.
+
+    A blank custom URL means OpenAI itself: the older server is not tested,
+    and the wizard writes LLM_BASE_URL blank so chew does not use it either.
+    """
+    import bibr.config
+
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "openai",
+        "LLM_MODEL": "gpt-5-nano",
+        "LLM_API_KEY": "sk-typed-key-1234567890",
+    }
+    if typed_url:
+        wizard.env_vars["LLM_BASE_URL"] = typed_url
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", "sk-older-key-placeholder")
+    monkeypatch.setattr(bibr.config.Settings.llm, "base_url", "http://older-server:8000/v1")
+    fake = _FakeInstructor()
+    monkeypatch.setattr("instructor.from_provider", fake)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+
+    wizard._offer_llm_connection_test()
+
+    [(model, kwargs)] = fake.clients
+    assert model == "openai/gpt-5-nano"
+    assert kwargs["api_key"] == "sk-typed-key-1234567890"
+    assert kwargs.get("base_url") == expected_url
+
+
+def test_connection_test_stops_on_an_invalid_saved_value(monkeypatch):
+    """A bad value in the existing config is not a connection problem: no key retry."""
+    from bibr.exceptions import ConfigurationError
+
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+        "GOOGLE_API_KEY": "AIza-typed-key-1234567890",
+    }
+
+    def invalid(*a, **k):
+        raise ConfigurationError("LLM_MAX_TOKENS=abc is invalid: expected an integer")
+
+    confirms = []
+    fake = _FakeInstructor()
+    monkeypatch.setattr("bibr.config.snapshot_settings", invalid)
+    monkeypatch.setattr("instructor.from_provider", fake)
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda text, **k: confirms.append(text) or True
+    )
+
+    wizard._offer_llm_connection_test()
+
+    text = wizard.console.export_text()
+    assert "Can't test the connection: LLM_MAX_TOKENS=abc is invalid" in text
+    assert "`bibr chew` stops on it too" in text
+    assert confirms == ["Test the LLM connection now?"]
+    assert fake.clients == []
+
+
+def _settings_from(env_file, monkeypatch):
+    """The settings ``bibr chew`` would load from ``env_file`` alone."""
+    from bibr.config import GlobalSettings
+
+    for name in ("LLM_PROVIDER", "LLM_BACKEND", "LLM_API_KEY", "LLM_BASE_URL", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_file))
+    return GlobalSettings()
+
+
+def test_merge_leaves_no_older_llm_key_server_or_backend_in_effect(tmp_path, monkeypatch):
+    """Switching to Google must not keep sending an older LLM_API_KEY, or running vLLM.
+
+    The Google adapter prefers LLM_API_KEY to GOOGLE_API_KEY, and a merge keeps
+    every key the wizard does not write.
+    """
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "LLM_PROVIDER=openai\nLLM_API_KEY=sk-older-openai-key\n"
+        "LLM_BASE_URL=http://older-server/v1\nLLM_BACKEND=vllm\nLLM_RATE_LIMIT_RPM=7\n",
+        encoding="utf-8",
+    )
+    wizard = _recording_wizard()
+    wizard.env_path = env_path
+    wizard.env_vars = {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+        "GOOGLE_API_KEY": "AIza-typed-key-1234567890",
+    }
+    answers = iter(["merge"])
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(answers))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+
+    wizard._step_write_env()
+
+    settings = _settings_from(env_path, monkeypatch)
+    assert settings.llm.backend == "cloud"
+    assert settings.llm.provider == "google"
+    assert (settings.llm.api_key or settings.GOOGLE_API_KEY) == "AIza-typed-key-1234567890"
+    assert settings.llm.rate_limit_rpm == 7  # other hand-set values survive the merge
+    # The answers themselves (and so a saved preset) are unchanged.
+    assert "LLM_API_KEY" not in wizard.env_vars
+
+
+@pytest.mark.parametrize(
+    ("answers", "written"),
+    [
+        (
+            {"LLM_PROVIDER": "google", "GOOGLE_API_KEY": "AIza-typed"},
+            {"LLM_BACKEND": "cloud", "LLM_API_KEY": ""},
+        ),
+        (
+            {"LLM_PROVIDER": "openai", "LLM_API_KEY": "sk-typed"},
+            {"LLM_BACKEND": "cloud", "LLM_API_KEY": "sk-typed", "LLM_BASE_URL": ""},
+        ),
+        (
+            {"LLM_PROVIDER": "ollama", "LLM_OLLAMA_BASE_URL": "http://localhost:11434"},
+            {"LLM_BACKEND": "cloud"},
+        ),
+        ({"LLM_BACKEND": "vllm", "LLM_LOCAL_MODEL": "org/model"}, {"LLM_BACKEND": "vllm"}),
+    ],
+)
+def test_fresh_env_pins_the_llm_routing_settings(tmp_path, answers, written):
+    """A fresh ./.env overrides ~/.bibr/.env, so it must name the key and server too."""
+    from bibr.env_utils import parse_env
+
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    wizard.env_vars = dict(answers)
+
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_write_env()
+
+    env = parse_env(wizard.env_path)
+    routing = {"LLM_BACKEND", "LLM_API_KEY", "LLM_BASE_URL"}
+    assert {k: v for k, v in env.items() if k in routing} == written
 
 
 def test_fetch_models_returns_empty_on_error():
@@ -1810,7 +1972,7 @@ def test_help_text_describes_new_flow():
     assert "offers them as defaults" not in _HELP_TEXT
     assert "plan preview" in _HELP_TEXT.lower()
     assert "overwrite, merge, or skip" in _HELP_TEXT
-    assert "never reads your existing .env" in _HELP_TEXT
+    assert "does not take its answers from your existing\n.env" in _HELP_TEXT
 
 
 def test_plan_preview_shows_paddle_default_and_model(monkeypatch):

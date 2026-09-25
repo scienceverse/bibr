@@ -235,6 +235,15 @@ released.
   answered kept them waiting on the SDK's own timeout instead, which for the
   OpenAI SDK that Ollama and OpenAI-compatible servers go through is 600 s per
   attempt.
+- `bibr setup` could leave an older `LLM_API_KEY`, `LLM_BASE_URL` or
+  `LLM_BACKEND` in effect behind the provider just chosen. Merging into an
+  existing `.env`, the default, keeps every key the wizard does not write, and
+  `~/.bibr/.env` still applies under a new `./.env`. The Google, Anthropic and
+  Groq adapters send `LLM_API_KEY` in place of their own key, so switching
+  from OpenAI to Google sent the old OpenAI key to Gemini, while the
+  connection test, which used the typed key, passed. Choosing a provider now
+  also writes `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL`
+  where none was entered, and the connection test uses those same values.
 - `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
   resolved to the backend chew would start on this machine; doctor used to
   check it as a cloud provider and ask for a key. The provider's credentials are

@@ -422,28 +422,56 @@ def _redact(text: str, api_key: str) -> str:
     return redact_key(text, api_key)
 
 
+def _with_llm_routing(env_vars: dict[str, str]) -> dict[str, str]:
+    """The wizard's answers plus a value for every LLM routing setting it left unset.
+
+    What gets written to ``.env``, and what the connection test tests. When
+    the wizard configures a provider, the settings that decide where LLM
+    requests go and with which key must all come from its answers. Otherwise
+    a value left by an earlier setup, in the ``.env`` being merged into or in
+    ``~/.bibr/.env``, stays in effect: the google, anthropic and groq adapters
+    send ``LLM_API_KEY`` in place of their own key whenever it is set, the
+    openai adapter sends every request to ``LLM_BASE_URL`` when it is set,
+    and a managed ``LLM_BACKEND`` does not use the provider at all. The test
+    would then pass on the values just typed while ``bibr chew`` used the old
+    ones. So ``LLM_BACKEND`` is written as ``cloud``, and ``LLM_API_KEY`` and
+    ``LLM_BASE_URL`` as blank where the answers do not set them.
+    """
+    provider = env_vars.get("LLM_PROVIDER")
+    if not provider:
+        return dict(env_vars)
+    routing = {"LLM_BACKEND": "cloud"}
+    if provider != "ollama":
+        routing["LLM_API_KEY"] = ""
+    if provider == "openai":
+        routing["LLM_BASE_URL"] = ""
+    return {**env_vars, **{k: v for k, v in routing.items() if k not in env_vars}}
+
+
 def _connection_test_settings(env_vars: dict[str, str]) -> "GlobalSettings":
     """Settings for the LLM connection test: the current ones plus the wizard's answers.
 
-    The test runs before ``.env`` is written (advanced flow), so the provider,
-    model, key and endpoint the user just entered override a snapshot of the
-    current settings; everything else (token caps, thinking budget, Instructor
-    mode) is what the first ``bibr chew`` will use too.
+    The provider, model, keys and endpoint come from the answers, as
+    :func:`_with_llm_routing` writes them to ``.env``. Everything else
+    (token caps, thinking budget, Instructor mode) comes from a snapshot of
+    the current settings, which a merge into the existing ``.env`` keeps, so
+    the test sends what the first ``bibr chew`` will send.
     """
     from bibr.config import snapshot_settings
 
+    answers = _with_llm_routing(env_vars)
     settings = snapshot_settings()
     llm = settings.llm
-    llm.provider = env_vars.get("LLM_PROVIDER", llm.provider)
-    llm.model = env_vars.get("LLM_MODEL", llm.model)
-    # Test the key that was typed: the adapters prefer LLM_API_KEY over the
-    # provider's own key, so an older one must not shadow it.
-    llm.api_key = env_vars.get("LLM_API_KEY") or None
-    llm.base_url = env_vars.get("LLM_BASE_URL") or None
-    llm.ollama_base_url = env_vars.get("LLM_OLLAMA_BASE_URL") or llm.ollama_base_url
+    llm.provider = answers.get("LLM_PROVIDER", llm.provider)
+    llm.model = answers.get("LLM_MODEL", llm.model)
+    if "LLM_API_KEY" in answers:
+        llm.api_key = answers["LLM_API_KEY"] or None
+    if "LLM_BASE_URL" in answers:
+        llm.base_url = answers["LLM_BASE_URL"] or None
+    llm.ollama_base_url = answers.get("LLM_OLLAMA_BASE_URL") or llm.ollama_base_url
     for key_env in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"):
-        if env_vars.get(key_env):
-            setattr(settings, key_env, env_vars[key_env])
+        if answers.get(key_env):
+            setattr(settings, key_env, answers[key_env])
     return settings
 
 
@@ -1334,8 +1362,14 @@ class SetupWizard:
                 ui.ok(self.console, f"Connected — LLM responded: {reply.strip()}")
                 break
             except ConfigurationError as exc:
-                # An invalid value in the current .env or environment, not the connection.
+                # An invalid value already in .env, ~/.bibr/.env or the
+                # environment, not in the answers: chew stops on it too.
                 ui.error(self.console, f"Can't test the connection: {exc}")
+                self.console.print(
+                    "[dim]That value comes from your existing configuration, not from "
+                    "this setup. `bibr chew` stops on it too until it is fixed or "
+                    "overwritten; run `bibr doctor` after saving to check again.[/dim]"
+                )
                 break
             except Exception as exc:
                 msg = _redact(str(exc), api_key)
@@ -1513,7 +1547,7 @@ class SetupWizard:
                 self.console.print("[dim]Skipped — .env unchanged[/dim]")
                 return
             if action == "merge":
-                _merge_env(self.env_path, self.env_vars)
+                _merge_env(self.env_path, _with_llm_routing(self.env_vars))
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
                 if save_preset_name:
                     self._save_preset(save_preset_name)
@@ -1521,7 +1555,7 @@ class SetupWizard:
                     self._offer_save_preset()
                 return
 
-        _write_env_fresh(self.env_path, self.env_vars)
+        _write_env_fresh(self.env_path, _with_llm_routing(self.env_vars))
         ui.ok(self.console, f"Wrote {self.env_path}")
         if save_preset_name:
             self._save_preset(save_preset_name)
@@ -1728,10 +1762,13 @@ By default this runs the short recommended flow:
 Use --advanced for step-by-step control over extras, LLM provider + API key,
 connection test, OCR backend, memory mode, and writing .env.
 
-Re-running is safe: the wizard never reads your existing .env, but if one is
-present at save time it asks whether to overwrite, merge, or skip (merge is
-the default, so hand-edited values are preserved). Press Ctrl+C at any time to
-quit without saving.
+Re-running is safe: the wizard does not take its answers from your existing
+.env and writes .env only at the save step. If one is present then, it asks
+whether to overwrite, merge, or skip (merge is the default, so hand-edited
+values are preserved). Choosing an LLM provider also writes LLM_BACKEND=cloud,
+and a blank LLM_API_KEY or LLM_BASE_URL where you entered none, so that an
+older key or server cannot override the one you entered. Press Ctrl+C at any
+time to quit without saving.
 
 options:
   -h, --help   show this help message and exit
