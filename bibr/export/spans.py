@@ -62,12 +62,23 @@ _COMPARATORS = {
 }
 
 
+# A value printed on past a parsed rhs: its digits or decimals continue, or a
+# range does ("n = 5" is not the start of "n = 5–6")
+_VALUE_CONTINUES = r"(?!\d|\.\d|[−–-]\d)"
+
+
 def equation_pattern(lhs: str, df: str | None, comp: str, rhs: str) -> re.Pattern[str] | None:
-    """Pattern for one parsed expression as it may be printed, e.g. ``t(28) = 2.10``."""
-    parts = [_whitespace_flexible(v) for v in (lhs, comp, rhs)]
-    if any(p is None for p in parts):
+    """Pattern for one parsed expression as it may be printed, e.g. ``t(28) = 2.10``.
+
+    The rhs's tokens may be printed closer together than parsed: late
+    clean-up prints the "10 − 6" of "9.62 × 10 − 6" as "10 −6".
+    """
+    parts = [_whitespace_flexible(v) for v in (lhs, comp)]
+    rhs_tokens = rhs.split()
+    if any(p is None for p in parts) or not rhs_tokens:
         return None
-    lhs_p, _, rhs_p = parts
+    lhs_p = parts[0]
+    rhs_p = r"\s*".join(re.escape(token) for token in rhs_tokens)
     comp_p = _COMPARATORS.get(comp.strip(), re.escape(comp.strip()))
     df_p = ""
     if df:
@@ -75,7 +86,7 @@ def equation_pattern(lhs: str, df: str | None, comp: str, rhs: str) -> re.Patter
         if df_inner is None:
             return None
         df_p = rf"\s*[(\[]\s*{df_inner.pattern}\s*[)\]]"
-    return re.compile(rf"{lhs_p.pattern}{df_p}\s*{comp_p}\s*{rhs_p.pattern}")  # type: ignore[union-attr]
+    return re.compile(rf"{lhs_p.pattern}{df_p}\s*{comp_p}\s*{rhs_p}{_VALUE_CONTINUES}")  # type: ignore[union-attr]
 
 
 class SpanLocator:

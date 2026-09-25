@@ -87,6 +87,24 @@ def test_expressions_locate_across_printed_spellings():
     assert equation_span(locator, eq("t", "28", "=", "2.10")) is None  # no third occurrence
 
 
+def test_expression_spans_follow_late_clean_up_and_stop_at_the_value():
+    # Late clean-up prints the parsed "10 − 6" as "10 −6", and "n = 5" is not
+    # the start of "n = 5–6".
+    texts = {1: "Pools (n = 5–6) and brains (n = 5), OR = 2.4, p = 9.62 × 10 −6."}
+    locator = SpanLocator(texts, shared=False)
+
+    def eq(lhs, df, comp, rhs):
+        return SimpleNamespace(text_id=1, lhs=lhs, df=df, comp=comp, rhs=rhs)
+
+    spans = [
+        equation_span(locator, eq("n", "", "=", "5–6")),
+        equation_span(locator, eq("n", "", "=", "5")),
+        equation_span(locator, eq("p", "", "=", "9.62 × 10 − 6")),
+    ]
+    assert [texts[1][a:b] for a, b in spans] == ["n = 5–6", "n = 5", "p = 9.62 × 10 −6"]
+    assert spans[1][0] == texts[1].index("n = 5)")
+
+
 def test_export_emits_spans_and_fills_eq_verbatim(demo_paper):
     from bibr.export.json_export import _export_paper_payload
 

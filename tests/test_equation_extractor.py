@@ -214,6 +214,20 @@ class TestChiSquareDfArgument:
         by_lhs = {eq.lhs: eq for eq in eqs}
         assert set(by_lhs) == {"\u03c7\u00b2", "p"}
 
+    def test_latex_chi_square_df_holds_its_n(self):
+        eqs = _extract("It held ($\\chi^{2}(1, N = 100) = 3.84$, $p = .05$).")
+
+        assert _components(eqs) == [
+            ("p", "", "=", ".05"),
+            ("\\chi^{2}", "1, N = 100", "=", "3.84"),
+        ]
+
+    def test_n_of_a_statistic_without_a_value_is_kept(self):
+        # Nothing else carries this N, so the broad pass reads it
+        assert _components(_extract("The test χ²(1, N = 100) was significant.")) == [
+            ("N", "", "=", "100")
+        ]
+
     def test_f_test_df_pair_is_still_a_df(self):
         sent = _make_sentence(1, "F(2, 45) = 5.6, p = .007.")
         eqs = EquationExtractor().extract_from_sentences([sent], _make_sections())
@@ -526,7 +540,11 @@ class TestCompleteValues:
             ("2.3 × 10−5", "JATS/PDF text layer: superscript flattened, U+2212"),
             ("2.3 × 10⁻⁵", "Unicode superscripts"),
             ("2.3 x 10^-5", "ASCII caret"),
+            ("2.3 × 10^(-5)", "parenthesized exponent"),
+            ("2.3 x 10**-5", "ASCII double star"),
+            ("2.3 X 10−5", "capital X"),
             ("3.4 · 10−6", "middle dot"),
+            ("3.8∙10−35", "bullet operator (PLOS)"),
             ("2.3e-5", "e notation"),
             ("3.16E-20", "E notation"),
             ("3.43e–7", "e notation, en dash (native PDF text)"),
@@ -542,6 +560,20 @@ class TestCompleteValues:
 
         assert _components(eqs) == [("t", "28", "=", "5.10"), ("p", "", "=", value)], note
         assert len({eq.grp_id for eq in eqs}) == 1
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("It was decisive (BF10 = 2.3e5).", ("BF10", "", "=", "2.3e5")),
+            ("Genome-wide (P < 5 × 10−8).", ("P", "", "<", "5 × 10−8")),
+            ("Genome-wide (P < 10⁻⁸).", ("P", "", "<", "10⁻⁸")),
+            ("Counts were high (N = 2.5 × 103).", ("N", "", "=", "2.5 × 103")),
+            ("The slope was b = 8.0E04.", ("b", "", "=", "8.0E04")),
+        ],
+    )
+    def test_scientific_notation_of_other_statistics(self, text, expected):
+        # BF10 and P are the broad pass's; "× 103" is 10³ flattened.
+        assert _components(_extract(text)) == [expected]
 
     def test_mantissa_of_one_is_not_a_valid_looking_p(self):
         eqs = _extract("The effect was significant (t(28) = 5.10, p < 1e-10).")
@@ -594,9 +626,14 @@ class TestCompleteValues:
         # "0,000" matched as a thousands group, dropping the last digit.
         assert _components(_extract("It held (p = 0,0001).")) == [("p", "", "=", "0,0001")]
 
+    def test_latex_decimal_comma(self):
+        assert _components(_extract("Der Effekt war signifikant ($p = 0{,}05$).")) == [
+            ("p", "", "=", "0{,}05")
+        ]
+
     def test_commas_that_are_not_decimal(self):
-        # df pairs belong to the LHS, APA value lists put a space after the
-        # comma, and a run of comma-joined digits is a list, not "1,2".
+        # df pairs belong to the LHS, and APA value lists put a space after
+        # the comma.
         assert _components(_extract("The ANOVA (F(1,23) = 4,5, p = .04) held.")) == [
             ("F", "1,23", "=", "4,5"),
             ("p", "", "=", ".04"),
@@ -604,7 +641,48 @@ class TestCompleteValues:
         assert _components(_extract("Values (p = .03, .04) were both small.")) == [
             ("p", "", "=", ".03")
         ]
-        assert "1,2" not in [eq.rhs for eq in _extract("Indices (n = 1,2,3) were used.")]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Levels (M = 1,2,3) were used.",
+            "Levels (M = 1,2,...) were used.",
+            "Levels (M = 1,2,…,K) were used.",
+        ],
+    )
+    def test_comma_run_is_a_list_not_a_decimal(self, text):
+        # Seen part by part inside parentheses, "M = 1,2" of "M = 1,2,…,K"
+        # read as the decimal 1.2.
+        assert _components(_extract(text)) == [("M", "", "=", "1")]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "Only the relatively small cluster 8 (n=304,3% of ACSs) corresponds to it.",
+                [("n", "", "=", "304")],
+            ),
+            (
+                "Sample sizes ranged from n = 8246 to n = 9380,37 and men from 13.6% to 46.6%.",
+                [("n", "", "=", "8246"), ("n", "", "=", "9380")],
+            ),
+            (
+                "(stimulated vs. unstimulated: 2.97 ± 0.48; n = 9,7 cells; p<0.05)",
+                [("n", "", "=", "9"), ("p", "", "<", "0.05")],
+            ),
+            ("Indices (n = 1,2,3) were used.", [("n", "", "=", "1")]),
+            ("Indices (k = 1,2,…,K) were used.", [("k", "", "=", "1")]),
+            ("The cohort (N = 1,204) was large.", [("N", "", "=", "1,204")]),
+            # "n = 9" is too small to be told from an index, and so is "n = 9,7"
+            ("Recordings came from n = 9,7 cells.", []),
+            # A 0 before the comma makes it a decimal, not a count
+            ("We take k = 0,75 for the losses.", [("k", "", "=", "0,75")]),
+        ],
+    )
+    def test_count_takes_no_decimal_comma(self, text, expected):
+        # A comma after a count's digits lists group sizes or runs into a
+        # percentage or a flattened citation number; it still groups thousands.
+        assert _components(_extract(text)) == expected
 
     def test_ranges(self):
         assert _components(_extract("The measures were intercorrelated with r = .85–.94.")) == [
@@ -615,6 +693,48 @@ class TestCompleteValues:
             ("RMSEA", "", "=", "0.08"),
         ]
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("It held (r = .85 – .94).", ("r", "", "=", ".85 – .94")),
+            ("It held (95% CI = −2.84–−0.19).", ("95% CI", "", "=", "−2.84–−0.19")),
+            ("It held (99.9% CI = 0.2–0.5).", ("99.9% CI", "", "=", "0.2–0.5")),
+        ],
+    )
+    def test_spaced_negative_and_levelled_ranges(self, text, expected):
+        assert _components(_extract(text)) == [expected]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Since \\( \\eta \\leq 1/50 \\), \\( b \\leq 1/3 \\) is always satisfied.",
+            "It held for (c^J + 13\\eta)M \\leq 14\\eta M in all cases.",
+            "The condition (T_{ab} l^a l^b \\geq 0) holds.",
+        ],
+    )
+    def test_value_that_runs_on_is_not_cut(self, text):
+        # b ≤ 1 of "b ≤ 1/3", M ≤ 14 of "M ≤ 14ηM", and the superscript b of
+        # "l^b" are no statistics.
+        assert _extract(text) == []
+
+    def test_value_before_its_error_is_whole(self):
+        assert _components(_extract("The mean was high (M = 63.0\\pm 9.0).")) == [
+            ("M", "", "=", "63.0")
+        ]
+
+    def test_time_is_not_a_value(self):
+        assert _components(_extract("It was measured (t = 12:30, p = .05).")) == [
+            ("p", "", "=", ".05")
+        ]
+
+    def test_count_before_a_slash_is_printed_whole(self):
+        # "12 of 20 cells" and "150 WT and 123 KO": each n is a printed count
+        assert _components(_extract("It fired (C; n = 12/20 cells).")) == [("n", "", "=", "12")]
+        assert _components(_extract("It fell (p = .01; n = 150/123 WT/KO).")) == [
+            ("p", "", "=", ".01"),
+            ("n", "", "=", "150"),
+        ]
+
 
 class TestStatisticNames:
     """A statistic's name is not cut at a Greek letter, superscript or Δ.
@@ -622,7 +742,24 @@ class TestStatisticNames:
     ``η²p`` (partial eta squared) exported as a p-value, and ``ΔR²`` as R².
     """
 
-    @pytest.mark.parametrize("name", ["η²p", "ηp²", "ηp2", "η2p", "η2 p", "ηₚ²", "ω²p", "ηG²"])
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "η²p",
+            "ηp²",
+            "ηp2",
+            "η2p",
+            "η2 p",
+            "η 2 p",
+            "η p 2",
+            "η 2",
+            "ηₚ²",
+            "ω²p",
+            "ω 2 p",
+            "ω p 2",
+            "ηG²",
+        ],
+    )
     def test_partial_eta_squared_is_not_a_p_value(self, name):
         eqs = _extract(f"A main effect, F(1, 40) = 5.2, p = .03, {name} = .12.")
 
@@ -638,6 +775,71 @@ class TestStatisticNames:
 
         assert [eq.lhs for eq in eqs] == ["F", "p", "η²p"]
 
+    def test_spaced_partial_eta_squared_from_a_pdf_text_layer(self):
+        # Verbatim from a bibr export and eLife HTML: "η 2 p" is η²p.
+        assert _components(_extract("η 2 p = 0.05.")) == [("η 2 p", "", "=", "0.05")]
+        eqs = _extract(
+            "a main effect of SNR (F(3,54) = 36.22, p<0.001, Huynh-Feldt corrected, "
+            "η 2 p = 0.67), and of visual context"
+        )
+        assert _components(eqs) == [
+            ("F", "3,54", "=", "36.22"),
+            ("p", "", "<", "0.001"),
+            ("η 2 p", "", "=", "0.67"),
+        ]
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "A main effect, F(1, 40) = 5.2, p = .03, ε²p = .12.",
+            "A main effect, F(1, 40) = 5.2, p = .03, ε 2 p = .12.",
+            "A main effect, F(1, 40) = 5.2, p = .03, η p = .12.",
+        ],
+    )
+    def test_subscript_of_another_effect_size_is_not_a_p_value(self, text):
+        assert _components(_extract(text)) == [("F", "1, 40", "=", "5.2"), ("p", "", "=", ".03")]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # A Holm-adjusted p, Spearman's r_s, membrane resistance R_m, d_z
+            (
+                "(WT: 36.1 pA; n = 12; BACHD: 45.6 pA; n = 11; p h = 0.7399; Figure 2A)",
+                [("n", "", "=", "12"), ("n", "", "=", "11")],
+            ),
+            ("(Spearman’s Rho r s = 0.42; p=0.1)", [("p", "", "=", "0.1")]),
+            ("(R m = 2.04 Ωm 2, R a = 1.02 Ωm; n = 5)", [("n", "", "=", "5")]),
+            ("(d z = 0.5, p = .03)", [("p", "", "=", ".03")]),
+            ("Spearman’s Rho r s = 0.42, p=0.1.", [("p", "", "=", "0.1")]),
+        ],
+    )
+    def test_spaced_subscript_is_not_a_statistic(self, text, expected):
+        # An HTML or PDF text layer prints p_h as "p h": h alone is a
+        # Kruskal-Wallis H to a consumer.
+        assert _components(_extract(f"It held {text}")) == expected
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            # group labels and footnote marks before a statistic
+            (
+                "(T-KO n = 33, CpxI-3R n = 49, WT n = 50)",
+                [("n", "", "=", "33"), ("n", "", "=", "49"), ("n", "", "=", "50")],
+            ),
+            (
+                "MS versus P P < 0.05 and LS P < 0.01",
+                [("P", "", "<", "0.05"), ("P", "", "<", "0.01")],
+            ),
+            ("Se m:Se d p<0.001", [("p", "", "<", "0.001")]),
+            (
+                "(n = 9–10 mice) *p < 0.001 versus DCS, ^p < 0.05 versus CDP",
+                [("n", "", "=", "9–10"), ("p", "", "<", "0.001"), ("p", "", "<", "0.05")],
+            ),
+        ],
+    )
+    def test_letter_after_a_label_or_mark_is_a_statistic(self, text, expected):
+        assert _components(_extract(text)) == expected
+
     def test_delta_prefix(self):
         assert _components(_extract("(ΔR² = .05, F(1, 96) = 6.2, p = .01)")) == [
             ("ΔR²", "", "=", ".05"),
@@ -651,6 +853,31 @@ class TestStatisticNames:
         assert _components(_extract("Model B was preferred (ΔAIC = 4.1).")) == [
             ("ΔAIC", "", "=", "4.1")
         ]
+        assert _components(_extract("The fit improved, Δχ²(1, N = 100) = 3.84, p = .05.")) == [
+            ("Δχ²", "1, N = 100", "=", "3.84"),
+            ("p", "", "=", ".05"),
+        ]
+
+    def test_increment_sign_prefix(self):
+        # ∆ (U+2206), as PDF text layers and Word print Δ
+        assert _components(_extract("(∆R² = .05, F(1, 96) = 6.2, p = .01)")) == [
+            ("∆R²", "", "=", ".05"),
+            ("F", "1, 96", "=", "6.2"),
+            ("p", "", "=", ".01"),
+        ]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("pre-post pairing with Δt = −20 ms", [("Δt", "", "=", "−20")]),
+            ("a displacement vector Δp = 0.35 was found", [("Δp", "", "=", "0.35")]),
+            ("invariance holds when ΔCFI ≤ 0.01", [("ΔCFI", "", "≤", "0.01")]),
+            ("the change ∆z = 0.65 held", [("∆z", "", "=", "0.65")]),
+        ],
+    )
+    def test_delta_stays_on_the_name(self, text, expected):
+        # "Δt = −20 ms" is a time difference, not a t statistic.
+        assert _components(_extract(text)) == expected
 
     def test_greek_subscripted_name_is_not_a_bare_statistic(self):
         # τp is a time constant, not a p-value; τd is not Cohen's d.
@@ -723,6 +950,48 @@ class TestSharedParentheses:
         assert all("PPR" not in eq.lhs for eq in eqs)
 
 
+class TestGroupingAcrossPasses:
+    """Components printed together share a group whichever pass read them."""
+
+    def _groups(self, text: str) -> list[list[str]]:
+        groups: dict[int, list[str]] = {}
+        for eq in _extract(text):
+            groups.setdefault(eq.grp_id, []).append(eq.lhs)
+        return list(groups.values())
+
+    def test_z_groups_with_its_broad_pass_p(self):
+        # Pass 2 reads z, Z and k; pass 4 reads x and P (FWE-corrected).
+        groups = self._groups(
+            "(A) Common activation in the left amygdala, x = −20, y = 2, z = −16; Z = 2.84; "
+            "P (FWE-corrected) = 0.035; k = 114 voxel."
+        )
+
+        assert groups == [["x"], ["z", "Z", "P", "k"]]
+
+    def test_confidence_interval_groups_with_its_fit_indices(self):
+        groups = self._groups(
+            "χ2(96) = 179.24, p = .00, CFI = 0.91; RMSEA = 0.08, 90% CI = 0.06–0.09."
+        )
+
+        assert groups == [["χ2", "p", "CFI", "RMSEA", "90% CI"]]
+
+    @pytest.mark.parametrize(
+        ("text", "lhs"),
+        [
+            ("Groups differed ($\\chi^{2}(1) = 5.2$, $p = .02$).", ["p", "\\chi^{2}"]),
+            (
+                "A main effect ($F(1, 40) = 5.2$, $p = .03$, $\\eta_{p}^{2} = .12$).",
+                ["F", "p", "\\eta_{p}^{2}"],
+            ),
+            ("It held (t(28) = 2.1, $\\chi^2(1) = 3.84$).", ["t", "\\chi^2"]),
+            ("The fit differed, $\\chi^2(1) = 3.84$, $p = .05$.", ["\\chi^2", "p"]),
+        ],
+    )
+    def test_latex_statistic_groups_with_the_statistics_printed_with_it(self, text, lhs):
+        # Only the LaTeX pass reads \chi and \eta; OCR wraps each in $...$.
+        assert self._groups(text) == [lhs]
+
+
 class TestDuplicates:
     """Each printed expression is exported once, in one group."""
 
@@ -748,15 +1017,134 @@ class TestDuplicates:
         ]
 
     @pytest.mark.parametrize(
-        ("latex", "comp"), [("\\leq", "≤"), ("\\le", "≤"), ("\\geq", "≥"), ("\\neq", "≠")]
+        ("latex", "comp"),
+        [
+            ("\\leq", "≤"),
+            ("\\le", "≤"),
+            ("\\leqslant", "≤"),
+            ("\\geq", "≥"),
+            ("\\geqslant", "≥"),
+            ("\\neq", "≠"),
+            ("\\approx", "≈"),
+            ("\\sim", "~"),
+        ],
     )
     def test_latex_comparators(self, latex, comp):
         assert _components(_extract(f"It held ($p {latex} 0.05$).")) == [("p", "", comp, "0.05")]
+
+    def test_latex_comparator_printed_as_plain_text_in_a_group(self):
+        eqs = _extract("It held (t(28) = 2.1, p \\leq .05).")
+
+        assert _components(eqs) == [("t", "28", "=", "2.1"), ("p", "", "≤", ".05")]
+        assert len({eq.grp_id for eq in eqs}) == 1
+
+    def test_slanted_comparators(self):
+        assert _components(_extract("The effect held (t(28) = 2.10, p ⩽ 0.05).")) == [
+            ("t", "28", "=", "2.10"),
+            ("p", "", "≤", "0.05"),
+        ]
+        # A name only the structured passes read
+        assert _components(_extract("The fit held (Δχ²(1) ⩾ 3.84).")) == [("Δχ²", "1", "≥", "3.84")]
+
+    def test_latex_command_starting_with_a_relation_is_not_one(self):
+        # \left is not \le, nor \neg \ne
+        display = PaperSentence(
+            text_id=1,
+            text="\\left( \\frac{a}{b} \\right) = 2",
+            section_id=1,
+            paragraph_id=1,
+            is_display_formula=True,
+        )
+        eqs = EquationExtractor().extract_from_sentences([display], _make_sections())
+
+        assert _components(eqs) == [("\\left( \\frac{a}{b} \\right)", "", "=", "2")]
+        assert _components(_extract("It held ($\\neg A = 1$).")) == [("\\neg A", "", "=", "1")]
 
     def test_latex_statistic_splits_its_df(self):
         assert _components(_extract("The model fit ($\\chi^2(1) = 3.84$).")) == [
             ("\\chi^2", "1", "=", "3.84")
         ]
+        # Its df argument holds no N of its own
+        assert _components(_extract("It held ($\\chi^{2}(1, N = 100) = 3.84$).")) == [
+            ("\\chi^{2}", "1, N = 100", "=", "3.84")
+        ]
+
+    def test_display_formula_the_structured_passes_decomposed_is_not_repeated(self):
+        display = PaperSentence(
+            text_id=1,
+            text="t(28) = 2.10, p < .05.",
+            section_id=1,
+            paragraph_id=1,
+            is_display_formula=True,
+        )
+        eqs = EquationExtractor().extract_from_sentences([display], _make_sections())
+
+        assert _components(eqs) == [("t", "28", "=", "2.10"), ("p", "", "<", ".05")]
+
+    def test_operator_in_an_unclosed_parenthesis_still_splits_a_formula(self):
+        display = PaperSentence(
+            text_id=1,
+            text="f(1-\\exp(-x) = y",
+            section_id=1,
+            paragraph_id=1,
+            is_display_formula=True,
+        )
+        eqs = EquationExtractor().extract_from_sentences([display], _make_sections())
+
+        assert _components(eqs) == [("f(1-\\exp(-x)", "", "=", "y")]
+
+    def test_small_integer_in_a_display_formula_is_not_a_statistic(self):
+        # "z \le - 1" of a piecewise definition is a bound, as "z = -1" is
+        text = "h(z) = \\left\\{ 0 \\quad {\\text{if }}z \\le - 1 \\right."
+        display = PaperSentence(
+            text_id=1, text=text, section_id=1, paragraph_id=1, is_display_formula=True
+        )
+        eqs = EquationExtractor().extract_from_sentences([display], _make_sections())
+
+        assert [eq.lhs for eq in eqs] == ["h(z)"]
+
+    @pytest.mark.parametrize(
+        ("text", "lhs"),
+        [
+            ("y(n)=median(x(n-k:n+k),k=(l-1)/2)", "y(n)"),
+            ("H(n)=-\\sum p(\\pi)\\log p(\\pi)", "H(n)"),
+            ("P_R^{\\prime\\prime}(1) = 0.25", "P_R^{\\prime\\prime}(1)"),
+        ],
+    )
+    def test_latex_function_argument_is_not_a_df(self, text, lhs):
+        display = PaperSentence(
+            text_id=1, text=text, section_id=1, paragraph_id=1, is_display_formula=True
+        )
+        eqs = EquationExtractor().extract_from_sentences([display], _make_sections())
+
+        assert [(eq.lhs, eq.df) for eq in eqs] == [(lhs, "")]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("It held ($ICC = 0.85$).", [("ICC", "", "=", "0.85")]),
+            ("It held ($BF10 = 12.3$).", [("BF10", "", "=", "12.3")]),
+            (
+                "It held ($t(28) = 2.10, p < .05$).",
+                [("t", "28", "=", "2.10"), ("p", "", "<", ".05")],
+            ),
+            ("The effect was reliable ($p < 0.001^{***}$).", [("p", "", "<", "0.001")]),
+            ("The effect was reliable, $p = 0.03^{a}$.", [("p", "", "=", "0.03")]),
+            ("The effect was reliable ($p < .001\\,$).", [("p", "", "<", ".001")]),
+            ("It held ($d = 0.45 \\pm 0.10$).", [("d", "", "=", "0.45")]),
+            (
+                "Effects were reliable ($t = 2.1, p = .03$).",
+                [("p", "", "=", ".03"), ("t", "", "=", "2.1")],
+            ),
+        ],
+    )
+    def test_inline_latex_is_not_read_again(self, text, expected):
+        # The LaTeX pass skips a formula whose relation, or a statistic after
+        # it, another pass read; the broad pass skips the LaTeX pass's.
+        eqs = _extract(text)
+
+        assert _components(eqs) == expected
+        assert len({eq.grp_id for eq in eqs}) == 1
 
     def test_latex_relation_inside_parentheses_is_an_argument(self):
         eqs = EquationExtractor().extract_from_sentences(
@@ -780,6 +1168,33 @@ class TestDuplicates:
         )
 
         assert _components(eqs) == [("CD4", "", "<", "200")]
+        # A command between the amounts does not make them math: the closing
+        # "$" starts the second amount.
+        eqs = _extract(
+            "Costs rose from US$26.3 billion (a 12\\% rise) for those with CD4 <200 "
+            "to US$42.5 billion."
+        )
+        assert _components(eqs) == [("CD4", "", "<", "200")]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "A $2 \\times 2$ design with $\\eta_{p}^{2} = 0.12$ overall.",
+                ("\\eta_{p}^{2}", "", "=", "0.12"),
+            ),
+            ("Values $0.5$ and $R^{2} = 0.45$ were found.", ("R^{2}", "", "=", "0.45")),
+            (
+                "The difference was reliable, $95 \\% \\mathrm{CI} = [0.12, 0.45]$.",
+                ("95 \\% \\mathrm{CI}", "", "=", "[0.12, 0.45]"),
+            ),
+            ("It cost $5 and yielded $\\eta^2 = .1$.", ("\\eta^2", "", "=", ".1")),
+        ],
+    )
+    def test_math_starting_with_a_digit_is_not_currency(self, text, expected):
+        # A command or a lone number makes "$2 ..." math, and its closing "$"
+        # must not open the next formula.
+        assert _components(_extract(text)) == [expected]
 
 
 class TestGroupIds:

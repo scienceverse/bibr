@@ -346,28 +346,53 @@ released.
   `p < 1e-10` as `p < 1` (a value that passes any p ≤ 1 check), `p = 0,05` as
   `p = 0` and `r = .85–.94` as `r = .85`. `rhs` now holds scientific notation in
   every spelling the extractor sees (`e-5`, `E−06`, `× 10−5` and `× 103` where a
-  JATS or PDF text layer flattened the superscript, `× 10⁻⁵`, `10^{-5}` and
-  `\times 10^{-5}` from OCR), decimal commas (a comma that does not group
-  thousands and does not continue a list such as `i = 1,2,3`) and ranges.
-- A Greek letter, superscript or Δ now belongs to the statistic's name:
-  `η²p = .12` (partial eta squared) exported as a p-value, `ηp2` (as JATS
-  prints ηp²) was dropped, `ΔR²` exported as `R²`, and a subscripted symbol
-  such as `τp` or `τd` as a p-value or a d. `r(df)`, `H(df)`, `Z`, `g`, `χ²`
-  without df and `90% CI` are now recognised names.
+  JATS or PDF text layer flattened the superscript, `3.8∙10−35`, `× 10⁻⁵`,
+  `10^{-5}` and `\times 10^{-5}` from OCR), decimal commas and ranges. A comma
+  is decimal only between digits that do not group thousands, do not continue
+  a list (`i = 1,2,3`, also inside parentheses) and do not follow a count:
+  `(n = 9,7 cells; …)` lists two group sizes and `(n=304,3% of ACSs)` runs
+  into a percentage, so they export `n = 9` and `n = 304`. A value that runs on
+  into a fraction, a time or a LaTeX coefficient is no longer exported cut
+  short: `TR/TE = 2500/24`, `BF10<1/3` and `t = 12:30` exported `TE = 2500`,
+  `BF10 < 1` and `t = 12`. A count before a slash (`n = 12/20 cells`) is still
+  exported, as printed.
+- A Greek letter, superscript or Δ (also ∆, U+2206) now belongs to the
+  statistic's name: `η²p = .12` (partial eta squared) exported as a p-value,
+  and so did `η 2 p` as PDF text layers print it; `ηp2` (as JATS prints ηp²)
+  and `η p 2` were dropped; `ΔR²`, `ΔCFI` and `Δt` exported as `R²`, `CFI` and a
+  t statistic; and a subscripted symbol such as `τp` or `τd` as a p-value or a
+  d. A subscript an HTML or PDF text layer printed after a space is no longer a
+  statistic of its own: `p h = 0.74` (Holm-adjusted), `r s = 0.42`
+  (Spearman), `R m` and `d z` exported `h`, `s`, `m` and `z`. `r(df)`, `H(df)`,
+  `Z`, `g`, `χ²` without df and `90% CI` are now recognised names. Names are
+  exported as printed, so a consumer that matches `χ²` or `ηp²` has to fold a
+  leading `Δ` and spellings such as `η 2 p`, `ηp2` and `ηG²`.
 - Statistics sharing parentheses with a recognised one are no longer dropped.
   The structured pass marked the whole parenthesis as extracted, so the other
   passes skipped `BF10` in `(p < .001, BF10 = 12.3)`, and likewise `ICC`,
   `P`, `t` without df and any second component of one part. They now join the
-  parenthesis's group.
-- Each printed expression is exported once. Inline LaTeX (`$t(28) = 2.10$`)
-  was exported again by the LaTeX pass under a new group, and `Cohen's d` as
-  both `d` and `Cohen's d`, while two identical printed values, as in
-  `(p < .001 and p < .001)`, were merged into one. Duplicates are now found by
-  where they are printed. LaTeX comparators (`\leq`, `\geq`, `\neq`,
-  `\approx`, `\sim`) are read, a `$` before a digit is currency rather than
-  math, groups no longer skip ids, and the LLM fallback continues the group
-  ids of regex results it is handed. The broad pass also stops rescanning
-  inside a token, which was quadratic in the token's length.
+  parenthesis's group, and statistics printed together share a group whichever
+  pass reads them: `Z = 2.84; P (FWE-corrected) = 0.035`, `F(1, 26) = 4.87,
+  MSE = .033, p < .05, ηp2 = .16` and OCR's `($\chi^{2}(1) = 5.2$, $p = .02$)`
+  were split across groups, so their p was not paired with its statistic.
+- No two passes export the same printed statistic. Inline LaTeX
+  (`$t(28) = 2.10$`, `$p < 0.001^{***}$`) was exported again by the LaTeX pass
+  under a new group, and `Cohen's d` as both `d` and `Cohen's d`, while two
+  identical printed values, as in `(p < .001 and p < .001)`, were merged into
+  one. Duplicates are now found by where they are printed; a display formula
+  keeps its own row unless the structured passes read all of it. LaTeX
+  comparators (`\leq`, `\leqslant`, `\geq`, `\neq`, `\approx`, `\sim`) and
+  `⩽`/`⩾` are read, and a LaTeX statistic splits its df (`\chi^{2}(1, N = 100)`
+  gives df `1, N = 100` and no separate `N = 100`; a function such as `y(n)`
+  keeps its argument). A `$` before a digit is currency rather than math
+  unless it opens a formula such as `$2 \times 2$`, whose closing `$` then no
+  longer pairs with the next formula's. Groups no longer skip ids, and the LLM
+  fallback continues the group ids of regex results it is handed. The broad
+  pass stops rescanning inside a token, which was quadratic in the token's
+  length (20,000 characters took 5.8 s).
+- `eq[]` spans no longer place a value at a longer one that begins with it
+  (`n = 1` at the `n = 16` earlier in the sentence), and locate a value that
+  late clean-up respaced (`10 − 6` printed as `10 −6`).
 
 ### Added
 
