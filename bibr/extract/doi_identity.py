@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import replace
 from difflib import SequenceMatcher
+from functools import partial
+from typing import TYPE_CHECKING
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
@@ -14,10 +16,24 @@ from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
 from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
+if TYPE_CHECKING:
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence, TextLayerLine
+
 EXPECTED_VISIBLE = 4
 EXPLICIT_SELF_ID = 3
 FRONT_MATTER_OR_REPEATED_FURNITURE = 2
 UNCONTESTED_UNTYPED = 1
+
+# Candidate sources read from the PDF itself (``pdf_doi_evidence``) rather than
+# from the parsed text. A text-layer DOI is printed on the page; a link target
+# or a metadata DOI is not, so it can only agree with a printed candidate.
+TEXT_LAYER = "text_layer"
+LINK_ANNOTATION = "link_annotation"
+PDF_INFO = "pdf_info"
+PDF_XMP = "pdf_xmp"
+_AGREEMENT_SOURCES = frozenset({LINK_ANNOTATION, PDF_INFO, PDF_XMP})
+AGREEMENT_ONLY = "agreement_only"
+LINE_JOIN_OVERRUN = "line_join_overrun"
 
 _DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
@@ -471,8 +487,15 @@ def _pageless_front_block_end(contents, section_map) -> int | None:
     return min(classified, default=None)
 
 
-def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
-    """Collect every source-visible DOI with sentence or furniture provenance."""
+def collect_doi_candidates(
+    contents, pdf_evidence: PdfDoiEvidence | None = None
+) -> tuple[DoiCandidate, ...]:
+    """Collect every source-visible DOI with sentence or furniture provenance.
+
+    With *pdf_evidence* (a PDF input) the pool also takes the DOIs the front
+    pages' text layer prints outside the parsed text, and the link targets and
+    document metadata as agreement-only rows; see ``_with_pdf_evidence``.
+    """
 
     section_map = {section.section_id: section for section in contents.sections}
     front_block_end = _pageless_front_block_end(contents, section_map)
@@ -536,11 +559,265 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
             )
         )
     candidates.extend(_publication_table_doi_candidates(contents))
+    if pdf_evidence is not None:
+        candidates = _with_pdf_evidence(contents, candidates, pdf_evidence, section_map)
     return tuple(candidates)
+
+
+# Layout labels whose text a DOI inside them belongs to: a reference entry, a
+# table, or a figure and its caption. The parse keeps these out of the body
+# text, so their sentences carry these section types.
+_REFERENCE_LABELS = frozenset({"reference", "reference_content"})
+_FIGURE_LABELS = frozenset({"image", "chart", "figure_title", "header_image", "footer_image"})
+# Characters that may follow a DOI without being part of the token after it.
+_DOI_CLOSERS = frozenset(".,;:)]}>\"'’”")
+_BANNER_RE = re.compile(r"\bfirst\s+published\s+as\b", re.IGNORECASE)
+
+
+def _region_at(regions: list, point: tuple[float, float]):
+    """The smallest layout region on the page that contains *point*."""
+    x, y = point
+    best = None
+    for region in regions:
+        if region.bbox is None:
+            continue
+        x1, y1, x2, y2 = region.bbox
+        if x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2:
+            area = (x2 - x1) * (y2 - y1)
+            if best is None or area < best[0]:
+                best = (area, region)
+    return best[1] if best is not None else None
+
+
+def _region_context(region, section_map) -> tuple[int | None, str | None]:
+    """Section id and type a DOI printed inside *region* gets, as its sentences would."""
+    if region is None:
+        return None, None
+    if region.label in _REFERENCE_LABELS:
+        return region.section_id, CanonicalSection.REFERENCES.value
+    if region.label == "table":
+        return region.section_id, CanonicalSection.TABLE.value
+    if region.label in _FIGURE_LABELS:
+        return region.section_id, CanonicalSection.FIGURE.value
+    section = section_map.get(region.section_id)
+    if section is None or section.section_type is None:
+        return region.section_id, None
+    return region.section_id, section.section_type.value
+
+
+def _text_layer_candidates(
+    line: TextLayerLine, regions: list, section_map
+) -> list[tuple[DoiCandidate, str]]:
+    """Candidates of one text-layer line, each with the text after it on the line.
+
+    Each takes the context of the layout region it is printed in, so a DOI in a
+    reference entry, a table or a figure is rejected as its sentence would be.
+    Text outside every region (a margin banner, a masthead the layout missed)
+    has only its page and its own line for context. A repository banner states
+    the article's DOI ("… first published as 10.1234/… on 1 May 1999.
+    Downloaded from …"); the text layer may give its phrases in either order.
+    """
+
+    source = line.text
+    cleaned = _repair_doi_text(source)
+    matches = tuple(_DOI_RE.finditer(cleaned))
+    if not matches:
+        return []
+    ranges = _cleaned_char_source_ranges(source, cleaned)
+    banner = bool(_BANNER_RE.search(cleaned))
+    found = []
+    for match in matches:
+        start = ranges[match.start()][0]
+        end = max(ranges[match.end() - 1][1], start + 1)
+        points = [point for point in line.centers[start:end] if point is not None]
+        region = None
+        if points:
+            center = (
+                sum(point[0] for point in points) / len(points),
+                sum(point[1] for point in points) / len(points),
+            )
+            region = _region_at(regions, center)
+        section_id, section_type = _region_context(region, section_map)
+        candidate = _candidate_from_match(
+            cleaned,
+            match,
+            raw=source[start:end],
+            source_kind=TEXT_LAYER,
+            page=line.page,
+            section_id=section_id,
+            section_type=section_type,
+            region_index=region.index if region is not None else None,
+            region_type=region.label if region is not None else None,
+            text_id=None,
+        )
+        if candidate is None:
+            continue
+        if banner and candidate.rejection_reason is None:
+            candidate = replace(
+                candidate,
+                marker_kind="first_published_as",
+                semantic_context="article_self",
+                selection_tier=EXPLICIT_SELF_ID,
+            )
+        # The line after the DOI, including punctuation normalization dropped.
+        end = cleaned.casefold().find(candidate.normalized, match.start())
+        end = end + len(candidate.normalized) if end >= 0 else match.end()
+        found.append((candidate, cleaned[end:]))
+    return found
+
+
+def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
+    """One row per DOI a link target or the document metadata names.
+
+    A link target counts once per page. ``semantic_context`` says whether the
+    page prints that DOI under or next to the link (``printed_link``); the
+    printed DOI itself is a candidate of the text it is printed in.
+    """
+
+    rows: list[DoiCandidate] = []
+    seen: set[tuple[str, int | None, str]] = set()
+
+    def row(raw, normalized, source_kind, page, marker_kind, semantic_context) -> None:
+        if (source_kind, page, normalized) in seen:
+            return
+        seen.add((source_kind, page, normalized))
+        rows.append(
+            DoiCandidate(
+                raw=raw[:300],
+                normalized=normalized,
+                source_kind=source_kind,
+                page=page,
+                section_id=None,
+                section_type=None,
+                region_index=None,
+                region_type=None,
+                text_id=None,
+                marker_kind=marker_kind,
+                repeated_header_footer_count=0,
+                semantic_context=semantic_context,
+                selection_tier=0,
+                rejection_reason=AGREEMENT_ONLY,
+            )
+        )
+
+    for link in evidence.links:
+        normalized = _canonical_doi(link.doi)
+        if normalized is None:
+            continue
+        printed = normalized in "".join(link.printed_text.split()).casefold()
+        context = "printed_link" if printed else "link_target"
+        row(link.uri, normalized, LINK_ANNOTATION, link.page, "link_uri", context)
+    for item in evidence.metadata:
+        for match in _DOI_RE.finditer(item.value):
+            normalized = _canonical_doi(match.group(0))
+            if normalized is not None:
+                row(match.group(0), normalized, item.source, None, item.key, "pdf_metadata")
+    return rows
+
+
+def _overruns_line(
+    parsed: DoiCandidate, reading: DoiCandidate, tail: str, line: TextLayerLine, agreeing
+) -> bool | None:
+    """Whether *parsed* ran past the line end where the text layer ends *reading*.
+
+    *tail* is what the line prints after *reading*. None when *parsed* does
+    not continue *reading* onto the next line. Otherwise the parse joined the
+    two lines: True when the join ran into the next field (the continuation is
+    glued to more text, or only *reading* agrees with the link and metadata
+    DOIs), False for a DOI wrapped onto the next line.
+    """
+
+    rest = parsed.normalized[len(reading.normalized) :]
+    joined = ("".join(tail.split()) + line.next_text.lstrip()).casefold()
+    if not rest or not joined.startswith(rest):
+        return None
+    after = joined[len(rest) : len(rest) + 1]
+    glued = bool(after) and not after.isspace() and after not in _DOI_CLOSERS
+    return glued or (reading.normalized in agreeing and parsed.normalized not in agreeing)
+
+
+def _with_pdf_evidence(
+    contents, parsed: list[DoiCandidate], evidence: PdfDoiEvidence, section_map
+) -> list[DoiCandidate]:
+    """Add the PDF's own DOI evidence to the parsed-text candidates.
+
+    A text-layer DOI joins the pool unless the parsed text already holds it on
+    that page (or in the pageless page furniture) or reads more of it (the
+    text layer broke a wrapped DOI at the line end), or the parse read the same
+    layout region's DOI differently: the parse chose that region's text. The
+    line geometry also sets a DOI's end: a parsed DOI that runs from a line's
+    end into the next field, such as an ISSN printed on the next line
+    ("…04.006" + "1234-5678/© 2026"), is rejected. Link targets and metadata
+    DOIs are added as agreement-only rows.
+    """
+
+    regions_by_page: dict[int, list] = defaultdict(list)
+    for region in getattr(contents, "region_summaries", ()) or ():
+        if region.page is not None:
+            regions_by_page[region.page].append(region)
+    rows = _agreement_rows(evidence)
+    agreeing = {row.normalized for row in rows}
+
+    readings = [
+        (candidate, tail, line)
+        for line in evidence.lines
+        for candidate, tail in _text_layer_candidates(
+            line, regions_by_page.get(line.page, []), section_map
+        )
+    ]
+    checked: list[DoiCandidate] = []
+    for candidate in parsed:
+        for reading, tail, line in readings:
+            if (
+                candidate.rejection_reason is None
+                and candidate.page in (None, reading.page)
+                and len(candidate.normalized) > len(reading.normalized)
+                and candidate.normalized.startswith(reading.normalized)
+                and all(ch.isspace() or ch in _DOI_CLOSERS for ch in tail)
+                and _overruns_line(candidate, reading, tail, line, agreeing)
+            ):
+                candidate = replace(
+                    candidate,
+                    semantic_context="line_join_overrun",
+                    selection_tier=0,
+                    rejection_reason=LINE_JOIN_OVERRUN,
+                )
+                break
+        checked.append(candidate)
+
+    def read_by_parse(reading: DoiCandidate) -> bool:
+        for candidate in checked:
+            if candidate.page not in (None, reading.page):
+                continue
+            if candidate.normalized == reading.normalized:
+                return True
+            if candidate.rejection_reason != LINE_JOIN_OVERRUN and candidate.normalized.startswith(
+                reading.normalized
+            ):
+                return True
+            if (
+                reading.region_index is not None
+                and candidate.page == reading.page
+                and candidate.region_index == reading.region_index
+                and not reading.normalized.startswith(candidate.normalized)
+            ):
+                return True
+        return False
+
+    added: list[DoiCandidate] = []
+    for reading, _tail, _line in readings:
+        if read_by_parse(reading) or any(
+            (c.page, c.normalized) == (reading.page, reading.normalized) for c in added
+        ):
+            continue
+        added.append(reading)
+    return [*checked, *added, *rows]
 
 
 _FURNITURE_SOURCES = frozenset({"header", "footer"})
 _NUMERIC_EXTENSION_RE = re.compile(r"^[/.]\d")
+# The end a parse can lose off a printed DOI: a few characters, none a letter.
+_LOST_END_RE = re.compile(r"^[-._;()/:0-9]{1,4}$")
 
 
 def _distinct_dois(candidates: list[DoiCandidate]) -> set[str]:
@@ -555,19 +832,40 @@ def _drop_truncated_prefixes(candidates: list[DoiCandidate]) -> list[DoiCandidat
     (``10.30574/wjarr`` → ``10.30574/wjarr.2022.14.3.0574``), while supplement
     and component spellings extend with a letter (``/s1``, ``.s001``, ``.g001``)
     and must never displace the article they belong to.
+
+    A text-layer DOI is read from one printed line, so a parsed DOI it extends
+    by a few characters without letters lost its end in the parse
+    (``…/25.202.3`` for the printed ``…/25.202.33``) and is dropped too.
     """
 
     values = _distinct_dois(candidates)
+    complete = {c.normalized.casefold() for c in candidates if c.source_kind == TEXT_LAYER}
     truncated = {
         value
         for value in values
         for other in values
         if other != value
         and other.startswith(value)
-        and _NUMERIC_EXTENSION_RE.match(other[len(value) :])
+        and (
+            _NUMERIC_EXTENSION_RE.match(other[len(value) :])
+            or (other in complete and _LOST_END_RE.match(other[len(value) :]))
+        )
     }
     kept = [c for c in candidates if c.normalized.casefold() not in truncated]
     return kept or candidates
+
+
+def _prefer_agreeing(
+    candidates: list[DoiCandidate], agreeing: frozenset[str]
+) -> list[DoiCandidate]:
+    """Prefer a DOI that a link target or the document metadata also names.
+
+    The PDF's own metadata and its link targets name the paper's DOI far more
+    often than any other, so of two printed rivals the one they name is kept.
+    """
+
+    agreed = [c for c in candidates if c.normalized.casefold() in agreeing]
+    return agreed or candidates
 
 
 def _prefer_structured(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
@@ -617,25 +915,57 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
 # Lowest tier that can name the paper without an expected DOI.
 _MIN_IDENTITY_TIER = FRONT_MATTER_OR_REPEATED_FURNITURE
 
-_TIE_BREAK_LADDER = (
-    _prefer_structured,
-    _drop_truncated_prefixes,
-    _prefer_marked,
-    _prefer_body_sources,
-    _prefer_lowest_page,
-)
+
+def _tie_break_ladder(agreeing: frozenset[str]):
+    return (
+        _prefer_structured,
+        partial(_prefer_agreeing, agreeing=agreeing),
+        _drop_truncated_prefixes,
+        _prefer_marked,
+        _prefer_body_sources,
+        _prefer_lowest_page,
+    )
+
+
+def _agreeing_dois(candidates: tuple[DoiCandidate, ...]) -> frozenset[str]:
+    """DOIs named by an agreement-only source: a link target or the document metadata."""
+    return frozenset(
+        c.normalized.casefold() for c in candidates if c.source_kind in _AGREEMENT_SOURCES
+    )
+
+
+def _confirmed_by_agreement(
+    candidates: tuple[DoiCandidate, ...], agreeing: frozenset[str]
+) -> DoiCandidate | None:
+    """The one printed tier-1 DOI that a link target or the metadata also names.
+
+    A tier-1 DOI alone does not name the paper: printed unmarked in the body it
+    is usually a cited work. When the PDF's metadata or a link target names the
+    same DOI, it is the paper's own, printed where the tiers do not look.
+    """
+
+    confirmed = [
+        c
+        for c in candidates
+        if c.rejection_reason is None
+        and c.selection_tier == UNCONTESTED_UNTYPED
+        and c.normalized.casefold() in agreeing
+    ]
+    return confirmed[0] if len(_distinct_dois(confirmed)) == 1 else None
 
 
 def _select_without_expected(
     candidates: tuple[DoiCandidate, ...], *, min_tier: int = UNCONTESTED_UNTYPED
 ) -> DoiSelection:
+    agreeing = _agreeing_dois(candidates)
     eligible = [
         candidate
         for candidate in candidates
         if candidate.rejection_reason is None and candidate.selection_tier >= min_tier
     ]
     if not eligible:
-        return DoiSelection(None, candidates, ())
+        confirmed = _confirmed_by_agreement(candidates, agreeing) if agreeing else None
+        return DoiSelection(confirmed, candidates, ())
     highest_tier = max(candidate.selection_tier for candidate in eligible)
     highest = [candidate for candidate in eligible if candidate.selection_tier == highest_tier]
     if len(_distinct_dois(highest)) > 1:
@@ -648,7 +978,7 @@ def _select_without_expected(
         # deterministic provenance ladder and take the winner only if the tie
         # collapses to a single DOI. Otherwise abstain, as before.
         resolved = highest
-        for rule in _TIE_BREAK_LADDER:
+        for rule in _tie_break_ladder(agreeing):
             if len(_distinct_dois(resolved)) == 1:
                 break
             resolved = rule(resolved)
