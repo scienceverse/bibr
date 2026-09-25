@@ -73,9 +73,12 @@ def _text_for_type(
 def copy_integrity_statements(contents: PaperContents, metadata: PaperMetadata) -> None:
     """Copy FUNDING / COI / ETHICS / OPEN_DATA section bodies verbatim onto the
     corresponding ``PaperMetadata`` statement fields. Pure copy — no LLM."""
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+
     text_map = _build_section_text_map(contents)
     for field, section_type in _STATEMENT_SECTION_TYPES.items():
-        setattr(metadata, field, _text_for_type(contents, text_map, section_type))
+        text = _text_for_type(contents, text_map, section_type)
+        apply_decision(metadata, decide_value(field, FieldCandidate(field, "section_copy", text)))
 
 
 def _initials(name: str) -> str:
@@ -223,6 +226,7 @@ async def extract_structured_integrity(
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:
+        _keep_unparsed(metadata, "nothing_to_parse")
         return
 
     author_names = [(a.given, a.family) for a in metadata.authors]
@@ -250,26 +254,50 @@ async def extract_structured_integrity(
                     "parts were not parsed",
                 )
             )
+        _keep_unparsed(metadata, "call_failed")
         return
 
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+
+    parsed_funding = [
+        FundingEntry(
+            funder=f.funder.strip(), award_ids=[a.strip() for a in f.award_ids if a.strip()]
+        )
+        for f in result.funding
+        if f.funder and f.funder.strip()
+    ]
     # Gate funding on the funding statement actually existing: when funding_text
     # is empty (only affiliations/contributions drove the call), NuExtract3 can
     # hallucinate placeholder funding entries — discard them wholesale.
-    metadata.funding = (
-        [
-            FundingEntry(
-                funder=f.funder.strip(), award_ids=[a.strip() for a in f.award_ids if a.strip()]
-            )
-            for f in result.funding
-            if f.funder and f.funder.strip()
-        ]
-        if funding_text
-        else []
+    funding = FieldCandidate(
+        "funding",
+        "llm",
+        parsed_funding if funding_text else [],
+        transforms=("discarded_without_statement",) if parsed_funding and not funding_text else (),
     )
+    apply_decision(metadata, decide_value("funding", funding))
     _apply_contributions(metadata.authors, result.contributions)
-    metadata.affiliations = _build_affiliations(
-        unique_affils, affil_author_ids, result.affiliations
+    apply_decision(
+        metadata,
+        decide_value(
+            "affiliations",
+            FieldCandidate(
+                "affiliations",
+                "llm",
+                _build_affiliations(unique_affils, affil_author_ids, result.affiliations),
+            ),
+        ),
     )
+
+
+def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:
+    """Record that the structured-integrity call left funding and affiliations as they were."""
+    from bibr.extract.field_decisions import FieldDecision, apply_decision
+
+    for name, attribute in (("funding", "funding"), ("affiliations", "affiliations")):
+        apply_decision(
+            metadata, FieldDecision(name, getattr(metadata, attribute), None, rule, producer="llm")
+        )
 
 
 def _clean_component(value: str | None) -> str | None:

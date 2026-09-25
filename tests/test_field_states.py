@@ -1,7 +1,7 @@
 """``extraction.fields`` (schema 12.1): one state per tracked field.
 
-The builder turns facts the pipeline already records (final values, the write
-site of each value, the run's scope, and the codes of the issues and warnings
+The builder turns facts the pipeline already records (final values, each
+field's decision, the run's scope, and the codes of the issues and warnings
 that explain a missing value) into ``extracted``, ``absent``, ``abstained``,
 ``failed`` or ``not_attempted``.
 """
@@ -147,20 +147,31 @@ def test_ambiguous_doi_is_an_abstention_only_when_unresolved():
 
 def test_integrity_failure_fails_funding_only_when_there_was_a_statement():
     failed = ProcessingWarning(WarningCode.RESEARCH_INTEGRITY_LLM_FAILED, "llm_timeout: x")
-    with_statement = _states({"funding_statement"}, warnings=[failed])
+    with_statement = _states(
+        {"funding_statement"},
+        sources={"funding_statement": "integrity_statement"},
+        warnings=[failed],
+    )
     assert with_statement["funding"] == ("failed", None, ["RESEARCH_INTEGRITY_LLM_FAILED"])
     assert with_statement["funding_statement"] == ("extracted", "integrity_statement", [])
     assert _states(warnings=[failed])["funding"] == ("absent", None, [])
 
 
-def test_lexical_funding_statement_is_named():
-    lexical = ProcessingWarning(
-        WarningCode.STATEMENT_LEXICAL_FALLBACK,
-        "funding_statement filled by lexical anchor matching",
+def test_sources_and_rules_come_from_the_decisions():
+    records = build_field_states(
+        present={field: field == "funding_statement" for field in TRACKED_FIELDS},
+        sources={"funding_statement": "lexical_anchor"},
+        scope=FieldScope(references_source="ner"),
+        issues=(),
+        warnings=(),
+        rules={"funding_statement": "integrity_resolution", "title": "none"},
     )
-    assert _states({"funding_statement"}, warnings=[lexical])["funding_statement"][1] == (
-        "lexical_anchor"
-    )
+    assert records["funding_statement"].source == "lexical_anchor"
+    assert records["funding_statement"].rule == "integrity_resolution"
+    assert records["title"].rule == "none"
+    # The reference list's source is part of the run's scope; no decision names it.
+    assert records["bib"].rule is None
+    assert records["doi"].rule is None
 
 
 def test_author_states():
@@ -208,15 +219,24 @@ def test_export_outside_the_pipeline_has_no_fields(demo_paper):
 def test_pipeline_export_carries_valid_fields(demo_paper):
     from bibr.export import PaperExport
     from bibr.export.json_export import export_paper_to_json
-    from bibr.field_states import set_field_source
+    from bibr.extract.field_decisions import FieldCandidate, FieldDecision, FieldDecisions
 
     demo_paper.field_scope = FieldScope()
-    set_field_source(demo_paper.metadata, "title", "llm")
+    decisions = FieldDecisions()
+    title = FieldCandidate("title", "llm", demo_paper.metadata.title)
+    decisions.record(FieldDecision("title", title.value, title, "extracted"))
+    demo_paper.field_decisions = decisions
     payload = export_paper_to_json(demo_paper)
 
     fields = payload["extraction"]["fields"]
     assert list(fields) == list(TRACKED_FIELDS)
-    assert fields["title"] == {"state": "extracted", "source": "llm", "issues": []}
+    assert fields["title"] == {
+        "state": "extracted",
+        "source": "llm",
+        "issues": [],
+        "rule": "extracted",
+    }
+    assert fields["abstract"]["rule"] is None
     PaperExport.model_validate(payload)
 
 
@@ -333,14 +353,17 @@ async def test_failed_title_call_field_states(tmp_path, monkeypatch):
         "state": "extracted",
         "source": "front_matter_candidate",
         "issues": ["VAL_METADATA_FIELD_FAILED"],
+        "rule": "selected_record_title",
     }
     assert fields["abstract"]["state"] == "extracted"
     assert fields["abstract"]["source"] == "abstract_section"
+    assert fields["abstract"]["rule"] == "abstract_section_fallback"
     # A failed field names the step that failed.
     assert fields["keywords"] == {
         "state": "failed",
         "source": "llm",
         "issues": ["VAL_METADATA_FIELD_FAILED"],
+        "rule": "none",
     }
     assert fields["author"]["state"] == fields["bib"]["state"] == "extracted"
 

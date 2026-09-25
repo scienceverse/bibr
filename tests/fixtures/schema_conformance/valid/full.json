@@ -421,57 +421,68 @@
       "title": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "author": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "abstract": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "keywords": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "doi": {
         "state": "extracted",
         "source": null,
-        "issues": []
+        "issues": [],
+        "rule": null
       },
       "published": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "journal": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "funding_statement": {
         "state": "extracted",
         "source": "integrity_statement",
-        "issues": []
+        "issues": [],
+        "rule": "integrity_resolution"
       },
       "funding": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": "extracted"
       },
       "paper_type": {
         "state": "extracted",
         "source": "classifier",
-        "issues": []
+        "issues": [],
+        "rule": "classifier"
       },
       "bib": {
         "state": "extracted",
         "source": "llm",
-        "issues": []
+        "issues": [],
+        "rule": null
       }
     },
     "warnings": [

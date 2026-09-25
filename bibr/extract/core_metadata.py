@@ -22,11 +22,20 @@ import pandas as pd
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
+from bibr.extract.field_decisions import (
+    Classification,
+    FieldCandidate,
+    FieldDecision,
+    apply_decision,
+    decide_authors,
+    decide_classification,
+    decide_value,
+    with_transforms,
+)
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
 from bibr.extract.title_subtitle import fold_printed_subtitle
-from bibr.field_states import set_field_source
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -1657,6 +1666,21 @@ def _normalize_affiliation_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", translated).strip()
 
 
+@dataclass
+class _AuthorProposal:
+    """An author list the extractor produced, with what it did to it."""
+
+    source: str
+    value: list[PaperAuthor]
+    transforms: list[str]
+    veto: str | None = None
+
+    def candidate(self) -> FieldCandidate:
+        return FieldCandidate(
+            "author", self.source, self.value, transforms=tuple(self.transforms), veto=self.veto
+        )
+
+
 class CoreMetadataExtractor:
     """Extracts the paper's own metadata (not references) via the LLM."""
 
@@ -1680,8 +1704,10 @@ class CoreMetadataExtractor:
         self._explicit_classifier_runtime = settings is not None or classifier_resources is not None
         self._front_matter_resolution = front_matter_resolution
         self.validation_issues: list[ValidationIssue] = []
-        # Which step decided paper_type, for ``extraction.fields``.
+        # Which step classified the paper, and the trained classifier's
+        # prediction when the LLM relabelled its low-confidence paper type.
         self._paper_type_source = "llm"
+        self._classifier_prediction: Classification | None = None
         self.locator = locator or RefLocator(contents, settings=self._settings)
         if email_harvester is not None:
             self._email_harvester = email_harvester
@@ -1716,7 +1742,9 @@ class CoreMetadataExtractor:
                 logger.warning(
                     "Front-matter selection abstained; skipping core metadata extraction."
                 )
-                return PaperMetadata(doi="", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi="", title="", keywords=[], authors=[]), "abstained"
+                )
 
             cutoff_iloc = self.locator.get_cutoff_index()
             allowed_text_ids = resolution.allowed_text_ids if resolution is not None else None
@@ -1732,7 +1760,9 @@ class CoreMetadataExtractor:
 
             if not full_text:
                 logger.warning("No metadata text available to extract.")
-                return PaperMetadata(doi="", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi="", title="", keywords=[], authors=[]), "no_front_matter_text"
+                )
 
             table_text = author_table_context(self.contents, resolution)
             if table_text:
@@ -1799,7 +1829,10 @@ class CoreMetadataExtractor:
                     "core_metadata_call_failed",
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
-                return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[]),
+                    "core_metadata_failed",
+                )
             recorded = getattr(llm_metadata, "_field_failures", None)
             field_failures = dict(recorded) if isinstance(recorded, dict) else {}
             title_call_failed = "title" in field_failures
@@ -1833,58 +1866,73 @@ class CoreMetadataExtractor:
             if isinstance(repair_note, str):
                 self._record_metadata_warning(WarningCode.LLM_RESPONSE_REPAIRED, repair_note)
 
+            # Author candidates in precedence order. The recovery and the CRediT
+            # harvest are produced only while no usable list is in hand, so they
+            # can never replace or reorder what the extraction found.
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
-            authors = self._drop_translator_credits(authors, full_text)
-            self._repair_glued_names(authors)
+            authors, transforms = self._sanitize_authors(authors, full_text)
+            veto = None
             if resolution is not None:
-                authors = self._drop_fabricated_authors(authors, full_text, resolution)
-                authors = self._drop_transliterated_authors(authors, full_text, resolution)
-
-            author_source = "llm"
+                kept = self._drop_fabricated_authors(authors, full_text, resolution)
+                if authors and not kept:
+                    veto = "fabricated: absent from the extraction context"
+                elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
+                    veto = "romanised: written in a script the byline does not print"
+            author_trail = [_AuthorProposal("llm", authors, transforms, veto)]
+            usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
-            if not authors:
+            if not usable:
                 recovered = await self._recover_empty_authors(
                     context=byline_recovery_context(resolution) or authors_text or full_text,
                 )
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
-                    authors = self._convert_llm_authors(llm_metadata.authors)
-                    authors = self._drop_translator_credits(authors, full_text)
-                    self._repair_glued_names(authors)
-                    author_source = "llm_recovery"
+                    usable, transforms = self._sanitize_authors(
+                        self._convert_llm_authors(llm_metadata.authors), full_text
+                    )
+                    author_trail.append(_AuthorProposal("llm_recovery", usable, transforms))
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
-            if not authors:
-                authors = self._harvest_credit_authors()
-                if authors:
-                    author_source = "credit_statement"
+            if not usable:
+                usable = self._harvest_credit_authors()
+                author_trail.append(_AuthorProposal("credit_statement", usable, []))
             # Keep the complete frame so affiliation footnotes and repeated-name reconciliation
             # can inspect evidence on later pages.
-            self._reconcile_numbered_affiliations(authors, self.sentences_df)
-            self._reconcile_repeated_name_affiliations(authors, self.sentences_df)
-            self._email_harvester.demote_implausible_flags(authors)
+            affiliations_before = [author.affiliation for author in usable]
+            self._reconcile_numbered_affiliations(usable, self.sentences_df)
+            self._reconcile_repeated_name_affiliations(usable, self.sentences_df)
+            if [author.affiliation for author in usable] != affiliations_before:
+                author_trail[-1].transforms.append("affiliations_reconciled")
+            self._email_harvester.demote_implausible_flags(usable)
 
             # Title/abstract must resolve BEFORE classification: the trained
             # classifier consumes them as input. Order is behavior-neutral for
-            # the LLM-validation path (which ignores title/abstract).
+            # the LLM-validation path (which ignores title/abstract). Post-parse
+            # decides the title after its fallbacks; the classifier and the
+            # correction-notice guard see the extracted one.
             model_title = strip_affiliation_markers(llm_metadata.title or "")
             title, title_issue = ground_title_to_printed_text(
                 model_title, resolution, full_text, printed_rows=self._printed_rows()
             )
+            title_transforms: list[str] = []
+            title_evidence: list[str] = []
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
-            title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=authors)
+                if title != model_title:
+                    title_transforms.append("regrounded")
+                    title_evidence.extend(title_issue.evidence_ids)
+            title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=usable)
             if subtitle_issue is not None:
                 self.validation_issues.append(subtitle_issue)
+                title_transforms.append("subtitle_folded")
+                title_evidence.extend(subtitle_issue.evidence_ids)
             abstract = (llm_metadata.abstract or "").strip()
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
 
-            paper_type, oecd_l1, oecd_l2 = "", "", ""
-            paper_type_confidence: float | None = None
-            oecd_confidence: float | None = None
+            classifications: list[FieldCandidate] = []
             if not skip_classifier:
                 (
                     paper_type,
@@ -1895,17 +1943,29 @@ class CoreMetadataExtractor:
                 ) = await self._classify_paper(
                     title, abstract, llm_metadata, classification_context
                 )
+                classifications.append(
+                    FieldCandidate(
+                        "paper_type",
+                        self._paper_type_source,
+                        Classification(
+                            paper_type, paper_type_confidence, oecd_l1, oecd_l2, oecd_confidence
+                        ),
+                    )
+                )
+                if self._paper_type_source == "llm_label" and self._classifier_prediction:
+                    classifications.append(
+                        FieldCandidate(
+                            "paper_type",
+                            "classifier",
+                            self._classifier_prediction,
+                            veto="paper type below the confidence threshold; relabelled",
+                        )
+                    )
 
             is_notice, notice_type = self._apply_correction_notice_guard(title)
+            notice = notice_type if is_notice else None
+            notice_veto = f"correction notice ({notice_type})" if is_notice else None
             if is_notice:
-                authors = []
-                abstract = ""
-                keywords = []
-                oecd_l1 = ""
-                oecd_l2 = ""
-                oecd_confidence = None
-                paper_type = notice_type
-                paper_type_confidence = None
                 logger.info(
                     "Correction-notice guard fired (kind=%s); "
                     "suppressing fabricated authors/abstract/keywords/oecd",
@@ -1927,48 +1987,29 @@ class CoreMetadataExtractor:
                     )
                 )
 
-            metadata = PaperMetadata(
-                doi=doi if doi else "",
-                title=title,
-                abstract=abstract,
-                keywords=keywords,
-                authors=authors,
-                oecd_l1=oecd_l1,
-                oecd_l2=oecd_l2,
-                oecd_confidence=oecd_confidence,
-                paper_type=paper_type,
-                paper_type_confidence=paper_type_confidence,
-                journal=llm_metadata.journal,
-                volume=llm_metadata.volume,
-                issue=llm_metadata.issue,
-                first_page=llm_metadata.first_page,
-                last_page=llm_metadata.last_page,
-                issn=llm_metadata.issn,
-                publisher=llm_metadata.publisher,
-                published=published,
-                license=llm_metadata.license,
+            author_decision = decide_authors(
+                [proposal.candidate() for proposal in author_trail], notice=notice
             )
-            metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
-            for field, source in (
-                ("title", "llm" if title == model_title else "title_grounding"),
-                ("abstract", "llm"),
-                ("keywords", "llm"),
-                ("published", "llm"),
-                ("journal", "llm"),
-                ("author", author_source),
-                ("paper_type", "correction_notice" if is_notice else self._paper_type_source),
-            ):
-                set_field_source(metadata, field, source)
-
-            self._email_harvester.harvest(metadata.authors)
-            self.validation_issues.extend(
-                repair_author_partitions(metadata.authors, precision_context)
+            final_authors = author_decision.value
+            contacts_before = [(author.email, author.corresponding) for author in final_authors]
+            self._email_harvester.harvest(final_authors)
+            partition_issues = repair_author_partitions(final_authors, precision_context)
+            self.validation_issues.extend(partition_issues)
+            author_decision = with_transforms(
+                author_decision,
+                *(
+                    ["emails_harvested"]
+                    if [(author.email, author.corresponding) for author in final_authors]
+                    != contacts_before
+                    else []
+                ),
+                *(["partitions_repaired"] if partition_issues else []),
             )
 
             if resolution is not None and not is_notice:
                 self.validation_issues.extend(
                     assess_author_grounding(
-                        metadata.authors,
+                        final_authors,
                         build_byline_group(resolution),
                     )
                 )
@@ -1979,16 +2020,78 @@ class CoreMetadataExtractor:
             # found nothing either). Surface it so eval/monitoring can see it
             # instead of shipping an empty author list quietly. A notice
             # legitimately has no authors — the guard handles that, don't warn.
-            if not metadata.authors and not is_notice:
+            if not final_authors and not is_notice:
                 self._record_metadata_warning(
                     WarningCode.AUTHORS_EMPTY, f"0 authors extracted (title={title[:60]!r})"
                 )
 
+            # The record carries the title, abstract and keywords as proposals
+            # for post-parse to decide; the fields only this extractor produces
+            # are decided here.
+            metadata = PaperMetadata(
+                doi=doi if doi else "",
+                title=title,
+                abstract="" if is_notice else abstract,
+                keywords=[] if is_notice else keywords,
+                volume=llm_metadata.volume,
+                issue=llm_metadata.issue,
+                first_page=llm_metadata.first_page,
+                last_page=llm_metadata.last_page,
+                issn=llm_metadata.issn,
+                license=llm_metadata.license,
+            )
+            metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
+            ledger = metadata._field_decisions
+            ledger.propose(
+                FieldCandidate(
+                    "title",
+                    "llm" if title == model_title else "title_grounding",
+                    title,
+                    evidence_ids=tuple(title_evidence),
+                    transforms=tuple(title_transforms),
+                )
+            )
+            ledger.propose(FieldCandidate("abstract", "llm", abstract, veto=notice_veto))
+            ledger.propose(FieldCandidate("keywords", "llm", keywords, veto=notice_veto))
+            for decision in (
+                author_decision,
+                decide_value(
+                    "published",
+                    FieldCandidate(
+                        "published",
+                        "llm",
+                        published,
+                        transforms=(
+                            ("precision_refined",) if published != llm_metadata.published else ()
+                        ),
+                    ),
+                ),
+                decide_value("journal", FieldCandidate("journal", "llm", llm_metadata.journal)),
+                decide_value(
+                    "publisher", FieldCandidate("publisher", "llm", llm_metadata.publisher)
+                ),
+                decide_classification(classifications, notice=notice),
+            ):
+                apply_decision(metadata, decision)
             return metadata
 
         except ValueError as e:
             logger.error(f"Metadata extraction failed: {e}")
             raise
+
+    @staticmethod
+    def _undecided(metadata: PaperMetadata, rule: str) -> PaperMetadata:
+        """Record that the fields only this extractor produces got no candidate."""
+
+        for decision in (
+            FieldDecision("author", [], None, rule),
+            FieldDecision("published", None, None, rule),
+            FieldDecision("journal", None, None, rule),
+            FieldDecision("publisher", None, None, rule),
+            FieldDecision("paper_type", Classification(), None, rule),
+        ):
+            apply_decision(metadata, decision)
+        return metadata
 
     def _record_metadata_warning(self, code: WarningCode, message: str) -> None:
         """Log and persist a metadata-extraction warning onto
@@ -2222,6 +2325,21 @@ class CoreMetadataExtractor:
                     evidence_ids=(f"author:{author.author_id}", "reason:glued_family_name"),
                 )
             )
+
+    def _sanitize_authors(
+        self, authors: list[PaperAuthor], context: str
+    ) -> tuple[list[PaperAuthor], list[str]]:
+        """Drop translator credits and split glued names; say which repairs applied."""
+
+        kept = self._drop_translator_credits(authors, context)
+        repairs = len(self.validation_issues)
+        self._repair_glued_names(kept)
+        transforms = []
+        if len(kept) != len(authors):
+            transforms.append("translator_credits_dropped")
+        if len(self.validation_issues) != repairs:
+            transforms.append("glued_names_split")
+        return kept, transforms
 
     def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
         """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
@@ -2783,6 +2901,7 @@ class CoreMetadataExtractor:
         stay ``None``.
         """
         self._paper_type_source = "llm"
+        self._classifier_prediction = None
         if not self._settings.ml.paper_classifier_model_id:
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=llm_metadata.oecd_domain,
@@ -2902,6 +3021,9 @@ class CoreMetadataExtractor:
                 logger.warning("paper_type LLM escalation failed: %s", e)
                 label = None
             if label is not None and getattr(label, "paper_type", None):
+                self._classifier_prediction = Classification(
+                    paper_type, paper_type_confidence, oecd_l1, oecd_l2, oecd_confidence
+                )
                 paper_type = label.paper_type
                 paper_type_confidence = label.confidence
                 self._paper_type_source = "llm_label"

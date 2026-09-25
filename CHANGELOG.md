@@ -16,7 +16,7 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
   tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
   declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
   `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
-  `bib` it records `{state, source, issues}`. `state` is `extracted` (a value
+  `bib` it records `{state, source, issues, rule}`. `state` is `extracted` (a value
   was exported), `absent` (the extractor ran and found none), `abstained`
   (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
   `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
@@ -26,10 +26,28 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
   `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
   `classifier`, `llm_label`, `correction_notice`, `identity`,
   `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
-  and `issues` the codes of the warnings and validation issues that explain the
-  state. The block is built from facts the pipeline already records and is
-  omitted for a Paper exported outside the pipeline. The conformance fixtures
-  gain a 12.0 reader example and an invalid field record.
+  `issues` the codes of the warnings and validation issues that explain the
+  state, and `rule` the rule of the field's decision that chose the value or
+  its absence (`extracted`, `selected_record_title`, `layout_title_fallback`,
+  `abstract_section_fallback`, `correction_notice`, `abstained`, ...; null for
+  `doi` and `bib`). The block is built from facts the pipeline already records
+  and is omitted for a Paper exported outside the pipeline. The conformance
+  fixtures gain a 12.0 reader example and an invalid field record.
+
+### Changed — one decision point per metadata field
+
+- Every metadata field other than the DOI is decided once, by one rule in
+  `bibr.extract.field_decisions`, from the candidates its producers propose:
+  the model's answer and its grounding repairs, the selected-record and layout
+  title fallbacks, the unclassified-heading scan, the Abstract and Keywords
+  sections, the PDF doc-info, the empty-author recovery and the CRediT
+  statement, the paper classifier and its LLM relabel, the correction-notice
+  guard, and the integrity-statement resolution. Only that module writes these
+  fields once the record exists, and a test fails when another does. The rules
+  keep the precedence the scattered write sites had, so no exported value
+  changes. Each field's receipt (the candidates considered, the one used, the
+  repairs applied to it and the rule) is kept on `Paper.field_decisions`, and
+  `extraction.fields` takes its `source` and `rule` from it.
 
 ### Changed — export schema 12.0 (breaking)
 

@@ -1614,6 +1614,13 @@ class FieldRecordExport(BaseModel):
         description="Codes of the extraction.warnings or extraction.validation.issues entries "
         "that explain this state, such as VAL_METADATA_FIELD_FAILED or AUTHORS_TRUNCATED."
     )
+    rule: str | None = Field(
+        default=None,
+        description="The rule of the field's decision that chose the value or its absence, "
+        "e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', "
+        "'abstract_section_fallback', 'correction_notice', 'abstained'. Null when the field "
+        "has no such decision.",
+    )
 
 
 class FieldStatesExport(BaseModel):

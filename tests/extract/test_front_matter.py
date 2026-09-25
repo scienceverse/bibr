@@ -1638,8 +1638,9 @@ async def test_post_parse_attaches_resolution_between_classification_and_normali
     monkeypatch.setattr(post_parse_module, "_attach_front_matter_resolution", attach, raising=False)
     monkeypatch.setattr(post_parse_module, "_normalize_section_structure", normalize)
     monkeypatch.setattr(post_parse_module, "_extract_metadata_and_equations", extract)
-    monkeypatch.setattr(post_parse_module, "_resolve_title", lambda *_args: None)
-    monkeypatch.setattr(post_parse_module, "_finalize_abstract_and_keywords", lambda *_args: None)
+    monkeypatch.setattr(
+        post_parse_module, "_finalize_abstract_and_keywords", lambda *_args, **_kwargs: None
+    )
 
     paper = await post_parse_module.post_parse(
         contents,

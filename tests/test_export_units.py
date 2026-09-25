@@ -474,50 +474,93 @@ class TestOcrMetadataSchema:
 # ── _merge_ocr_metadata ───────────────────────────────────────────────
 
 
+def _fill_from_doc_info(meta, ocr):
+    """Unscoped doc-info fills: the title, keyword and author decisions, then the DOI."""
+    from bibr.extract.field_decisions import (
+        apply_decision,
+        decide_authors,
+        decide_keywords,
+        decide_title,
+        incumbent_candidate,
+    )
+    from bibr.paper import doc_info_candidates
+
+    doc_info = doc_info_candidates(ocr)
+    authors = [incumbent_candidate(meta, "author", source=None)]
+    if "author" in doc_info:
+        authors.append(doc_info["author"])
+    apply_decision(meta, decide_authors(authors))
+    apply_decision(
+        meta,
+        decide_title(
+            incumbent_candidate(meta, "title", source=None),
+            resolution=None,
+            detected_title=None,
+            sections=[],
+            journal=None,
+            publisher=None,
+            scoped=False,
+            abstained=False,
+            prefer_byline_adjacent=False,
+            doc_info=doc_info.get("title"),
+        ),
+    )
+    apply_decision(
+        meta,
+        decide_keywords(
+            incumbent_candidate(meta, "keywords", source=None),
+            doc_info=doc_info.get("keywords"),
+            section=None,
+            abstained=False,
+        ),
+    )
+    _merge_ocr_metadata(meta, ocr)
+
+
 class TestMergeOcrMetadata:
     def test_fills_empty_title(self):
         meta = PaperMetadata(doi="10.1/x", title="")
-        _merge_ocr_metadata(meta, {"title": "OCR Title"})
+        _fill_from_doc_info(meta, {"title": "OCR Title"})
         assert meta.title == "OCR Title"
 
     def test_does_not_overwrite_existing_title(self):
         meta = PaperMetadata(doi="10.1/x", title="LLM Title")
-        _merge_ocr_metadata(meta, {"title": "OCR Title"})
+        _fill_from_doc_info(meta, {"title": "OCR Title"})
         assert meta.title == "LLM Title"
 
     def test_fills_empty_doi(self):
         meta = PaperMetadata(doi="", title="T")
-        _merge_ocr_metadata(meta, {"doi": "10.1234/ocr"})
+        _fill_from_doc_info(meta, {"doi": "10.1234/ocr"})
         assert meta.doi == "10.1234/ocr"
 
     def test_rejects_invalid_doi(self):
         meta = PaperMetadata(doi="", title="T")
-        _merge_ocr_metadata(meta, {"doi": "not-a-doi"})
+        _fill_from_doc_info(meta, {"doi": "not-a-doi"})
         assert meta.doi == ""
 
     def test_does_not_overwrite_existing_doi(self):
         meta = PaperMetadata(doi="10.1/existing", title="T")
-        _merge_ocr_metadata(meta, {"doi": "10.1/ocr"})
+        _fill_from_doc_info(meta, {"doi": "10.1/ocr"})
         assert meta.doi == "10.1/existing"
 
     def test_fills_keywords(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"keywords": ["ML", "NLP"]})
+        _fill_from_doc_info(meta, {"keywords": ["ML", "NLP"]})
         assert meta.keywords == ["ML", "NLP"]
 
     def test_rejects_non_list_keywords(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"keywords": "not a list"})
+        _fill_from_doc_info(meta, {"keywords": "not a list"})
         assert meta.keywords == []
 
     def test_rejects_non_string_keyword_items(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"keywords": [1, 2, 3]})
+        _fill_from_doc_info(meta, {"keywords": [1, 2, 3]})
         assert meta.keywords == []
 
     def test_fills_authors_from_name_strings(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"authors": ["Jane Smith", "Bob Lee"]})
+        _fill_from_doc_info(meta, {"authors": ["Jane Smith", "Bob Lee"]})
         assert len(meta.authors) == 2
         assert meta.authors[0].given == "Jane"
         assert meta.authors[0].family == "Smith"
@@ -528,14 +571,14 @@ class TestMergeOcrMetadata:
 
     def test_single_name_author(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"authors": ["Madonna"]})
+        _fill_from_doc_info(meta, {"authors": ["Madonna"]})
         assert len(meta.authors) == 1
         assert meta.authors[0].given == ""
         assert meta.authors[0].family == "Madonna"
 
     def test_skips_blank_author_names(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {"authors": ["", "  ", "Jane Doe"]})
+        _fill_from_doc_info(meta, {"authors": ["", "  ", "Jane Doe"]})
         assert len(meta.authors) == 1
         assert meta.authors[0].family == "Doe"
 
@@ -547,18 +590,18 @@ class TestMergeOcrMetadata:
                 PaperAuthor(author_id=1, given="Existing", family="Author", affiliation=""),
             ],
         )
-        _merge_ocr_metadata(meta, {"authors": ["New Person"]})
+        _fill_from_doc_info(meta, {"authors": ["New Person"]})
         assert len(meta.authors) == 1
         assert meta.authors[0].family == "Author"
 
     def test_empty_ocr_dict_is_noop(self):
         meta = PaperMetadata(doi="10.1/x", title="T")
-        _merge_ocr_metadata(meta, {})
+        _fill_from_doc_info(meta, {})
         assert meta.title == "T"
 
     def test_title_stripped(self):
         meta = PaperMetadata(doi="10.1/x", title="")
-        _merge_ocr_metadata(meta, {"title": "  Padded Title  "})
+        _fill_from_doc_info(meta, {"title": "  Padded Title  "})
         assert meta.title == "Padded Title"
 
 

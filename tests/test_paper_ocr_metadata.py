@@ -1,20 +1,16 @@
-"""L5: OCR-supplied author names merged into ``PaperMetadata``.
+"""L5: OCR-supplied author names offered as doc-info author candidates.
 
 "Family, Given" was split on the last space, which inverted the name.
 """
-
-from bibr.models import PaperMetadata
 
 
 class TestOcrMetadataNameSplitting:
     """L5: "Family, Given" was split on the last space, inverting the name."""
 
     def _merged(self, name):
-        from bibr.paper import _merge_ocr_metadata
+        from bibr.paper import doc_info_candidates
 
-        metadata = PaperMetadata(title="T", doi="")
-        _merge_ocr_metadata(metadata, {"authors": [name]})
-        return metadata.authors[0]
+        return doc_info_candidates({"authors": [name]})["author"].value[0]
 
     def test_comma_form_is_not_inverted(self):
         author = self._merged("Smith, John")
