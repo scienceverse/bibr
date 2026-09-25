@@ -1109,6 +1109,10 @@ def test_strong_funding_heading_cannot_override_failed_author_grounding(
         "The authors gratefully acknowledge financial support from the Swiss National "
         "Science Foundation (grant 100019).",
         "The first author was supported by a doctoral fellowship from the Studienstiftung.",
+        "This paper was supported by the Wellcome Trust (grant 206194).",
+        "This project has also received funding from the European Research Council under "
+        "grant agreement No 123456.",
+        "We kindly acknowledge funding from the German Research Foundation (DFG, grant 12345).",
     ],
 )
 def test_standard_funding_wording_without_a_named_author_is_owned(text: str):
@@ -1534,6 +1538,8 @@ def test_data_available_upon_request_from_corresponding_author_is_not_clipped():
     [
         "The data are available by contacting the corresponding author.",
         "The data are accessible through the corresponding author.",
+        "The data are available via the corresponding author.",
+        "The data are available on request; please contact the corresponding author.",
     ],
 )
 def test_data_corresponding_author_contact_constructions_are_not_clipped(text: str):
@@ -1582,6 +1588,20 @@ def test_data_corresponding_author_contact_constructions_are_not_clipped(text: s
             "data_availability",
             "All data and materials are openly available on OSF (https://osf.io/abcde) "
             "under a CC-BY 4.0 license.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "All data are openly available on OSF (https://osf.io/abcde) under a Creative "
+            "Commons Attribution 4.0 International licence.",
+        ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            "The data are available at https://osf.io/abcde/ under a Creative Commons "
+            "Attribution (CC BY 4.0) licence.",
         ),
         (
             "Data availability",
@@ -1654,6 +1674,15 @@ def test_standard_declarations_under_generic_headings_are_kept_whole(
                 ("This article is distributed under a Creative Commons license.", 7),
             ],
         ),
+        (
+            "Data availability",
+            CanonicalSection.OPEN_DATA,
+            "data_availability",
+            [
+                ("Data are available at https://osf.io/abcde/.", 7),
+                ("Reuse of the figures is governed by the journal licence.", 7),
+            ],
+        ),
     ],
 )
 def test_publisher_history_and_license_sentences_still_end_a_declaration(
@@ -1667,6 +1696,38 @@ def test_publisher_history_and_license_sentences_still_end_a_declaration(
     _resolution, active = _resolve_apply(contents, "active")
 
     assert getattr(active, field) == rows[0][0]
+
+
+def test_licence_in_a_later_sentence_of_the_row_still_ends_a_data_statement():
+    """Only a licence in the sentence that makes the data available is exempt."""
+
+    text = (
+        "Data are available at https://osf.io/abcde/. "
+        "Figures are reproduced under the journal's licence."
+    )
+    contents = _contents(
+        [(1, "Data availability", CanonicalSection.OPEN_DATA, "exact_alias", 1.0, [text])]
+    )
+
+    _resolution, active = _resolve_apply(contents, "active")
+
+    assert active.data_availability is not None
+    assert active.data_availability.startswith("Data are available at https://osf.io/abcde/.")
+    assert "licence" not in active.data_availability
+
+
+def test_secondary_data_provenance_is_not_a_data_availability_statement():
+    text = (
+        "The data were obtained from the authors of the original study, who used the "
+        "publicly available Add Health dataset."
+    )
+    contents = _contents([(1, "Method", CanonicalSection.METHODS, "exact_alias", 1.0, [text])])
+
+    shadow_resolution, _shadow = _resolve_apply(contents, "shadow")
+    _active_resolution, active = _resolve_apply(contents, "active")
+
+    assert active.data_availability is None
+    assert shadow_resolution.issues == ()
 
 
 def test_prefers_research_ethics_over_publication_consent_decoy():

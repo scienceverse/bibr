@@ -388,11 +388,14 @@ released.
   under a generic heading, and the default shadow mode raised
   `VAL_STATEMENT_SUSPECT` for each. "Available upon reasonable request to the
   corresponding author" was cut after "to the". "Data and analysis scripts are
-  available at …", "… will be made available by the authors", Frontiers'
-  "conducted in the absence of any commercial or financial relationships …"
-  conflict-of-interest statement and "Ethical approval was received …" were
-  rejected. A data licence and the date an approval was received ended the
-  statement as if they were publisher boilerplate.
+  available at …", "The datasets can be obtained from the corresponding author
+  …", "… will be made available by the authors", Frontiers' "conducted in the
+  absence of any commercial or financial relationships …" conflict-of-interest
+  statement and "Ethical approval was received …" were rejected. The licence
+  the data are made available under ("… available … under a CC BY 4.0 license"
+  or "under a Creative Commons Attribution 4.0 licence") and the date an
+  approval was received ended the statement as if they were publisher
+  boilerplate.
 
 ### Added
 

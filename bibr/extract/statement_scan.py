@@ -73,9 +73,12 @@ _DATA_ASSERTIVE_DECLARATION = re.compile(
     rf"(?:generated|analy[sz]ed|collected|produced|used|underlying|supporting)\b"
     rf".{{0,160}}\b(?:available|accessible|deposited|archived)\b"
     rf".{{0,120}}\b{_DATA_TARGET}|"
-    rf"{_DATA_SUBJECT}\s+(?:are|is|were|was|will\s+be|can\s+be)\s+"
+    rf"{_DATA_SUBJECT}\s+(?:(?:are|is|were|was|will\s+be|can\s+be)\s+"
     rf"(?:(?:openly|publicly|freely)\s+)?(?:made\s+)?"
-    rf"(?:available|accessible|deposited|archived|obtained)\b.{{0,120}}\b{_DATA_TARGET})",
+    rf"(?:available|accessible|deposited|archived)|"
+    # "can be obtained from the corresponding author" offers access; "the data
+    # were obtained from the authors of ..." says where secondary data came from.
+    rf"(?:can|may|will)\s+be\s+obtained)\b.{{0,120}}\b{_DATA_TARGET})",
     re.IGNORECASE,
 )
 # PaperMetadata statement field → its ordered anchor phrases. Order mirrors
@@ -619,7 +622,8 @@ def _has_field_anchor(field: str, text: str) -> bool:
 
 # Boundary words that belong to the declaration itself rather than to publisher
 # furniture: a data request addressed to the corresponding author, the licence
-# deposited data carry, and the date an ethics approval was received.
+# (or Creative Commons licence) deposited data carry, and the date an ethics
+# approval was received.
 _DATA_CONTACT_PREFIX = re.compile(
     r"\b(?:available|accessible|obtained)\b[^.!?]{0,80}"
     r"(?:\b(?:from|to|via|through)\s+|\bcontact(?:ing)?\s+)(?:the\s+)?$",
@@ -636,13 +640,19 @@ _ETHICS_APPROVAL_DATE_PREFIX = re.compile(
 )
 
 
+# The prefixes above end at the boundary and span under 300 characters, so only
+# this tail of the text can match. Searching all of it made a long run-on
+# paragraph with many boundaries quadratic.
+_DECLARATION_PREFIX_WINDOW = 320
+
+
 def _boundary_is_declaration_text(field: str, boundary: re.Match[str], text: str) -> bool:
-    before = text[: boundary.start()]
+    before = text[max(0, boundary.start() - _DECLARATION_PREFIX_WINDOW) : boundary.start()]
     word = boundary.group().casefold()
     if field == "data_availability":
         if word.startswith("correspond"):
             return bool(_DATA_CONTACT_PREFIX.search(before))
-        if word.startswith("licen"):
+        if word.startswith(("licen", "creative")):
             return bool(_DATA_LICENSE_PREFIX.search(before))
     if field == "ethics_statement" and word.startswith(("received", "accepted")):
         return bool(_ETHICS_APPROVAL_DATE_PREFIX.search(before))
