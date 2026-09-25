@@ -1,8 +1,8 @@
 """Serve caches only final results.
 
 A result shaped by a failure a retry could avoid (a timed-out enrichment, a
-failed LLM call, a blocking issue, a failed field) used to be cached for the
-full TTL, so every later request for the same PDF got the degraded export back.
+failed LLM call, a blocking issue) used to be cached for the full TTL, so every
+later request for the same PDF got the degraded export back.
 """
 
 import pytest
@@ -90,7 +90,15 @@ async def test_degraded_result_is_not_cached_and_the_next_request_reruns(tmp_pat
         ),
         (_payload(validation={"promotable": True, "issues": []}), True),
         (_payload(enrichment={"complete": False, "refs_enriched": 1, "refs_total": 3}), False),
-        (_payload(fields={"title": {"state": "failed", "source": "llm", "issues": []}}), False),
+        # A failed field is not final through the warning or issue that failed
+        # it; a deterministic failure fails the same way on the next run.
+        (
+            _payload(
+                warnings=[{"code": "REF_SEG_FAILED", "message": "m"}],
+                fields={"bib": {"state": "failed", "source": None, "issues": ["REF_SEG_FAILED"]}},
+            ),
+            True,
+        ),
         (_payload(fields={"title": {"state": "absent", "source": None, "issues": []}}), True),
     ],
 )

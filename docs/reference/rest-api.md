@@ -150,13 +150,14 @@ When `CACHE_ENABLED=true` (the default) and Redis is configured, the API caches
 successful extraction responses that are final: a response shaped by a failure
 a retry could avoid is not cached, so the next request runs the extraction
 again. That covers a blocking validation issue other than a front-matter
-abstention (`VAL_METADATA_MULTI_ITEM`), incomplete enrichment, a field whose `extraction.fields` state is
-`failed`, and warnings such as `OCR_REGION_FAILED`, `CROSSREF_ENRICHMENT_TIMEOUT`
-or an LLM task's `*_LLM_FAILED`. Keys distinguish file content, page range,
-figure/region output, consolidation, and reference-strategy overrides. The
-cache namespace also includes a settings fingerprint and code version.
-Identical concurrent cache misses are coalesced; failed Redis operations are
-bounded and extraction continues without the cache.
+abstention (`VAL_METADATA_MULTI_ITEM`), incomplete enrichment, and warnings
+such as `OCR_REGION_FAILED`, `CROSSREF_ENRICHMENT_TIMEOUT` or an LLM task's
+`*_LLM_FAILED`. A deterministic failure, such as `REF_SEG_FAILED`, fails the
+same way on every run, so its response is cached. Keys distinguish file
+content, page range, figure/region output, consolidation, and
+reference-strategy overrides. The cache namespace also includes a settings
+fingerprint and code version. Identical concurrent cache misses are coalesced;
+failed Redis operations are bounded and extraction continues without the cache.
 
 Configure caching:
 

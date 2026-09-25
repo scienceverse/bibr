@@ -129,9 +129,11 @@ def _is_final_result(payload: dict) -> bool:
 
     Not when a failure a retry could avoid shaped it: a blocking validation
     issue other than a front-matter abstention (a failed title call,
-    incomplete references), incomplete enrichment, a failed field, or a
-    warning in ``NOT_FINAL_CODES``. Caching such a result would replay one
-    timeout or outage to every request for the TTL.
+    incomplete references), incomplete enrichment, or a warning in
+    ``NOT_FINAL_CODES``. Caching such a result would replay one timeout or
+    outage to every request for the TTL. A ``failed`` field state alone does
+    not count: a deterministic failure such as ``REF_SEG_FAILED`` fails the
+    same way on every run.
     """
     from bibr.processing_warnings import NOT_FINAL_CODES
     from bibr.validation import payload_validation
@@ -149,11 +151,6 @@ def _is_final_result(payload: dict) -> bool:
         return True
     enrichment = extraction.get("enrichment")
     if isinstance(enrichment, dict) and enrichment.get("complete") is False:
-        return False
-    fields = extraction.get("fields")
-    if isinstance(fields, dict) and any(
-        isinstance(record, dict) and record.get("state") == "failed" for record in fields.values()
-    ):
         return False
     return not any(
         isinstance(warning, dict) and warning.get("code") in NOT_FINAL_CODES
