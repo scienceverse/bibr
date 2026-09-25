@@ -196,8 +196,6 @@ def _check_ocr_backend(ok, warn, fail) -> None:
 
     candidates = resolve_backend_candidates(backend, Settings) if backend == "paddle" else ()
     if len(candidates) > 1:
-        import importlib.util
-
         from bibr.local.cli.run_config import _ocr_runtime_blocker
 
         # chew refuses the run when no candidate can start; so does doctor.
@@ -514,8 +512,9 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
             probe_gpu_backend,
         )
 
+        # Found: the blocker check above refused a missing server.
         prefix = find_llama_server()
-        gpu = probe_gpu_backend(prefix) if prefix is not None else None
+        gpu = probe_gpu_backend(prefix)
         if gpu is False:
             # Soft: binary is present but will crawl on CPU. Doctor's ok/fail
             # API has no warn channel here, so encode the upgrade path in the
@@ -525,7 +524,7 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
                 f"very slow; {install_hint()}"
             )
             return
-        if gpu is True and prefix is not None:
+        if gpu is True:
             # Vulkan-on-NVIDIA runs but is slower than CUDA for bibr's prefill-
             # heavy workload; encode the steering hint in the status line (no
             # warn channel here, same as the CPU-only case above).
@@ -577,10 +576,11 @@ def _check_llm_connection(settings, console, ok, fail) -> None:
     output is routinely pasted into bug reports (audit M2).
     """
     from bibr.clients.llm import ping_llm
+    from bibr.config import snapshot_settings
 
     try:
         with console.status(f"  [dim]contacting {settings.llm.provider}…[/dim]"):
-            ping_llm()
+            ping_llm(snapshot_settings(settings))
         ok("LLM connection OK")
     except Exception as e:
         fail(

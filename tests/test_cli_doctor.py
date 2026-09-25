@@ -708,17 +708,17 @@ def test_check_ref_strategies_off_reports_disabled(monkeypatch):
 def test_run_doctor_exits_1_when_a_check_fails(monkeypatch):
     """``bibr doctor`` must exit 1 if any check reports a hard failure.
 
-    Forces the LLM-provider check to fail (no API key resolvable) without
-    hitting the network: ``provider="openai"`` with ``api_key=None`` fails
-    the provider check (component 3) and, since ``api_key`` is falsy, also
-    skips straight to the "LLM connection: skipped" fail (component 4) —
-    no real API call is made either way.
+    Forces the LLM-provider check to fail without hitting the network:
+    ``provider="openai"`` with no ``api_key`` and no ``base_url`` makes the
+    adapter's credential check raise, so the provider check fails and the
+    connection test is reported as skipped instead of being sent.
     """
     import bibr.config
     from bibr.local.cli import _run_doctor
 
     monkeypatch.setattr(bibr.config.Settings.llm, "provider", "openai")
     monkeypatch.setattr(bibr.config.Settings.llm, "api_key", None)
+    monkeypatch.setattr(bibr.config.Settings.llm, "base_url", None)
 
     with pytest.raises(SystemExit) as exc_info:
         _run_doctor()
@@ -814,7 +814,6 @@ class _FakeInstructor:
         self.requests: list[dict] = []
 
     def __call__(self, model, **kwargs):
-        kwargs.pop("api_key", None)
         self.clients.append((model, kwargs))
         return self
 
@@ -930,6 +929,86 @@ def test_doctor_accepts_a_keyless_openai_compatible_server(monkeypatch):
         "✓ LLM connection OK",
     ]
     assert fake.clients[-1][1]["base_url"] == "http://gpu-box:8000/v1"
+    assert code == 0
+
+
+def test_doctor_reports_a_missing_google_key_and_sends_nothing(monkeypatch):
+    """The most common first-run failure: the adapter's own message, and no request."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "google")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gemini-3.5-flash-lite")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", None)
+    monkeypatch.setattr(bibr.config.Settings, "GOOGLE_API_KEY", None)
+
+    lines, code, fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("LLM")
+    assert lines[start + 1 : start + 5] == [
+        "✗ LLM provider: google — Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY "
+        "environment variable.",
+        "Run bibr setup or set the key in .env",
+        "✗ LLM connection: skipped",
+        "Fix the LLM provider first",
+    ]
+    assert fake.clients == []
+    assert fake.requests == []
+    assert code == 1
+
+
+def _failing_ping(monkeypatch, error):
+    import bibr.config
+
+    def ping(settings=None):
+        raise error
+
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", ping)
+    return bibr.config
+
+
+def test_doctor_ping_failure_for_ollama_names_the_server_and_model(monkeypatch):
+    config = _failing_ping(monkeypatch, ConnectionError("Connection error."))
+    monkeypatch.setattr(config.Settings.llm, "provider", "ollama")
+    monkeypatch.setattr(config.Settings.llm, "model", "gpt-oss:20b")
+    monkeypatch.setattr(config.Settings.llm, "ollama_base_url", "http://gpu-box:11434")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("✗ LLM connection failed: Connection error.")
+    assert lines[start + 1] == (
+        "Check that Ollama is running at http://gpu-box:11434 and has the model "
+        "(ollama pull gpt-oss:20b)"
+    )
+    assert code == 1
+
+
+def test_doctor_ping_failure_for_a_custom_server_hides_its_key(monkeypatch):
+    """A self-hosted server's key need not look like a vendor key; it is masked anyway."""
+    key = "local-server-secret-42"
+    config = _failing_ping(monkeypatch, RuntimeError(f"401 Unauthorized: bad token {key}"))
+    monkeypatch.setattr(config.Settings.llm, "provider", "openai")
+    monkeypatch.setattr(config.Settings.llm, "model", "served-model")
+    monkeypatch.setattr(config.Settings.llm, "api_key", key)
+    monkeypatch.setattr(config.Settings.llm, "base_url", "http://gpu-box:8000/v1")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("✗ LLM connection failed: 401 Unauthorized: bad token ***")
+    assert lines[start + 1] == (
+        "Check that the server at http://gpu-box:8000/v1 is running and serves served-model"
+    )
+    assert not [line for line in lines if key in line or key[:12] in line]
+    assert code == 1
+
+
+def test_doctor_with_dotenv_disabled_says_so_and_passes(monkeypatch):
+    monkeypatch.setenv("BIBR_DISABLE_DOTENV", "1")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if ".env" in line] == [
+        "✓ .env files ignored (BIBR_DISABLE_DOTENV); settings come from the environment"
+    ]
     assert code == 0
 
 
@@ -1098,30 +1177,29 @@ def test_check_explicit_paddle_vllm_fails_without_a_gpu(monkeypatch):
     ]
 
 
+_NO_GEMINI_KEY = (
+    "fail",
+    "OCR backend: gemini: no API key",
+    "Set GOOGLE_API_KEY (or LLM_API_KEY) in .env",
+)
+_NO_OPENAI_KEY = ("fail", "OCR backend: openai: no API key", "Set LLM_API_KEY in .env")
+
+
 @pytest.mark.parametrize(
-    ("backend", "llm_key", "google_key", "expected"),
+    ("backend", "llm_key", "google_key", "openai_env_key", "expected"),
     [
-        (
-            "gemini",
-            None,
-            None,
-            (
-                "fail",
-                "OCR backend: gemini: no API key",
-                "Set GOOGLE_API_KEY (or LLM_API_KEY) in .env",
-            ),
-        ),
-        ("gemini", None, "AIza-test-key", ("ok", "OCR backend: gemini", "")),
-        ("gemini", "AIza-test-key", None, ("ok", "OCR backend: gemini", "")),
-        (
-            "openai",
-            None,
-            None,
-            ("fail", "OCR backend: openai: no API key", "Set LLM_API_KEY in .env"),
-        ),
+        ("gemini", None, None, None, _NO_GEMINI_KEY),
+        ("gemini", None, "AIza-test-key", None, ("ok", "OCR backend: gemini", "")),
+        ("gemini", "AIza-test-key", None, None, ("ok", "OCR backend: gemini", "")),
+        ("openai", None, None, None, _NO_OPENAI_KEY),
+        ("openai", "sk-test-key", None, None, ("ok", "OCR backend: openai", "")),
+        # The OpenAI SDK reads OPENAI_API_KEY from the process environment itself.
+        ("openai", None, None, "sk-test-key", ("ok", "OCR backend: openai", "")),
     ],
 )
-def test_check_ocr_backend_vision_needs_a_key(monkeypatch, backend, llm_key, google_key, expected):
+def test_check_ocr_backend_vision_needs_a_key(
+    monkeypatch, backend, llm_key, google_key, openai_env_key, expected
+):
     from bibr.config import Settings
     from bibr.local.cli import _check_ocr_backend
 
@@ -1129,6 +1207,8 @@ def test_check_ocr_backend_vision_needs_a_key(monkeypatch, backend, llm_key, goo
     monkeypatch.setattr(Settings.llm, "api_key", llm_key)
     monkeypatch.setattr(Settings, "GOOGLE_API_KEY", google_key)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if openai_env_key:
+        monkeypatch.setenv("OPENAI_API_KEY", openai_env_key)
 
     rec = _Recorder()
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)

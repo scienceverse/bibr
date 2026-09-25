@@ -8,30 +8,18 @@ from pathlib import Path
 from bibr.local.cli import ui
 
 
-def _preset_env_path() -> Path:
-    """The ``.env`` file ``bibr preset`` reads and writes.
-
-    Settings merge ``~/.bibr/.env`` and then ``./.env`` (or the files in
-    ``BIBR_ENV_FILE``), later files overriding earlier ones, so the last one
-    that exists is the file whose values are in effect. With none present it
-    is where the chain would look last; ``./.env`` when the chain is empty.
-    """
-    from bibr.config import _default_env_files
-
-    chain = _default_env_files()
-    existing = [path for path in chain if path.is_file()]
-    if existing:
-        return existing[-1].absolute()
-    return (chain[-1] if chain else Path(".env")).absolute()
-
-
 def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     """Handle ``bibr preset`` subcommands."""
     from rich.console import Console
     from rich.prompt import Confirm
 
     from bibr.env_utils import parse_env
-    from bibr.presets import InvalidPresetError, PresetManager, redact_value
+    from bibr.presets import (
+        InvalidPresetError,
+        PresetManager,
+        effective_env_file,
+        redact_value,
+    )
 
     console = Console()
     # NOTE: ``Path("") or None`` evaluates to ``Path('.')`` because Path
@@ -42,7 +30,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     manager = (
         PresetManager(presets_dir=Path(presets_dir_str)) if presets_dir_str else PresetManager()
     )
-    env_path = _preset_env_path()
+    env_path = effective_env_file()
 
     cmd = args.preset_command
 

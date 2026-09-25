@@ -266,6 +266,7 @@ released.
   file whose values are in effect, which is the last existing file of that
   chain. `preset save` and `preset use` therefore work when the configuration
   lives in `~/.bibr/.env`, and `save`, `use` and `deactivate` name the file.
+  The demo's preset picker reads the active preset from the same file.
 - `bibr doctor` reports a missing `uv` as a warning instead of a failure.
   `python -m pip install bibr` is a documented setup, and only the uv-managed
   vLLM and MLX-VLM runners need uv. Their own checks still fail without it.

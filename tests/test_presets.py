@@ -479,3 +479,50 @@ def test_preset_use_writes_the_env_file_in_effect(home_only_config, tmp_path):
         "LLM_PROVIDER=google\nLLM_MODEL=gemini-x\n\nBIBR_ACTIVE_PRESET=small\n"
     )
     assert not (project / ".env").exists()
+
+
+def test_preset_works_on_the_project_env_when_both_files_exist(home_only_config, tmp_path):
+    """./.env overrides ~/.bibr/.env, so it is the file a preset is applied to."""
+    home_env, project = home_only_config
+    home_before = home_env.read_text(encoding="utf-8")
+    project_env = project / ".env"
+    project_env.write_text("LLM_PROVIDER=openai\nLLM_MODEL=gpt-5-nano\n", encoding="utf-8")
+    manager = PresetManager(presets_dir=tmp_path / "presets")
+
+    _preset("save", name="project", force=True)
+    manager.save("small", {"LLM_MODEL": "gpt-5-mini"})
+    _preset("use", name="small")
+
+    assert manager.load("project") == {"LLM_PROVIDER": "openai", "LLM_MODEL": "gpt-5-nano"}
+    assert project_env.read_text(encoding="utf-8") == (
+        "LLM_PROVIDER=openai\nLLM_MODEL=gpt-5-mini\n\nBIBR_ACTIVE_PRESET=small\n"
+    )
+    assert home_env.read_text(encoding="utf-8") == home_before
+
+
+def test_effective_env_file_follows_the_dotenv_chain(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from bibr.presets import effective_env_file
+
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    (home / ".bibr").mkdir(parents=True)
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+
+    # Neither file exists: the one the chain reads last, ./.env.
+    assert effective_env_file() == project / ".env"
+    (home / ".bibr" / ".env").write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    assert effective_env_file() == home / ".bibr" / ".env"
+    (project / ".env").write_text("LLM_PROVIDER=openai\n", encoding="utf-8")
+    assert effective_env_file() == project / ".env"
+
+    # BIBR_ENV_FILE replaces the chain; an empty value loads no file at all.
+    listed = tmp_path / "ci.env"
+    monkeypatch.setenv("BIBR_ENV_FILE", str(listed))
+    assert effective_env_file() == listed
+    monkeypatch.setenv("BIBR_ENV_FILE", "")
+    assert effective_env_file() == project / ".env"
