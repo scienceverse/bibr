@@ -58,6 +58,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.mcp_server import _PaperStore, _register_query_tools, _summarize
 from bibr.serve.admission import UploadAdmission, UploadAdmissionError, base64_envelope
+from bibr.serve.auth import KEYLESS_HOSTS
 from bibr.serve.ingress import (
     EmptyUploadError,
     InvalidUploadOptionError,
@@ -410,15 +411,15 @@ def mount_mcp(
         transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     else:
         # No key: loopback is the only boundary, and a DNS-rebinding page would
-        # otherwise reach it under its own host name.
-        loopback = ("127.0.0.1", "localhost", "[::1]")
+        # otherwise reach it under its own host name. Same names and origins as
+        # the serve app's own gate (check_keyless_request).
         transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=[host for name in loopback for host in (name, f"{name}:*")],
+            allowed_hosts=[host for name in KEYLESS_HOSTS for host in (name, f"{name}:*")],
             allowed_origins=[
                 *(
                     origin
-                    for name in loopback
+                    for name in KEYLESS_HOSTS
                     for scheme in ("http", "https")
                     for origin in (f"{scheme}://{name}", f"{scheme}://{name}:*")
                 ),

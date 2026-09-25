@@ -145,14 +145,14 @@ class CloudOcrClient:
             if api_key is not None:
                 kwargs["api_key"] = api_key
             if cfg.base_url:
-                if api_key and not settings.ocr.allow_insecure_http:
-                    from bibr.utils.hosts import refuse_public_plaintext
+                from bibr.utils.hosts import refuse_plaintext_llm_key
 
-                    refuse_public_plaintext(
-                        cfg.base_url,
-                        credential="vision OCR API key",
-                        opt_out="set OCR_ALLOW_INSECURE_HTTP=true",
-                    )
+                # The vision endpoint gets the LLM provider's key, so the LLM
+                # opt-out governs it (OCR_ALLOW_INSECURE_HTTP, on by default in
+                # docker-compose, is for the OCR server's own token).
+                refuse_plaintext_llm_key(
+                    cfg.base_url, api_key, allow_insecure_http=settings.llm.allow_insecure_http
+                )
                 kwargs["base_url"] = cfg.base_url
 
             self._client = instructor.from_provider(model_string, **kwargs)

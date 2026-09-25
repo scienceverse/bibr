@@ -2,7 +2,13 @@
 
 import pytest
 
-from bibr.utils.hosts import is_loopback_host, is_private_network_host, refuse_public_plaintext
+from bibr.utils.hosts import (
+    cleartext_network_host,
+    is_loopback_host,
+    is_private_network_host,
+    is_tailnet_host,
+    refuse_public_plaintext,
+)
 
 
 @pytest.mark.parametrize(
@@ -34,13 +40,17 @@ def test_non_loopback_hosts(host):
         "nas.local",
         "box.lan",
         "printer.home.arpa",
+        "declan.tail1234.ts.net",  # Tailscale MagicDNS
     ],
 )
 def test_private_network_hosts(host):
     assert is_private_network_host(host) is True
 
 
-@pytest.mark.parametrize("host", ["bibr.example.org", "api.openai.com", "8.8.8.8", ""])
+@pytest.mark.parametrize(
+    "host",
+    ["bibr.example.org", "api.openai.com", "8.8.8.8", "::ffff:8.8.8.8", "ts.net.example", ""],
+)
 def test_public_hosts(host):
     assert is_private_network_host(host) is False
 
@@ -68,3 +78,37 @@ def test_refuse_public_plaintext_refuses_a_public_http_host():
         "Refusing to send the serve bearer token over plain HTTP to the public host "
         "'bibr.example.org'. Use an https:// URL, or pass --x if the network path is trusted."
     )
+
+
+@pytest.mark.parametrize(
+    ("host", "tailnet"),
+    [
+        ("100.64.0.1", True),
+        ("100.127.255.254", True),
+        ("fd7a:115c:a1e0::1", True),
+        ("gpu.tail1234.ts.net", True),
+        ("100.128.0.1", False),
+        ("10.0.0.1", False),
+        ("fd00::1", False),
+        ("gpu-box", False),
+    ],
+)
+def test_tailnet_hosts(host, tailnet):
+    assert is_tailnet_host(host) is tailnet
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        ("http://gpu-box:8000", "gpu-box"),
+        ("http://192.168.1.20:8000", "192.168.1.20"),
+        ("http://bibr.example.org", "bibr.example.org"),
+        ("http://127.0.0.1:8000", None),
+        ("http://localhost:8000", None),
+        ("http://100.113.200.117:8000", None),
+        ("http://gpu.tail1234.ts.net:8000", None),
+        ("https://gpu-box:8443", None),
+    ],
+)
+def test_cleartext_network_host(url, host):
+    assert cleartext_network_host(url) == host

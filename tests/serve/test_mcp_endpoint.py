@@ -469,9 +469,9 @@ _TEST_KEY = "sk_test_0123456789abcdef0123456789abcdef"
 def _restore_api_key():
     from bibr.config import Settings
 
-    original = Settings.auth.api_key
+    original = Settings.auth.api_key, Settings.cors.origins
     yield
-    Settings.auth.api_key = original
+    Settings.auth.api_key, Settings.cors.origins = original
 
 
 @asynccontextmanager
@@ -704,10 +704,11 @@ _INITIALIZE = {
 
 
 @asynccontextmanager
-async def _keyless_mounted_app(tracker: _FakeTracker):
+async def _keyless_mounted_app(tracker: _FakeTracker, cors_origins: list[str] | None = None):
     from bibr.config import Settings
 
     Settings.auth.api_key = None
+    Settings.cors.origins = cors_origins or []
     app = FastAPI()
     store = UploadStore.create(max_size=1_000_000, spool_memory_bytes=1024, stale_after_seconds=60)
     try:
@@ -725,10 +726,12 @@ async def _keyless_mounted_app(tracker: _FakeTracker):
         ("http://127.0.0.1:8000", "https://evil.example", 403),
         ("http://127.0.0.1:8000", None, 200),
         ("http://localhost:8000", "http://localhost:8000", 200),
+        ("http://[::1]:8000", "https://[::1]:8443", 200),
+        ("http://127.0.0.1:8000", "https://ui.example.org", 200),  # listed in CORS_ORIGINS
     ],
 )
 async def test_keyless_mount_admits_only_loopback_hosts_and_origins(base_url, origin, status):
-    async with _keyless_mounted_app(_FakeTracker()) as app:
+    async with _keyless_mounted_app(_FakeTracker(), ["https://ui.example.org", "*"]) as app:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url=base_url
         ) as client:

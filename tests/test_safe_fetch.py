@@ -317,6 +317,9 @@ async def test_fetch_allowlist_enforced_before_any_network():
         ('attachment; filename="\\\\\\\\server\\\\share\\\\p.pdf"', "https://x.org/y", "p.pdf"),
         ('attachment; filename="NUL.pdf"', "https://x.org/y", "_NUL.pdf"),
         ('attachment; filename="com1.pdf"', "https://x.org/y", "_com1.pdf"),
+        ('attachment; filename="LPT9.tar.pdf"', "https://x.org/y", "_LPT9.tar.pdf"),
+        ('attachment; filename="aux"', "https://x.org/y", "_aux.pdf"),
+        ('attachment; filename="lpt10.pdf"', "https://x.org/y", "lpt10.pdf"),  # not a device
         ('attachment; filename="paper.pdf:stream"', "https://x.org/y", "paper.pdf_stream.pdf"),
         ('attachment; filename="paper.pdf. "', "https://x.org/y", "paper.pdf"),
         ('attachment; filename=".."', "https://x.org/files/p.pdf", "p.pdf"),

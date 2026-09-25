@@ -1254,6 +1254,7 @@ class TestExportUrlSanity:
             "java\nscript:alert(1)",
             "vbscript:msgbox(1)",
             "data:text/html;base64,PHNjcmlwdD4=",
+            "\x01javascript:alert(1)",  # a leading control character browsers skip
             "https://osf.io/abcde/",
             "mailto:author@example.org",
             "info:doi/10.1371/journal.pone.0000001",
@@ -1293,22 +1294,49 @@ class TestExportUrlSanity:
                 start=1,
             )
         ]
+        # Match rows come from an external record as deposited: no URL repair
+        # runs first, so the scheme check must skip the space and the tab itself.
         refs[1].match = {
             MatchSource.CROSSREF: ExternalMatch(
-                doi="10.1234/x", score=99.0, url="javascript:alert(3)"
+                doi="10.1234/x",
+                score=99.0,
+                url=" javascript:alert(3)",
+                license_url="java\tscript:alert(4)",
             )
         }
-        paper = _minimal_paper(
-            metadata=PaperMetadata(doi="10.1234/test", title="Test Paper", references=refs)
-        )
-        result = export_paper_to_json(paper)
+        refs[3].match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/y",
+                score=99.0,
+                url="https://doi.org/10.1234/y",
+                license_url="https://creativecommons.org/licenses/by/4.0/",
+            )
+        }
+        metadata = PaperMetadata(doi="10.1234/test", title="Test Paper", references=refs)
+        metadata.match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/test",
+                score=99.0,
+                url="javascript:alert(5)",
+                license_url="JAVASCRIPT:alert(6)",
+            )
+        }
+        result = export_paper_to_json(_minimal_paper(metadata=metadata), validate=True)
         assert [b.get("url") for b in result["bib"]] == [
             None,
             "https://osf.io/x",
             None,
             "http://www.example.org]",
         ]
-        assert [m.get("url") for m in result["bib_match"]] == [None]
+        assert [(m["url"], m["license_url"], m["license_spdx"]) for m in result["bib_match"]] == [
+            (None, None, None),
+            (
+                "https://doi.org/10.1234/y",
+                "https://creativecommons.org/licenses/by/4.0/",
+                "CC-BY-4.0",
+            ),
+        ]
+        assert [(m["url"], m["license_url"]) for m in result["metadata_match"]] == [(None, None)]
 
 
 # ── JSON export: top-level fields ──────────────────────────────────────

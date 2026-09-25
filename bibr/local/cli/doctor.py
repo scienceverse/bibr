@@ -530,12 +530,16 @@ def _check_llm_connection(
     ok,
     warn,  # noqa: ARG001
     fail,
+    *,
+    allow_insecure_http: bool = False,
 ) -> None:
     """Ping the cloud LLM provider once to confirm the key + network work.
 
     On failure the raw SDK exception is redacted before display: google-genai and
     other SDKs frequently embed ``?key=<API_KEY>`` in exception URLs, and doctor
-    output is routinely pasted into bug reports (audit M2).
+    output is routinely pasted into bug reports (audit M2). A public plain-HTTP
+    ``base_url`` fails the check without sending the key, as the pipeline would
+    refuse it.
     """
     try:
         import instructor
@@ -550,6 +554,9 @@ def _check_llm_connection(
         elif provider == "openai":
             kwargs["api_key"] = api_key
             if base_url:
+                from bibr.utils.hosts import refuse_plaintext_llm_key
+
+                refuse_plaintext_llm_key(base_url, api_key, allow_insecure_http=allow_insecure_http)
                 kwargs["base_url"] = base_url
                 # Mirror OpenAIProvider: local OpenAI-compatible servers
                 # need JSON_SCHEMA mode (they reject object-form tool_choice).
@@ -705,7 +712,15 @@ def _run_doctor() -> None:
         # take seconds, so it gets a spinner.
         if api_key and provider and provider != "ollama":
             _check_llm_connection(
-                provider, model, api_key, settings.llm.base_url, console, ok, warn, fail
+                provider,
+                model,
+                api_key,
+                settings.llm.base_url,
+                console,
+                ok,
+                warn,
+                fail,
+                allow_insecure_http=settings.llm.allow_insecure_http,
             )
         elif provider == "ollama":
             warn("LLM connection: Ollama (not tested)", hint="Start Ollama and test manually")

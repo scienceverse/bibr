@@ -9,6 +9,9 @@ import pytest
 from bibr.config import snapshot_settings
 
 _REFUSAL = "Refusing to send the LLM API key over plain HTTP to the public host 'llm.example.org'"
+_OPT_OUT = (
+    "Use an https:// URL, or set LLM_ALLOW_INSECURE_HTTP=true if the network path is trusted."
+)
 
 
 def _settings(base_url: str, *, api_key: str | None = "llm-key-placeholder", allow=False):
@@ -34,6 +37,7 @@ def test_openai_provider_refuses_a_public_http_base_url():
     [
         ("http://127.0.0.1:8001/v1", "llm-key-placeholder", False),  # local vLLM
         ("http://100.113.200.117:30000/v1", "llm-key-placeholder", False),  # tailnet fleet
+        ("http://gpu.tail1234.ts.net:30000/v1", "llm-key-placeholder", False),  # MagicDNS
         ("https://llm.example.org/v1", "llm-key-placeholder", False),
         ("http://llm.example.org/v1", None, False),  # no key, nothing to leak
         ("http://llm.example.org/v1", "llm-key-placeholder", True),  # explicit opt-out
@@ -75,10 +79,105 @@ def test_vision_ocr_refuses_a_public_http_base_url(monkeypatch):
         c._settings = settings
         return c
 
-    with pytest.raises(ValueError, match="vision OCR API key over plain HTTP"):
+    # OCR_ALLOW_INSECURE_HTTP (on by default in docker-compose) is the OCR
+    # server's opt-out: the vision endpoint gets the LLM key, so it stays refused.
+    settings.ocr.allow_insecure_http = True
+    with pytest.raises(ValueError, match="LLM API key over plain HTTP"):
         asyncio.run(client()._aget_client())
     assert built == []
 
-    settings.ocr.allow_insecure_http = True
+    settings.llm.allow_insecure_http = True
     asyncio.run(client()._aget_client())
     assert built[0]["base_url"] == "http://vision.example.org/v1"
+
+
+# --- bibr setup and bibr doctor send the key too --------------------------------
+
+
+def test_setup_wizard_asks_again_for_a_public_http_base_url(monkeypatch):
+    from bibr.setup_wizard import SetupWizard
+
+    monkeypatch.delenv("LLM_ALLOW_INSECURE_HTTP", raising=False)
+    answers = iter(["http://llm.example.org/v1", "https://llm.example.org/v1"])
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *_a, **_k: next(answers))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *_a, **_k: False)
+    wizard = SetupWizard()
+
+    assert wizard._ask_llm_base_url("llm-key-placeholder") == "https://llm.example.org/v1"
+    assert "LLM_ALLOW_INSECURE_HTTP" not in wizard.env_vars
+
+
+def test_setup_wizard_records_an_explicit_plain_http_opt_in(monkeypatch):
+    from bibr.setup_wizard import SetupWizard
+
+    monkeypatch.delenv("LLM_ALLOW_INSECURE_HTTP", raising=False)
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *_a, **_k: "http://llm.example.org")
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *_a, **_k: True)
+    wizard = SetupWizard()
+
+    assert wizard._ask_llm_base_url("llm-key-placeholder") == "http://llm.example.org"
+    assert wizard.env_vars["LLM_ALLOW_INSECURE_HTTP"] == "true"
+    assert wizard._allows_insecure_llm_http()
+
+
+def test_setup_wizard_model_listing_never_sends_the_key_to_a_public_http_host(monkeypatch):
+    from bibr import setup_wizard
+
+    sent = []
+    monkeypatch.setattr(
+        setup_wizard, "_fetch_openai_compat_models", lambda *a, **kw: sent.append(kw) or ["m"]
+    )
+    url = "http://llm.example.org/v1"
+    assert setup_wizard._fetch_models("openai", "llm-key-placeholder", url) == []
+    assert sent == []
+    assert setup_wizard._fetch_models(
+        "openai", "llm-key-placeholder", url, allow_insecure_http=True
+    ) == ["m"]
+
+
+def test_setup_wizard_connection_test_client_refuses_a_public_http_base_url(monkeypatch):
+    pytest.importorskip("instructor")
+    from bibr.setup_wizard import _build_test_client
+
+    built = []
+    monkeypatch.setattr("instructor.from_provider", lambda *a, **kw: built.append(kw))
+    with pytest.raises(ValueError, match=_REFUSAL):
+        _build_test_client("openai", "m", "llm-key-placeholder", "http://llm.example.org/v1")
+    assert built == []
+    _build_test_client("openai", "m", "llm-key-placeholder", "http://gpu-box:8000/v1")
+    _build_test_client(
+        "openai",
+        "m",
+        "llm-key-placeholder",
+        "http://llm.example.org/v1",
+        allow_insecure_http=True,
+    )
+    assert [kw["base_url"] for kw in built] == [
+        "http://gpu-box:8000/v1",
+        "http://llm.example.org/v1",
+    ]
+
+
+def test_doctor_fails_the_connection_check_without_sending_the_key(monkeypatch):
+    pytest.importorskip("instructor")
+    import io
+
+    from rich.console import Console
+
+    from bibr.local.cli.doctor import _check_llm_connection
+
+    built = []
+    monkeypatch.setattr("instructor.from_provider", lambda *a, **kw: built.append(kw))
+    failures = []
+    _check_llm_connection(
+        "openai",
+        "m",
+        "llm-key-placeholder",
+        "http://llm.example.org/v1",
+        Console(file=io.StringIO()),
+        lambda *_a: None,
+        lambda *_a, **_k: None,
+        lambda msg, **_k: failures.append(msg),
+    )
+    assert built == []
+    assert failures == [f"LLM connection failed: {_REFUSAL}. " + _OPT_OUT]

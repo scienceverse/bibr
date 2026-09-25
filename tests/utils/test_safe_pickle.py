@@ -97,6 +97,21 @@ def test_object_array_payload_is_read_under_the_allowlist(tmp_path):
     assert list(safe_joblib_load(tmp_path / "labels.joblib")["classes"]) == ["B-REF", "I-REF"]
 
 
+def test_object_array_payload_may_not_nest_a_joblib_array_wrapper(tmp_path):
+    """Only joblib's own unpickler reads a wrapper's array bytes; inside an
+    object-array payload one is refused rather than left half-built."""
+    np = pytest.importorskip("numpy")
+    import joblib.numpy_pickle as jnp
+
+    nested = np.empty(1, dtype=object)
+    nested[0] = jnp.NumpyArrayWrapper(np.ndarray, (1,), "C", np.dtype("float64"))
+    joblib.dump({"arr": nested}, tmp_path / "nested.joblib")
+
+    with pytest.raises(pickle.UnpicklingError) as exc:
+        safe_joblib_load(tmp_path / "nested.joblib")
+    assert str(exc.value) == "refusing a nested joblib array wrapper"
+
+
 def test_refuses_the_pre_0_10_joblib_format(tmp_path):
     """That format is read by joblib's compatibility unpickler, not the restricted one."""
     path = tmp_path / "legacy.joblib"

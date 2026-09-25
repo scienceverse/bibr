@@ -18,7 +18,6 @@ from urllib.parse import urlsplit
 from fastapi import Header, HTTPException, status
 
 from bibr.config import Settings
-from bibr.utils.hosts import is_loopback_host
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +27,29 @@ _MIN_API_KEY_LEN = 32
 # Paths reachable without credentials: liveness/readiness probes carry none.
 PUBLIC_PATHS = frozenset({"/health", "/ready"})
 
+# The only host names a server without AUTH_API_KEY binds and answers to, in
+# ``Host`` headers and in browser ``Origin``s. The MCP transport's DNS-rebinding
+# check admits the same names (``bibr.serve.mcp.mount_mcp``).
+KEYLESS_HOSTS = ("127.0.0.1", "localhost", "[::1]")
+_KEYLESS_HOSTNAMES = frozenset(name.strip("[]") for name in KEYLESS_HOSTS)
+
+
+def _is_keyless_bind(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host) in (
+            ipaddress.ip_address("127.0.0.1"),
+            ipaddress.ip_address("::1"),
+        )
+    except ValueError:
+        return host == "localhost"
+
 
 def validate_bind_auth(host: str, api_key: str | None) -> None:
-    """Refuse a network-visible bind unless bearer authentication is enabled."""
+    """Refuse a network-visible bind unless bearer authentication is enabled.
+
+    Without a key only ``127.0.0.1``, ``::1`` and ``localhost`` are allowed,
+    the names :func:`check_keyless_request` answers to.
+    """
     normalized = host.strip().strip("[]").lower()
     is_loopback = normalized == "localhost"
     if not is_loopback:
@@ -38,7 +57,7 @@ def validate_bind_auth(host: str, api_key: str | None) -> None:
             is_loopback = ipaddress.ip_address(normalized).is_loopback
         except ValueError:
             is_loopback = False
-    if not is_loopback and not api_key:
+    if not api_key and not _is_keyless_bind(normalized):
         raise ValueError(
             f"Refusing to bind unauthenticated bibr server to {host!r}. "
             "Set AUTH_API_KEY or bind to 127.0.0.1/::1."
@@ -86,13 +105,17 @@ def check_bearer(authorization: str | None) -> str | None:
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-def _loopback_url_host(value: str) -> bool:
-    """Whether a Host header (``host[:port]``) or an Origin names a loopback host."""
+def _keyless_host(value: str, *, origin: bool = False) -> bool:
+    """Whether a ``Host`` header (``host[:port]``) or an http(s) ``Origin``
+    names one of :data:`KEYLESS_HOSTS`."""
     try:
-        host = urlsplit(value if "://" in value else f"//{value}").hostname
+        parts = urlsplit(value if origin else f"//{value}")
+        host = parts.hostname
     except ValueError:
         return False
-    return host is not None and is_loopback_host(host)
+    if origin and parts.scheme not in ("http", "https"):
+        return False
+    return host in _KEYLESS_HOSTNAMES
 
 
 def check_keyless_request(method: str, headers: Mapping[str, str]) -> tuple[int, str] | None:
@@ -102,10 +125,10 @@ def check_keyless_request(method: str, headers: Mapping[str, str]) -> tuple[int,
     then the whole boundary, which a page open in the operator's browser can
     cross: a cross-site form POST needs no CORS preflight, and a DNS-rebinding
     page reaches 127.0.0.1 under a host name of its own and reads the answers.
-    So a keyless server answers only a loopback ``Host``, and takes a
-    state-changing request only from a loopback ``Origin`` (or one listed in
-    ``CORS_ORIGINS``) or, without an ``Origin``, when ``Sec-Fetch-Site`` does
-    not say ``cross-site``.
+    So a keyless server answers only a ``Host`` in :data:`KEYLESS_HOSTS`, and
+    takes a state-changing request only from an ``Origin`` on those hosts (or
+    one listed in ``CORS_ORIGINS``; ``*`` admits no origin here) or, without an
+    ``Origin``, when ``Sec-Fetch-Site`` does not say ``cross-site``.
 
     ``bibr batch``, MCP clients and curl send a loopback Host and no Origin; the
     operator's own browser on ``http://127.0.0.1:<port>/docs`` sends a loopback
@@ -116,7 +139,7 @@ def check_keyless_request(method: str, headers: Mapping[str, str]) -> tuple[int,
     if Settings.auth.api_key:
         return None
     host = headers.get("host")
-    if host is not None and not _loopback_url_host(host):
+    if host is not None and not _keyless_host(host):
         return (
             status.HTTP_421_MISDIRECTED_REQUEST,
             "Host not allowed: without AUTH_API_KEY bibr serve answers only loopback names",
@@ -126,8 +149,7 @@ def check_keyless_request(method: str, headers: Mapping[str, str]) -> tuple[int,
     cross_site = "Cross-site request refused: bibr serve has no AUTH_API_KEY"
     origin = headers.get("origin")
     if origin is not None:
-        allowed = Settings.cors.origins
-        if origin in allowed or "*" in allowed or _loopback_url_host(origin):
+        if origin in Settings.cors.origins or _keyless_host(origin, origin=True):
             return None
         return status.HTTP_403_FORBIDDEN, cross_site
     if (headers.get("sec-fetch-site") or "").lower() == "cross-site":

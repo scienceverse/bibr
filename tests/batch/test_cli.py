@@ -469,3 +469,55 @@ def test_remote_refuses_to_send_the_token_to_a_public_http_host(
         captured.out + captured.err
     )
     assert refused is (code == 2)
+
+
+def _remote_batch_output(tmp_path, capsys, monkeypatch, serve_url, *token_args):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+    monkeypatch.delenv("BIBR_SERVE_TOKEN", raising=False)
+    monkeypatch.setattr("bibr.batch.remote.resolve_token", lambda explicit: explicit)
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(_pdf(tmp_path)),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            serve_url,
+            *token_args,
+        ]
+    )
+    code = _run_batch(args)
+    captured = capsys.readouterr()
+    return code, " ".join((captured.out + captured.err).split())
+
+
+@pytest.mark.parametrize(
+    ("serve_url", "warned"),
+    [
+        ("http://gpu-box:8000", True),  # LAN: allowed, but readable on the segment
+        ("http://192.168.1.20:8000", True),
+        ("http://100.113.200.117:8000", False),  # tailnet: WireGuard-encrypted
+        ("http://gpu.tail1234.ts.net:8000", False),
+        ("http://127.0.0.1:8000", False),
+        ("https://bibr.example.org", False),
+    ],
+)
+def test_remote_warns_when_the_token_crosses_a_network_in_clear_text(
+    serve_url, warned, tmp_path, capsys, monkeypatch
+):
+    code, output = _remote_batch_output(
+        tmp_path, capsys, monkeypatch, serve_url, "--token", "serve-token-placeholder"
+    )
+    assert code == 0
+    assert ("the bearer token goes to" in output) is warned
+
+
+def test_remote_without_a_token_may_use_plain_http_to_any_host(tmp_path, capsys, monkeypatch):
+    """Nothing secret rides the requests, so there is nothing to refuse."""
+    code, output = _remote_batch_output(
+        tmp_path, capsys, monkeypatch, "http://bibr.example.org:8000"
+    )
+    assert code == 0
+    assert "Refusing" not in output
+    assert "the bearer token goes to" not in output

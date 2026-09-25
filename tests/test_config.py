@@ -1051,6 +1051,26 @@ def test_redis_password_reaches_sibling_urls_on_the_same_server(monkeypatch):
     assert s.crossref.cache_redis_url == "redis://:hunter2@redis/2"
 
 
+def test_redis_password_reaches_a_unix_socket_url_and_its_siblings(monkeypatch):
+    """A socket URL has no host; redis-py still reads ``unix://:password@/path``."""
+    from redis.connection import parse_url
+
+    s = _redis_env(
+        monkeypatch,
+        {
+            "REDIS_URL": "unix:///var/run/redis/redis.sock?db=0",
+            "REDIS_PASSWORD": "hunter2",
+            "JOBS_REDIS_URL": "unix:///var/run/redis/redis.sock?db=1",
+            "CROSSREF_CACHE_REDIS_URL": "unix:///run/other/redis.sock?db=0",
+        },
+    )
+    assert s.redis.url == "unix://:hunter2@/var/run/redis/redis.sock?db=0"
+    assert parse_url(s.redis.url)["password"] == "hunter2"
+    assert s.jobs.redis_url == "unix://:hunter2@/var/run/redis/redis.sock?db=1"
+    assert s.crossref.cache_redis_url == "unix:///run/other/redis.sock?db=0"
+    assert s.model_dump()["redis"]["url"] == "unix://:***@/var/run/redis/redis.sock?db=0"
+
+
 def test_redis_password_stays_off_a_separate_server_and_explicit_credentials(monkeypatch):
     s = _redis_env(
         monkeypatch,

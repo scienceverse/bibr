@@ -105,7 +105,9 @@ def test_loopback_bind_allows_auth_disabled(host):
 
 @pytest.mark.parametrize(  # noqa: S104 - intentionally exercise unsafe bind addresses
     "host",
-    ["0.0.0.0", "::", "api.example.com", "192.168.1.10"],  # noqa: S104
+    # 127.0.0.2 is loopback, but a keyless server answers only the names its
+    # clients send for 127.0.0.1, ::1 and localhost (check_keyless_request).
+    ["0.0.0.0", "::", "api.example.com", "192.168.1.10", "127.0.0.2"],  # noqa: S104
 )
 def test_network_bind_requires_auth(host):
     from bibr.serve.auth import validate_bind_auth
@@ -583,6 +585,24 @@ class TestKeylessLoopbackGate:
     def test_rebound_host_is_refused_on_every_path(self, server, path):
         resp = self._client(server, "http://evil.example:8000").get(path)
         assert (resp.status_code, resp.json()) == (421, self._BAD_HOST)
+
+    @pytest.mark.parametrize("host", ["127.0.0.2:8000", "bibr.localhost:8000", "localhost."])
+    def test_only_the_names_the_mcp_transport_admits_pass(self, server, host):
+        """One host policy for REST and /mcp (the SDK's allowlist is exact)."""
+        resp = self._client(server).get("/openapi.json", headers={"Host": host})
+        assert (resp.status_code, resp.json()) == (421, self._BAD_HOST)
+
+    @pytest.mark.parametrize("origin", ["https://evil.example", "ftp://127.0.0.1"])
+    def test_a_wildcard_cors_setting_admits_no_origin_without_a_key(
+        self, server, monkeypatch, origin
+    ):
+        from bibr.config import Settings
+
+        monkeypatch.setattr(Settings.cors, "origins", ["*"])
+        resp = self._client(server).post(
+            "/papers/extract", data={"refs": "llm"}, headers={"Origin": origin}
+        )
+        assert (resp.status_code, resp.json()) == (403, self._CROSS_SITE)
 
     @pytest.mark.parametrize(
         ("host", "origin"),

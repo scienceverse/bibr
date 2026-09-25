@@ -932,7 +932,7 @@ class BibrPipelineAPI(ls.LitAPI):
 
     @staticmethod
     def _cache_key(
-        file_hash: str,
+        content_hash: str,
         start_page: int | None,
         end_page: int | None,
         include_figures: bool,
@@ -943,7 +943,9 @@ class BibrPipelineAPI(ls.LitAPI):
         crossref: bool = False,
         input_format: str | None = None,
     ) -> str:
-        key = f"json:{file_hash}"
+        """Response-cache key: the full SHA-256 of the upload (never the 16-hex
+        ``file_hash`` display id) plus every option that changes the export."""
+        key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
         if end_page is not None:

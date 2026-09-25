@@ -34,6 +34,7 @@ from bibr.local.llm_models import (
     variants_for,
 )
 from bibr.presets import PresetManager
+from bibr.utils.hosts import refuse_plaintext_llm_key
 from bibr.utils.onnx_providers import onnxruntime_gpu_reinstall_command
 
 # ---------------------------------------------------------------------------
@@ -419,11 +420,19 @@ def _redact(text: str, api_key: str) -> str:
     return redact_key(text, api_key)
 
 
-def _build_test_client(provider: str, model: str, api_key: str, base_url: str = ""):
+def _build_test_client(
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str = "",
+    *,
+    allow_insecure_http: bool = False,
+):
     """Build an Instructor client for connection testing.
 
     Uses wizard-collected values instead of the Settings singleton
-    (which hasn't been written yet).
+    (which hasn't been written yet). Raises ``ValueError`` rather than send the
+    key over plain HTTP to a public ``base_url``, as the pipeline would.
     """
     import instructor
 
@@ -435,6 +444,7 @@ def _build_test_client(provider: str, model: str, api_key: str, base_url: str = 
     elif provider == "openai":
         kwargs["api_key"] = api_key
         if base_url:
+            refuse_plaintext_llm_key(base_url, api_key, allow_insecure_http=allow_insecure_http)
             kwargs["base_url"] = base_url
     elif provider in ("anthropic", "groq"):
         kwargs["api_key"] = api_key
@@ -455,10 +465,13 @@ _OPENAI_FILTER_PATTERNS = (
 )
 
 
-def _fetch_models(provider: str, api_key: str, base_url: str = "") -> list[str]:
+def _fetch_models(
+    provider: str, api_key: str, base_url: str = "", *, allow_insecure_http: bool = False
+) -> list[str]:
     """Fetch available model IDs from a provider's API.
 
-    Returns a sorted list of model ID strings, or an empty list on any error.
+    Returns a sorted list of model ID strings, or an empty list on any error,
+    including a public plain-HTTP ``base_url`` the key must not be sent to.
     """
     try:
         if provider == "google":
@@ -480,6 +493,7 @@ def _fetch_models(provider: str, api_key: str, base_url: str = "") -> list[str]:
             )
         elif provider == "openai":
             if base_url:
+                refuse_plaintext_llm_key(base_url, api_key, allow_insecure_http=allow_insecure_http)
                 return _fetch_openai_compat_models(
                     api_key, base_url=base_url, filter_non_chat=False
                 )
@@ -1142,10 +1156,7 @@ class SetupWizard:
             self.env_vars[defaults["key_env"]] = api_key
 
         if provider == "openai":
-            base_url = Prompt.ask(
-                "Custom base URL (leave blank for OpenAI default)",
-                default="",
-            )
+            base_url = self._ask_llm_base_url(api_key)
             if base_url:
                 self.env_vars["LLM_BASE_URL"] = base_url
 
@@ -1157,7 +1168,12 @@ class SetupWizard:
         # --- Fetch and select model ---
         model = None
         with self.console.status("Fetching available models …"):
-            models = _fetch_models(provider, api_key, base_url)
+            models = _fetch_models(
+                provider,
+                api_key,
+                base_url,
+                allow_insecure_http=self._allows_insecure_llm_http(),
+            )
 
         if models:
             model = _select_model(models, defaults["model"], self.console)
@@ -1170,6 +1186,33 @@ class SetupWizard:
             model = Prompt.ask("Model name", default=defaults["model"])
 
         self.env_vars["LLM_MODEL"] = model
+
+    def _allows_insecure_llm_http(self) -> bool:
+        value = self.env_vars.get("LLM_ALLOW_INSECURE_HTTP") or os.environ.get(
+            "LLM_ALLOW_INSECURE_HTTP", ""
+        )
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
+    def _ask_llm_base_url(self, api_key: str) -> str:
+        """Ask for ``LLM_BASE_URL`` before the key is first sent to it.
+
+        Listing models and the connection test both send the key, so a public
+        ``http://`` URL is refused here, as the pipeline would refuse it, unless
+        the user opts in; the opt-in is saved as ``LLM_ALLOW_INSECURE_HTTP``.
+        """
+        while True:
+            base_url = Prompt.ask("Custom base URL (leave blank for OpenAI default)", default="")
+            try:
+                refuse_plaintext_llm_key(
+                    base_url, api_key, allow_insecure_http=self._allows_insecure_llm_http()
+                )
+            except ValueError as exc:
+                ui.error(self.console, str(exc))
+                if Confirm.ask("Send the key over plain HTTP anyway?", default=False):
+                    self.env_vars["LLM_ALLOW_INSECURE_HTTP"] = "true"
+                    return base_url
+                continue
+            return base_url
 
     def _step_llm_local(self) -> None:
         """Managed local LLM: pick a curated model/quant for this machine."""
@@ -1333,7 +1376,13 @@ class SetupWizard:
                     class TestResponse(BaseModel):
                         reply: str = Field(description="Your reply")
 
-                    client = _build_test_client(provider, model, api_key, base_url)
+                    client = _build_test_client(
+                        provider,
+                        model,
+                        api_key,
+                        base_url,
+                        allow_insecure_http=self._allows_insecure_llm_http(),
+                    )
                     create_kwargs: dict = {}
                     if provider == "google":
                         create_kwargs["generation_config"] = {"max_tokens": 64}

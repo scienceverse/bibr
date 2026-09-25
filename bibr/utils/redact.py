@@ -32,8 +32,11 @@ _BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-]{8,}=*", re.IGNOR
 _URL_USERINFO_RE = re.compile(r"(://)[^/\s:@]*:[^/\s:@]+@")
 # Just the password of URL user-info, keeping the user name visible.
 _URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^/\s:@]+@")
-# Any ``scheme://…`` URL, for text that must not name endpoints at all.
-_URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s'\"<>]+", re.IGNORECASE)
+# Any ``scheme://…`` URL, for text that must not name endpoints at all. A match
+# takes the whole run of scheme characters before ``://`` (so ``-https://`` loses
+# the dash too) and starts only where such a run starts: a long run without
+# ``://`` is scanned once, not once per word boundary inside it.
+_URL_RE = re.compile(r"(?<![a-z0-9+.\-])[a-z0-9+.\-]+://[^\s'\"<>]+", re.IGNORECASE)
 # Vendor key shapes: Google (AIza…), OpenAI/Anthropic (sk-…), Groq (gsk_…).
 _VENDOR_KEY_RE = re.compile(
     r"\b(?:AIza[0-9A-Za-z_\-]{20,}|sk-(?:ant-)?[0-9A-Za-z_\-]{16,}|gsk_[0-9A-Za-z_\-]{16,})"
@@ -118,6 +121,19 @@ def describe_error(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+def _scrubbed_arg(arg: object) -> object:
+    """*arg* with secrets masked: a str is scrubbed, any other object is
+    replaced by its scrubbed text only when its text carries a secret."""
+    if isinstance(arg, str):
+        return scrub_secrets(arg)
+    try:
+        text = str(arg)
+    except Exception:  # noqa: BLE001 - the whole-message check below decides
+        return arg
+    scrubbed = scrub_secrets(text)
+    return scrubbed if scrubbed != text else arg
+
+
 class SecretScrubbingFilter(logging.Filter):
     """Logging filter that scrubs credential-shaped substrings from records.
 
@@ -135,12 +151,7 @@ class SecretScrubbingFilter(logging.Filter):
         if rendered is not None:
             scrubbed = scrub_secrets(rendered)
             if scrubbed != rendered:
-                # Freeze the scrubbed text. The formatter renders
-                # ``msg % args`` only after this filter has run, so an
-                # argument that is not a str (an exception, the most common
-                # case) would otherwise come back unscrubbed.
-                record.msg = scrubbed
-                record.args = ()
+                self._mask(record, scrubbed)
         else:
             if isinstance(record.msg, str):
                 record.msg = scrub_secrets(record.msg)
@@ -153,6 +164,28 @@ class SecretScrubbingFilter(logging.Filter):
         elif record.exc_info:
             record.exc_text = scrub_secrets(logging.Formatter().formatException(record.exc_info))
         return True
+
+    @staticmethod
+    def _mask(record: logging.LogRecord, scrubbed: str) -> None:
+        """Make *record* render as *scrubbed*, the masked form of its message.
+
+        The formatter renders ``msg % args`` only after this filter has run, so
+        an argument that is not a str (an exception, the most common case) must
+        be replaced, not skipped. Masking argument by argument keeps the tuple's
+        shape, which formatters such as uvicorn's ``AccessFormatter`` unpack;
+        when that does not render the same masked text, the message is frozen.
+        """
+        if isinstance(record.msg, str) and isinstance(record.args, tuple):
+            record.msg = scrub_secrets(record.msg)
+            record.args = tuple(_scrubbed_arg(a) for a in record.args)
+            try:
+                masked = record.getMessage() == scrubbed
+            except Exception:  # noqa: BLE001 - masking split a format directive
+                masked = False
+            if masked:
+                return
+        record.msg = scrubbed
+        record.args = ()
 
 
 def install_secret_scrubbing(*targets: logging.Logger | logging.Handler) -> None:

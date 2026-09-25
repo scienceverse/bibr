@@ -539,7 +539,7 @@ def test_step_llm_provider_fetches_models_after_credentials():
     assert wizard.env_vars["LLM_PROVIDER"] == "openai"
     assert wizard.env_vars["LLM_MODEL"] == "gpt-4o"
     assert wizard.env_vars["LLM_API_KEY"] == "sk-test"
-    mock_fetch.assert_called_once_with("openai", "sk-test", "")
+    mock_fetch.assert_called_once_with("openai", "sk-test", "", allow_insecure_http=False)
     mock_select.assert_called_once()
 
 

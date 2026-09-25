@@ -104,6 +104,25 @@ def test_rewrites_keep_the_existing_mode_and_leave_no_temp_file(tmp_path):
 
 
 @_POSIX_MODES
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores modes")
+def test_an_existing_env_is_rewritten_in_place(tmp_path):
+    """A writable .env in a directory the user cannot write (or a single-file
+    bind mount) must stay writable, and a hard link must see the update."""
+    project = tmp_path / "project"
+    project.mkdir()
+    env_path = project / ".env"
+    env_path.write_text("A=1\n", encoding="utf-8")
+    other_name = tmp_path / "linked.env"
+    os.link(env_path, other_name)
+    os.chmod(project, 0o500)
+    try:
+        merge_env(env_path, {"B": "2"})
+    finally:
+        os.chmod(project, 0o700)
+    assert parse_env(other_name) == {"A": "1", "B": "2"}
+
+
+@_POSIX_MODES
 def test_a_symlinked_env_is_rewritten_through_the_link(tmp_path):
     from bibr.env_utils import write_env_text
 

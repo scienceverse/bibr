@@ -95,6 +95,64 @@ async def test_page_warning_and_file_error_name_the_status_not_the_ocr_url(monke
     assert fs.error == "OCR failed for all pages: HTTPStatusError: HTTP 400 Bad Request"
 
 
+async def test_an_upstream_outage_fails_the_file_without_the_ocr_url(monkeypatch):
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.pipeline.stages.ocr import OcrStage
+
+    async def outage(*_args, **_kwargs):
+        raise UpstreamServiceError("ocr", f"Client error '503' for url '{_OCR_URL}'")
+
+    monkeypatch.setattr("bibr.pipeline.stages.ocr.ocr_page_regions", outage)
+    fs = _ocr_fs(pages=1)
+    await OcrStage().run(_ocr_ctx(fs))
+
+    assert fs.error == (
+        "OCR upstream service failed: Error in ocr: Client error '503' for url '<url>'"
+    )
+
+
+async def test_an_unexpected_ocr_failure_names_the_status_not_the_ocr_url(monkeypatch):
+    from bibr.pipeline.stages.ocr import OcrStage
+
+    def fails_before_any_page(*_args, **_kwargs):
+        raise _status_error()
+
+    monkeypatch.setattr("bibr.pipeline.stages.ocr.ocr_page_regions", fails_before_any_page)
+    fs = _ocr_fs(pages=1)
+    await OcrStage().run(_ocr_ctx(fs))
+
+    assert fs.error == "OCR failed: HTTPStatusError: HTTP 400 Bad Request"
+
+
+async def test_an_enricher_crash_warning_omits_the_request_url():
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.context import PipelineContext, RunConfig
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.stages.enrich import EnrichmentStage
+
+    class _Crashes:
+        name = "crashes"
+
+        async def enrich(self, fs):  # noqa: ARG002
+            raise _status_error("https://api.crossref.org/works?mailto=me@example.org&query=x")
+
+    fs = FileState(path=Path("p.pdf"), paper=MagicMock())
+    settings = GlobalSettings()
+    settings.crossref.enrich = True
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=RunConfig(crossref=True),
+        settings=settings,
+    )
+    await EnrichmentStage([_Crashes()]).run(ctx)
+
+    assert [w.message for w in fs.warnings] == [
+        "_Crashes failed: HTTPStatusError: HTTP 400 Bad Request"
+    ]
+
+
 async def test_crossref_failure_warning_and_detail_omit_the_request_url():
     from bibr.pipeline.enricher import CrossrefEnricher
 

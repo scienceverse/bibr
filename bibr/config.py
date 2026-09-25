@@ -169,22 +169,29 @@ def _with_redis_password(url: str, password: str) -> str:
     """*url* with URL-encoded *password* in its user-info, unless it carries one.
 
     A user name is kept (``redis://default@host`` for a Redis 6 ACL user), and
-    a password containing ``@ : / ? #`` still authenticates.
+    a password containing ``@ : / ? #`` still authenticates. A host-less
+    ``unix:///path/redis.sock`` gets ``unix://:password@/path/redis.sock``,
+    which redis-py reads the same way.
     """
     parsed = urlparse(url)
-    if parsed.password is not None or not parsed.hostname:
+    if parsed.password is not None:
         return url
     user, _, hostport = parsed.netloc.rpartition("@")
     netloc = f"{user}:{_url_quote(password, safe='')}@{hostport}"
     return urlunparse(parsed._replace(netloc=netloc))
 
 
+def _redis_server(url: str) -> tuple[str, str | int] | None:
+    """The server *url* connects to: its socket path, or its host and port."""
+    parsed = urlparse(url)
+    if parsed.scheme == "unix":
+        return ("unix", parsed.path) if parsed.path else None
+    return (parsed.hostname, parsed.port or 6379) if parsed.hostname else None
+
+
 def _same_redis_server(url: str, other: str) -> bool:
-    a, b = urlparse(url), urlparse(other)
-    return a.hostname is not None and (a.hostname, a.port or 6379) == (
-        b.hostname,
-        b.port or 6379,
-    )
+    server = _redis_server(url)
+    return server is not None and server == _redis_server(other)
 
 
 def _split_csv_env(value, *, lower: bool = False):
@@ -306,9 +313,10 @@ class LlmOptions(_BibrSettings):
     )
     allow_insecure_http: bool = Field(
         False,
-        description="Send LLM_API_KEY over plain http:// to a public LLM_BASE_URL host. "
-        "Loopback and private-network hosts (RFC 1918 or tailnet addresses, single-label "
-        "names, .local/.internal/.lan) never need it; public hosts default to HTTPS-only.",
+        description="Send the LLM API key over plain http:// to a public LLM_BASE_URL or "
+        "OCR_VISION_BASE_URL host. Loopback and private-network hosts (RFC 1918 or tailnet "
+        "addresses, single-label names, .local/.internal/.lan/.ts.net) never need it; public "
+        "hosts default to HTTPS-only.",
     )
     chat_template_kwargs: dict[str, Any] = Field(
         default_factory=dict,

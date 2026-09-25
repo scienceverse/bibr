@@ -745,7 +745,8 @@ def _export_paper_payload(
 
     def _record_ids(m) -> dict[str, Any]:
         """License and funder identifiers of one external record."""
-        license_url = getattr(m, "license_url", None)
+        # Taken from the external record as deposited, like its ``url``.
+        license_url = _without_active_scheme(getattr(m, "license_url", None))
         funders = getattr(m, "funders", None)
         return {
             "license_url": license_url,
