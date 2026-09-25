@@ -343,6 +343,38 @@ class TestErrorTranslation:
         assert out["error_code"] == "llm_invalid_output"
         assert out["safe_diagnostics"] == diagnostics.to_dict()
 
+    @pytest.mark.parametrize(
+        ("error_class", "kind", "code", "status"),
+        [
+            ("LlmTruncatedError", "processing", "llm_truncated", 422),
+            ("LlmInvalidOutputError", "processing", "llm_invalid_output", 422),
+            ("LlmTimeoutError", "upstream_service", "llm_timeout", 502),
+            ("LlmServiceError", "upstream_service", "llm_failed", 502),
+            ("LlmRejectedError", "upstream_service", "llm_failed", 502),
+            ("LlmCallError", "upstream_service", "llm_failed", 502),
+        ],
+    )
+    async def test_typed_llm_failures_keep_their_code(
+        self, tmp_path, error_class, kind, code, status
+    ):
+        """A truncated or invalid response is deterministic: 422, so clients
+        and ``bibr batch --remote`` do not retry it as an outage."""
+        from fastapi import HTTPException
+
+        from bibr import exceptions
+
+        error = getattr(exceptions, error_class)("Failed to extract references", cause="why")
+        api = _new_api(tmp_path)
+        out = api._translate_error("x.pdf", error)
+
+        assert out["error_kind"] == kind
+        assert out["error_code"] == code
+        assert out["error"] == "Error in LLM: Failed to extract references (why)"
+        with pytest.raises(HTTPException) as raised:
+            await api.encode_response(out)
+        assert raised.value.status_code == status
+        assert raised.value.detail == {"message": out["error"], "error_code": code}
+
 
 def test_real_fastapi_body_nests_structured_processing_detail(tmp_path):
     from fastapi import FastAPI

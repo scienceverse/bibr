@@ -961,12 +961,21 @@ class BibrPipelineAPI(ls.LitAPI):
         """Map pipeline exceptions back to the wire error-kind taxonomy."""
         from bibr.exceptions import (
             InputValidationError,
+            LlmCallError,
+            LlmInvalidOutputError,
+            LlmTruncatedError,
             ProcessingError,
             UpstreamServiceError,
         )
 
         if isinstance(exc, InputValidationError):
             kind = "input_validation"
+            message = str(exc)
+        elif isinstance(exc, (LlmTruncatedError, LlmInvalidOutputError)):
+            # The model answered, but the answer was cut off or malformed.
+            # The same request fails the same way again, so this is a 422
+            # with its code, not a 502 that clients would retry.
+            kind = "processing"
             message = str(exc)
         elif isinstance(exc, UpstreamServiceError):
             kind = "upstream_service"
@@ -977,9 +986,11 @@ class BibrPipelineAPI(ls.LitAPI):
         else:
             kind = "unexpected"
             message = "Internal processing error"
-        error_code = exc.error_code if isinstance(exc, ProcessingError) else None
+        error_code = exc.error_code if isinstance(exc, (ProcessingError, LlmCallError)) else None
         safe_diagnostics = exc.safe_diagnostics if isinstance(exc, ProcessingError) else None
-        if error_code:
+        # An unclassified LLM failure may be a bug in the call path: keep its
+        # traceback like any other uncoded error.
+        if error_code and type(exc) is not LlmCallError:
             logger.error("[%s] %s (%s): %s", filename, kind, error_code, message)
         else:
             logger.exception("[%s] %s: %s", filename, kind, exc)

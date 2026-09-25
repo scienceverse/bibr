@@ -12,7 +12,7 @@ import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from bibr.exceptions import ProcessingError
+from bibr.exceptions import LlmCallError, ProcessingError
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import NAME_CHAR_CLS
 
@@ -1914,11 +1914,14 @@ class PostParseStage:
             if isinstance(result, BaseException):
                 typed_processing = isinstance(result, ProcessingError)
                 protocol_failure = typed_processing and result.error_code == "llm_invalid_output"
-                error_code = (
-                    result.error_code
-                    if typed_processing and result.error_code
-                    else "extraction_failed"
-                )
+                if typed_processing and result.error_code:
+                    error_code = result.error_code
+                elif isinstance(result, LlmCallError):
+                    # Say how the LLM failed (llm_timeout, llm_truncated, ...)
+                    # instead of the generic extraction code.
+                    error_code = result.error_code
+                else:
+                    error_code = "extraction_failed"
                 if typed_processing:
                     result.failed_stage = result.failed_stage or self.name
                 if protocol_failure:

@@ -16,7 +16,17 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from bibr.clients.prompts import PROMPTS
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.exceptions import ProcessingError, SafeLlmDiagnostics, UpstreamServiceError
+from bibr.exceptions import (
+    LlmCallError,
+    LlmInvalidOutputError,
+    LlmRejectedError,
+    LlmServiceError,
+    LlmTimeoutError,
+    LlmTruncatedError,
+    ProcessingError,
+    SafeLlmDiagnostics,
+    UpstreamServiceError,
+)
 from bibr.schemas import (
     AuthorLLM,
     AuthorsLLM,
@@ -289,6 +299,162 @@ def _find_last_completion(exc: BaseException) -> Any:
         nxt = getattr(cur, "original_error", None)
         cur = nxt if isinstance(nxt, BaseException) else cur.__cause__
     return None
+
+
+# How far down ``original_error`` / ``__cause__`` / ``__context__`` the failure
+# classifier looks. Instructor and the SDKs wrap an error two or three deep.
+_FAILURE_CHAIN_DEPTH = 8
+
+_TIMEOUT_EXC_NAMES = frozenset(
+    {"TimeoutError", "TimeoutException", "APITimeoutError", "DeadlineExceeded"}
+)
+_INVALID_OUTPUT_EXC_NAMES = frozenset(
+    {"ValidationError", "JSONDecodeError", "ResponseParsingError", "AsyncValidationError"}
+)
+_TRUNCATED_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+
+def _failure_chain(exc: BaseException) -> list[BaseException]:
+    """*exc* and the errors it wraps, outermost first, without repeats."""
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending and len(chain) < _FAILURE_CHAIN_DEPTH:
+        current = pending.pop(0)
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        chain.append(current)
+        pending.extend(
+            nested
+            for nested in (
+                getattr(current, "original_error", None),
+                current.__cause__,
+                None if current.__suppress_context__ else current.__context__,
+            )
+            if isinstance(nested, BaseException)
+        )
+    return chain
+
+
+def _exc_names(exc: BaseException) -> set[str]:
+    return {klass.__name__ for klass in type(exc).__mro__}
+
+
+def _finish_reason(completion: Any) -> str | None:
+    """The provider's stop reason for *completion*, lowercased, if it has one."""
+    choices = getattr(completion, "choices", None)
+    reason = getattr(choices[0], "finish_reason", None) if choices else None
+    if reason is None:
+        reason = getattr(completion, "stop_reason", None)  # Anthropic
+    if reason is None:
+        candidates = getattr(completion, "candidates", None)  # google-genai
+        reason = getattr(candidates[0], "finish_reason", None) if candidates else None
+    if reason is None:
+        return None
+    return str(getattr(reason, "name", reason)).lower()
+
+
+def _classify_llm_failure(exc: BaseException) -> type[LlmCallError]:
+    """Pick the :class:`~bibr.exceptions.LlmCallError` class for a failed call.
+
+    The order encodes precedence: a truncated response stays a truncation even
+    when Instructor wrapped it, a status anywhere in the chain beats the
+    wrapper's missing one, and only a failure with no service signal counts as
+    invalid output.
+    """
+    if isinstance(exc, LlmCallError):
+        return type(exc)
+    chain = _failure_chain(exc)
+    for error in chain:
+        if "IncompleteOutputException" in _exc_names(error):
+            return LlmTruncatedError
+        completion = getattr(error, "last_completion", None)
+        if completion is not None and _finish_reason(completion) in _TRUNCATED_FINISH_REASONS:
+            return LlmTruncatedError
+    if any(_exc_names(error) & _TIMEOUT_EXC_NAMES for error in chain):
+        return LlmTimeoutError
+    status = next(
+        (code for error in chain if (code := _extract_http_status(error)) is not None), None
+    )
+    if status == 408:
+        return LlmTimeoutError
+    if status is not None and (status == 429 or status >= 500):
+        return LlmServiceError
+    if status is not None and 400 <= status < 500:
+        return LlmRejectedError
+    if any(
+        "CircuitOpenError" in _exc_names(error) or is_transient_network_error(error)
+        for error in chain
+    ):
+        return LlmServiceError
+    if any(_exc_names(error) & _INVALID_OUTPUT_EXC_NAMES for error in chain):
+        return LlmInvalidOutputError
+    return LlmCallError
+
+
+def _bounded(text: str, limit: int = 160) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _failure_cause(error_class: type[LlmCallError], exc: BaseException) -> str:
+    """A bounded description of why the call failed, without model output.
+
+    Validation errors quote the rejected values, so for invalid output only
+    the error locations and types are kept.
+    """
+    if isinstance(exc, LlmCallError) and exc.cause:
+        return exc.cause
+    chain = _failure_chain(exc)
+    if error_class is LlmTruncatedError:
+        return "the response stopped at the output-token limit"
+    if error_class is LlmInvalidOutputError:
+        from pydantic import ValidationError
+
+        for error in chain:
+            if isinstance(error, ValidationError):
+                locations = ", ".join(
+                    f"{'.'.join(str(part) for part in item['loc']) or '<root>'} [{item['type']}]"
+                    for item in error.errors()[:3]
+                )
+                return _bounded(f"{error.error_count()} validation error(s): {locations}")
+            if isinstance(error, json.JSONDecodeError):
+                return _bounded(f"JSONDecodeError: {error.msg} at position {error.pos}")
+        return f"invalid structured output ({type(chain[-1]).__name__})"
+    root = chain[-1]
+    for error in chain:
+        if _extract_http_status(error) is not None:
+            root = error
+            break
+    detail = str(root)
+    status = _extract_http_status(root)
+    prefix = f"HTTP {status}: " if status is not None and str(status) not in detail else ""
+    return _bounded(f"{prefix}{type(root).__name__}: {detail}" if detail else type(root).__name__)
+
+
+def llm_call_error(message: str, exc: BaseException) -> LlmCallError:
+    """Wrap a failed LLM task call in the :class:`LlmCallError` that fits it.
+
+    ``message`` names the task ("Failed to extract authors"); the cause is
+    appended from the exception chain, and ``exc`` stays ``original_error``.
+    """
+    error_class = _classify_llm_failure(exc)
+    return error_class(message, exc, cause=_failure_cause(error_class, exc))
+
+
+def llm_failure_code(exc: BaseException) -> str:
+    """The stable error code for a failed LLM call, however it was raised.
+
+    Callers that degrade on any exception use it to label their warning: a
+    typed error keeps its code, a typed processing failure its own, and a raw
+    exception (``invoke_structured`` does not wrap) is classified here.
+    """
+    if isinstance(exc, LlmCallError):
+        return exc.error_code
+    if isinstance(exc, ProcessingError) and exc.error_code:
+        return exc.error_code
+    return _classify_llm_failure(exc).error_code
 
 
 def _completion_text(completion: Any) -> str:
@@ -1841,7 +2007,7 @@ class LLMClient:
                 f"LLM title/keywords extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract title/keywords", e) from e
+            raise llm_call_error("Failed to extract title/keywords", e) from e
 
     @track_llm_usage
     async def extract_authors(
@@ -1890,7 +2056,7 @@ class LLMClient:
                 f"LLM author extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract authors", e) from e
+            raise llm_call_error("Failed to extract authors", e) from e
 
     @track_llm_usage
     async def extract_paper_classification(
@@ -1927,7 +2093,7 @@ class LLMClient:
                 f"LLM paper classification failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to classify paper", e) from e
+            raise llm_call_error("Failed to classify paper", e) from e
 
     @track_llm_usage
     async def label_paper_type(
@@ -1963,7 +2129,7 @@ class LLMClient:
                 f"LLM paper_type labeling failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to label paper_type", e) from e
+            raise llm_call_error("Failed to label paper_type", e) from e
 
     @track_llm_usage
     async def extract_core_metadata_merged(
@@ -2000,7 +2166,7 @@ class LLMClient:
                 f"Merged LLM core metadata extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract core metadata", e) from e
+            raise llm_call_error("Failed to extract core metadata", e) from e
 
     async def extract_core_metadata(
         self,
@@ -2064,9 +2230,7 @@ class LLMClient:
 
         # Title/keywords is the anchor of the record — propagate its failure.
         if isinstance(title_kw, BaseException):
-            raise UpstreamServiceError(
-                "LLM", "Failed to extract title/keywords", title_kw
-            ) from title_kw
+            raise llm_call_error("Failed to extract title/keywords", title_kw) from title_kw
         # Authors failing outright (e.g. a persistent truncation the salvage
         # couldn't recover) must NOT sink the whole record — title/keywords
         # succeeded. Degrade to an empty list; the empty-author re-roll below
@@ -2221,7 +2385,7 @@ class LLMClient:
                 f"LLM reference extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract references", e) from e
+            raise llm_call_error("Failed to extract references", e) from e
 
     @track_llm_usage
     async def extract_references_chunk(
@@ -2268,7 +2432,7 @@ class LLMClient:
                 f"LLM chunked reference extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract references (chunk)", e) from e
+            raise llm_call_error("Failed to extract references (chunk)", e) from e
 
     @track_llm_usage
     async def segment_references(self, text: str, file_hash: str = "unknown") -> list[str]:
@@ -2333,7 +2497,7 @@ class LLMClient:
                 f"LLM reference segmentation failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to segment references", e) from e
+            raise llm_call_error("Failed to segment references", e) from e
 
     async def _segment_window(self, window_text: str) -> list[str]:
         """LLM-segment one references window into verbatim opening anchors."""
@@ -2409,7 +2573,7 @@ class LLMClient:
                 f"LLM research-integrity extraction failed (hash={file_hash}): {e}",
                 exc_info=True,
             )
-            raise UpstreamServiceError("LLM", "Failed to extract research integrity", e) from e
+            raise llm_call_error("Failed to extract research integrity", e) from e
 
     @track_llm_usage
     async def resolve_citations(

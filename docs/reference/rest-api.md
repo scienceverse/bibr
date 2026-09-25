@@ -182,10 +182,10 @@ tokens as new usage.
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
-| `422` | Extraction processing error |
+| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way |
 | `429` | Upload admission or async-job active cap reached |
 | `500` | Unexpected internal error |
-| `502` | Upstream service failed (OCR server, LLM API) |
+| `502` | Upstream service failed (OCR server, LLM API); an LLM failure carries `error_code` `llm_timeout` or `llm_failed` |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
 | `504` | Pipeline processing timed out |
 | `503` | Job store unreachable (`JOBS_STORE=redis`): the upload was dropped and nothing queued — retry later |

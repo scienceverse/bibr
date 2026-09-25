@@ -213,6 +213,20 @@ released.
 
 ### Fixed
 
+- A failed LLM call now says how it failed. Every LLM task raised a bare
+  `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
+  answered all of them with 502, so a response truncated at the token limit
+  or rejected by schema validation, which fails the same way on every retry,
+  looked like an outage and `bibr batch --remote` resubmitted the paper up to
+  four times. The call now raises an `LlmCallError` subclass
+  (`LlmTruncatedError`, `LlmInvalidOutputError`, `LlmTimeoutError`,
+  `LlmServiceError`, `LlmRejectedError`), still an `UpstreamServiceError`, with
+  an `error_code` (`llm_truncated`, `llm_invalid_output`, `llm_timeout`,
+  `llm_failed`) and a bounded cause in the message; for invalid output it
+  names the error locations only, never the model's text. Serve answers a
+  truncated or invalid response with 422 and its code, and keeps 502, now with
+  the code, for the others. A post-parse failure caused by an LLM error
+  records that code instead of `extraction_failed`.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

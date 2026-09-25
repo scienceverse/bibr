@@ -346,6 +346,7 @@ class ErrorCode(StrEnum):
     PARSE_FAILED = "parse_failed"
     EXTRACTION_FAILED = "extraction_failed"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
+    LLM_TRUNCATED = "llm_truncated"
     EXPORT_FAILED = "export_failed"
 
     # Upstream

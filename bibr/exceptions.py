@@ -8,11 +8,19 @@ distinguish at HTTP / CLI boundaries:
 - ``ProcessingError``       (422 for stable processing failures) — processing failed mid-pipeline
 - ``ConfigurationError``          — invalid ``.env`` / environment settings
 
+A failed LLM task call raises an ``LlmCallError``, an ``UpstreamServiceError``
+subclass whose class and ``error_code`` say how it failed: the service did not
+answer (``LlmServiceError``, ``LlmTimeoutError``), refused the request
+(``LlmRejectedError``), or answered with a truncated or invalid response
+(``LlmTruncatedError``, ``LlmInvalidOutputError``). Serve maps the last two to
+422, because retrying the same request cannot help.
+
 Most call sites catch the bare ``Exception`` and surface a structured
-``ProcessingStatus`` instead. The one load-bearing specific catch is in
-``bibr/clients/llm.py`` where ``UpstreamServiceError`` triggers retry.
-Keep the hierarchy minimal; do not add new subclasses unless a new
-catch site needs to discriminate them.
+``ProcessingStatus`` instead. The specific catches are the degrade sites that
+keep a paper when an optional ``UpstreamServiceError`` call fails,
+``Pipeline.process_file`` and serve's error translation. Keep the hierarchy
+minimal; do not add new subclasses unless a new catch site needs to
+discriminate them.
 """
 
 from __future__ import annotations
@@ -266,6 +274,62 @@ class UpstreamServiceError(BibrError):
         self.service_name = service_name
         self.original_error = original_error
         super().__init__(f"Error in {service_name}: {message}")
+
+
+class LlmCallError(UpstreamServiceError):
+    """An LLM task call failed; the subclass says how.
+
+    Every class here is an ``UpstreamServiceError``, so each site that degrades
+    on an upstream failure keeps doing so. ``error_code`` is the stable code
+    for warnings, issues and HTTP details, and the message keeps a bounded
+    description of the cause. :func:`bibr.clients.llm.llm_call_error` picks the
+    class from the exception chain; this base class is a failure no rule
+    recognized, such as a bug in the call path.
+    """
+
+    error_code = "llm_failed"
+
+    def __init__(
+        self,
+        message: str,
+        original_error: BaseException | None = None,
+        *,
+        cause: str | None = None,
+    ):
+        super().__init__("LLM", f"{message} ({cause})" if cause else message, original_error)
+        self.cause = cause
+
+
+class LlmServiceError(LlmCallError):
+    """The LLM service did not answer: a 429 or 5xx status, a transport failure
+    or an open circuit breaker. Retrying later can succeed."""
+
+
+class LlmTimeoutError(LlmServiceError):
+    """The LLM call did not finish within its time budget."""
+
+    error_code = "llm_timeout"
+
+
+class LlmRejectedError(LlmCallError):
+    """The LLM service refused the request with a 4xx status other than 429 —
+    a credential, model or request-size problem rather than an outage."""
+
+
+class LlmTruncatedError(LlmCallError):
+    """The model stopped at its output-token limit before finishing the response.
+
+    Deterministic for the same input and settings, so a retry does not help.
+    """
+
+    error_code = "llm_truncated"
+
+
+class LlmInvalidOutputError(LlmCallError):
+    """The model's finished response failed JSON parsing or schema validation,
+    including any validation re-asks. Deterministic, like a truncation."""
+
+    error_code = "llm_invalid_output"
 
 
 class InputValidationError(BibrError):
