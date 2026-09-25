@@ -336,6 +336,16 @@ def test_keyword_rule(incumbent, doc_info, section, value, source):
     assert (decision.value, decision.source) == (value, source)
 
 
+def test_abstention_decides_no_keywords():
+    decision = decide_keywords(
+        FieldCandidate("keywords", None, []),
+        doc_info=FieldCandidate("keywords", "doc_info", ["doc"]),
+        section=FieldCandidate("keywords", "keywords_section", ["section"]),
+        abstained=True,
+    )
+    assert (decision.value, decision.selected, decision.rule) == ([], None, "abstained")
+
+
 def test_notice_keywords_are_never_used():
     decision = decide_keywords(
         FieldCandidate("keywords", "llm", ["notice"], veto="correction notice"),
