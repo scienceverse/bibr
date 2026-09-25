@@ -362,6 +362,16 @@ released.
   footnote sections added at the end of the list, so enough floats could
   place a terminal References section in the "first half" and reset it. Only
   body sections count now.
+- The printed abstract span opened only on absolute page 1 and continued only
+  onto page 2. A PDF processed with `--pages` or serve `start_page` keeps its
+  absolute page numbers, and DOCX, HTML and ePub input has no pages, so none
+  of them got a span: a DOCX with no model abstract exported an empty one, and
+  a DOCX model abstract was flagged `VAL_ABSTRACT_SUSPECT` (`ungrounded`) even
+  when it matched the printed abstract. The span now opens on the first page
+  the parse saw, as the first-page abstract fallback already did, and skips
+  the page test for input without pages. On the eLife HTML sample it now
+  selects exactly the printed Abstract section in 841 of 984 articles, where it
+  selected nothing.
 
 ### Added
 

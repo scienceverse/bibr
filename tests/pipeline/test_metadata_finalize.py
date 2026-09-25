@@ -896,3 +896,129 @@ class TestSelectedAbstractFinalize:
         resolution = _selected_resolution(explicit, unsafe, allowed_text_ids=allowed_ids)
 
         assert select_abstract_span(contents, resolution).text_ids == (2,)
+
+
+class TestAbstractSpanFirstProcessedPage:
+    """The span opens on the first page the parse saw, not absolute page 1.
+
+    ``--pages 5-12`` / serve ``start_page`` keep absolute page numbers, and
+    native DOCX/HTML/JATS/ePub parses carry no pages at all; in both a printed
+    abstract used to select nothing, so a run without an LLM abstract exported
+    an empty one.
+    """
+
+    ABSTRACT = (
+        "We tested whether moral licensing replicates in a large preregistered sample. "
+        "It did not replicate."
+    )
+
+    @staticmethod
+    def _contents(page_of) -> PaperContents:
+        from bibr.paper_contents import Provenance
+
+        def prov(page, y):
+            return [Provenance(page, (100, y, 900, y + 30))] if page is not None else []
+
+        sections = [
+            PaperSection(0, "", 0, None),
+            PaperSection(
+                1,
+                "Moral Licensing Revisited: A Registered Report",
+                1,
+                0,
+                CanonicalSection.TITLE,
+                provenance=prov(page_of(1), 50),
+            ),
+            PaperSection(
+                2, "Abstract", 1, 0, CanonicalSection.ABSTRACT, provenance=prov(page_of(1), 300)
+            ),
+            PaperSection(
+                3,
+                "Introduction",
+                1,
+                0,
+                CanonicalSection.INTRODUCTION,
+                provenance=prov(page_of(1), 600),
+            ),
+            PaperSection(
+                4, "Method", 1, 0, CanonicalSection.METHODS, provenance=prov(page_of(2), 50)
+            ),
+        ]
+        for section in sections[2:]:
+            section.classification_source = "exact_alias"
+
+        def row(text_id, text, section_id, page, y):
+            return PaperSentence(
+                text_id,
+                text,
+                section_id,
+                text_id,
+                page_number=page_of(page),
+                provenance=prov(page_of(page), y),
+            )
+
+        sentences = [
+            row(1, "Jane Doe and John Roe", 1, 1, 120),
+            row(2, "Department of Psychology, University of Somewhere", 1, 1, 180),
+            row(
+                3,
+                "We tested whether moral licensing replicates in a large preregistered sample.",
+                2,
+                1,
+                340,
+            ),
+            row(4, "It did not replicate.", 2, 1, 370),
+            row(5, "Moral licensing is a popular idea.", 3, 1, 640),
+            row(6, "We recruited 1000 adults.", 4, 2, 90),
+        ]
+        contents = _contents(sentences, sections)
+        contents.detected_title = sections[1].header
+        return contents
+
+    @pytest.mark.parametrize(
+        "page_of",
+        [lambda page: page, lambda page: page + 4, lambda page: None],
+        ids=["pdf-unsliced", "pdf-pages-5-6", "native-no-pages"],
+    )
+    def test_printed_abstract_is_selected_and_finalized(self, page_of):
+        from bibr.extract.front_matter import resolve_front_matter
+        from bibr.structure.implicit_sections import select_abstract_span
+
+        contents = self._contents(page_of)
+        resolution, _ = resolve_front_matter(contents)
+
+        selection = select_abstract_span(contents, resolution)
+        assert selection.text_ids == (3, 4)
+        assert selection.reason_flags == ("explicit_abstract",)
+
+        meta = PaperMetadata(doi="10.1/x", title="T", abstract="")
+        _finalize_abstract_and_keywords(contents, meta, resolution=resolution)
+        assert meta.abstract == self.ABSTRACT
+
+    def test_sliced_continuation_reaches_one_page_past_the_first_processed_page(self):
+        from bibr.structure.implicit_sections import select_abstract_span
+
+        sections = [
+            PaperSection(0, "Root", 0, None),
+            PaperSection(1, "Paper Title", 1, 0, CanonicalSection.UNKNOWN),
+            PaperSection(2, "Introduction", 1, 0, CanonicalSection.INTRODUCTION),
+        ]
+        sentences = [
+            PaperSentence(1, "Paper Title", 1, 1, page_number=5),
+            PaperSentence(2, "Selected abstract sentence one.", 1, 2, page_number=5),
+            PaperSentence(3, "Selected continuation on page six.", 1, 3, page_number=6),
+            PaperSentence(4, "Spill onto page seven.", 1, 4, page_number=7),
+            PaperSentence(5, "Body sentence.", 2, 5, page_number=7),
+        ]
+        contents = _contents(sentences, sections)
+        resolution = _selected_resolution(
+            _candidate("abstract-1", 1, (2,), sentences[1].text, roles={"abstract"}, page=5),
+            _candidate("abstract-2", 2, (3,), sentences[2].text, roles=set(), page=6),
+            _candidate("abstract-3", 3, (4,), sentences[3].text, roles=set(), page=7),
+            allowed_text_ids={1, 2, 3, 4},
+        )
+
+        selection = select_abstract_span(contents, resolution)
+
+        assert selection.text_ids == (2, 3)
+        assert selection.reason_flags == ("explicit_abstract", "page_two_continuation")
