@@ -310,6 +310,11 @@ released.
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- A paper whose DOI is printed only in a citation line that opens with the
+  year ("2017. Proc Soc 2, 20:1-15. https://doi.org/…"), as some journals print
+  it above the title, was exported with no DOI: the year was read as the number
+  of a reference-list entry. Numbered entries ("12. …", "[3] …") are still
+  references.
 - `bibr.Result(data)` loads exports written by newer releases of the same
   major version, as the additive-only policy promises. It previously rejected
   any unknown key and any `schema_version` other than the exact one it writes.
