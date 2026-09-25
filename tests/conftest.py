@@ -330,13 +330,12 @@ def _restore_logging_state():
         ):
             root.removeHandler(handler)
     root.setLevel(before_level)
-    known = set(before_levels)
     for name, logger in logging.Logger.manager.loggerDict.items():
         if not isinstance(logger, logging.Logger):
             continue
         if name in before_levels:
             logger.setLevel(before_levels[name])
-        elif name not in known:
+        else:
             logger.setLevel(logging.NOTSET)
 
 
@@ -403,6 +402,36 @@ def _guarded_create_connection(real_create_connection):
     return create_connection
 
 
+def _guarded_connect_ex(real_connect_ex):
+    def connect_ex(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect_ex(self, address, *args, **kwargs)
+        host = address[0] if isinstance(address, tuple) else address
+        if not _is_loopback_host(host):
+            pytest.fail(
+                f"socket.connect_ex({address!r}) blocked: unit tests must not open "
+                "non-loopback sockets. Stub the client instead."
+            )
+        return real_connect_ex(self, address, *args, **kwargs)
+
+    return connect_ex
+
+
+def _guarded_gethostbyname(real_gethostbyname):
+    def gethostbyname(host, *args, **kwargs):
+        if isinstance(host, str) and host not in _LOOPBACK_NAMES:
+            try:
+                ipaddress.ip_address(host.split("%", 1)[0])
+            except ValueError:
+                pytest.fail(
+                    f"socket.gethostbyname({host!r}) blocked: unit tests must not "
+                    "resolve external names. Stub the client instead."
+                )
+        return real_gethostbyname(host, *args, **kwargs)
+
+    return gethostbyname
+
+
 def _guarded_getaddrinfo(real_getaddrinfo):
     def getaddrinfo(host, *args, **kwargs):
         if isinstance(host, str) and host not in _LOOPBACK_NAMES:
@@ -419,10 +448,20 @@ def _guarded_getaddrinfo(real_getaddrinfo):
 
 
 @pytest.fixture(autouse=True)
-def _block_non_loopback_sockets(monkeypatch):
-    """Fail any test that tries a real non-loopback connect or DNS lookup."""
-    monkeypatch.setattr(socket.socket, "connect", _guarded_connect(socket.socket.connect))
-    monkeypatch.setattr(
-        socket, "create_connection", _guarded_create_connection(socket.create_connection)
-    )
-    monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
+def _block_non_loopback_sockets(monkeypatch, request):
+    """Fail any test that tries a real non-loopback connect or DNS lookup.
+
+    Tests marked ``network`` opt out: the live/API tests exist precisely to
+    reach the network (gated on env vars/keys and marked slow), so the
+    guard would break the runs it is meant to protect.
+    """
+    if request.node.get_closest_marker("network") is None:
+        monkeypatch.setattr(socket.socket, "connect", _guarded_connect(socket.socket.connect))
+        monkeypatch.setattr(
+            socket.socket, "connect_ex", _guarded_connect_ex(socket.socket.connect_ex)
+        )
+        monkeypatch.setattr(
+            socket, "create_connection", _guarded_create_connection(socket.create_connection)
+        )
+        monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
+        monkeypatch.setattr(socket, "gethostbyname", _guarded_gethostbyname(socket.gethostbyname))

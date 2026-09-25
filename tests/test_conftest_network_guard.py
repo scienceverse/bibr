@@ -7,6 +7,11 @@ that tries a non-loopback connect or external DNS lookup, while loopback
 (serve TestClients, the wedged-Redis probe, spawned LitServe workers) keeps
 working. These tests fail on the pre-fix tree (no guard: real DNS/connect
 attempts) and pass with it.
+
+Tests marked ``network`` opt out of the guard: the live/API tests exist
+precisely to reach the network. The last two tests pin the opt-out without
+touching the network (a marked test sees the real socket functions, an
+unmarked one sees the wrappers).
 """
 
 from __future__ import annotations
@@ -45,6 +50,17 @@ def test_external_connect_is_blocked():
         socket.create_connection(("192.0.2.1", 443), timeout=5)
 
 
+def test_external_connect_ex_is_blocked():
+    with socket.socket() as sock:
+        with pytest.raises(pytest.fail.Exception):
+            sock.connect_ex(("192.0.2.1", 443))
+
+
+def test_external_gethostbyname_is_blocked():
+    with pytest.raises(pytest.fail.Exception):
+        socket.gethostbyname("nonexistent.invalid")
+
+
 def test_loopback_connect_still_works():
     """Guard: loopback sockets the suite relies on must keep working."""
     with socket.socket() as server:
@@ -54,3 +70,21 @@ def test_loopback_connect_still_works():
         port = server.getsockname()[1]
         with socket.create_connection(("127.0.0.1", port), timeout=5):
             pass
+
+
+def test_unmarked_tests_see_the_guarded_sockets():
+    assert "guarded" in socket.getaddrinfo.__qualname__
+    assert "guarded" in socket.gethostbyname.__qualname__
+    assert "guarded" in socket.create_connection.__qualname__
+    assert "guarded" in socket.socket.connect.__qualname__
+    assert "guarded" in socket.socket.connect_ex.__qualname__
+
+
+@pytest.mark.network
+def test_network_mark_sees_the_real_sockets():
+    """Opt-out pin: a ``network``-marked test skips the guard entirely."""
+    assert "guarded" not in socket.getaddrinfo.__qualname__
+    assert "guarded" not in socket.gethostbyname.__qualname__
+    assert "guarded" not in socket.create_connection.__qualname__
+    assert "guarded" not in socket.socket.connect.__qualname__
+    assert "guarded" not in socket.socket.connect_ex.__qualname__

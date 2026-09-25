@@ -284,6 +284,7 @@ filterwarnings = [
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests",
+    "network: marks tests that intentionally reach the network (they opt out of the socket guard)",
 ]
 
 [tool.coverage.run]

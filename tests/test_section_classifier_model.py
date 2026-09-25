@@ -212,6 +212,7 @@ def test_download_snapshot_retries_windows_symlink_privilege_error(monkeypatch, 
 
 
 @pytest.mark.slow  # hits HF Hub
+@pytest.mark.network  # downloads the checkpoint by design; opts out of the socket guard.
 def test_section_classifier_model_predicts_canonical_type_and_top_level():
     model = SectionClassifierModel.from_pretrained("thesanogoeffect/bibr-section-classifier-v2")
     result = model.classify_batch(
