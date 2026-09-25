@@ -1,7 +1,6 @@
 """``bibr doctor`` — validate the local setup and environment."""
 
 import sys
-from pathlib import Path
 
 from bibr.exceptions import ConfigurationError
 from bibr.local.cli import ui
@@ -615,7 +614,13 @@ def _run_doctor() -> None:
     if shutil.which("uv"):
         ok("uv available")
     else:
-        fail("uv not on PATH", hint="Install from https://docs.astral.sh/uv/")
+        # A pip install works without uv; only the uv-managed vLLM and MLX-VLM
+        # runners need it, and their checks below fail when they do.
+        warn(
+            "uv not on PATH",
+            hint="Only the uv-managed vLLM and MLX-VLM runners need it. "
+            "Install from https://docs.astral.sh/uv/",
+        )
 
     # libmagic is a system library python-magic only binds to; a fresh install
     # on macOS/Linux can be missing it and every extraction dies on the first
@@ -631,15 +636,24 @@ def _run_doctor() -> None:
     # --- Configuration -------------------------------------------------------
     ui.section(console, "Configuration")
 
-    if Path(".env").exists():
-        ok(".env file found")
+    # Settings load ~/.bibr/.env, then ./.env (or BIBR_ENV_FILE's list), so
+    # name the files actually read. None at all is fine when the environment
+    # carries the configuration; the checks below judge the settings.
+    import bibr.config
+
+    if bibr.config.dotenv_disabled():
+        ok(".env files ignored (BIBR_DISABLE_DOTENV); settings come from the environment")
+    elif env_files := bibr.config.dotenv_files_present():
+        ok(".env: " + ", ".join(str(path) for path in env_files))
     else:
-        fail(".env not found", hint="Run bibr setup or cp .env.example .env")
+        warn(
+            "No .env file found; settings come from the environment and defaults",
+            hint="Run bibr setup or cp .env.example .env",
+        )
 
     # Settings validity — a bad .env value would otherwise crash every check
     # below on first access. Surface it as a failed check (naming the env
     # var(s) + allowed values) and keep running the Settings-free diagnostics.
-    import bibr.config
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS
 
     settings = bibr.config.Settings

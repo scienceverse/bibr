@@ -428,3 +428,54 @@ def test_full_lifecycle(tmp_path):
     content = env_path.read_text()
     assert "LLM_PROVIDER=google" in content
     assert "BIBR_ACTIVE_PRESET=google-default" in content
+
+
+# --- which .env file `bibr preset` works on ----------------------------------
+
+
+@pytest.fixture()
+def home_only_config(tmp_path, monkeypatch):
+    """Config in ~/.bibr/.env, run from a project directory that has no .env."""
+    from pathlib import Path
+
+    home = tmp_path / "home"
+    (home / ".bibr").mkdir(parents=True)
+    env_file = home / ".bibr" / ".env"
+    env_file.write_text("LLM_PROVIDER=google\nLLM_MODEL=gemini-3.5-flash-lite\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(tmp_path / "presets"))
+    return env_file, project
+
+
+def _preset(command, **kwargs):
+    import argparse
+
+    from bibr.local.cli.presets import _run_preset
+
+    _run_preset(argparse.Namespace(preset_command=command, **kwargs))
+
+
+def test_preset_save_reads_the_home_env_file(home_only_config, tmp_path):
+    """Settings come from ~/.bibr/.env here, so that is what a preset snapshots."""
+    _preset("save", name="home", force=True)
+
+    assert PresetManager(presets_dir=tmp_path / "presets").load("home") == {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+    }
+
+
+def test_preset_use_writes_the_env_file_in_effect(home_only_config, tmp_path):
+    env_file, project = home_only_config
+    PresetManager(presets_dir=tmp_path / "presets").save("small", {"LLM_MODEL": "gemini-x"})
+
+    _preset("use", name="small")
+
+    assert env_file.read_text(encoding="utf-8") == (
+        "LLM_PROVIDER=google\nLLM_MODEL=gemini-x\n\nBIBR_ACTIVE_PRESET=small\n"
+    )
+    assert not (project / ".env").exists()

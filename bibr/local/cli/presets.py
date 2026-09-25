@@ -8,6 +8,23 @@ from pathlib import Path
 from bibr.local.cli import ui
 
 
+def _preset_env_path() -> Path:
+    """The ``.env`` file ``bibr preset`` reads and writes.
+
+    Settings merge ``~/.bibr/.env`` and then ``./.env`` (or the files in
+    ``BIBR_ENV_FILE``), later files overriding earlier ones, so the last one
+    that exists is the file whose values are in effect. With none present it
+    is where the chain would look last; ``./.env`` when the chain is empty.
+    """
+    from bibr.config import _default_env_files
+
+    chain = _default_env_files()
+    existing = [path for path in chain if path.is_file()]
+    if existing:
+        return existing[-1].absolute()
+    return (chain[-1] if chain else Path(".env")).absolute()
+
+
 def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     """Handle ``bibr preset`` subcommands."""
     from rich.console import Console
@@ -25,7 +42,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
     manager = (
         PresetManager(presets_dir=Path(presets_dir_str)) if presets_dir_str else PresetManager()
     )
-    env_path = Path.cwd() / ".env"
+    env_path = _preset_env_path()
 
     cmd = args.preset_command
 
@@ -81,7 +98,8 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             manager.save(args.name, data)
             ui.ok(
                 console,
-                f"Saved preset [cyan]{args.name}[/cyan] ({len(data)} settings; secrets excluded)",
+                f"Saved preset [cyan]{args.name}[/cyan] from {env_path} "
+                f"({len(data)} settings; secrets excluded)",
             )
         except InvalidPresetError as e:
             ui.error(console, str(e))
@@ -96,7 +114,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             data = manager.load(args.name)
             ui.ok(
                 console,
-                f"Applied preset [cyan]{args.name}[/cyan] to .env "
+                f"Applied preset [cyan]{args.name}[/cyan] to {env_path} "
                 f"(also wrote BIBR_ACTIVE_PRESET marker)",
             )
             _print_settings(data, dim=True)
@@ -109,10 +127,11 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         if removed:
             ui.ok(
                 console,
-                "Removed [cyan]BIBR_ACTIVE_PRESET[/cyan] from .env (other settings unchanged)",
+                f"Removed [cyan]BIBR_ACTIVE_PRESET[/cyan] from {env_path} "
+                "(other settings unchanged)",
             )
         else:
-            console.print("[dim]No active preset marker in .env — nothing to do.[/dim]")
+            console.print(f"[dim]No active preset marker in {env_path} — nothing to do.[/dim]")
 
     elif cmd == "rm":
         if not args.yes and not Confirm.ask(
@@ -138,7 +157,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
 
     elif cmd == "diff":
         if not env_path.exists():
-            ui.error(console, "No .env file found in current directory.")
+            ui.error(console, f"No .env file found (looked for {env_path}).")
             sys.exit(1)
         try:
             env_dict = parse_env(env_path)
@@ -147,7 +166,7 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             _suggest_available(args.name)
             sys.exit(1)
         if not changed and not only_in_preset and not only_in_env:
-            ui.ok(console, f"Preset [cyan]{args.name}[/cyan] matches .env")
+            ui.ok(console, f"Preset [cyan]{args.name}[/cyan] matches {env_path}")
             return
         if changed:
             console.print(f"[bold]Changed[/bold] ({len(changed)}):")

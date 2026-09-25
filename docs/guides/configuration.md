@@ -232,6 +232,11 @@ bibr preset rm fast-gemini      # delete a preset
 bibr preset deactivate          # clear the active-preset marker (no other changes)
 ```
 
+The "current `.env`" is the file whose values win: `./.env` when the working
+directory has one, otherwise `~/.bibr/.env` (or the last existing file in
+`BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
+changed.
+
 Presets are stored as JSON under `~/.bibr/presets/`. Secrets (API keys and
 similar) are excluded by default when saving; endpoint URLs and other private
 configuration may still be present. You can also apply a preset for a single run

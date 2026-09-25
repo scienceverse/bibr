@@ -220,6 +220,16 @@ released.
   Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
   unless the URL already ends in it, so both forms work. The wizard no longer
   lists models from `/v1/v1/models` when the URL is typed with `/v1`.
+- `bibr doctor` no longer fails when the working directory has no `.env`.
+  Settings come from `~/.bibr/.env` and `./.env`, or from `BIBR_ENV_FILE`.
+  Doctor now names the files it read, and warns when there are none, because
+  configuration from the environment alone is valid. `bibr preset` uses the
+  file whose values are in effect, which is the last existing file of that
+  chain. `preset save` and `preset use` therefore work when the configuration
+  lives in `~/.bibr/.env`, and `save`, `use` and `deactivate` name the file.
+- `bibr doctor` reports a missing `uv` as a warning instead of a failure.
+  `python -m pip install bibr` is a documented setup, and only the uv-managed
+  vLLM and MLX-VLM runners need uv. Their own checks still fail without it.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

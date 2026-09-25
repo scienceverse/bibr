@@ -737,3 +737,116 @@ def test_llm_connection_ok_reports_success():
         _run_check_llm_connection(rec, api_key="AIzaSyAsomethinglongenough12345")
 
     assert rec.calls == [("ok", "LLM connection OK", "")]
+
+
+# --- the whole doctor run, with the device and OCR checks stubbed ------------
+
+
+class _Completion:
+    """What the fake Instructor client returns; awaitable, like the async client's result."""
+
+    reply = "OK"
+
+    def __await__(self):
+        async def _result():
+            return self
+
+        return _result().__await__()
+
+
+class _FakeInstructor:
+    """Stands in for ``instructor.from_provider``: records clients built and requests sent."""
+
+    def __init__(self):
+        self.clients: list[tuple[str, dict]] = []
+        self.requests: list[dict] = []
+
+    def __call__(self, model, **kwargs):
+        kwargs.pop("api_key", None)
+        self.clients.append((model, kwargs))
+        return self
+
+    def create(self, **kwargs):
+        self.requests.append(
+            {
+                k: v
+                for k, v in kwargs.items()
+                if k not in {"response_model", "messages", "max_retries"}
+            }
+        )
+        return _Completion()
+
+
+def _run_doctor_lines(monkeypatch) -> tuple[list[str], int, _FakeInstructor]:
+    """Run ``bibr doctor`` offline; return its output lines, exit code and fake client."""
+    import io
+
+    import rich.console
+
+    import bibr.local.cli.doctor as doctor
+
+    out = io.StringIO()
+    real_console = rich.console.Console
+    monkeypatch.setattr(
+        rich.console,
+        "Console",
+        lambda *a, **k: real_console(file=out, width=400, color_system=None),
+    )
+    monkeypatch.setattr(doctor, "_check_device", lambda ok, warn, fail: ok("Device: stub"))
+    monkeypatch.setattr(
+        doctor, "_check_ocr_backend", lambda ok, warn, fail: ok("OCR backend: stub")
+    )
+    fake = _FakeInstructor()
+    monkeypatch.setattr("instructor.from_provider", fake)
+    code = 0
+    try:
+        doctor._run_doctor()
+    except SystemExit as exc:
+        code = exc.code
+    return [line.strip() for line in out.getvalue().splitlines() if line.strip()], code, fake
+
+
+def test_doctor_names_the_home_env_file(monkeypatch, tmp_path):
+    """Settings read ~/.bibr/.env, so a project directory without .env is not a failure."""
+    from pathlib import Path
+
+    home = tmp_path / "home"
+    (home / ".bibr").mkdir(parents=True)
+    env_file = home / ".bibr" / ".env"
+    env_file.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    monkeypatch.delenv("BIBR_DISABLE_DOTENV", raising=False)
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if ".env" in line] == [f"✓ .env: {env_file.resolve()}"]
+    assert code == 0
+
+
+def test_doctor_without_env_file_warns_and_passes(monkeypatch):
+    """Configuration from the environment alone is legitimate (containers, CI)."""
+    monkeypatch.setenv("BIBR_ENV_FILE", "")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "! No .env file found; settings come from the environment and defaults" in lines
+    assert code == 0
+
+
+def test_doctor_without_uv_warns_and_passes(monkeypatch):
+    """``pip install bibr`` is a documented setup; only the uv-managed runners need uv."""
+    import shutil
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: None if name == "uv" else real_which(name, *a, **k)
+    )
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "! uv not on PATH" in lines
+    assert code == 0
