@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from bibr.input.jats_native import JatsParser
 from bibr.paper_contents import CanonicalSection
 
@@ -739,3 +741,108 @@ def test_jats_captions_are_not_ocr_text():
     assert "Table 1 Items 1 2 3 by age_group." in texts
     assert "Figure 1 Scores on items 1 2 3 by age_group." in texts
     assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+# Inline MathML as PLOS and eLife pretty-print it: whitespace between elements.
+# Operators and punctuation close up, as a renderer shows them and as the same
+# formula reads from a publisher that writes no whitespace.
+MATHML_OPERATORS = [
+    (
+        '<mml:msub><mml:mover accent="true"><mml:mi>y</mml:mi> <mml:mo>¯</mml:mo></mml:mover> '
+        "<mml:mrow><mml:mi>t</mml:mi> <mml:mo>-</mml:mo> <mml:mn>1</mml:mn></mml:mrow></mml:msub>",
+        "y¯t-1",
+    ),
+    (
+        "<mml:mi>t</mml:mi> <mml:mo>(</mml:mo> <mml:mn>28</mml:mn> <mml:mo>)</mml:mo> "
+        "<mml:mo>=</mml:mo> <mml:mn>2</mml:mn> <mml:mo>.</mml:mo> <mml:mn>1</mml:mn>",
+        "t(28)=2.1",
+    ),
+    ("<mml:mi>SD</mml:mi>\n  <mml:mo>=</mml:mo>\n  <mml:mn>1.2</mml:mn>", "SD=1.2"),
+    (
+        "<mml:msub><mml:mi>a</mml:mi><mml:mrow><mml:mi>i</mml:mi><mml:mi>j</mml:mi></mml:mrow>"
+        "</mml:msub> <mml:mo>=</mml:mo> <mml:mn>5</mml:mn>",
+        "aij=5",
+    ),
+    (
+        "<mml:mi>β</mml:mi> <mml:mo>∼</mml:mo> <mml:mtext>Cauchy</mml:mtext> <mml:mo>(</mml:mo> "
+        "<mml:mn>0</mml:mn> <mml:mo>,</mml:mo> <mml:mn>2</mml:mn> <mml:mo>.</mml:mo> "
+        "<mml:mn>5</mml:mn> <mml:mo>)</mml:mo>",
+        "β∼Cauchy(0,2.5)",
+    ),
+    ("<mml:mi>x</mml:mi> <mml:mi>y</mml:mi>", "xy"),
+    (
+        "<mml:mi>f</mml:mi> <mml:mo>(</mml:mo> <mml:mi>x</mml:mi> <mml:mo>,</mml:mo> "
+        "<mml:mi>y</mml:mi> <mml:mo>)</mml:mo>",
+        "f(x,y)",
+    ),
+]
+# Where a renderer spaces words by other means, or the source spells a word
+# one letter per element, the whitespace keeps them apart.
+MATHML_WORDS = [
+    (
+        "<mml:mi>b</mml:mi> <mml:mo>⋅</mml:mo> <mml:mi>ln</mml:mi> <mml:mi>dbh</mml:mi>",
+        "b⋅ln dbh",
+    ),
+    ("<mml:mn>0.93</mml:mn> <mml:mtext>GeV</mml:mtext>", "0.93 GeV"),
+    ("<mml:mn>2</mml:mn>\n  <mml:mtext>s</mml:mtext>", "2 s"),
+    (
+        "".join(f'<mml:mi mathvariant="normal">{c}</mml:mi>' for c in "direct")
+        + " "
+        + "".join(f'<mml:mi mathvariant="normal">{c}</mml:mi>' for c in "effect"),
+        "direct effect",
+    ),
+    (
+        "<mml:mi>A</mml:mi><mml:mo>,</mml:mo> <mml:mi>B</mml:mi><mml:mo>,</mml:mo> "
+        "<mml:mtext>and</mml:mtext> <mml:mi>C</mml:mi>",
+        "A,B, and C",
+    ),
+]
+
+
+def _mathml_jats(paragraph: str) -> bytes:
+    return (
+        '<?xml version="1.0"?><article xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+        "<front><article-meta><title-group><article-title>T</article-title></title-group>"
+        f"</article-meta></front><body><sec><title>Method</title><p>{paragraph}</p></sec>"
+        "</body></article>"
+    ).encode()
+
+
+def _inline_text(math: str) -> str:
+    inline = (
+        '<inline-formula><mml:math display="inline"><mml:mrow>'
+        f"{math}</mml:mrow></mml:math></inline-formula>"
+    )
+    (entry,) = _parse(_mathml_jats(f"We used {inline} here.")).assembler.entries
+    return entry.text
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_OPERATORS,
+    ids=["index", "statistic", "identifier", "subscript", "text", "variables", "arguments"],
+)
+def test_whitespace_between_mathml_elements_is_dropped(math, expected):
+    """Kept as text it split "2.1" into "2 . 1"; the late clean-up used to
+    fuse some of those runs back, until it stopped touching document text."""
+    assert _inline_text(math) == f"We used {expected} here."
+    assert _inline_text(re.sub(r">\s+<", "><", math)) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_WORDS,
+    ids=["function-names", "unit-mtext", "unit-newline", "spelled-words", "text-after-comma"],
+)
+def test_whitespace_between_mathml_elements_keeps_words_apart(math, expected):
+    assert _inline_text(math) == f"We used {expected} here."
+
+
+def test_mathml_whitespace_next_to_prose_keeps_the_words_apart():
+    xml = _mathml_jats(
+        'the value<inline-formula><mml:math display="inline"> <mml:mi>x</mml:mi> '
+        "</mml:math></inline-formula>is small, <inline-formula><mml:math>"
+        "<mml:mi>y</mml:mi> </mml:math></inline-formula>, too."
+    )
+    (entry,) = _parse(xml).assembler.entries
+    assert entry.text == "the value x is small, y, too."

@@ -9,6 +9,7 @@ contract used by the other native inputs.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from collections.abc import Iterator
@@ -18,6 +19,7 @@ from typing import Any
 import pandas as pd
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
+from bibr.input.mathml_whitespace import FlatText
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
     CanonicalSection,
@@ -149,31 +151,43 @@ def _flatten(tag: Tag) -> str:
     The walk keeps its own stack: html5lib does not bound nesting depth, and
     legacy markup such as unclosed ``<font>`` or ``<span>`` tags nests every
     later element one level deeper, past Python's recursion limit.
+
+    Whitespace between MathML elements is dropped as a renderer drops it,
+    except where it keeps two words apart (:mod:`bibr.input.mathml_whitespace`).
     """
-    parts: list[str] = []
+    flat = FlatText()
+    name = _tag_name(tag)
+    serials = itertools.count()
 
-    def boundary() -> None:
-        if parts and not parts[-1][-1:].isspace():
-            parts.append(" ")
-
-    # One frame per open element: its remaining children, and whether the
-    # element separates words (a boundary goes in on entry and on exit).
-    stack: list[tuple[Iterator[Any], bool]] = [(iter(tag.children), False)]
+    # One frame per open element: its remaining children, whether the element
+    # separates words (a boundary goes in on entry and on exit), its name,
+    # whether it sits inside ``<math>``, and the serial numbers of the element
+    # and of its parent.
+    stack: list[tuple[Iterator[Any], bool, str, bool, int, int]] = [
+        (iter(tag.children), False, name, name == "math", next(serials), next(serials))
+    ]
     while stack:
-        children, separates = stack[-1]
+        children, separates, name, in_math, serial, parent = stack[-1]
         child = next(children, None)
         if child is None:
             stack.pop()
             if separates:
-                boundary()
+                flat.separate()
         elif isinstance(child, Tag):
-            separates = _tag_name(child) not in _INLINE_TAGS
+            child_name = _tag_name(child)
+            separates = child_name not in _INLINE_TAGS
             if separates:
-                boundary()
-            stack.append((iter(child.children), separates))
+                flat.separate()
+            in_child_math = in_math or child_name == "math"
+            stack.append(
+                (iter(child.children), separates, child_name, in_child_math, next(serials), serial)
+            )
         elif type(child) in (NavigableString, CData):
-            parts.append(str(child))
-    return "".join(parts)
+            if in_math:
+                flat.add_math(str(child), name, parent)
+            else:
+                flat.add(str(child))
+    return flat.join()
 
 
 def _text(tag: Any) -> str:

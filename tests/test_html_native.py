@@ -412,3 +412,29 @@ def test_html_captions_are_not_ocr_text():
     assert figure_caption in texts
     assert table_caption in texts
     assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    [
+        (
+            "<mi>β</mi> <mo>∼</mo> <mtext>Cauchy</mtext> <mo>(</mo> <mn>0</mn> <mo>,</mo> "
+            "<mn>2</mn> <mo>.</mo> <mn>5</mn> <mo>)</mo>",
+            "β∼Cauchy(0,2.5)",
+        ),
+        ("<msub><mi>t</mi> <mrow><mi>i</mi> <mo>-</mo> <mn>1</mn></mrow></msub>", "ti-1"),
+        ("<mi>ln</mi> <mi>dbh</mi> <mo>+</mo> <mn>0.93</mn> <mtext>GeV</mtext>", "ln dbh+0.93 GeV"),
+    ],
+    ids=["decimal", "index", "words"],
+)
+def test_whitespace_between_mathml_elements_is_dropped_unless_it_separates_words(math, expected):
+    """eLife's HTML pretty-prints MathML like its JATS; kept as text the
+    whitespace split "2.5" into "2. 5" (see the JATS parser's tests)."""
+    html = (
+        '<html><head><meta charset="utf-8"></head><body><article><h2>Method</h2>'
+        f"<p>We used <math>{math}</math> here.</p></article></body></html>"
+    )
+    parser = HtmlParser(html.encode())
+    parser.parse()
+
+    assert [entry.text for entry in parser.assembler.entries] == [f"We used {expected} here."]

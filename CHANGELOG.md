@@ -257,6 +257,25 @@ released.
   each of its 984 test articles as both HTML and JATS. The share of HTML
   sentences that also appear word for word in the same article's JATS rose
   from about 24% to 41%.
+- JATS and HTML text no longer splits inline MathML at the whitespace
+  publishers put between its elements. PLOS and eLife pretty-print MathML
+  (`<mi>t</mi> <mo>-</mo> <mn>1</mn>`), and the parsers kept that whitespace,
+  so a formula read "( 0 , 2 . 5 )" or "y ¯ t - 1". The late clean-up's
+  spaced-run collapse fused some of those runs back by accident, but it also
+  fused prose, and it no longer touches document text. The parsers now drop
+  whitespace between MathML elements as a renderer does, so "(0,2.5)" and
+  "y¯t-1" read as they do from a publisher that writes none. They keep a
+  space where it separates words: "ln dbh", "0.93 GeV", "direct effect"
+  spelled one letter per element, a word after a comma, and the text around
+  the formula. Of the 1,450 test articles that contain MathML
+  (PMC_sample_1943, eLife_984 as JATS and as HTML, PLOS_1000), 154 read
+  differently. In the 148 whose sentences still line up one to one, 883
+  sentences and 168 table cells changed, each only by removed spaces. In
+  that text, spaced decimals ("2 . 5") fell from 85 to none and
+  spaced differences ("t - 1") from 134 to none. The change joins 20 pairs of
+  words, all inside formulas: terms of a product, the two parts of a
+  fraction, and one unit ("6220M-1cm-1"). Dropping every such space would
+  have joined 149 ("lndbh", "directeffect").
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
