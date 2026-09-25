@@ -2273,9 +2273,9 @@ class LLMClient:
                     file_hash,
                     exc,
                 )
-                failed = CoreMetadataLLM(authors=[])
-                failed._field_failures = dict.fromkeys(CoreMetadataLLM.model_fields, exc.error_code)
-                return failed
+                empty = CoreMetadataLLM(authors=[])
+                empty._field_failures = dict.fromkeys(CoreMetadataLLM.model_fields, exc.error_code)
+                return empty
 
         authors_text = authors_text or text
         classification_text = classification_text or text
@@ -2325,28 +2325,27 @@ class LLMClient:
         # keep what the other calls extracted and mark its fields failed.
         if isinstance(title_kw, BaseException):
             typed = {
-                id(failed): (
-                    failed
-                    if isinstance(failed, LlmCallError)
-                    else llm_call_error(f"Failed to extract {task}", failed)
+                id(outcome): (
+                    outcome
+                    if isinstance(outcome, LlmCallError)
+                    else llm_call_error(f"Failed to extract {task}", outcome)
                 )
-                for failed, task in (
+                for outcome, task in (
                     (title_kw, "title/keywords"),
                     (authors, "authors"),
                     (classification, "paper classification"),
                 )
-                if isinstance(failed, BaseException)
+                if isinstance(outcome, BaseException)
             }
             # A partial record is kept only when no call failed for a reason a
             # retry could fix; otherwise the paper fails as it always did.
-            for failed in (title_kw, authors, classification):
-                error = typed.get(id(failed))
-                if error is not None and not isinstance(
-                    error, (LlmTruncatedError, LlmInvalidOutputError)
-                ):
-                    if error is failed:
-                        raise error
-                    raise error from failed
+            for outcome in (title_kw, authors, classification):
+                error = typed.get(id(outcome))
+                if error is None or isinstance(error, (LlmTruncatedError, LlmInvalidOutputError)):
+                    continue
+                if error is outcome:
+                    raise error
+                raise error from cast(BaseException, outcome)
             title_error = typed[id(title_kw)]
             logger.warning(
                 "Title/keywords extraction failed (hash=%s); keeping the other core "
