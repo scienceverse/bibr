@@ -1141,7 +1141,9 @@ def _export_paper_payload(
         for position, f in enumerate(meta.funding if meta else [], start=1)
     ]
     exported_doi = _export_doi(meta.doi if meta else None, "metadata.doi")
-    if extraction_data is not None and paper.field_scope is not None:
+    from bibr.field_states import FieldScope
+
+    if extraction_data is not None and isinstance(paper.field_scope, FieldScope):
         extraction_data["fields"] = _field_states(
             paper,
             present={

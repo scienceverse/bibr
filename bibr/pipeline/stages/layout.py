@@ -115,14 +115,15 @@ class LayoutStage:
                 )
 
             page_tuples = await loop.run_in_executor(None, _render_all)
-            fs.warnings.extend(
-                ProcessingWarning(
-                    WarningCode.PAGE_DPI_REDUCED,
-                    f"page {page_idx + 1} rendered at {dpi} DPI instead of "
-                    f"{settings.layout.dpi} to fit the render budget",
+            if reduced:
+                fs.warnings.extend(
+                    ProcessingWarning(
+                        WarningCode.PAGE_DPI_REDUCED,
+                        f"page {page_idx + 1} rendered at {dpi} DPI instead of "
+                        f"{settings.layout.dpi} to fit the render budget",
+                    )
+                    for page_idx, dpi in reduced
                 )
-                for page_idx, dpi in reduced
-            )
             fs.page_images = [img for _, img in page_tuples]
             fs.page_indices = [idx for idx, _ in page_tuples]
             return fs.page_images

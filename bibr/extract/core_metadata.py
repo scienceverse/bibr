@@ -1436,7 +1436,8 @@ class CoreMetadataExtractor:
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
                 return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
-            field_failures = dict(getattr(llm_metadata, "_field_failures", None) or {})
+            recorded = getattr(llm_metadata, "_field_failures", None)
+            field_failures = dict(recorded) if isinstance(recorded, dict) else {}
             title_call_failed = "title" in field_failures
             # The trained classifier reads the title and abstract; after a failed
             # title/keywords call it would classify empty input, so its fields
