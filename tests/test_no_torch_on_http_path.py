@@ -8,7 +8,10 @@ on the committed torch-free bundles (``tests/fixtures/onnx/``, see
 ``sys.modules`` checked for ``torch`` (and ``transformers``/``cv2``).
 
 This test needs no torch to build fixtures, so it runs in the core-only CI
-jobs — the environments that match a user's default install.
+jobs — the environments that match a user's default install. ``onnxruntime``
+is a core dependency (not an optional one), so it is imported directly:
+if it were missing, skipping would silently drop the only core coverage of
+the default runtime.
 """
 
 from __future__ import annotations
@@ -18,9 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
-pytest.importorskip("onnxruntime")
+import onnxruntime  # noqa: F401  # core dependency; must be importable here.
 
 BUNDLES = Path(__file__).parent / "fixtures" / "onnx"
 

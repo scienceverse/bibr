@@ -7,7 +7,7 @@
   "pad_token": "[PAD]",
   "max_length": 32,
   "label_classes": [
-    "introduction",
+    "intro",
     "method",
     "results",
     "discussion",

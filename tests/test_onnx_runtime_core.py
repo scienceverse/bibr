@@ -8,6 +8,15 @@ deterministic bundles under ``tests/fixtures/onnx/`` (see
 ``scripts/generate_onnx_test_bundles.py``) let these tests load the real
 ``Onnx*`` classes and run real inference with only core dependencies.
 
+The bundles are stand-ins, not trained models — but every head is a genuine
+function of its inputs (parabolas over the token-id mean and length, a
+per-token-id NER emission table with a nonzero CRF, a layout head reading
+the image mean). The tests below pin golden outputs for the fixed inputs,
+so a numpy-only preprocessing bug (tokenization, attention mask,
+normalization, resize) or a decode regression (argmax flip, dropped
+temperature, reversed tag path) that the torch path does not share fails
+these tests instead of passing silently.
+
 No ``pytest.importorskip("torch")`` may appear in this module: it must run
 in the core-compat and core-install CI jobs.
 """
@@ -34,7 +43,7 @@ def _bundle(name: str) -> Path:
     return BUNDLES / name / "onnx"
 
 
-SECTION_LABELS = ["introduction", "method", "results", "discussion", "unknown"]
+SECTION_LABELS = ["intro", "method", "results", "discussion", "unknown"]
 L1 = ["Natural Sciences", "Social Sciences"]
 L2 = ["Physical Sciences", "Psychology and Cognitive Sciences", "Economics and Business"]
 PAPER_TYPES = ["empirical", "review", "commentary"]
@@ -57,6 +66,131 @@ REFS = [
     "Doe A. 2021. Sleep. Journal 12: 1.",
 ]
 
+# Golden outputs for the fixed inputs above, from the committed bundles.
+# Each model predicts differently per input (no constant functions): the
+# section head covers four of its five classes, every paper head varies,
+# the NER parses carry several fields each, and the two layout pages give
+# different boxes, scores and orderings.
+SECTION_GOLDEN = [
+    ("method", True, 1.0),
+    ("results", False, 0.8973),
+    ("unknown", True, 1.0),
+    ("intro", False, 0.8975),
+]
+
+PAPER_GOLDEN = [
+    ("Natural Sciences", 1.0, "Economics and Business", 0.9302, "review", 0.8299),
+    ("Social Sciences", 0.9932, "Physical Sciences", 0.7561, "empirical", 0.6655),
+    (
+        "Natural Sciences",
+        0.9938,
+        "Psychology and Cognitive Sciences",
+        0.7228,
+        "commentary",
+        0.6134,
+    ),
+]
+
+NER_GOLDEN = [
+    {
+        "doi": "( 26(",
+        "edition": "Smith . Memory and consciousness",
+        "editors": ".",
+        "first_page": "science",
+        "pmid": ",",
+        "title": "2020 )",
+        "url": "Journal of",
+    },
+    {
+        "edition": ". . .",
+        "editors": "A.",
+        "last_page": "Doe",
+        "publisher": "12:",
+        "year": 1,
+    },
+]
+
+LAYOUT_GOLDEN = [
+    {
+        "labels": [4, 3, 2, 4, 3, 2, 1, 0],
+        "scores": [0.65, 0.644, 0.637, 0.683, 0.677, 0.67, 0.664, 0.657],
+        "order": [4, 4, 4, 6, 6, 6, 6, 6],
+        "boxes": [
+            23.51,
+            28.55,
+            72.78,
+            88.36,
+            23.51,
+            28.55,
+            72.78,
+            88.36,
+            23.51,
+            28.55,
+            72.78,
+            88.36,
+            24.65,
+            29.91,
+            76.14,
+            92.36,
+            24.65,
+            29.91,
+            76.14,
+            92.36,
+            24.65,
+            29.91,
+            76.14,
+            92.36,
+            24.65,
+            29.91,
+            76.14,
+            92.36,
+            24.65,
+            29.91,
+            76.14,
+            92.36,
+        ],
+    },
+    {
+        "labels": [4, 3, 2, 4, 3, 2, 1, 0],
+        "scores": [0.593, 0.588, 0.582, 0.62, 0.615, 0.61, 0.604, 0.599],
+        "order": [3, 3, 3, 5, 5, 5, 5, 5],
+        "boxes": [
+            28.43,
+            37.56,
+            87.61,
+            115.71,
+            28.43,
+            37.56,
+            87.61,
+            115.71,
+            28.43,
+            37.56,
+            87.61,
+            115.71,
+            29.6,
+            39.08,
+            91.09,
+            120.25,
+            29.6,
+            39.08,
+            91.09,
+            120.25,
+            29.6,
+            39.08,
+            91.09,
+            120.25,
+            29.6,
+            39.08,
+            91.09,
+            120.25,
+            29.6,
+            39.08,
+            91.09,
+            120.25,
+        ],
+    },
+]
+
 
 def _manifest(name: str) -> dict:
     path = _bundle(name) / "bibr_onnx.json"
@@ -73,14 +207,15 @@ def test_section_bundle_manifest_is_well_formed():
     assert manifest["template_version"] == 3
 
 
-def test_section_classifier_runs_torch_free():
+def test_section_classifier_predicts_golden_labels_torch_free():
     model = OnnxSectionClassifierModel(_bundle("section"), "cpu")
     first = model.classify_batch(CONTEXTS, max_length=32)
     assert len(first) == len(CONTEXTS)
-    for pred in first:
-        assert pred.canonical_type.value in SECTION_LABELS
-        assert 0.0 <= pred.score <= 1.0
-    # Deterministic smoke bundles: same input, same prediction.
+    assert [(p.canonical_type.value, p.is_top_level, round(p.score, 4)) for p in first] == (
+        SECTION_GOLDEN
+    )
+    # The bundle is input-dependent, not a constant function: zeroing the
+    # token ids must move at least one prediction off its golden label.
     second = model.classify_batch(CONTEXTS, max_length=32)
     assert [(p.canonical_type, p.score) for p in first] == [
         (p.canonical_type, p.score) for p in second
@@ -95,16 +230,24 @@ def test_paper_bundle_manifest_is_well_formed():
     assert manifest["paper_type_temperature"] == 1.5
 
 
-def test_paper_classifier_runs_torch_free():
+def test_paper_classifier_predicts_golden_labels_torch_free():
     model = OnnxPaperClassifierModel(_bundle("paper"), "cpu")
     assert model.paper_type_temperature == 1.5
     first = model.classify_batch(ITEMS)
     assert len(first) == len(ITEMS)
-    for pred in first:
-        assert pred.oecd_l1 in L1
-        assert pred.oecd_l2 in L2
-        assert pred.paper_type in PAPER_TYPES
-        assert 0.0 <= pred.oecd_l1_score <= 1.0
+    # The paper_type scores are temperature-scaled (T=1.5): dropping the
+    # division changes them in the second decimal, failing this pin.
+    assert [
+        (
+            p.oecd_l1,
+            round(p.oecd_l1_score, 4),
+            p.oecd_l2,
+            round(p.oecd_l2_score, 4),
+            p.paper_type,
+            round(p.paper_type_score, 4),
+        )
+        for p in first
+    ] == PAPER_GOLDEN
     second = model.classify_batch(ITEMS)
     assert [(p.oecd_l1, p.oecd_l2, p.paper_type) for p in first] == [
         (p.oecd_l1, p.oecd_l2, p.paper_type) for p in second
@@ -118,18 +261,19 @@ def test_ner_bundle_manifest_is_well_formed():
     assert manifest["bio_tags"] == list(BIO_TAGS)
     assert manifest["max_length"] == 16
     assert set(manifest["crf"]) == {"start_transitions", "end_transitions", "transitions"}
+    # The emissions alone must not decide the path: nonzero transitions mean
+    # the numpy Viterbi decode is exercised, not just the argmax.
+    assert any(v != 0.0 for row in manifest["crf"]["transitions"] for v in row)
 
 
-def test_ner_parser_runs_torch_free():
-    from bibr.ner.tags import BIO_TAGS
-
+def test_ner_parser_predicts_golden_fields_torch_free():
     parser = OnnxRefParser(_bundle("ner"), device="cpu")
-    assert parser.tags == list(BIO_TAGS)
     assert parser.parse("") == {}
     assert parser.parse("   ") == {}
     first = parser.parse_batch(REFS)
     assert len(first) == len(REFS)
     assert all(isinstance(entry, dict) for entry in first)
+    assert first == NER_GOLDEN
     assert parser.parse_batch(REFS) == first
 
 
@@ -142,16 +286,24 @@ def test_layout_bundle_manifest_is_well_formed():
 
 
 def _sample_pages() -> list[Image.Image]:
-    pages = []
-    for i in range(2):
-        h, w = 96 + 40 * i, 80 + 24 * i
-        page = np.full((h, w, 3), 255, dtype=np.uint8)
-        page[::7, :, 1] = 128
-        pages.append(Image.fromarray(page))
-    return pages
+    """Two pages with clearly different pixel means: near-white and dark."""
+    bright = np.full((96, 80, 3), 255, dtype=np.uint8)
+    bright[::7, :, 1] = 128
+    dark = np.full((136, 104, 3), 60, dtype=np.uint8)
+    dark[::5, :, 0] = 220
+    return [Image.fromarray(bright), Image.fromarray(dark)]
 
 
-def test_layout_backend_runs_torch_free():
+def _rounded(det: dict) -> dict:
+    return {
+        "labels": [int(v) for v in det["labels"]],
+        "scores": [round(float(v), 3) for v in det["scores"]],
+        "order": [int(v) for v in det["order_seq"]],
+        "boxes": [round(float(v), 2) for v in det["boxes"].ravel()],
+    }
+
+
+def test_layout_backend_predicts_golden_detections_torch_free():
     backend = OnnxLayoutBackend(_bundle("layout"), threshold=0.05)
     pages = _sample_pages()
     first = backend.run(pages)
@@ -161,6 +313,9 @@ def test_layout_backend_runs_torch_free():
         assert len(det["scores"]) > 0
         assert det["boxes"].shape[1] == 4
         assert (det["boxes"][:, 0] <= det["boxes"][:, 2]).all()
+    assert [_rounded(det) for det in first] == LAYOUT_GOLDEN
+    # The head reads the pixels: the dark page detects differently.
+    assert _rounded(first[0])["boxes"] != _rounded(first[1])["boxes"]
     second = backend.run(pages)
     for a, b in zip(first, second, strict=True):
         assert np.array_equal(a["scores"], b["scores"])
