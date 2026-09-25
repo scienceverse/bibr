@@ -409,6 +409,48 @@ async def test_geom_segment_count_gate_counts_only_onsets_on_the_reference_pages
     ex.llm_client.segment_references.assert_not_awaited()
 
 
+async def test_reference_region_summaries_keep_regions_without_a_page():
+    ex, _titles, _attempts = await _extract_main_list(_GEO, geom_spans=True)
+    pageless = RegionSummary(page=None, index=99, label="reference_content", bbox=None)
+    ex.contents.region_summaries = [*ex.contents.region_summaries, pageless]
+
+    kept = ex._reference_region_summaries()
+
+    assert [summary.content for summary in kept[:-1]] == _MAIN_LIST
+    assert kept[-1] is pageless
+
+
+async def test_chunked_parse_aligns_only_onsets_on_the_reference_pages():
+    from bibr.extract import ref_extractor
+    from bibr.schemas import PaperReferenceLLM
+
+    ex, _titles, _attempts = await _extract_main_list(_GEO, geom_spans=True)
+    ex.llm_client.extract_references_chunk = AsyncMock(
+        return_value=[
+            PaperReferenceLLM(
+                index=1,
+                title="T",
+                first_page=None,
+                volume=None,
+                authors="A",
+                year=2000,
+                container=None,
+            )
+        ]
+    )
+    seen_pages: list[set] = []
+    real_region_chunks = ref_extractor.region_chunks
+
+    def spy(ref_text, summaries, **kwargs):
+        seen_pages.append({summary.page for summary in summaries})
+        return real_region_chunks(ref_text, summaries, **kwargs)
+
+    with patch.object(ref_extractor, "region_chunks", side_effect=spy):
+        await ex._parse_references_llm_chunked("\n".join(_MAIN_LIST), _MAIN_LIST)
+
+    assert seen_pages == [{1, 2}]
+
+
 async def test_region_tier_aligns_only_onsets_on_the_reference_pages():
     ex, titles, attempts = await _extract_main_list(None, geom_spans=False)
 

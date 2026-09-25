@@ -24,6 +24,9 @@ JATS_REFS = [
     "Econ Review, 5, 1-20.",
     "Aristotle. Nicomachean Ethics. Trans. W. D. Ross.",
     "Doe, A. (2019). Seeing things clearly. Journal of Vision, 2, 11-20.",
+    # A sentence-case title citing another work, which the merged-reference
+    # splitter still cuts before "Kahneman".
+    "Evans, R. (2020). Loss aversion after Kahneman and Tversky (1979). Econ Letters, 7, 3-9.",
 ]
 
 JATS = (
@@ -61,8 +64,11 @@ def _contents(parser):
     return contents
 
 
-def _parsed_segments(contents) -> list[str]:
-    """Run reference extraction with the NER parser stubbed; return what it was given."""
+def _parsed_segments(contents, segments: list[str] | None = None) -> list[str]:
+    """Run reference extraction with the NER parser stubbed; return what it was given.
+
+    *segments*, when given, replaces the segmentation cascade's output.
+    """
     seen: list[str] = []
 
     def parse(self, segments):
@@ -83,7 +89,13 @@ def _parsed_segments(contents) -> list[str]:
     ref_df = RefLocator(contents).collect_reference_rows()
     extractor = ReferenceExtractor(contents, llm_client=mock.Mock(), parse_strategy="ner")
     with mock.patch.object(ReferenceExtractor, "_parse_references_ner_aligned", parse):
-        asyncio.run(extractor.extract(ref_df))
+        if segments is None:
+            asyncio.run(extractor.extract(ref_df))
+        else:
+            with mock.patch.object(
+                ReferenceExtractor, "_segment_references", mock.AsyncMock(return_value=segments)
+            ):
+                asyncio.run(extractor.extract(ref_df))
     return seen
 
 
@@ -108,3 +120,18 @@ def test_html_reference_list_items_still_drop_page_navigation():
         "Smith, J. (2020). First reference. Journal A, 1, 1-2.",
         "Doe, J. (2021). Second reference. Journal B, 2, 3-4.",
     ]
+
+
+def test_reference_strings_from_another_tier_are_filtered_even_for_jats():
+    # A JATS ref-list that yielded no strings leaves segmentation to the
+    # cascade, whose output is not one reference per <ref>.
+    contents = _contents(HtmlParser(HTML))
+    contents.native_ref_strings = []
+    contents.native_ref_strings_authoritative = True
+
+    parsed = _parsed_segments(
+        contents,
+        segments=["Smith, J. (2020). First reference. Journal A, 1, 1-2.", "Download BibTeX"],
+    )
+
+    assert parsed == ["Smith, J. (2020). First reference. Journal A, 1, 1-2."]
