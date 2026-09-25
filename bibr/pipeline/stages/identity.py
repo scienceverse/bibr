@@ -14,6 +14,7 @@ from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
     from bibr.extract.pdf_doi_evidence import PdfDoiEvidence
+    from bibr.pipeline.state import FileState
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _source_integrity_issue(queue_record_id: str) -> ValidationIssue:
     )
 
 
-def _processed_bytes(fs) -> bytes | None:
+def _processed_bytes(fs: FileState) -> bytes | None:
     """The bytes this run processed, if they are still at hand.
 
     ``pdf_bytes`` are freed after OCR. A caller-supplied upload keeps them on
@@ -55,7 +56,7 @@ def _processed_bytes(fs) -> bytes | None:
     return data
 
 
-def _pdf_doi_evidence(fs) -> PdfDoiEvidence | None:
+def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
     """The input PDF's own DOI evidence; None for other inputs or an unreadable PDF."""
     contents = getattr(fs.paper, "contents", None)
     if contents is None or getattr(contents, "preparsed_metadata", None) is not None:
@@ -67,7 +68,7 @@ def _pdf_doi_evidence(fs) -> PdfDoiEvidence | None:
     )
     pages = [page for page in _EVIDENCE_PAGES if page in processed]
     data = _processed_bytes(fs)
-    if not pages or not is_pdf(data):
+    if not pages or data is None or not is_pdf(data):
         return None
     try:
         return read_pdf_doi_evidence(data, pages)

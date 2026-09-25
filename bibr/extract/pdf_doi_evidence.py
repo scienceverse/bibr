@@ -113,7 +113,7 @@ class PdfDoiEvidence:
 
 def is_pdf(data: bytes | None) -> bool:
     """Whether *data* looks like a PDF (a ``%PDF-`` header near the start)."""
-    return bool(data) and b"%PDF-" in data[:1024]
+    return data is not None and b"%PDF-" in data[:1024]
 
 
 def _to_layout_point(
