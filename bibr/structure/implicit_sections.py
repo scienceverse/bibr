@@ -15,7 +15,13 @@ from typing import TYPE_CHECKING
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError
-from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection, PaperSentence
+from bibr.paper_contents import (
+    CanonicalSection,
+    PaperContents,
+    PaperSection,
+    PaperSentence,
+    sections_in_document_order,
+)
 from bibr.schemas import FrontMatterResult
 
 if TYPE_CHECKING:
@@ -621,10 +627,14 @@ def _reorder_sections_by_document_position(contents: PaperContents) -> None:
     Synthesized sections (e.g. an Introduction created from front-matter text
     that had no explicit heading) are appended with the highest section_id but
     contain low-text_id sentences.  This shuffles the section list so each
-    section sits where its first sentence appears in the document.
+    section sits where its text starts in the document.
 
-    Sections without assigned sentences (orphan headers, figure/table/footnote
-    aggregators) keep their relative order.
+    A section without sentences takes its place from its first descendant
+    (a numbered parent heading whose prose sits in its subsections) or, when
+    nothing below it holds text, stays right after the section created before
+    it (the title section once its sentences moved into the new Abstract).
+    ``enforce_section_sanity`` reads this list's order as document order, so a
+    heading sent to the end would put References before the body.
     """
     first_text_id_by_section: dict[int, int] = {}
     for sent in contents.sentences:
@@ -635,14 +645,7 @@ def _reorder_sections_by_document_position(contents: PaperContents) -> None:
         if prev is None or sent.text_id < prev:
             first_text_id_by_section[sid] = sent.text_id
 
-    def _sort_key(sec: PaperSection) -> tuple[int, int, int]:
-        first_tid = first_text_id_by_section.get(sec.section_id)
-        if first_tid is not None:
-            return (0, first_tid, sec.section_id)
-        # Sections without sentences keep their relative position via section_id
-        return (1, sec.section_id, sec.section_id)
-
-    contents.sections.sort(key=_sort_key)
+    contents.sections[:] = sections_in_document_order(contents.sections, first_text_id_by_section)
 
 
 def _trim_bloated_abstract(contents: PaperContents) -> None:

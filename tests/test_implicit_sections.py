@@ -1561,3 +1561,89 @@ class TestBoundedPositionalAbstract:
         assert contents.sections_text[1] == f"{'A' * 1800} {'B' * 1800}"
         assert "section_id=1" in caplog.text
         assert "text_ids=(1, 2)" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Implicit sections leave the list in document order for the sanity pass
+# ---------------------------------------------------------------------------
+
+
+def _normalize(contents: PaperContents) -> None:
+    """Run post-parse normalization: implicit detection, then both enforce_* passes."""
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.stages.post_parse import _normalize_section_structure
+
+    class _Client:
+        def _cap_input(self, text):
+            return text
+
+        async def close(self):
+            pass
+
+    asyncio.run(
+        _normalize_section_structure(
+            contents,
+            False,
+            _Client(),
+            "hash",
+            settings=GlobalSettings(),
+        )
+    )
+
+
+class TestSectionsStayInDocumentOrder:
+    def test_implicit_sections_leave_empty_parent_headings_in_place(self):
+        """Headings without prose of their own (the root, the emptied title,
+        numbered parents) used to sort behind References; the sanity pass then
+        saw Methods/Results after References and reset it to UNKNOWN."""
+        sections = [
+            PaperSection(0, "", 0, None),
+            PaperSection(1, "Paper Title", 1, 0, CanonicalSection.TITLE, 1.0, "title"),
+            PaperSection(2, "2 Method", 1, 0, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(3, "2.1 Participants", 2, 2, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(4, "3 Results", 1, 0, CanonicalSection.RESULTS, 1.0, "exact_alias"),
+            PaperSection(5, "3.1 Main effect", 2, 4, CanonicalSection.UNKNOWN),
+            PaperSection(6, "4 Discussion", 1, 0, CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+            PaperSection(7, "References", 1, 0, CanonicalSection.REFERENCES, 1.0, "exact_alias"),
+            PaperSection(10, "Appendix", 1, 0, CanonicalSection.APPENDIX, 1.0, "exact_alias"),
+        ]
+        sentences = [
+            PaperSentence(1, "Summary sentence one.", 1, 1, page_number=1),
+            PaperSentence(2, "Summary sentence two.", 1, 1, page_number=1),
+            PaperSentence(3, "Background prose one.", 1, 2, page_number=1),
+            PaperSentence(4, "Background prose two.", 1, 2, page_number=1),
+            PaperSentence(5, "We recruited 40 adults.", 3, 3, page_number=2),
+            PaperSentence(6, "The effect was large.", 5, 4, page_number=3),
+            PaperSentence(7, "We discuss it.", 6, 5, page_number=4),
+            PaperSentence(8, "Smith, J. (2020).", 7, 6, page_number=5),
+            PaperSentence(9, "Extra tables.", 10, 7, page_number=6),
+        ]
+        contents = _make_contents(sections, sentences)
+        result = FrontMatterResult(
+            segments=[
+                FrontMatterSegment(first_text_id=1, section_type="abstract"),
+                FrontMatterSegment(first_text_id=3, section_type="intro"),
+            ]
+        )
+
+        with patch(
+            "bibr.structure.implicit_sections._detect_via_llm",
+            new=AsyncMock(return_value=result),
+        ):
+            _normalize(contents)
+
+        assert [(s.section_id, s.header, s.section_type) for s in contents.sections] == [
+            (0, "", CanonicalSection.UNKNOWN),
+            (1, "Paper Title", CanonicalSection.TITLE),
+            (11, "Abstract", CanonicalSection.ABSTRACT),
+            (12, "Introduction", CanonicalSection.INTRODUCTION),
+            (2, "2 Method", CanonicalSection.METHODS),
+            (3, "2.1 Participants", CanonicalSection.METHODS),
+            (4, "3 Results", CanonicalSection.RESULTS),
+            (5, "3.1 Main effect", CanonicalSection.UNKNOWN),
+            (6, "4 Discussion", CanonicalSection.DISCUSSION),
+            (7, "References", CanonicalSection.REFERENCES),
+            (10, "Appendix", CanonicalSection.APPENDIX),
+        ]
+        references = next(s for s in contents.sections if s.section_id == 7)
+        assert references.classification_score == 1.0

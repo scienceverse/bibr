@@ -16,6 +16,8 @@ from bibr.input.consolidate_text import clean_text_content_late
 from bibr.processing_warnings import ProcessingWarning
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
     from bibr.models import PaperMetadata, PaperReference
@@ -494,6 +496,50 @@ class PaperSection:
     # On a footnote's synthetic section: the marker the note is printed with
     # ("1", "*", "†"); None when none is printed or detected.
     footnote_label: str | None = None
+
+
+def sections_in_document_order(
+    sections: list[PaperSection], first_text_id: "Mapping[int, int]"
+) -> list[PaperSection]:
+    """Sort sections by where their text starts; ties go by section id.
+
+    ``first_text_id`` maps a section id to the lowest text_id it holds. A
+    section's text starts at its own first sentence or its first descendant's,
+    whichever comes first. A section with no text anywhere below it (a heading
+    whose paragraphs went to its subsections, or a title whose sentences moved
+    into a synthesized Abstract) stays right after the section created before
+    it: parsers number sections as they read, but the list order is not
+    document order. Stages append the sections they find (an unheaded abstract
+    is added after the body), so the list has to be put back in order.
+    """
+    children: dict[int, list[PaperSection]] = {}
+    for section in sections:
+        children.setdefault(section.parent_section_id or 0, []).append(section)
+
+    starts: dict[int, int | None] = {}
+
+    def start(section: PaperSection, seen: set[int]) -> int | None:
+        if section.section_id in starts:
+            return starts[section.section_id]
+        if section.section_id in seen:  # a cycle in the parent links
+            return None
+        seen.add(section.section_id)
+        found = [first_text_id[section.section_id]] if section.section_id in first_text_id else []
+        found += [
+            child_start
+            for child in children.get(section.section_id, [])
+            if (child_start := start(child, seen)) is not None
+        ]
+        starts[section.section_id] = min(found, default=None)
+        return starts[section.section_id]
+
+    keys: dict[int, tuple[int, int]] = {}
+    previous = 0
+    for section in sorted(sections, key=lambda s: s.section_id):
+        section_start = start(section, set())
+        previous = previous if section_start is None else section_start
+        keys[section.section_id] = (previous, section.section_id)
+    return sorted(sections, key=lambda s: keys[s.section_id])
 
 
 @dataclass

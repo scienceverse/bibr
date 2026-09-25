@@ -174,8 +174,16 @@ def enforce_section_sanity(sections: list[PaperSection]) -> None:
       sections still to come (reference lists end the body; appendices and
       floats after a terminal reference list are fine and stay untouched).
 
+    Positions are read from the list order, which must be document order
+    (``implicit_sections`` re-sorts the list after it synthesizes sections
+    from the LLM's boundaries). The root and the synthetic
+    figure/table/footnote sections that ``create_content_sections`` appends at
+    the tail are not body sections: they take no position, so a paper's float
+    count cannot move the "first half".
+
     Runs after ``enforce_imrad_order``. Mutates sections in-place.
     """
+    sections = [s for s in sections if s.level > 0 and not s.synthetic_kind]
     if not sections:
         return
 

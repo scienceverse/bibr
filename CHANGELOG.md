@@ -341,6 +341,27 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- When implicit-section detection created an Abstract or Introduction, it
+  moved every section without text of its own behind References: the root,
+  the title once its text went to the new Abstract, a printed "Abstract"
+  heading emptied the same way, and a numbered parent such as "2 Method"
+  whose paragraphs sit in "2.1". The section sanity check reads list position
+  as document position, so it then reset that printed Abstract heading to
+  `unknown`, and reset References to `unknown` with score 0 whenever body
+  sections now followed it in the first half of the list (reference location
+  put the type back, not the score). A section without text now sits where
+  its first subsection's text starts, or right after the section before it,
+  which is the order the export already used; the pipeline and the export now
+  share that code. Replayed on the stored gate192 exports of main 50bef42,
+  the sanity check no longer resets References in 6 of 193 papers or a
+  printed Abstract heading in 3. Where a printed heading
+  ("LITERATURE CITED") and the reference section bibr created for the rows
+  both classify as references, the printed heading now comes first and keeps
+  the type, as the tie-break by document order intends.
+- The section sanity check also counted the root and the figure, table and
+  footnote sections added at the end of the list, so enough floats could
+  place a terminal References section in the "first half" and reset it. Only
+  body sections count now.
 
 ### Added
 

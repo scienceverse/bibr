@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, TypeVar
 
 from bibr.export.models import FootnoteExport
+from bibr.paper_contents import sections_in_document_order
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -90,7 +91,7 @@ def export_ids(contents: PaperContents) -> ExportIds:
     first_text_id = {section_id: min(text_ids) for section_id, text_ids in held.items()}
 
     body = [s for s in contents.sections if s.section_id != 0 and s.section_id not in synthetic]
-    sections = _document_order(body, first_text_id)
+    sections = sections_in_document_order(body, first_text_id)
     figures = _float_order(contents.figures)
     tables = _float_order(contents.tables)
 
@@ -137,46 +138,3 @@ def _float_order(items: Sequence[_Float]) -> list[_Float]:
             enumerate(items), key=lambda pair: (pair[1].page_number or 0, pair[0])
         )
     ]
-
-
-def _document_order(
-    sections: list[PaperSection], first_text_id: dict[int, int]
-) -> list[PaperSection]:
-    """Sort sections by where their text starts; ties go by section id.
-
-    A section's text starts at its own first sentence or its first
-    descendant's, whichever comes first. A section with no text anywhere below
-    it (a heading whose paragraphs went to its subsections) stays right after
-    the section created before it: parsers number sections as they read, but
-    the list order is not document order. Stages append the sections they find
-    (an unheaded abstract is added after the body), and ``implicit_sections``
-    moves every section without text to the end of the list.
-    """
-    children: dict[int, list[PaperSection]] = {}
-    for section in sections:
-        children.setdefault(section.parent_section_id or 0, []).append(section)
-
-    starts: dict[int, int | None] = {}
-
-    def start(section: PaperSection, seen: set[int]) -> int | None:
-        if section.section_id in starts:
-            return starts[section.section_id]
-        if section.section_id in seen:  # a cycle in the parent links
-            return None
-        seen.add(section.section_id)
-        found = [first_text_id[section.section_id]] if section.section_id in first_text_id else []
-        found += [
-            child_start
-            for child in children.get(section.section_id, [])
-            if (child_start := start(child, seen)) is not None
-        ]
-        starts[section.section_id] = min(found, default=None)
-        return starts[section.section_id]
-
-    keys: dict[int, tuple[int, int]] = {}
-    previous = 0
-    for section in sorted(sections, key=lambda s: s.section_id):
-        section_start = start(section, set())
-        previous = previous if section_start is None else section_start
-        keys[section.section_id] = (previous, section.section_id)
-    return sorted(sections, key=lambda s: keys[s.section_id])
