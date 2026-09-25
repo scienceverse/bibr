@@ -105,11 +105,15 @@ class _Pipeline:
     def __init__(self, behaviour):
         self.behaviour = behaviour
         self.chunks = []
+        self.states = []
 
     async def process_chunk(self, file_states, progress=None):
         self.chunks.append([fs.path.name for fs in file_states])
+        self.states.extend(file_states)
         action = self.behaviour[len(self.chunks) - 1]
         if action == "crash":
+            for fs in file_states:
+                fs.page_images = ["a rendered page"]
             raise RuntimeError("stage raised")
         for fs in file_states:
             if action == "ok":
@@ -126,6 +130,7 @@ async def test_crashed_chunk_fails_only_its_files():
 
     assert pipeline.chunks == [["a.pdf", "b.pdf"], ["c.pdf"]]
     assert [type(r) for r in results] == [ChewFailure, ChewFailure, Result]
+    assert all(fs.page_images is None for fs in pipeline.states[:2])
     assert results[0].error_code == "chunk_error"
     assert "stage raised" in results[0].error
 

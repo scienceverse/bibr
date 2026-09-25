@@ -384,6 +384,8 @@ async def _process_batch(
             for fs in chunk:
                 if fs.error is None and fs.result_json is None:
                     fs.set_error(f"Pipeline chunk failed: {exc}", code="chunk_error", exc=exc)
+                # Release the chunk's page images before the next chunk renders.
+                fs.free_all()
     results: list[Result | ChewFailure] = []
     for fs in states:
         if fs.error:
