@@ -220,6 +220,31 @@ released.
   Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
   unless the URL already ends in it, so both forms work. The wizard no longer
   lists models from `/v1/v1/models` when the URL is typed with `/v1`.
+- `bibr doctor` and the `bibr setup` connection test now send their test
+  request through the provider adapter that extraction uses. Both built their
+  own client, with a 64-token cap. For the default `gemini-3.5-flash-lite`
+  they left out the thinking budget the Gemini adapter always sends. For
+  OpenAI they sent `max_tokens`, which reasoning models such as the wizard's
+  `gpt-5-nano` reject, where the adapter sends `max_completion_tokens`. The
+  test could therefore fail a setup that `bibr chew` runs. Doctor also skipped
+  Ollama; it now tests it like any other provider. When the wizard's test
+  fails for Ollama, it offers to change the base URL. It used to ask for an
+  API key and write the answer to `.env` as a line with no name, `=<key>`.
+- `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
+  resolved to the backend chew would start on this machine; doctor used to
+  check it as a cloud provider and ask for a key. The provider's credentials are
+  checked by its adapter. `LLM_API_KEY` now counts for Google, Anthropic and
+  Groq, and an OpenAI-compatible server set with `LLM_BASE_URL` needs no key.
+  A managed local backend fails when chew's preflight would refuse it, for
+  example vLLM on a machine with no NVIDIA GPU, which doctor passed. An unknown
+  `LLM_BACKEND` value is reported instead of being checked as cloud.
+- `bibr doctor`'s OCR check now fails where `bibr chew` refuses a PDF. With
+  the default `OCR_BACKEND=paddle` on Windows, or on Linux without a GPU that
+  fits paddle-vllm, the automatic chain is glm-llama alone. Doctor now looks
+  for llama.cpp there, where it used to warn that availability was unverified.
+  It fails when no runtime of the chain can start, when
+  `OCR_BACKEND=paddle-vllm` has no GPU that fits it, and when a cloud vision
+  backend (`gemini`, `openai`, `anthropic`) has no API key.
 - `bibr doctor` no longer fails when the working directory has no `.env`.
   Settings come from `~/.bibr/.env` and `./.env`, or from `BIBR_ENV_FILE`.
   Doctor now names the files it read, and warns when there are none, because

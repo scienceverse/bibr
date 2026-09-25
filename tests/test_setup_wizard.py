@@ -9,7 +9,6 @@ from bibr.setup_wizard import (
     SetupWizard,
     _available_extras,
     _build_recommended_setup,
-    _build_test_client,
     _fetch_models,
     _merge_env,
     _ml_extra_available,
@@ -84,52 +83,6 @@ def test_merge_env_preserves_existing(tmp_path):
     assert "NEW_KEY=new_value" in content
     # Comment preserved
     assert "# existing comment" in content
-
-
-def test_build_test_client_google():
-    """Test that _build_test_client calls instructor.from_provider for google."""
-    mock_client = MagicMock()
-
-    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
-        result = _build_test_client("google", "gemini-3.5-flash-lite", "key123")
-
-    assert result is mock_client
-    mock_from.assert_called_once_with("google/gemini-3.5-flash-lite", api_key="key123")
-
-
-def test_build_test_client_openai():
-    """Test that _build_test_client calls instructor.from_provider for openai with base_url."""
-    mock_client = MagicMock()
-
-    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
-        result = _build_test_client("openai", "gpt-4o-mini", "sk-key", "https://custom.api")
-
-    assert result is mock_client
-    mock_from.assert_called_once_with(
-        "openai/gpt-4o-mini", api_key="sk-key", base_url="https://custom.api"
-    )
-
-
-def test_build_test_client_anthropic():
-    """Test that _build_test_client calls instructor.from_provider for anthropic."""
-    mock_client = MagicMock()
-
-    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
-        result = _build_test_client("anthropic", "claude-haiku-4-5-20251001", "sk-ant-key")
-
-    assert result is mock_client
-    mock_from.assert_called_once_with("anthropic/claude-haiku-4-5-20251001", api_key="sk-ant-key")
-
-
-def test_build_test_client_groq():
-    """Test that _build_test_client calls instructor.from_provider for groq."""
-    mock_client = MagicMock()
-
-    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
-        result = _build_test_client("groq", "llama-3.3-70b-versatile", "gsk-key")
-
-    assert result is mock_client
-    mock_from.assert_called_once_with("groq/llama-3.3-70b-versatile", api_key="gsk-key")
 
 
 def test_fetch_models_openai():
@@ -260,14 +213,120 @@ def test_fetch_models_ollama_does_not_double_v1():
     assert result == ["llama3:latest"]
 
 
-def test_build_test_client_ollama_uses_the_v1_api():
-    """The connection test's client must reach Ollama's /v1 routes, like the adapter."""
-    mock_client = MagicMock()
+# --- LLM connection test: the adapter extraction uses ----------------------
 
-    with patch("instructor.from_provider", return_value=mock_client) as mock_from:
-        _build_test_client("ollama", "gpt-oss:20b", "", "http://localhost:11434")
 
-    mock_from.assert_called_once_with("ollama/gpt-oss:20b", base_url="http://localhost:11434/v1")
+class _Completion:
+    """The fake client's answer; awaitable, like the async Instructor client's."""
+
+    reply = "OK"
+
+    def __await__(self):
+        async def _result():
+            return self
+
+        return _result().__await__()
+
+
+class _FakeInstructor:
+    """Stands in for ``instructor.from_provider``; each create() fails or answers in turn."""
+
+    def __init__(self, *outcomes):
+        self.outcomes = list(outcomes)
+        self.clients: list[tuple[str, dict]] = []
+        self.requests: list[dict] = []
+
+    def __call__(self, model, **kwargs):
+        kwargs.pop("api_key", None)
+        self.clients.append((model, kwargs))
+        return self
+
+    def create(self, **kwargs):
+        self.requests.append(
+            {
+                k: v
+                for k, v in kwargs.items()
+                if k not in {"response_model", "messages", "max_retries"}
+            }
+        )
+        outcome = self.outcomes.pop(0) if self.outcomes else None
+        if isinstance(outcome, Exception):
+            raise outcome
+        return _Completion()
+
+
+def test_connection_test_sends_ollama_requests_to_the_v1_api(monkeypatch):
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "ollama",
+        "LLM_MODEL": "gpt-oss:20b",
+        "LLM_OLLAMA_BASE_URL": "http://localhost:11434",
+    }
+    fake = _FakeInstructor()
+    monkeypatch.setattr("instructor.from_provider", fake)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+
+    wizard._offer_llm_connection_test()
+
+    assert [base_url for _model, kw in fake.clients if (base_url := kw.get("base_url"))] == [
+        "http://localhost:11434/v1"
+    ]
+    assert "Connected — LLM responded: OK" in wizard.console.export_text()
+
+
+def test_connection_test_retry_for_ollama_asks_for_the_url_not_a_key(monkeypatch):
+    """Ollama has no key: a retry must not write '=<answer>' into .env."""
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "ollama",
+        "LLM_MODEL": "gpt-oss:20b",
+        "LLM_OLLAMA_BASE_URL": "http://localhost:11434",
+    }
+    fake = _FakeInstructor(ConnectionError("connection refused"))
+    confirms = []
+    prompts = []
+    monkeypatch.setattr("instructor.from_provider", fake)
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Confirm.ask", lambda text, **k: confirms.append(text) or True
+    )
+    monkeypatch.setattr(
+        "bibr.setup_wizard.Prompt.ask",
+        lambda text, **k: prompts.append(text) or "http://gpu-box:11434",
+    )
+
+    wizard._offer_llm_connection_test()
+
+    assert confirms == ["Test the LLM connection now?", "Retry with a different Ollama base URL?"]
+    assert prompts == ["Ollama base URL"]
+    assert wizard.env_vars == {
+        "LLM_PROVIDER": "ollama",
+        "LLM_MODEL": "gpt-oss:20b",
+        "LLM_OLLAMA_BASE_URL": "http://gpu-box:11434",
+    }
+    assert len(fake.requests) == 2
+
+
+def test_connection_test_sends_the_google_adapter_request(monkeypatch):
+    """The recommended cloud setup tests gemini-3.5-flash-lite, which cannot turn
+    thinking off: the test must send the adapter's thinking budget, as chew does."""
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+        "GOOGLE_API_KEY": "AIza-typed-key-1234567890",
+    }
+    fake = _FakeInstructor()
+    monkeypatch.setattr("instructor.from_provider", fake)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+
+    wizard._offer_llm_connection_test()
+
+    assert fake.requests == [
+        {
+            "generation_config": {"temperature": 0.0, "max_tokens": 4096},
+            "thinking_config": {"thinking_budget": 1},
+        }
+    ]
 
 
 def test_fetch_models_returns_empty_on_error():

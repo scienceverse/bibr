@@ -122,6 +122,13 @@ def _check_paddle_http(backend: str, url: str | None, ok, warn) -> None:
     ok(f"{label}: {url})")
 
 
+_VISION_OCR_KEY_HINTS = {
+    "gemini": "Set GOOGLE_API_KEY (or LLM_API_KEY) in .env",
+    "openai": "Set LLM_API_KEY in .env",
+    "anthropic": "Set ANTHROPIC_API_KEY in .env",
+}
+
+
 def _check_ocr_backend(ok, warn, fail) -> None:
     """Probe whether the configured OCR backend is importable and instantiable.
 
@@ -146,6 +153,17 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         _check_paddle_rapid_mlx(backend, ok, warn, fail)
         return
     if backend == "paddle-vllm":
+        from bibr.local.cli.run_config import _ocr_candidate_unavailable_reason
+
+        # chew refuses paddle-vllm without a GPU that fits it; say so here too.
+        blocker = _ocr_candidate_unavailable_reason(backend)
+        if blocker is not None:
+            fail(
+                f"OCR backend: {backend} — cannot start here: {blocker}",
+                hint="Set OCR_BACKEND=paddle to use the local runtime this machine supports, "
+                "or use an external or cloud OCR backend.",
+            )
+            return
         available, status = _paddle_vllm_status(Settings.ocr.paddle_model)
         reporter = warn if available else fail
         reporter(
@@ -170,12 +188,24 @@ def _check_ocr_backend(ok, warn, fail) -> None:
     # not prove it accepts an image plus the Paddle prompt; only the managed
     # startup smoke can establish that capability. Keep doctor honest and name
     # the managed MLX-VLM fallback rather than declaring the chain ready.
-    if backend == "paddle":
+    #
+    # A one-candidate chain (Windows, and Linux without a GPU that fits
+    # paddle-vllm, where it is glm-llama alone) is checked as that backend
+    # below, which looks for llama.cpp exactly as chew's preflight does.
+    from bibr.ocr.registry import resolve_backend_candidates
+
+    candidates = resolve_backend_candidates(backend, Settings) if backend == "paddle" else ()
+    if len(candidates) > 1:
         import importlib.util
 
-        from bibr.ocr.registry import resolve_backend_candidates
+        from bibr.local.cli.run_config import _ocr_runtime_blocker
 
-        candidates = resolve_backend_candidates(backend, Settings)
+        # chew refuses the run when no candidate can start; so does doctor.
+        blocker = _ocr_runtime_blocker(backend)
+        if blocker is not None:
+            fail("OCR backend: paddle (automatic) — no OCR runtime can start here", hint=blocker)
+            return
+
         primary = candidates[0]
         if primary.backend == "paddle-vllm":
             _available, status = _paddle_vllm_status(Settings.ocr.paddle_model)
@@ -320,7 +350,17 @@ def _check_ocr_backend(ok, warn, fail) -> None:
         ok(f"{label} (remote: {ocr_url})")
         return
     elif resolved in ("gemini", "openai", "anthropic"):
-        # Vision-LLM OCR — uses the LLM provider keys.
+        # Vision-LLM OCR — uses the LLM provider keys, resolved the way the
+        # OCR client resolves them. Without one every page's OCR call fails.
+        import os
+
+        from bibr.local.ocr_cloud import _api_key_for_provider
+
+        # The OpenAI SDK also reads OPENAI_API_KEY from the process environment.
+        sdk_key = resolved == "openai" and bool(os.environ.get("OPENAI_API_KEY"))
+        if not (_api_key_for_provider(resolved, Settings) or sdk_key):
+            fail(f"{label}: no API key", hint=_VISION_OCR_KEY_HINTS[resolved])
+            return
         ok(f"{label}")
         return
 
@@ -437,42 +477,35 @@ def _check_ref_strategies(ok, fail) -> None:
 def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
     """Report a managed local LLM backend + launcher availability.
 
-    Local backends own their own server, so there is no API key to check —
-    report the backend + model and verify the launcher is installed instead.
+    Local backends own their own server, so there is no API key to check.
+    The pass/fail verdict is ``bibr chew``'s own preflight (launcher and
+    hardware), so doctor refuses exactly what a run would refuse; the lines
+    below it only describe how the backend will launch.
     """
     import importlib.util
-    import shutil
 
-    if backend == "vllm":
-        vllm_installed = importlib.util.find_spec("vllm") is not None
-        available = vllm_installed or shutil.which("uv") is not None
+    from bibr.local.cli.run_config import _local_llm_backend_blocker
+
+    problem = _local_llm_backend_blocker(backend)
+    if problem is not None:
+        fail(f"LLM backend: {backend} — cannot start here", hint=problem)
+        return
+
+    if backend == "vllm" and importlib.util.find_spec("vllm") is None:
+        # Honest about the cost: the first chew bootstraps vLLM through uv
+        # (several GB), and on Python 3.14 — where the vllm extra installs
+        # nothing because vllm==0.27.0 has no 3.14 wheels — inside a
+        # managed Python 3.13.
         hint = "Install with: uv sync --extra vllm, or install uv (https://astral.sh/uv)"
-        if available and not vllm_installed:
-            # Honest about the cost: the first chew bootstraps vLLM through uv
-            # (several GB), and on Python 3.14 — where the vllm extra installs
-            # nothing because vllm==0.27.0 has no 3.14 wheels — inside a
-            # managed Python 3.13.
-            note = "uv-managed vLLM runner; the first run downloads several GB"
-            if sys.version_info >= (3, 14):
-                note += (
-                    " into a managed Python 3.13 (vllm has no 3.14 wheels, so "
-                    "`uv sync --extra vllm` installs nothing on this interpreter)"
-                )
-            ok(f"LLM backend: {backend} ({note}, model={model}) — {hint}")
-            return
-    elif backend == "vllm-mlx":
-        from bibr.local.vllm_mlx_runtime import vllm_mlx_unavailable_reason
-
-        unavailable_reason = vllm_mlx_unavailable_reason()
-        available = unavailable_reason is None
-        hint = "Install with: uv sync --extra local-mlx  (or uv pip install vllm-mlx)"
-    elif backend == "rapid-mlx":
-        from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
-
-        unavailable_reason = rapid_mlx_unavailable_reason()
-        available = unavailable_reason is None
-        hint = "Install with: pip install 'rapid-mlx[guided]'"
-    elif backend == "llama-cpp":
+        note = "uv-managed vLLM runner; the first run downloads several GB"
+        if sys.version_info >= (3, 14):
+            note += (
+                " into a managed Python 3.13 (vllm has no 3.14 wheels, so "
+                "`uv sync --extra vllm` installs nothing on this interpreter)"
+            )
+        ok(f"LLM backend: {backend} ({note}, model={model}) — {hint}")
+        return
+    if backend == "llama-cpp":
         from bibr.local.llama_cpp import (
             cuda_steering_hint,
             find_llama_server,
@@ -482,13 +515,7 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
         )
 
         prefix = find_llama_server()
-        if prefix is None:
-            fail(
-                f"LLM backend: {backend} — launcher not available",
-                hint=install_hint(),
-            )
-            return
-        gpu = probe_gpu_backend(prefix)
+        gpu = probe_gpu_backend(prefix) if prefix is not None else None
         if gpu is False:
             # Soft: binary is present but will crawl on CPU. Doctor's ok/fail
             # API has no warn channel here, so encode the upgrade path in the
@@ -498,7 +525,7 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
                 f"very slow; {install_hint()}"
             )
             return
-        if gpu is True:
+        if gpu is True and prefix is not None:
             # Vulkan-on-NVIDIA runs but is slower than CUDA for bibr's prefill-
             # heavy workload; encode the steering hint in the status line (no
             # warn channel here, same as the CPU-only case above).
@@ -508,73 +535,57 @@ def _check_llm_local_backend(backend: str, model: str, ok, fail) -> None:
                 return
             ok(f"LLM backend: {backend} (GPU, managed local server, model={model})")
             return
-        ok(f"LLM backend: {backend} (managed local server, model={model})")
-        return
-    else:  # llmster
-        available = shutil.which("lms") is not None
-        hint = "Install manually: curl -fsSL https://lmstudio.ai/install.sh | bash"
-
-    if available:
-        ok(f"LLM backend: {backend} (managed local server, model={model})")
-    else:
-        fail(f"LLM backend: {backend} — launcher not available", hint=hint)
+    ok(f"LLM backend: {backend} (managed local server, model={model})")
 
 
-def _check_llm_connection(
-    provider: str,
-    model: str,
-    api_key: str,
-    base_url: str | None,
-    console,
-    ok,
-    warn,  # noqa: ARG001
-    fail,
-) -> None:
-    """Ping the cloud LLM provider once to confirm the key + network work.
+def _llm_connection_hint(settings) -> str:
+    """What to check when the LLM connection test fails, for the configured endpoint."""
+    provider = settings.llm.provider
+    model = settings.llm.model
+    if provider == "ollama":
+        return (
+            f"Check that Ollama is running at {settings.llm.ollama_base_url} and has the model "
+            f"(ollama pull {model})"
+        )
+    if provider == "openai" and settings.llm.base_url:
+        return f"Check that the server at {settings.llm.base_url} is running and serves {model}"
+    return "Check your API key, the model name and your network connection"
+
+
+def _redact_llm_keys(text: str, settings) -> str:
+    """Mask every configured LLM key in ``text``, plus anything key-shaped."""
+    from bibr.utils.redact import redact_key, scrub_secrets
+
+    for key in (
+        settings.llm.api_key,
+        settings.GOOGLE_API_KEY,
+        settings.ANTHROPIC_API_KEY,
+        settings.GROQ_API_KEY,
+    ):
+        text = redact_key(text, key or "")
+    return scrub_secrets(text)
+
+
+def _check_llm_connection(settings, console, ok, fail) -> None:
+    """Ping the configured LLM provider once to confirm the key, endpoint and model work.
+
+    The request goes through :func:`bibr.clients.llm.ping_llm`, the provider
+    adapter extraction uses, so doctor tests what ``bibr chew`` will send.
 
     On failure the raw SDK exception is redacted before display: google-genai and
     other SDKs frequently embed ``?key=<API_KEY>`` in exception URLs, and doctor
     output is routinely pasted into bug reports (audit M2).
     """
+    from bibr.clients.llm import ping_llm
+
     try:
-        import instructor
-        from pydantic import BaseModel, Field
-
-        class _Ping(BaseModel):
-            reply: str = Field(description="Your reply")
-
-        kwargs: dict = {}
-        if provider == "google":
-            kwargs["api_key"] = api_key
-        elif provider == "openai":
-            kwargs["api_key"] = api_key
-            if base_url:
-                kwargs["base_url"] = base_url
-                # Mirror OpenAIProvider: local OpenAI-compatible servers
-                # need JSON_SCHEMA mode (they reject object-form tool_choice).
-                kwargs["mode"] = instructor.Mode.JSON_SCHEMA
-        elif provider in ("anthropic", "groq"):
-            kwargs["api_key"] = api_key
-
-        client = instructor.from_provider(f"{provider}/{model}", **kwargs)
-        create_kwargs: dict = {}
-        if provider == "google":
-            create_kwargs["generation_config"] = {"max_tokens": 64}
-        else:
-            create_kwargs["max_tokens"] = 64
-        with console.status(f"  [dim]contacting {provider}…[/dim]"):
-            client.create(
-                response_model=_Ping,
-                messages=[{"role": "user", "content": "Reply with the single word: OK"}],
-                **create_kwargs,
-            )
+        with console.status(f"  [dim]contacting {settings.llm.provider}…[/dim]"):
+            ping_llm()
         ok("LLM connection OK")
     except Exception as e:
-        from bibr.utils.redact import redact_key
-
         fail(
-            f"LLM connection failed: {redact_key(str(e), api_key or '')}",
-            hint="Check your API key and network connection",
+            f"LLM connection failed: {_redact_llm_keys(str(e), settings)}",
+            hint=_llm_connection_hint(settings),
         )
 
 
@@ -654,14 +665,14 @@ def _run_doctor() -> None:
     # Settings validity — a bad .env value would otherwise crash every check
     # below on first access. Surface it as a failed check (naming the env
     # var(s) + allowed values) and keep running the Settings-free diagnostics.
-    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
+    from bibr.exceptions import InputValidationError
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
 
     settings = bibr.config.Settings
     config_ok = True
-    _llm_local = False
-    api_key = provider = model = None
+    backend_setting = "cloud"
     try:
-        _llm_local = settings.llm.backend in LOCAL_LLM_BACKENDS
+        backend_setting = settings.llm.backend
     except ConfigurationError as e:
         config_ok = False
         for problem in e.problems or [str(e)]:
@@ -670,61 +681,41 @@ def _run_doctor() -> None:
             )
 
     # --- LLM (provider + key, or managed local backend; needs Settings) ------
+    llm_backend: str | None = None
     if config_ok:
         ui.section(console, "LLM")
-
-    if not config_ok:
-        pass
-    elif _llm_local:
-        # Managed local server: report backend + model, check the launcher, and
-        # skip the cloud API-key + connection tests below (nothing to reach yet).
-        _check_llm_local_backend(
-            settings.llm.backend,
-            _managed_llm_model(settings.llm.backend, settings),
-            ok,
-            fail,
-        )
-    else:
         try:
-            provider = settings.llm.provider
-            model = settings.llm.model
+            # Resolve ``local`` to the backend chew would start on this machine.
+            llm_backend = resolve_llm_backend(backend_setting)
+        except InputValidationError as e:
+            fail(f"LLM backend: {e}", hint="Fix LLM_BACKEND in your .env or environment")
 
-            # Determine API key based on provider
-            api_key = None
-            if provider == "google":
-                api_key = settings.GOOGLE_API_KEY
-            elif provider == "anthropic":
-                api_key = settings.ANTHROPIC_API_KEY
-            elif provider == "groq":
-                api_key = settings.GROQ_API_KEY
-            elif provider == "openai":
-                api_key = settings.llm.api_key
-            elif provider == "ollama":
-                api_key = "n/a"  # Ollama doesn't need a key
+    if llm_backend is None:
+        pass
+    elif llm_backend in LOCAL_LLM_BACKENDS:
+        # Managed local server: report backend + model, check the launcher and
+        # hardware, and skip the provider key + connection tests below
+        # (nothing to reach yet).
+        _check_llm_local_backend(llm_backend, _managed_llm_model(llm_backend, settings), ok, fail)
+    else:
+        # The same credential check chew runs before any work: the provider
+        # adapter builds its client (LLM_API_KEY or the provider's own key; an
+        # OpenAI-compatible server with LLM_BASE_URL needs none).
+        from bibr.clients.llm import preflight_credentials
 
-            if api_key:
-                ok(f"LLM provider: {provider} ({model})")
-            else:
-                fail(
-                    f"LLM provider: {provider} — no API key",
-                    hint="Run bibr setup or set the key in .env",
-                )
-        except Exception as e:
-            fail(f"LLM config: {e}", hint="Run bibr setup to configure")
-            api_key = None
-            provider = None
-            model = None
-
-        # LLM connection test (cloud backends only) — the one check that can
-        # take seconds, so it gets a spinner.
-        if api_key and provider and provider != "ollama":
-            _check_llm_connection(
-                provider, model, api_key, settings.llm.base_url, console, ok, warn, fail
+        provider = settings.llm.provider
+        try:
+            preflight_credentials()
+        except Exception as e:  # noqa: BLE001 — missing key, unknown provider or SDK
+            fail(
+                f"LLM provider: {provider} — {_redact_llm_keys(str(e), settings)}",
+                hint="Run bibr setup or set the key in .env",
             )
-        elif provider == "ollama":
-            warn("LLM connection: Ollama (not tested)", hint="Start Ollama and test manually")
+            fail("LLM connection: skipped", hint="Fix the LLM provider first")
         else:
-            fail("LLM connection: skipped", hint="Configure an API key first")
+            ok(f"LLM provider: {provider} ({settings.llm.model})")
+            # The one check that can take seconds, so it gets a spinner.
+            _check_llm_connection(settings, console, ok, fail)
 
     # --- OCR (needs Settings) -------------------------------------------------
     if config_ok:

@@ -18,7 +18,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -35,6 +35,9 @@ from bibr.local.llm_models import (
 )
 from bibr.presets import PresetManager
 from bibr.utils.onnx_providers import onnxruntime_gpu_reinstall_command
+
+if TYPE_CHECKING:
+    from bibr.config import GlobalSettings
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -419,31 +422,29 @@ def _redact(text: str, api_key: str) -> str:
     return redact_key(text, api_key)
 
 
-def _build_test_client(provider: str, model: str, api_key: str, base_url: str = ""):
-    """Build an Instructor client for connection testing.
+def _connection_test_settings(env_vars: dict[str, str]) -> "GlobalSettings":
+    """Settings for the LLM connection test: the current ones plus the wizard's answers.
 
-    Uses wizard-collected values instead of the Settings singleton
-    (which hasn't been written yet).
+    The test runs before ``.env`` is written (advanced flow), so the provider,
+    model, key and endpoint the user just entered override a snapshot of the
+    current settings; everything else (token caps, thinking budget, Instructor
+    mode) is what the first ``bibr chew`` will use too.
     """
-    import instructor
+    from bibr.config import snapshot_settings
 
-    model_string = f"{provider}/{model}"
-    kwargs: dict = {}
-
-    if provider == "google":
-        kwargs["api_key"] = api_key
-    elif provider == "openai":
-        kwargs["api_key"] = api_key
-        if base_url:
-            kwargs["base_url"] = base_url
-    elif provider in ("anthropic", "groq"):
-        kwargs["api_key"] = api_key
-    elif provider == "ollama" and base_url:
-        from bibr.clients.providers.ollama import ollama_openai_base_url
-
-        kwargs["base_url"] = ollama_openai_base_url(base_url)
-
-    return instructor.from_provider(model_string, **kwargs)
+    settings = snapshot_settings()
+    llm = settings.llm
+    llm.provider = env_vars.get("LLM_PROVIDER", llm.provider)
+    llm.model = env_vars.get("LLM_MODEL", llm.model)
+    # Test the key that was typed: the adapters prefer LLM_API_KEY over the
+    # provider's own key, so an older one must not shadow it.
+    llm.api_key = env_vars.get("LLM_API_KEY") or None
+    llm.base_url = env_vars.get("LLM_BASE_URL") or None
+    llm.ollama_base_url = env_vars.get("LLM_OLLAMA_BASE_URL") or llm.ollama_base_url
+    for key_env in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"):
+        if env_vars.get(key_env):
+            setattr(settings, key_env, env_vars[key_env])
+    return settings
 
 
 _OPENAI_FILTER_PATTERNS = (
@@ -1317,46 +1318,43 @@ class SetupWizard:
             self.console.print("[dim]Skipped.[/dim]")
             return
 
+        from bibr.clients.llm import ping_llm
+        from bibr.exceptions import ConfigurationError
+
         provider = self.env_vars.get("LLM_PROVIDER", "")
-        model = self.env_vars.get("LLM_MODEL", "")
-        api_key = (
-            self.env_vars.get(LLM_DEFAULTS[provider]["key_env"], "")
-            if provider in LLM_DEFAULTS
-            else ""
-        )
-        base_url = self.env_vars.get("LLM_BASE_URL", "") or self.env_vars.get(
-            "LLM_OLLAMA_BASE_URL", ""
-        )
+        key_env = LLM_DEFAULTS[provider]["key_env"] if provider in LLM_DEFAULTS else ""
+        api_key = self.env_vars.get(key_env, "") if key_env else ""
 
         while True:
             try:
                 with self.console.status("Connecting to LLM …"):
-                    from pydantic import BaseModel, Field
-
-                    class TestResponse(BaseModel):
-                        reply: str = Field(description="Your reply")
-
-                    client = _build_test_client(provider, model, api_key, base_url)
-                    create_kwargs: dict = {}
-                    if provider == "google":
-                        create_kwargs["generation_config"] = {"max_tokens": 64}
-                    else:
-                        create_kwargs["max_tokens"] = 64
-                    response = client.create(
-                        response_model=TestResponse,
-                        messages=[{"role": "user", "content": "Reply with the single word: OK"}],
-                        **create_kwargs,
-                    )
-                ui.ok(self.console, f"Connected — LLM responded: {response.reply.strip()}")
+                    # The provider adapter extraction uses, so this sends what
+                    # the first ``bibr chew`` will send.
+                    reply = ping_llm(_connection_test_settings(self.env_vars))
+                ui.ok(self.console, f"Connected — LLM responded: {reply.strip()}")
+                break
+            except ConfigurationError as exc:
+                # An invalid value in the current .env or environment, not the connection.
+                ui.error(self.console, f"Can't test the connection: {exc}")
                 break
             except Exception as exc:
                 msg = _redact(str(exc), api_key)
                 ui.error(self.console, f"Couldn't connect: {msg}")
-                if not Confirm.ask("Retry with a different API key?", default=True):
+                if provider == "ollama":
+                    # Ollama takes no key; what the user can change is the URL.
+                    if not Confirm.ask("Retry with a different Ollama base URL?", default=True):
+                        self.console.print("[dim]Skipping connection test.[/dim]")
+                        break
+                    self.env_vars["LLM_OLLAMA_BASE_URL"] = Prompt.ask(
+                        "Ollama base URL",
+                        default=self.env_vars.get("LLM_OLLAMA_BASE_URL", "http://localhost:11434"),
+                    )
+                    continue
+                if not key_env or not Confirm.ask("Retry with a different API key?", default=True):
                     self.console.print("[dim]Skipping connection test.[/dim]")
                     break
                 api_key = Prompt.ask("API key", password=True)
-                self.env_vars[LLM_DEFAULTS[provider]["key_env"]] = api_key
+                self.env_vars[key_env] = api_key
 
     def _step_external_services(self) -> None:
         ui.step(self.console, 4, 6, "Models & external services")
