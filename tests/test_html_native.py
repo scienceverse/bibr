@@ -424,12 +424,25 @@ def test_html_captions_are_not_ocr_text():
         ),
         ("<msub><mi>t</mi> <mrow><mi>i</mi> <mo>-</mo> <mn>1</mn></mrow></msub>", "ti-1"),
         ("<mi>ln</mi> <mi>dbh</mi> <mo>+</mo> <mn>0.93</mn> <mtext>GeV</mtext>", "ln dbh+0.93 GeV"),
+        ("<mi>M</mi> <mo>=</mo> <mfrac><mn>1</mn> <mn>2</mn></mfrac>", "M=1 2"),
+        (
+            "<mi>J</mi> <mo>=</mo> <mrow><mo>[</mo> <mtable><mtr><mtd><mn>0</mn></mtd> "
+            "<mtd><mn>1</mn></mtd></mtr> <mtr><mtd><mn>10</mn></mtd> <mtd><mn>20</mn></mtd>"
+            "</mtr></mtable> <mo>]</mo></mrow>",
+            "J=[ 0 1 10 20 ]",
+        ),
+        (
+            "<msub><mi>E</mi> <mrow><mi>t</mi> <mo>-</mo> <mn>1</mn></mrow></msub> "
+            '<mspace width="8pt"/> <mn>0</mn> <mo>&lt;</mo> <mi>λ</mi>',
+            "Et-1 0<λ",
+        ),
     ],
-    ids=["decimal", "index", "words"],
+    ids=["decimal", "index", "words", "fraction", "matrix", "mspace"],
 )
 def test_whitespace_between_mathml_elements_is_dropped_unless_it_separates_words(math, expected):
     """eLife's HTML pretty-prints MathML like its JATS; kept as text the
-    whitespace split "2.5" into "2. 5" (see the JATS parser's tests)."""
+    whitespace split "2.5" into "2. 5" (see the JATS parser's tests). Two
+    numbers, matrix cells and ``<mspace>`` stay apart."""
     html = (
         '<html><head><meta charset="utf-8"></head><body><article><h2>Method</h2>'
         f"<p>We used <math>{math}</math> here.</p></article></body></html>"
@@ -438,3 +451,17 @@ def test_whitespace_between_mathml_elements_is_dropped_unless_it_separates_words
     parser.parse()
 
     assert [entry.text for entry in parser.assembler.entries] == [f"We used {expected} here."]
+
+
+def test_mathml_fraction_in_a_table_cell_keeps_its_numbers_apart():
+    html = (
+        b"<html><body><article><h2>Results</h2><p>Body text.</p>"
+        b"<table><caption>Table 1. Shares.</caption><tr><th>share</th><th>n</th></tr>"
+        b"<tr><td><math><mfrac><mn>3</mn> <mn>4</mn></mfrac></math></td><td>12</td></tr>"
+        b"</table></article></body></html>"
+    )
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    assert contents.tables[0].contents == [["share", "n"], ["3 4", "12"]]

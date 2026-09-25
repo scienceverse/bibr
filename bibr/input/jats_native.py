@@ -27,7 +27,7 @@ import logging
 
 import pandas as pd
 
-from bibr.input.mathml_whitespace import FlatText
+from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.input.xml_entities import parse_xml
 from bibr.models import (
     ORGANIZATION_ROLE,
@@ -139,6 +139,10 @@ _TEXT_BOUNDARY = frozenset(
         "tr",
         "td",
         "th",
+        # MathML matrix rows and cells, as in the HTML parser.
+        "mtr",
+        "mlabeledtr",
+        "mtd",
         # Structured <aff>/<address> fields — sibling values, not a sentence.
         "institution",
         "institution-wrap",
@@ -187,7 +191,9 @@ def _flatten(el, exclude: set[str] | None = None) -> str:
                     add(child.tail, in_math, None, serial)
                 continue
             if exclude is None or child_ln not in exclude:
-                if child_ln in _TEXT_BOUNDARY:
+                if child_ln in _TEXT_BOUNDARY or (
+                    child_ln == "mspace" and mspace_separates(child.attrib)
+                ):
                     flat.separate()
                 walk(child, in_math, serial)
             if child.tail:

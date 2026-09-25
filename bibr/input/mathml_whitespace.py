@@ -18,25 +18,38 @@ resolved against its neighbours:
 * between two letters or digits, it is kept when either side is a word: an
   ``mtext``/``ms`` with a letter, or two letters or more in ``mi``/``mn``/
   ``mo`` elements, in one ("ln", "GeV") or spelled across siblings ("direct");
+* between two digits, it is always kept: the parts of a fraction read "1 2",
+  not "12", and a coefficient and its root "3 2", while an index pair
+  pretty-printed as ``<msubsup><mi>g</mi> <mn>1</mn> <mn>1</mn></msubsup>``
+  reads "g1 1";
+* after the invisible function application, it is kept before a letter or a
+  digit ("sin x", where a renderer spaces the name from its argument) but not
+  before a bracket ("sin(x)");
 * after a comma, a semicolon, a colon or a closing bracket, it is kept before
   an ``mtext``/``ms`` word (", and", ") for");
 * never before closing punctuation or after an opening bracket, and nowhere
   else: operators and punctuation close up ("SD=1.2", "a_ij = 5" reads
   "aij=5"), as the formula reads from a publisher that writes no whitespace.
+
+An ``<mspace>`` shows as space unless its width is negative (``\\quad`` is
+``<mspace width="1em"/>``), so the parsers treat it as a word boundary, like
+a matrix cell (:func:`mspace_separates`).
 """
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Mapping
 
 # XML whitespace. A no-break space is content, not formatting.
 _XML_WHITESPACE = " \t\r\n"
 _TOKENS = frozenset({"mi", "mn", "mo", "mtext", "ms"})
 _TEXT_TOKENS = frozenset({"mtext", "ms"})
 # Invisible operators (function application, times, separator, plus) attach
-# on both sides.
-_INVISIBLE = "\u2061\u2062\u2063\u2064"
-_NO_SPACE_AFTER = "([{⟨〈" + _INVISIBLE
+# to what comes before them, and all but function application to what comes
+# after.
+_APPLY_FUNCTION = "\u2061"
+_INVISIBLE = _APPLY_FUNCTION + "\u2062\u2063\u2064"
+_NO_SPACE_AFTER = "([{⟨〈\u2062\u2063\u2064"
 _NO_SPACE_BEFORE = ")]}⟩〉,.;:!?" + _INVISIBLE
 _SPACE_BEFORE_TEXT = ",;:)]}⟩〉"
 
@@ -128,6 +141,10 @@ class FlatText:
             return True
         if before in _SPACE_BEFORE_TEXT:
             return sides[1] == _TEXT
+        if before == _APPLY_FUNCTION:
+            return after.isalnum()
+        if before.isdigit() and after.isdigit():
+            return True
         return max(sides) >= _LETTERS and before.isalnum() and after.isalnum()
 
     def join(self) -> str:
@@ -146,3 +163,11 @@ class FlatText:
             out.append(text)
             left = index
         return "".join(out)
+
+
+def mspace_separates(attributes: Mapping[str, object]) -> bool:
+    """Whether an ``<mspace>`` with these *attributes* separates the text
+    around it: unless its width is negative (``negativethinmathspace``,
+    ``-0.17em``), which pulls its neighbours together."""
+    width = str(attributes.get("width", "")).strip().lower()
+    return not width.startswith(("-", "negative"))

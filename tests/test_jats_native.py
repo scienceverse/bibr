@@ -775,6 +775,11 @@ MATHML_OPERATORS = [
         "<mml:mi>y</mml:mi> <mml:mo>)</mml:mo>",
         "f(x,y)",
     ),
+    (
+        "<mml:mi>cos</mml:mi> <mml:mo>&#x2061;</mml:mo> <mml:mo>(</mml:mo> "
+        "<mml:mi>q</mml:mi> <mml:mo>)</mml:mo>",
+        "cos\u2061(q)",
+    ),
 ]
 # Where a renderer spaces words by other means, or the source spells a word
 # one letter per element, the whitespace keeps them apart.
@@ -795,6 +800,58 @@ MATHML_WORDS = [
         "<mml:mi>A</mml:mi><mml:mo>,</mml:mo> <mml:mi>B</mml:mi><mml:mo>,</mml:mo> "
         "<mml:mtext>and</mml:mtext> <mml:mi>C</mml:mi>",
         "A,B, and C",
+    ),
+    # A renderer spaces a function name from a bare argument.
+    ("<mml:mi>sin</mml:mi> <mml:mo>&#x2061;</mml:mo> <mml:mi>x</mml:mi>", "sin\u2061 x"),
+]
+# Whitespace between two numbers stays: a renderer shows them apart (the parts
+# of a fraction, a coefficient and its root, a base and its scripts).
+MATHML_NUMBERS = [
+    (
+        "<mml:mi>M</mml:mi> <mml:mo>=</mml:mo> "
+        "<mml:mfrac><mml:mn>1</mml:mn> <mml:mn>2</mml:mn></mml:mfrac> "
+        "<mml:mo>(</mml:mo> <mml:mi>s</mml:mi> <mml:mo>)</mml:mo>",
+        "M=1 2(s)",
+    ),
+    ("<mml:mn>3</mml:mn> <mml:msqrt><mml:mn>2</mml:mn></mml:msqrt>", "3 2"),
+    ("<mml:mroot><mml:mn>27</mml:mn> <mml:mn>3</mml:mn></mml:mroot>", "27 3"),
+    (
+        "<mml:msubsup><mml:mi>g</mml:mi> <mml:mn>1</mml:mn> <mml:mn>1</mml:mn></mml:msubsup>",
+        "g1 1",
+    ),
+    ("<mml:msup><mml:mn>10</mml:mn> <mml:mn>3</mml:mn></mml:msup>", "10 3"),
+    (
+        "<mml:msup><mml:mi>Σ</mml:mi> <mml:mrow><mml:mo>-</mml:mo> <mml:mn>1</mml:mn></mml:mrow>"
+        "</mml:msup> <mml:mn>1</mml:mn>",
+        "Σ-1 1",
+    ),
+]
+# Matrix cells and <mspace> separate the text around them, whitespace or not.
+MATHML_SEPARATORS = [
+    (
+        "<mml:mi>J</mml:mi> <mml:mo>=</mml:mo> <mml:mrow><mml:mo>[</mml:mo> <mml:mtable>"
+        "<mml:mtr><mml:mtd><mml:mn>0</mml:mn></mml:mtd> <mml:mtd><mml:mn>1</mml:mn></mml:mtd>"
+        "</mml:mtr> <mml:mtr><mml:mtd><mml:mn>10</mml:mn></mml:mtd> "
+        "<mml:mtd><mml:mn>20</mml:mn></mml:mtd></mml:mtr></mml:mtable> <mml:mo>]</mml:mo></mml:mrow>",
+        "J=[ 0 1 10 20]",
+    ),
+    # E_{t-1} \quad 0 < λ ≤ 1, as in journal.pone.0278264.
+    (
+        "<mml:msub><mml:mi>E</mml:mi> <mml:mrow><mml:mi>t</mml:mi> <mml:mo>-</mml:mo> "
+        '<mml:mn>1</mml:mn></mml:mrow></mml:msub> <mml:mspace width="8pt"/> <mml:mn>0</mml:mn> '
+        "<mml:mo>&lt;</mml:mo> <mml:mi>λ</mml:mi> <mml:mo>≤</mml:mo> <mml:mn>1</mml:mn>",
+        "Et-1 0<λ≤1",
+    ),
+    (
+        " ".join(f"<mml:mi>{c}</mml:mi>" for c in "naive")
+        + ' <mml:mspace width="1em"/> '
+        + " ".join(f"<mml:mi>{c}</mml:mi>" for c in "seasonality"),
+        "naive seasonality",
+    ),
+    # A negative space pulls its neighbours together.
+    (
+        '<mml:mi>a</mml:mi> <mml:mspace width="negativethinmathspace"/> <mml:mi>b</mml:mi>',
+        "ab",
     ),
 ]
 
@@ -820,7 +877,16 @@ def _inline_text(math: str) -> str:
 @pytest.mark.parametrize(
     ("math", "expected"),
     MATHML_OPERATORS,
-    ids=["index", "statistic", "identifier", "subscript", "text", "variables", "arguments"],
+    ids=[
+        "index",
+        "statistic",
+        "identifier",
+        "subscript",
+        "text",
+        "variables",
+        "arguments",
+        "function-bracket",
+    ],
 )
 def test_whitespace_between_mathml_elements_is_dropped(math, expected):
     """Kept as text it split "2.1" into "2 . 1"; the late clean-up used to
@@ -832,10 +898,52 @@ def test_whitespace_between_mathml_elements_is_dropped(math, expected):
 @pytest.mark.parametrize(
     ("math", "expected"),
     MATHML_WORDS,
-    ids=["function-names", "unit-mtext", "unit-newline", "spelled-words", "text-after-comma"],
+    ids=[
+        "function-names",
+        "unit-mtext",
+        "unit-newline",
+        "spelled-words",
+        "text-after-comma",
+        "function-argument",
+    ],
 )
 def test_whitespace_between_mathml_elements_keeps_words_apart(math, expected):
     assert _inline_text(math) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_NUMBERS,
+    ids=["fraction", "coefficient-root", "root-index", "scripts", "power", "different-rows"],
+)
+def test_whitespace_between_mathml_numbers_is_kept(math, expected):
+    """Dropped, it wrote one number for two: one half read "12"."""
+    assert _inline_text(math) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_SEPARATORS,
+    ids=["matrix", "mspace-number", "mspace-words", "negative-mspace"],
+)
+def test_mathml_matrix_cells_and_spaces_separate_the_text(math, expected):
+    assert _inline_text(math) == f"We used {expected} here."
+    assert _inline_text(re.sub(r">\s+<", "><", math)) == f"We used {expected} here."
+
+
+def test_mathml_fraction_in_a_table_cell_keeps_its_numbers_apart():
+    fraction = (
+        "<inline-formula><mml:math><mml:mfrac><mml:mn>3</mml:mn> <mml:mn>4</mml:mn></mml:mfrac>"
+        "</mml:math></inline-formula>"
+    )
+    xml = _mathml_jats(
+        'Text.</p><table-wrap id="t1"><label>Table 1</label><caption><p>Shares.</p></caption>'
+        f"<table><tr><th>share</th><th>n</th></tr><tr><td>{fraction}</td><td>12</td></tr></table>"
+        "</table-wrap><p>More."
+    )
+    contents = _segment(_parse(xml))
+
+    assert contents.tables[0].df.values.tolist() == [["3 4", "12"]]
 
 
 def test_mathml_whitespace_next_to_prose_keeps_the_words_apart():

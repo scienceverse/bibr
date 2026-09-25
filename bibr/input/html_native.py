@@ -19,7 +19,7 @@ from typing import Any
 import pandas as pd
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
-from bibr.input.mathml_whitespace import FlatText
+from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
     CanonicalSection,
@@ -176,7 +176,7 @@ def _flatten(tag: Tag) -> str:
         elif isinstance(child, Tag):
             child_name = _tag_name(child)
             separates = child_name not in _INLINE_TAGS
-            if separates:
+            if separates or (child_name == "mspace" and mspace_separates(child.attrs)):
                 flat.separate()
             in_child_math = in_math or child_name == "math"
             stack.append(

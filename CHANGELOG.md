@@ -266,16 +266,26 @@ released.
   whitespace between MathML elements as a renderer does, so "(0,2.5)" and
   "y¯t-1" read as they do from a publisher that writes none. They keep a
   space where it separates words: "ln dbh", "0.93 GeV", "direct effect"
-  spelled one letter per element, a word after a comma, and the text around
-  the formula. Of the 1,450 test articles that contain MathML
-  (PMC_sample_1943, eLife_984 as JATS and as HTML, PLOS_1000), 154 read
-  differently. In the 148 whose sentences still line up one to one, 883
-  sentences and 168 table cells changed, each only by removed spaces. In
-  that text, spaced decimals ("2 . 5") fell from 85 to none and
-  spaced differences ("t - 1") from 134 to none. The change joins 20 pairs of
-  words, all inside formulas: terms of a product, the two parts of a
-  fraction, and one unit ("6220M-1cm-1"). Dropping every such space would
-  have joined 149 ("lndbh", "directeffect").
+  spelled one letter per element, a word after a comma, a function name
+  before a bare argument ("sin x"), and the text around the formula. They
+  also keep it between two numbers, so the parts of a fraction read "1 2" and
+  not "12"; an index pair (x with 1 below and 2 above) reads "x1 2". An
+  `<mspace>` (`\quad`, `\,`) and, in JATS as in HTML, a matrix row or cell
+  now separate the text around them, whitespace or not: "E_{t-1} \quad
+  0<λ≤1" reads "Et-1 0<λ≤1", and a matrix that read "(2112)" reads
+  "( 2 1 1 2)". Other letters and digits still close up, across a fraction
+  bar, a product or a script too, as they do from a publisher that writes no
+  whitespace: a/b reads "ab", and a unit set as an upright `<mi>` after a
+  number reads "5m" (in `<mtext>` it keeps its space).
+  Measured against the parsers that kept every such space, on the 885 test
+  articles that contain a MathML element (PMC_sample_1943, eLife_984 as JATS
+  and as HTML, PLOS_1000): 3,329 of their 40,308 formulas read differently.
+  Spaced decimals ("2 . 5") in them fell from 121 to none and spaced
+  differences ("t - 1") from 346 to none. No space between two digits and
+  none at an `<mspace>` is lost. Twenty closed spaces join two tokens of two
+  letters or more, between terms of a product ("m3hgNa"), the parts of a
+  fraction ("e-diλi") or a sum and its limits. Dropping every such space
+  would have joined 187 ("lndbh", "directeffect").
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
