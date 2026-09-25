@@ -39,6 +39,8 @@ declined, fell back or under-yielded, or the stream is clearly better.
 
 from __future__ import annotations
 
+import bisect
+import itertools
 import logging
 import re
 import statistics
@@ -48,6 +50,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from bibr.extract.merge_split import find_interior_onsets
 from bibr.extract.region_seg import (
     _CJK_START,
     _QUOTED_TITLE_START,
@@ -87,12 +90,18 @@ _BOTTOM_BAND = 900.0
 
 _WS = re.compile(r"\s+")
 _DIGITS = re.compile(r"\d+")
+# A lone page number, arabic or roman, optionally as "page 12", "- 12 -" or
+# "12 of 30".
 _PAGE_NUMBER_LINE = re.compile(
-    r"^\s*(?:(?:page|p\.|pp\.|seite|página|pagina|str\.)\s*)?[-–—]?\s*\d{1,4}\s*[-–—]?\s*"
-    r"(?:(?:/|of|von|de)\s*\d{1,4})?\s*$",
+    r"^\s*(?:(?:page|p\.|pp\.|seite|página|pagina|str\.)\s*)?[-–—]?\s*(\d{1,4}|[ivxlc]{1,7})\s*"
+    r"[-–—]?\s*(?:(?:/|of|von|de)\s*\d{1,4})?\s*$",
     re.IGNORECASE,
 )
-_ROMAN_ONLY_LINE = re.compile(r"^\s*[ivxlcdm]{1,7}\s*$", re.IGNORECASE)
+# Running heads are mostly words. A line holding a DOI, URL, arXiv id or ISBN
+# is never furniture, however alike two of them look once their digits are
+# masked ("https://doi.org/#.#/#" on two pages of one journal).
+_FURNITURE_MIN_LETTERS = 6
+_LOCATOR_TEXT = re.compile(r"10\.\d{4,9}/|https?://|www\.|\bdoi\s*:|\barxiv\b|\bisbn\b", re.I)
 
 # Headings that end a reference list. Whole-heading shaped: the cue opens a
 # short line and ends it, or is followed by a colon ("Funding: ...").
@@ -144,12 +153,17 @@ class LineStream:
     tail_text: str = ""
     text_layer_regions: int = 0
     region_text_regions: int = 0
-    # Alphanumeric projection of the section's rows, the text both the
-    # cascade's and the stream's entries are measured against.
+    # Alphanumeric projection of the section's rows (furniture and any text
+    # after the list included), the text both the cascade's and the stream's
+    # entries are measured against.
     section_key: str = ""
     # The rows of a references section split in two at a page break were
     # added in front of the located ones.
     split_section: bool = False
+    # A page of the section is rotated. Its lines' boxes are turned into the
+    # layout frame, but their point geometry (indent, gaps, the geometry
+    # model's features) is not, so the stream's votes there are unreliable.
+    rotated: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,9 +182,8 @@ class StreamSegmentation:
     link_dois: tuple[str | None, ...]
     numbered_style: bool
     reason_flags: tuple[str, ...]
-    # ``LineStream.section_key`` less any text this segmentation found to lie
-    # after the list: what the cascade's and the stream's entries are
-    # measured against.
+    # ``LineStream.section_key``: what the cascade's and the stream's entries
+    # are both measured against.
     section_key: str = ""
 
 
@@ -178,8 +191,39 @@ def _alnum(text: str) -> str:
     return "".join(ch for ch in text.lower() if ch.isalnum())
 
 
-def _furniture_key(text: str) -> str:
-    return _DIGITS.sub("#", _WS.sub(" ", text.casefold()).strip())
+def _furniture_key(text: str) -> str | None:
+    """Digit-masked form under which a running head repeats, or None.
+
+    None for a line that cannot be a running head: one holding a locator
+    (``_LOCATOR_TEXT``) or fewer than six letters.
+    """
+    if _LOCATOR_TEXT.search(text):
+        return None
+    key = _DIGITS.sub("#", _WS.sub(" ", text.casefold()).strip())
+    if sum(ch.isalpha() for ch in key) < _FURNITURE_MIN_LETTERS:
+        return None
+    return key
+
+
+def _page_number_value(text: str) -> int | None:
+    match = _PAGE_NUMBER_LINE.match(text)
+    if match is None:
+        return None
+    token = match.group(1)
+    return int(token) if token.isdigit() else _roman_value(token)
+
+
+def _confirmed_page_numbers(candidates: list[tuple[int, int, int]]) -> set[int]:
+    """Candidates ``(key, page, value)`` whose value runs with the page number.
+
+    A lone number is a page number when another page carries one at the same
+    offset from its page index; a year or a volume that happens to stand alone
+    on an edge line does not.
+    """
+    pages_by_offset: dict[int, set[int]] = defaultdict(set)
+    for _key, page, value in candidates:
+        pages_by_offset[value - page].add(page)
+    return {key for key, page, value in candidates if len(pages_by_offset[value - page]) >= 2}
 
 
 def _box(values: Sequence[float]) -> tuple[float, float, float, float]:
@@ -282,28 +326,62 @@ def _edge_line_ids(by_page: dict[int, list[dict[str, Any]]]) -> set[int]:
     return edges
 
 
-def _repeated_edge_keys(by_page: dict[int, list[dict[str, Any]]], edge_ids: set[int]) -> set[str]:
+def _edge_furniture_ids(by_page: dict[int, list[dict[str, Any]]], edge_ids: set[int]) -> set[int]:
+    """Edge lines that are page furniture.
+
+    A running head: its furniture key recurs at an edge of two or more pages.
+    A page number: a lone number whose offset from the page index recurs.
+    Only lines at a page edge ever qualify, as in the geometry segmenter's own
+    capture (``bibr.ocr.ref_geometry``).
+    """
     pages_by_key: dict[str, set[int]] = defaultdict(set)
+    keyed: list[tuple[int, str]] = []
+    numbered: list[tuple[int, int, int]] = []
     for page, lines in by_page.items():
         for line in lines:
-            if id(line) in edge_ids:
-                key = _furniture_key(str(line["text"]))
-                if key:
-                    pages_by_key[key].add(page)
-    return {key for key, pages in pages_by_key.items() if len(pages) >= 2}
+            if id(line) not in edge_ids:
+                continue
+            text = str(line["text"])
+            value = _page_number_value(text)
+            if value is not None:
+                numbered.append((id(line), page, value))
+                continue
+            key = _furniture_key(text)
+            if key is not None:
+                pages_by_key[key].add(page)
+                keyed.append((id(line), key))
+    furniture = {line_id for line_id, key in keyed if len(pages_by_key[key]) >= 2}
+    return furniture | _confirmed_page_numbers(numbered)
 
 
-def _repeated_band_region_keys(contents: PaperContents) -> set[str]:
-    """Digit-masked texts of margin-band regions repeated on two or more pages."""
+def _in_band(bbox: Sequence[float] | None) -> bool:
+    return bbox is not None and (bbox[3] <= _TOP_BAND or bbox[1] >= _BOTTOM_BAND)
+
+
+def _band_furniture(contents: PaperContents) -> tuple[set[str], set[int]]:
+    """Running-head keys and page-number offsets from the margin-band regions.
+
+    The same two tests as ``_edge_furniture_ids``, for regions read without
+    text-layer lines (scans): a furniture key recurring in the bands of two
+    pages, and the offsets at which lone numbers there run with the page.
+    """
     pages_by_key: dict[str, set[int]] = defaultdict(set)
+    numbered: list[tuple[int, int, int]] = []
     for summary in getattr(contents, "region_summaries", None) or []:
-        bbox = summary.bbox
-        if bbox is None or not (bbox[3] <= _TOP_BAND or bbox[1] >= _BOTTOM_BAND):
+        if not _in_band(summary.bbox):
             continue
-        key = _furniture_key(summary.content or "")
-        if key:
+        text = collapse_ws(summary.content or "")
+        value = _page_number_value(text)
+        if value is not None:
+            numbered.append((len(numbered), summary.page, value))
+            continue
+        key = _furniture_key(text)
+        if key is not None:
             pages_by_key[key].add(summary.page)
-    return {key for key, pages in pages_by_key.items() if len(pages) >= 2}
+    keys = {key for key, pages in pages_by_key.items() if len(pages) >= 2}
+    confirmed = _confirmed_page_numbers(numbered)
+    offsets = {value - page for index, page, value in numbered if index in confirmed}
+    return keys, offsets
 
 
 def _furniture_boxes(contents: PaperContents) -> dict[int, list[tuple[float, float, float, float]]]:
@@ -312,10 +390,6 @@ def _furniture_boxes(contents: PaperContents) -> dict[int, list[tuple[float, flo
         if (summary.label or "") in _FURNITURE_LABELS and summary.bbox is not None:
             boxes[summary.page].append(summary.bbox)
     return boxes
-
-
-def _is_page_number_text(text: str) -> bool:
-    return bool(_PAGE_NUMBER_LINE.match(text) or _ROMAN_ONLY_LINE.match(text))
 
 
 def _region_text_lines(region: _SectionRegion) -> list[str]:
@@ -434,14 +508,14 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
     section_key = _match_key(" ".join(row_texts))
     by_page = _page_lines_by_page(getattr(contents, "ref_page_lines", None) or [])
     edge_ids = _edge_line_ids(by_page)
-    edge_keys = _repeated_edge_keys(by_page, edge_ids)
-    band_keys = _repeated_band_region_keys(contents)
+    edge_furniture = _edge_furniture_ids(by_page, edge_ids)
+    band_keys, band_page_offsets = _band_furniture(contents)
     furniture_boxes = _furniture_boxes(contents)
 
-    stream = LineStream(lines=[], split_section=extended is not None)
-    # Furniture and the text after the list, taken out of the section text the
-    # segmentations are measured against: neither is reference content.
-    removed: list[str] = []
+    # The section's own text is what the cascade's and the stream's entries are
+    # both measured against, furniture and text after the list included: text
+    # the stream leaves out costs it coverage.
+    stream = LineStream(lines=[], section_key=section_key, split_section=extended is not None)
     assigned: set[int] = set()
     emitted_key = ""
     for region_index, region in enumerate(regions):
@@ -479,12 +553,10 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
                 assigned.add(id(line))
                 edge = id(line) in edge_ids
                 center = _center(line["bbox"])
-                raw = str(line["text"])
-                if any(_inside(center, box) for box in furniture_boxes.get(region.page, ())) or (
-                    edge and (_furniture_key(raw) in edge_keys or _is_page_number_text(raw))
+                if id(line) in edge_furniture or any(
+                    _inside(center, box) for box in furniture_boxes.get(region.page, ())
                 ):
                     stream.furniture_removed += 1
-                    removed.append(text)
                     continue
                 stream.lines.append(
                     StreamLine(
@@ -508,18 +580,15 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
             # The same text read again through an overlapping region box.
             continue
         stream.region_text_regions += 1
-        in_band = region.bbox is not None and (
-            region.bbox[3] <= _TOP_BAND or region.bbox[1] >= _BOTTOM_BAND
-        )
-        if in_band and _furniture_key(" ".join(region.rows)) in band_keys:
+        in_band = _in_band(region.bbox)
+        if in_band and _furniture_key(collapse_ws(" ".join(region.rows))) in band_keys:
             stream.furniture_removed += len(region.rows)
-            removed.extend(region.rows)
             continue
         first = True
         for text in _region_text_lines(region):
-            if in_band and _is_page_number_text(text):
+            value = _page_number_value(text) if in_band else None
+            if value is not None and value - region.page in band_page_offsets:
                 stream.furniture_removed += 1
-                removed.append(text)
                 continue
             stream.lines.append(
                 StreamLine(
@@ -536,14 +605,9 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
             first = False
     if not stream.lines:
         return None
+    stream.rotated = any((line.geometry or {}).get("rotation") for line in stream.lines)
     _assign_columns(stream, regions)
     _cut_end_of_list(stream)
-    removed.append(stream.tail_text)
-    for text in removed:
-        key = _match_key(text)
-        if key:
-            section_key = section_key.replace(key, "", 1)
-    stream.section_key = section_key
     _attach_link_dois(stream, getattr(contents, "pdf_uri_links", None) or [])
     return stream
 
@@ -573,6 +637,11 @@ def _assign_columns(stream: LineStream, regions: list[_SectionRegion]) -> None:
             line.column = columns[(line.page, bbox[0])]
 
 
+# The line before an end-of-list heading closes an entry: it ends on a
+# period, a bracket, a digit or a locator, not mid-sentence ("reported in").
+_CLOSES_ENTRY = re.compile(r"(?:[.)\]\d]|https?://\S+|10\.\d{4,9}/\S+)\s*$")
+
+
 def _cut_end_of_list(stream: LineStream) -> None:
     """Stop the stream at a heading that ends the reference list."""
     starts_seen = 0
@@ -584,6 +653,7 @@ def _cut_end_of_list(stream: LineStream) -> None:
             and len(text) <= _END_OF_LIST_MAX_CHARS
             and _END_OF_LIST_RE.match(text)
             and not YEARISH_RE.search(text)
+            and _CLOSES_ENTRY.search(collapse_ws(stream.lines[index - 1].text))
         ):
             tail = stream.lines[index:]
             stream.tail_text = collapse_ws(" ".join(t.text for t in tail))
@@ -682,7 +752,8 @@ def _list_mark(text: str) -> str | None:
 # "Same author as above": a dash run or underscores opening the line, then a
 # year, a period/comma or a capital (coauthors, the title).
 _DASH_START = re.compile(
-    r"^(?:[—―⸺⸻]+|[–-]{1,6}|_{2,})\s*[.,:]?\s*(?=[(\[]?\d{4}|[A-ZÀ-Þ]|$|and\b|&)"
+    r"^(?:(?:[—―⸺⸻]+|_{2,})\s*[.,:]?\s*|[–-]{1,6}(?:\s*[.,:]\s*|\s+|(?=[(\[]?\d{4})))"
+    r"(?=[(\[]?\d{4}|[A-ZÀ-Þ]|$|and\b|&)"
 )
 # All-caps family name opening an ABNT/ISO 690 entry, then an initial or a
 # capitalised word: "SILVA, J." "BRASIL. Ministério". An all-caps journal
@@ -779,20 +850,85 @@ def _is_dash_start(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _numbering_chain(markers: list[tuple[int, str, int]]) -> list[int]:
-    """Longest run of list markers counting up by one, in stream order.
+# Words that follow a number inside an entry rather than an entry number:
+# edition, supplement, part, volume and month words ("3. Aufl.", "10 Suppl",
+# "5. Juni").
+_NUMBER_CONTINUATION = re.compile(
+    r"(?:aufl(?:age)?|ausg(?:abe)?|ed(?:n|ition)?|udg(?:ave)?|utg(?:ave)?|uppl(?:aga)?"
+    r"|oppl(?:ag)?|painos|izd|изд|vyd|wyd|kiad(?:ás)?|bask[ıi]|suppl(?:ement)?|pt|part|teil"
+    r"|bd|band|jg|jahrg(?:ang)?|hrsg|vol|no|nr"
+    r"|jan(?:uary|uar)?|feb(?:ruary|ruar)?|mar(?:ch)?|märz|apr(?:il)?|may|mai|june?|juni"
+    r"|july?|juli|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|okt(?:ober)?|nov(?:ember)?"
+    r"|dec(?:ember)?|dez(?:ember)?)\b",
+    re.IGNORECASE,
+)
+# How far (PDF points) a numbered line may sit off the list's marker column.
+_MARKER_COLUMN_TOLERANCE = 4.0
 
-    ``markers`` holds ``(line_index, kind, number)``. One missing number is
-    tolerated (an OCR-damaged marker), and the marker style may change along
-    the run ("ix." then "10."), but the run must open at 1-3: page numbers and
-    years never do. Returns the run's line indices.
+
+def _marker_family(kind: str) -> str:
+    return "roman" if kind == "roman" else "arabic"
+
+
+def _chain_candidates(
+    markers: list[tuple[int, str, int]], texts: list[str], offsets: list[float | None]
+) -> list[tuple[int, str, int]]:
+    """Marker lines that may claim a place in the numbering sequence.
+
+    Not number 0, not a number followed by an edition, supplement, part or
+    month word, and at the list's marker column where the line has geometry:
+    within a few points of where most lines with that marker style start. A
+    continuation line that happens to open on a number ("3. Aufl.", "X. Li,")
+    sits at the continuation indent instead.
+    """
+    kept = [
+        (line_index, kind, number)
+        for line_index, kind, number in markers
+        if number > 0 and not _NUMBER_CONTINUATION.match(_strip_marker(texts[line_index]))
+    ]
+    marker_lines = {line_index for line_index, _, _ in markers}
+    others = [
+        offset for i, offset in enumerate(offsets) if offset is not None and i not in marker_lines
+    ]
+    other_column = statistics.median(others) if others else None
+    columns: dict[str, tuple[float, float]] = {}
+    for kind in {kind for _, kind, _ in kept}:
+        placed = [offset for i, k, _ in kept if k == kind and (offset := offsets[i]) is not None]
+        if not placed:
+            continue
+        column = statistics.median(placed)
+        # Right-aligned numbers ("9." over "10.", "VIII." over "IX.") start at
+        # different points; half the distance to the continuation indent
+        # still tells a numbered line from a continuation.
+        spread = abs(other_column - column) / 2 if other_column is not None else 0.0
+        columns[kind] = (column, max(_MARKER_COLUMN_TOLERANCE, spread))
+    placed_ok: list[tuple[int, str, int]] = []
+    for line_index, kind, number in kept:
+        offset = offsets[line_index]
+        if offset is not None and kind in columns:
+            column, tolerance = columns[kind]
+            if abs(offset - column) > tolerance:
+                continue
+        placed_ok.append((line_index, kind, number))
+    return placed_ok
+
+
+def _longest_run(items: list[tuple[int, int]]) -> list[int]:
+    """Longest run of ``(line_index, number)`` counting up by one, one gap allowed.
+
+    The run must open at 1-3: page numbers and years never do. A 1 after a run
+    that reached 3 starts a second list in the same run (supplementary
+    references numbered from 1 again).
     """
     chains: dict[int, list[int]] = {}
     best: list[int] = []
-    for line_index, _kind, number in markers:
+    best_last = 0
+    for line_index, number in items:
         previous = chains.get(number - 1) or chains.get(number - 2)
         if previous is not None:
             candidate = [*previous, line_index]
+        elif number == 1 and best_last >= 3:
+            candidate = [*best, line_index]
         elif number <= 3:
             candidate = [line_index]
         else:
@@ -800,8 +936,28 @@ def _numbering_chain(markers: list[tuple[int, str, int]]) -> list[int]:
         if len(candidate) > len(chains.get(number, [])):
             chains[number] = candidate
             if len(candidate) > len(best):
-                best = candidate
+                best, best_last = candidate, number
     return best
+
+
+def _numbering_chain(candidates: list[tuple[int, str, int]]) -> list[int]:
+    """Line indices of the printed numbering sequence(s), in stream order.
+
+    ``candidates`` holds ``(line_index, kind, number)`` from
+    ``_chain_candidates``. The sequence keeps one marker style ("[n]", "n.",
+    "(n)", "n ", roman), so a roman initial never joins an arabic list or the
+    reverse. A second list numbered from 1 again after the first
+    (supplementary references) continues the sequence.
+    """
+    by_kind: dict[str, list[tuple[int, int]]] = defaultdict(list)
+    for line_index, kind, number in candidates:
+        by_kind[kind].append((line_index, number))
+    chain: list[int] = []
+    for items in by_kind.values():
+        run = _longest_run(items)
+        if len(run) > len(chain):
+            chain = run
+    return chain
 
 
 # ---------------------------------------------------------------------------
@@ -996,7 +1152,6 @@ def segment_line_stream(
     if not lines:
         return None
     tail_text = stream.tail_text
-    section_key = stream.section_key
     texts = [collapse_ws(line.text) for line in lines]
     scores, onsets = _start_scores(lines, probabilities)
     voted = [0] + [i for i in range(1, len(lines)) if scores[i] >= _START_THRESHOLD]
@@ -1005,7 +1160,8 @@ def segment_line_stream(
         parsed = _parse_marker(text)
         if parsed is not None:
             markers.append((i, parsed[0], parsed[1]))
-    chain = _numbering_chain(markers)
+    candidates = _chain_candidates(markers, texts, _indent_offsets(lines))
+    chain = _numbering_chain(candidates)
     reason_flags: list[str] = []
     # A printed sequence decides the boundaries when it accounts for at least
     # half of the voted starts; three stray "1." "2." "3." lines in an
@@ -1018,7 +1174,7 @@ def segment_line_stream(
             marked[mark].append(i)
     bulleted = max(marked.values(), key=len, default=[])
     if numbered_style:
-        missing = _chain_missing_numbers(chain, markers, texts)
+        missing = _chain_missing_numbers(chain, candidates, texts)
         starts = sorted({0, *chain, *missing, *_chain_gap_starts(chain, texts, scores, onsets)})
         protected = {*chain, *missing}
         reason_flags.append("numbering_sequence")
@@ -1026,7 +1182,6 @@ def segment_line_stream(
         if cut is not None:
             after = collapse_ws(" ".join(line.text for line in lines[cut:]))
             tail_text = collapse_ws(f"{after} {tail_text}")
-            section_key = section_key.replace(_match_key(after), "", 1)
             lines = lines[:cut]
             texts = texts[:cut]
             starts = [start for start in starts if start < cut]
@@ -1084,7 +1239,7 @@ def segment_line_stream(
         link_dois=tuple(link_dois),
         numbered_style=numbered_style,
         reason_flags=tuple(reason_flags),
-        section_key=section_key,
+        section_key=stream.section_key,
     )
 
 
@@ -1092,23 +1247,27 @@ _MIN_CHAIN = 3
 
 
 def _chain_missing_numbers(
-    chain: list[int], markers: list[tuple[int, str, int]], texts: list[str]
+    chain: list[int], candidates: list[tuple[int, str, int]], texts: list[str]
 ) -> list[int]:
-    """Marker lines carrying a number the sequence skipped, wherever they stand.
+    """Candidate lines carrying a number the sequence skipped, wherever they stand.
 
     Layout reading order can put entry 5 before entry 4 across a column or box
-    boundary; entry 4 still opens an entry.
+    boundary; entry 4 still opens an entry. Only a line whose marker is of the
+    sequence's family (arabic or roman) qualifies.
     """
-    numbers = [marker[1] for marker in (_parse_marker(texts[i]) for i in chain) if marker]
-    if not numbers:
+    markers = [marker for marker in (_parse_marker(texts[i]) for i in chain) if marker]
+    if not markers:
         return []
-    skipped = set(range(numbers[0], numbers[-1] + 1)) - set(numbers)
+    family = _marker_family(markers[0][0])
+    numbers = [marker[1] for marker in markers]
+    skipped = set(range(min(numbers), max(numbers) + 1)) - set(numbers)
     in_chain = set(chain)
     found: list[int] = []
-    for line_index, _kind, number in markers:
-        if line_index not in in_chain and number in skipped:
-            skipped.discard(number)
-            found.append(line_index)
+    for line_index, kind, number in candidates:
+        if line_index in in_chain or number not in skipped or _marker_family(kind) != family:
+            continue
+        skipped.discard(number)
+        found.append(line_index)
     return found
 
 
@@ -1212,20 +1371,78 @@ def _split_multi_doi(
     return out
 
 
+# A line with fewer alphanumerics than this cannot be placed in a segment.
+_PLACE_MIN_CHARS = 6
+
+
+def link_dois_for_segments(
+    segments: Sequence[str], lines: Sequence[StreamLine]
+) -> list[str | None]:
+    """The DOI link over each segment's own lines, when there is exactly one.
+
+    Walks the stream's lines through the segments' text in order; a line lies
+    within a segment when its whole text is found there, and a line that
+    straddles two segments places nothing. A segment takes a DOI only when
+    the DOI links over its lines name exactly one and it prints none itself.
+    """
+    mapped: list[str | None] = [None] * len(segments)
+    if not segments or not any(line.link_dois for line in lines):
+        return mapped
+    keys = [_match_key(segment) for segment in segments]
+    ends = list(itertools.accumulate(len(key) for key in keys))
+    joined = "".join(keys)
+    claims: dict[int, dict[str, str]] = defaultdict(dict)
+    cursor = 0
+    for line in lines:
+        key = _match_key(line.text)
+        if len(key) < _PLACE_MIN_CHARS:
+            continue
+        position = joined.find(key, cursor)
+        if position < 0:
+            continue
+        segment = bisect.bisect_right(ends, position)
+        if segment >= len(ends) or position + len(key) > ends[segment]:
+            continue
+        cursor = position + len(key)
+        for doi in line.link_dois:
+            claims[segment][doi.lower()] = doi
+    for segment, dois in claims.items():
+        if len(dois) == 1 and not _printed_dois(segments[segment]):
+            mapped[segment] = next(iter(dois.values()))
+    return mapped
+
+
 # ---------------------------------------------------------------------------
 # Quality
 # ---------------------------------------------------------------------------
 
-# An entry this long almost always holds several references.
-_MAX_ENTRY_CHARS = 1200
-# Two dates are common in one reference (a reprint, an access date); three,
-# or two in a long entry, mark a merge.
-_MERGE_TWO_DATES_MIN_CHARS = 400
 _MIN_ENTRY_CHARS = 20
+# An entry this many times the typical entry length (and at least this long)
+# holds several references.
+_OUTLIER_LENGTH_FACTOR = 3.0
+_OUTLIER_MIN_CHARS = 500
+# An author-date opening "(2001)" or a Vancouver date "2001;12" opens one
+# reference: two in one entry mark a merge.
+_PAREN_YEAR = re.compile(r"\((?:1[6-9]|20)\d\d[a-z]?(?:,[^)]{0,20})?\)")
+_VANCOUVER_DATE = re.compile(r"(?<!\d)(?:1[6-9]|20)\d\d[a-z]?\s*;\s*\d")
 
 
-def _date_count(text: str) -> int:
-    return len({match.group(0).lower() for match in YEARISH_RE.finditer(text)})
+# A year standing on its own, not a page in a range ("pp. 1765-1770"), part of
+# a DOI or an ISSN.
+_STANDALONE_YEAR = re.compile(r"(?<![\d\-–—/.:])(?:1[6-9]|20)\d\d(?![\d\-–—/])")
+# A second date one reference prints: when it was accessed, or first
+# published.
+_SECOND_DATE = re.compile(
+    r"(?:acess?o em|accessed(?: on)?|retrieved(?: on)?|abgerufen am|zugegriffen am"
+    r"|consultado(?: em| el)?|visited(?: on)?|date of access|original(?:ly)? (?:work )?published"
+    r"|first published|reprinted?(?: in)?)[^;)\]]{0,30}?(?:1[6-9]|20)\d\d",
+    re.IGNORECASE,
+)
+
+
+def _year_count(text: str) -> int:
+    text = _SECOND_DATE.sub(" ", text)
+    return len({match.group(0) for match in _STANDALONE_YEAR.finditer(text)})
 
 
 # Coverage is measured on fixed 12-character pieces of the section's text, so
@@ -1248,43 +1465,84 @@ def _section_coverage(entries: Sequence[str], section_key: str) -> float:
     return len(pieces & found) / len(pieces)
 
 
+def numbered_entries(entries: Sequence[str]) -> list[bool]:
+    """Entries whose printed number continues the previous entry's or leads into the next.
+
+    Computed from the entries alone, so it treats every segmentation alike.
+    """
+    numbers: list[tuple[str, int] | None] = []
+    for entry in entries:
+        marker = _parse_marker(collapse_ws(entry))
+        numbers.append((_marker_family(marker[0]), marker[1]) if marker and marker[1] > 0 else None)
+    flags: list[bool] = []
+    for index, current in enumerate(numbers):
+        previous = numbers[index - 1] if index else None
+        following = numbers[index + 1] if index + 1 < len(numbers) else None
+        flags.append(
+            current is not None
+            and (
+                (previous is not None and previous == (current[0], current[1] - 1))
+                or (following is not None and following == (current[0], current[1] + 1))
+            )
+        )
+    return flags
+
+
+def typical_entry_length(*segmentations: Sequence[str]) -> float:
+    """Median entry length over every segmentation being compared."""
+    lengths = [len(entry.strip()) for entries in segmentations for entry in entries]
+    return float(statistics.median(lengths)) if lengths else 0.0
+
+
+def is_merged_entry(text: str, typical_length: float) -> bool:
+    """Whether an entry holds more than one reference.
+
+    Two distinct DOIs, two distinct years (pages and identifiers aside), two
+    author-date openings or Vancouver dates, a second reference the
+    merged-reference splitter can see, or a length far above the typical
+    entry. A single reference that prints two years (a reprint, an access
+    date) is flagged too; the flag weighs alike in every segmentation that
+    keeps that reference whole.
+    """
+    return bool(
+        len(_printed_dois(text)) >= 2
+        or _year_count(text) >= 2
+        or len(_PAREN_YEAR.findall(text)) >= 2
+        or len(_VANCOUVER_DATE.findall(text)) >= 2
+        or len(text) > max(_OUTLIER_MIN_CHARS, _OUTLIER_LENGTH_FACTOR * typical_length)
+        or find_interior_onsets(text)
+    )
+
+
 def segmentation_quality(
-    entries: Sequence[str],
-    section_key: str,
-    *,
-    protected: Sequence[bool] | None = None,
+    entries: Sequence[str], section_key: str, *, typical_length: float | None = None
 ) -> float:
     """Share of the section plausibly split into single references, in [0, 1].
 
-    Coverage of the section's text (``LineStream.section_key``) times the
-    share of entries that look like one complete reference: not a fragment
-    (opens in lower case, is very short, or carries no date or DOI) and not a
-    merge (two DOIs, three dates, two dates in a long entry, or over 1,200
-    characters). Entries in ``protected`` (a verified numbering sequence)
-    count as complete even without a date. Computed the same way for the
-    cascade's and the stream's entries so the two can be compared.
+    Coverage of the section's text (``LineStream.section_key``, which keeps
+    furniture and anything after the list, so text a segmentation leaves out
+    costs it) times the share of entries that look like one complete
+    reference: not a fragment (opens in lower case, is very short, or carries
+    no date or DOI unless its printed number continues the list's) and not a
+    merge (``is_merged_entry``). ``typical_length`` should come from every
+    segmentation being compared (``typical_entry_length``) so that all are
+    judged alike; it defaults to these entries' median.
     """
     if not entries or not section_key:
         return 0.0
     coverage = _section_coverage(entries, section_key)
+    numbered = numbered_entries(entries)
+    typical = typical_length if typical_length else typical_entry_length(entries)
     good = 0
-    for index, entry in enumerate(entries):
+    for entry, is_numbered in zip(entries, numbered, strict=True):
         text = entry.strip()
-        is_protected = bool(protected[index]) if protected is not None else False
         stripped = _strip_marker(text)
         fragment = (
             len(text) < _MIN_ENTRY_CHARS
             or bool(_LOWER_START.match(stripped) and not _is_dash_start(text))
-            or (not is_protected and not _entry_has_date_or_doi(text))
+            or (not is_numbered and not _entry_has_date_or_doi(text))
         )
-        dates = _date_count(text)
-        merged = (
-            len(_printed_dois(text)) >= 2
-            or dates >= 3
-            or (dates == 2 and len(text) > _MERGE_TWO_DATES_MIN_CHARS)
-            or len(text) > _MAX_ENTRY_CHARS
-        )
-        good += not (fragment or merged)
+        good += not (fragment or is_merged_entry(text, typical))
     return coverage * good / len(entries)
 
 

@@ -351,39 +351,52 @@ released.
   lines did not align, or a list of short entries came out merged, cut short or
   dropped. The stream reads the text-layer lines inside the located section's
   layout boxes, page after page (a box without usable text-layer lines, such as
-  an OCR'd or scanned page, contributes its text line by line), drops page
-  furniture (lines in header, footer and page-number boxes, running heads
-  repeated at a page edge on two or more pages with the digits ignored,
-  standalone page numbers) and manuscript line numbers, reads a box that repeats
-  an aggregate box's text once, and stops at a heading that ends the list
-  (Acknowledgements, Funding, Appendix, Data availability and the like). Each
-  line's start is voted by the geometry model's per-line probability,
-  author/year, Vancouver, all-caps and corporate onsets, "same author" dashes,
-  the first line of a layout box, hanging indent, a vertical gap and the
-  previous line ending in a DOI, a URL or a DOI link. A printed sequence
-  counting up by one ("[n]", "n.", "(n)", roman numerals), bullets or bracketed
-  labels decide instead when the list has them, an entry printed out of order
-  included, and a numbered list ends with its last entry's box. A fragment that
-  opens in lower case with no date or DOI rejoins the entry before it, an entry
-  holding two DOIs is split after the first, and a numbered entry is never
-  dropped as a short fragment without a year. A reference list split into two
-  sections, a non-English heading ("Referencias") over the first page and a
-  synthetic "References" section for the reference boxes on the next, is read
-  whole. Parsing is unchanged.
-- The cascade still runs, and its result is kept unless it fell back (region
+  an OCR'd or scanned page, contributes its text line by line), reads a box that
+  repeats an aggregate box's text once, drops manuscript line numbers and page
+  furniture, and stops at a heading that ends the list (Acknowledgements,
+  Funding, Appendix, Data availability and the like) when the line before it
+  closes an entry. Furniture is a line in a header, footer or page-number box,
+  or a line at a page edge that is a running head (its text, digits masked,
+  recurs at an edge of two or more pages and has six letters or more, and it
+  holds no DOI, URL, arXiv id or ISBN) or a page number (a lone number whose
+  offset from the page index recurs on another page). Each line's start is voted
+  by the geometry model's per-line probability, author/year, Vancouver, all-caps
+  and corporate onsets, "same author" dashes, the first line of a layout box,
+  hanging indent, a vertical gap and the previous line ending in a DOI, a URL or
+  a DOI link. A printed sequence counting up by one ("[n]", "n.", "(n)", roman
+  numerals, a second list numbered from 1 again included), bullets or bracketed
+  labels decide instead when the list has them. A sequence keeps one marker
+  style, and a line numbered 0, opening on an edition, supplement or month word
+  ("3. Aufl.", "10 Suppl") or standing off the list's marker column takes no
+  place in it. An entry printed out of order still opens, and a numbered list
+  ends with its last entry's box. A fragment that opens in lower case with no
+  date or DOI rejoins the entry before it, an entry holding two DOIs is split
+  after the first, and a numbered entry is never dropped as a short fragment
+  without a year. A reference list split into two sections, a non-English
+  heading ("Referencias") over the first page and a synthetic "References"
+  section for the reference boxes on the next, is read whole. Parsing is
+  unchanged.
+- The cascade still runs, and its result stands unless it fell back (region
   recovery, CRF, marker split) or found nothing, most of its entries came from
-  the merged-reference splitter, or it under-yielded against the section's rows
-  or credible starts; then the line stream's result is used unless its quality
-  is lower by more than 0.05. A selected geometry or LLM-anchor result gives way
-  only to a stream whose quality is higher by 0.15. Quality is the share of the
-  section's text the entries cover (furniture and the text after the list left
-  out) times the share of entries that look like one complete reference, neither
-  a fragment nor a merge. `extraction.diagnostics.reference_yield.attempts`
-  records the stream as a `line_stream` attempt with the reason for the decision
-  and both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
+  the merged-reference splitter, or it under-yielded against its credible entry
+  starts; then the line stream's result is used when its quality is at least the
+  cascade's. A selected geometry or LLM-anchor result gives way only to a stream
+  whose quality is higher by 0.15. The stream never replaces a result with fewer
+  entries than that result has distinct ones (a segment read twice, nearly alike
+  and with the same years, counts once), nor on a paper with a rotated reference
+  page, where its line geometry is unreliable. Quality is the share of the
+  section's full text the entries cover (so text the stream leaves out costs it)
+  times the share of entries that look like one complete reference: not a
+  fragment, and not a merge (two DOIs, two publication years once access and
+  first-publication dates are set aside, two author-date or Vancouver dates, a
+  second reference the merged-reference splitter can see, or an outlier length).
+  Both segmentations are scored the same way, a numbered entry counting as
+  complete in either. `extraction.diagnostics.reference_yield.attempts` records
+  the stream as a `line_stream` attempt with the reason for the decision and
+  both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
   attempt is marked `superseded_by_line_stream`. The stream's spans index its
   own text (flag `stream_text_offsets`); a joined split section is flagged
-  `split_section_joined`.
+  `split_section_joined`. Any error in the stream keeps the cascade's result.
 - Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
   a list numbered that way, as arabic ones already were. They were parsed into
   the first author ("V. Lal, S. K. L.").
@@ -437,11 +450,14 @@ released.
   alongside the strict `bibr-export-v12.schema.json`.
 - `bibr.ocr.pdf_links.read_uri_links()` reads a PDF's URI link annotations
   (page, rectangle, target), and `doi_from_uri()` the DOI a doi.org or `doi:`
-  link targets. The PDF inspection now captures every page's text-layer lines
-  and its URI links in the layout frame. A reference whose text prints no DOI
-  takes the one the link over its lines targets, as MDPI, BMJ and IOP print it
-  only behind a "[CrossRef]" label; the reference yield receipt records
-  `doi_from_link_annotation`. This applies with the NER parser, the default.
+  link targets, with HTML entities and percent-encoding undone; a target holding
+  a NUL or a replacement character, or not DOI-shaped once decoded, yields none.
+  The PDF inspection now captures every page's text-layer lines and its URI
+  links in the layout frame, numbered by PDF page. A reference whose text prints
+  no DOI takes the one targeted by the only DOI link over its own lines, as
+  MDPI, BMJ and IOP print it only behind a "[CrossRef]" label; the reference
+  yield receipt records `doi_from_link_annotation`. This applies with the NER
+  parser, the default.
 
 ### Changed
 
