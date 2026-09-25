@@ -83,7 +83,8 @@ async def recover_paddle_table(
         )
         return result
     logger.warning(
-        "Paddle table output incomplete; retrying once at %d tokens (finish_reason=%s, reasons=%s)",
+        "Paddle table output incomplete; retrying once with output limit %d "
+        "(finish_reason=%s, reasons=%s)",
         PADDLE_TABLE_RECOVERY_MAX_TOKENS,
         finish_reason,
         completeness.reasons,
