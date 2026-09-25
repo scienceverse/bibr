@@ -2,7 +2,13 @@
 
 A Paddle table generation cut short by its token budget exports a ragged or
 unterminated OTSL grid. One retry of the same region at
-``PADDLE_TABLE_RECOVERY_MAX_TOKENS`` usually completes it. This policy used to
+``PADDLE_TABLE_RECOVERY_MAX_TOKENS`` usually completes it — but only when
+that budget is larger than the first request's table cap (the resolved
+profile's table budget, including an ``OCR_GENERATION_MAX_TOKENS``
+override). Retrying at an equal or smaller budget can only reproduce a
+shorter prefix of the same decode and replace the longer output the first
+request kept, so in that case the first result is returned unchanged and no
+second request is sent. This policy used to
 live only in the serve HTTP backend, so local runs (the default
 ``paddle-vllm`` chain, ``paddle-http``, the managed MLX clients) exported
 truncated tables with only a warning.
@@ -55,13 +61,26 @@ async def recover_paddle_table(
 
     Returns:
         The recovered result when the retry yields non-empty output, else the
-        original result. A failed retry never loses the first output.
+        original result. A failed retry never loses the first output. No retry
+        is sent when the first request's table budget already meets or exceeds
+        ``PADDLE_TABLE_RECOVERY_MAX_TOKENS`` — the retry could only return a
+        shorter prefix of the same decode.
     """
     if profile.name != "paddle" or profile.task_for_prompt(prompt) != "table":
         return result
     completeness = check_otsl_completeness(result)
     finish_reason = getattr(result, "finish_reason", None)
     if not otsl_looks_truncated(completeness, finish_reason):
+        return result
+    first_budget = profile.request.max_tokens_for("table")
+    if first_budget >= PADDLE_TABLE_RECOVERY_MAX_TOKENS:
+        logger.debug(
+            "Skipping Paddle table recovery: first request already used %d tokens "
+            "(recovery budget %d; finish_reason=%s)",
+            first_budget,
+            PADDLE_TABLE_RECOVERY_MAX_TOKENS,
+            finish_reason,
+        )
         return result
     logger.warning(
         "Paddle table output incomplete; retrying once at %d tokens (finish_reason=%s, reasons=%s)",

@@ -158,6 +158,37 @@ class TestRecognize:
         assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("cap", [8192, 16384])
+    async def test_does_not_retry_when_first_table_budget_meets_recovery_budget(self, cap):
+        """Pin: with an OCR_GENERATION_MAX_TOKENS override at or above the
+        recovery budget, a length-truncated table keeps its (longer) first
+        output and costs exactly one request."""
+        pytest.importorskip("cv2")
+        from bibr.ocr.profiles import resolve_ocr_profile
+
+        profile = resolve_ocr_profile(
+            explicit="paddle",
+            backend="serve-http",
+            model="paddle-ocr-vl-1.6",
+            max_tokens=cap,
+        )
+        payloads: list[dict] = []
+        backend = _make_backend(
+            _sequence_transport(
+                [("<fcel>A<fcel>B", "length")],
+                payloads,
+            ),
+            model="paddle-ocr-vl-1.6",
+            profile=profile,
+        )
+
+        out = await backend.recognize(_tiny_image(), profile.prompt_for("table"))
+
+        assert out == "<fcel>A<fcel>B"
+        assert out.finish_reason == "length"
+        assert [payload["max_tokens"] for payload in payloads] == [cap]
+
+    @pytest.mark.asyncio
     async def test_retries_structurally_incomplete_table_without_finish_reason(self):
         """Structural truncation retries only when no finish reason is reported."""
         pytest.importorskip("cv2")

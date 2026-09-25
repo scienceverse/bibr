@@ -275,8 +275,8 @@ def test_serve_paddle_key_changes_with_table_recovery_limit(monkeypatch):
 
 
 def test_local_paddle_key_changes_with_table_recovery_limit(monkeypatch):
-    """Every Paddle backend retries truncated tables at the recovery budget,
-    so every Paddle cache key carries it — entries written before recovery
+    """The paddle-* transports and serve run the truncated-table retry, so
+    their cache keys carry its budget — entries written before recovery
     existed must not be served as recovered output."""
     fs = _fs()
     cfg = RunConfig(ocr_backend="paddle-vllm", ocr_profile="paddle")
@@ -286,6 +286,20 @@ def test_local_paddle_key_changes_with_table_recovery_limit(monkeypatch):
     monkeypatch.setattr(ocr_cache, "PADDLE_TABLE_RECOVERY_MAX_TOKENS", 16384)
 
     assert baseline != ocr_cache._key(fs, cfg, identity)
+
+
+@pytest.mark.parametrize("backend", ["glm-http", "gemini"])
+def test_non_recovery_transport_key_ignores_table_recovery_limit(backend, monkeypatch):
+    """A Paddle profile behind a backend that never runs the retry (glm-http,
+    cloud vision) must not carry the recovery term in its cache key."""
+    fs = _fs()
+    cfg = RunConfig(ocr_backend=backend, ocr_profile="paddle")
+    identity = _identity(backend=backend, model="glm-ocr", profile="paddle")
+    baseline = ocr_cache._key(fs, cfg, identity)
+
+    monkeypatch.setattr(ocr_cache, "PADDLE_TABLE_RECOVERY_MAX_TOKENS", 16384)
+
+    assert ocr_cache._key(fs, cfg, identity) == baseline
 
 
 def test_key_changes_with_effective_generation_temperature():

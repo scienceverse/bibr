@@ -97,10 +97,14 @@ def _key(
     )
     request = profile.request
     # The incomplete-table retry re-runs truncated Paddle tables at this
-    # higher budget on every Paddle backend (local and serve share one
-    # recovery helper), so it shapes the cached artifacts everywhere — not
-    # just behind serve-http.
-    table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if identity.profile == "paddle" else 0
+    # higher budget, but only on the transports that run it (the paddle-*
+    # local clients and serve-http share one recovery helper). A Paddle
+    # profile behind any other backend (glm-http, cloud vision) never
+    # retries, so its key must not claim the recovery shaped its artifacts.
+    runs_table_recovery = identity.profile == "paddle" and (
+        identity.backend == "serve-http" or identity.backend.startswith("paddle")
+    )
+    table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
 
     parts = [
