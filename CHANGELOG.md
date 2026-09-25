@@ -369,6 +369,12 @@ released.
   an edition number that equals the next entry number in a numbered list
   ("1. Müller A. Lehrbuch. 2. Aufl. …", and likewise "udg.", "uppl.", "ed.",
   "wyd." and similar edition words).
+- The geometry segmenter's segment-count check and the layout-region
+  segmentation tier count only the reference onsets on the pages of the
+  located reference section. Onsets from a second list elsewhere in the PDF,
+  such as a transliterated copy of the bibliography or supplementary
+  references, made the check decline a correct geometry result and the region
+  tier decline as well, so the list went to the LLM segmenter.
 
 ### Added
 

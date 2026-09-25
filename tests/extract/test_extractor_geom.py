@@ -342,6 +342,84 @@ async def test_geom_segment_count_gate_skipped_without_regions():
     ex.llm_client.segment_references.assert_not_awaited()
 
 
+# A located 20-entry list on pages 1-2 and a second, unrelated 20-entry list on
+# pages 3-4 (a multi-article PDF, or supplementary references the locator did
+# not select). Only the first list is in ref_text.
+_MAIN_LIST = [
+    f"Author{chr(65 + i)}, {chr(65 + i)}. ({2000 + i}). Main-list title {i}. Journal, {i}, 1-2."
+    for i in range(20)
+]
+_SECOND_LIST = [
+    f"Other{chr(65 + i)}, {chr(65 + i)}. ({2010 + i}). Supplement title {i}. Journal, {i}, 3-4."
+    for i in range(20)
+]
+
+
+async def _extract_main_list(ref_line_geometry, geom_spans):
+    import pandas as pd
+
+    from bibr.extract.anchor_snap import starts_to_spans
+    from bibr.paper import PaperReference
+
+    ex = _extractor(ref_line_geometry)
+    ex.contents.region_summaries = [
+        RegionSummary(page=1 + i // 10, index=i, label="reference_content", bbox=None, content=text)
+        for i, text in enumerate(_MAIN_LIST + _SECOND_LIST)
+    ]
+    ref_df = pd.DataFrame(
+        {"text": _MAIN_LIST, "page_number": [1 + i // 10 for i in range(len(_MAIN_LIST))]}
+    )
+    ref_text = "\n".join(_MAIN_LIST)
+    seg = MagicMock()
+    spans = starts_to_spans(ref_text, [ref_text.find(ref) for ref in _MAIN_LIST])
+    seg.segment_spans.return_value = (spans, 0.99, 20, 20) if geom_spans else ([], 0.0, 0, 0)
+
+    def parse(self, segments):
+        return [
+            PaperReference(
+                bib_id=i,
+                title=segment,
+                authors=None,
+                year=None,
+                container=None,
+                volume=None,
+                first_page=None,
+            )
+            for i, segment in enumerate(segments, start=1)
+        ]
+
+    with (
+        patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=seg),
+        patch.object(ReferenceExtractor, "_parse_references_ner_aligned", parse),
+    ):
+        ex._ref_seg_strategy, ex._ref_parse_strategy = "geom", "ner"
+        refs = await ex.extract(ref_df)
+    attempts = [
+        (attempt.strategy, attempt.selected, attempt.reason_flags)
+        for attempt in ex.contents.reference_yield_receipt.attempts
+    ]
+    return ex, [ref.title for ref in refs], attempts
+
+
+async def test_geom_segment_count_gate_counts_only_onsets_on_the_reference_pages():
+    ex, titles, attempts = await _extract_main_list(_GEO, geom_spans=True)
+
+    assert titles == _MAIN_LIST
+    assert attempts == [("geom", True, ())]
+    ex.llm_client.segment_references.assert_not_awaited()
+
+
+async def test_region_tier_aligns_only_onsets_on_the_reference_pages():
+    ex, titles, attempts = await _extract_main_list(None, geom_spans=False)
+
+    assert titles == _MAIN_LIST
+    assert attempts == [
+        ("geom", False, ("source_geometry_unavailable",)),
+        ("region", True, ()),
+    ]
+    ex.llm_client.segment_references.assert_not_awaited()
+
+
 async def test_crf_strategy_unchanged():
     ex = _extractor(_GEO)
     seg = MagicMock()
