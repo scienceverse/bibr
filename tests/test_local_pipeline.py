@@ -285,7 +285,9 @@ class TestLlmBackendResolution:
 
         monkeypatch.setattr(platform, "system", lambda: "Darwin")
         monkeypatch.setattr(platform, "machine", lambda: "arm64")
-        monkeypatch.setattr(rapid_mlx, "rapid_mlx_unavailable_reason", lambda executable=None: None)
+        monkeypatch.setattr(
+            rapid_mlx, "rapid_mlx_unavailable_reason", lambda executable=None, settings=None: None
+        )
         # This test isolates the LLM alias. Pin the unrelated OCR backend so
         # the result does not depend on a checkout-local OCR_BACKEND in .env.
         pipe = LocalPipeline(llm_backend="local", ocr_backend="glm-rapid-mlx")
@@ -302,7 +304,7 @@ class TestLlmBackendResolution:
         monkeypatch.setattr(
             rapid_mlx,
             "rapid_mlx_unavailable_reason",
-            lambda executable=None: "'rapid-mlx' was not found or is not executable",
+            lambda executable=None, settings=None: "'rapid-mlx' was not found or is not executable",
         )
         # Isolate the LLM fallback from OCR auto-detection: this test
         # deliberately makes Rapid-MLX unavailable for the LLM decision.
