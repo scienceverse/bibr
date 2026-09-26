@@ -57,9 +57,13 @@ _DATA_SUBJECT = (
     r"(?:(?:raw|anonymi[sz]ed|de-identified|underlying|source|study|research|"
     r"survey|experimental|processed|supporting)\s+){0,2}"
     r"(?:data|datasets?|code|materials?)"
+    # "Data and analysis scripts are available at ...", "data and materials".
+    r"(?:\s+(?:and|&)\s+(?:(?:analysis|analytic|study|experimental|source)\s+)?"
+    r"(?:data|datasets?|code|materials?|scripts?|software))?"
 )
 _DATA_TARGET = (
-    r"(?:osf|zenodo|figshare|dryad|github|repository|corresponding author|request|https?://)"
+    r"(?:osf|zenodo|figshare|dryad|github|repository|corresponding author|authors?|request|"
+    r"https?://)"
 )
 _DATA_ASSERTIVE_DECLARATION = re.compile(
     rf"^\s*(?:(?:data|code|materials?)\s+availability\s*:\s*"
@@ -69,9 +73,12 @@ _DATA_ASSERTIVE_DECLARATION = re.compile(
     rf"(?:generated|analy[sz]ed|collected|produced|used|underlying|supporting)\b"
     rf".{{0,160}}\b(?:available|accessible|deposited|archived)\b"
     rf".{{0,120}}\b{_DATA_TARGET}|"
-    rf"{_DATA_SUBJECT}\s+(?:are|is|were|was|will\s+be|can\s+be)\s+"
+    rf"{_DATA_SUBJECT}\s+(?:(?:are|is|were|was|will\s+be|can\s+be)\s+"
     rf"(?:(?:openly|publicly|freely)\s+)?(?:made\s+)?"
-    rf"(?:available|accessible|deposited|archived)\b.{{0,120}}\b{_DATA_TARGET})",
+    rf"(?:available|accessible|deposited|archived)|"
+    # "can be obtained from the corresponding author" offers access; "the data
+    # were obtained from the authors of ..." says where secondary data came from.
+    rf"(?:can|may|will)\s+be\s+obtained)\b.{{0,120}}\b{_DATA_TARGET})",
     re.IGNORECASE,
 )
 # PaperMetadata statement field → its ordered anchor phrases. Order mirrors
@@ -187,12 +194,16 @@ _FUNDER_STRONG = re.compile(
     r"(?:Foundation|Council|Trust|Institute|Fund|Agency|Ministry)\b"
     r"|\b(?:[A-Z][A-Za-z&.-]+\s+){1,5}University\b"
 )
+# The perfect tense ("has received funding") is the EU-mandated Horizon 2020 /
+# Horizon Europe and ERC wording; acknowledgements usually carry an adverb
+# ("We gratefully acknowledge funding from ...").
 _FUNDING_ACTION = (
     r"(?:(?:was|were|is|are|has|have)\s+(?:been\s+)?(?:funded|supported)\b|"
     r"(?:had|has|have)\s+(?:received\s+)?no\s+"
     r"(?:external\s+)?(?:funding|financial support)\b|"
-    r"(?:received|receives?|receive)\s+"
+    r"(?:(?:has|have|had)\s+(?:also\s+)?)?(?:received|receives?|receive)\s+"
     r"(?:no\s+(?:external\s+)?(?:funding|financial support)|funding|financial support)\b|"
+    r"(?:(?:gratefully|kindly|also)\s+)?"
     r"acknowledg(?:e|es|ed)\s+(?:the\s+)?(?:funding|financial support)\b)"
 )
 _AUTHOR_FUNDING_ACTION = rf"(?:{_FUNDING_ACTION}|(?:funded|supported)\s+by\b)"
@@ -211,7 +222,13 @@ _FUNDING_ASSERTIVE_DECLARATION = re.compile(
     r"(?:supported|funded)\s+by\b|funding\s+for\s+(?:this|the)\b|"
     r"(?:grant|award)\s+(?:no\.?|number|#)\b|additional support came from\b|"
     rf"(?:this|the|our)\s+(?:present\s+)?"
-    rf"(?:study|work|research|project|trial|article|manuscript)\s+{_FUNDING_ACTION}|"
+    rf"(?:study|work|research|project|trial|article|manuscript|paper|publication)\s+"
+    rf"{_FUNDING_ACTION}|"
+    rf"(?:the\s+)?research\s+leading\s+to\s+(?:these|this|the)\s+results?\s+{_FUNDING_ACTION}|"
+    rf"(?:preparation|writing)\s+of\s+(?:this|the)\s+(?:article|manuscript|paper|report)\s+"
+    rf"{_FUNDING_ACTION}|"
+    rf"(?:the\s+)?(?:first|second|third|last|senior|corresponding|lead)\s+authors?\s+"
+    rf"{_FUNDING_ACTION}|"
     rf"work\s+on\s+(?:this|the)\b.{{0,80}}\s+{_FUNDING_ACTION}|"
     rf"research\s+reported\s+in\s+(?:this|the)\s+"
     rf"(?:publication|article|work)\s+{_FUNDING_ACTION}|"
@@ -255,7 +272,7 @@ _ETHICS_ASSERTIVE_DECLARATION = re.compile(
     r"approved\s+by\s+(?:the\s+)?(?:ethics committee|institutional review board|irb)\b|"
     r"(?:the\s+)?(?:ethics committee|institutional review board|irb)\s+"
     r"(?:approved|reviewed)\b|"
-    r"(?:ethical|ethics)\s+approval\s+(?:was\s+)?(?:obtained|granted|provided)\b|"
+    r"(?:ethical|ethics)\s+approval\s+(?:was\s+)?(?:obtained|granted|provided|received)\b|"
     r"(?:written\s+)?informed consent\s+(?:was\s+)?"
     r"(?:obtained|provided|given|secured|documented|waived)\b|"
     r"(?:all\s+)?(?:participants?|patients?|subjects?)\s+"
@@ -272,8 +289,13 @@ _COI_ASSERTIVE_DECLARATION = re.compile(
     r"conflicts? of interest|competing interests?)\s*:\s*)?"
     r"(?:(?:the\s+)?(?:authors?|author\(s\))|we)\s+"
     r"(?:declar(?:e[sd]?|ed)|report(?:s|ed)?)\s+(?:that\s+)?(?:they\s+)?"
-    r"(?:have\s+)?(?:(?:no\s+(?:potential\s+)?|potential\s+)?"
-    r"(?:conflicts?|competing interests?)|none)\b|"
+    r"(?:have\s+)?(?:(?:no\s+(?:known\s+|potential\s+)?|potential\s+)?"
+    r"(?:conflicts?|competing\s+(?:financial\s+)?interests?)|none|"
+    # Frontiers: "... declare that the research was conducted in the absence of
+    # any commercial or financial relationships that could be construed as a
+    # potential conflict of interest."
+    r"the\s+research\s+was\s+conducted\s+in\s+the\s+absence\s+of\s+any\b"
+    r"[^.]{0,160}\bconflicts?\s+of\s+interest)\b|"
     r"(?:the\s+)?author\s+has\s+no\s+(?:conflicts?|competing interests?)\b|"
     r"no\s+(?:potential\s+)?(?:conflicts?|competing interests?)\s+"
     r"(?:were\s+)?(?:declared|reported)\b|none declared\b)",
@@ -598,19 +620,48 @@ def _has_field_anchor(field: str, text: str) -> bool:
     )
 
 
+# Boundary words that belong to the declaration itself rather than to publisher
+# furniture: a data request addressed to the corresponding author, the licence
+# (or Creative Commons licence) deposited data carry, and the date an ethics
+# approval was received.
+_DATA_CONTACT_PREFIX = re.compile(
+    r"\b(?:available|accessible|obtained)\b[^.!?]{0,80}"
+    r"(?:\b(?:from|to|via|through)\s+|\bcontact(?:ing)?\s+)(?:the\s+)?$",
+    re.IGNORECASE,
+)
+_DATA_LICENSE_PREFIX = re.compile(
+    r"\b(?:available|accessible|deposited|archived)\b(?:(?![.!?]\s).){0,200}"
+    r"\bunder\b(?:(?![.!?]\s).){0,60}$",
+    re.IGNORECASE,
+)
+_ETHICS_APPROVAL_DATE_PREFIX = re.compile(
+    r"\bapprov\w*\s+(?:was\s+|were\s+|has\s+been\s+)?$",
+    re.IGNORECASE,
+)
+
+
+# The prefixes above end at the boundary and span under 300 characters, so only
+# this tail of the text can match. Searching all of it made a long run-on
+# paragraph with many boundaries quadratic.
+_DECLARATION_PREFIX_WINDOW = 320
+
+
+def _boundary_is_declaration_text(field: str, boundary: re.Match[str], text: str) -> bool:
+    before = text[max(0, boundary.start() - _DECLARATION_PREFIX_WINDOW) : boundary.start()]
+    word = boundary.group().casefold()
+    if field == "data_availability":
+        if word.startswith("correspond"):
+            return bool(_DATA_CONTACT_PREFIX.search(before))
+        if word.startswith(("licen", "creative")):
+            return bool(_DATA_LICENSE_PREFIX.search(before))
+    if field == "ethics_statement" and word.startswith(("received", "accepted")):
+        return bool(_ETHICS_APPROVAL_DATE_PREFIX.search(before))
+    return False
+
+
 def _boilerplate_boundary_for_field(field: str, text: str, start: int = 0) -> re.Match[str] | None:
     for match in _BOILERPLATE_BOUNDARY.finditer(text, start):
-        legitimate_data_contact = bool(
-            field == "data_availability"
-            and match.group().casefold().startswith("correspond")
-            and re.search(
-                r"\b(?:available|accessible)\b[^.!?]{0,80}"
-                r"(?:\bfrom\s+|\bby\s+contacting\s+|\bthrough\s+)(?:the\s+)?$",
-                text[: match.start()],
-                re.IGNORECASE,
-            )
-        )
-        if legitimate_data_contact:
+        if _boundary_is_declaration_text(field, match, text):
             continue
         return match
     return None

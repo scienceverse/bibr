@@ -404,12 +404,16 @@ def _rescue_authors_from_segment(segment: str | None) -> str | None:
 _NER_SEGMENTER = None
 _NER_PARSER = None
 _NER_SEGMENTER_KEY: tuple[str, str, str] | None = None
-_NER_PARSER_KEY: tuple[str, str, str] | None = None
+_NER_PARSER_KEY: tuple[str, str | None, str] | None = None
 _NER_LOCK = threading.Lock()
 
 
 def _get_ner_segmenter(settings: GlobalSettings | None = None):
-    """Lazy-load the CRF segmenter singleton (no parser)."""
+    """Lazy-load the CRF segmenter singleton (no parser).
+
+    Known follow-up (deferred): unlike the parser above, this still loads
+    with settings.NER_DEVICE and has no aggressive-mode unload hook.
+    """
     global _NER_SEGMENTER, _NER_SEGMENTER_KEY
     settings = settings if settings is not None else snapshot_settings()
     key = (settings.NER_SEG_CKPT, settings.NER_DEVICE, settings.NER_SEG_REVISION)
@@ -477,11 +481,19 @@ def _get_geom_segmenter(settings: GlobalSettings | None = None):
     return _GEOM_SEGMENTER
 
 
-def _get_ner_parser(settings: GlobalSettings | None = None):
-    """Lazy-load the CRF parser singleton (no segmenter)."""
+def _get_ner_parser(settings: GlobalSettings | None = None, memory_mode: str | None = None):
+    """Lazy-load the CRF parser singleton (no segmenter).
+
+    ``memory_mode`` selects the parser device through
+    :func:`resolve_ner_device` (aggressive mode forces CPU, mirroring the
+    classifier device policy); ``None`` falls back to
+    ``settings.pipeline.memory_mode``. The resolved device is part of the
+    cache key, so pipelines with different modes do not share a session.
+    """
     global _NER_PARSER, _NER_PARSER_KEY
     settings = settings if settings is not None else snapshot_settings()
-    key = (settings.NER_PARSER_CKPT, settings.NER_DEVICE, settings.NER_PARSER_REVISION)
+    device = resolve_ner_device(settings, memory_mode)
+    key = (settings.NER_PARSER_CKPT, device, settings.NER_PARSER_REVISION)
     if _NER_PARSER is None or key != _NER_PARSER_KEY:
         with _NER_LOCK:
             if _NER_PARSER is None or key != _NER_PARSER_KEY:
@@ -490,12 +502,59 @@ def _get_ner_parser(settings: GlobalSettings | None = None):
                 logger.info("loading NER parser: %s", settings.NER_PARSER_CKPT)
                 _NER_PARSER = load_ref_parser(
                     settings.NER_PARSER_CKPT,
-                    device=settings.NER_DEVICE,
+                    device=device,
                     revision=settings.NER_PARSER_REVISION,
                     settings=settings,
                 )
                 _NER_PARSER_KEY = key
     return _NER_PARSER
+
+
+def resolve_ner_device(settings: GlobalSettings, memory_mode: str | None = None) -> str | None:
+    """Device for the NER reference parser.
+
+    An explicit ``NER_DEVICE`` always wins. Otherwise aggressive memory mode
+    forces ``"cpu"``, mirroring the classifier device policy in
+    ``choose_classifier_device``: the ~1 GB parser must not pin VRAM (or an
+    unbounded CUDA arena) that aggressive mode reserved for the OCR/LLM
+    handoff. ``None`` keeps the previous auto behavior (CUDA when available).
+    """
+    if "NER_DEVICE" in settings.model_fields_set:
+        return settings.NER_DEVICE
+    mode = memory_mode if memory_mode is not None else settings.pipeline.memory_mode
+    if mode == "aggressive":
+        return "cpu"
+    return settings.NER_DEVICE
+
+
+def unload_ner_parser() -> None:
+    """Drop the cached NER parser singleton reference, if one is loaded.
+
+    Only clears the module-global reference (and its key) under
+    ``_NER_LOCK``; an in-flight ``parse_batch`` holding its own reference
+    keeps using its session, and the object is freed once all holders
+    finish. Never closes the shared object: closing its session while
+    another pipeline parses would break that parse. The aggressive-mode
+    hook in ``PostParseStage`` calls this after post-parse so the parser's
+    ~1 GB does not stay resident through the next chunk's OCR/LLM phases;
+    ``ResourceManager.close_models`` calls it in aggressive mode only.
+    Reload is lazy on next use.
+    """
+    global _NER_PARSER, _NER_PARSER_KEY
+    with _NER_LOCK:
+        _NER_PARSER = None
+        _NER_PARSER_KEY = None
+    logger.info("NER parser unloaded")
+
+
+def _page_range(ref_df: pd.DataFrame) -> tuple[int, int] | None:
+    """First and last page of the located reference rows, or None without pages."""
+    if "page_number" not in ref_df.columns:
+        return None
+    pages = pd.to_numeric(ref_df["page_number"], errors="coerce").dropna()
+    if pages.empty:
+        return None
+    return int(pages.min()), int(pages.max())
 
 
 def _chunk(items: list, n: int):
@@ -1197,10 +1256,12 @@ class ReferenceExtractor:
         seg_strategy: str | None = None,
         parse_strategy: str | None = None,
         settings: GlobalSettings | None = None,
+        memory_mode: str | None = None,
     ):
         self.contents = contents
         self.file_hash = file_hash
         self._settings = settings if settings is not None else snapshot_settings()
+        self._memory_mode = memory_mode
         self.llm_client = llm_client or LLMClient(settings=self._settings)
         self._ref_seg_strategy = seg_strategy
         self._ref_parse_strategy = parse_strategy
@@ -1209,6 +1270,7 @@ class ReferenceExtractor:
         self._selected_segmentation_spans: tuple[tuple[int, int], ...] = ()
         self._credible_source_starts: int | None = None
         self._source_record_count: int | None = None
+        self._reference_pages: tuple[int, int] | None = None
 
     # Class-attribute seams so tests can patch capture without touching the
     # module functions other callers share.
@@ -1229,6 +1291,7 @@ class ReferenceExtractor:
         self._selected_segmentation_spans = ()
         self._credible_source_starts = None
         self._source_record_count = None
+        self._reference_pages = _page_range(ref_df)
 
         seg_strategy, parse_strategy = _resolve_ref_strategies(
             self._ref_seg_strategy,
@@ -1247,8 +1310,9 @@ class ReferenceExtractor:
         raw_ref_strings = await self._segment_references(ref_text, seg_strategy)
         raw_spans = self._selected_segmentation_spans
         ref_strings = raw_ref_strings
-        ref_strings = drop_non_reference_segments(ref_strings)
-        ref_strings = self._maybe_split_merged(ref_strings)
+        if not self._authoritative_native_selected():
+            ref_strings = drop_non_reference_segments(ref_strings)
+            ref_strings = self._maybe_split_merged(ref_strings)
         if ref_strings == raw_ref_strings and len(raw_spans) == len(ref_strings):
             located_spans: tuple[tuple[int, int] | None, ...] = raw_spans
         else:
@@ -1321,7 +1385,7 @@ class ReferenceExtractor:
 
     def _aligned_region_onset_count(self, ref_text: str) -> int:
         """Count unique layout anchors aligned to physical source offsets."""
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             return 0
         try:
@@ -1639,13 +1703,35 @@ class ReferenceExtractor:
         independent lower bound for the geom segment-count sanity gate. Never
         raises: an absent or malformed summary stream just disables the gate.
         """
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             return 0
         try:
             return len(region_anchor_texts(summaries))
         except Exception:  # noqa: BLE001 — the gate must never break extraction
             return 0
+
+    def _reference_region_summaries(self) -> list:
+        """Layout regions on the pages of the located reference rows.
+
+        ``contents.region_summaries`` covers the whole document. Reference
+        onsets from another list (a multi-article PDF, supplementary references
+        the locator did not select, a tail trimmed off the section) would
+        otherwise inflate the geom segment-count gate's lower bound and pull
+        the region tier's alignment fraction under its threshold, declining
+        both free tiers for a correct segmentation. Every summary is kept when
+        the reference rows carry no page numbers, and so is any summary without
+        a page.
+        """
+        summaries = list(getattr(self.contents, "region_summaries", None) or [])
+        if self._reference_pages is None:
+            return summaries
+        first, last = self._reference_pages
+        return [
+            summary
+            for summary in summaries
+            if not isinstance(getattr(summary, "page", None), int) or first <= summary.page <= last
+        ]
 
     async def _segment_llm_then_crf(
         self, ref_text: str, try_region: bool = True, reserve: list[str] | None = None
@@ -1711,7 +1797,7 @@ class ReferenceExtractor:
                 "region", ref_text, selected=False, reason_flags=("tier_disabled",)
             )
             return None
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             self._record_segmentation_attempt(
                 "region", ref_text, selected=False, reason_flags=("no_summaries",)
@@ -1803,6 +1889,21 @@ class ReferenceExtractor:
                 f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
+
+    def _authoritative_native_selected(self) -> bool:
+        """Whether the selected segmentation is a JATS ref-list taken verbatim.
+
+        Each ``<ref>`` is one reference by construction, so the junk filter
+        (which drops short entries without a year) and the merge splitter
+        (which cuts at in-title citations and bare years) can only lose or
+        split real entries, shifting every later bib_id.
+        """
+        if getattr(self.contents, "native_ref_strings_authoritative", False) is not True:
+            return False
+        return any(
+            attempt.strategy == "native" and attempt.selected
+            for attempt in self._segmentation_attempts
+        )
 
     def _maybe_split_merged(self, ref_strings: list[str]) -> list[str]:
         """Split merged reference strings when REF_SPLIT_MERGED_REFS is on.
@@ -2211,7 +2312,7 @@ class ReferenceExtractor:
         # Parse-chunk sourcing is a distinct axis from the seg-cascade tier:
         # region_chunks() here only shapes parse batches, so it runs regardless
         # of REF_SEG_REGION_ANCHORS (which gates the region *segmentation* tier).
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         chunks = region_chunks(ref_text, summaries)
         if chunks is None:
             chunks = _group_segments_into_chunks(ref_strings, _CHUNK_TARGET_CHARS)
@@ -2338,7 +2439,7 @@ class ReferenceExtractor:
         # model work from sibling post-parse threads intermittently
         # segfaulted the process on MPS (see bibr.utils.locks).
         with LOCAL_INFERENCE_LOCK:
-            ref_parser = _get_ner_parser(self._settings)
+            ref_parser = _get_ner_parser(self._settings, self._memory_mode)
             parsed = ref_parser.parse_batch(_strip_enum_markers(ref_strings))
         aligned: list[PaperReference | None] = []
         parsed_count = 0

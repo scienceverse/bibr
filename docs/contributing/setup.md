@@ -41,7 +41,11 @@ This selects the main CI suite. Core-only CI also runs the non-slow suite with
 dependencies should use `pytest.importorskip()`. Slow tests are excluded by
 the `-m` expression, not by pytest's default configuration. Read a slow test's
 requirements before enabling it: it may need model downloads, an OCR service,
-GPU hardware, or LLM credentials.
+GPU hardware, or LLM credentials. Unit tests stay offline: an autouse guard
+fails any test that opens a non-loopback socket or resolves an external name,
+and global `Settings` changes plus `bibr.*` logger levels are restored after
+every test. Tests that intentionally reach the network take the `network`
+mark, which opts them out of the socket guard.
 
 ## Linting and formatting
 

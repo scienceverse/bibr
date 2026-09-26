@@ -185,6 +185,13 @@ class TestFileStateDefaults:
         assert fs.error_code == "ocr_timeout"
         assert fs.failed_stage == "ocr"
 
+    def test_a_later_error_replaces_the_outage_flag(self):
+        fs = FileState(path=Path("test.pdf"))
+        fs.set_error("OCR backend init failed", code="ocr_failed", stage="ocr", outage=True)
+        assert fs.error_outage is True
+        fs.set_error("Post-parse failed", code="post_parse_failed", stage="post_parse")
+        assert fs.error_outage is False
+
     def test_warnings_independent_per_instance(self):
         fs1 = FileState(path=Path("a.pdf"))
         fs2 = FileState(path=Path("b.pdf"))

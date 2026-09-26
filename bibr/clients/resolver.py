@@ -52,8 +52,11 @@ class ResolverClient:
         try:
             resp = await self._client.get("/health")
             resp.raise_for_status()
-            return resp.json().get("status") == "ok"
-        except (httpx.HTTPError, ValueError) as e:
+            payload = resp.json()
+            # A proxy or another service answering /health may return any JSON
+            # (``["ok"]``, ``"ok"``); only an object with status "ok" is healthy.
+            return isinstance(payload, dict) and payload.get("status") == "ok"
+        except Exception as e:  # noqa: BLE001 — the probe's contract is a verdict, never an error
             logger.debug("resolver health probe failed: %s", e)
             return False
 
@@ -85,9 +88,12 @@ class ResolverClient:
             # A body of ``{"candidates": null}`` makes ``.get(..., [])`` return
             # None, not the default — and this method is documented to return a
             # list. One such response used to poison the whole fallback batch
-            # downstream. Anything that isn't a list is treated as no results.
+            # downstream. Anything that isn't a list is treated as no results,
+            # and an entry that isn't an object is no candidate.
             candidates = payload.get("candidates") if isinstance(payload, dict) else None
-            return candidates if isinstance(candidates, list) else []
+            if not isinstance(candidates, list):
+                return []
+            return [c for c in candidates if isinstance(c, dict)]
         except (httpx.HTTPError, ValueError) as e:
             if raise_on_error:
                 raise
@@ -148,7 +154,10 @@ class ResolverClient:
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
-            return resp.json()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise ValueError(f"resolver /works answered {type(payload).__name__}, not a work")
+            return payload
         except (httpx.HTTPError, ValueError) as e:
             if raise_on_error:
                 raise

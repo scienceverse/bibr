@@ -203,7 +203,10 @@ class LocalPipeline(Pipeline):
 
     - ``"aggressive"``: Load/unload each model per phase (8 GB machines)
     - ``"balanced"``: Keep layout + segmenter loaded; OCR engine stays
-      resident across chunks unless a local LLM server needs the VRAM
+      resident across chunks unless a local LLM server needs the VRAM.
+      Resident RSS includes the models' ORT CPU arenas, which keep their
+      peak allocation — CPU-only layout/SaT sessions opt out of the arena,
+      but the weights stay resident across files by design.
     - ``"keep_all"``: Keep everything loaded (24+ GB GPU or cloud LLM only)
     - ``None`` (default): ``PIPELINE_MEMORY_MODE`` if set, else auto-detect
       from system RAM (≤8 GB → aggressive, else balanced)
