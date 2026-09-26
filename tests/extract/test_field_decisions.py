@@ -6,6 +6,8 @@ the receipts a pipeline run leaves on the ``Paper``.
 """
 
 import ast
+import copy
+import pickle
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -163,6 +165,52 @@ def test_a_second_decision_supersedes_the_first():
 
     assert metadata.journal == "Journal B"
     assert metadata._field_decisions.superseded == [first]
+
+
+def _journal_decided():
+    metadata = PaperMetadata(doi="", title="")
+    apply_decision(metadata, decide_value("journal", FieldCandidate("journal", "llm", "Journal A")))
+    return metadata
+
+
+def _decide_journal_b(metadata):
+    apply_decision(
+        metadata, decide_value("journal", FieldCandidate("journal", "native", "Journal B"))
+    )
+
+
+@pytest.mark.parametrize(
+    "clone",
+    [
+        lambda metadata: metadata.model_copy(),
+        lambda metadata: metadata.model_copy(deep=True),
+        copy.copy,
+        copy.deepcopy,
+        lambda metadata: pickle.loads(pickle.dumps(metadata)),
+    ],
+)
+def test_a_copy_has_its_own_receipts(clone):
+    original = _journal_decided()
+    copied = clone(original)
+    assert copied._field_decisions.get("journal").value == "Journal A"
+
+    _decide_journal_b(copied)
+
+    assert original._field_decisions.get("journal").value == "Journal A"
+    assert original._field_decisions.superseded == []
+
+
+def test_a_copy_that_rewrites_a_field_drops_its_stale_receipt():
+    copied = _journal_decided().model_copy(update={"journal": "Journal C"})
+    assert copied.journal == "Journal C"
+    assert copied._field_decisions.get("journal") is None
+
+
+def test_a_second_decision_is_logged(caplog):
+    metadata = _journal_decided()
+    with caplog.at_level("WARNING", logger="bibr.extract.field_decisions"):
+        _decide_journal_b(metadata)
+    assert "decided twice" in caplog.text
 
 
 def test_a_test_double_is_written_without_a_ledger():

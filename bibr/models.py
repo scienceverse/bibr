@@ -9,7 +9,9 @@ at serialization sites.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -334,6 +336,19 @@ class PaperMetadata(_Base):
     # Set by CrossrefEnricher: True if enrichment ran to completion, False if it
     # timed out / failed (so bib_match is a partial prefix), None if it never ran.
     enrichment_complete: bool | None = None
+
+    # A copy gets its own receipts, so a decision on it never rewrites the
+    # original's; a field an ``update`` rewrites loses its now stale receipt.
+    def __copy__(self) -> Self:
+        copied = super().__copy__()
+        copied._field_decisions = self._field_decisions.copy()
+        return copied
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        copied = super().model_copy(update=update, deep=deep)
+        if update:
+            copied._field_decisions.forget_attributes(update)
+        return copied
 
 
 class ErrorCode(StrEnum):

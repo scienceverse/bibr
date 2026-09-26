@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -146,8 +146,28 @@ class FieldDecisions:
     def record(self, decision: FieldDecision) -> None:
         previous = self._decisions.get(decision.field)
         if previous is not None:
+            # The pipeline decides each field once; a second decision replaces
+            # the written value, so the newer receipt is kept.
+            logger.warning(
+                "Field %r decided twice (rule %r, then %r)",
+                decision.field,
+                previous.rule,
+                decision.rule,
+            )
             self.superseded.append(previous)
         self._decisions[decision.field] = decision
+
+    def copy(self) -> FieldDecisions:
+        """An independent ledger with the same proposals and receipts."""
+        return FieldDecisions(dict(self._proposals), dict(self._decisions), list(self.superseded))
+
+    def forget_attributes(self, attributes: Iterable[str]) -> None:
+        """Drop the receipts of the fields whose attributes were rewritten outside a decision."""
+        changed = set(attributes)
+        for name, field_attributes in FIELD_ATTRIBUTES.items():
+            if changed.intersection(field_attributes):
+                self._decisions.pop(name, None)
+                self._proposals.pop(name, None)
 
     def get(self, name: str) -> FieldDecision | None:
         return self._decisions.get(name)
