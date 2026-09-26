@@ -20,7 +20,7 @@ from bibr.local.cli.run_config import (
 )
 from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
 
-# Mirrors what ``_default_ocr_model`` resolves for each HTTP backend, so the
+# Mirrors what ``resolve_served_model`` resolves for each HTTP backend, so the
 # preview cannot drift from what the run actually asks the server for.
 _OCR_HTTP_DEFAULT_SERVED_NAME = {
     "glm-http": GLM_SERVED_MODEL_ALIAS,
@@ -103,7 +103,16 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     if backend == "paddle-http":
         return config.ocr_model or Settings.ocr.paddle_served_model, None
     if backend in _OCR_HTTP_DEFAULT_SERVED_NAME:
-        served = config.ocr_model or Settings.ocr.model or _OCR_HTTP_DEFAULT_SERVED_NAME[backend]
+        from bibr.config import snapshot_settings
+        from bibr.ocr.profiles import resolve_served_model
+
+        snapshot = snapshot_settings()
+        served = config.ocr_model or resolve_served_model(
+            requested_backend=backend,
+            concrete_backend=backend,
+            settings=snapshot,
+            explicit_profile=config.ocr_profile or snapshot.ocr.profile,
+        )
         return served, None
     if backend in ("gemini", "openai", "anthropic"):
         return config.ocr_model or Settings.ocr_vision.model, None

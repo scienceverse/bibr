@@ -1073,6 +1073,71 @@ released.
   the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the file, and the file
   is rewritten only when consolidation ran) and replays the enriched run's
   `extraction.timings`, so the `enrich` stage time is reported on both paths.
+- Anthropic thinking budgets no longer produce requests the API rejects
+  with a 400. With `LLM_THINKING_BUDGET` set, a task cap sends thinking only
+  when it leaves at least 1024 tokens above the budget for the answer;
+  smaller caps run without thinking at temperature 0. Budgets below the 1024
+  minimum are raised to it and logged.
+- `bibr mcp` chew tools report failure causes again: `chew_paper` and
+  `chew_url` wrap non-`BibrError` failures in a `ToolError` carrying the
+  exception type and a secret-scrubbed message with the file name only,
+  never the full path or URL, instead of the detail-less "Error executing
+  tool". `BibrError` messages are scrubbed the same way, and `chew_url`
+  reports the downloaded file name rather than the URL.
+- `bibr mcp` without cloud credentials prints the one-line missing-key
+  message and exits 1 instead of dumping a traceback. Only the startup
+  credential check is reported that way; a `ValueError` from the running
+  server session keeps its traceback, and `bibr.chew()`/`Chewer` still raise
+  the provider's `ValueError`.
+- The offline batch docs no longer claim batch runs prefill the LLM
+  response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
+- The Crossref bulk DOI prefetch sends no request and seeds nothing when
+  both cache tiers are disabled, and leaves comma-bearing DOIs to their
+  individual lookup instead of failing the whole chunk's filter.
+- `CACHE_TTL_SECONDS=0` (or negative) now means "no expiry" instead of
+  failing every Redis SET with "invalid expire time" and silently
+  disabling the result cache.
+- `dir(bibr)` lists the lazy public API (`chew`, `Chewer`, `Result`,
+  `write_tables`, ...) without importing it, and `Result` answers the
+  plural table aliases (`figures`, `tables`, `affiliations`, `urls`,
+  `equations`).
+- Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
+  "not implemented" warning instead of passing silently.
+- `bibr serve` cache-miss waiters no longer give up after a flat 10 seconds and
+  pay for a duplicate extraction. Unless the operator set an explicit wait, the
+  wait budget now follows the pipeline timeout, and a waiter whose owner's
+  lease disappears re-reads the cache once before falling back (the owner's
+  publish may have landed between the waiter's read and its lease check) and
+  otherwise takes over only after atomically acquiring the lease, so exactly
+  one waiter extracts instead of every waiter at once.
+- `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
+  to report them degraded without ever checking the directory): a local
+  directory counts as present when the configured runtime could load from
+  it (the ONNX bundle is required only for `ML_RUNTIME=onnx`), re-checks
+  a failed classifier verdict after a bounded
+  interval instead of caching it forever, and still loads no model on the
+  request path. It also probes the OCR server's `/v1/models` for the
+  served-model alias the backend will ask for, so a healthy `/health` with
+  the wrong models listed no longer reads ready; a 401 there is reported as
+  unauthorized (check the key), not as a missing model. The backend's startup
+  wait remembers the last non-200 status for the same reason, cleared by any
+  later 200.
+- `bibr serve` keeps a failed `serve-http` OCR backend — one that owns a
+  cross-request readiness cooldown — instead of discarding it, so the
+  backend's own cooldown fail-fasts later requests instead of every request
+  paying a full poll. The published instance is never shut down. Clients
+  without such a cooldown are still discarded on failure.
+- On the `/papers/extract` and `/jobs` routes, `bibr serve` extraction
+  metering records now carry the `request_id` of the request that submitted
+  them (and the `job_id` for async jobs), so the worker-side `extract`
+  record joins back to the API-side request record.
+  Unhandled route failures also emit their request record with status 500
+  before the 500 response is built; the 500 body itself is unchanged.
+- The served-model choice for HTTP OCR endpoints now lives in one place. With
+  `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
+  own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
+  defaults and `--dry-run` now agree on the paddle alias, and the dry-run
+  preview prints the resolved alias.
 - `bibr setup` writes a retried cloud API key back to `.env` instead of
   keeping it in memory. When the connection test failed and a different key
   passed, setup finished "successfully" with the old key in the file, so the
@@ -1193,6 +1258,13 @@ released.
   (whose only consumer was never published, and whose per-request peaks were
   process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
   no longer imports.
+- `bibr serve` no longer runs two rotating writers against one
+  `METER_LOG_PATH`. The API process writes request records to `METER_LOG_PATH`
+  itself while the worker writes extraction records — the only ones carrying
+  `llm_usage_totals` — to the sibling `<stem>.worker<suffix>` file, each
+  process rotating only its own file, so records are neither lost nor
+  duplicated across rotation. Operators tallying token usage must read both
+  files: `METER_LOG_PATH` alone holds no extraction records.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
@@ -1296,6 +1368,20 @@ released.
   unix-socket URL gets it as before (`unix://:password@/path/redis.sock`), and so
   does a sibling URL on the same socket. A URL on a different server, or with its
   own password, is left alone.
+- `ML_CLASSIFIERS_REQUIRED=true` is now enforced on the local pipeline, not
+  just in serve. A required classifier that fails to load fails the file
+  with code `classifier_required_failed` and a message naming the setting.
+  The run used to continue silently without the classifiers; set
+  `ML_CLASSIFIERS_REQUIRED=false` to allow the run to continue without them.
+- `save_paper` writes only `.json` files and refuses to overwrite an
+  existing file unless `overwrite=True` is passed explicitly.
+
+### Removed
+
+- Dead helpers with no callers anywhere (including tests):
+  `snapshot_download_no_symlink`, `onnxruntime_available`,
+  `ONNX_TOKENIZER`, `vllm_mlx_available`, `TAG_TO_IDX`, and
+  `bibr.batch.runner._print`.
 
 ## [0.5.1] - 2026-09-12
 

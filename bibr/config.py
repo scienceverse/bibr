@@ -1244,13 +1244,20 @@ class CacheOptions(_BibrSettings):
         description="Cache version namespace; invalidates stored entries on change. Defaults to a "
         "hash of the code — override only to pin or force-invalidate manually.",
     )
-    ttl_seconds: int = Field(86400, description="Result cache entry TTL in seconds.")
+    ttl_seconds: int = Field(
+        86400,
+        description="Result cache entry TTL in seconds. 0 or a negative value means no expiry.",
+    )
     distributed_singleflight: bool = Field(
         True,
         description="Coalesce identical Redis-backed cache misses across workers. Fail-open.",
     )
     singleflight_wait_seconds: float = Field(
-        10.0, ge=0, description="Maximum time a distributed waiter polls for the owner's result."
+        10.0,
+        ge=0,
+        description="Maximum time a distributed waiter polls for the owner's result. "
+        "Unset (left at its default without explicitly setting it) follows PIPELINE_TIMEOUT; "
+        "an explicitly set value is the wait budget.",
     )
     singleflight_lease_ttl_seconds: int = Field(
         120, ge=1, description="TTL for a distributed extraction ownership lease."
@@ -1291,14 +1298,14 @@ class CacheOptions(_BibrSettings):
     )
     # Opt-in disk cache for structured LLM responses, keyed on model + schema +
     # system + user text. A hit costs no tokens and no rate-limit slot. This is
-    # also the prefill target for the offline Message Batches path: a batch
-    # answers requests at half price and writes them here for a later run to
-    # find. Off by default — like the OCR cache, it never silently changes
+    # not written by the offline Message Batches path (bibr/clients/batch.py
+    # has no CLI or pipeline caller), so nothing prefills it today.
+    # Off by default — like the OCR cache, it never silently changes
     # results unless opted in. Env: CACHE_LLM.
     llm: bool = Field(
         False,
         description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
-        "system prompt and user text. Also the prefill target for offline batch runs. Off by "
+        "system prompt and user text. Not written by the offline batch layer. Off by "
         "default.",
     )
     # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm
@@ -1873,9 +1880,11 @@ class JobsOptions(_BibrSettings):
 class MeteringOptions(_BibrSettings):
     """Per-request usage metering (serve). Env: ``METER_ENABLED``, ``METER_LOG_PATH``.
 
-    When ``log_path`` is set, metering records (one JSON line per request and per
-    extraction) are also written as JSONL to that file. Purely observational —
-    does not affect extraction output.
+    When ``log_path`` is set, request records are written as JSONL to that
+    file while the inference worker writes extraction records (the only ones
+    carrying LLM token usage) to the sibling ``<stem>.worker<suffix>`` file;
+    each process rotates only its own file, so usage tallies must read both.
+    Purely observational — does not affect extraction output.
     """
 
     model_config = _section("METER_")
@@ -1883,7 +1892,9 @@ class MeteringOptions(_BibrSettings):
     enabled: bool = Field(True, description="Enable per-request usage metering (serve).")
     log_path: str | None = Field(
         None,
-        description="Path to write metering records as JSONL (one line per request/extraction).",
+        description="Path to write metering records as JSONL (request records; the worker "
+        "writes extraction records to the sibling '<stem>.worker<suffix>' file, "
+        "so read both files for token usage).",
     )
     log_max_bytes: int = Field(
         100 * 1024 * 1024,
