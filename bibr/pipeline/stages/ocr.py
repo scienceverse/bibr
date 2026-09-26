@@ -301,7 +301,10 @@ def _postprocess_ocr_regions(
 
     Runs formula-number merging, hyphenated-word merging, and bullet-point
     inference using standalone functions from ``bibr.ocr.postprocess``.
+    Regions filled from the PDF text layer (``_native_text_used``) skip the
+    OCR-artifact cleanup; they are only trimmed.
     """
+    from bibr.ocr.normalization import strip_one_balanced_formula_wrapper
     from bibr.ocr.postprocess import (
         clean_ocr_content,
         format_bullet_points,
@@ -318,39 +321,46 @@ def _postprocess_ocr_regions(
 
     for page_regions in pages:
         # 0. Clean raw OCR output: strip \t, collapse repeated punctuation,
-        #    remove hallucinated repetitions, normalise numbered lists.
+        #    remove hallucinated repetitions, normalise numbered lists. Text
+        #    from the PDF text layer has none of these artifacts, and the
+        #    repairs damage it ("U.S." -> "U. S.", a dot-leader table of
+        #    contents cut after its first entry), so it is only trimmed.
         for region in page_regions:
             content = region.get("content")
-            if content:
-                region["content"] = clean_ocr_content(content)
+            if not content:
+                continue
+            if region.get("_native_text_used"):
+                region["content"] = content.strip()
+            else:
+                region["content"] = clean_ocr_content(
+                    content, formula=region.get("label") == "formula"
+                )
 
         # 1. Pre-wrap formula content in $$\n...\n$$ so that
         #    merge_formula_numbers can detect endswith("\n$$") for \tag{}.
         #    PDFParser._handle_formula won't double-wrap: it checks
-        #    startswith("$") first.
+        #    startswith("$") first. Only a wrapper whose opening delimiter
+        #    the final one closes is removed ("\\(a\\) + \\(b\\)" is two
+        #    formulas), and a single "$...$" pair too, which would otherwise
+        #    end up nested inside the "$$".
         for region in page_regions:
             if region.get("label") == "formula":
                 content = region.get("content", "")
                 if content:
-                    inner = content
-                    if (
-                        inner.startswith("$$")
-                        and inner.endswith("$$")
-                        or inner.startswith("\\[")
-                        and inner.endswith("\\]")
-                        or inner.startswith("\\(")
-                        and inner.endswith("\\)")
-                    ):
-                        inner = inner[2:-2].strip()
+                    inner = strip_one_balanced_formula_wrapper(content, single_dollar=True)
                     region["content"] = "$$\n" + inner + "\n$$"
 
         # 2. Normalise bullet markers so format_bullet_points can detect
-        #    existing bullet context for gap-filling.
+        #    existing bullet context for gap-filling. "* " is the Markdown
+        #    bullet OCR emits; in the text layer it is a printed asterisk
+        #    ("* p < .05"), so only bullet glyphs are rewritten there.
         for region in page_regions:
             if region.get("native_label") == "text":
                 content = region.get("content", "")
                 if content and (
-                    content.startswith("·") or content.startswith("•") or content.startswith("* ")
+                    content.startswith("·")
+                    or content.startswith("•")
+                    or (content.startswith("* ") and not region.get("_native_text_used"))
                 ):
                     region["content"] = "- " + content[1:].lstrip()
 
