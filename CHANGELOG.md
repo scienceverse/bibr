@@ -353,9 +353,12 @@ released.
 - One stale PDF bookmark no longer discards the whole outline; entries whose
   destination lies past the last page keep their title with no resolvable page.
   An ePub with one missing spine file now exports its readable chapters instead
-  of failing, failing only when no spine member is readable, and
-  `dc:identifier` values in `doi:`, `urn:doi:` and `https://doi.org/` form are
-  recognised as DOIs alongside bare `10.` strings.
+  of failing, failing only when no spine member is readable, and each skipped
+  chapter is recorded as an `EPUB_SPINE_MEMBER_SKIPPED` entry in
+  `extraction.warnings` instead of vanishing silently. An over-cap or
+  corrupt spine member still rejects the book. `dc:identifier` values in
+  `doi:`, `urn:doi:` and `https://doi.org/` form are recognised as DOIs
+  alongside bare `10.` strings.
 - The export gate's `VAL_EMPTY_EQ` now fires on a blank `lhs` or a blank
   `rhs`, the shape a null equation side ships as, instead of only on an
   all-blank row the exporter cannot produce. A link dropped from the export as
@@ -363,17 +366,15 @@ released.
   `extraction.warnings` instead of vanishing silently. `VAL_DANGLING_REF` now
   covers `xref`/`url`/`eq` text ids, affiliation author ids, the three match
   tables and the `extraction` id lists, and a new `VAL_DUPLICATE_PK` flags
-  repeated primary keys. Over the 193 stored gate192 exports, the only new
-  issues are `VAL_EMPTY_EQ` on 9 files whose rows genuinely have a blank side;
-  nothing previously flagged goes quiet.
+  repeated primary keys. The all-blank shape the old check fired on still
+  fires; nothing previously flagged goes quiet.
 - Impossible printed dates such as `31 April 2020` no longer export as
   `published_date: '2020-04-31'`; the value falls back to `YYYY-MM`. Valid
-  dates, leap days included, are unchanged: no `published_date` recomputed
-  over the gate192 exports differs from before.
-- A checkpointed (`-o`) export now matches the unsinked export: it runs
-  consolidation (so the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the
-  file) and replays the enriched run's `extraction.timings`, so the `enrich`
-  stage time is reported on both paths.
+  dates, leap days included, are unchanged.
+- A checkpointed (`-o`) export now consolidates like the unsinked export (so
+  the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the file, and the file
+  is rewritten only when consolidation ran) and replays the enriched run's
+  `extraction.timings`, so the `enrich` stage time is reported on both paths.
 
 ### Added
 
