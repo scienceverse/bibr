@@ -24,6 +24,7 @@ from bibr.paper_contents import (
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
 from bibr.structure.float_images import composite_panel_image
 from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD, caption_label, normalize_label
+from bibr.structure.html_table import html_table_frame
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -136,7 +137,7 @@ class MediaHandlersMixin:
         # Detect format and parse accordingly. For HTML input, keep the source
         # markup verbatim: the VLM's rowspan/colspan and multi-level headers
         # carry structure a flat DataFrame cannot, and round-tripping through
-        # ``read_html`` -> ``to_html`` drops rowspan and injects
+        # the DataFrame -> ``to_html`` drops rowspan and injects
         # ``Unnamed: 0_level_0`` / ``class="dataframe"`` noise. The DataFrame is
         # still used for the flattened ``contents`` grid.
         source_html: str | None = None
@@ -1534,18 +1535,15 @@ class MediaHandlersMixin:
     def _parse_html_table(html: str) -> pd.DataFrame | None:
         """Parse an HTML ``<table>`` string into a DataFrame.
 
-        Uses :func:`pandas.read_html` with the ``html5lib`` parser (stdlib
-        fallback) to handle ``<tr>/<td>/<th>`` markup returned by the OCR
-        engine.  Returns ``None`` on any parse failure.
+        Handles the ``<tr>/<td>/<th>`` markup returned by the OCR engine with
+        :func:`~bibr.structure.html_table.html_table_frame`, so every cell is
+        the text as printed.  Returns ``None`` on any parse failure.
         """
         try:
-            from io import StringIO
-
-            dfs = pd.read_html(StringIO(html), flavor="html5lib")
-            if dfs:
-                df = dfs[0].fillna("")
-                # When OCR HTML lacks <th> tags, pandas assigns integer column
-                # names (0, 1, 2, …).  Promote the first data row to headers.
+            df = html_table_frame(html)
+            if df is not None:
+                # When OCR HTML lacks <th> tags, the columns are numbered
+                # (0, 1, 2, …).  Promote the first data row to headers.
                 if len(df) > 0 and all(isinstance(c, (int, float)) for c in df.columns):
                     df.columns = [str(v) for v in df.iloc[0]]
                     df = df.iloc[1:].reset_index(drop=True)
