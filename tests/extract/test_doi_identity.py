@@ -1340,8 +1340,9 @@ def test_the_tail_of_a_reference_entry_is_a_cited_work(tail):
     assert selection.selected is None
 
 
+@pytest.mark.parametrize("page", [3, 5, 30])
 @pytest.mark.parametrize("header", ["References", "4. References", "Bibliography"])
-def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header):
+def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header, page):
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     contents = _contents(
@@ -1351,7 +1352,7 @@ def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header):
                 header,
                 CanonicalSection.UNKNOWN,
                 "Journal of Examples, 88(1), 189-202. doi:10.1234/cited.6",
-                30,
+                page,
             ),
         ]
     )
@@ -1361,3 +1362,40 @@ def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header):
     [candidate] = selection.candidates
     assert candidate.rejection_reason == "reference_candidate"
     assert selection.selected is None
+
+
+@pytest.mark.parametrize(
+    "cite_box",
+    [
+        "Doe, J., & Roe, R. (2022). A study of examples. Journal of Examples, 11(1),"
+        " 175-209. https://doi.org/10.1234/own.7",
+        "Citation: Doe J and Roe R (2022) A study of examples. J. Examples 13:812345."
+        " doi: 10.1234/own.7",
+    ],
+)
+def test_a_page_one_cite_box_under_a_made_up_references_heading_names_the_paper(cite_box):
+    # The layout labels a first-page "Cite as" box as reference text, and the
+    # parser heads its section "References" although the page prints no such
+    # heading. The paper's own DOI in the box still names it.
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("References", CanonicalSection.UNKNOWN, cite_box, 1),
+            (
+                "References",
+                CanonicalSection.UNKNOWN,
+                "Smith, J. (2019). Examples. Journal of Cases, 70, 1-10."
+                " https://doi.org/10.1234/cited.8",
+                27,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.7"
+    cited = next(c for c in selection.candidates if c.normalized == "10.1234/cited.8")
+    assert cited.rejection_reason == "reference_candidate"

@@ -558,8 +558,12 @@ released.
   notice's parent, like a "parent article DOI".
 - A reference entry under a "References" (or "Bibliography") heading that the
   section classifier left untyped counted as body text, so its labelled DOI
-  could name a paper that prints none of its own. The printed heading now
-  marks the section as the reference list for the DOI choice.
+  could name a paper that prints none of its own. From page 3 on, the section
+  header now marks the section as the reference list for the DOI choice,
+  whether the page prints it or the parser made it up from the layout's
+  reference label. On pages 1 and 2 the section keeps its own type: there the
+  parser can head a "Cite as" box that the layout labels as reference text
+  "References", and the paper's own DOI in it still names the paper.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from

@@ -560,16 +560,21 @@ def _pageless_front_block_end(contents, section_map) -> int | None:
     return min(classified, default=None)
 
 
-def _section_type(section) -> str | None:
-    """The section's type, taking a section headed "References" as one.
+def _section_type(section, page: int | None) -> str | None:
+    """The section's type, taking a section headed "References" as one after page 2.
 
-    The classifier can leave a reference list's section untyped; its printed
-    heading still says what it is.
+    The classifier can leave a reference list's section untyped; its heading
+    still says what it is. On pages 1 and 2 the heading may not be printed:
+    the parser names the section of a box the layout labels as reference text,
+    such as the paper's own "Cite as" box, "References", and the paper's DOI in
+    it must stay the paper's. There the section keeps its own type.
     """
     if section is None:
         return None
-    if section.section_type != CanonicalSection.REFERENCES and _REF_HEADER_RE.match(
-        section.header or ""
+    if (
+        (page is None or page > 2)
+        and section.section_type != CanonicalSection.REFERENCES
+        and _REF_HEADER_RE.match(section.header or "")
     ):
         return CanonicalSection.REFERENCES.value
     return section.section_type.value if section.section_type else None
@@ -597,7 +602,7 @@ def collect_doi_candidates(
                 source_kind="sentence",
                 page=sentence.page_number,
                 section_id=sentence.section_id,
-                section_type=_section_type(section),
+                section_type=_section_type(section, sentence.page_number),
                 region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
