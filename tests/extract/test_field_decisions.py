@@ -17,6 +17,7 @@ import pytest
 import bibr
 from bibr.extract.field_decisions import (
     DECIDED_ATTRIBUTES,
+    FIELD_ATTRIBUTES,
     Classification,
     FieldCandidate,
     FieldDecision,
@@ -45,59 +46,143 @@ _OTHER_OBJECTS = {
     ("extract/ref_extractor.py", "ref.authors"),
     # The model's response, before any candidate is built from it.
     ("extract/core_metadata.py", "llm_metadata.model_copy"),
+    # PaperMetadata's own copy, which drops the receipts of the fields an
+    # update rewrites.
+    ("models.py", "super().model_copy"),
 }
 _MUTATORS = {"append", "extend", "insert", "remove", "clear", "pop", "sort", "reverse"}
-_METADATA_NAME = re.compile(r"meta(?:data)?$|preparsed$")
+_METADATA_NAME = re.compile(r"meta(?:data)?$|preparsed$|record$")
+_CONSTRUCTORS = {"model_validate", "model_construct"}
+
+
+def _decided_constant(node):
+    return isinstance(node, ast.Constant) and node.value in DECIDED_ATTRIBUTES
+
+
+def _decided_path(node):
+    """Whether *node* is, or reaches into, a decided attribute: ``m.authors[0]``."""
+    return any(
+        isinstance(sub, ast.Attribute) and sub.attr in DECIDED_ATTRIBUTES for sub in ast.walk(node)
+    )
+
+
+def _target_writes(target, aliases):
+    """The decided-field writes one assignment or ``del`` target makes."""
+    if isinstance(target, (ast.Tuple, ast.List)):
+        for element in target.elts:
+            yield from _target_writes(element, aliases)
+    elif isinstance(target, ast.Starred):
+        yield from _target_writes(target.value, aliases)
+    elif isinstance(target, ast.Attribute):
+        # ``m.title = x``, and a write into a decided value: ``m.authors[0].family = x``.
+        if (
+            target.attr in DECIDED_ATTRIBUTES
+            or _decided_path(target.value)
+            or (isinstance(target.value, ast.Name) and target.value.id in aliases)
+        ):
+            yield ast.unparse(target)
+    elif isinstance(target, ast.Subscript):
+        container = target.value
+        dunder = (isinstance(container, ast.Attribute) and container.attr == "__dict__") or (
+            isinstance(container, ast.Call)
+            and isinstance(container.func, ast.Name)
+            and container.func.id == "vars"
+        )
+        if (
+            _decided_path(container)
+            or (dunder and _decided_constant(target.slice))
+            or (isinstance(container, ast.Name) and container.id in aliases)
+        ):
+            yield ast.unparse(target)
+
+
+def _aliases(function, relative):
+    """Local names a function binds to a decided value, as in ``authors = meta.authors``."""
+    return {
+        target.id
+        for node in ast.walk(function)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr in DECIDED_ATTRIBUTES
+        and (relative, ast.unparse(node.value)) not in _OTHER_OBJECTS
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
 
 
 def _writes_in(relative, source):
-    """Assignments, list mutations and ``setattr`` calls that write a decided field."""
-    for node in ast.walk(ast.parse(source)):
+    """Every form that writes a decided field once the record exists.
+
+    Assignments and ``del`` (attributes, items and slices of a decided value,
+    ``__dict__``/``vars()`` items), in-place list mutations, including through a
+    local alias of a decided value, ``setattr``/``object.__setattr__``, and
+    record rebuilds (``model_copy(update=...)``, ``PaperMetadata.model_validate``
+    of a dump, ``PaperMetadata.model_construct``).
+    """
+    tree = ast.parse(source)
+    enclosing = {}
+    for function in ast.walk(tree):
+        if isinstance(function, ast.FunctionDef | ast.AsyncFunctionDef):
+            for node in ast.walk(function):
+                enclosing[node] = function
+    aliases_of = {function: _aliases(function, relative) for function in set(enclosing.values())}
+    for node in ast.walk(tree):
+        function = enclosing.get(node)
+        aliases = aliases_of[function] if function is not None else set()
         targets = []
         if isinstance(node, ast.Assign):
             targets = node.targets
         elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
             targets = [node.target]
+        elif isinstance(node, ast.Delete):
+            targets = node.targets
         for target in targets:
-            for sub in ast.walk(target):
-                if (
-                    isinstance(sub, ast.Attribute)
-                    and isinstance(sub.ctx, ast.Store)
-                    and sub.attr in DECIDED_ATTRIBUTES
-                    and (relative, ast.unparse(sub)) not in _OTHER_OBJECTS
-                ):
-                    yield relative, node.lineno, ast.unparse(sub)
+            for text in _target_writes(target, aliases):
+                if (relative, text) not in _OTHER_OBJECTS:
+                    yield relative, node.lineno, text
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if (
-            isinstance(func, ast.Attribute)
-            and func.attr in _MUTATORS
-            and isinstance(func.value, ast.Attribute)
-            and func.value.attr in DECIDED_ATTRIBUTES
-        ):
-            yield relative, node.lineno, ast.unparse(func)
+        if isinstance(func, ast.Attribute) and func.attr in _MUTATORS:
+            receiver = func.value
+            if (isinstance(receiver, ast.Attribute) and receiver.attr in DECIDED_ATTRIBUTES) or (
+                isinstance(receiver, ast.Name) and receiver.id in aliases
+            ):
+                yield relative, node.lineno, ast.unparse(func)
         if (
             isinstance(func, ast.Attribute)
             and func.attr == "model_copy"
             and (relative, ast.unparse(func)) not in _OTHER_OBJECTS
-            and any(
-                keyword.arg == "update"
-                and isinstance(keyword.value, ast.Dict)
-                and any(
-                    isinstance(key, ast.Constant) and key.value in DECIDED_ATTRIBUTES
-                    for key in keyword.value.keys
-                )
-                for keyword in node.keywords
-            )
         ):
-            yield relative, node.lineno, ast.unparse(func)
-        if isinstance(func, ast.Name) and func.id == "setattr" and node.args:
+            for keyword in node.keywords:
+                if keyword.arg != "update":
+                    continue
+                value = keyword.value
+                literal = isinstance(value, ast.Dict) and None not in value.keys
+                if not literal or any(_decided_constant(key) for key in value.keys):
+                    yield relative, node.lineno, ast.unparse(func)
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr in _CONSTRUCTORS
+            and ast.unparse(func.value).endswith("PaperMetadata")
+        ):
+            arguments = [*node.args, *(k.value for k in node.keywords if k.arg is None)]
+            rebuilt = any(
+                isinstance(argument, ast.Dict) and None in argument.keys for argument in arguments
+            )
+            decided_keywords = any(k.arg in DECIDED_ATTRIBUTES for k in node.keywords)
+            if rebuilt or (func.attr == "model_construct" and decided_keywords):
+                yield relative, node.lineno, ast.unparse(func)
+        setter = (isinstance(func, ast.Name) and func.id == "setattr") or (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__setattr__"
+            and isinstance(func.value, ast.Name)
+            and func.value.id == "object"
+        )
+        if setter and node.args:
             owner = ast.unparse(node.args[0])
             attribute = node.args[1] if len(node.args) > 1 else None
-            if _METADATA_NAME.search(owner) or (
-                isinstance(attribute, ast.Constant) and attribute.value in DECIDED_ATTRIBUTES
-            ):
+            if _METADATA_NAME.search(owner) or _decided_constant(attribute):
                 yield relative, node.lineno, ast.unparse(node)
 
 
@@ -111,22 +196,37 @@ def test_only_the_decision_writes_the_decided_fields():
     assert writes == []
 
 
-def test_the_scan_sees_every_kind_of_write():
-    source = (
-        "def f(paper_metadata, meta, ref, field):\n"
-        "    paper_metadata.title = 'x'\n"
-        "    meta.keywords.append('y')\n"
-        "    setattr(meta, field, None)\n"
-        "    meta = meta.model_copy(update={'abstract': ''})\n"
-        "    ref.authors = []\n"
-    )
-    writes = [text for _, _, text in _writes_in("extract/ref_extractor.py", source)]
-    assert writes == [
-        "paper_metadata.title",
-        "meta.keywords.append",
-        "setattr(meta, field, None)",
-        "meta.model_copy",
-    ]
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def f(paper_metadata):\n    paper_metadata.title = 'x'\n",
+        "def f(meta):\n    meta.keywords.append('y')\n",
+        "def f(meta, field):\n    setattr(meta, field, None)\n",
+        "def f(record, name):\n    setattr(record, name, None)\n",
+        "def f(meta):\n    object.__setattr__(meta, 'title', 'X')\n",
+        "def f(meta):\n    meta = meta.model_copy(update={'abstract': ''})\n",
+        "def f(meta, update):\n    return meta.model_copy(update=update)\n",
+        "def f(meta):\n    return meta.model_copy(update=dict(title='X'))\n",
+        "def f(meta, a):\n    meta.authors[0] = a\n",
+        "def f(meta):\n    meta.keywords[:] = []\n",
+        "def f(meta):\n    del meta.keywords[0]\n",
+        "def f(meta):\n    del meta.title\n",
+        "def f(meta, a):\n    authors = meta.authors\n    authors.append(a)\n",
+        "def f(meta):\n    meta.authors[0].family = 'X'\n",
+        "def f(meta):\n    meta.__dict__['title'] = 'X'\n",
+        "def f(meta):\n    vars(meta)['title'] = 'X'\n",
+        "def f(meta, PaperMetadata):\n"
+        "    return PaperMetadata.model_validate({**meta.model_dump(), 'title': 'X'})\n",
+        "def f(PaperMetadata):\n    return PaperMetadata.model_construct(title='X', doi='')\n",
+    ],
+)
+def test_the_scan_sees_every_kind_of_write(source):
+    assert list(_writes_in("pipeline/stages/post_parse.py", source))
+
+
+def test_the_scan_ignores_the_listed_other_objects():
+    source = "def f(ref, resolved):\n    ref.authors = resolved\n"
+    assert list(_writes_in("extract/ref_extractor.py", source)) == []
 
 
 # ---------------------------------------------------------------------------
@@ -725,7 +825,12 @@ async def test_pipeline_decides_each_field_once(tmp_path, monkeypatch):
         decided
     )
     assert {"paper_type", "funding_statement", "funding", "affiliations"} <= decided
-    assert decisions.get("title").value == paper.metadata.title
+    # Every receipt describes the value the record ends up with.
+    for decision in decisions:
+        attributes = FIELD_ATTRIBUTES[decision.field]
+        final = tuple(getattr(paper.metadata, attribute) for attribute in attributes)
+        written = tuple(decision.value) if len(attributes) > 1 else (decision.value,)
+        assert final == written, decision.field
     fields = result["extraction"]["fields"]
     assert fields["title"]["rule"] == decisions.get("title").rule
     assert "rule" not in fields["bib"]
