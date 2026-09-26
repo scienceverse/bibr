@@ -382,6 +382,16 @@ def test_key_changes_with_native_text_settings(monkeypatch):
     assert ocr_cache._key(fs, cfg, _identity()) != base
 
 
+def test_key_changes_with_native_header_footer_setting(monkeypatch):
+    fs = _fs()
+    cfg = RunConfig(ocr_backend="glm-llama")
+    base = ocr_cache._key(fs, cfg, _identity())
+
+    monkeypatch.setattr(Settings.ocr, "native_text_header_footer", True)
+
+    assert ocr_cache._key(fs, cfg, _identity()) != base
+
+
 def test_key_changes_with_effective_reference_segmentation_strategy():
     fs = _fs()
     geom = ocr_cache._key(

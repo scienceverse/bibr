@@ -629,6 +629,9 @@ class OnnxLayoutBackend:
             model_path,
             device=device,
             model_name=f"layout ({architecture_label(self.architecture)} ONNX)",
+            # CPU-only layout sessions skip ORT's CPU arena (audit-measured
+            # ~5 GB at batch 8); a no-op when the chain includes CUDA.
+            disable_cpu_arena=True,
         )
         self._input_name = self.session.get_inputs()[0].name
         outputs = {o.name for o in self.session.get_outputs()}

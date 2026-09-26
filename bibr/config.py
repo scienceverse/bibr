@@ -689,6 +689,13 @@ class OcrOptions(_BibrSettings):
         description="Minimum fraction of printable characters a native-text extraction must have "
         "to be trusted; below this the page falls back to OCR.",
     )
+    native_text_header_footer: bool = Field(
+        False,
+        description="Read header/footer regions from the PDF text layer instead of OCR "
+        "on born-digital PDFs, under the same printable-ratio gate as body text. "
+        "Off by default pending an eval of DOI furniture and front-matter effects; "
+        "enable to A/B. Short running heads use the short-text allowance.",
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "
@@ -922,7 +929,14 @@ class LayoutOptions(_BibrSettings):
         0.5,
         description="Minimum overlap fraction for one detected region to be treated as contained in another.",
     )
-    batch_size: int = Field(8, ge=1, description="Page batch size for layout model inference.")
+    batch_size: int = Field(
+        8,
+        ge=1,
+        description="Page batch size for layout model inference. The configured value is "
+        "the non-CPU batch; on CPU the local and serve detectors run one page at a time "
+        "unless this was set explicitly (a CPU batch of 8 grows the ORT CPU arena to "
+        "several GB with no throughput gain).",
+    )
     # Coalescing window (ms) for the serve GpuBatcher: how long the layout
     # micro-batcher keeps gathering pages from concurrent requests after the
     # first queued page before flushing a partial batch. A single paper's
@@ -1422,13 +1436,16 @@ class MlOptions(_BibrSettings):
         description="Type-head softmax probability below which a section-classifier prediction "
         "collapses to UNKNOWN. Set to 0.0 to disable.",
     )
-    # When the trained classifier's prediction collapses to UNKNOWN (softmax
-    # below ``section_classifier_min_confidence``), escalate those headers to
-    # the batched LLM classifier instead of discarding the header. Only fires
-    # on misses, so the added cost is a fraction of a call per paper.
+    # When the trained classifier's prediction is UNKNOWN — either collapsed
+    # below ``section_classifier_min_confidence`` or confidently predicted as
+    # the model's own 'unknown' class — escalate those headers to the batched
+    # LLM classifier instead of discarding the header. Fires for every UNKNOWN,
+    # so on papers with many topic subheadings most non-alias headings reach
+    # the LLM; narrowing that to collapses-only needs a val-set measurement.
     section_classifier_llm_escalation: bool = Field(
         True,
-        description="Escalate section headers that collapse to UNKNOWN to the batched LLM "
+        description="Escalate section headers the trained classifier leaves UNKNOWN "
+        "(below-confidence collapses and confident unknown predictions) to the batched LLM "
         "classifier instead of discarding them.",
     )
     # Override the device the classifier runs on. ``None`` picks automatically
