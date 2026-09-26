@@ -6,6 +6,8 @@ import inspect
 import logging
 from typing import TYPE_CHECKING
 
+from bibr.pipeline.classifier_resources import ClassifierState
+
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
 
@@ -32,3 +34,20 @@ class ClassifierStage:
                 "Classifier startup failed; papers use the fallback classification",
                 exc_info=True,
             )
+        failures = {
+            name: status
+            for name, status in ctx.resources.classifiers.status().items()
+            if status.state is ClassifierState.FAILED_REQUIRED
+        }
+        if not failures:
+            return
+        detail = "; ".join(
+            f"{name}: {status.error or 'load failed'}" for name, status in failures.items()
+        )
+        message = (
+            f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
+            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
+        )
+        for fs in ctx.file_states:
+            if fs.error is None:
+                fs.set_error(message, code="classifier_required_failed", stage=self.name)

@@ -1211,3 +1211,48 @@ class TestResolveSelectedTitle:
 
         assert paper.metadata.title == real
         assert "VAL_TITLE_RECOVERED" in {issue.code for issue in paper.validation_issues}
+
+
+@pytest.mark.asyncio
+async def test_aggressive_mode_unloads_ner_parser_after_post_parse():
+    """Aggressive mode releases the ~1 GB NER singleton after post-parse so
+    the next chunk's OCR/LLM phases get the whole machine."""
+    fs = FileState(path=Path("x.pdf"))
+    fs.contents = MagicMock(layout_hints=None)
+    ctx = _ctx([fs])
+    ctx.config.memory_mode = "aggressive"
+
+    with patch("bibr.pipeline.stages.post_parse.post_parse", AsyncMock(return_value=MagicMock())):
+        await PostParseStage().run(ctx)
+
+    ctx.resources.unload_ner_parser.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_balanced_mode_keeps_ner_parser_after_post_parse():
+    fs = FileState(path=Path("x.pdf"))
+    fs.contents = MagicMock(layout_hints=None)
+    ctx = _ctx([fs])
+    ctx.config.memory_mode = "balanced"
+
+    with patch("bibr.pipeline.stages.post_parse.post_parse", AsyncMock(return_value=MagicMock())):
+        await PostParseStage().run(ctx)
+
+    ctx.resources.unload_ner_parser.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stage_threads_memory_mode_to_post_parse():
+    """The run's memory mode reaches post_parse so the NER parser loads on
+    CPU in aggressive mode."""
+    fs = FileState(path=Path("x.pdf"))
+    fs.contents = MagicMock(layout_hints=None)
+    ctx = _ctx([fs])
+    ctx.config.memory_mode = "aggressive"
+
+    with patch(
+        "bibr.pipeline.stages.post_parse.post_parse", AsyncMock(return_value=MagicMock())
+    ) as mk:
+        await PostParseStage().run(ctx)
+
+    assert mk.await_args.kwargs["memory_mode"] == "aggressive"

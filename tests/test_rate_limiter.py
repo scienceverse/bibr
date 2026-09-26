@@ -29,7 +29,7 @@ class TestLocalRateLimiter:
         start = time.monotonic()
         await limiter.acquire()
         elapsed = time.monotonic() - start
-        assert elapsed > 0.0
+        assert elapsed >= 0.8
 
     async def test_close_is_noop(self):
         limiter = AsyncLocalRateLimiter(resource_id="test")

@@ -436,6 +436,7 @@ async def _resolve_preparsed_references(
     *,
     settings: GlobalSettings,
     on_references_ready: Callable[[list], None] | None = None,
+    memory_mode: str | None = None,
 ):
     """Fill references onto a natively-preparsed (JATS) ``PaperMetadata``.
 
@@ -474,6 +475,7 @@ async def _resolve_preparsed_references(
         ref_seg_strategy=ref_seg_strategy,
         ref_parse_strategy=ref_parse_strategy,
         settings=settings,
+        memory_mode=memory_mode,
     )
     try:
         ref_df = extractor._collect_reference_rows()
@@ -529,6 +531,7 @@ async def _extract_metadata_and_equations(
     front_matter_resolution: FrontMatterResolution | None = None,
     validation_issue_sink: list[ValidationIssue] | None = None,
     on_references_ready: Callable[[list], None] | None = None,
+    memory_mode: str | None = None,
 ):
     """Phase 1: metadata + equation extraction in parallel.
 
@@ -578,6 +581,7 @@ async def _extract_metadata_and_equations(
             ref_parse_strategy,
             settings=effective_settings,
             on_references_ready=on_references_ready,
+            memory_mode=memory_mode,
         )
     else:
         extractor = MetadataExtractor(
@@ -589,6 +593,7 @@ async def _extract_metadata_and_equations(
             settings=effective_settings,
             classifier_resources=classifier_resources,
             front_matter_resolution=front_matter_resolution,
+            memory_mode=memory_mode,
         )
         # Pass the listener only when one is set so extractor doubles that take no
         # kwargs (and every non-prefetching path) see the unchanged call.
@@ -1106,6 +1111,7 @@ async def post_parse(
     classifier_resources: ClassifierResources | None = None,
     expected_identity: ExpectedIdentity | None = None,
     enrichment_prefetch: bool = False,
+    memory_mode: str | None = None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
@@ -1221,6 +1227,7 @@ async def post_parse(
                 front_matter_resolution=contents.front_matter_resolution,
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
+                memory_mode=memory_mode,
             )
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
@@ -1524,6 +1531,7 @@ class PostParseStage:
                     classifier_resources=ctx.resources.classifiers,
                     expected_identity=fs.expected_identity,
                     enrichment_prefetch=enrichment_prefetch,
+                    memory_mode=ctx.config.memory_mode,
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result
@@ -1582,6 +1590,13 @@ class PostParseStage:
                 # the caches keyed on it.
                 result.input_file.sha256 = fs.content_sha256
                 fs.paper = result
+
+        if ctx.config.memory_mode == "aggressive":
+            # The NER reference parser (~1 GB) is a process-wide singleton
+            # outside the layout/segmenter lifecycle: release it now so the
+            # next chunk's OCR/LLM phases get the whole machine, mirroring
+            # the layout/segmenter unloads in aggressive mode.
+            ctx.resources.unload_ner_parser()
 
         logger.debug("Post-parse stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)

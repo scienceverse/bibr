@@ -223,18 +223,28 @@ class AsyncCircuitBreaker:
                 event_to_wait = self._probe_event
 
             # Wait (outside the lock) for the probe to finish, then re-check.
-            # Use a timeout to avoid hanging forever if the probe task is
-            # cancelled before its __aexit__ can signal waiters.
+            # The wait is bounded so a probe task cancelled before its
+            # __aexit__ can signal waiters cannot hang them forever — but the
+            # timeout is patience, not a verdict: a still-running probe owns
+            # the HALF_OPEN → CLOSED/OPEN transition, and a timed-out waiter
+            # must not steal it by forcing OPEN underneath a probe that is
+            # about to succeed.
             if event_to_wait is not None:
                 try:
                     await asyncio.wait_for(event_to_wait.wait(), timeout=self.reset_timeout)
                 except TimeoutError:
-                    # Probe likely died — force-signal and let the loop re-check state
                     async with self._lock:
                         if self._probe_event is event_to_wait and not event_to_wait.is_set():
-                            self._state = CircuitState.OPEN
-                            self._last_failure_time = self._clock()
-                            self._signal_waiters()
+                            probe = self._probe_task
+                            if probe is None or probe.done():
+                                # Probe died without signalling — fail fast so
+                                # later callers see OPEN instead of parking on
+                                # a dead event.
+                                self._state = CircuitState.OPEN
+                                self._last_failure_time = self._clock()
+                                self._signal_waiters()
+                            # Else the probe is still mid-flight: loop around
+                            # and re-wait. Its __aexit__ will signal us.
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         self._ensure_loop_state()

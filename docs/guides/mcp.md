@@ -80,7 +80,7 @@ summary plus a `paper_id`, and the query tools read slices on demand.
 | `get_reference_citations(paper_id, bib_id)` | Every in-text citation of one reference, with the full source sentence and page |
 | `get_tables(paper_id, table_id?)` | Printed label and caption per table; full HTML + cells for one `table_id` |
 | `get_figures(paper_id, figure_id?)` | Captions and pages; the image is replaced by `has_image` |
-| `save_paper(paper_id, path, compact?)` | Writes the complete export JSON to disk |
+| `save_paper(paper_id, path, compact?, overwrite?)` | Writes the complete export JSON to a `.json` path; refuses to overwrite an existing file unless `overwrite=True` |
 
 This maps directly onto bibr's auditability contract: an agent can pull a
 claim from `get_references`, then `get_reference_citations` to see the exact

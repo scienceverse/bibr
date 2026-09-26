@@ -6,11 +6,14 @@ request that would have produced it. Nothing about the paper, the run, or the
 call site enters the key, which is what lets one entry serve an identical
 prompt across papers, runs, and machines.
 
-That property is what makes this a safe *prefill* target: an offline Anthropic
-Message Batch (``bibr/clients/batch.py``) answers a pile of requests at half
-price and writes them here, and a later ordinary run finds them already
-answered. A key that misses simply falls through to a live call, so a prefill
-that is stale, partial, or absent costs correctness nothing.
+That property would make this a safe *prefill* target, but no offline path
+writes here today: the Anthropic Message Batches layer
+(``bibr/clients/batch.py``) has no CLI or pipeline caller and never touches
+this cache, and a batch request does not carry the full request identity
+(``max_tokens``, reasoning effort, mode, schema), so a hand-written prefill
+would miss every live key. A key that misses simply falls through to a live
+call, so a prefill that is stale, partial, or absent costs correctness
+nothing.
 
 Storage is one JSON file per key, fanned out by the first two hex characters to
 keep directory sizes sane. Writes are atomic (tmp + ``os.replace``) and every

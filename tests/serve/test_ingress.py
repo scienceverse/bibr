@@ -1256,3 +1256,49 @@ def test_extract_route_openapi_retains_multipart_contract():
     finally:
         asyncio.run(tracker.close())
         asyncio.run(store.close())
+
+
+def test_extract_route_links_request_id_into_descriptor():
+    """The worker-side extract record must join back to the request record."""
+    import asyncio
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from bibr.serve.ingress import (
+        InferenceDispatchTracker,
+        UploadStore,
+        register_extract_route,
+    )
+
+    received = []
+
+    async def dispatch(descriptor):
+        received.append(descriptor)
+        return {"ok": True}
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _fake_metering(request, call_next):
+        # Stand-in for serve.app's metering middleware, which owns
+        # request.state.request_id in production.
+        request.state.request_id = request.headers.get("x-request-id", "generated")
+        return await call_next(request)
+
+    store = UploadStore.create(max_size=100, spool_memory_bytes=4, stale_after_seconds=120)
+    tracker = InferenceDispatchTracker(dispatch=dispatch, store=store)
+    register_extract_route(app, store, tracker)
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/papers/extract",
+                files={"file": ("paper.pdf", b"0123456789", "application/pdf")},
+                headers={"x-request-id": "link-1"},
+            )
+            assert response.status_code == 200
+            assert received[0]["request_id"] == "link-1"
+    finally:
+        asyncio.run(tracker.close())
+        asyncio.run(store.close())

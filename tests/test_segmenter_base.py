@@ -613,3 +613,28 @@ def test_collect_split_result_falls_back_only_for_tokenizer_rejected_text():
         ["bad text. More bad."],
         ["last ok"],
     ]
+
+
+def test_segmenter_cpu_session_disables_the_cpu_arena(monkeypatch):
+    """CPU-only SaT sessions reach wtpsplit with ort_kwargs disabling ORT's
+    CPU arena (which otherwise keeps ~2.8 GB after one paper)."""
+    ort = pytest.importorskip("onnxruntime")
+
+    _, _, init = _build_segmenter(monkeypatch, model_name="sat-6l-sm")
+
+    sess_options = init["kwargs"]["ort_kwargs"]["sess_options"]
+    assert isinstance(sess_options, ort.SessionOptions)
+    assert sess_options.enable_cpu_mem_arena is False
+
+
+def test_segmenter_cuda_session_keeps_default_session_options(monkeypatch):
+    """CUDA sessions keep wtpsplit's default: the CUDA EP manages its own
+    arena and the CPU-arena opt-out is unverified there."""
+    _, _, init = _build_segmenter(
+        monkeypatch,
+        model_name="sat-6l-sm",
+        requested_providers=_CUDA_CHAIN,
+        session_providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
+
+    assert "ort_kwargs" not in init["kwargs"]
