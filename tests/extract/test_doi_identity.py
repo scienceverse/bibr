@@ -1338,3 +1338,26 @@ def test_the_tail_of_a_reference_entry_is_a_cited_work(tail):
     [candidate] = selection.candidates
     assert candidate.semantic_context == "cited_work"
     assert selection.selected is None
+
+
+@pytest.mark.parametrize("header", ["References", "4. References", "Bibliography"])
+def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                header,
+                CanonicalSection.UNKNOWN,
+                "Journal of Examples, 88(1), 189-202. doi:10.1234/cited.6",
+                30,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.rejection_reason == "reference_candidate"
+    assert selection.selected is None

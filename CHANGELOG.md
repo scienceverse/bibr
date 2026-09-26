@@ -556,6 +556,10 @@ released.
 - A correction notice printed "DOI of original article: …" on its first page
   and exported the corrected article's DOI as its own. That DOI is now the
   notice's parent, like a "parent article DOI".
+- A reference entry under a "References" (or "Bibliography") heading that the
+  section classifier left untyped counted as body text, so its labelled DOI
+  could name a paper that prints none of its own. The printed heading now
+  marks the section as the reference list for the DOI choice.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from

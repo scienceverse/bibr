@@ -9,7 +9,7 @@ from dataclasses import replace
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
-from bibr.extract.ref_locator import _looks_like_terminal_reference_start
+from bibr.extract.ref_locator import _REF_HEADER_RE, _looks_like_terminal_reference_start
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
@@ -560,6 +560,21 @@ def _pageless_front_block_end(contents, section_map) -> int | None:
     return min(classified, default=None)
 
 
+def _section_type(section) -> str | None:
+    """The section's type, taking a section headed "References" as one.
+
+    The classifier can leave a reference list's section untyped; its printed
+    heading still says what it is.
+    """
+    if section is None:
+        return None
+    if section.section_type != CanonicalSection.REFERENCES and _REF_HEADER_RE.match(
+        section.header or ""
+    ):
+        return CanonicalSection.REFERENCES.value
+    return section.section_type.value if section.section_type else None
+
+
 def collect_doi_candidates(
     contents, pdf_evidence: PdfDoiEvidence | None = None
 ) -> tuple[DoiCandidate, ...]:
@@ -582,9 +597,7 @@ def collect_doi_candidates(
                 source_kind="sentence",
                 page=sentence.page_number,
                 section_id=sentence.section_id,
-                section_type=section.section_type.value
-                if section and section.section_type
-                else None,
+                section_type=_section_type(section),
                 region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
