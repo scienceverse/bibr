@@ -274,6 +274,31 @@ def test_checkpoint_path_consolidates_like_unsinked():
     assert materialized["p"]["extraction"]["warnings"] == sinked_out["extraction"]["warnings"]
 
 
+def test_checkpoint_path_does_not_rematerialize_when_consolidation_is_off():
+    """Guard: with the default consolidate-off config there is nothing to
+    merge, so the checkpoint path must not rewrite the -o file a second time.
+    Fails while materialize runs unconditionally after the no-op consolidate."""
+    import copy
+    from types import SimpleNamespace
+
+    calls = []
+    fs = SimpleNamespace(
+        paper=_CannedPaper(_checkpoint_core()),
+        warnings=[],
+        result_json=copy.deepcopy(_checkpoint_core()),
+        artifact_sink=SimpleNamespace(materialize=lambda fs, p: calls.append(p)),
+        core_sha256="deadbeef",
+        enrichment_state=None,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+    out = _sinked_run(fs, RunConfig())
+
+    assert calls == []
+    assert out == _checkpoint_core()
+
+
 def test_enrichment_replay_carries_enrich_timings():
     """The replayed (-o) payload's extraction.timings must include the enrich
     stage that ran, matching the unsinked export. Fails on base (core

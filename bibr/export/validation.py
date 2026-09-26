@@ -405,6 +405,13 @@ def _check_empty_eq(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_url_malformed(payload: dict) -> list[ValidationIssue]:
+    """Flag exported URLs with an http(s) scheme but no dotted host.
+
+    The exporter drops such links before they reach the gate (recording a
+    URL_MALFORMED_DROPPED warning instead), so on exporter output this check
+    is silent by construction. It stays as a guard for hand-built or older
+    payloads validated directly.
+    """
     bad = 0
     for u in _as_list(payload, "url"):
         if not isinstance(u, dict):

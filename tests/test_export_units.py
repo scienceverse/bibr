@@ -1254,6 +1254,21 @@ class TestExportUrlSanity:
         codes = [w["code"] for w in result["extraction"]["warnings"]]
         assert "URL_MALFORMED_DROPPED" in codes
 
+    def test_repeated_export_does_not_accumulate_drop_warnings(self):
+        """Guard: the drop warning is built locally per export — exporting the
+        same Paper twice must not grow paper.processing_warnings, and the
+        exported warnings stay at one entry. Fails while the export appends
+        to the Paper on every call."""
+        paper = self._paper_with_links(["https://blog"])
+        first = export_paper_to_json(paper)
+        second = export_paper_to_json(paper)
+        assert paper.processing_warnings == []
+        for result in (first, second):
+            drop_warnings = [
+                w for w in result["extraction"]["warnings"] if w["code"] == "URL_MALFORMED_DROPPED"
+            ]
+            assert len(drop_warnings) == 1
+
     def test_kept_link_leaves_no_drop_warning(self):
         """Guard: well-formed links must not trip the drop warning."""
         paper = self._paper_with_links(["https://openai.com/research"])
