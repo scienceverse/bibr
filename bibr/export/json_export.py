@@ -74,7 +74,7 @@ from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.export.structure_ids import ExportIds, export_ids
 from bibr.extract.research_integrity import collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
-from bibr.processing_warnings import ProcessingWarning
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -997,6 +997,17 @@ def _export_paper_payload(
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)
     exported_links = _sane_export_links(paper.contents.links)
+    # A dropped link leaves no trace in the payload, so record each loss as a
+    # coded warning (read on by the extraction-warnings union below). Without
+    # this the malformed-URL loss is silent (audit export-3).
+    for link in paper.contents.links:
+        if not _is_sane_url(_normalize_export_url(link.url)):
+            paper.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.URL_MALFORMED_DROPPED,
+                    f"Dropped malformed URL from export: {link.url[:160]!r}",
+                )
+            )
     exported_xrefs = list(enumerate(paper.contents.xrefs, start=1))
 
     # Processing facts about content rows, keyed by the rows' primary keys.

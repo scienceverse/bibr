@@ -188,3 +188,93 @@ def test_docx_rejects_real_oversized_document_xml(monkeypatch):
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("word/document.xml", b"<w:document>" + b"A" * 8192 + b"</w:document>")
     assert validate._check_docx_corruption(buf.getvalue()) is True
+
+
+# --- Missing spine members and prefixed DOI identifiers (input-parsers-28) ---
+
+
+def _make_epub_two_chapters(*, with_ch2: bool, identifier: str) -> bytes:
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    opf_xml = f"""<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Sample</dc:title>
+    <dc:identifier>{identifier}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>""".encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+        zf.writestr("OEBPS/ch1.xhtml", "<html><body><p>Chapter one.</p></body></html>")
+        if with_ch2:
+            zf.writestr("OEBPS/ch2.xhtml", "<html><body><p>Chapter two.</p></body></html>")
+    return buf.getvalue()
+
+
+def test_epub_skips_missing_spine_member():
+    """One manifest item absent from the zip must not reject the whole book —
+    the readable chapters still validate. Fails on base (corrupted=True)."""
+    result = validate_input_file(
+        Path("paper.epub"), _make_epub_two_chapters(with_ch2=False, identifier="10.1234/abc")
+    )
+    assert result.is_corrupted is False
+    assert result.is_valid is True
+
+
+def test_epub_all_spine_members_missing_is_still_corrupted():
+    """Guard: when nothing is readable the book is still rejected."""
+    from bibr.input import epub_native
+
+    buf = io.BytesIO()
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    opf_xml = b"""<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest><item id="c1" href="gone.xhtml" media-type="application/xhtml+xml"/></manifest>
+  <spine><itemref idref="c1"/></spine>
+</package>"""
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("mimetype", "application/epub+zip")
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+    with pytest.raises(ValueError, match="no readable spine"):
+        epub_native.read_epub_document(buf.getvalue())
+    result = validate_input_file(Path("paper.epub"), buf.getvalue())
+    assert result.is_corrupted is True
+    assert result.is_valid is False
+
+
+@pytest.mark.parametrize(
+    ("identifier", "expected"),
+    [
+        ("10.1234/abc", "10.1234/abc"),
+        ("doi:10.1234/abc", "10.1234/abc"),
+        ("https://doi.org/10.1234/abc", "10.1234/abc"),
+        ("urn:doi:10.1234/abc", "10.1234/abc"),
+    ],
+)
+def test_epub_identifier_doi_forms(identifier: str, expected: str):
+    """Packagers spell the DOI with urn:/doi:/URL prefixes — every form must
+    land on the bare DOI. The urn: form fails on base (no doi key)."""
+    from bibr.input import epub_native
+
+    doc = epub_native.read_epub_document(
+        _make_epub_two_chapters(with_ch2=True, identifier=identifier)
+    )
+    assert doc.metadata.get("doi") == expected

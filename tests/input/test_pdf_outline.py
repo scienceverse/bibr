@@ -284,3 +284,63 @@ def test_extract_pdf_outline_no_outline_returns_empty():
 def test_extract_pdf_outline_defensive_on_bad_bytes():
     # Corrupt input must never raise — best-effort returns [].
     assert extract_pdf_outline(b"not a pdf") == []
+
+
+# --------------------------------------------------------------------------- stale destinations (input-parsers-26)
+
+
+def _build_stale_outline_pdf() -> bytes:
+    """One-page PDF whose outline has a valid bookmark plus a stale one.
+
+    Both destinations use raw integer page indices, which PDFium reports
+    without validating — the stale entry points at page 40 of a 1-page
+    document, as seen in excerpts of proceedings volumes.
+    """
+    objs = [
+        b"<< /Type /Catalog /Outlines 5 0 R /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R /Resources << >> >>",
+        b"<< /Length 44 >>\nstream\nBT /F1 12 Tf 10 10 Td (hi) Tj ET\nendstream",
+        b"<< /First 6 0 R /Last 7 0 R /Count 2 >>",
+        b"<< /Title (Introduction) /Parent 5 0 R /Next 7 0 R /Dest [0 /XYZ null null null] >>",
+        b"<< /Title (Stale bookmark) /Parent 5 0 R /Prev 6 0 R /Dest [40 /XYZ null null null] >>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for i, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += f"{i} 0 obj\n".encode() + body + b"\nendobj\n"
+    xref_at = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode()
+    for off in offsets:
+        out += f"{off:010d} 00000 n \n".encode()
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF".encode()
+    return bytes(out)
+
+
+def test_stale_bookmark_keeps_valid_entries():
+    """One destination past the last page must not discard the whole outline.
+    Fails on base (returns [])."""
+    items = extract_pdf_outline(_build_stale_outline_pdf())
+    by_title = {it.title: it for it in items}
+    assert set(by_title) == {"Introduction", "Stale bookmark"}
+    assert by_title["Introduction"].page_no == 1
+    assert by_title["Stale bookmark"].page_no is None
+    assert by_title["Stale bookmark"].y_top is None
+
+
+def test_walk_out_of_range_index_yields_no_page():
+    """Mock-level pin: with a known page count, an out-of-range destination
+    resolves to no page instead of raising."""
+    dest = _FakeDest(40, (pdfium_c.PDFDEST_VIEW_XYZ, [0.0, 500.0, 0.0]))
+
+    class _LenDoc(_FakeDoc):
+        def __len__(self):
+            return 1
+
+    doc = _LenDoc([_FakeBookmark("Stale", 0, dest)])
+    items = _walk_pdfium_outline(doc)
+    assert len(items) == 1
+    assert items[0].page_no is None
+    assert items[0].y_top is None
+    assert doc.opened_pages == []

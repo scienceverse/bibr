@@ -167,3 +167,155 @@ def test_ocr_engine_serve_http_default_profile_follows_served_model(monkeypatch)
         "model": "glm-ocr",
         "profile": "glm",
     }
+
+
+# --- audit pipeline-stages-12: checkpointed (-o) vs unsinked parity -------
+
+
+def _sinked_run(fs, config):
+    """Run ExportStage with a bare-bones context (mirrors test_consolidate)."""
+    import asyncio
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+
+    ctx = SimpleNamespace(
+        progress=_NullProgress(),
+        config=config,
+        settings=GlobalSettings(),
+        alive=lambda: [fs],
+    )
+    asyncio.run(ExportStage().run(ctx))
+    return fs.result_json
+
+
+class _NullProgress:
+    def stage_start(self, name):
+        pass
+
+    def stage_end(self, name):
+        pass
+
+
+class _CannedPaper:
+    """A paper whose export is a fixed payload (no models involved)."""
+
+    def __init__(self, payload):
+        import copy
+
+        self._payload = copy.deepcopy(payload)
+        self.processing_warnings = []
+        self.llm_usage_labels = {}
+        self.llm_trace = []
+        self.text_quality = None
+        self.metadata = None
+        self.extraction = None
+
+    def export_to_json(self, *, include_regions=False, include_region_meta=False):
+        import copy
+
+        return copy.deepcopy(self._payload)
+
+
+def _checkpoint_core() -> dict:
+    return {
+        "schema_version": "12.0",
+        "bib": [{"bib_id": 1, "doi": None}],
+        "bib_match": [],
+        "extraction": {
+            "warnings": [],
+            "timings": {"stages": {"parse": 1.0}, "total_seconds": 1.0},
+        },
+    }
+
+
+def _boom_on_error(*a, **k):
+    raise AssertionError(f"export errored: {a} {k}")
+
+
+def test_checkpoint_path_consolidates_like_unsinked():
+    """With consolidate on and enrichment off, the -o (checkpoint) export must
+    carry the same CONSOLIDATE_WITHOUT_ENRICHMENT warning as the unsinked
+    export. Fails on base (checkpoint path skips consolidation)."""
+    import copy
+    from types import SimpleNamespace
+
+    config = RunConfig(consolidate="fill", crossref=False)
+
+    plain_fs = SimpleNamespace(
+        paper=_CannedPaper(_checkpoint_core()),
+        warnings=[],
+        result_json=None,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+    plain_out = _sinked_run(plain_fs, config)
+
+    materialized = {}
+    fs = SimpleNamespace(
+        paper=_CannedPaper(_checkpoint_core()),
+        warnings=[],
+        result_json=copy.deepcopy(_checkpoint_core()),
+        artifact_sink=SimpleNamespace(materialize=lambda fs, p: materialized.setdefault("p", p)),
+        core_sha256="deadbeef",
+        enrichment_state=None,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+    sinked_out = _sinked_run(fs, config)
+
+    assert sinked_out["extraction"]["warnings"] == plain_out["extraction"]["warnings"]
+    assert any(
+        w["code"] == "CONSOLIDATE_WITHOUT_ENRICHMENT" for w in sinked_out["extraction"]["warnings"]
+    )
+    # The -o file is the materialized payload, so the warning reaches disk.
+    assert materialized["p"]["extraction"]["warnings"] == sinked_out["extraction"]["warnings"]
+
+
+def test_enrichment_replay_carries_enrich_timings():
+    """The replayed (-o) payload's extraction.timings must include the enrich
+    stage that ran, matching the unsinked export. Fails on base (core
+    timings, no enrich key)."""
+    import copy
+    from types import SimpleNamespace
+
+    from bibr.pipeline.artifacts import RunState, canonical_json_sha256
+
+    core = _checkpoint_core()
+    enriched = copy.deepcopy(core)
+    enriched["bib_match"] = [{"bib_id": 1, "service": "crossref", "doi": "10.1234/ref"}]
+    enriched["extraction"]["timings"] = {
+        "stages": {"parse": 1.0, "enrich": 2.0},
+        "total_seconds": 3.0,
+    }
+
+    stored: dict = {}
+
+    def _materialize(fs, payload):
+        stored["payload"] = payload
+
+    sink = SimpleNamespace(
+        read_core=lambda fs: copy.deepcopy(core),
+        write_enrichment=lambda fs, sidecar: stored.setdefault("sidecar", sidecar),
+        read_enrichment=lambda fs: stored["sidecar"],
+        materialize=_materialize,
+        record=lambda *a, **k: None,
+    )
+    fs = SimpleNamespace(
+        paper=_CannedPaper(enriched),
+        warnings=[],
+        result_json=copy.deepcopy(core),
+        artifact_sink=sink,
+        core_sha256=canonical_json_sha256(core),
+        enrichment_state=RunState.ENRICHMENT_COMPLETE,
+        path=Path("x.pdf"),
+        free_all=lambda: None,
+        set_error=_boom_on_error,
+    )
+    out = _sinked_run(fs, RunConfig())
+
+    assert out["bib_match"] == enriched["bib_match"]  # replay succeeded, no fallback
+    assert out["extraction"]["timings"] == enriched["extraction"]["timings"]
+    assert stored["payload"]["extraction"]["timings"] == enriched["extraction"]["timings"]

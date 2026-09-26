@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import io
+import logging
 import posixpath
 import zipfile
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ from bibr.input.html_native import HtmlParser
 from bibr.input.xml_entities import parse_xml
 from bibr.input.zip_limits import ZipExpansionLimitError, read_zip_member_capped
 from bibr.paper_contents import PaperContents
+from bibr.utils.text import normalize_doi
+
+logger = logging.getLogger(__name__)
 
 _EPUB_TOTAL_UNCOMPRESSED_MAX_BYTES = 256 * 1024 * 1024
 _EPUB_MAX_ENTRIES = 20_000
@@ -59,8 +63,10 @@ def _text(el) -> str:
 
 
 def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
-    if name not in zf.namelist():
-        raise ValueError(f"ePub member missing: {name}")
+    try:
+        zf.getinfo(name)
+    except KeyError:
+        raise ValueError(f"ePub member missing: {name}") from None
     try:
         return read_zip_member_capped(zf, name, max_bytes=_EPUB_MAX_MEMBER_BYTES)
     except ZipExpansionLimitError as exc:
@@ -130,8 +136,15 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
                     metadata.setdefault("authors", []).append(creator)
             elif ln == "identifier":
                 value = _text(el)
-                if value.startswith("10."):
-                    metadata["doi"] = value
+                # ePub packagers spell the DOI as a bare '10.…', 'doi:10.…',
+                # 'https://doi.org/10.…', or 'urn:doi:10.…' — normalize every
+                # form to the bare DOI instead of only the first.
+                bare = value
+                if bare.lower().startswith("urn:doi:"):
+                    bare = bare[len("urn:doi:") :]
+                doi = normalize_doi(bare)
+                if doi:
+                    metadata["doi"] = doi
             elif ln == "publisher" and not metadata.get("publisher"):
                 metadata["publisher"] = _text(el)
             elif ln == "date" and not metadata.get("published"):
@@ -161,12 +174,23 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
 
         body_parts: list[str] = []
         spine_bytes = 0
+        skipped: list[str] = []
         for path in spine_paths:
-            data = _read_zip_member(zf, path)
+            try:
+                data = _read_zip_member(zf, path)
+            except Exception as exc:  # noqa: BLE001 — one missing chapter must not reject the book
+                logger.warning("Skipping unreadable ePub spine member %r: %s", path, exc)
+                skipped.append(path)
+                continue
             spine_bytes += len(data)
             if spine_bytes > _EPUB_MAX_SPINE_BYTES:
                 raise ValueError("ePub archive exceeds expansion limits")
             body_parts.append(data.decode("utf-8", errors="replace"))
+        if not body_parts:
+            raise ValueError(
+                "ePub package has no readable spine documents"
+                + (f" (skipped: {', '.join(skipped)})" if skipped else "")
+            )
 
     head_parts = []
     if metadata.get("title"):
@@ -200,14 +224,6 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
         + "</article></body></html>"
     )
     return EpubDocument(html_bytes=combined.encode("utf-8"), metadata=metadata)
-
-
-def epub_has_spine(epub_bytes: bytes) -> bool:
-    try:
-        read_epub_document(epub_bytes)
-    except Exception:
-        return False
-    return True
 
 
 class EpubParser:

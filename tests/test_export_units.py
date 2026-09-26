@@ -1245,6 +1245,45 @@ class TestExportUrlSanity:
         result = export_paper_to_json(paper)
         assert [u["href"] for u in result["url"]] == ["https://openai.com/research"]
 
+    def test_dropped_link_leaves_coded_warning(self):
+        """Audit export-3: a silently dropped link must be recorded in
+        extraction.warnings. Fails on base (no such warning)."""
+        paper = self._paper_with_links(["https://blog"])
+        result = export_paper_to_json(paper)
+        assert result["url"] == []
+        codes = [w["code"] for w in result["extraction"]["warnings"]]
+        assert "URL_MALFORMED_DROPPED" in codes
+
+    def test_kept_link_leaves_no_drop_warning(self):
+        """Guard: well-formed links must not trip the drop warning."""
+        paper = self._paper_with_links(["https://openai.com/research"])
+        result = export_paper_to_json(paper)
+        codes = [w["code"] for w in result["extraction"]["warnings"]]
+        assert "URL_MALFORMED_DROPPED" not in codes
+
+
+class TestExportEmptyEqGate:
+    """Audit export-3: a blank equation side reaches the export as '' and must
+    trip VAL_EMPTY_EQ in extraction.validation (not silently ship)."""
+
+    def _paper_with_eq(self, lhs: str, rhs: str) -> Paper:
+        contents = _minimal_contents(
+            equations=[PaperEquation(text_id=1, grp_id=1, lhs=lhs, comp="=", rhs=rhs)]
+        )
+        return _minimal_paper(contents=contents)
+
+    def test_blank_lhs_trips_val_empty_eq(self):
+        result = export_paper_to_json(self._paper_with_eq("", ".04"))
+        assert result["eq"][0]["lhs"] == ""
+        codes = [i["code"] for i in result["extraction"]["validation"]["issues"]]
+        assert "VAL_EMPTY_EQ" in codes
+
+    def test_full_equation_trips_no_val_empty_eq(self):
+        """Guard: a complete equation stays silent."""
+        result = export_paper_to_json(self._paper_with_eq("x", "1"))
+        codes = [i["code"] for i in result["extraction"]["validation"]["issues"]]
+        assert "VAL_EMPTY_EQ" not in codes
+
 
 # ── JSON export: top-level fields ──────────────────────────────────────
 

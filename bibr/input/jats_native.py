@@ -199,6 +199,31 @@ def _flatten_excluding(el, exclude: set[str]) -> str:
     return _flatten(el, exclude)
 
 
+def _unwrap_article_root(root):
+    """Return the ``<article>`` element for a parsed JATS document.
+
+    An NCBI E-utilities efetch (db=pmc) response wraps its single article in
+    a ``<pmc-articleset>`` element; unwrap that single child so programmatic
+    PMC downloads parse. Multi-article sets and any other root raise
+    ``ValueError`` with a specific message.
+    """
+    if _ln(root) == "article":
+        return root
+    if _ln(root) == "pmc-articleset":
+        articles = [
+            child
+            for child in root
+            if isinstance(getattr(child, "tag", None), str) and _ln(child) == "article"
+        ]
+        if len(articles) == 1:
+            return articles[0]
+        raise ValueError(
+            f"PMC articleset contains {len(articles)} <article> documents; "
+            "only single-article JATS <article> documents are supported"
+        )
+    raise ValueError(f"Expected <article> root, got <{_ln(root)}>")
+
+
 class JatsParser:
     """Parses JATS-XML bytes directly into a :class:`PaperContents`.
 
@@ -259,10 +284,12 @@ class JatsParser:
 
             raise ProcessingError(f"Failed to parse JATS XML: {exc}") from exc
 
-        if _ln(root) != "article":
+        try:
+            root = _unwrap_article_root(root)
+        except ValueError as exc:
             from bibr.exceptions import ProcessingError
 
-            raise ProcessingError(f"Expected <article> root, got <{_ln(root)}>")
+            raise ProcessingError(str(exc)) from exc
 
         front = _first_child(root, "front")
         body = _first_child(root, "body")

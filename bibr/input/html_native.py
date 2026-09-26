@@ -48,16 +48,6 @@ _DROP_TAGS = {
     "svg",
 }
 _BLOCK_TEXT_TAGS = {"p", "blockquote", "pre"}
-_CONTAINER_TAGS = {
-    "article",
-    "main",
-    "body",
-    "section",
-    "div",
-    "header",
-    "footer",
-    "details",
-}
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
 # above any real article/JATS/EPUB spine document, below what makes parsing a
@@ -462,7 +452,9 @@ class HtmlParser:
                 self._handle_table(child)
             elif name == "figure":
                 self._handle_figure(child)
-            elif name in _CONTAINER_TAGS or name:
+            else:
+                # Every other element (known containers and unknown tags alike)
+                # may hold text deeper down — recurse rather than drop it.
                 self._process_children(child)
 
     def _handle_heading(self, tag: Tag) -> None:
@@ -646,8 +638,3 @@ def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
     root = soup.find("article") or soup.find("main") or soup.body or soup
     has_content = bool(collapse_ws(root.get_text(" ", strip=True)).strip())
     return has_content, soup if has_content else None
-
-
-def html_has_content(html_bytes: bytes) -> bool:
-    """Compatibility wrapper returning only the HTML validation decision."""
-    return inspect_html(html_bytes)[0]

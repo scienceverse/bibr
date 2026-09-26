@@ -341,6 +341,39 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- Input validation no longer rejects readable files. A password-protected DOCX
+  is reported as password-protected instead of corrupted: the CFB check
+  searched for an ASCII `EncryptedPackage` stream name that real files store as
+  UTF-16LE. A PDF that pypdfium2 opens is no longer rejected for bytes before
+  `%PDF-` or data after `%%EOF`; the reader's open verdict is the corruption
+  verdict, with the byte heuristics kept as a fallback. A PMC efetch download
+  (`<pmc-articleset>` wrapping exactly one `<article>`) validates and parses;
+  multi-article sets are still rejected, with a message naming the count. All
+  3,927 PMC/eLife/PLOS corpus files validate exactly as before.
+- One stale PDF bookmark no longer discards the whole outline; entries whose
+  destination lies past the last page keep their title with no resolvable page.
+  An ePub with one missing spine file now exports its readable chapters instead
+  of failing, failing only when no spine member is readable, and
+  `dc:identifier` values in `doi:`, `urn:doi:` and `https://doi.org/` form are
+  recognised as DOIs alongside bare `10.` strings.
+- The export gate's `VAL_EMPTY_EQ` now fires on a blank `lhs` or a blank
+  `rhs`, the shape a null equation side ships as, instead of only on an
+  all-blank row the exporter cannot produce. A link dropped from the export as
+  malformed is recorded as a `URL_MALFORMED_DROPPED` entry in
+  `extraction.warnings` instead of vanishing silently. `VAL_DANGLING_REF` now
+  covers `xref`/`url`/`eq` text ids, affiliation author ids, the three match
+  tables and the `extraction` id lists, and a new `VAL_DUPLICATE_PK` flags
+  repeated primary keys. Over the 193 stored gate192 exports, the only new
+  issues are `VAL_EMPTY_EQ` on 9 files whose rows genuinely have a blank side;
+  nothing previously flagged goes quiet.
+- Impossible printed dates such as `31 April 2020` no longer export as
+  `published_date: '2020-04-31'`; the value falls back to `YYYY-MM`. Valid
+  dates, leap days included, are unchanged: no `published_date` recomputed
+  over the gate192 exports differs from before.
+- A checkpointed (`-o`) export now matches the unsinked export: it runs
+  consolidation (so the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the
+  file) and replays the enriched run's `extraction.timings`, so the `enrich`
+  stage time is reported on both paths.
 
 ### Added
 
