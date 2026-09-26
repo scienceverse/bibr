@@ -213,6 +213,13 @@ released.
 
 ### Fixed
 
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that

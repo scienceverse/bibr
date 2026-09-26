@@ -15,13 +15,16 @@ the setup wizard, ``config_cli``) can use it without circular-import risk.
 from __future__ import annotations
 
 import io
+import re
 import shutil
 import sys
 
 from rich import box
 from rich.console import Console
+from rich.errors import StyleError
 from rich.rule import Rule
 from rich.table import Table
+from rich.text import Text
 
 BRAND = "🦫"
 OK = "✓"
@@ -78,21 +81,71 @@ def brand_header(console: Console, title: str, *, subtitle: str | None = None) -
 # line intact and lets the terminal do any visual wrapping.
 def ok(console: Console, msg: str) -> None:
     """One indented green-check status line."""
-    console.print(f"{INDENT}[green]{OK}[/green] {msg}", soft_wrap=True)
+    console.print(f"{INDENT}[green]{OK}[/green] {_literal_brackets(console, msg)}", soft_wrap=True)
 
 
 def warn(console: Console, msg: str, *, hint: str = "") -> None:
     """One indented yellow status line, plus an optional dim hint below it."""
-    console.print(f"{INDENT}[yellow]{WARN}[/yellow] {msg}", soft_wrap=True)
-    for line in hint.splitlines():
-        console.print(f"{INDENT}  [dim]{line}[/dim]", soft_wrap=True)
+    console.print(
+        f"{INDENT}[yellow]{WARN}[/yellow] {_literal_brackets(console, msg)}", soft_wrap=True
+    )
+    _hint(console, hint)
 
 
 def fail(console: Console, msg: str, *, hint: str = "") -> None:
     """One indented red-cross status line, plus an optional dim hint below it."""
-    console.print(f"{INDENT}[red]{FAIL}[/red] {msg}", soft_wrap=True)
+    console.print(f"{INDENT}[red]{FAIL}[/red] {_literal_brackets(console, msg)}", soft_wrap=True)
+    _hint(console, hint)
+
+
+def _hint(console: Console, hint: str) -> None:
+    # Dim via the Text style, not a wrapping ``[dim]…[/dim]``: a hint ending in
+    # a backslash (a Windows path) would escape the closing tag.
     for line in hint.splitlines():
-        console.print(f"{INDENT}  [dim]{line}[/dim]", soft_wrap=True)
+        text = Text.from_markup(_literal_brackets(console, line), style="dim")
+        console.print(Text(f"{INDENT}  ") + text, soft_wrap=True)
+
+
+# Rich's own tag pattern (``rich.markup.RE_TAGS``): a run of backslashes, then
+# ``[`` and a tag body starting with a lowercase letter, ``#``, ``/`` or ``@``.
+_MARKUP_TAG = re.compile(r"(\\*)\[([a-z#/@][^[]*?)]")
+
+
+def _literal_brackets(console: Console, text: str) -> str:
+    """Escape bracketed text that Rich would swallow as an unknown style tag.
+
+    Status lines mix deliberate markup (``[cyan]bibr setup[/cyan]``) with
+    literal text that looks like a tag: ``pip install 'rapid-mlx[guided]'``
+    parses as a ``guided`` style that does not exist, and Rich drops it without
+    a word. Only tags that name no style this console knows (or, for a closing
+    tag, close nothing opened before it) are escaped, so real markup still
+    renders, and text a caller already passed through ``rich.markup.escape``
+    is left as it is instead of gaining backslashes.
+    """
+    opened: set[str] = set()
+
+    def replace(match: re.Match[str]) -> str:
+        backslashes, tag = match.groups()
+        if len(backslashes) % 2:
+            return match.group(0)  # already escaped
+        name, _, parameters = tag.partition("=")
+        if name.startswith("/"):
+            keep = name[1:] in opened or (name == "/" and bool(opened))
+        else:
+            keep = name.startswith("@") or _is_style(console, name, parameters)
+            if keep:
+                opened.add(name)
+        return match.group(0) if keep else f"{backslashes}\\[{tag}]"
+
+    return _MARKUP_TAG.sub(replace, text)
+
+
+def _is_style(console: Console, name: str, parameters: str) -> bool:
+    try:
+        console.get_style(f"{name} {parameters}" if parameters else name)
+    except StyleError:
+        return False
+    return True
 
 
 def error(console: Console, msg: str, *, hint: str = "") -> None:
