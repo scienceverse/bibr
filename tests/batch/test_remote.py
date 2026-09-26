@@ -339,6 +339,36 @@ async def test_poll_timeout_fails_the_paper_without_retry(tmp_path):
     assert executor.stats["transient_retries"] == 0
 
 
+async def test_serve_pipeline_timeout_is_retried_once_and_blames_the_paper(tmp_path):
+    """A job the serve failed with 504 ran out of PIPELINE_TIMEOUT: the serve
+    is healthy, the paper is slow. One more try, no in-flight shrink, and the
+    ledger code says so instead of blaming the OCR/LLM services."""
+    serve = FakeServe(fail={"thesis": ({"detail": "Pipeline processing timed out"}, 504)})
+    executor, sleeper = _executor(serve, retries=3, concurrency=3, max_concurrency=4)
+    (item,) = _items(tmp_path, "thesis")
+
+    _, [(_, outcome)] = await _run(executor, [item])
+
+    assert len(serve.submits) == 2
+    assert outcome.error_code == "pipeline_timeout"
+    assert outcome.error == "Pipeline processing timed out"
+    assert outcome.extra == {"http_status": 504, "job_id": "job2", "retries": 1}
+    assert executor.gate.size == 3
+    assert executor.stats["transient_retries"] == 0
+    assert [s for s in sleeper.calls if s >= 5] == [5.0]
+
+
+async def test_a_timeout_that_clears_on_the_retry_succeeds(tmp_path):
+    serve = FakeServe(fail_once={"busy": ({"detail": "Pipeline processing timed out"}, 504)})
+    executor, _ = _executor(serve, retries=3)
+    (item,) = _items(tmp_path, "busy")
+
+    _, [(_, outcome)] = await _run(executor, [item])
+
+    assert outcome.ok
+    assert outcome.extra == {"job_id": "job2", "retries": 1}
+
+
 async def test_lost_job_is_transient(tmp_path):
     serve = FakeServe()
 
@@ -458,6 +488,67 @@ async def test_deadline_stops_submission_but_lets_in_flight_finish(tmp_path):
 # --- runner integration -----------------------------------------------------------
 
 
+def test_papers_failed_by_a_rejected_token_run_again_once_it_is_fixed(tmp_path, monkeypatch):
+    """With two in flight, both papers get a 401 before the run stops; fixing
+    the token and re-running the same command must pick them up."""
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: None)
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    for stem in ("a", "b", "c"):
+        (papers / f"{stem}.pdf").write_bytes(b"%PDF-1.4\n" + stem.encode())
+    out = tmp_path / "out"
+
+    def options(token: str) -> BatchOptions:
+        remote = RemoteOptions(
+            serve_url="http://serve", token=token, poll_interval=0.001, concurrency=2
+        )
+        return BatchOptions(inputs=[str(papers)], out=out, remote=remote, tables=False)
+
+    serve = FakeServe(auth_token="right")  # noqa: S106
+    assert run_batch(options("wrong"), transport=httpx.MockTransport(serve.handler)) == 2
+    rows = Ledger(out / LEDGER_FILENAME).read()
+    assert sorted((r["paper_id"], r["error_code"]) for r in rows) == [
+        ("a", "http_401"),
+        ("b", "http_401"),
+    ]
+
+    assert run_batch(options("right"), transport=httpx.MockTransport(serve.handler)) == 0
+    assert sorted(name for name, _ in serve.submits) == ["a.pdf", "b.pdf", "c.pdf"]
+    latest = Ledger(out / LEDGER_FILENAME).latest()
+    assert {pid: row["status"] for pid, row in latest.items()} == {
+        "a": "ok",
+        "b": "ok",
+        "c": "ok",
+    }
+
+
+def test_a_paper_that_keeps_failing_as_an_outage_stops_being_resubmitted(tmp_path, monkeypatch):
+    """The serve answers 502 for an LLM failure the paper itself triggers.
+    Resume runs an outage again, but only until the paper has failed that way
+    three times, so re-running the command converges."""
+    monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: None)
+    papers = tmp_path / "papers"
+    papers.mkdir()
+    for stem in ("bad", "good"):
+        (papers / f"{stem}.pdf").write_bytes(b"%PDF-1.4\n" + stem.encode())
+    serve = FakeServe(fail={"bad": ({"detail": "Error in LLM: Failed to extract references"}, 502)})
+    remote = RemoteOptions(
+        serve_url="http://serve",
+        token="tok",  # noqa: S106
+        poll_interval=0.001,
+        concurrency=1,
+        retries=0,
+    )
+    options = BatchOptions(inputs=[str(papers)], out=tmp_path / "out", remote=remote, tables=False)
+
+    codes = [run_batch(options, transport=httpx.MockTransport(serve.handler)) for _ in range(4)]
+
+    assert codes == [1, 1, 1, 0]
+    assert [name for name, _ in serve.submits] == ["bad.pdf", "good.pdf", "bad.pdf", "bad.pdf"]
+    latest = Ledger(tmp_path / "out" / LEDGER_FILENAME).latest()["bad"]
+    assert (latest["error_code"], latest["transient_exhausted"]) == ("upstream_unavailable", True)
+
+
 def test_run_batch_remote_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr("bibr.batch.runner.local_build_sha", lambda: "unused-locally")
     serve = FakeServe(fail={"bad": ({"message": "no text", "error_code": "OCR_EMPTY"}, 422)})
@@ -530,6 +621,8 @@ def test_looks_transient_markers():
     assert looks_transient("Circuit breaker 'ocr' is OPEN")
     assert looks_transient("Error in OCR: upstream unreachable")
     assert not looks_transient("reference parse produced no rows")
+    # A timeout can be the paper's own slowness; never an outage by its text.
+    assert not looks_transient("Post-parse failed: LLM call timed out after 600s")
 
 
 def test_resolve_token_precedence(monkeypatch):

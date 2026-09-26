@@ -237,10 +237,23 @@ class TablesReport:
     skipped: tuple[tuple[str, str], ...] = ()  # (source, reason)
 
 
+@dataclass(frozen=True)
+class ExportFile:
+    """An export JSON file its caller has parsed already: *path* names it in
+    the report and in errors, as a path source would, without a second read."""
+
+    path: Path
+    data: Mapping[str, Any]
+
+
 def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] | None, str | None]]:
     """``(label, payload, skip_reason)`` for each source: a dict, a
-    :class:`bibr.Result`, or a path to an export JSON file."""
+    :class:`bibr.Result`, an :class:`ExportFile`, or a path to an export JSON
+    file."""
     for source in sources:
+        if isinstance(source, ExportFile):
+            yield str(source.path), source.data, None
+            continue
         if isinstance(source, Mapping):
             yield "<dict>", source, None
             continue
@@ -249,7 +262,12 @@ def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] |
             continue
         data = getattr(source, "data", None)
         if isinstance(data, Mapping):
-            yield str(getattr(source, "paper_id", "<result>")), data, None
+            # Name the input file: two results sharing a paper_id share it as
+            # a label too, and the duplicate error must say which files clash.
+            origin = data.get("source")
+            file_name = origin.get("file_name") if isinstance(origin, Mapping) else None
+            label = str(getattr(source, "paper_id", "<result>"))
+            yield f"{label} ({file_name})" if file_name else label, data, None
             continue
         path = Path(source)
         try:
@@ -267,10 +285,11 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     """Write the exports in *sources* as one Parquet file per table in *out_dir*.
 
     *sources* are export dicts, :class:`bibr.Result` objects, or paths to
-    export JSON files; files that are not bibr exports, and the
-    :class:`bibr.ChewFailure` slots of a batch, are skipped and listed in the
-    report. Every export is validated with the lenient 12.x reader, so
-    one from another major version raises :class:`pydantic.ValidationError`.
+    export JSON files (or :class:`ExportFile`, a path with its parsed data);
+    files that are not bibr exports, and the :class:`bibr.ChewFailure` slots
+    of a batch, are skipped and listed in the report. Every export is
+    validated with the lenient 12.x reader, so one from another major version
+    raises :class:`pydantic.ValidationError`.
     A ``paper_id`` seen twice raises :class:`ValueError`: it is the key that
     joins the tables. The files are written to a temporary directory and
     moved into *out_dir* only when every source was read, replacing earlier

@@ -9,7 +9,7 @@ scripts that used to sit next to the repository.
 bibr batch papers/ --out results/                     # local: one warm pipeline
 bibr batch manifest.txt --out results/ --refs llm     # a manifest, LLM reference parsing
 bibr batch manifest.txt --out results/ \
-    --serve-url http://gpu-box:8000 --concurrency 2   # remote: a bibr serve job API
+    --serve-url https://bibr.example.org              # remote: a bibr serve job API
 bibr batch manifest.txt --out results/ --dry-run      # the plan, nothing processed
 bibr batch report results/                            # summarise the ledger
 ```
@@ -30,9 +30,13 @@ Missing entries are reported (and counted in the dry run) but never abort the
 run. Every file is identified by its **`paper_id`** — the file stem — and its
 export is written to `<out>/<paper_id>.json`. Two inputs that share a stem
 (case-insensitively) would overwrite each other, so colliding files get
-`<stem>-<sha256[:8]>` instead; the mapping is printed by `--dry-run` and
-recorded under `collisions` in `run_info.json`, and every ledger line carries
-the original `stem`.
+`<stem>-<sha256[:8]>` instead, and so does a file named `run_info`, whose export
+would replace the run's own `run_info.json`; the mapping is printed by
+`--dry-run` and recorded under `collisions` in `run_info.json`, and every
+ledger line carries the original `stem`. A file keeps the id the ledger
+recorded for its path, so a corpus can grow: adding a second `paper.pdf` from
+another directory gives only the newcomer a suffix and never renames, or
+re-processes, the paper already done.
 
 Selection flags: `--limit N` processes at most N papers this run (after
 resume filtering), `--shuffle` randomises the order (`--seed` makes it
@@ -49,11 +53,24 @@ The ledger's latest line per `paper_id` decides what a new run does with it:
 | none | run | run | run |
 | `ok` | skip | skip | run |
 | `failed` | skip | run | run |
-| `failed` with `error_code: interrupted` | run | run | run |
+| `failed` before the paper got a verdict: `error_code` `interrupted`, `http_401` or `http_403` | run | run | run |
+| `failed` on a crash or a service outage: `error_code` `chunk_error` or `upstream_unavailable`, or `transient_exhausted: true` | run until the paper has failed this way 3 times, then skip | run | run |
 
-A paper interrupted by Ctrl-C never really ran, so it is picked up again by
-default. Every attempt appends a new line with an incremented `attempt`
-counter — nothing is ever rewritten, so `outcomes.jsonl` is a full history.
+A paper the run was interrupted on (Ctrl-C), or whose upload the serve refused
+because of the token, never got a verdict, so it always runs again. A crash or
+a service outage — the OCR or LLM server unreachable or unable to start, a
+serve that kept answering 502/503 until the retries ran out — is usually the
+machine's or the service's, so it runs again too. It can also be the paper's
+own: a bug its content triggers, a prompt that brings the LLM server down, a
+model reply the serve reports as a 502. So a paper that has failed this way
+three times since its last success waits for `--retry-failed`, and a batch
+still finishes. A timeout is in neither group: a paper can be too slow on its
+own, and re-running it by default would never finish.
+
+Every attempt appends a new line with an incremented `attempt` counter —
+nothing is ever rewritten, so `outcomes.jsonl` is a full history. A run killed
+mid-write (out of memory, a full disk) can leave a torn last line; it is
+skipped with a warning and the next run starts on a fresh line.
 
 Ctrl-C is graceful in both executors: the local executor records the chunk
 that was running as `interrupted`; the remote executor stops submitting,
@@ -76,8 +93,16 @@ pipeline flags apply: `--ocr`, `--ocr-url`, `--llm`, `--refs`, `--ref-seg`,
 [`bibr serve`](deployment.md) async job API (`POST /papers/jobs`, poll
 `GET /papers/jobs/{id}`, fetch `…/result`). The bearer token comes from
 `--token`, else `AUTH_API_KEY` / `BIBR_SERVE_TOKEN` in the environment, else
-`AUTH_API_KEY` in bibr's `.env`. The run waits for `GET /ready` first (up to
-`--ready-timeout`) and records the serve's `build_sha` in every ledger line.
+`AUTH_API_KEY` in bibr's `.env`. The token rides every request, so a plain
+`http://` serve URL is accepted only for a loopback or private-network host
+(a LAN or tailnet address, a single-label name such as `gpu-box`, or a
+`.local`/`.internal`/`.lan`/`.ts.net` name); a public host needs `https://`
+or an explicit `--allow-insecure-http`. Plain `http://` to a LAN host still
+shows the token to anyone on that network, so the run warns about it; a TLS
+reverse proxy, an SSH tunnel (`ssh -L 8000:127.0.0.1:8000 gpu-box`, then
+`--serve-url http://127.0.0.1:8000`) or a tailnet address avoids that. The
+run waits for `GET /ready` first (up to `--ready-timeout`) and records the
+serve's `build_sha` in every ledger line.
 The options the job API accepts are passed through — `--refs`, `--ref-seg`,
 `--consolidate`, `--pages` (as `start_page`/`end_page`), `--figure-images`,
 `--include-regions` — plus arbitrary `--form k=v` fields; the pipeline flags
@@ -90,14 +115,20 @@ Concurrency adapts to the serve:
 - A **429** on submit is the serve's queue cap (`JOBS_MAX_ACTIVE`) — normal
   under load. In-flight drops to `--min-concurrency` and the submit waits
   `Retry-After`; it is never counted as a failure.
-- **502/503/504**, connection errors, and a job the serve failed because of an
-  upstream OCR/LLM outage (circuit breaker open, OCR server unreachable, …)
-  are *transient*: in-flight shrinks by one and the paper is retried with
-  backoff up to `--retries` times (default 3). If it never recovers, the last
-  transient code is recorded.
+- **502/503/504** answers to a submit or poll, connection errors, and a job
+  the serve failed because of an upstream OCR/LLM outage (circuit breaker open,
+  OCR server unreachable, …) are *transient*: in-flight shrinks by one and the
+  paper is retried with backoff up to `--retries` times (default 3). If it
+  never recovers, the last transient code is recorded, and the next run picks
+  the paper up again.
 - Every success grows in-flight by one, back toward `--max-concurrency`.
+- A job the serve failed with **504** ran out of the serve's
+  `PIPELINE_TIMEOUT`: the serve is up and the paper was too slow. It is
+  submitted once more (the serve's OCR and LLM are shared with other jobs)
+  without shrinking in-flight, then recorded as `pipeline_timeout`.
 - Other 4xx answers are the paper's own problem — recorded once, no retry. A
-  401/403 stops the whole run.
+  401/403 stops the whole run; the papers it failed are picked up again once
+  the token is fixed.
 - `--poll-timeout` (default 2400 s) bounds one paper's wall clock; expiry is
   recorded as `poll_timeout` without a retry.
 
@@ -119,7 +150,9 @@ Each export's `paper_id` is the batch's own id, the name of its JSON file, so it
 is unique across the corpus even when papers share a DOI. `tables/` is rebuilt
 from every paper whose latest attempt is `ok` at the end of each run
 (`--no-tables` skips it); see the
-[Python guide](library.md#corpus-tables-parquet) for its layout.
+[Python guide](library.md#corpus-tables-parquet) for its layout. An export of
+another schema major, left in `<out>` by an older bibr, is left out of the
+tables with a warning; `--force` re-runs every paper under the current schema.
 
 `run_info.json` carries the `run_id` that stamps this run's ledger lines,
 `started_at`/`finished_at`, the invocation (`options`, without the token),
@@ -158,11 +191,16 @@ One JSON object per line of `outcomes.jsonl`:
 | `job_id`, `retries`, `http_status`, `transient_exhausted` | remote only | serve job id, transient retries used, the failure's HTTP status |
 
 `error_code` values: locally, the pipeline's own code (`ChewFailure.error_code`, e.g.
-an OCR or reference-parse code) or `processing_error`, `chunk_error` (the whole
-chunk crashed), `interrupted`; remotely, the serve's `error_code` when it
-gave one, else `http_<status>`, `connection_error`, `upstream_unavailable`,
-`job_lost`, `submit_wait_exhausted`, `poll_timeout`, `bad_submit_response`,
-`bad_result_json`, `client_error`, `unreadable_input`, `interrupted`.
+an OCR or reference-parse code) or `processing_error`, `upstream_unavailable`
+(an OCR or LLM service was down or could not start: `ChewFailure.outage`),
+`chunk_error` (the pipeline crashed on the paper: a chunk that crashes runs its
+papers again one by one, so only a paper that crashes on its own gets it, or
+the whole chunk when the pipeline could not run at all), `interrupted`;
+remotely, the serve's `error_code` when it gave one, else `http_<status>`,
+`connection_error`, `upstream_unavailable`, `job_lost`,
+`submit_wait_exhausted`, `pipeline_timeout`, `poll_timeout`,
+`bad_submit_response`, `bad_result_json`, `client_error`, `unreadable_input`,
+`interrupted`.
 
 ## Reading the report
 

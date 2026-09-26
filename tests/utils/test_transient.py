@@ -97,3 +97,138 @@ def test_self_referential_cause_chain_terminates():
     exc.__cause__ = exc
 
     assert not is_transient_network_error(exc)
+
+
+# --- is_service_outage: does a failure say nothing about the input? ----------
+
+
+class APITimeoutError(APIConnectionError):
+    """Stand-in for the openai SDK class: a timeout, though it subclasses the
+    connection error."""
+
+
+def _status_error(status: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://ocr:8080/v1/chat/completions")
+    response = httpx.Response(status, request=request)
+    return httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+
+
+def _wrapped(cause: BaseException) -> BaseException:
+    """What the LLM client does: a catch-all UpstreamServiceError around the cause."""
+    from bibr.exceptions import UpstreamServiceError
+
+    try:
+        raise UpstreamServiceError("LLM", "Failed to extract authors", cause) from cause
+    except UpstreamServiceError as exc:
+        return exc
+
+
+def _raised_from(cause: BaseException) -> BaseException:
+    """A plain wrapper with only ``__cause__`` (no ``original_error``)."""
+    try:
+        raise RuntimeError("OCR page failed") from cause
+    except RuntimeError as exc:
+        return exc
+
+
+def _raised_while_handling(context: BaseException, *, suppress: bool) -> BaseException:
+    try:
+        try:
+            raise context
+        except type(context):
+            if suppress:
+                raise ValueError("no JSON object in the completion") from None
+            raise ValueError("no JSON object in the completion")  # noqa: B904
+    except ValueError as exc:
+        return exc
+
+
+class _GenaiError(Exception):
+    """Stand-in for google-genai's APIError, which keeps the int status in ``code``."""
+
+    def __init__(self, code: int):
+        super().__init__(f"{code} error")
+        self.code = code
+
+
+def _circuit_open() -> BaseException:
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.utils.circuit_breaker import CircuitOpenError
+
+    opened = CircuitOpenError("ocr", 30.0)
+    return UpstreamServiceError("ocr", str(opened), original_error=opened)
+
+
+OUTAGES = [
+    ConnectionRefusedError("refused"),
+    httpx.ConnectError("[Errno 111] Connection refused"),
+    httpx.ConnectTimeout("never connected"),
+    httpx.ReadError("server went away"),
+    httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    APIConnectionError("connection"),
+    LocalEntryNotFoundError("offline"),
+    _status_error(503),
+    _status_error(502),
+    _status_error(429),
+    _wrapped(httpx.ConnectError("refused")),
+    _raised_from(httpx.ConnectError("[Errno 111] Connection refused")),
+    _raised_while_handling(httpx.ConnectError("refused"), suppress=False),
+    _circuit_open(),
+    _GenaiError(503),
+]
+
+NOT_OUTAGES = [
+    None,
+    TimeoutError("LLM call timed out after 600s"),
+    httpx.ReadTimeout("read"),
+    APITimeoutError("timed out"),
+    _status_error(504),
+    _status_error(500),
+    _status_error(400),
+    _wrapped(ValueError("no JSON object in the completion")),
+    _wrapped(TimeoutError("slow")),
+    _raised_while_handling(httpx.ConnectError("refused"), suppress=True),
+    _GenaiError(404),
+    ValueError("bad value"),
+]
+
+
+@pytest.mark.parametrize("exc", OUTAGES, ids=lambda e: type(e).__name__)
+def test_service_outages_are_recognised_through_wrappers(exc):
+    from bibr.utils.transient import is_service_outage
+
+    assert is_service_outage(exc) is True
+
+
+@pytest.mark.parametrize("exc", NOT_OUTAGES, ids=lambda e: type(e).__name__)
+def test_timeouts_and_paper_failures_are_not_outages(exc):
+    from bibr.utils.transient import is_service_outage
+
+    assert is_service_outage(exc) is False
+
+
+def test_without_http_status_only_a_service_that_is_gone_counts():
+    """The OCR stage fails a file only for a server that is gone: a busy
+    answer (429/502/503) is left out, through wrappers too."""
+    from bibr.utils.transient import is_service_outage
+
+    for status in (429, 502, 503):
+        assert is_service_outage(_status_error(status), http_status=False) is False
+        assert is_service_outage(_wrapped(_status_error(status)), http_status=False) is False
+    assert is_service_outage(_GenaiError(503), http_status=False) is False
+    assert is_service_outage(httpx.ConnectError("refused"), http_status=False) is True
+    assert is_service_outage(httpx.RemoteProtocolError("hung up"), http_status=False) is True
+    assert is_service_outage(_circuit_open(), http_status=False) is True
+    assert is_service_outage(httpx.ReadTimeout("read"), http_status=False) is False
+
+
+def test_an_upstream_error_alone_is_not_an_outage():
+    """The LLM client wraps any failure, bad model output included, in an
+    UpstreamServiceError; only a service-shaped cause makes it an outage."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.utils.transient import is_service_outage
+
+    assert (
+        is_service_outage(UpstreamServiceError("LLM", "All 3 reference parse batches failed"))
+        is False
+    )

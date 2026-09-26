@@ -70,3 +70,4 @@ async def test_start_failure_marks_files_errored_without_raising():
     assert fs.error_code == "llm_server_failed"
     assert fs.failed_stage == "llm_server"
     assert isinstance(fs.original_error, RuntimeError)
+    assert fs.error_outage is True  # the server's failure, not the paper's

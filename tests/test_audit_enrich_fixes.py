@@ -7,7 +7,7 @@ response whose ``candidates`` is null).
 import pytest
 
 from bibr.enrich.references import (
-    _doi_coherent_candidates,
+    _doi_agrees,
     _score_fingerprint,
     _split_page_range,
 )
@@ -75,21 +75,18 @@ class TestDoiCoherence:
     """M18: an unparseable printed DOI killed the fallback outright."""
 
     def test_an_agreeing_doi_keeps_only_the_agreeing_candidate(self):
-        ref = _ref(doi="10.1000/x")
-        candidates = [{"doi": "10.1000/x"}, {"doi": "10.1000/y"}]
-
-        assert _doi_coherent_candidates(ref, candidates) == [{"doi": "10.1000/x"}]
+        assert [
+            doi for doi in ("10.1000/x", "10.1000/y", None) if _doi_agrees("10.1000/x", doi)
+        ] == ["10.1000/x"]
 
     def test_an_unparseable_printed_doi_no_longer_discards_everything(self):
         """These are exactly the refs most in need of a fallback search."""
-        ref = _ref(doi="10 .1O00/garbled-by-ocr")
-        candidates = [{"doi": "10.1000/x"}, {"doi": "10.1000/y"}]
-
-        assert _doi_coherent_candidates(ref, candidates) == candidates
+        assert [
+            doi for doi in ("10.1000/x", "10.1000/y") if _doi_agrees("10 .1O00/garbled-by-ocr", doi)
+        ] == ["10.1000/x", "10.1000/y"]
 
     def test_no_printed_doi_passes_everything_through(self):
-        candidates = [{"doi": "10.1000/x"}]
-        assert _doi_coherent_candidates(_ref(), candidates) == candidates
+        assert _doi_agrees(None, "10.1000/x") is True
 
 
 class TestPageRangeSplitting:
