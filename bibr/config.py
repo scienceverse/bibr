@@ -1154,6 +1154,7 @@ class ResolverOptions(_BibrSettings):
     # Max concurrent /search calls when prefetching a reference list's title searches.
     search_concurrency: int = Field(
         8,
+        ge=1,
         description="Max concurrent /search calls when prefetching a reference list's title searches.",
     )
     # Assert the resolver is backed by the same corpus as CrossRef. When True, a

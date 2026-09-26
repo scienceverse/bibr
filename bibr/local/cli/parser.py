@@ -372,7 +372,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "and an append-only <out>/outcomes.jsonl ledger (one line per attempt). "
             "Re-running the same command resumes: papers whose latest ledger line is "
             "'ok' are skipped, failed ones too unless --retry-failed, everything runs "
-            "again with --force. Without --serve-url the corpus runs through one warm "
+            "again with --force. A paper that was interrupted, or refused by the serve's "
+            "token, runs again anyway, and so does one that crashed or hit a service "
+            "outage, until it has failed that way three times. "
+            "Without --serve-url the corpus runs through one warm "
             "local pipeline in chunks of --batch-size (the 'bibr chew' options apply); "
             "with --serve-url papers go to a bibr serve async job API with adaptive "
             "concurrency. 'bibr batch report <out>' summarizes a ledger."
@@ -416,7 +419,11 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Also re-run papers whose latest ledger line is 'failed'",
+        help=(
+            "Also re-run papers whose latest ledger line is 'failed' (without it, an "
+            "interruption or a rejected token runs again anyway, and a crash or a service "
+            "outage until the paper has failed that way three times)"
+        ),
     )
     batch.add_argument(
         "--force",

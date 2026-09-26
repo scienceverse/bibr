@@ -18,7 +18,7 @@ import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
@@ -36,6 +36,9 @@ from bibr.local.llm_models import (
 from bibr.presets import PresetManager
 from bibr.utils.hosts import refuse_plaintext_llm_key
 from bibr.utils.onnx_providers import onnxruntime_gpu_reinstall_command
+
+if TYPE_CHECKING:
+    from bibr.config import GlobalSettings
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -420,38 +423,64 @@ def _redact(text: str, api_key: str) -> str:
     return redact_key(text, api_key)
 
 
-def _build_test_client(
-    provider: str,
-    model: str,
-    api_key: str,
-    base_url: str = "",
-    *,
-    allow_insecure_http: bool = False,
-):
-    """Build an Instructor client for connection testing.
+def _with_llm_routing(env_vars: dict[str, str]) -> dict[str, str]:
+    """The wizard's answers plus a value for every LLM routing setting it left unset.
 
-    Uses wizard-collected values instead of the Settings singleton
-    (which hasn't been written yet). Raises ``ValueError`` rather than send the
-    key over plain HTTP to a public ``base_url``, as the pipeline would.
+    What gets written to ``.env``, and what the connection test tests. When
+    the wizard configures a provider, the settings that decide where LLM
+    requests go and with which key must all come from its answers. Otherwise
+    a value left by an earlier setup, in the ``.env`` being merged into or in
+    ``~/.bibr/.env``, stays in effect: the google, anthropic and groq adapters
+    send ``LLM_API_KEY`` in place of their own key whenever it is set, the
+    openai adapter sends every request to ``LLM_BASE_URL`` when it is set,
+    and a managed ``LLM_BACKEND`` does not use the provider at all. The test
+    would then pass on the values just typed while ``bibr chew`` used the old
+    ones. So ``LLM_BACKEND`` is written as ``cloud``, and ``LLM_API_KEY`` and
+    ``LLM_BASE_URL`` as blank where the answers do not set them.
     """
-    import instructor
+    provider = env_vars.get("LLM_PROVIDER")
+    if not provider:
+        return dict(env_vars)
+    routing = {"LLM_BACKEND": "cloud"}
+    if provider != "ollama":
+        routing["LLM_API_KEY"] = ""
+    if provider == "openai":
+        routing["LLM_BASE_URL"] = ""
+    return {**env_vars, **{k: v for k, v in routing.items() if k not in env_vars}}
 
-    model_string = f"{provider}/{model}"
-    kwargs: dict = {}
 
-    if provider == "google":
-        kwargs["api_key"] = api_key
-    elif provider == "openai":
-        kwargs["api_key"] = api_key
-        if base_url:
-            refuse_plaintext_llm_key(base_url, api_key, allow_insecure_http=allow_insecure_http)
-            kwargs["base_url"] = base_url
-    elif provider in ("anthropic", "groq"):
-        kwargs["api_key"] = api_key
-    elif provider == "ollama" and base_url:
-        kwargs["base_url"] = base_url
+def _connection_test_settings(env_vars: dict[str, str]) -> "GlobalSettings":
+    """Settings for the LLM connection test: the current ones plus the wizard's answers.
 
-    return instructor.from_provider(model_string, **kwargs)
+    The provider, model, keys and endpoint come from the answers, as
+    :func:`_with_llm_routing` writes them to ``.env``. Everything else
+    (token caps, thinking budget, Instructor mode) comes from a snapshot of
+    the current settings, which a merge into the existing ``.env`` keeps, so
+    the test sends what the first ``bibr chew`` will send.
+    """
+    from bibr.config import snapshot_settings
+
+    answers = _with_llm_routing(env_vars)
+    settings = snapshot_settings()
+    llm = settings.llm
+    llm.provider = answers.get("LLM_PROVIDER", llm.provider)
+    llm.model = answers.get("LLM_MODEL", llm.model)
+    if "LLM_API_KEY" in answers:
+        llm.api_key = answers["LLM_API_KEY"] or None
+    if "LLM_BASE_URL" in answers:
+        llm.base_url = answers["LLM_BASE_URL"] or None
+    llm.ollama_base_url = answers.get("LLM_OLLAMA_BASE_URL") or llm.ollama_base_url
+    for key_env in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"):
+        if answers.get(key_env):
+            setattr(settings, key_env, answers[key_env])
+    if "LLM_ALLOW_INSECURE_HTTP" in answers:
+        llm.allow_insecure_http = answers["LLM_ALLOW_INSECURE_HTTP"].strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
+    return settings
 
 
 _OPENAI_FILTER_PATTERNS = (
@@ -485,10 +514,11 @@ def _fetch_models(
                 filter_non_chat=True,
             )
         elif provider == "ollama":
-            host = (base_url or "http://localhost:11434").rstrip("/")
+            from bibr.clients.providers.ollama import ollama_openai_base_url
+
             return _fetch_openai_compat_models(
                 "ollama",
-                base_url=f"{host}/v1",
+                base_url=ollama_openai_base_url(base_url or "http://localhost:11434"),
                 filter_non_chat=False,
             )
         elif provider == "openai":
@@ -1357,52 +1387,49 @@ class SetupWizard:
             self.console.print("[dim]Skipped.[/dim]")
             return
 
+        from bibr.clients.llm import ping_llm
+        from bibr.exceptions import ConfigurationError
+
         provider = self.env_vars.get("LLM_PROVIDER", "")
-        model = self.env_vars.get("LLM_MODEL", "")
-        api_key = (
-            self.env_vars.get(LLM_DEFAULTS[provider]["key_env"], "")
-            if provider in LLM_DEFAULTS
-            else ""
-        )
-        base_url = self.env_vars.get("LLM_BASE_URL", "") or self.env_vars.get(
-            "LLM_OLLAMA_BASE_URL", ""
-        )
+        key_env = LLM_DEFAULTS[provider]["key_env"] if provider in LLM_DEFAULTS else ""
+        api_key = self.env_vars.get(key_env, "") if key_env else ""
 
         while True:
             try:
                 with self.console.status("Connecting to LLM …"):
-                    from pydantic import BaseModel, Field
-
-                    class TestResponse(BaseModel):
-                        reply: str = Field(description="Your reply")
-
-                    client = _build_test_client(
-                        provider,
-                        model,
-                        api_key,
-                        base_url,
-                        allow_insecure_http=self._allows_insecure_llm_http(),
-                    )
-                    create_kwargs: dict = {}
-                    if provider == "google":
-                        create_kwargs["generation_config"] = {"max_tokens": 64}
-                    else:
-                        create_kwargs["max_tokens"] = 64
-                    response = client.create(
-                        response_model=TestResponse,
-                        messages=[{"role": "user", "content": "Reply with the single word: OK"}],
-                        **create_kwargs,
-                    )
-                ui.ok(self.console, f"Connected — LLM responded: {response.reply.strip()}")
+                    # The provider adapter extraction uses, so this sends what
+                    # the first ``bibr chew`` will send.
+                    reply = ping_llm(_connection_test_settings(self.env_vars))
+                ui.ok(self.console, f"Connected — LLM responded: {reply.strip()}")
+                break
+            except ConfigurationError as exc:
+                # An invalid value already in .env, ~/.bibr/.env or the
+                # environment, not in the answers: chew stops on it too.
+                ui.error(self.console, f"Can't test the connection: {exc}")
+                self.console.print(
+                    "[dim]That value comes from your existing configuration, not from "
+                    "this setup. `bibr chew` stops on it too until it is fixed or "
+                    "overwritten; run `bibr doctor` after saving to check again.[/dim]"
+                )
                 break
             except Exception as exc:
                 msg = _redact(str(exc), api_key)
                 ui.error(self.console, f"Couldn't connect: {msg}")
-                if not Confirm.ask("Retry with a different API key?", default=True):
+                if provider == "ollama":
+                    # Ollama takes no key; what the user can change is the URL.
+                    if not Confirm.ask("Retry with a different Ollama base URL?", default=True):
+                        self.console.print("[dim]Skipping connection test.[/dim]")
+                        break
+                    self.env_vars["LLM_OLLAMA_BASE_URL"] = Prompt.ask(
+                        "Ollama base URL",
+                        default=self.env_vars.get("LLM_OLLAMA_BASE_URL", "http://localhost:11434"),
+                    )
+                    continue
+                if not key_env or not Confirm.ask("Retry with a different API key?", default=True):
                     self.console.print("[dim]Skipping connection test.[/dim]")
                     break
                 api_key = Prompt.ask("API key", password=True)
-                self.env_vars[LLM_DEFAULTS[provider]["key_env"]] = api_key
+                self.env_vars[key_env] = api_key
 
     def _step_external_services(self) -> None:
         ui.step(self.console, 4, 6, "Models & external services")
@@ -1561,7 +1588,7 @@ class SetupWizard:
                 self.console.print("[dim]Skipped — .env unchanged[/dim]")
                 return
             if action == "merge":
-                _merge_env(self.env_path, self.env_vars)
+                _merge_env(self.env_path, _with_llm_routing(self.env_vars))
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
                 if save_preset_name:
                     self._save_preset(save_preset_name)
@@ -1569,7 +1596,7 @@ class SetupWizard:
                     self._offer_save_preset()
                 return
 
-        _write_env_fresh(self.env_path, self.env_vars)
+        _write_env_fresh(self.env_path, _with_llm_routing(self.env_vars))
         ui.ok(self.console, f"Wrote {self.env_path}")
         if save_preset_name:
             self._save_preset(save_preset_name)
@@ -1776,10 +1803,13 @@ By default this runs the short recommended flow:
 Use --advanced for step-by-step control over extras, LLM provider + API key,
 connection test, OCR backend, memory mode, and writing .env.
 
-Re-running is safe: the wizard never reads your existing .env, but if one is
-present at save time it asks whether to overwrite, merge, or skip (merge is
-the default, so hand-edited values are preserved). Press Ctrl+C at any time to
-quit without saving.
+Re-running is safe: the wizard does not take its answers from your existing
+.env and writes .env only at the save step. If one is present then, it asks
+whether to overwrite, merge, or skip (merge is the default, so hand-edited
+values are preserved). Choosing an LLM provider also writes LLM_BACKEND=cloud,
+and a blank LLM_API_KEY or LLM_BASE_URL where you entered none, so that an
+older key or server cannot override the one you entered. Press Ctrl+C at any
+time to quit without saving.
 
 options:
   -h, --help   show this help message and exit

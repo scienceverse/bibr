@@ -49,7 +49,7 @@ second file return `400`.
 | `include_figures` | bool | No | Emit figure images as `data:` URIs (default: `false`) |
 | `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
 | `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
-| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
+| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 

@@ -135,27 +135,25 @@ def test_setup_wizard_model_listing_never_sends_the_key_to_a_public_http_host(mo
     ) == ["m"]
 
 
-def test_setup_wizard_connection_test_client_refuses_a_public_http_base_url(monkeypatch):
+def test_setup_wizard_connection_test_refuses_a_public_http_base_url(monkeypatch):
     pytest.importorskip("instructor")
-    from bibr.setup_wizard import _build_test_client
+    from bibr.clients.llm import ping_llm
+    from bibr.setup_wizard import _connection_test_settings
 
     built = []
     monkeypatch.setattr("instructor.from_provider", lambda *a, **kw: built.append(kw))
+    answers = {
+        "LLM_PROVIDER": "openai",
+        "LLM_MODEL": "m",
+        "LLM_API_KEY": "llm-key-placeholder",
+        "LLM_BASE_URL": "http://llm.example.org/v1",
+    }
     with pytest.raises(ValueError, match=_REFUSAL):
-        _build_test_client("openai", "m", "llm-key-placeholder", "http://llm.example.org/v1")
+        ping_llm(_connection_test_settings(answers))
     assert built == []
-    _build_test_client("openai", "m", "llm-key-placeholder", "http://gpu-box:8000/v1")
-    _build_test_client(
-        "openai",
-        "m",
-        "llm-key-placeholder",
-        "http://llm.example.org/v1",
-        allow_insecure_http=True,
-    )
-    assert [kw["base_url"] for kw in built] == [
-        "http://gpu-box:8000/v1",
-        "http://llm.example.org/v1",
-    ]
+    # The opt-in the wizard saves reaches the connection test too.
+    opted_in = _connection_test_settings({**answers, "LLM_ALLOW_INSECURE_HTTP": "true"})
+    assert opted_in.llm.allow_insecure_http is True
 
 
 def test_doctor_fails_the_connection_check_without_sending_the_key(monkeypatch):
@@ -164,19 +162,22 @@ def test_doctor_fails_the_connection_check_without_sending_the_key(monkeypatch):
 
     from rich.console import Console
 
+    from bibr.config import snapshot_settings
     from bibr.local.cli.doctor import _check_llm_connection
 
     built = []
     monkeypatch.setattr("instructor.from_provider", lambda *a, **kw: built.append(kw))
+    settings = snapshot_settings()
+    settings.llm.provider = "openai"
+    settings.llm.model = "m"
+    settings.llm.api_key = "llm-key-placeholder"
+    settings.llm.base_url = "http://llm.example.org/v1"
+    settings.llm.allow_insecure_http = False
     failures = []
     _check_llm_connection(
-        "openai",
-        "m",
-        "llm-key-placeholder",
-        "http://llm.example.org/v1",
+        settings,
         Console(file=io.StringIO()),
         lambda *_a: None,
-        lambda *_a, **_k: None,
         lambda msg, **_k: failures.append(msg),
     )
     assert built == []

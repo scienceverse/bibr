@@ -39,6 +39,12 @@ CONSOLIDATABLE_FIELDS = (
 # Highest-trust service first; unknown services sort after the known ones.
 SERVICE_PRECEDENCE = ("crossref",)
 
+# A registry's catch-all value says only that the record fits none of the
+# others. It may fill a gap but never replaces what the paper printed: a
+# Crossref "standard" or "journal-issue" maps to bib_type "other", and a
+# printed "book" is more specific than that.
+_CATCH_ALL = {"bib_type": "other"}
+
 
 def _doi_key(value) -> str | None:
     """Case-folded DOI for identity checks; DOIs are case-insensitive."""
@@ -87,9 +93,15 @@ def consolidate_bibs(data: dict, mode: Literal["fill", "replace"] = "fill") -> i
         taken: list[str] = []
         for field in CONSOLIDATABLE_FIELDS:
             current = bib.get(field)
-            sources = matches if current in (None, "") else same_work
+            empty = current in (None, "")
+            sources = matches if empty else same_work
             value = next(
-                (m.get(field) for m in sources if m.get(field) not in (None, "")),
+                (
+                    m.get(field)
+                    for m in sources
+                    if m.get(field) not in (None, "")
+                    and (empty or m.get(field) != _CATCH_ALL.get(field))
+                ),
                 None,
             )
             if value is None or value == current:
