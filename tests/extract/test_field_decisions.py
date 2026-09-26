@@ -63,6 +63,7 @@ _OTHER_OBJECTS = {
     ("extract/core_metadata.py", "llm_metadata.authors"),
     ("extract/core_metadata.py", "recovered.authors"),
     ("extract/research_integrity.py", "result.affiliations"),
+    ("structure/citation_linker.py", "reference.authors"),
     ("structure/citation_matcher.py", "r.authors"),
 }
 _MUTATORS = {"append", "extend", "insert", "remove", "clear", "pop", "sort", "reverse"}
