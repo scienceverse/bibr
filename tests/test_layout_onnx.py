@@ -221,6 +221,43 @@ def test_serve_detector_runs_onnx_through_the_batcher(layout_bundle, monkeypatch
     assert len(regions) == 2
 
 
+def test_onnx_layout_backend_disables_cpu_arena(tmp_path, monkeypatch):
+    """The layout ONNX session opts out of the CPU arena (the ~5 GB cut)."""
+    from bibr.layout_onnx import _GRAPH_OUTPUTS, PP_DOCLAYOUT_V3, OnnxLayoutBackend
+    from bibr.utils import onnx_providers as providers
+
+    seen = {}
+
+    class _FakeIONode:
+        def __init__(self, name):
+            self.name = name
+
+    class _FakeSession:
+        def get_inputs(self):
+            return [_FakeIONode("x")]
+
+        def get_outputs(self):
+            return [_FakeIONode(name) for name in _GRAPH_OUTPUTS[PP_DOCLAYOUT_V3]]
+
+    def fake_create(model_path, **kwargs):
+        seen.update(kwargs)
+        return _FakeSession(), "cpu"
+
+    monkeypatch.setattr(providers, "create_session", fake_create)
+    monkeypatch.setattr(
+        "bibr.layout_onnx.read_onnx_manifest",
+        lambda bundle_dir: {
+            "architecture": PP_DOCLAYOUT_V3,
+            "preprocessing": {},
+            "model_file": "model.onnx",
+        },
+    )
+
+    OnnxLayoutBackend(tmp_path, device="cpu", threshold=0.3)
+
+    assert seen.get("disable_cpu_arena") is True
+
+
 # -- PP-DocLayoutV4 ----------------------------------------------------------
 
 

@@ -17,13 +17,13 @@ import httpx
 
 from bibr.local.ocr_transport import BaseHttpOcrClient
 from bibr.ocr.backend import OcrText
-from bibr.ocr.otsl import check_otsl_completeness
 from bibr.ocr.profiles import (
     PADDLE_TABLE_RECOVERY_MAX_TOKENS,
     OcrProfile,
     resolve_ocr_profile,
 )
 from bibr.ocr.registry import register
+from bibr.ocr.table_recovery import recover_paddle_table
 from bibr.utils.circuit_breaker import AsyncCircuitBreaker
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,13 @@ class BibrServeOcrBackend:
     """``OcrBackend`` implementation that proxies to a remote GLM-OCR server."""
 
     name: ClassVar[str] = "serve-http"
+
+    #: A failed readiness poll keeps this instance published on the
+    #: ``ResourceManager`` so later requests fail fast on its cooldown
+    #: instead of rebuilding and re-polling for the full timeout. Backends
+    #: without this flag are discarded (and shut down) on readiness failure,
+    #: never reused.
+    keeps_readiness_cooldown: ClassVar[bool] = True
 
     #: Served-model alias used when the caller passes no model. The documented
     #: convention for externally-managed GLM-OCR servers; a server serving a
@@ -130,18 +137,30 @@ class BibrServeOcrBackend:
                 "Waiting up to %ds for OCR server at %s…", self._ready_timeout, self._base_url
             )
             host_was_unreachable = False
+            last_status: int | None = None
             observed_model_ids: list[str] = []
             while time.monotonic() < deadline:
                 try:
                     resp = await self._http.get(f"{self._base_url}/v1/models", timeout=5.0)
+                    # Any response proves the host is up, whatever its status.
                     host_was_unreachable = False
                     if resp.status_code == 200:
                         data = resp.json()
                         observed_model_ids = [item["id"] for item in data["data"]]
+                        # A 200 answers the key question in the affirmative —
+                        # forget any earlier 401 so the failure names the
+                        # model the server keeps not listing, not a key the
+                        # server has since accepted.
+                        last_status = None
                         if self._model in observed_model_ids:
                             self._ready = True
                             logger.info("OCR server ready at %s", self._base_url)
                             return
+                    else:
+                        # A non-200 answer still proves the host is up; remember
+                        # which status so the failure names the key (401), not
+                        # the model alias.
+                        last_status = resp.status_code
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     host_was_unreachable = True
                 except Exception:  # noqa: S110
@@ -157,6 +176,17 @@ class BibrServeOcrBackend:
                     self._ready_timeout,
                 )
                 raise UpstreamServiceError("ocr", "OCR server is unreachable.")
+            if last_status == 401:
+                logger.error(
+                    "OCR server at %s returned 401 (unauthorized — check OCR_API_KEY); "
+                    "observed model ids: %r",
+                    self._base_url,
+                    observed_model_ids,
+                )
+                raise UpstreamServiceError(
+                    "ocr",
+                    "OCR server unauthorized (401): check OCR_API_KEY.",
+                )
             logger.error(
                 "OCR server at %s did not serve model %r within %.0fs; observed model ids: %r",
                 self._base_url,
@@ -193,39 +223,16 @@ class BibrServeOcrBackend:
                     encode_region_for_ocr, image, self._profile.image
                 )
                 result = await self._post_with_retry(image_b64, prompt)
-                task = self._profile.task_for_prompt(prompt)
-                if self._profile.name != "paddle" or task != "table":
-                    return result
-
-                completeness = check_otsl_completeness(result)
-                if result.finish_reason != "length" and completeness.complete:
-                    return result
-
-                logger.warning(
-                    "Paddle table output incomplete; retrying once at %d tokens "
-                    "(finish_reason=%s, reasons=%s)",
-                    PADDLE_TABLE_RECOVERY_MAX_TOKENS,
-                    result.finish_reason,
-                    completeness.reasons,
-                )
-                try:
-                    recovered = await self._post_with_retry(
+                return await recover_paddle_table(
+                    profile=self._profile,
+                    prompt=prompt,
+                    result=result,
+                    retry=lambda: self._post_with_retry(
                         image_b64,
                         prompt,
                         max_tokens=PADDLE_TABLE_RECOVERY_MAX_TOKENS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Paddle table recovery failed; retaining initial output",
-                        exc_info=True,
-                    )
-                    return result
-                if not recovered:
-                    logger.warning(
-                        "Paddle table recovery returned empty output; retaining initial output"
-                    )
-                    return result
-                return recovered
+                    ),
+                )
         except CircuitOpenError as exc:
             # The breaker only counts server-side failures (5xx/connection/
             # timeout), so an OPEN breaker means the OCR server is down. Surface

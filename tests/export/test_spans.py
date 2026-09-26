@@ -87,6 +87,49 @@ def test_expressions_locate_across_printed_spellings():
     assert equation_span(locator, eq("t", "28", "=", "2.10")) is None  # no third occurrence
 
 
+def test_expression_spans_follow_late_clean_up_and_stop_at_the_value():
+    # Late clean-up prints the parsed "10 − 6" as "10 −6", and "n = 5" is not
+    # the start of "n = 5–6".
+    texts = {1: "Pools (n = 5–6) and brains (n = 5), OR = 2.4, p = 9.62 × 10 −6."}
+    locator = SpanLocator(texts, shared=False)
+
+    def eq(lhs, df, comp, rhs):
+        return SimpleNamespace(text_id=1, lhs=lhs, df=df, comp=comp, rhs=rhs)
+
+    spans = [
+        equation_span(locator, eq("n", "", "=", "5–6")),
+        equation_span(locator, eq("n", "", "=", "5")),
+        equation_span(locator, eq("p", "", "=", "9.62 × 10 − 6")),
+    ]
+    assert [texts[1][a:b] for a, b in spans] == ["n = 5–6", "n = 5", "p = 9.62 × 10 −6"]
+    assert spans[1][0] == texts[1].index("n = 5)")
+
+
+def test_a_name_read_with_spaces_is_located_where_printed_without_them():
+    # The extractor reads MathML's η_p^2 as "η p 2", which late clean-up
+    # prints as "ηp2".
+    texts = {
+        1: "Recall improved, F(2, 356) = 14.2, ηp2 =.07, but not by condition.",
+        2: "It held, η p 2 = .07, and again, ηp2 = .07.",
+        3: "The others = .4, and r s = .4.",
+    }
+    locator = SpanLocator(texts, shared=False)
+
+    def eq(text_id, lhs, rhs):
+        return SimpleNamespace(text_id=text_id, lhs=lhs, df="", comp="=", rhs=rhs)
+
+    def printed(text_id, lhs, rhs):
+        span = equation_span(locator, eq(text_id, lhs, rhs))
+        return None if span is None else texts[text_id][span[0] : span[1]]
+
+    assert printed(1, "η p 2", ".07") == "ηp2 =.07"
+    # Where it is printed as read first, and no place twice
+    assert [printed(2, "η p 2", ".07") for _ in range(3)] == ["η p 2 = .07", "ηp2 = .07", None]
+    # Printed as read, it is not looked for closer together: not at the
+    # "rs = .4" of "others"
+    assert equation_span(locator, eq(3, "r s", ".4")) == (21, 29)
+
+
 def test_export_emits_spans_and_fills_eq_verbatim(demo_paper):
     from bibr.export.json_export import _export_paper_payload
 

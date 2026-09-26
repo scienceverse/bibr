@@ -5,6 +5,7 @@ manages llama.cpp. ``VllmMlxServer`` supports the managed LLM
 backend, while its retired OCR client only reports an actionable error.
 """
 
+import asyncio
 import json
 import logging
 import subprocess
@@ -16,7 +17,10 @@ from typing import ClassVar
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
 from bibr.local.ocr_transport import BaseHttpOcrClient
+from bibr.ocr.image_utils import encode_region_for_ocr
+from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
 from bibr.ocr.registry import register
+from bibr.ocr.table_recovery import recover_paddle_table
 
 logger = logging.getLogger(__name__)
 
@@ -123,37 +127,51 @@ class VllmMlxServer:
         )
 
         # Poll /health until ready or timeout
+        self._wait_until_ready()
+
+    def _wait_until_ready(self) -> None:
+        """Poll /health until the engine reports ``model_loaded`` or timeout."""
+        assert self._process is not None  # noqa: S101 — spawned by __init__ before this call
         timeout = self._settings.vllm_mlx.startup_timeout
         deadline = time.monotonic() + timeout
         poll_interval = 2.0
-        health_url = f"http://localhost:{port}/health"
+        health_url = f"http://localhost:{self._port}/health"
 
-        while time.monotonic() < deadline:
-            # Check process didn't die during startup
-            if self._process.poll() is not None:
-                rc = self._process.returncode
-                stderr_tail = self._read_stderr_tail()
-                self._close_stderr_fh()
-                self._process = None
-                raise RuntimeError(
-                    f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[:500]}"
-                )
-            try:
-                status, _reason, raw_body = request_bytes(health_url, timeout=5)
-                if status == 200:
-                    body = json.loads(raw_body.decode("utf-8"))
-                    # /health returns 200 as soon as the FastAPI app is up,
-                    # but the MLX engine may still be mmapping weights. Wait
-                    # for ``model_loaded: true`` — otherwise the first OCR
-                    # request pays the full paging cost and can blow past
-                    # the per-request read-timeout.
-                    if body.get("model_loaded"):
-                        logger.info("vllm-mlx server ready (model=%s, port=%d)", model, port)
-                        self._warmup_model()
-                        return
-            except (LocalHttpError, json.JSONDecodeError):
-                pass
-            time.sleep(poll_interval)
+        try:
+            while time.monotonic() < deadline:
+                # Check process didn't die during startup
+                if self._process.poll() is not None:
+                    rc = self._process.returncode
+                    stderr_tail = self._read_stderr_tail()
+                    self._close_stderr_fh()
+                    self._process = None
+                    raise RuntimeError(
+                        f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[-500:]}"
+                    )
+                try:
+                    status, _reason, raw_body = request_bytes(health_url, timeout=5)
+                    if status == 200:
+                        body = json.loads(raw_body.decode("utf-8"))
+                        # /health returns 200 as soon as the FastAPI app is up,
+                        # but the MLX engine may still be mmapping weights. Wait
+                        # for ``model_loaded: true`` — otherwise the first OCR
+                        # request pays the full paging cost and can blow past
+                        # the per-request read-timeout.
+                        if body.get("model_loaded"):
+                            logger.info(
+                                "vllm-mlx server ready (model=%s, port=%d)", self._model, self._port
+                            )
+                            self._warmup_model()
+                            return
+                except (LocalHttpError, json.JSONDecodeError):
+                    pass
+                time.sleep(poll_interval)
+        except BaseException:
+            # BaseException, not Exception: the child never sees the
+            # terminal's Ctrl-C, so a KeyboardInterrupt or task cancellation
+            # out of the health wait must still shut it down.
+            self.shutdown()
+            raise
 
         # Timeout — kill the process, but never let cleanup mask the TimeoutError.
         try:
@@ -435,3 +453,22 @@ class PaddleHttpOcrClient(BaseHttpOcrClient):
     name: ClassVar[str] = "paddle-http"
     _DEFAULT_MODEL: ClassVar[str] = "paddle-ocr-vl-1.6"
     _SERVICE_LABEL: ClassVar[str] = "Paddle OCR"
+
+    async def recognize(self, image, prompt: str) -> str:
+        """OCR one region, retrying a truncated table once at higher budget.
+
+        Shares the serve backend's recovery policy (see
+        ``bibr.ocr.table_recovery``) so local and served runs export the same
+        tables. The managed Paddle clients (vLLM, MLX-VLM, Rapid-MLX) all
+        delegate here.
+        """
+        image_b64 = await asyncio.to_thread(encode_region_for_ocr, image, self._profile.image)
+        result = await self._send_request(image_b64, prompt)
+        return await recover_paddle_table(
+            profile=self._profile,
+            prompt=prompt,
+            result=result,
+            retry=lambda: self._send_request(
+                image_b64, prompt, max_tokens=PADDLE_TABLE_RECOVERY_MAX_TOKENS
+            ),
+        )

@@ -93,6 +93,30 @@ def test_dry_run_prints_the_plan_without_running(tmp_path, capsys, monkeypatch):
     assert not out.exists()
 
 
+def test_dry_run_reports_a_failing_preflight_like_the_real_run(tmp_path, monkeypatch, capsys):
+    """``batch --dry-run`` is the plan check: when the run's own preflight
+    fails, the preview must fail the same way (exit 1) instead of a clean
+    exit 0."""
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._preflight_ocr_runtime",
+        lambda config: "No local OCR runtime can start on this machine for PDF input",
+    )
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+
+    dry_args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--dry-run", "--no-llm"]
+    )
+    assert _run_batch(dry_args) == 1
+    assert "No local OCR runtime can start" in capsys.readouterr().err
+
+    real_args = _build_parser().parse_args(["batch", str(pdf), "--out", str(out), "--no-llm"])
+    assert _run_batch(real_args) == 1
+    assert "No local OCR runtime can start" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_remote_dry_run_shows_form_and_warns_about_local_only_flags(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("AUTH_API_KEY", raising=False)
     pdf = _pdf(tmp_path)
@@ -431,3 +455,93 @@ def test_chew_and_batch_share_pipeline_options():
     assert chew.refs == batch.refs == "off"
     for name in ("ocr", "llm", "memory", "pages", "device", "batch_size", "preset", "consolidate"):
         assert hasattr(batch, name), name
+
+
+@pytest.mark.parametrize(
+    ("serve_url", "extra", "code"),
+    [
+        ("http://bibr.example.org:8000", [], 2),
+        ("http://bibr.example.org:8000", ["--allow-insecure-http"], 0),
+        ("https://bibr.example.org", [], 0),
+        ("http://gpu-box:8000", [], 0),
+        ("http://127.0.0.1:8000", [], 0),
+    ],
+)
+def test_remote_refuses_to_send_the_token_to_a_public_http_host(
+    serve_url, extra, code, tmp_path, capsys, monkeypatch
+):
+    """x-security-9: the bearer token rides every submit and poll."""
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(_pdf(tmp_path)),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            serve_url,
+            "--token",
+            "serve-token-placeholder",
+            *extra,
+        ]
+    )
+
+    assert _run_batch(args) == code
+    captured = capsys.readouterr()
+    refused = "Refusing to send the serve bearer token over plain HTTP" in (
+        captured.out + captured.err
+    )
+    assert refused is (code == 2)
+
+
+def _remote_batch_output(tmp_path, capsys, monkeypatch, serve_url, *token_args):
+    monkeypatch.delenv("AUTH_API_KEY", raising=False)
+    monkeypatch.delenv("BIBR_SERVE_TOKEN", raising=False)
+    monkeypatch.setattr("bibr.batch.remote.resolve_token", lambda explicit: explicit)
+    args = _build_parser().parse_args(
+        [
+            "batch",
+            str(_pdf(tmp_path)),
+            "--out",
+            str(tmp_path / "out"),
+            "--dry-run",
+            "--serve-url",
+            serve_url,
+            *token_args,
+        ]
+    )
+    code = _run_batch(args)
+    captured = capsys.readouterr()
+    return code, " ".join((captured.out + captured.err).split())
+
+
+@pytest.mark.parametrize(
+    ("serve_url", "warned"),
+    [
+        ("http://gpu-box:8000", True),  # LAN: allowed, but readable on the segment
+        ("http://192.168.1.20:8000", True),
+        ("http://100.113.200.117:8000", False),  # tailnet: WireGuard-encrypted
+        ("http://gpu.tail1234.ts.net:8000", False),
+        ("http://127.0.0.1:8000", False),
+        ("https://bibr.example.org", False),
+    ],
+)
+def test_remote_warns_when_the_token_crosses_a_network_in_clear_text(
+    serve_url, warned, tmp_path, capsys, monkeypatch
+):
+    code, output = _remote_batch_output(
+        tmp_path, capsys, monkeypatch, serve_url, "--token", "serve-token-placeholder"
+    )
+    assert code == 0
+    assert ("the bearer token goes to" in output) is warned
+
+
+def test_remote_without_a_token_may_use_plain_http_to_any_host(tmp_path, capsys, monkeypatch):
+    """Nothing secret rides the requests, so there is nothing to refuse."""
+    code, output = _remote_batch_output(
+        tmp_path, capsys, monkeypatch, "http://bibr.example.org:8000"
+    )
+    assert code == 0
+    assert "Refusing" not in output
+    assert "the bearer token goes to" not in output

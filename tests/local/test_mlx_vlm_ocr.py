@@ -187,3 +187,29 @@ def test_model_only_client_constructor_uses_one_model_for_server_and_http(monkey
 
     assert server_factory.call_args.kwargs["model"] == "custom/PaddleOCR-VL"
     assert http_factory.call_args.kwargs["model"] == "custom/PaddleOCR-VL"
+
+
+def test_requested_model_path_beats_candidate_model(monkeypatch):
+    """An explicit `--ocr-model` request wins over the candidate default.
+
+    The factory passes the raw requested model as `model_path` and the
+    winning candidate's model as `model`; the request must be launched, as
+    on main — the candidate is only the default when nothing was requested.
+    """
+    from bibr.config import GlobalSettings
+    from bibr.local import mlx_vlm_ocr as mod
+
+    server = MagicMock(base_url="http://localhost:8775", loaded=True)
+    server_factory = MagicMock(return_value=server)
+    http_factory = MagicMock()
+    monkeypatch.setattr(mod, "MlxVlmOcrServer", server_factory)
+    monkeypatch.setattr(mod, "PaddleHttpOcrClient", http_factory)
+
+    mod.PaddleMlxVlmOcrClient(
+        model="candidate/PaddleOCR-VL",
+        model_path="requested/PaddleOCR-VL",
+        settings=GlobalSettings(),
+    )
+
+    assert server_factory.call_args.kwargs["model"] == "requested/PaddleOCR-VL"
+    assert http_factory.call_args.kwargs["model"] == "requested/PaddleOCR-VL"
