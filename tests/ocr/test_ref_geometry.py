@@ -134,19 +134,13 @@ def test_reference_lines_keep_mid_page_lines_that_match_edge_furniture():
     ]
 
 
-@pytest.mark.slow
 def test_recover_reference_lines_from_gold_pdf():
-    pdf = Path("data/psych_science_pdf_oa/09567976211052476.pdf")
-    if not pdf.exists():
-        pytest.skip("gold PDF not present")
+    pdf = Path(__file__).parent.parent / "fixtures" / "ref_geometry_hanging_indent_sample.pdf"
     lines = recover_reference_lines(pdf.read_bytes())
     assert len(lines) > 20
     assert len({round(ln.x0) for ln in lines}) >= 2  # hanging-indent x0 levels
 
 
-@pytest.mark.slow
 def test_recover_reference_lines_no_text_layer_returns_empty():
-    pdf = Path("tests/fixtures/scanned_sample.pdf")
-    if not pdf.exists():
-        pytest.skip("fixture absent")
+    pdf = Path(__file__).parent.parent / "fixtures" / "scanned_sample.pdf"
     assert recover_reference_lines(pdf.read_bytes()) == []

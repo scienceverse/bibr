@@ -298,7 +298,10 @@ def test_check_ocr_backend_paddle_rapid_candidate_is_unverified_not_ready(monkey
     monkeypatch.setattr(Settings.ocr, "backend", "paddle")
     _pin_apple_silicon_paddle_chain(monkeypatch)
     monkeypatch.setattr("bibr.local.rapid_mlx.rapid_mlx_unavailable_reason", lambda: None)
-    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    # doctor calls its own module-level helper, so patching the re-export on
+    # bibr.local.cli is a no-op here (same reason as in
+    # test_check_ocr_backend_glm_llama_vulkan_on_nvidia_warns).
+    monkeypatch.setattr("bibr.local.cli.doctor._opencv_unavailable_reason", lambda: None)
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
 
@@ -319,7 +322,7 @@ def test_check_ocr_backend_paddle_reports_rapid_executable_failure_separately(mo
         "bibr.local.rapid_mlx.rapid_mlx_unavailable_reason",
         lambda: "'rapid-mlx' was not found or is not executable",
     )
-    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.doctor._opencv_unavailable_reason", lambda: None)
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
 
@@ -335,7 +338,7 @@ def test_check_explicit_paddle_rapid_mlx_never_claims_ready_without_smoke(monkey
     rec = _Recorder()
     monkeypatch.setattr(Settings.ocr, "backend", "paddle-rapid-mlx")
     monkeypatch.setattr("bibr.local.rapid_mlx.rapid_mlx_unavailable_reason", lambda: None)
-    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr("bibr.local.cli.doctor._opencv_unavailable_reason", lambda: None)
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
 
@@ -351,13 +354,48 @@ def test_check_explicit_paddle_http_probes_the_configured_remote_url(monkeypatch
     rec = _Recorder()
     monkeypatch.setattr(Settings.ocr, "backend", "paddle-http")
     monkeypatch.setattr(Settings, "OCR_BASE_URL", "http://ocr.example", raising=False)
-    monkeypatch.setattr("bibr.local.cli._probe_ocr_url", lambda url: False)
+    # doctor calls its own module-level probe, so patching the re-export on
+    # bibr.local.cli is a no-op (the real stdlib probe would run against
+    # http://ocr.example and the expected 'warn' would come only from DNS).
+    monkeypatch.setattr("bibr.local.cli.doctor._probe_ocr_url", lambda url: False)
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
 
     assert rec.calls[0][0] == "warn"
     assert "Paddle OCR" in rec.calls[0][1]
     assert "unreachable" in rec.calls[0][1]
+
+
+def test_check_explicit_paddle_http_stub_controls_the_verdict(monkeypatch):
+    """Pin the patch target: doctor reads its own module-level probe.
+
+    Patching the ``bibr.local.cli`` re-export must not change the verdict
+    (it never reaches the code under test); patching
+    ``bibr.local.cli.doctor._probe_ocr_url`` must. A stubbed reachable probe
+    reports 'ok' without touching the network (the socket guard fails the
+    test if the real probe runs).
+    """
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend
+
+    rec = _Recorder()
+    monkeypatch.setattr(Settings.ocr, "backend", "paddle-http")
+    monkeypatch.setattr(Settings, "OCR_BASE_URL", "http://ocr.example", raising=False)
+    monkeypatch.setattr("bibr.local.cli._probe_ocr_url", lambda url: True)
+    monkeypatch.setattr("bibr.local.cli.doctor._probe_ocr_url", lambda url: False)
+
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert rec.calls[0][0] == "warn"
+    assert "unreachable" in rec.calls[0][1]
+
+    rec2 = _Recorder()
+    monkeypatch.setattr("bibr.local.cli.doctor._probe_ocr_url", lambda url: True)
+
+    _check_ocr_backend(rec2.ok, rec2.warn, rec2.fail)
+
+    assert rec2.calls[0][0] == "ok"
+    assert "http://ocr.example" in rec2.calls[0][1]
 
 
 def test_check_explicit_paddle_mlx_vlm_reports_launch_and_cache_state(monkeypatch):
