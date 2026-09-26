@@ -15,11 +15,6 @@ from bibr.utils.locks import LOCAL_INFERENCE_LOCK
 logger = logging.getLogger(__name__)
 _MIB = 1024 * 1024
 
-# VRAM share the managed PaddleOCR vLLM server claims at startup
-# (``--gpu-memory-utilization`` in bibr/local/vllm_ocr.py). It starts after
-# the classifiers load, so their device decisions must leave it room.
-_PADDLE_VLLM_GPU_FRACTION = 0.92
-
 
 class ClassifierState(StrEnum):
     UNCONFIGURED = "unconfigured"
@@ -48,14 +43,8 @@ def choose_classifier_device(
     managed_vllm_fraction: float,
     estimated_peak_bytes: int,
     safety_reserve_bytes: int,
-    claimed_bytes: int = 0,
 ) -> str:
-    """Choose CUDA only when classifier and reserve fit after vLLM allocation.
-
-    ``claimed_bytes`` is VRAM already placed by earlier models in this
-    process — each decision sees the usable budget minus those claims, so
-    two models that each fit alone cannot overcommit together.
-    """
+    """Choose CUDA only when classifier and reserve fit after vLLM allocation."""
     if explicit_device:
         return explicit_device
     if memory_mode == "aggressive" or not cuda_available:
@@ -63,7 +52,7 @@ def choose_classifier_device(
     if free_vram_bytes is None or total_vram_bytes is None:
         return "cpu"
     post_vllm_capacity = int(total_vram_bytes * max(0.0, 1.0 - managed_vllm_fraction))
-    usable = min(free_vram_bytes, post_vllm_capacity) - safety_reserve_bytes - claimed_bytes
+    usable = min(free_vram_bytes, post_vllm_capacity) - safety_reserve_bytes
     return "cuda" if usable > estimated_peak_bytes else "cpu"
 
 
@@ -142,15 +131,8 @@ class ClassifierResources:
                     self._free_vram_bytes,
                     self._total_vram_bytes,
                 ) = await asyncio.to_thread(_cuda_memory_info)
-            claimed_bytes = 0
-            for resource in (self._paper, self._section):
-                await self._start_one(resource, claimed_bytes=claimed_bytes)
-                device = resource.status.device
-                if device is not None and device.startswith("cuda"):
-                    # A CUDA-placed model holds its estimated peak for the
-                    # rest of the process — later decisions see the usable
-                    # budget minus this claim, not the same budget again.
-                    claimed_bytes += resource.estimated_peak_bytes
+            await self._start_one(self._paper)
+            await self._start_one(self._section)
             self._started = True
 
     async def classify_paper(self, item):
@@ -176,20 +158,6 @@ class ClassifierResources:
     def status(self) -> dict[str, ClassifierStatus]:
         return {"paper": self._paper.status, "section": self._section.status}
 
-    def _effective_vllm_fraction(self) -> float:
-        """vLLM VRAM share the classifier decisions must leave room for.
-
-        The managed LLM server's fraction arrives via the constructor; the
-        managed PaddleOCR vLLM server (``OCR_BACKEND=paddle-vllm``) claims
-        :data:`_PADDLE_VLLM_GPU_FRACTION` at startup, after the classifiers
-        load, and is invisible to the LLM fraction (0.0 on cloud-LLM runs).
-        """
-        fraction = self._managed_vllm_fraction
-        ocr_backend = getattr(getattr(self._settings, "ocr", None), "backend", "") or ""
-        if ocr_backend.lower() == "paddle-vllm":
-            fraction = max(fraction, _PADDLE_VLLM_GPU_FRACTION)
-        return fraction
-
     async def close(self) -> None:
         if self._closed:
             return
@@ -201,7 +169,7 @@ class ClassifierResources:
             resource.model = None
             resource.status = ClassifierStatus(ClassifierState.CLOSED, resource.status.device)
 
-    async def _start_one(self, resource: _ManagedClassifier, *, claimed_bytes: int = 0) -> None:
+    async def _start_one(self, resource: _ManagedClassifier) -> None:
         if not resource.model_id:
             resource.status = ClassifierStatus(ClassifierState.UNCONFIGURED)
             return
@@ -211,10 +179,9 @@ class ClassifierResources:
             cuda_available=bool(self._cuda_available),
             free_vram_bytes=self._free_vram_bytes,
             total_vram_bytes=self._total_vram_bytes,
-            managed_vllm_fraction=self._effective_vllm_fraction(),
+            managed_vllm_fraction=self._managed_vllm_fraction,
             estimated_peak_bytes=resource.estimated_peak_bytes,
             safety_reserve_bytes=self._settings.ml.classifier_vram_safety_reserve_mb * _MIB,
-            claimed_bytes=claimed_bytes,
         )
         resource.status = ClassifierStatus(ClassifierState.LOADING, device)
         try:
