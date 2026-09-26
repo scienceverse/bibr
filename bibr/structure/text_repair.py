@@ -24,8 +24,11 @@ def bbox_to_tuple(bbox: list | None) -> tuple[float, float, float, float] | None
 
 
 # Matches a leading dotted-number prefix that has at least one space *inside*
-# the dotted run, e.g. "3. 1", "3. 2.1", "3. 2. 1". Used to repair GLM-OCR's
-# "3. 1 Encoder" artefact back to "3.1 Encoder" before level inference runs.
+# the dotted run, e.g. "3. 1", "3. 2.1", "3. 2. 1". Used to repair a spaced
+# "3. 1 Encoder" back to "3.1 Encoder" before level inference runs. Most of
+# these came from bibr's own OCR list-marker normalisation
+# (``bibr.ocr.postprocess.clean_ocr_content``), which no longer splits a
+# number; OCR output and older cached regions can still carry them.
 _NUMBERED_PREFIX_WITH_SPACES_RE = re.compile(r"^(\s*\d+(?:\.\s*\d+)+)")
 # Same repair for lettered-appendix sub-headings: "A. 1" -> "A.1", "B. 2. 1"
 # -> "B.2.1". A single leading uppercase letter followed by a dotted-number

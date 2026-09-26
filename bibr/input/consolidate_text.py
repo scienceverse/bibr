@@ -6,6 +6,7 @@ in text content.
 
 import logging
 import re
+from collections.abc import Iterable, Iterator
 
 from bibr.utils.text import CONTROL_CHAR_RE, DOI_BODY, URL_RE, normalize_unicode
 
@@ -577,6 +578,21 @@ _TRAILING_LATEX_RE = re.compile(r"^\s*\\end\{array\}\s*\$\$\s*$", re.DOTALL)
 # Matches inline math $ ... $ (single dollar, NOT $$ display math).
 # Used to strip OCR-inserted inline LaTeX delimiters from body text.
 _INLINE_MATH_RE = re.compile(r"(?<!\$)\$(?!\$)\s*(.+?)\s*\$(?!\$)")
+# The same for text a parser read from the document, where most dollar signs
+# are literal: currency ("US$ 5", "35 MJ/$, while"), R's ``df$age_group``,
+# shell ``file:$ADAPTER``. There neither delimiter may face a space (Pandoc's
+# rule), a word character may touch neither from outside, and the opening one
+# may not be followed by closing punctuation. JATS tex-math
+# (``}$\textbf{q}$\end``) still matches; DOCX inline equations need no rule
+# (see ``clean_text_content_late``'s ``inline_math``). The span never crosses
+# an unescaped ``$``: one that cannot close it ends the attempt, so a sentence
+# full of currency amounts is scanned once, not once per dollar sign.
+_STRICT_INLINE_MATH_RE = re.compile(
+    r"(?<![\w$\\])\$(?![\s$,;:!?)\]}])((?:[^$\\\n]|\\.)+?)(?<![\s$\\])\$(?![\w$])"
+)
+# Paddle-OCR-VL writes inline math in text regions as ``\( ... \)``. The span
+# stops at the next ``\(`` for the same reason.
+_PAREN_INLINE_MATH_RE = re.compile(r"\\\(((?:[^\\\n]|\\[^()\n])+?)\\\)")
 
 # Matches LaTeX superscript affiliation markers that may leak into author names:
 #   ^{1}  ^{1,2}  ^{1, 2, 3}  ^{†}  ^{*}  $ ^{1} $  $ ^{1,2} $
@@ -783,36 +799,44 @@ def unwrap_latex_text(text: str) -> str:
     return text
 
 
+def _inline_math_spans(text: str, *, strict: bool = False) -> Iterator[re.Match[str]]:
+    """Yield the ``$ ... $`` spans :func:`strip_inline_math` unwraps.
+
+    A ``$`` immediately followed by a digit is a currency amount, not a math
+    delimiter — otherwise two amounts in one sentence (``$5 … $10``) would pair
+    up as a math span and the text between them would be fused.  When a
+    currency ``$`` is skipped, scanning resumes right after it so a later real
+    math span can still match.  ``strict`` applies the tighter delimiter rule
+    of :data:`_STRICT_INLINE_MATH_RE`, for text that is not OCR output.
+    """
+    pattern = _STRICT_INLINE_MATH_RE if strict else _INLINE_MATH_RE
+    pos = 0
+    while (m := pattern.search(text, pos)) is not None:
+        if text[m.start() + 1].isdigit():
+            # Currency, not math: let its closing ``$`` candidate re-open the
+            # next search.
+            pos = m.start() + 1
+            continue
+        yield m
+        pos = m.end()
+
+
 def strip_inline_math(text: str) -> str:
     r"""Strip inline math delimiters ``$ ... $`` from body text.
 
     The OCR engine wraps inline statistics like ``t(97.7)=2.9`` in single-dollar
     math delimiters: ``$ t(97.7)=2.9 $``.  This strips the delimiters and keeps
     the content as plain text.  Double-dollar display math (``$$...$$``) is not
-    affected.
-
-    A ``$`` immediately followed by a digit is a currency amount, not a math
-    delimiter — otherwise two amounts in one sentence (``$5 … $10``) would pair
-    up as a math span and the text between them would be fused.  When a
-    currency ``$`` is skipped, scanning resumes right after it so a later real
-    math span can still match.
+    affected, and neither is a currency ``$`` (see :func:`_inline_math_spans`).
     """
     out: list[str] = []
     pos = 0
-    while True:
-        m = _INLINE_MATH_RE.search(text, pos)
-        if m is None:
-            out.append(text[pos:])
-            return "".join(out)
-        if text[m.start() + 1].isdigit():
-            # Currency, not math: keep the ``$`` and let its closing ``$``
-            # candidate re-open the next search.
-            out.append(text[pos : m.start() + 1])
-            pos = m.start() + 1
-            continue
+    for m in _inline_math_spans(text):
         out.append(text[pos : m.start()])
         out.append(m.group(1))
         pos = m.end()
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def strip_affiliation_markers(text: str) -> str:
@@ -827,15 +851,30 @@ def strip_affiliation_markers(text: str) -> str:
 
 
 def strip_latex_commands(text: str) -> str:
-    r"""Strip residual LaTeX commands from body text.
+    r"""Strip residual LaTeX commands from math text.
 
-    Handles common patterns that leak through OCR into plain text:
+    Handles the common patterns in OCR and inline-equation math:
 
     * ``\mathrm{...}``, ``\text{...}``, ``\textit{...}``, ``\textbf{...}``
       -- unwrapped to their content.
     * ``\Delta``, ``\alpha``, ``\varDelta``, etc. -- converted to Unicode.
-    * ``_{...}`` and ``^{...}`` -- flattened to just the content inside braces.
+    * ``_{...}`` and ``^{...}`` -- flattened to just the content inside braces,
+      and so are the single-character forms ``_x`` and ``^x``.
     * Any remaining ``\command`` -- the backslash prefix is removed.
+
+    Whitespace runs collapse to one space. Meant for math: in prose the
+    single-character rule deletes the underscore of ``age_group`` and turns
+    ``10^6`` into ``106`` (see :func:`clean_text_content_late`).
+    """
+    return " ".join(_flatten_latex(text, single_char=True).split())
+
+
+def _flatten_latex(text: str, *, single_char: bool) -> str:
+    """The rewrites of :func:`strip_latex_commands`, leaving whitespace alone.
+
+    ``single_char=False`` keeps bare ``_x`` / ``^x``, which outside a math
+    span are far more often an identifier, a file name or an exponent than
+    LaTeX.
     """
     result = text
 
@@ -845,8 +884,9 @@ def strip_latex_commands(text: str) -> str:
     # 2. Flatten subscripts and superscripts: _{c} -> c, ^{2} -> 2
     result = _LATEX_SUB_RE.sub(r"\1", result)
     result = _LATEX_SUP_RE.sub(r"\1", result)
-    result = _LATEX_SUB_SINGLE_RE.sub(r"\1", result)
-    result = _LATEX_SUP_SINGLE_RE.sub(r"\1", result)
+    if single_char:
+        result = _LATEX_SUB_SINGLE_RE.sub(r"\1", result)
+        result = _LATEX_SUP_SINGLE_RE.sub(r"\1", result)
 
     # 3. Replace known LaTeX symbol commands with Unicode equivalents.
     result = _LATEX_SYMBOL_RE.sub(lambda m: _LATEX_SYMBOL_MAP[m.group()], result)
@@ -854,12 +894,9 @@ def strip_latex_commands(text: str) -> str:
     # 4. Strip any remaining \command sequences (remove backslash + command name).
     result = _LATEX_BACKSLASH_CMD_RE.sub(r"\1", result)
 
-    # 5. Clean up leftover empty brace pairs and extra whitespace
+    # 5. Clean up leftover empty brace pairs
     result = result.replace("{}", "")
-    result = result.replace("{ }", "")
-    result = " ".join(result.split())
-
-    return result
+    return result.replace("{ }", "")
 
 
 def clean_text_content(text: str) -> str | None:
@@ -891,47 +928,115 @@ def clean_text_content(text: str) -> str | None:
     return result
 
 
-# URL mask placeholders: NUL-delimited indices survive every late-phase
-# transform (no whitespace, no LaTeX metacharacters).
-_URL_MASK_RE = re.compile("\x00(\\d+)\x00")
+# Email addresses: masked like URLs, since the local part is exactly where
+# identifiers put underscores (``john_smith@uni.edu``). The local part starts
+# where a run of its characters starts: unanchored, a long token without an
+# ``@`` was rescanned from every position, quadratic in its length.
+_EMAIL_PATTERN = r"(?<![\w.+-])[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[A-Za-z]{2,}"
+_PROTECTED_SPAN_RE = re.compile(f"{URL_RE.pattern}|{_EMAIL_PATTERN}", re.IGNORECASE)
+
+# Mask placeholders: NUL-delimited indices survive every late-phase transform
+# (no whitespace, no LaTeX metacharacters).
+_PROTECTED_MASK_RE = re.compile("\x00(\\d+)\x00")
 
 
-def _mask_urls(text: str) -> tuple[str, list[str]]:
-    """Replace URL spans with ``\\x00<i>\\x00`` placeholders."""
-    urls: list[str] = []
+def _mask_protected_spans(text: str, math: Iterable[str] = ()) -> tuple[str, list[str]]:
+    """Replace URL and email spans with ``\\x00<i>\\x00`` placeholders.
 
-    def _mask(m: re.Match[str]) -> str:
-        urls.append(m.group(0))
-        return f"\x00{len(urls) - 1}\x00"
+    Each ``$…$`` span in *math* is replaced by a placeholder for its flattened
+    content (see ``clean_text_content_late``'s ``inline_math``).
+    """
+    spans: list[str] = []
 
-    return URL_RE.sub(_mask, text), urls
+    def _hold(value: str) -> str:
+        spans.append(value)
+        return f"\x00{len(spans) - 1}\x00"
+
+    masked = _PROTECTED_SPAN_RE.sub(lambda m: _hold(m.group(0)), text)
+    wanted = sorted({span for span in math if len(span) > 1}, key=len, reverse=True)
+    if wanted:
+        # One left-to-right pass, longest span first at each position: two
+        # equations around a plain letter ("$a$x$b$") never pair up as "$x$".
+        spans_re = re.compile("|".join(map(re.escape, wanted)))
+        masked = spans_re.sub(lambda m: _hold(strip_latex_commands(m.group(0)[1:-1])), masked)
+    return masked, spans
 
 
-def _restore_urls(text: str, urls: list[str]) -> str:
-    if not urls:
+def _restore_protected_spans(text: str, spans: list[str]) -> str:
+    if not spans:
         return text
-    return _URL_MASK_RE.sub(lambda m: urls[int(m.group(1))], text)
+    return _PROTECTED_MASK_RE.sub(lambda m: spans[int(m.group(1))], text)
 
 
-def clean_text_content_late(text: str) -> str:
+def _flatten_ocr_prose(text: str) -> str:
+    r"""Repair the LaTeX OCR leaks into prose outside ``$…$`` spans.
+
+    ``^{3}``, ``\alpha`` and ``\mathrm{…}`` are flattened, but a bare ``_x``
+    or ``^x`` is kept: in prose it is an identifier, a file name or an
+    exponent. Inside the ``\(…\)`` inline math Paddle-OCR-VL writes it is
+    math, so that span is flattened in full, as ``$…$`` is; its delimiters stay.
+    """
+    parts: list[str] = []
+    pos = 0
+    for m in _PAREN_INLINE_MATH_RE.finditer(text):
+        parts.append(_flatten_latex(text[pos : m.start()], single_char=False))
+        parts.append(f"\\({_flatten_latex(m.group(1), single_char=True)}\\)")
+        pos = m.end()
+    parts.append(_flatten_latex(text[pos:], single_char=False))
+    return "".join(parts)
+
+
+def clean_text_content_late(
+    text: str, *, from_ocr: bool = True, inline_math: Iterable[str] = ()
+) -> str:
     """Late-phase cleaning — strips inline math delimiters and LaTeX commands.
 
     Must run **after** citation linking, equation extraction, and xref
     detection, because those stages depend on patterns like ``^{3}`` and
     ``$...$`` that this function removes.
 
-    URL spans are masked during cleaning — LaTeX stripping would otherwise
-    corrupt them (``_LATEX_SUB_SINGLE_RE`` eats the underscores in
-    ``…/to_err_is_human``, flattening it to ``…/toerrishuman``).
+    Inline math spans are unwrapped and their LaTeX flattened in full
+    (:func:`strip_latex_commands`). In OCR text these are the ``$...$`` spans
+    :func:`strip_inline_math` finds. Text a parser read from the document
+    itself (``from_ocr=False``: DOCX, JATS, HTML, ePub, the PDF text layer)
+    uses literal dollar signs, so only a tightly delimited span counts there
+    (:data:`_STRICT_INLINE_MATH_RE`): JATS tex-math is written that way, while
+    ``df$age_group`` and "US$ 5" are left alone. A pair of literal dollars
+    that happens to meet that rule ("$/cap/yr … MJ/$") is still unwrapped.
+    ``inline_math`` lists the ``$…$`` spans the parser itself wrote into the
+    text (DOCX inline equations, ``PaperSentence.inline_math``); these are
+    unwrapped wherever they sit, glued to a word included ("the $n$th" ->
+    "the nth").
+
+    Outside those spans only OCR text is touched: OCR leaks ``^{3}``,
+    ``\\alpha`` and ``\\mathrm{…}`` into prose and spaces out characters
+    (``1 7. 9 0 6``); see :func:`_flatten_ocr_prose`. Text from the document
+    keeps its prose as written — "a 2 x 2 design", ``age_group``, ``10^6``.
+    The default treats unknown text as OCR, so the repairs still reach it.
+    Whitespace runs collapse to one space for every source.
+
+    URL and email spans are masked during cleaning — LaTeX stripping would
+    otherwise corrupt them (the single-character subscript rule flattens
+    ``…/to_err_is_human`` to ``…/toerrishuman``).
     """
-    masked, urls = _mask_urls(text)
-    result = strip_inline_math(masked)
-    result = strip_latex_commands(result)
-    # Collapse OCR character-spacing in regular text (e.g. "9 0 6" → "906").
-    # This handles spaced text that came from formula OCR regions merged into
-    # body text, or from the text OCR prompt on dense statistical notation.
-    result = _collapse_bare_spaced_runs(result)
-    return _restore_urls(result, urls)
+    masked, protected = _mask_protected_spans(text, inline_math)
+    parts: list[str] = []
+    pos = 0
+    for m in _inline_math_spans(masked, strict=not from_ocr):
+        outside = masked[pos : m.start()]
+        parts.append(_flatten_ocr_prose(outside) if from_ocr else outside)
+        parts.append(strip_latex_commands(m.group(1)))
+        pos = m.end()
+    outside = masked[pos:]
+    parts.append(_flatten_ocr_prose(outside) if from_ocr else outside)
+    result = " ".join("".join(parts).split())
+    if from_ocr:
+        # Collapse OCR character-spacing in regular text (e.g. "9 0 6" → "906").
+        # This handles spaced text that came from formula OCR regions merged
+        # into body text, or from the text OCR prompt on dense statistical
+        # notation.
+        result = _collapse_bare_spaced_runs(result)
+    return _restore_protected_spans(result, protected)
 
 
 _OPERATORNAME_RE = re.compile(r"\\operatorname\s*\{([^}]*)\}")
@@ -997,7 +1102,21 @@ def _fix_text_spacing(text: str) -> str:
     return _LATEX_TEXT_BLOCK_RE.sub(_collapse, text)
 
 
-_MATH_OPERATORS = frozenset("=+<>~≤≥≠±∓")
+_MATH_OPERATORS = frozenset("=+<>~≤≥≠±∓×")
+
+
+def _has_math_operator(run: list[str]) -> bool:
+    """Whether a run of single-character tokens contains an operator.
+
+    A letter ``x`` between two digits is a multiplication sign ("a 2 x 2
+    design"), not a spaced-out variable name.
+    """
+    for i, char in enumerate(run):
+        if char in _MATH_OPERATORS:
+            return True
+        if char in "xX" and 0 < i < len(run) - 1 and run[i - 1].isdigit() and run[i + 1].isdigit():
+            return True
+    return False
 
 
 def _collapse_bare_spaced_runs(text: str) -> str:
@@ -1009,7 +1128,8 @@ def _collapse_bare_spaced_runs(text: str) -> str:
     Strategy: split on spaces, find maximal runs of single-character tokens
     (length == 1), and collapse runs of 3+ that contain at least one digit
     and no mathematical operators.  The operator check preserves intentional
-    spacing in expressions like ``x = 5`` or ``a + b``.
+    spacing in expressions like ``x = 5``, ``a + b`` or ``2 x 2``.  Prose has
+    such runs too ("Items 1 2 3 and 4"), so only OCR text may be collapsed.
     """
     tokens = text.split(" ")
     result: list[str] = []
@@ -1022,8 +1142,7 @@ def _collapse_bare_spaced_runs(text: str) -> str:
                 i += 1
             run = tokens[run_start:i]
             has_digit = any(c.isdigit() for c in run)
-            has_operator = any(c in _MATH_OPERATORS for c in run)
-            if len(run) >= 3 and has_digit and not has_operator:
+            if len(run) >= 3 and has_digit and not _has_math_operator(run):
                 result.append("".join(run))
             else:
                 result.extend(run)
