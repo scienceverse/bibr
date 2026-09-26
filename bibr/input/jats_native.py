@@ -22,10 +22,12 @@ match on the local name so both namespaced and bare documents parse.
 
 from __future__ import annotations
 
+import itertools
 import logging
 
 import pandas as pd
 
+from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.input.xml_entities import parse_xml
 from bibr.models import (
     ORGANIZATION_ROLE,
@@ -137,6 +139,10 @@ _TEXT_BOUNDARY = frozenset(
         "tr",
         "td",
         "th",
+        # MathML matrix rows and cells, as in the HTML parser.
+        "mtr",
+        "mlabeledtr",
+        "mtd",
         # Structured <aff>/<address> fields — sibling values, not a sentence.
         "institution",
         "institution-wrap",
@@ -159,32 +165,42 @@ def _flatten(el, exclude: set[str] | None = None) -> str:
     Inserts a single space where :data:`_TEXT_BOUNDARY` markup implies a word
     boundary the source itself does not spell out — but never where the text so
     far already ends in whitespace, so an ``<aff>`` whose fields are separated
-    by ", " in the source stays "X, Y" instead of becoming "X , Y".
+    by ", " in the source stays "X, Y" instead of becoming "X , Y". Whitespace
+    between MathML elements is dropped as a renderer drops it, except where it
+    keeps two words apart (:mod:`bibr.input.mathml_whitespace`).
     """
-    parts: list[str] = []
+    flat = FlatText()
+    serials = itertools.count()
 
-    def boundary() -> None:
-        if parts and parts[-1] and not parts[-1][-1].isspace():
-            parts.append(" ")
+    def add(text: str, in_math: bool, owner: str | None, group: int) -> None:
+        if in_math:
+            flat.add_math(text, owner, group)
+        else:
+            flat.add(text)
 
-    def walk(node) -> None:
+    def walk(node, in_math: bool, parent: int) -> None:
+        ln = _ln(node)
+        in_math = in_math or ln == "math"
+        serial = next(serials)
         if node.text:
-            parts.append(node.text)
+            add(node.text, in_math, ln, parent)
         for child in node:
-            ln = _ln(child)
-            if not ln:  # comments / processing instructions are not content
+            child_ln = _ln(child)
+            if not child_ln:  # comments / processing instructions are not content
                 if child.tail:
-                    parts.append(child.tail)
+                    add(child.tail, in_math, None, serial)
                 continue
-            if exclude is None or ln not in exclude:
-                if ln in _TEXT_BOUNDARY:
-                    boundary()
-                walk(child)
+            if exclude is None or child_ln not in exclude:
+                if child_ln in _TEXT_BOUNDARY or (
+                    child_ln == "mspace" and mspace_separates(child.attrib)
+                ):
+                    flat.separate()
+                walk(child, in_math, serial)
             if child.tail:
-                parts.append(child.tail)
+                add(child.tail, in_math, None, serial)
 
-    walk(el)
-    return "".join(parts)
+    walk(el, False, next(serials))
+    return flat.join()
 
 
 def _text(el) -> str:
@@ -294,13 +310,15 @@ class JatsParser:
         )
 
     def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:
-        """Build a sentence — no provenance/region_meta side-channels (like DOCX)."""
+        """Build a sentence — no provenance/region_meta side-channels, never OCR text
+        (like DOCX)."""
         return PaperSentence(
             text_id=text_id,
             text=text,
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
         )
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
@@ -345,6 +363,7 @@ class JatsParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -372,6 +391,7 @@ class JatsParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -398,6 +418,7 @@ class JatsParser:
                     section_id=footnote_section_id,
                     paragraph_id=self._paragraph_counter,
                     page_number=None,
+                    from_ocr=False,
                 )
             )
             self._sentence_counter += 1

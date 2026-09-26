@@ -234,6 +234,79 @@ released.
   row in the middle of `contents` when the later page prints the header with
   different spacing, case, dashes or punctuation ("Mean(SD)" under
   "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
+- Text from DOCX, JATS, HTML, ePub and the PDF text layer no longer goes
+  through the late clean-up meant for OCR output. That clean-up ran on every
+  sentence of every input. It fused "a 2 x 2 x 3 design" into "a2x2x3" and
+  "Items 1 2 3" into "Items 123". It deleted the underscore from identifiers,
+  file names and email addresses (`age_group`, `NM_022770`, `RRID:SCR_003070`,
+  `john_smith@uni.edu`), and it turned `10^6` into `106`. It also read two
+  literal dollar signs as a math span and deleted them along with the
+  underscores between (`df$age_group`, "US$ 60 to US$ 1,419", `$SAMPLE_R1`).
+  Each sentence now records whether any of its text came from OCR, and only
+  OCR text gets those repairs. DOCX inline equations are still unwrapped and
+  flattened, one glued to a word included ("the $n$th" reads "the nth"),
+  because each sentence also records the `$…$` spans the parser wrote.
+  Elsewhere in document text only a tightly delimited `$…$` counts as math,
+  as JATS tex-math writes it; two literal dollars that happen to fit that
+  shape are still unwrapped. In OCR text, `_x` and `^x` are now flattened only
+  inside `$…$` and `\(…\)` math, email addresses are protected like URLs, and
+  "2 x 2" and "2 × 2" are no longer fused. OCR text keeps the spaced-run
+  collapse, which repairs OCR's character spacing ("1 7. 9 0 6"), so an OCR'd
+  "Items 1 2 3" still reads "Items 123"; narrowing it further waits on data
+  from a GLM-OCR run. The PDF text layer sometimes extracts a superscript or
+  subscript as a separate token ("R 2 ,", "r 2 ¼"). The old clean-up fused
+  those by accident; they are now kept as extracted.
+- The per-region OCR clean-up no longer touches the PDF text layer, and it no
+  longer damages formulas and numbers. On text-layer regions it split "U.S."
+  into "U. S." and "e.g." into "e. g.", and it broke a DOI that opens a line
+  into "10. 1038/…". It cut a table of contents longer than 2,048 characters
+  with spaced dot leaders to its first entry. It also turned a printed "* p <
+  .05" into a bullet. Those regions are now only trimmed. In OCR output, a
+  formula that starts with `\theta`, `\tau`, `\text`, `\tilde` or `\times` no
+  longer loses its leading `\t`; on the default Paddle profile it exported as
+  "heta_{t+1} = …". The list-marker spacing ("1.text" → "1. text") no longer
+  applies to decimals, DOIs, abbreviations or formulas. The repeated-content
+  trimmer keeps the text after a repeated run instead of dropping the rest of
+  the region. A formula region that holds two formulas ("\(a\) + \(b\)") keeps
+  its delimiters, and one wrapped in single dollars is no longer nested inside
+  `$$`.
+- HTML and ePub text keeps inline markup attached to its word. The parser put a
+  space around every element, so `H<sub>2</sub>O` read "H 2 O",
+  `m<sup>6</sup>A` "m 6 A" and a linked citation "( Figure 1 )". Now only
+  block-level elements separate words, as in the JATS parser; like there, an
+  exponent joins its number (`10<sup>6</sup>` reads "106"). eLife publishes
+  each of its 984 test articles as both HTML and JATS. The share of HTML
+  sentences that also appear word for word in the same article's JATS rose
+  from about 24% to 41%.
+- JATS and HTML text no longer splits inline MathML at the whitespace
+  publishers put between its elements. PLOS and eLife pretty-print MathML
+  (`<mi>t</mi> <mo>-</mo> <mn>1</mn>`), and the parsers kept that whitespace,
+  so a formula read "( 0 , 2 . 5 )" or "y ¯ t - 1". The late clean-up's
+  spaced-run collapse fused some of those runs back by accident, but it also
+  fused prose, and it no longer touches document text. The parsers now drop
+  whitespace between MathML elements as a renderer does, so "(0,2.5)" and
+  "y¯t-1" read as they do from a publisher that writes none. They keep a
+  space where it separates words: "ln dbh", "0.93 GeV", "direct effect"
+  spelled one letter per element, a word after a comma, a function name
+  before a bare argument ("sin x"), and the text around the formula. They
+  also keep it between two numbers, so the parts of a fraction read "1 2" and
+  not "12"; an index pair (x with 1 below and 2 above) reads "x1 2". An
+  `<mspace>` (`\quad`, `\,`) and, in JATS as in HTML, a matrix row or cell
+  now separate the text around them, whitespace or not: "E_{t-1} \quad
+  0<λ≤1" reads "Et-1 0<λ≤1", and a matrix that read "(2112)" reads
+  "( 2 1 1 2)". Other letters and digits still close up, across a fraction
+  bar, a product or a script too, as they do from a publisher that writes no
+  whitespace: a/b reads "ab", and a unit set as an upright `<mi>` after a
+  number reads "5m" (in `<mtext>` it keeps its space).
+  Measured against the parsers that kept every such space, on the 885 test
+  articles that contain a MathML element (PMC_sample_1943, eLife_984 as JATS
+  and as HTML, PLOS_1000): 3,329 of their 40,308 formulas read differently.
+  Spaced decimals ("2 . 5") in them fell from 121 to none and spaced
+  differences ("t - 1") from 346 to none. No space between two digits and
+  none at an `<mspace>` is lost. Twenty closed spaces join two tokens of two
+  letters or more, between terms of a product ("m3hgNa"), the parts of a
+  fraction ("e-diλi") or a sum and its limits. Dropping every such space
+  would have joined 187 ("lndbh", "directeffect").
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

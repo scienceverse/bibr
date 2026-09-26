@@ -330,6 +330,145 @@ def test_html_figcaption_label_resolves_mentions():
     ]
 
 
+def test_html_sentences_are_not_ocr_text_and_keep_their_prose():
+    """Late cleanup assumed OCR input and fused "a 2 x 2 design" into "a2x2"
+    and dropped the underscores from ``age_group`` and email addresses."""
+    prose = [
+        "Participants completed a 2 x 2 x 3 mixed design.",
+        "Items 1 2 3 and 4 were reverse scored; age_group was coded.",
+        "Data are available from john_smith@uni.edu on request.",
+    ]
+    html = (
+        "<html><body><article><h2>Method</h2><p>" + " ".join(prose) + "</p></article></body></html>"
+    ).encode()
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = parser._contents
+    parser.apply_segmentation(
+        contents, [list(prose) for e in parser.assembler.entries if e.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+
+    contents.finalize_text()
+    assert [s.text for s in contents.sentences] == prose
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def test_inline_markup_stays_attached_to_its_word():
+    """``get_text(" ")`` put a space around every element: "H 2 S", "m 6 A",
+    "( Figure 1 )". Only block-level elements separate words."""
+    html = (
+        b"<html><body><article><h2>Method</h2>"
+        b"<p>Dissolved H<sub>2</sub>S and m<sup>6</sup>A (<a href='#f1'>Figure 1</a>) in "
+        b"<i>Mus musculus</i><!-- note --> cells, by the <i>p</i>-value.<br>Next line.</p>"
+        b"<ul><li>One</li><li>Two</li></ul></article></body></html>"
+    )
+    parser = HtmlParser(html)
+    parser.parse()
+
+    assert [entry.text for entry in parser.assembler.entries] == [
+        "Dissolved H2S and m6A (Figure 1) in Mus musculus cells, by the p-value. Next line.",
+        "One",
+        "Two",
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "<p>" + "".join(f"<span>w{i} " for i in range(2000)) + "</p>",
+        "".join(f"<p><font size={i % 7 + 1}>para {i}." for i in range(2000)),
+    ],
+    ids=["unclosed-spans", "font-soup"],
+)
+def test_deeply_nested_legacy_markup_still_parses(body):
+    """html5lib nests every element after an unclosed ``<span>`` or
+    ``<font>`` one level deeper; a recursive walk hit the recursion limit and
+    failed the whole document."""
+    html = ("<html><body><article><h2>Method</h2>" + body + "</article></body></html>").encode()
+    parser = HtmlParser(html)
+    parser.parse()
+
+    texts = [entry.text for entry in parser.assembler.entries]
+    assert texts
+    assert texts[0].startswith(("w0 w1 ", "para 0."))
+
+
+def test_html_captions_are_not_ocr_text():
+    """Captions are document text too: the late cleanup's spaced-run collapse
+    turned "items 1 2 3" into "items 123"."""
+    figure_caption = "Figure 1. Scores on items 1 2 3 by age_group."
+    table_caption = "Table 1. Items 1 2 3 by age_group."
+    html = (
+        "<html><body><article><h2>Results</h2><p>Body text.</p>"
+        f'<figure><img src="a.png"><figcaption>{figure_caption}</figcaption></figure>'
+        f"<table><caption>{table_caption}</caption><tr><th>A</th></tr><tr><td>1</td></tr>"
+        "</table></article></body></html>"
+    ).encode()
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert figure_caption in texts
+    assert table_caption in texts
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    [
+        (
+            "<mi>β</mi> <mo>∼</mo> <mtext>Cauchy</mtext> <mo>(</mo> <mn>0</mn> <mo>,</mo> "
+            "<mn>2</mn> <mo>.</mo> <mn>5</mn> <mo>)</mo>",
+            "β∼Cauchy(0,2.5)",
+        ),
+        ("<msub><mi>t</mi> <mrow><mi>i</mi> <mo>-</mo> <mn>1</mn></mrow></msub>", "ti-1"),
+        ("<mi>ln</mi> <mi>dbh</mi> <mo>+</mo> <mn>0.93</mn> <mtext>GeV</mtext>", "ln dbh+0.93 GeV"),
+        ("<mi>M</mi> <mo>=</mo> <mfrac><mn>1</mn> <mn>2</mn></mfrac>", "M=1 2"),
+        (
+            "<mi>J</mi> <mo>=</mo> <mrow><mo>[</mo> <mtable><mtr><mtd><mn>0</mn></mtd> "
+            "<mtd><mn>1</mn></mtd></mtr> <mtr><mtd><mn>10</mn></mtd> <mtd><mn>20</mn></mtd>"
+            "</mtr></mtable> <mo>]</mo></mrow>",
+            "J=[ 0 1 10 20 ]",
+        ),
+        (
+            "<msub><mi>E</mi> <mrow><mi>t</mi> <mo>-</mo> <mn>1</mn></mrow></msub> "
+            '<mspace width="8pt"/> <mn>0</mn> <mo>&lt;</mo> <mi>λ</mi>',
+            "Et-1 0<λ",
+        ),
+    ],
+    ids=["decimal", "index", "words", "fraction", "matrix", "mspace"],
+)
+def test_whitespace_between_mathml_elements_is_dropped_unless_it_separates_words(math, expected):
+    """eLife's HTML pretty-prints MathML like its JATS; kept as text the
+    whitespace split "2.5" into "2. 5" (see the JATS parser's tests). Two
+    numbers, matrix cells and ``<mspace>`` stay apart."""
+    html = (
+        '<html><head><meta charset="utf-8"></head><body><article><h2>Method</h2>'
+        f"<p>We used <math>{math}</math> here.</p></article></body></html>"
+    )
+    parser = HtmlParser(html.encode())
+    parser.parse()
+
+    assert [entry.text for entry in parser.assembler.entries] == [f"We used {expected} here."]
+
+
+def test_mathml_fraction_in_a_table_cell_keeps_its_numbers_apart():
+    html = (
+        b"<html><body><article><h2>Results</h2><p>Body text.</p>"
+        b"<table><caption>Table 1. Shares.</caption><tr><th>share</th><th>n</th></tr>"
+        b"<tr><td><math><mfrac><mn>3</mn> <mn>4</mn></mfrac></math></td><td>12</td></tr>"
+        b"</table></article></body></html>"
+    )
+    parser = HtmlParser(html)
+    parser._contents = parser.parse()
+    contents = _segment(parser)
+
+    assert contents.tables[0].contents == [["share", "n"], ["3 4", "12"]]
+
+
 # ``pandas.read_html`` inferred column types: "0.050" came back as 0.05, "007"
 # as 7, a decimal comma "1,5" as 15, and an empty cell as the string "nan".
 _NUMERIC_TABLE = (
