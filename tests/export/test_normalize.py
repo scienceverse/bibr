@@ -34,6 +34,41 @@ def test_iso_date(printed, expected):
 
 
 @pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        # Impossible calendar dates (audit export-11): the day is undetermined
+        # but the printed month and year still are, so the value falls back to
+        # YYYY-MM instead of shipping a date date.fromisoformat rejects.
+        ("2021-02-30", "2021-02"),
+        ("31 April 2020", "2020-04"),
+        ("February 30, 2021", "2021-02"),
+        ("2020-04-31", "2020-04"),
+        ("2021-02-29", "2021-02"),  # 2021 is not a leap year
+    ],
+)
+def test_iso_date_impossible_day_falls_back_to_month(printed, expected):
+    assert iso_date(printed) == expected
+
+
+@pytest.mark.parametrize(
+    ("printed", "expected"),
+    [
+        # Guard: valid dates — including leap days and month ends — pass
+        # through unchanged.
+        ("2020-02-29", "2020-02-29"),  # leap day
+        ("2020-04-30", "2020-04-30"),
+        ("31 January 2020", "2020-01-31"),
+        ("29 February 2020", "2020-02-29"),
+        ("30 April 2020", "2020-04-30"),
+        ("2021-02-28", "2021-02-28"),
+        ("15 January 2026", "2026-01-15"),
+    ],
+)
+def test_iso_date_valid_dates_unchanged(printed, expected):
+    assert iso_date(printed) == expected
+
+
+@pytest.mark.parametrize(
     ("printed", "url", "spdx"),
     [
         ("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/", "CC-BY-4.0"),

@@ -48,6 +48,11 @@ _LABEL_RE = re.compile(
     re.IGNORECASE,
 )
 _HISTORY_RE = re.compile(r"\b(?:received|accepted|revised)\s*:?\s*", re.IGNORECASE)
+# Start of a date-like tail after a publication label: a digit (ISO or
+# day-first date) or a month name. Anything else ('by Elsevier', 'under a
+# CC BY licence') is publisher/licence boilerplate, not a date the label
+# failed to parse, so the label is skipped rather than treated as ambiguity.
+_DATE_LIKE_RE = re.compile(rf"(?:\d|{_MONTH})", re.IGNORECASE)
 _ORGANIZATION_RE = re.compile(
     r"\b(?:consortium|collaboration|group|team|committee|society|association|university|"
     r"institute|department|centre|center|network|project|study|research)\b",
@@ -109,9 +114,16 @@ def refine_publication_date(published: str | None, source_text: str) -> str | No
         line_start = source_text.rfind("\n", 0, label.start()) + 1
         if not _metadata_prefix(source_text[line_start : label.start()]):
             continue
-        value = _date_after_label(source_text[label.end() :])
+        tail = source_text[label.end() :]
+        value = _date_after_label(tail)
         if value is None:
-            return published
+            # Only a date-like tail that failed to parse marks the record
+            # ambiguous. Publisher/licence boilerplate ('Published by ...',
+            # 'Published under ...') carries no date, so skip the label and
+            # keep scanning for a labelled date elsewhere in the block.
+            if _DATE_LIKE_RE.match(tail.lstrip()):
+                return published
+            continue
         found.add(value)
     if len(found) == 1:
         value = next(iter(found))

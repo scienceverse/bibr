@@ -346,6 +346,12 @@ def get_native_text_in_bbox(
 #     figures/tables with fuzzy bbox boundaries — OCR is safer.
 #   - formula_number: short inline text (typically 1-3 chars) that is better
 #     handled by OCR than by the min_chars threshold.
+#   - header / footer: only eligible when OCR_NATIVE_TEXT_HEADER_FOOTER is on
+#     (see HEADER_FOOTER_LABELS). Their only consumers (detected_headers /
+#     detected_footers feeding DOI furniture candidates and front-matter
+#     masthead checks) need plain text, which the native layer returns exactly
+#     on born-digital PDFs — about half of all OCR calls there. The
+#     printable-ratio corruption gate still applies.
 DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     {
         "text",
@@ -363,8 +369,30 @@ DEFAULT_ELIGIBLE_LABELS: frozenset[str] = frozenset(
     }
 )
 
+# Header/footer labels, eligible only when the header/footer native-text
+# setting is on (off by default, so default output is unchanged).
+HEADER_FOOTER_LABELS: frozenset[str] = frozenset({"header", "footer"})
 
-_SHORT_NATIVE_TEXT_LABELS: frozenset[str] = frozenset({"doc_title", "paragraph_title"})
+
+def resolve_eligible_labels(include_header_footer: bool) -> frozenset[str]:
+    """Eligible native-text labels for the header/footer setting.
+
+    Takes a plain bool (not Settings) to keep this module free of the
+    config import cycle; callers pass
+    ``settings.ocr.native_text_header_footer``.
+    """
+    if include_header_footer:
+        return DEFAULT_ELIGIBLE_LABELS | HEADER_FOOTER_LABELS
+    return DEFAULT_ELIGIBLE_LABELS
+
+
+# Short running heads ("Cell Biology", "Benartzi et al.") are shorter than
+# the body min_chars: "header"/"footer" share the short-text allowance, but
+# only take effect when the header/footer setting makes them eligible —
+# otherwise they are skipped as ineligible before this check.
+_SHORT_NATIVE_TEXT_LABELS: frozenset[str] = frozenset(
+    {"doc_title", "paragraph_title", "header", "footer"}
+)
 _SHORT_NATIVE_TEXT_MIN_CHARS = 3
 
 _FONT_SAMPLE_SIZE = 15

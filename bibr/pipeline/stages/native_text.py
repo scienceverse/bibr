@@ -57,12 +57,14 @@ class NativeTextStage:
         # Resolve conditional consumers once, then inspect each document under
         # one PDFium lock/open/page walk into detached Python data.
         from bibr.extract.ref_extractor import _resolve_ref_strategies
+        from bibr.ocr.native_text import resolve_eligible_labels
 
         run_config = getattr(ctx, "config", None)
         effective_seg = _resolve_ref_strategies(
             getattr(run_config, "ref_seg_strategy", None),
             settings=settings,
         )[0]
+        eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
         native_skip_total = 0
         for fs in ctx.alive():
             if not fs.pdf_bytes or fs.layout_results is None:
@@ -79,6 +81,7 @@ class NativeTextStage:
                     include_ref_geometry=effective_seg == "geom",
                     min_chars=settings.ocr.native_text_min_chars,
                     min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
+                    eligible_labels=eligible_labels,
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:

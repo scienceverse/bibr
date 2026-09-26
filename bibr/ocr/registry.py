@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from bibr.ocr.backend import OcrBackend
-from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -84,14 +83,12 @@ def paddle_vllm_unavailable_reason(*, vram_gb: float | None | object = _PROBE) -
 
 def default_backend() -> str:
     """Pick the preferred local OCR runtime supported by the host platform."""
-    if sys.platform == "darwin" and platform.machine() == "arm64":
-        return "paddle-rapid-mlx"
-    if sys.platform == "win32":
-        return "glm-llama"
-    if sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
-        return "paddle-vllm"
-    # Unknown platform: llama.cpp is the most portable managed runtime.
-    return "glm-llama"
+    from bibr.config import snapshot_settings
+
+    # The automatic ``paddle`` chain skips runtimes the host cannot run (no
+    # NVIDIA GPU with room → no managed vLLM), so its head — not a fixed
+    # platform guess — is the default that can actually start here.
+    return resolve_backend_candidates("paddle", snapshot_settings())[0].backend
 
 
 def default_glm_backend() -> str:
@@ -102,22 +99,25 @@ def default_glm_backend() -> str:
 
 
 def _candidate_model(backend: str, settings: GlobalSettings) -> str:
-    ocr = settings.ocr
-    if backend in {"paddle-vllm", "paddle-http"}:
-        return getattr(ocr, "paddle_served_model", "paddle-ocr-vl-1.6")
-    if backend == "paddle-rapid-mlx":
-        return getattr(ocr, "paddle_rapid_mlx_model", "PaddlePaddle/PaddleOCR-VL-1.6")
-    if backend == "paddle-mlx-vlm":
-        return getattr(ocr, "paddle_mlx_model", "PaddlePaddle/PaddleOCR-VL-1.6")
-    if backend == "glm-rapid-mlx":
-        return getattr(ocr, "rapid_mlx_model", "THUDM/GLM-OCR")
-    if backend == "glm-llama":
-        return getattr(ocr, "llama_cpp_model", "THUDM/GLM-OCR")
-    if backend in {"glm-http", "serve-http"}:
-        # An HTTP backend must ask for the alias the server advertises, not
-        # the HuggingFace repo id a local runtime would load weights from.
-        return getattr(ocr, "model", None) or GLM_SERVED_MODEL_ALIAS
-    return getattr(ocr, "model", None) or getattr(ocr, "local_model", "THUDM/GLM-OCR")
+    from bibr.ocr.profiles import resolve_served_model
+
+    # One table (bibr/ocr/profiles.py) for startup candidates and static
+    # identity alike. serve-http resolves its family from the explicit
+    # profile: with OCR_PROFILE=paddle the server is a Paddle endpoint and
+    # must be asked for the Paddle served alias, not 'glm-ocr'.
+    if backend == "serve-http":
+        return resolve_served_model(
+            requested_backend="serve-http",
+            concrete_backend="serve-http",
+            settings=settings,
+            explicit_profile=settings.ocr.profile,
+        )
+    return resolve_served_model(
+        requested_backend=backend,
+        concrete_backend=backend,
+        settings=settings,
+        explicit_profile=None,
+    )
 
 
 def _candidate(backend: str, settings: GlobalSettings) -> OcrBackendCandidate:

@@ -302,8 +302,11 @@ class BaseLayoutDetector:
 
             # Compiled inference pads every call back to the configured maximum.
             # Disable that padding before retrying or the smaller logical batch
-            # would consume exactly the same memory and OOM again.
-            if self._compiled:
+            # would consume exactly the same memory and OOM again. Restored
+            # afterwards: the compiled graph is still resident, so later
+            # batches must keep padding or every new shape recompiles.
+            compiled = self._compiled
+            if compiled:
                 self._compiled = False
                 logger.warning("Layout OOM disabled fixed-size compiled padding for retries")
             half = max(1, len(images) // 2)
@@ -313,10 +316,14 @@ class BaseLayoutDetector:
                 half,
                 len(images) - half,
             )
+            first, second = images[:half], images[half:]
 
         # Retry after leaving the exception handler: Python then clears the
         # traceback (which may retain failed-forward tensors and their VRAM).
-        return self._detect_images(images[:half]) + self._detect_images(images[half:])
+        try:
+            return self._detect_images(first) + self._detect_images(second)
+        finally:
+            self._compiled = compiled
 
     def _detect_onnx(self, pil_images: list, orig_sizes: list[tuple[int, int]]) -> list[list[dict]]:
         """ONNX Runtime inference path: numpy pre/post-processing around one session run."""
