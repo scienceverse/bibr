@@ -57,6 +57,11 @@ _SUPPLEMENT_ISSUE_RE = re.compile(r"(?:\(\s*|\bvol(?:ume)?\.?\s*\d+\s*,?\s*)supp
 _NON_SELF_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"reference\s+doi\s*[:.]?\s*$", re.IGNORECASE), "reference_doi"),
     (re.compile(r"parent(?:\s+article)?\s+doi\s*[:.]?\s*$", re.IGNORECASE), "parent_doi"),
+    # A correction notice names the article it corrects.
+    (
+        re.compile(r"doi\s+of\s+(?:the\s+)?original\s+article\s*[:.]?\s*$", re.IGNORECASE),
+        "parent_doi",
+    ),
     (
         re.compile(
             r"(?:component|supplement(?:ary)?|figure|table)\s+doi\s*[:.]?\s*$",

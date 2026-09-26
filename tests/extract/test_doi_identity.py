@@ -1324,3 +1324,26 @@ def test_a_reference_entry_read_as_page_furniture_is_a_reference(header, rejecte
     [candidate] = collect_doi_candidates(contents)
 
     assert (candidate.rejection_reason == "reference_candidate") is rejected
+
+
+def test_a_correction_notice_names_the_original_article_as_its_parent():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            (
+                "Correction",
+                CanonicalSection.TITLE,
+                "DOI of original article: 10.1234/original.1",
+                1,
+            ),
+        ],
+        footers=["https://doi.org/10.1234/notice.2"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    parent = next(c for c in selection.candidates if c.normalized == "10.1234/original.1")
+    assert (parent.marker_kind, parent.rejection_reason) == ("parent_doi", "component_candidate")
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/notice.2"
