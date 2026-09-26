@@ -213,6 +213,218 @@ released.
 
 ### Fixed
 
+- `table[].contents` keeps the cell text the paper printed. The OCR engines
+  return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
+  too. That HTML was read with pandas type inference, so every column that
+  looked numeric was rewritten: "2.50" became "2.5", "007" became "7",
+  "1,234" became "1234", a decimal comma was read as a thousands separator
+  ("1,5" became "15", "0,25" became "25"), an integer column with one empty
+  cell came out as "12.0", and "TRUE" became "True". A cell printing "NA",
+  "n/a" or "None" came out empty from a PDF and as "nan" from HTML or ePub,
+  where every empty cell was "nan" too. A PDF table without a header row,
+  whose first row becomes the header, could get headers such as "2019.0".
+  Cells now keep their printed text and an empty cell is "", and tables keep
+  the shape they had before. A table printed as an image is now kept
+  with its caption and empty `contents`, so a mention of it resolves: in HTML
+  and ePub input a `<table>` with no cell text whose caption prints a table
+  label ("Table 3. ..."), in JATS a `<table-wrap>` with a label or caption but
+  no `<table>` with rows. An HTML table with a span such as `colspan="2px"` is no longer
+  dropped.
+- A table continued across pages no longer gets its repeated header as a data
+  row in the middle of `contents` when the later page prints the header with
+  different spacing, case, dashes or punctuation ("Mean(SD)" under
+  "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
+- Text from DOCX, JATS, HTML, ePub and the PDF text layer no longer goes
+  through the late clean-up meant for OCR output. That clean-up ran on every
+  sentence of every input. It fused "a 2 x 2 x 3 design" into "a2x2x3" and
+  "Items 1 2 3" into "Items 123". It deleted the underscore from identifiers,
+  file names and email addresses (`age_group`, `NM_022770`, `RRID:SCR_003070`,
+  `john_smith@uni.edu`), and it turned `10^6` into `106`. It also read two
+  literal dollar signs as a math span and deleted them along with the
+  underscores between (`df$age_group`, "US$ 60 to US$ 1,419", `$SAMPLE_R1`).
+  Each sentence now records whether any of its text came from OCR, and only
+  OCR text gets those repairs. DOCX inline equations are still unwrapped and
+  flattened, one glued to a word included ("the $n$th" reads "the nth"),
+  because each sentence also records the `$…$` spans the parser wrote.
+  Elsewhere in document text only a tightly delimited `$…$` counts as math,
+  as JATS tex-math writes it; two literal dollars that happen to fit that
+  shape are still unwrapped. In OCR text, `_x` and `^x` are now flattened only
+  inside `$…$` and `\(…\)` math, email addresses are protected like URLs, and
+  "2 x 2" and "2 × 2" are no longer fused. OCR text keeps the spaced-run
+  collapse, which repairs OCR's character spacing ("1 7. 9 0 6"), so an OCR'd
+  "Items 1 2 3" still reads "Items 123"; narrowing it further waits on data
+  from a GLM-OCR run. The PDF text layer sometimes extracts a superscript or
+  subscript as a separate token ("R 2 ,", "r 2 ¼"). The old clean-up fused
+  those by accident; they are now kept as extracted.
+- The per-region OCR clean-up no longer touches the PDF text layer, and it no
+  longer damages formulas and numbers. On text-layer regions it split "U.S."
+  into "U. S." and "e.g." into "e. g.", and it broke a DOI that opens a line
+  into "10. 1038/…". It cut a table of contents longer than 2,048 characters
+  with spaced dot leaders to its first entry. It also turned a printed "* p <
+  .05" into a bullet. Those regions are now only trimmed. In OCR output, a
+  formula that starts with `\theta`, `\tau`, `\text`, `\tilde` or `\times` no
+  longer loses its leading `\t`; on the default Paddle profile it exported as
+  "heta_{t+1} = …". The list-marker spacing ("1.text" → "1. text") no longer
+  applies to decimals, DOIs, abbreviations or formulas. The repeated-content
+  trimmer keeps the text after a repeated run instead of dropping the rest of
+  the region. A formula region that holds two formulas ("\(a\) + \(b\)") keeps
+  its delimiters, and one wrapped in single dollars is no longer nested inside
+  `$$`.
+- HTML and ePub text keeps inline markup attached to its word. The parser put a
+  space around every element, so `H<sub>2</sub>O` read "H 2 O",
+  `m<sup>6</sup>A` "m 6 A" and a linked citation "( Figure 1 )". Now only
+  block-level elements separate words, as in the JATS parser; like there, an
+  exponent joins its number (`10<sup>6</sup>` reads "106"). eLife publishes
+  each of its 984 test articles as both HTML and JATS. The share of HTML
+  sentences that also appear word for word in the same article's JATS rose
+  from about 24% to 41%.
+- JATS and HTML text no longer splits inline MathML at the whitespace
+  publishers put between its elements. PLOS and eLife pretty-print MathML
+  (`<mi>t</mi> <mo>-</mo> <mn>1</mn>`), and the parsers kept that whitespace,
+  so a formula read "( 0 , 2 . 5 )" or "y ¯ t - 1". The late clean-up's
+  spaced-run collapse fused some of those runs back by accident, but it also
+  fused prose, and it no longer touches document text. The parsers now drop
+  whitespace between MathML elements as a renderer does, so "(0,2.5)" and
+  "y¯t-1" read as they do from a publisher that writes none. They keep a
+  space where it separates words: "ln dbh", "0.93 GeV", "direct effect"
+  spelled one letter per element, a word after a comma, a function name
+  before a bare argument ("sin x"), and the text around the formula. They
+  also keep it between two numbers, so the parts of a fraction read "1 2" and
+  not "12"; an index pair (x with 1 below and 2 above) reads "x1 2". An
+  `<mspace>` (`\quad`, `\,`) and, in JATS as in HTML, a matrix row or cell
+  now separate the text around them, whitespace or not: "E_{t-1} \quad
+  0<λ≤1" reads "Et-1 0<λ≤1", and a matrix that read "(2112)" reads
+  "( 2 1 1 2)". Other letters and digits still close up, across a fraction
+  bar, a product or a script too, as they do from a publisher that writes no
+  whitespace: a/b reads "ab", and a unit set as an upright `<mi>` after a
+  number reads "5m" (in `<mtext>` it keeps its space).
+  Measured against the parsers that kept every such space, on the 885 test
+  articles that contain a MathML element (PMC_sample_1943, eLife_984 as JATS
+  and as HTML, PLOS_1000): 3,329 of their 40,308 formulas read differently.
+  Spaced decimals ("2 . 5") in them fell from 121 to none and spaced
+  differences ("t - 1") from 346 to none. No space between two digits and
+  none at an `<mspace>` is lost. Twenty closed spaces join two tokens of two
+  letters or more, between terms of a product ("m3hgNa"), the parts of a
+  fraction ("e-diλi") or a sum and its limits. Dropping every such space
+  would have joined 187 ("lndbh", "directeffect").
+- The Ollama provider sent every request to `/chat/completions` under
+  `LLM_OLLAMA_BASE_URL`, and Ollama answers that with 404. With the default URL,
+  `http://localhost:11434`, which is also what `bibr setup` writes, every paper
+  failed at its first LLM call, and so did the setup wizard's connection test.
+  Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
+  unless the URL already ends in it, so both forms work. The wizard no longer
+  lists models from `/v1/v1/models` when the URL is typed with `/v1`.
+- `bibr doctor` and the `bibr setup` connection test now send their test
+  request through the provider adapter that extraction uses. Both built their
+  own client, with a 64-token cap. For the default `gemini-3.5-flash-lite`
+  they left out the thinking budget the Gemini adapter always sends. For
+  OpenAI they sent `max_tokens`, which reasoning models such as the wizard's
+  `gpt-5-nano` reject, where the adapter sends `max_completion_tokens`. The
+  test could therefore fail a setup that `bibr chew` runs. Doctor also skipped
+  Ollama; it now tests it like any other provider. When the wizard's test
+  fails for Ollama, it offers to change the base URL. It used to ask for an
+  API key and write the answer to `.env` as a line with no name, `=<key>`.
+  Both tests now give up after twice `LLM_TIMEOUT_SECONDS`, the limit `bibr
+  chew` puts on one LLM call. A server that accepted the request and never
+  answered kept them waiting on the SDK's own timeout instead, which for the
+  OpenAI SDK that Ollama and OpenAI-compatible servers go through is 600 s per
+  attempt.
+- `bibr setup` could leave an older `LLM_API_KEY`, `LLM_BASE_URL` or
+  `LLM_BACKEND` in effect behind the provider just chosen. Merging into an
+  existing `.env`, the default, keeps every key the wizard does not write, and
+  `~/.bibr/.env` still applies under a new `./.env`. The Google, Anthropic and
+  Groq adapters send `LLM_API_KEY` in place of their own key, so switching
+  from OpenAI to Google sent the old OpenAI key to Gemini, while the
+  connection test, which used the typed key, passed. Choosing a provider now
+  also writes `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL`
+  where none was entered, and the connection test uses those same values.
+- `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
+  resolved to the backend chew would start on this machine; doctor used to
+  check it as a cloud provider and ask for a key. The provider's credentials are
+  checked by its adapter. `LLM_API_KEY` now counts for Google, Anthropic and
+  Groq, and an OpenAI-compatible server set with `LLM_BASE_URL` needs no key.
+  A managed local backend fails when chew's preflight would refuse it, for
+  example vLLM on a machine with no NVIDIA GPU, which doctor passed. An unknown
+  `LLM_BACKEND` value is reported instead of being checked as cloud.
+- `bibr doctor`'s OCR check now fails where `bibr chew` refuses a PDF. With
+  the default `OCR_BACKEND=paddle` on Windows, or on Linux without a GPU that
+  fits paddle-vllm, the automatic chain is glm-llama alone. Doctor now looks
+  for llama.cpp there, where it used to warn that availability was unverified.
+  It fails when no runtime of the chain can start, when
+  `OCR_BACKEND=paddle-vllm` has no GPU that fits it, and when a cloud vision
+  backend (`gemini`, `openai`, `anthropic`) has no API key.
+- `bibr doctor` no longer fails when the working directory has no `.env`.
+  Settings come from `~/.bibr/.env` and `./.env`, or from `BIBR_ENV_FILE`.
+  Doctor now names the files it read, and warns when there are none, because
+  configuration from the environment alone is valid. `bibr preset` uses the
+  file whose values are in effect, which is the last existing file of that
+  chain. `preset save` and `preset use` therefore work when the configuration
+  lives in `~/.bibr/.env`, and `save`, `use` and `deactivate` name the file.
+  The demo's preset picker reads the active preset from the same file.
+- `bibr doctor` reports a missing `uv` as a warning instead of a failure.
+  `python -m pip install bibr` is a documented setup, and only the uv-managed
+  vLLM and MLX-VLM runners need uv. Their own checks still fail without it.
+- Reference enrichment (`--crossref`) rejected the correct Crossref or
+  resolver record for references printed in most citation styles. The
+  author-initials check took "and", "et" or "und" for a first name
+  ("Smith, J. and Weber, E. U." read Weber as "A."), kept only the middle
+  initial of "Jeffery M. Sobal", and vetoed a record whenever a reference cut
+  short by "et al." printed one of two co-authors who share a surname. It now
+  reads a given name on either side of the surname, treats conjunctions as
+  separators, skips the second half of a hyphenated surname and pools
+  co-authors who share one, and still rejects a different person with the same
+  surname. Surnames now also match without their diacritics or with an umlaut
+  spelled out ("González" and "Gonzalez", "Müller" and "Mueller"), and an
+  organization author no longer counts as a surname that fails to match.
+- A title search could accept a different work from the one the reference's
+  own DOI names. When the DOI lookup failed with a timeout or server error,
+  the Crossref title search took any record with a matching title, a preprint
+  of the article for example, and consolidation filled the reference's gaps
+  from it. A printed DOI that parses now admits only a record carrying that
+  DOI, on the Crossref title and fingerprint searches as on the resolver
+  fallback, which already had this rule. The Crossref search, the resolver
+  search and the resolver fallback now share one matcher, so their rules
+  cannot drift apart again.
+- A generic title ("Introduction", "Emotion regulation") matched any record of
+  that title by an author of the same surname in about the same year. A title
+  of three words or fewer is now rejected when the printed volume disagrees
+  with the record's, or when the printed container does, unless the printed
+  volume and first page both agree with the record's: those identify the
+  article even when the container is an abbreviation the matcher cannot
+  expand, such as "PNAS". Any title is rejected when both the printed volume
+  and the first page disagree with the record's. A value missing on either
+  side counts for nothing.
+- Crossref titles and journal names kept their inline markup
+  (`CO<sub>2</sub>`, `<i>Drosophila</i>`, `&amp;`). The tags cost enough
+  similarity to reject the correct record, and an accepted match carried them
+  into `bib_match` and, through consolidation, into `bib`. Titles and
+  container names from Crossref and the resolver are now plain text.
+- On 2,312 printed references, each paired with the recorded Crossref record
+  its printed DOI names, the title matcher with all of the changes above
+  rejects 130 of those records, down from 798, mostly where the printed title
+  differs from the deposited one.
+- With `BIBR_RESOLVER_AUTHORITATIVE=true`, a failed resolver prefetch left
+  every reference without a DOI unmatched and never asked Crossref, although
+  the log said it was falling back to Crossref. Those references now go to
+  Crossref. `BIBR_RESOLVER_SEARCH_CONCURRENCY` below 1, one way to make the
+  prefetch fail, is now rejected when settings load.
+- When the resolver fallback (`BIBR_RESOLVER_FALLBACK_SOURCES`) reached its
+  deadline it discarded every search that had already answered. Each
+  reference's result is now applied as it arrives, the deadline cancels only
+  the searches still outstanding, and the warning says how many were left.
+- A resolver that answered `/health` with JSON other than an object
+  (`["ok"]`) failed the paper's whole reference enrichment, and one fallback
+  candidate with `"authors": null` stopped the fallback for every remaining
+  reference. Such a health answer now means unhealthy, a non-object `/works`
+  answer is a miss, malformed authors count as none, and an error on one
+  reference costs only that reference.
+- A matched Crossref monograph, edited or reference book, book part, report
+  component or database came back with `bib_type` `other`, because
+  `migrate_bib_type` knew only the BibTeX names and a few Crossref ones.
+  `consolidate="replace"` then overwrote a printed `book` with it. These
+  Crossref types now map to `book`, `book_chapter`, `report` and `dataset`, a
+  match's `other` still fills a missing type but never replaces a printed one,
+  and a type that is not a string maps to `other` instead of raising.
 - Resuming a `bibr batch` run now runs again the papers that failed because
   of the run or a service rather than the paper; they used to wait for
   `--retry-failed`, which also re-runs every genuine failure. A local OCR or
@@ -401,6 +613,105 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
+  exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
+  `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
+  now holds, as printed, scientific notation (also as JATS, HTML and PDF text
+  layers flatten the superscript, `× 10−5` and `10 −9`, and as OCR prints it,
+  `\times 10^{-5}`), decimal commas, mid-dot decimals and ranges. A comma after
+  a count is no decimal comma (`n = 9,7 cells` lists two groups), and a signed
+  number after a space is the next column of a table flattened to text, not
+  the end of a range (`β = 0.21 −0.05 0.47` gives `β = 0.21`). A value that
+  runs on into a fraction or a time (`BF10<1/3`, `t = 12:30`) is no longer
+  exported cut short; a count before a slash is kept, cut at the slash
+  (`n = 12/20 cells` gives `n = 12`).
+- Statistic names are read whole and exported as printed. A Greek letter,
+  superscript or Δ (also ∆, U+2206) belongs to the name, so `η²p = .12` and
+  `η 2 p` (partial eta squared) are no longer p-values, `ΔR²` is no longer
+  `R²` and `τp` no longer a p. That holds where a PDF text layer puts the
+  stacked scripts on lines of their own, `η\r\n2\r\np = 0.11` (a p-value
+  before) and `ηp\r\n2 = .61` (not read at all before), as the extractor now
+  reads each line break as one character. `p-value` and `P value`, `χ 2` (χ²
+  as text layers print it), `r(df)`, `H(df)`, `Z`, `g`, `χ²` without df,
+  `90% CI`, `r s` and `rs` (Spearman) and `d z` are recognised. A subscript
+  printed after a space, such as the `h` of a Holm-adjusted `p h`, is no
+  longer a statistic of its own. Consumers matching `p`, `χ²` or `ηp²` have to
+  fold these spellings.
+- `lhs`, `df` and `rhs` in `eq[]` are exported on one line: a run of
+  whitespace, line breaks included, is one space, as in the sentence text.
+  PDF text layers gave the lhs `Cohen’s \r\ndz`, the df `1, \r\n19` and the rhs
+  `[0.30, \r\n0.42]`.
+- Statistics that share parentheses or a formula with a recognised one are no
+  longer dropped: `BF10` in `(p < .001, BF10 = 12.3)`, a second count in one
+  clause, `\chi^2(1)` in `$\chi^2(1) = 3.84, p = .05$`. Statistics printed
+  together share a group whichever pass reads them.
+- No printed statistic is exported twice. Inline LaTeX (`$t(28) = 2.10$`) and
+  `Cohen's d` were exported again under a new group, while two identical
+  printed values were merged into one. LaTeX comparators (`\leq`, `\geqslant`,
+  `\neq`, …) are read, a LaTeX statistic splits its df, and a `$` before a
+  digit is currency unless it opens math. Group ids no longer skip numbers,
+  the LLM fallback continues the regex results' ids, and the broad pass no
+  longer rescans a long token from each of its characters.
+- `eq[]` spans no longer place a value at a longer one that begins with it
+  (`n = 1` at the `n = 16` earlier in the sentence), and locate a value that
+  late clean-up respaced (`10 − 6` printed as `10 −6`) and a name it printed
+  without its spaces (`η p 2`, read from MathML, printed as `ηp2`). Late
+  clean-up prints `\leqslant` and `\geqslant` as `≤` and `≥`, not `≤slant`.
+- A supplement's DOI no longer becomes the paper's DOI (`metadata.doi`, which
+  also keys self-DOI enrichment) or makes its selection abstain. APA's
+  "Supplemental materials: https://doi.org/….supp", Copernicus `-supplement`,
+  MDPI `/s1`, PeerJ `/supp-1`, `/fig-1` and `/table-1`, and PLOS `.s001` DOIs
+  are now components, like PLOS figure and table DOIs.
+- BMJ articles from 2013 and 2014 (`10.1136/bmj.f1049`, `bmj.g2276`) and
+  articles whose citation line names a supplement issue ("30 (Supplement 5)",
+  "Volume 30, Supplement 5") were exported with no DOI, because their DOI was
+  taken for a component's. A component suffix now needs PLOS's zero-padded
+  number (`.g001`), and a supplement issue is not a component label.
+- Preprints hosted on OSF (PsyArXiv `10.31234/osf.io/…`, SocArXiv, OSF
+  Preprints) were exported with no DOI: "osf" inside the DOI marked it as a
+  data deposit. Only the text around a DOI counts now. OSF project, Zenodo,
+  Figshare and Dryad DOIs are still rejected by their registrant.
+- A DOI that no label names the article's (a bare DOI or a doi.org link),
+  printed outside the front matter and the running headers and footers, no
+  longer becomes the paper's DOI unless it matches the manifest's expected DOI.
+  Neither does a lone "Journal DOI". In a manuscript with no DOI of its own such
+  a DOI was a cited work. When it is the only candidate, a manifest that
+  requires a DOI now gets `VAL_EXPECTED_ID_MISSING`; before, the cited DOI was
+  selected, and reported as `VAL_EXPECTED_ID_MISMATCH` when an expected DOI was
+  given. The front matter is the title, abstract and keywords sections and
+  pages 1 and 2. DOCX, ePub, HTML and JATS inputs have no pages, so for them it
+  is the unclassified block before the first classified section (usually the
+  Abstract), and a DOCX title page's doi.org link still names the paper.
+- A DOI cited in a page-1 or page-2 footnote no longer replaces the paper's DOI
+  when the running header repeats the paper's own. The conflict is reported and
+  no DOI is selected.
+- A JATS or HTML article's own DOI (its `article-id` or `citation_doi`) now
+  wins over DOIs printed in its body text. eLife figure DOIs extend the article
+  DOI with a number, so many eLife JATS and HTML files exported no DOI, and one
+  a figure's.
+- Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
+  were cut at the `<` when read as the paper's DOI or matched against a
+  manifest's expected DOI. They are kept whole.
+- Standard funding wording reached neither structured funding (`funding`, and
+  so `funding_match`) in the default shadow integrity-statement mode nor
+  `funding_statement` in active mode: "This project has received funding from
+  the European Union's Horizon 2020 …", "The research leading to these results
+  has received funding …", "We gratefully acknowledge funding from …",
+  "Preparation of this article was supported by …" and "The first author was
+  supported by …". Their subjects were checked as if they named authors, and
+  failed. A named author who "has received funding" is now matched on the name.
+- Active integrity-statement mode rejected or cut short standard declarations
+  under a generic heading, and the default shadow mode raised
+  `VAL_STATEMENT_SUSPECT` for each. "Available upon reasonable request to the
+  corresponding author" was cut after "to the". "Data and analysis scripts are
+  available at …", "The datasets can be obtained from the corresponding author
+  …", "… will be made available by the authors", Frontiers' "conducted in the
+  absence of any commercial or financial relationships …" conflict-of-interest
+  statement and "Ethical approval was received …" were rejected. The licence
+  the data are made available under ("… available … under a CC BY 4.0 license"
+  or "under a Creative Commons Attribution 4.0 licence") and the date an
+  approval was received ended the statement as if they were publisher
+  boilerplate.
 
 ### Added
 

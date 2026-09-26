@@ -140,7 +140,7 @@ chew` CLI flags:
 | `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both |
 | `paper_id` | `--paper-id` | Paper ID override (single-file calls only) |
 | `batch_size` | `--batch-size` | Files per chunk in batch processing (batch calls only) |
-| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; `False` forces it off |
+| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI (a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one); `False` forces it off |
 | `settings` | `.env` / environment | A `GlobalSettings` instance copied into the pipeline at construction |
 
 ```python
