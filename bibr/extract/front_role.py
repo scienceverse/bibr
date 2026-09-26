@@ -201,7 +201,10 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
     """Return the configured classifier, or ``None`` when disabled/unavailable.
 
     Failures are logged once per (model, revision) and cached as ``None`` so a
-    missing optional bundle never costs more than one attempt per process.
+    missing optional bundle never costs more than one attempt per process. A
+    network failure (the Hub briefly unreachable) is not cached: one blip must
+    not turn the default prior off for a long-running worker, so the next
+    caller tries again.
     """
     ml = settings.ml
     model_id = getattr(ml, "front_role_model_id", None)
@@ -220,6 +223,10 @@ def load_front_role_classifier(settings: GlobalSettings) -> FrontRoleClassifier 
             model_id,
             exc,
         )
+        from bibr.utils.transient import is_transient_network_error
+
+        if is_transient_network_error(exc):
+            return None
         clf = None
     with _CACHE_LOCK:
         _CACHE[key] = clf

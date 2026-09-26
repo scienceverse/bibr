@@ -27,6 +27,9 @@ class OrganizationReport:
     attempted: int = 0
     matched: int = 0
     timed_out: bool = False
+    # Lookups ROR did not answer usefully, and why (``RorClient.lookup``).
+    failed: int = 0
+    failure_reasons: tuple[str, ...] = ()
 
 
 def affiliation_texts(metadata: PaperMetadata) -> list[str]:
@@ -47,10 +50,14 @@ async def enrich_organizations(
     if not affiliations and not funders:
         return OrganizationReport()
 
+    failures: list[str] = []
+
     async def run() -> None:
         # Stored as they arrive, so a timeout keeps what was already matched.
         async def one(text: str, into: dict) -> None:
-            result = await client.match(text)
+            result, failure = await client.lookup(text)
+            if failure is not None:
+                failures.append(failure)
             if result is not None:
                 into[text] = result
 
@@ -75,4 +82,6 @@ async def enrich_organizations(
         attempted=len(affiliations) + len(funders),
         matched=len(metadata.affiliation_match) + len(metadata.funder_match),
         timed_out=timed_out,
+        failed=len(failures),
+        failure_reasons=tuple(sorted(set(failures))),
     )

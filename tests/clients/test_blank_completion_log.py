@@ -5,15 +5,18 @@ an immediate EOS, so Instructor receives an empty string and raises a
 ``json_invalid`` ``ValidationError`` (``input_value=''``). That is model
 flakiness, not a genuine fault — best-effort callers (e.g. the equation LLM
 fallback) already degrade gracefully, so the failure should read as an
-INFO-level skip, not a scary WARNING that looks like a real error.
+INFO-level skip, not a scary WARNING that looks like a real error. The skip is
+still counted: the export's EQUATION_LLM_FALLBACK_FAILED warning names it.
 """
 
 import logging
 from unittest import mock
 
+import pytest
 from pydantic import ValidationError
 
 from bibr.clients.llm import LLMClient, _is_blank_completion_error
+from bibr.exceptions import LlmServiceError
 from bibr.schemas import EquationExtractionResult
 
 
@@ -70,25 +73,67 @@ def _client_with_limiter() -> LLMClient:
     return client
 
 
-async def test_extract_equations_soft_logs_blank_completion(caplog):
+async def test_extract_equations_raises_the_typed_failure():
+    """The call raises; the equation extractor decides how loudly to log. A
+    blank completion is the server failing to answer, so a service failure."""
     client = _client_with_limiter()
     client._invoke_structured = mock.AsyncMock(side_effect=_blank_json_error())
 
-    with caplog.at_level(logging.INFO, logger="bibr.clients.llm"):
-        result = await client.extract_equations([(1, "a sentence")], file_hash="h")
+    with pytest.raises(LlmServiceError):
+        await client.extract_equations([(1, "a sentence")], file_hash="h")
 
-    assert result == []
-    # No WARNING/ERROR — the empty completion is expected local-model flakiness.
+
+def _fallback_inputs():
+    from bibr.paper_contents import CanonicalSection, PaperSection, PaperSentence
+
+    sections = [
+        PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+        PaperSection(
+            section_id=1,
+            header="Results",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.RESULTS,
+        ),
+    ]
+    sentences = [
+        PaperSentence(
+            text_id=10,
+            text="Weird stat layout (t: 3.42, p: .003) regex misses.",
+            section_id=1,
+            paragraph_id=1,
+            page_number=None,
+        )
+    ]
+    return sentences, sections
+
+
+async def test_equation_fallback_soft_logs_blank_completion(caplog):
+    from bibr.extract.equation_extractor import EquationExtractor
+
+    client = _client_with_limiter()
+    client._invoke_structured = mock.AsyncMock(side_effect=_blank_json_error())
+    extractor = EquationExtractor()
+
+    with caplog.at_level(logging.INFO):
+        await extractor.extract_with_llm_fallback(*_fallback_inputs(), llm_client=client)
+
+    # No WARNING/ERROR — the empty completion is expected local-model flakiness —
+    # but the failed batch is still recorded for the export's warning.
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert any("empty completion" in r.getMessage().lower() for r in caplog.records)
+    assert any("failed for batch" in r.getMessage() for r in caplog.records)
+    assert extractor.llm_batch_failures == ["llm_failed"]
 
 
-async def test_extract_equations_still_warns_on_real_failure(caplog):
+async def test_equation_fallback_still_warns_on_real_failure(caplog):
+    from bibr.extract.equation_extractor import EquationExtractor
+
     client = _client_with_limiter()
     client._invoke_structured = mock.AsyncMock(side_effect=RuntimeError("boom"))
+    extractor = EquationExtractor()
 
-    with caplog.at_level(logging.INFO, logger="bibr.clients.llm"):
-        result = await client.extract_equations([(1, "a sentence")], file_hash="h")
+    with caplog.at_level(logging.INFO, logger="bibr.extract.equation_extractor"):
+        await extractor.extract_with_llm_fallback(*_fallback_inputs(), llm_client=client)
 
-    assert result == []
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+    assert extractor.llm_batch_failures == ["llm_failed"]

@@ -275,7 +275,10 @@ class ResourceManager:
         from bibr.extract.front_role import load_front_role_classifier
 
         self._front_role = load_front_role_classifier(self._settings)
-        self._front_role_resolved = True
+        # Pin only a loaded model. The loader caches every definitive miss, so
+        # asking again is free, and a load that failed on the network is
+        # retried by the next paper instead of being given up for the process.
+        self._front_role_resolved = self._front_role is not None
         return self._front_role
 
     @property

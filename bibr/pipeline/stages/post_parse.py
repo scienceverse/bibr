@@ -12,7 +12,8 @@ import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from bibr.exceptions import ProcessingError
+from bibr.exceptions import LlmCallError, ProcessingError
+from bibr.field_states import FieldScope, set_field_source
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import NAME_CHAR_CLS
 
@@ -482,6 +483,11 @@ async def _resolve_preparsed_references(
         ref_df = extractor._collect_reference_rows()
     except ValueError as e:
         logger.warning(f"Reference section not found: {e}")
+        contents.processing_warnings.append(
+            ProcessingWarning(
+                WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
+            )
+        )
         return paper_metadata
     except ProcessingError:
         raise
@@ -661,9 +667,38 @@ async def _extract_metadata_and_equations(
         contents.equations = regex_equations
     else:
         contents.equations = results[1]
+    failed_batches = eq_extractor.llm_batch_failures
+    if failed_batches:
+        # Each failed batch kept only its regex equations; say how many and why.
+        contents.processing_warnings.append(
+            ProcessingWarning(
+                WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+                f"{len(failed_batches)} of {eq_extractor.llm_batch_count} LLM batch(es) failed "
+                f"({', '.join(sorted(set(failed_batches)))}); their sentences kept regex-only "
+                "equation extraction",
+            )
+        )
     if validation_issue_sink is not None and extractor is not None:
         validation_issue_sink.extend(extractor.validation_issues)
     return results[0]
+
+
+def _note_extraction_sources(contents, paper_metadata, parse_strategy: str | None) -> None:
+    """Note the source of what metadata extraction produced, for ``extraction.fields``.
+
+    Front matter the input declares (JATS, HTML meta tags) is ``native``; the
+    core extractor notes its own sources. The reference list comes from the
+    input's structured citations or the configured parser.
+    """
+    if contents.preparsed_metadata is not None:
+        for field in ("title", "abstract", "keywords", "published", "journal", "author"):
+            set_field_source(paper_metadata, field, "native")
+        set_field_source(paper_metadata, "funding_statement", "native")
+    set_field_source(
+        paper_metadata,
+        "bib",
+        "native" if contents.native_references is not None else str(parse_strategy or "llm"),
+    )
 
 
 def _body_text_excluding_references(contents) -> str:
@@ -1389,6 +1424,20 @@ async def _link_citations(
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
+    if contents.citation_receipt is not None:
+        failed = [
+            reason.removeprefix("llm_failed:")
+            for candidate in contents.citation_receipt.candidates
+            for reason in candidate.rejection_reasons
+            if reason.startswith("llm_failed:")
+        ]
+        if failed:
+            contents.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.CITATION_LLM_FAILED,
+                    f"{failed[0]}: {len(failed)} ambiguous in-text citation(s) left unlinked",
+                )
+            )
     if validation_issue_sink is not None:
         issue = xref_low_coverage_issue(
             {reference.bib_id for reference in paper_metadata.references},
@@ -1634,6 +1683,7 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
+            _note_extraction_sources(contents, paper_metadata, parse_strategy)
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
@@ -1652,27 +1702,42 @@ async def post_parse(
             # under ownership scope. With a title in hand the only (default-off)
             # policy is byline adjacency for multilingual front matter.
             if metadata_ownership_scoped and not metadata_abstained and not paper_metadata.title:
-                if not _resolve_selected_title(
+                if _resolve_selected_title(
                     contents,
                     paper_metadata,
                     validation_issue_sink=metadata_issues,
                 ):
-                    _resolve_detected_title_fallback(
-                        contents,
-                        paper_metadata,
-                        validation_issue_sink=metadata_issues,
-                    )
-            elif metadata_ownership_scoped and not metadata_abstained:
-                _prefer_byline_adjacent_title(
+                    set_field_source(paper_metadata, "title", "front_matter_candidate")
+                elif _resolve_detected_title_fallback(
+                    contents,
+                    paper_metadata,
+                    validation_issue_sink=metadata_issues,
+                ):
+                    set_field_source(paper_metadata, "title", "layout_title")
+            elif (
+                metadata_ownership_scoped
+                and not metadata_abstained
+                and _prefer_byline_adjacent_title(
                     contents,
                     paper_metadata,
                     validation_issue_sink=metadata_issues,
                     settings=effective_settings,
                 )
+            ):
+                set_field_source(paper_metadata, "title", "byline_adjacent")
             if not metadata_ownership_scoped or is_exact_generic_article_label(
                 contents.detected_title
             ):
+                title_before = paper_metadata.title
                 _resolve_title(contents, paper_metadata)
+                if paper_metadata.title != title_before:
+                    set_field_source(
+                        paper_metadata,
+                        "title",
+                        "layout_title"
+                        if paper_metadata.title == contents.detected_title
+                        else "section_header",
+                    )
 
             # OCR/doc-info fallback can supply authors when primary extraction
             # abstains. Merge it before freezing the author-name snapshot used
@@ -1719,6 +1784,8 @@ async def post_parse(
             # commentary guard) finalizes metadata here — the export layer
             # serializes it verbatim.
             if not metadata_abstained:
+                abstract_before = paper_metadata.abstract
+                keywords_before = paper_metadata.keywords
                 _finalize_abstract_and_keywords(
                     contents,
                     paper_metadata,
@@ -1727,6 +1794,10 @@ async def post_parse(
                     ),
                     validation_issue_sink=metadata_issues,
                 )
+                if paper_metadata.abstract and not (abstract_before or "").strip():
+                    set_field_source(paper_metadata, "abstract", "abstract_section")
+                if paper_metadata.keywords and not keywords_before:
+                    set_field_source(paper_metadata, "keywords", "keywords_section")
 
             # Superscript cleanup runs last: it needs the ``^{N}`` markers
             # preserved through citation detection above, and must follow
@@ -1756,6 +1827,7 @@ async def post_parse(
                     file_hash,
                     integrity_resolution=integrity_resolution,
                 )
+                set_field_source(paper_metadata, "funding", "llm")
             extraction_completed = True
 
         except ProcessingError as exc:
@@ -1831,6 +1903,11 @@ async def post_parse(
     build_section_tree(contents.sections)
 
     paper = _build_paper(contents, paper_metadata, file_name, file_hash, paper_id)
+    paper.field_scope = FieldScope(
+        no_llm=no_llm,
+        native_metadata=contents.preparsed_metadata is not None,
+        references_off=parse_strategy == "off",
+    )
     paper.enrichment_prefetch = prefetch_handle
     paper.validation_issues.extend(front_matter_issues)
     paper.validation_issues.extend(metadata_issues)
@@ -1922,11 +1999,14 @@ class PostParseStage:
             if isinstance(result, BaseException):
                 typed_processing = isinstance(result, ProcessingError)
                 protocol_failure = typed_processing and result.error_code == "llm_invalid_output"
-                error_code = (
-                    result.error_code
-                    if typed_processing and result.error_code
-                    else "extraction_failed"
-                )
+                if typed_processing and result.error_code:
+                    error_code = result.error_code
+                elif isinstance(result, LlmCallError):
+                    # Say how the LLM failed (llm_timeout, llm_truncated, ...)
+                    # instead of the generic extraction code.
+                    error_code = result.error_code
+                else:
+                    error_code = "extraction_failed"
                 if typed_processing:
                     result.failed_stage = result.failed_stage or self.name
                 if protocol_failure:

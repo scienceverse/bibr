@@ -403,6 +403,7 @@ async def _classify_llm_batch(
     scope_context: list[str | None] | None = None,
     *,
     settings: GlobalSettings | None = None,
+    degradation_warnings: list[ProcessingWarning] | None = None,
 ) -> list[tuple[CanonicalSection, float]]:
     """Use LLM to classify unknown section headers in a single batch call.
 
@@ -556,7 +557,16 @@ Valid section types:
     except ProcessingError:
         raise
     except Exception as e:
+        from bibr.clients.llm import llm_failure_code
+
         logger.warning("LLM section classification failed: %s", e)
+        if degradation_warnings is not None:
+            degradation_warnings.append(
+                ProcessingWarning(
+                    WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
+                    f"{llm_failure_code(e)}: {len(header_texts)} header(s) were not classified",
+                )
+            )
         return [(CanonicalSection.UNKNOWN, 0.0)] * len(header_texts)
     finally:
         if owns_client and llm_client is not None:
@@ -776,6 +786,8 @@ async def classify_headers_batch_async(
                     }
                     if explicit_runtime:
                         llm_kwargs["settings"] = effective
+                    if degradation_warnings is not None:
+                        llm_kwargs["degradation_warnings"] = degradation_warnings
                     llm_results = await _classify_llm_batch(esc_texts, **llm_kwargs)
                     text_result_map = dict(zip(esc_texts, llm_results, strict=True))
                     for k in esc_keys:
@@ -826,6 +838,8 @@ async def classify_headers_batch_async(
             }
             if explicit_runtime:
                 llm_kwargs["settings"] = effective
+            if degradation_warnings is not None:
+                llm_kwargs["degradation_warnings"] = degradation_warnings
             llm_results_unique = await _classify_llm_batch(unique_texts, **llm_kwargs)
             unique_map_by_text = {
                 text: (canon, score, None, "llm" if canon != CanonicalSection.UNKNOWN else None)

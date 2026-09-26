@@ -235,6 +235,10 @@ class AbstractResponse(LLMResponse):
     """Retain an explicit JSON null separately from sanitized blank output."""
 
     _abstract_explicitly_absent: bool = PrivateAttr(default=False)
+    # Set when the response failed validation and was repaired locally
+    # (``bibr.clients.llm._recover_finished_response``): what the repair did,
+    # for the export's ``LLM_RESPONSE_REPAIRED`` warning. ``None`` otherwise.
+    _repair_note: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -450,9 +454,13 @@ class TitleKeywordsLLM(AbstractResponse):
 
     @field_validator("abstract", mode="before")
     @classmethod
-    def abstract_blank_to_none(cls, v: str | None) -> str | None:
+    def abstract_blank_to_none(cls, v: object) -> object:
         if v is None or _is_placeholder_token(v):
             return None
+        if not isinstance(v, str):
+            # Let the str check reject it as a ValidationError, which
+            # Instructor re-asks; an AttributeError here failed the call.
+            return v
         s = v.strip()
         return s or None
 
@@ -463,6 +471,10 @@ class TitleKeywordsLLM(AbstractResponse):
         non-str items defensively, preserving the order of the rest."""
         if v is None:
             return []
+        if isinstance(v, int | float):
+            # Left for the list check to reject as a ValidationError, which
+            # Instructor re-asks; iterating it raised a TypeError instead.
+            return v
         return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
 
     @model_validator(mode="before")
@@ -483,6 +495,10 @@ class AuthorsLLM(LLMResponse):
     nuextract_policy: ClassVar[NuExtractSchemaPolicy] = NuExtractSchemaPolicy()
 
     authors: list[AuthorLLM] = Field(description="The authors of the paper")
+
+    # Error code of the failed call these authors were salvaged from (the
+    # leading complete objects of an unfinished response); ``None`` normally.
+    _salvaged_after: str | None = PrivateAttr(default=None)
 
 
 class PaperClassificationLLM(LLMResponse):
@@ -612,6 +628,13 @@ class CoreMetadataLLM(AbstractResponse):
     published: str | None = Field(default=None)
     license: str | None = Field(default=None)
 
+    # Fields whose call failed, with the failure's error code, set when
+    # ``LLMClient.extract_core_metadata`` keeps the calls that succeeded. A
+    # failed field is empty, never a guess; never part of the response schema.
+    _field_failures: dict[str, str] = PrivateAttr(default_factory=dict)
+    # ``AuthorsLLM._salvaged_after`` of the author call, carried through.
+    _authors_salvaged_after: str | None = PrivateAttr(default=None)
+
     _coerce_title = field_validator("title", mode="before")(_scrub_str_placeholder)
     _canon_oecd_domain = field_validator("oecd_domain", mode="before")(_canonicalize_oecd_domain)
     _canon_oecd_subdomain = field_validator("oecd_subdomain", mode="before")(
@@ -621,10 +644,12 @@ class CoreMetadataLLM(AbstractResponse):
 
     @field_validator("abstract", mode="before")
     @classmethod
-    def abstract_blank_to_none(cls, v: str | None) -> str | None:
+    def abstract_blank_to_none(cls, v: object) -> object:
         """Mirror TitleKeywordsLLM: blank / NuExtract3 placeholder → None."""
         if v is None or _is_placeholder_token(v):
             return None
+        if not isinstance(v, str):
+            return v
         s = v.strip()
         return s or None
 
@@ -635,6 +660,10 @@ class CoreMetadataLLM(AbstractResponse):
         non-str items defensively, preserving the order of the rest."""
         if v is None:
             return []
+        if isinstance(v, int | float):
+            # Left for the list check to reject as a ValidationError, which
+            # Instructor re-asks; iterating it raised a TypeError instead.
+            return v
         return [kw for kw in v if isinstance(kw, str) and not _is_placeholder_token(kw)]
 
     @model_validator(mode="before")
@@ -851,11 +880,15 @@ class PaperReferenceLLM(PaperReference):
 
     @field_validator("bib_type", mode="before")
     @classmethod
-    def normalize_bib_type(cls, v: str | None) -> str | None:
+    def normalize_bib_type(cls, v: object) -> object:
         """Coerce legacy/free-form bib_type strings to a canonical
-        :class:`bibr.models.BibType` value (or None if unset)."""
+        :class:`bibr.models.BibType` value (or None if unset). A falsy value
+        maps to "other"; any other non-string is left for the str check to
+        reject as a ValidationError."""
         if v is None:
             return None
+        if not isinstance(v, str):
+            return v if v else migrate_bib_type(None)
         return migrate_bib_type(v)
 
     @model_validator(mode="before")

@@ -356,6 +356,7 @@ class RefLocator:
             if "reference" in hint_labels or "reference_content" in hint_labels:
                 ref_df = self._collect_last_unknown_section_rows()
                 self._reclassify_as_references(ref_df)
+                self._record_inferred_section(len(ref_df))
                 return self._trim_terminal_boundary(ref_df)
 
         # Fallback 2: a section whose whole heading reads as a references
@@ -377,6 +378,18 @@ class RefLocator:
                     return self._trim_terminal_boundary(fallback_df)
 
         raise ValueError("No reference section found.")
+
+    def _record_inferred_section(self, rows: int) -> None:
+        """Say that the reference list was inferred rather than found by its heading."""
+        from bibr.processing_warnings import ProcessingWarning, WarningCode
+
+        warning = ProcessingWarning(
+            WarningCode.REF_SECTION_INFERRED,
+            f"took the last unclassified section ({rows} rows) as the reference list",
+        )
+        warnings = getattr(self.contents, "processing_warnings", None)
+        if isinstance(warnings, list) and warning not in warnings:
+            warnings.append(warning)
 
     def _trim_terminal_boundary(self, ref_df: pd.DataFrame) -> pd.DataFrame:
         """Trim only a strong terminal transition after genuine ref rows.

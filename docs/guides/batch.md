@@ -128,7 +128,9 @@ Concurrency adapts to the serve:
   without shrinking in-flight, then recorded as `pipeline_timeout`.
 - Other 4xx answers are the paper's own problem — recorded once, no retry. A
   401/403 stops the whole run; the papers it failed are picked up again once
-  the token is fixed.
+  the token is fixed. An LLM response truncated at its token limit or rejected
+  by validation is a 422 with `error_code` `llm_truncated` or
+  `llm_invalid_output`, since the same request fails the same way again.
 - `--poll-timeout` (default 2400 s) bounds one paper's wall clock; expiry is
   recorded as `poll_timeout` without a retry.
 

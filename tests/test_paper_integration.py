@@ -118,7 +118,7 @@ def test_paper_export_to_json(mock_contents, mock_metadata):
     assert result["paper_id"] == "test"
 
     # Check metadata / source / root version
-    assert result["schema_version"] == "12.0"
+    assert result["schema_version"] == "12.1"
     metadata = result["metadata"]
     assert metadata["title"] == "Test Paper"
     assert metadata["doi"] == "10.1234/test"
@@ -405,7 +405,7 @@ def test_paper_export_bib_with_populated_references(mock_contents):
     assert cr["bib_type"] == "journal_article"
 
     # Verify version
-    assert result["schema_version"] == "12.0"
+    assert result["schema_version"] == "12.1"
 
 
 def test_paper_export_bib_without_matches(mock_contents):

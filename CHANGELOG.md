@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.1 (additive)
+
+The export moves to schema `12.1`, which adds one optional block; every 12.0
+export is still valid input for the 12.x reader, `bibr.validation`'s
+`payload_validation()` and the evaluator.
+
+- `extraction.fields` gives the state of each tracked field, so a consumer can
+  tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
+  declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
+  `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
+  `bib` it records `{state, source, issues}`. `state` is `extracted` (a value
+  was exported), `absent` (the extractor ran and found none), `abstained`
+  (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
+  `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
+  `not_attempted` (no LLM, references off). `source` names the step that
+  produced the value (`llm`, `title_grounding`, `front_matter_candidate`,
+  `layout_title`, `section_header`, `byline_adjacent`, `doc_info`,
+  `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
+  `classifier`, `llm_label`, `correction_notice`, `identity`,
+  `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
+  and `issues` the codes of the warnings and validation issues that explain the
+  state. The block is built from facts the pipeline already records and is
+  omitted for a Paper exported outside the pipeline. The conformance fixtures
+  gain a 12.0 reader example and an invalid field record.
+
 ### Changed — export schema 12.0 (breaking)
 
 The JSON export moves to schema `12.0`. It separates what the paper says from
@@ -549,6 +574,127 @@ released.
   is bit-identical to the serial loop. The OOM batch-halving retry restores
   torch.compile padding afterwards instead of leaving it disabled.
 
+- A failed LLM call now says how it failed. Every LLM task raised a bare
+  `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
+  answered all of them with 502, so a response truncated at the token limit
+  or rejected by schema validation, which fails the same way on every retry,
+  looked like an outage and `bibr batch --remote` resubmitted the paper up to
+  four times. The call now raises an `LlmCallError` subclass
+  (`LlmTruncatedError`, `LlmInvalidOutputError`, `LlmTimeoutError`,
+  `LlmServiceError`, `LlmRejectedError`), still an `UpstreamServiceError`, with
+  an `error_code` (`llm_truncated`, `llm_invalid_output`, `llm_timeout`,
+  `llm_failed`) and a bounded cause in the message: the error class and HTTP
+  status, never the provider's error text, and for invalid output the error
+  locations only, never the model's text. Serve answers a
+  truncated or invalid response with 422 and its code, and keeps 502, now with
+  the code, for the others. A post-parse failure caused by an LLM error
+  records that code instead of `extraction_failed`. `LlmUnreachableError`, an
+  `LlmServiceError`, marks a service that could not be reached at all (a
+  refused, dropped or never-accepted connection, or an open circuit breaker),
+  the same failures the batch resume's service-outage rule names, and that
+  rule now counts it as an outage, so a resumed batch runs such a paper again.
+- A truncated or invalid title/keywords response no longer fails the paper.
+  That call is the anchor of the record, so its failure cancelled the
+  reference task and the file ended with no export, losing references,
+  authors and DOI that were already extracted. Its fields (title, abstract,
+  keywords and the journal, date and license fields) now stay empty, the
+  layout fallbacks fill title and abstract as they do for any null model
+  title, and the export carries a blocking `VAL_METADATA_FIELD_FAILED` error
+  naming the failed fields and the error code. Blocking, like
+  `VAL_REFERENCES_INCOMPLETE`: the record is written but not promotable, so a
+  checkpointed `bibr chew -o` run routes it to `_quarantine/blocked/` and
+  keeps it retryable. The same applies to the merged core call
+  (`LLM_MERGED_CORE_METADATA`), whose failure marks every core field. A
+  timeout, a 429/5xx, a transport failure, a rejected request, a blank or
+  aborted completion (`llm_failed`, even when the unconstrained recovery of a
+  decoder abort then fails validation) or an unrecognized error still fails
+  the paper, since a retry can complete it, and so does a truncated title
+  response when another core call failed for such a reason. After a failed title call the trained paper classifier is
+  skipped rather than run on empty input. Before giving up, the title/keywords
+  call now recovers a finished response that failed validation only for
+  invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
+  explanatory prose around one JSON fence; it never completes truncated JSON
+  or takes a nested value (from draft PR #8). A repaired response adds a
+  non-blocking `LLM_RESPONSE_REPAIRED` warning naming the call and the repair.
+- One bad file no longer kills its chunk or the rest of a batch. The stage
+  contract says a stage records a per-file error and never raises, but a
+  failing sentence-segmenter load, an exception in the identity stage or a
+  failed classifier startup escaped the stage, and the library's batch loop
+  (`bibr.chew(list)`, `bibr batch`) then abandoned every later chunk. The
+  segmenter failure now fails the chunk's files with `parse_failed`, an
+  identity failure fails only its file (`identity_failed`), and a classifier
+  startup failure is logged while papers fall back as they do when the
+  trained classifiers do not answer.
+- A page too large for the render budget no longer fails its paper. Layout
+  rendered every page at one DPI and refused a page above
+  `LAYOUT_MAX_RENDER_PIXELS` or `LAYOUT_MAX_RENDER_DIMENSION`, so a 2420×3205 pt
+  poster page (59.9 MP at 200 DPI) failed the whole paper as `layout_failed`.
+  That page now renders at the largest DPI that fits (129 DPI for the poster),
+  down to 24, and the export carries a `PAGE_DPI_REDUCED` warning naming the
+  page and DPI; other pages keep the configured DPI. The floor is low because
+  only a page that is huge in PDF points needs it, and its text is as large: a
+  scan stored at eight times its paper size needs 64 DPI, and the largest page
+  PDF allows fits the default budget at 25. Layout boxes, OCR and
+  figure crops, native-text lookups and exported coordinates are all
+  normalized by the rendered image's own size or measured in PDF points, so
+  they stay in place on a reduced page. A page that does not fit even at 24 DPI
+  is still refused.
+- Fallbacks that used to leave only a log line now leave a warning in
+  `extraction.warnings`, its message starting with the error code (for
+  example `llm_timeout: …`); the extracted values are unchanged:
+  `RESEARCH_INTEGRITY_LLM_FAILED` (structured funding, author roles and
+  affiliation parts missing), `SECTION_CLASSIFIER_LLM_FAILED`,
+  `IMPLICIT_SECTIONS_LLM_FAILED`, `CITATION_LLM_FAILED` (the unresolved
+  tier-3 candidates also carry `llm_failed:<code>` in the citation receipt's
+  rejection reasons), `AUTHORS_LLM_FAILED`, `PAPER_CLASSIFICATION_FAILED`,
+  `REF_SECTION_NOT_FOUND` (the reference list is empty because no reference
+  section was found), `REF_SECTION_INFERRED` (the last unclassified section
+  was taken as the reference list), and `ROR_MATCHING_FAILED` (a ROR HTTP error,
+  transport failure or rate-limit backoff, which read as "no match").
+  `EQUATION_LLM_FALLBACK_FAILED` could not fire for an LLM failure; it now
+  reports how many fallback batches failed and why. A salvaged author list
+  says so: `AUTHORS_TRUNCATED` when the response hit the token limit,
+  `AUTHORS_PARTIAL` when it failed validation and only the leading authors
+  validated (the salvage used to report both as a truncation, in the log
+  only). `PAPER_CLASSIFIER_DEGRADED` is recorded once the LLM fallback's
+  outcome is known, and no longer claims the LLM classified the paper when
+  that call failed too. `LLMClient.resolve_citations` and
+  `extract_equations` now raise the typed error instead of returning an empty
+  list; their callers degrade as before.
+- A wrong-typed value in an LLM response (an abstract sent as a list of
+  paragraphs, a reference `bib_type` or the keywords sent as a number) raised
+  an `AttributeError` or `TypeError` from a validator, which skipped
+  Instructor's re-ask and failed the call as an upstream error. The validators
+  now leave such a value to the schema's type check, so it is a
+  `ValidationError`: re-asked where validation re-asks are enabled (cloud
+  providers by default; a custom OpenAI-compatible endpoint makes one
+  attempt), and otherwise an `llm_invalid_output` failure. A falsy `bib_type`
+  (`false`, `0`, `[]`) still maps to `other`.
+- The NuExtract native backend's Instructor recovery request now takes its own
+  rate-limit slot, as the decoder-abort recovery already did; it was a further
+  physical request that the shared limiter never saw.
+- Cloud OCR (`--ocr gemini|openai|anthropic`) now sees the HTTP status of a
+  failed call. Instructor wraps the provider's error in its own exception,
+  which carries no status, so a bad key (401/403/404) returned blank regions
+  until the file failed as mostly-failed OCR instead of raising at once, and a
+  429 or 5xx was never retried by bibr. The status is now read from the
+  wrapped error, as the LLM client's failure classification does.
+- One network blip while loading the default front-role classifier no longer
+  turns it off for the rest of the process. The loader cached any load failure
+  as "unavailable" and the resource manager pinned it, so after a Hub timeout a
+  long-running `bibr serve` worker or `bibr batch` ran every later paper on
+  front-matter heuristics alone. A network failure is now retried by the next
+  paper; a missing or invalid bundle is still given up after one attempt.
+- Serve no longer caches a result shaped by a failure a retry could avoid. Every
+  successful response was cached for 24 hours, so one Crossref timeout, OCR
+  blip or failed LLM call was replayed to every later request for the same
+  PDF, including async jobs and `bibr batch --remote` re-runs. A response with
+  a blocking issue other than a front-matter abstention, incomplete
+  enrichment or a warning in `bibr.processing_warnings.NOT_FINAL_CODES` (OCR,
+  LLM-task, enrichment and resolver failures and timeouts) is returned but not
+  cached. This matters
+  more now that a failed title/keywords response exports a partial record
+  instead of failing.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

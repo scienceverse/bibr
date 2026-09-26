@@ -904,12 +904,14 @@ class LayoutOptions(_BibrSettings):
     max_render_pixels: int = Field(
         25_000_000,
         ge=1,
-        description="Maximum rasterized pixels allowed for one PDF page before rendering.",
+        description="Maximum rasterized pixels for one PDF page. A page over it at LAYOUT_DPI "
+        "renders at the largest DPI that fits, down to 24; below that it is rejected.",
     )
     max_render_dimension: int = Field(
         10_000,
         ge=1,
-        description="Maximum rasterized width or height allowed for one PDF page.",
+        description="Maximum rasterized width or height for one PDF page, handled like "
+        "LAYOUT_MAX_RENDER_PIXELS.",
     )
     detection_threshold: float = Field(
         0.3, description="Minimum confidence score for a layout detection to be kept."

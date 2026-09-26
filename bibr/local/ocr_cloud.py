@@ -256,11 +256,12 @@ class CloudOcrClient:
                     text: str = result.text
                     return text
             except Exception as exc:
+                from bibr.clients.llm import http_status_in_chain
+
                 last_exc = exc
-                # Check if transient (retryable)
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if status is None:
-                    status = getattr(exc, "status_code", None)
+                # Check if transient (retryable). Instructor wraps the SDK's
+                # error, so the status is on the error it wraps.
+                status = http_status_in_chain(exc)
                 transient = isinstance(exc, TimeoutError) or (
                     status is not None and status in self._RETRYABLE_STATUS
                 )
