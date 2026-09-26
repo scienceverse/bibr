@@ -341,32 +341,6 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
-- The equation LLM fallback no longer queues methods/results sentences whose
-  digit-bearing parentheticals are only author-year citations, bare years, or
-  figure, table, supplement, equation or section references — unless the prose
-  around them carries digits of its own ("grand mean of 56.14", "PCC of
-  0.921"), which the regex pass also misses and the LLM can still ground.
-  Measured on the JATS corpora and the gate192 exports, roughly a fifth fewer
-  fallback candidates, every dropped one citation/reference-only; no exported
-  equation came from a dropped sentence.
-- Header and footer regions are now read from the PDF text layer instead of
-  OCR on born-digital PDFs, under the same printable-ratio gate as body text.
-  Their only consumers need plain text. Short running heads ("Cell Biology")
-  use the existing short-text allowance.
-- On CPU-only machines the layout detector now runs one page at a time unless
-  `LAYOUT_BATCH_SIZE` is set explicitly; batching pages on CPU only grows
-  ONNX Runtime's CPU arena without speeding anything up. CPU sessions for the
-  layout detector and the sentence segmenter now also disable the CPU arena,
-  which otherwise keeps its peak allocation for the session's life (the
-  auditor's RSS figures were not re-measured here). CUDA behavior is unchanged.
-- The NER reference parser now loads on CPU in aggressive memory mode and is
-  released after post-parse; `ResourceManager` also releases it when models
-  close. Balanced mode and CUDA behavior are unchanged.
-- The section classifier now distinguishes a below-threshold collapse from a
-  confident 'unknown' prediction in the code, and keeps the trained model's
-  `is_top_level` when the LLM escalation supplies a section type. Which
-  headings are escalated is unchanged: narrowing escalation to collapses only
-  needs a val-set measurement that cannot run without model weights.
 
 ### Added
 
@@ -419,6 +393,29 @@ released.
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
   still finish before the enrichment is reported partial.
+- On CPU-only machines the layout detector runs one page at a time unless
+  `LAYOUT_BATCH_SIZE` is set explicitly. Batching pages on CPU only grows
+  memory use without running faster.
+- CPU sessions for the layout detector and the sentence segmenter no longer
+  use the ONNX Runtime CPU arena, which otherwise holds its peak allocation
+  for the life of the session. The smaller footprint costs about 10% more
+  wall time on CPU.
+- In aggressive memory mode the NER reference parser loads on CPU rather than
+  the GPU and is released after post-parse. Balanced mode keeps it loaded
+  across files in one process, and CUDA behavior is unchanged.
+- The equation fallback sends fewer methods/results sentences to the LLM:
+  sentences whose digit-bearing parentheticals are only author-year citations,
+  bare years, or figure, table, supplement, equation or section references are
+  skipped — unless the surrounding prose carries digits of its own, in which
+  case they are still sent, as is any sentence with statistic-like content.
+  Measured over three public JATS corpora (3927 papers), about 18% of
+  sentences with digit-bearing parentheticals are skipped, all
+  citation/reference-only; no equation in the stored exports came from a
+  skipped sentence.
+- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
+  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
+  under the same printable-ratio gate as body text. Default output is
+  unchanged; enable it to compare.
 
 ## [0.5.1] - 2026-09-12
 

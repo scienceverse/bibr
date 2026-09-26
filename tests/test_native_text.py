@@ -269,20 +269,65 @@ def test_fill_skips_table_regions():
 
 
 def test_eligible_labels_include_header_footer():
-    """x-performance-3: header/footer regions are native-eligible — their only
-    consumers need plain text, which born-digital PDFs already contain."""
-    from bibr.ocr.native_text import _SHORT_NATIVE_TEXT_LABELS, DEFAULT_ELIGIBLE_LABELS
+    """x-performance-3 behind OCR_NATIVE_TEXT_HEADER_FOOTER (default off).
 
-    assert "header" in DEFAULT_ELIGIBLE_LABELS
-    assert "footer" in DEFAULT_ELIGIBLE_LABELS
+    Default output is unchanged (header/footer go to OCR); opting in adds
+    them to the eligible set. Short running heads keep the short-text
+    allowance in both cases (it only matters once they are eligible).
+    """
+    from bibr.config import GlobalSettings
+    from bibr.ocr.native_text import (
+        _SHORT_NATIVE_TEXT_LABELS,
+        DEFAULT_ELIGIBLE_LABELS,
+        HEADER_FOOTER_LABELS,
+        resolve_eligible_labels,
+    )
+
+    assert GlobalSettings().ocr.native_text_header_footer is False
+    assert "header" not in DEFAULT_ELIGIBLE_LABELS
+    assert "footer" not in DEFAULT_ELIGIBLE_LABELS
+    assert resolve_eligible_labels(False) == DEFAULT_ELIGIBLE_LABELS
+    assert resolve_eligible_labels(True) == DEFAULT_ELIGIBLE_LABELS | HEADER_FOOTER_LABELS
+    assert "header" in HEADER_FOOTER_LABELS
+    assert "footer" in HEADER_FOOTER_LABELS
     assert "header" in _SHORT_NATIVE_TEXT_LABELS
     assert "footer" in _SHORT_NATIVE_TEXT_LABELS
+
+
+def test_header_footer_setting_defaults_off_but_enables_fill(monkeypatch):
+    """The setting gates the behavior: off skips header/footer, on fills."""
+    from bibr.config import GlobalSettings
+    from bibr.ocr.native_text import resolve_eligible_labels
+
+    monkeypatch.setenv("OCR_NATIVE_TEXT_HEADER_FOOTER", "true")
+    assert GlobalSettings().ocr.native_text_header_footer is True
+
+    pdf_bytes = FIXTURE_PDF.read_bytes()
+    regions_off = [
+        [
+            {"label": "header", "task_type": "text", "bbox_2d": [0, 0, 1000, 1000], "content": ""},
+        ]
+    ]
+    filled_off = fill_regions_from_native_text(
+        pdf_bytes, regions_off, min_chars=5, eligible_labels=resolve_eligible_labels(False)
+    )
+    assert "_native_text_used" not in filled_off[0][0]
+
+    regions_on = [
+        [
+            {"label": "header", "task_type": "text", "bbox_2d": [0, 0, 1000, 1000], "content": ""},
+        ]
+    ]
+    filled_on = fill_regions_from_native_text(
+        pdf_bytes, regions_on, min_chars=5, eligible_labels=resolve_eligible_labels(True)
+    )
+    assert filled_on[0][0]["_native_text_used"] is True
 
 
 def test_fill_populates_header_footer_from_native_pdf():
     """Header/footer regions fill from the text layer like body text (same
     printable-ratio gate): every such region otherwise costs an OCR call."""
-    from bibr.ocr.native_text import DEFAULT_ELIGIBLE_LABELS
+    from bibr.ocr.native_text import resolve_eligible_labels
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     regions = [
@@ -293,7 +338,7 @@ def test_fill_populates_header_footer_from_native_pdf():
         ]
     ]
     filled = fill_regions_from_native_text(
-        pdf_bytes, regions, min_chars=5, eligible_labels=DEFAULT_ELIGIBLE_LABELS
+        pdf_bytes, regions, min_chars=5, eligible_labels=resolve_eligible_labels(True)
     )
     for region in filled[0]:
         assert region["_native_text_used"] is True, region["label"]
@@ -306,7 +351,7 @@ def test_fill_accepts_short_header_footer_below_body_min_chars(monkeypatch):
     """Running headers/footers ("Cell Biology", "Benartzi et al.") are shorter
     than the body min_chars: the short-text allowance covers them."""
     import bibr.ocr.native_text as native_mod
-    from bibr.ocr.native_text import DEFAULT_ELIGIBLE_LABELS
+    from bibr.ocr.native_text import resolve_eligible_labels
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     monkeypatch.setattr(native_mod, "_text_from_bbox_on_textpage", lambda *a, **k: "Cell Biology")
@@ -319,7 +364,7 @@ def test_fill_accepts_short_header_footer_below_body_min_chars(monkeypatch):
         ]
     ]
     filled = fill_regions_from_native_text(
-        pdf_bytes, regions, min_chars=20, eligible_labels=DEFAULT_ELIGIBLE_LABELS
+        pdf_bytes, regions, min_chars=20, eligible_labels=resolve_eligible_labels(True)
     )
 
     assert filled[0][0]["_native_text_used"] is True
@@ -332,7 +377,7 @@ def test_fill_header_footer_still_reject_corrupt_text(monkeypatch):
     """Guard: the printable-ratio gate still applies to headers/footers, so a
     broken text layer falls back to OCR instead of ingesting mojibake."""
     import bibr.ocr.native_text as native_mod
-    from bibr.ocr.native_text import DEFAULT_ELIGIBLE_LABELS
+    from bibr.ocr.native_text import resolve_eligible_labels
 
     pdf_bytes = FIXTURE_PDF.read_bytes()
     monkeypatch.setattr(
@@ -346,7 +391,7 @@ def test_fill_header_footer_still_reject_corrupt_text(monkeypatch):
         ]
     ]
     filled = fill_regions_from_native_text(
-        pdf_bytes, regions, min_chars=5, eligible_labels=DEFAULT_ELIGIBLE_LABELS
+        pdf_bytes, regions, min_chars=5, eligible_labels=resolve_eligible_labels(True)
     )
 
     for region in filled[0]:

@@ -1012,9 +1012,9 @@ class TestLlmEscalation:
         assert results[0][0] == CanonicalSection.METHODS
 
     async def test_llm_overwrite_keeps_model_is_top_level(self, monkeypatch):
-        """When the LLM supplies a type for a confidently-unknown heading,
-        the trained model's is_top_level survives (the LLM predicts no
-        hierarchy)."""
+        """Deferred with the escalation narrowing: the LLM overwrite resets
+        is_top_level to None (as on main), pending a val-set hierarchy
+        measurement. The trained model's top/sub bit is not followed yet."""
         import bibr.structure.section_classifier as sc
         from bibr.paper_contents import CanonicalSection
 
@@ -1033,7 +1033,7 @@ class TestLlmEscalation:
 
         results = await sc.classify_headers_batch_async(["Stimuli"])
 
-        assert results[0] == (CanonicalSection.METHODS, 0.85, False, "llm")
+        assert results[0] == (CanonicalSection.METHODS, 0.85, None, "llm")
 
     async def test_llm_overwrite_of_collapse_keeps_none_is_top_level(self, monkeypatch):
         """A below-threshold collapse carries no hierarchy signal, so the LLM

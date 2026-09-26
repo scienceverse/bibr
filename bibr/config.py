@@ -640,6 +640,13 @@ class OcrOptions(_BibrSettings):
         description="Minimum fraction of printable characters a native-text extraction must have "
         "to be trusted; below this the page falls back to OCR.",
     )
+    native_text_header_footer: bool = Field(
+        False,
+        description="Read header/footer regions from the PDF text layer instead of OCR "
+        "on born-digital PDFs, under the same printable-ratio gate as body text. "
+        "Off by default pending an eval of DOI furniture and front-matter effects; "
+        "enable to A/B. Short running heads use the short-text allowance.",
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "
@@ -877,7 +884,7 @@ class LayoutOptions(_BibrSettings):
         8,
         ge=1,
         description="Page batch size for layout model inference. The configured value is "
-        "the CUDA batch; on CPU the local and serve detectors run one page at a time "
+        "the non-CPU batch; on CPU the local and serve detectors run one page at a time "
         "unless this was set explicitly (a CPU batch of 8 grows the ORT CPU arena to "
         "several GB with no throughput gain).",
     )

@@ -197,28 +197,66 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
 _PAREN_WITH_NUMS_RE = re.compile(r"\([^)]*\d[^)]*\)")
 
 # A digit-bearing parenthetical that may carry a statistic the LLM could
-# extract shows a comparison/approximation operator. Groups without one that
-# match the citation/reference patterns below cannot ground an equation
-# component (the fallback drops ungrounded answers anyway), so they only
-# burn prompt budget — and serialize ahead of the metadata calls on managed
-# local backends. Checked first so a group like "(see Figure 3, t = 5.2)"
-# stays a candidate.
-_STAT_HINT_RE = re.compile(r"[=<>~≤≥≈≠±]")
+# extract shows a statistic hint. Groups without one that match the
+# citation/reference patterns below cannot ground an equation component
+# (the fallback drops ungrounded answers anyway), so they only burn prompt
+# budget — and serialize ahead of the metadata calls on managed local
+# backends. Checked first so a group like "(see Figure 3, t = 5.2)" stays
+# a candidate. Each alternative is a fixed token or a single
+# letter-plus-number (no nested quantifiers), so the scan stays linear.
+_STAT_HINT_RE = re.compile(
+    r"[=<>~≤≥≈≠±%]"
+    r"|\bCI\b"
+    r"|\b(?:OR|HR|RR|IQR|SD|SE)\b"
+    r"|\b(?:alpha|beta|Alpha|Beta)\b"
+    r"|\b[DMNRdmnrtFTf]\s*\d"
+)
+
+# A bare decimal (".87", "3.45") usually marks a statistic, but dotted
+# section numbers ("Section 2.3") legitimately contain one and must stay
+# filtered — so decimals only keep a candidate when no section-like dotted
+# number is present. Both searches are plain linear scans.
+_DECIMAL_HINT_RE = re.compile(r"(?:\d\.\d+|\.\d+)")
+_SECTION_LIKE_RE = re.compile(r"(?:section|chapter|§)\s*\d+\.\d+", re.IGNORECASE)
 
 # Four-digit publication years: 1800-2099 with an optional letter suffix.
 _PAREN_YEAR = r"(?:18|19|20)\d{2}[a-z]?"
 
-# Author-year citations: a capitalized name (or organisation) plus a year,
-# optionally several separated by semicolons/commas, with an optional
-# "see"/"e.g." lead and an optional trailing page span. Examples:
-# "(Teckchandani et al., 2014)", "(Smith & Jones, 2020)",
-# "(Smith, 2020; Jones et al., 2019)", "(WHO, 2021)".
-_CITATION_PAREN_RE = re.compile(
+# One author-year citation piece: a capitalized name plus year(s), with an
+# optional "see"/"cf." lead and an optional trailing page span. Examples:
+# "Teckchandani et al., 2014", "Smith & Jones, 2020", "WHO, 2021",
+# "Smith, 2020, p. 5", "see Smith, 2020". The name part forbids digits and
+# ";" so a piece cannot span years; callers split the parenthetical on ";"
+# and require every piece to match, which keeps the whole check linear
+# (no lazy runs nested inside a repeated group).
+_CITATION_PIECE_RE = re.compile(
     r"^\s*(?:see|cf\.?|e\.g\.?|i\.e\.?)?\.?\s*,?\s*"
-    r"[A-ZÀ-Þ][^()]*?" + _PAREN_YEAR + r"(?:\s*[;,]\s*[^()]*?" + _PAREN_YEAR + r")*"
+    r"[A-ZÀ-Þ][^;()\d]*?,?\s*" + _PAREN_YEAR + r"(?:\s*,\s*" + _PAREN_YEAR + r")*"
     r"(?:\s*[,;:]\s*(?:pp?\.?\s*)?\d+(?:\s*[–—-]\s*\d+)?)?"
     r"\s*$"
 )
+
+
+def _is_citation_piece(piece: str) -> bool:
+    """True when one ";"-separated piece looks like names plus year(s).
+
+    The regex above already requires a capitalized start and a year; the
+    extra comma/"et al."/"&" check rejects single-letter statistics such
+    as "N 1850" (no comma, no "et al.", no "&"), which would otherwise
+    read as a one-letter author plus a year-like number.
+    """
+    if not _CITATION_PIECE_RE.match(piece):
+        return False
+    low = piece.lower()
+    return "," in piece or "et al" in low or "&" in piece
+
+
+def _is_citation_group(inner: str) -> bool:
+    """True when every ";"-separated piece of a group is a citation."""
+    pieces = [p.strip() for p in inner.split(";")]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and all(_is_citation_piece(p) for p in pieces)
+
 
 # Bare year mentions: "(2020)", "(2019, 2020)", "(2004–2008)". A year is not
 # a statistic, so these groups never ground an equation component.
@@ -226,18 +264,89 @@ _BARE_YEAR_PAREN_RE = re.compile(
     r"^\s*" + _PAREN_YEAR + r"(?:\s*[,;/–—-]\s*" + _PAREN_YEAR + r")*\s*$"
 )
 
-# Figure/table/supplement/equation/section references: "(Figure 3c,d)",
-# "(Tables 1 and 2)", "(Supplementary Table S1)", "(Eq. 3)",
-# "(Section 2.3)", "(§2.3)". The lookahead keeps words that merely start
-# with a keyword ("Tablet 5mg", "Equal variances") out.
-_REF_PAREN_RE = re.compile(
-    r"^\s*(?:see|cf\.?|e\.g\.?)?\s*"
+# Reference keywords and the lookahead that keeps words merely starting
+# with one ("Tablet 5mg", "Equal variances") out.
+_REF_LEAD_RE = re.compile(r"^\s*(?:see|cf\.?|e\.g\.?)?\s*", re.IGNORECASE)
+_REF_KEYWORD_RE = re.compile(
     r"(?:fig(?:ure)?s?|tables?|tab\.|suppl(?:ement(?:ary)?)?"
     r"|eq(?:uation)?s?|sections?|sect?\.|§|chapters?|appendix|appendices)"
-    r"(?=[\s.)\]\d]|$)"
-    r"[^()]*$",
+    r"(?=[\s.)\]\d]|$)",
     re.IGNORECASE,
 )
+_REF_KEYWORD_TOKENS = frozenset(
+    {
+        "fig",
+        "figure",
+        "figures",
+        "table",
+        "tables",
+        "tab",
+        "suppl",
+        "supplement",
+        "supplementary",
+        "eq",
+        "equation",
+        "equations",
+        "section",
+        "sections",
+        "sect",
+        "chapter",
+        "chapters",
+        "appendix",
+        "appendices",
+    }
+)
+_REF_NUMBER_RE = re.compile(r"S?\d+(?:\.\d+)?[a-z]?")
+_REF_SINGLE_RE = re.compile(r"[A-Za-z]")
+
+
+def _is_reference_piece(piece: str) -> bool:
+    """True when one ";"-separated piece holds only reference tokens.
+
+    After an optional lead and keyword, the tail may contain numbers and
+    panel letters ("3", "3c", "S1", "2.3", "4b"), commas/colons/dashes,
+    "and"/"&", and further reference keywords ("Supplementary Table S1").
+    Anything else — "%", "CI", "OR", "SD", "beta", "vs", multi-letter
+    words — fails the piece, so mixed groups like "(Table 2; M 3.45)"
+    stay candidates. A lone letter only passes as a panel continuation
+    ("3c,d": "d" follows a number and precedes no number); a letter
+    before a number ("M 3.45", "N 1850", "p. 5") is a statistic or page
+    span, not a panel, and fails.
+    """
+    text = _REF_LEAD_RE.sub("", piece.strip(), count=1)
+    matched = _REF_KEYWORD_RE.match(text)
+    if not matched:
+        # No keyword: not a reference (bare "1a" or "M 3.45" stays a
+        # candidate; a bare "4" continuation after ";" also stays one —
+        # an extra LLM call is safer than filtering a statistic).
+        return False
+    tail = text[matched.end() :]
+    tokens = [t for t in re.split(r"[\s,;:()\[\]–—-]+", tail) if t and t != "."]
+    if not tokens:
+        return False
+    if not any(_REF_NUMBER_RE.fullmatch(t) for t in tokens):
+        return False
+    for i, tok in enumerate(tokens):
+        low = tok.lower().rstrip(".")
+        if low in ("and", "&") or low in _REF_KEYWORD_TOKENS:
+            continue
+        if _REF_NUMBER_RE.fullmatch(tok):
+            continue
+        if _REF_SINGLE_RE.fullmatch(tok):
+            prev_is_number = i > 0 and bool(_REF_NUMBER_RE.fullmatch(tokens[i - 1]))
+            next_is_number = i + 1 < len(tokens) and bool(_REF_NUMBER_RE.fullmatch(tokens[i + 1]))
+            if prev_is_number and not next_is_number:
+                continue
+            return False
+        return False
+    return True
+
+
+def _is_reference_group(inner: str) -> bool:
+    """True when every ";"-separated piece of a group is a reference."""
+    pieces = [p.strip() for p in inner.split(";")]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and all(_is_reference_piece(p) for p in pieces)
 
 
 def _is_nonstatistical_paren(group: str) -> bool:
@@ -245,16 +354,18 @@ def _is_nonstatistical_paren(group: str) -> bool:
 
     ``group`` includes its parentheses. Returns True for author-year
     citations, bare year mentions, and figure/table/supplement/equation/
-    section references — unless the group shows a statistic operator
-    (``=``, ``<``, ``>``, ...), which always keeps it a candidate.
+    section references — unless the group shows a statistic hint (an
+    operator, "%", "CI", "OR"/"HR"/"SD"/"SE" and kin, "alpha"/"beta", a
+    statistic letter with a number, or a non-section decimal), which
+    always keeps it a candidate.
     """
     inner = group[1:-1] if len(group) >= 2 else group
     if _STAT_HINT_RE.search(inner):
         return False
+    if _DECIMAL_HINT_RE.search(inner) and not _SECTION_LIKE_RE.search(inner):
+        return False
     return bool(
-        _CITATION_PAREN_RE.match(inner)
-        or _BARE_YEAR_PAREN_RE.match(inner)
-        or _REF_PAREN_RE.match(inner)
+        _is_citation_group(inner) or _BARE_YEAR_PAREN_RE.match(inner) or _is_reference_group(inner)
     )
 
 
@@ -358,6 +469,10 @@ class EquationExtractor:
         First runs regex extraction, then identifies sentences in
         methods/results sections that have parenthesized numeric content
         but where regex found nothing, and sends those to the LLM.
+        Sentences whose digit-bearing parentheticals are only author-year
+        citations, bare years, or figure/table references (see
+        :func:`_has_statistical_paren`) are skipped unless the surrounding
+        prose carries digits of its own.
 
         Parameters
         ----------

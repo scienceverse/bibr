@@ -409,7 +409,11 @@ _NER_LOCK = threading.Lock()
 
 
 def _get_ner_segmenter(settings: GlobalSettings | None = None):
-    """Lazy-load the CRF segmenter singleton (no parser)."""
+    """Lazy-load the CRF segmenter singleton (no parser).
+
+    Known follow-up (deferred): unlike the parser above, this still loads
+    with settings.NER_DEVICE and has no aggressive-mode unload hook.
+    """
     global _NER_SEGMENTER, _NER_SEGMENTER_KEY
     settings = settings if settings is not None else snapshot_settings()
     key = (settings.NER_SEG_CKPT, settings.NER_DEVICE, settings.NER_SEG_REVISION)
@@ -524,28 +528,22 @@ def resolve_ner_device(settings: GlobalSettings, memory_mode: str | None = None)
 
 
 def unload_ner_parser() -> None:
-    """Release the cached NER parser singleton, if one is loaded.
+    """Drop the cached NER parser singleton reference, if one is loaded.
 
-    The aggressive-mode hook in ``PostParseStage`` calls this after
-    post-parse so the parser's ~1 GB does not stay resident through the next
-    chunk's OCR/LLM phases; ``ResourceManager.close_models`` calls it too.
-    Reload is lazy on next use. Never raises.
+    Only clears the module-global reference (and its key) under
+    ``_NER_LOCK``; an in-flight ``parse_batch`` holding its own reference
+    keeps using its session, and the object is freed once all holders
+    finish. Never closes the shared object: closing its session while
+    another pipeline parses would break that parse. The aggressive-mode
+    hook in ``PostParseStage`` calls this after post-parse so the parser's
+    ~1 GB does not stay resident through the next chunk's OCR/LLM phases;
+    ``ResourceManager.close_models`` calls it in aggressive mode only.
+    Reload is lazy on next use.
     """
     global _NER_PARSER, _NER_PARSER_KEY
     with _NER_LOCK:
-        parser = _NER_PARSER
         _NER_PARSER = None
         _NER_PARSER_KEY = None
-    if parser is None:
-        return
-    for method_name in ("close", "unload"):
-        closer = getattr(parser, method_name, None)
-        if callable(closer):
-            try:
-                closer()
-            except Exception:  # noqa: BLE001 — best-effort release
-                logger.warning("NER parser %s failed", method_name, exc_info=True)
-            break
     logger.info("NER parser unloaded")
 
 

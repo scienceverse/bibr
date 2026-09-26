@@ -154,7 +154,9 @@ class LayoutDetector(BaseLayoutDetector):
 
         if self._runtime == "onnx":
             try:
-                batch_size = effective_layout_batch_size(self._settings, self._device.type)
+                batch_size = effective_layout_batch_size(
+                    self._settings, getattr(getattr(self, "_device", None), "type", None)
+                )
                 self._model.run([Image.new("RGB", (640, 480))] * batch_size)
                 logger.info("Layout model warmup complete (onnxruntime)")
             except Exception:
@@ -166,7 +168,10 @@ class LayoutDetector(BaseLayoutDetector):
         try:
             dummy = Image.new("RGB", (640, 480))
             inputs = self._image_processor(
-                images=[dummy] * effective_layout_batch_size(self._settings, self._device.type),
+                images=[dummy]
+                * effective_layout_batch_size(
+                    self._settings, getattr(getattr(self, "_device", None), "type", None)
+                ),
                 return_tensors="pt",
             )
             inputs = {k: v.to(self._device) for k, v in inputs.items()}

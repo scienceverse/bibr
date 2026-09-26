@@ -58,10 +58,6 @@ class OnnxRefParser:
         )
         self._input_names = [i.name for i in self.session.get_inputs()]
 
-    def close(self) -> None:
-        """Release the ORT session (see ``unload_ner_parser``). Idempotent."""
-        self.session = None
-
     def parse(self, ref_text: str) -> dict[str, str | int]:
         """Parse one reference. Returns a dict with PaperReference field names."""
         if not ref_text or not ref_text.strip():

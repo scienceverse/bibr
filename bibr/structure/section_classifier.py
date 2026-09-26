@@ -781,10 +781,12 @@ async def classify_headers_batch_async(
                     for k in esc_keys:
                         canon, score = text_result_map[esc_text_for_key[k]]
                         if canon != CanonicalSection.UNKNOWN:
-                            # Keep the trained model's is_top_level: it is the
-                            # signal the trained tier exists to provide, and
-                            # the LLM tier does not predict hierarchy.
-                            unique_map[k] = (canon, score, unique_map[k][2], "llm")
+                            # Deferred with the escalation narrowing below:
+                            # keeping the model's is_top_level here would move
+                            # exported levels/parents for LLM-typed headings,
+                            # which needs a val-set hierarchy measurement
+                            # first. The LLM tier predicts no hierarchy.
+                            unique_map[k] = (canon, score, None, "llm")
 
             # Last-resort fallback: model and LLM both said UNKNOWN, but the
             # header did contain a known alias — better a weak alias signal

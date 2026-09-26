@@ -219,12 +219,13 @@ class ResourceManager:
         return self._segmenter
 
     def unload_ner_parser(self) -> None:
-        """Release the NER reference-parser singleton, if one is loaded.
+        """Drop the NER reference-parser singleton reference, if one is loaded.
 
         The parser lives in ``bibr.extract.ref_extractor`` outside the
         layout/segmenter lifecycle, so aggressive mode never unloads it
         without this hook (``PostParseStage`` calls it after post-parse).
-        Reload is lazy on next use.
+        Only the reference is dropped; in-flight holders keep the object
+        alive. Reload is lazy on next use.
         """
         from bibr.extract.ref_extractor import unload_ner_parser
 
@@ -244,8 +245,11 @@ class ResourceManager:
         if not self._owns_models:
             return
         # The NER parser singleton is process-global rather than an owned
-        # model object, so it is released directly instead of via the loop.
-        self.unload_ner_parser()
+        # model object. Release it in aggressive mode only: balanced
+        # one-shot chew() calls share the process, and unloading there
+        # would reload the ~1 GB parser on every file.
+        if self.memory_mode == "aggressive":
+            self.unload_ner_parser()
         for model in models:
             if model is None:
                 continue

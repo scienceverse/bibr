@@ -108,7 +108,7 @@ _MAX_BATCH_SIZE = _DEFAULT_SETTINGS.layout.batch_size
 _CPU_LAYOUT_BATCH_SIZE = 1
 
 
-def effective_layout_batch_size(settings, device_type: str | None = None) -> int:
+def effective_layout_batch_size(settings: GlobalSettings, device_type: str | None = None) -> int:
     """Page batch size for layout inference given the resolved device.
 
     An explicitly configured ``LAYOUT_BATCH_SIZE`` always wins. Otherwise CPU

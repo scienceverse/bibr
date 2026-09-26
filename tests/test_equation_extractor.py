@@ -1045,3 +1045,96 @@ class TestLlmFallbackCitationFilter:
         ]
         for text in rescued:
             assert _has_statistical_paren(text) is True, text
+
+    def test_statistic_hints_keep_mixed_reference_groups(self):
+        """Statistics sharing a citation/reference paren stay candidates.
+
+        A Figure/Table group may hold only reference tokens; a citation
+        piece must read as names plus years. CI, "%", OR/HR/SD/SE and kin,
+        "alpha"/"beta", a statistic letter with a number, and non-section
+        decimals all mark a statistic.
+        """
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        kept = [
+            "The effect was robust (Cohen's d 0.45; Smith et al., 2019).",
+            "Accuracy improved (Table 2; M 3.45, SD 1.20).",
+            "Responses were slower (Figure 3, 95% CI 1.2 to 3.4).",
+            "Participants were recruited online (N 1850).",
+            "Scores rose (SE 1.2, N 2013).",
+            "Smoking was associated with higher risk (Table 2; OR 1.85, 95% CI 1.20-2.90).",
+            "Effects were robust (see Supplementary Table S3; beta 0.34, SE 0.05).",
+            "Scores were high overall (M 12.3, SD 2.1, N 2000).",
+            "Reliability was good (Cronbach alpha .87; Figure 2).",
+            "Accuracy improved markedly (Fig. 4b: 71.2% vs 64.5%).",
+            "The indirect effect was significant (Model 4 from Hayes, 2013; 95% CI [0.12, 0.45]).",
+        ]
+        for text in kept:
+            assert _has_statistical_paren(text) is True, text
+
+    def test_single_letter_sample_size_is_not_a_citation(self):
+        """ "N 1850" must not read as a one-letter author plus a year."""
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        assert _has_statistical_paren("Participants were recruited online (N 1850).") is True
+        assert _has_statistical_paren("Scores were high overall (M 12.3, SD 2.1, N 2000).") is True
+
+    def test_tablet_without_operator_stays_a_candidate(self):
+        """`Tablet` merely starts with the `table` keyword: the reference
+        lookahead must keep it out, so the group stays a candidate. Same
+        for a keyword prefix joined to reference tokens (`Tableand 2`):
+        without the lookahead the tail alone would read as a reference.
+        """
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        assert _has_statistical_paren("Dose was fixed (Tablet 5mg) per protocol.") is True
+        assert _has_statistical_paren("Results held (Tableand 2) across runs.") is True
+
+    def test_see_lead_citation_is_filtered(self):
+        """The citation "see" lead is part of the pattern; without it a
+        lowercase "see Smith, 2020" would not match and would waste a call."""
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        assert _has_statistical_paren("As shown before (see Smith, 2020).") is False
+
+    def test_page_span_citation_is_filtered(self):
+        """A trailing page span does not make a citation statistical."""
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        assert _has_statistical_paren("As shown before (Smith, 2020, p. 5).") is False
+
+    def test_long_citation_groups_finish_quickly(self):
+        """Linear-time guard: a 30-citation group with an "in press" tail
+        and a long comma-year run with a non-year tail each finish well
+        under 50 ms (the old nested pattern hung exponentially)."""
+        import time
+
+        from bibr.extract.equation_extractor import _has_statistical_paren
+
+        names = [
+            "Smith",
+            "Jones",
+            "Brown",
+            "Lee",
+            "Kim",
+            "Park",
+            "Chen",
+            "Wang",
+            "Li",
+            "Zhang",
+            "Liu",
+            "Garcia",
+            "Miller",
+            "Davis",
+            "Wilson",
+        ]
+        cites = "; ".join(f"{names[i % len(names)]} et al., {2000 + i}" for i in range(30))
+        long_press = f"Prior work agrees ({cites}; Martin, in press)."
+        start = time.perf_counter()
+        _has_statistical_paren(long_press)
+        assert time.perf_counter() - start < 0.05, "30-citation group took too long"
+
+        comma_run = "(A" + " 1999," * 8000 + " x)"
+        start = time.perf_counter()
+        _has_statistical_paren(comma_run)
+        assert time.perf_counter() - start < 0.05, "comma-year run took too long"
