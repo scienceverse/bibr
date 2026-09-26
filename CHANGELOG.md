@@ -541,12 +541,17 @@ released.
   parsed DOI that lost its last characters gives way to the complete reading
   of its printed line.
 - A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
-  figure note (a cited work, or the preprint of the paper) outranked the
-  paper's own DOI printed as a doi.org link on page 1, and became the DOI of a
-  paper that prints none. A labelled DOI now names the paper only in the front
-  matter and the running headers and footers. An eLife JATS or HTML file's
-  labelled figure DOIs no longer raise `VAL_DOI_AMBIGUOUS` against its
-  article-id.
+  figure note outranked the paper's own DOI printed as a doi.org link on page
+  1. Outside the front matter and the running headers and footers, a labelled
+  DOI now ranks below every front-matter candidate. It still names the paper
+  when it is the only candidate left, as in a preprint's "The present work has
+  been shared as a preprint on …, doi: …"; two different ones are reported as
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside a citation
+  (a reference entry outside the located reference list, or a figure's source
+  note citing another work) never names the paper, and neither does a reference
+  entry the layout took for a running header, as when a file repeats its
+  reference list. An eLife JATS or HTML file's labelled figure DOIs no longer
+  raise `VAL_DOI_AMBIGUOUS` against its article-id.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
