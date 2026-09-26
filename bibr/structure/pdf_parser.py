@@ -314,6 +314,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # capture time so an unowned candidate can be replayed as body text
         # under its own section rather than whatever section parsing ended in.
         self._caption_candidate_sections: dict[str, int] = {}
+        # caption_id → whether OCR produced the candidate's text (False for
+        # the PDF text layer); rides to the sentences it becomes.
+        self._caption_candidate_from_ocr: dict[str, bool] = {}
         self._figure_source_indices: dict[int, int] = {}
         self._table_source_indices: dict[int, int] = {}
         self._structure_validation_issues = []
@@ -553,6 +556,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         Preserves the original body ``section_id`` on each figure/table
         so that study-ID propagation can inherit from the correct section.
         """
+        caption_from_ocr = self._caption_text_from_ocr()
+
         # --- Figure sections ---
         for fig in self.figures:
             # Remember the body section where the figure was declared so
@@ -582,6 +587,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     section_id=self._section_counter,
                     paragraph_id=self._paragraph_counter,
                     page_number=fig.page_number,
+                    from_ocr=caption_from_ocr.get(fig.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
                 self._sentence_counter += 1
@@ -614,15 +620,20 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     section_id=self._section_counter,
                     paragraph_id=self._paragraph_counter,
                     page_number=tbl.page_number,
+                    from_ocr=caption_from_ocr.get(tbl.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
                 self._sentence_counter += 1
 
         # --- Footnote sections + xrefs ---
         formula_text_ids = {s.text_id for s in self.sentences if s.is_display_formula}
-        for footnote_num, (fn_text, fn_page, _fn_orig_section, fn_deferred_idx) in enumerate(
-            self._footnotes, start=1
-        ):
+        for footnote_num, (
+            fn_text,
+            fn_page,
+            _fn_orig_section,
+            fn_deferred_idx,
+            fn_from_ocr,
+        ) in enumerate(self._footnotes, start=1):
             self._section_counter += 1
             footnote_section_id = self._section_counter
             marker = printed_marker(fn_text)
@@ -646,6 +657,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 section_id=footnote_section_id,
                 paragraph_id=self._paragraph_counter,
                 page_number=fn_page,
+                from_ocr=fn_from_ocr,
             )
             contents.sentences.append(sent)
             self._sentence_counter += 1
@@ -968,6 +980,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             if treatment == "abandon":
                 continue
 
+            # Text read from the PDF text layer is not OCR output: the late
+            # cleanup leaves its prose alone (``PaperSentence.from_ocr``).
+            from_ocr = not region.native_text_used
+
             # Demote running headers detected by _mark_running_headers,
             # regardless of how the layout model labeled them (doc_title /
             # paragraph_title heading OR body ``text``). Routing to
@@ -985,16 +1001,23 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             if treatment == "heading":
                 # Flush any carry-over before a heading
                 self._flush_carry_over()
-                self._handle_heading(effective_label, content, page_number, bbox)
+                self._handle_heading(effective_label, content, page_number, bbox, from_ocr=from_ocr)
 
             elif treatment == "section_hint":
                 self._flush_carry_over()
                 self._handle_section_hint(
-                    effective_label, content, page_number, bbox, region_meta=region_meta
+                    effective_label,
+                    content,
+                    page_number,
+                    bbox,
+                    region_meta=region_meta,
+                    from_ocr=from_ocr,
                 )
 
             elif treatment == "content":
-                self._handle_content(content, page_number, bbox, region_meta=region_meta)
+                self._handle_content(
+                    content, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+                )
 
             elif treatment == "formula":
                 self._handle_formula(content, page_number, bbox, region_meta=region_meta)
@@ -1008,7 +1031,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 self._handle_table(content, page_number, bbox)
 
             elif treatment == "table_caption":
-                self._handle_table_caption(content, bbox, page_number)
+                self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
 
             elif treatment == "figure":
                 self._flush_carry_over()
@@ -1021,10 +1044,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
 
             elif treatment == "caption":
                 # Smart route: "Table …" → table caption, else → figure caption
-                self._handle_caption(content, bbox, page_number, source_label=effective_label)
+                self._handle_caption(
+                    content, bbox, page_number, source_label=effective_label, from_ocr=from_ocr
+                )
 
             elif treatment == "footnote":
-                self._handle_footnote(content, page_number)
+                self._handle_footnote(content, page_number, from_ocr=from_ocr)
 
             region_summary.section_id = self._current_section_id or None
 

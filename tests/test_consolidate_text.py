@@ -1,5 +1,9 @@
 """Tests for bibr.input.consolidate_text module."""
 
+import time
+
+import pytest
+
 from bibr.input.consolidate_text import (
     clean_formula_text,
     clean_text_content,
@@ -443,3 +447,143 @@ class TestCleanTextContentLate:
     def test_collapses_spaced_operatorname(self):
         result = clean_formula_text(r"\operatorname{A t t e n t i o n}(Q, K, V)")
         assert result == r"\operatorname{Attention}(Q, K, V)"
+
+
+class TestLateCleanupScope:
+    """Late cleanup flattens LaTeX inside ``$…$`` for every source; outside
+    those spans it repairs OCR text only, and prose never loses characters."""
+
+    PROSE = [
+        "Participants completed a 2 x 2 x 3 mixed design.",
+        "We used a 2 × 2 factorial design.",
+        "Items 1 2 3 and 4 were reverse scored.",
+        "The variable age_group was coded from one to five.",
+        "Data are available from john_smith@uni.edu on request.",
+        "We ran 10^6 bootstrap iterations with glmer_nb in analysis_script.R.",
+        "The model is described in \\cite{smith} and uses a_{i} weights.",
+    ]
+
+    def test_text_read_from_the_document_keeps_its_prose(self):
+        for text in self.PROSE:
+            assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_math_spans_are_flattened_for_every_source(self):
+        text = "Fit was good, $R^2 = .45$, with $\\alpha_{i}$ free."
+        expected = "Fit was good, R2 = .45, with αi free."
+        assert clean_text_content_late(text, from_ocr=False) == expected
+        assert clean_text_content_late(text) == expected
+
+    def test_whitespace_is_collapsed_for_every_source(self):
+        assert clean_text_content_late("one\r\ntwo  three", from_ocr=False) == "one two three"
+
+    def test_ocr_text_keeps_identifiers_and_emails(self):
+        text = "Contact john_smith@uni.edu; the age_group variable, 10^6 draws."
+        assert clean_text_content_late(text) == text
+
+    def test_ocr_text_still_loses_leaked_latex(self):
+        text = "the \\alpha value of \\mathrm{SD} was 1.2^{3}, see $x_i$."
+        assert clean_text_content_late(text) == "the α value of SD was 1.23, see xi."
+
+    def test_ocr_design_notation_is_not_fused(self):
+        for text in self.PROSE[:2]:
+            assert clean_text_content_late(text) == text
+
+    def test_ocr_character_spacing_is_still_collapsed(self):
+        assert clean_text_content_late("F(1, 26) = 1 7. 9 0 6") == "F(1, 26) = 1 7. 906"
+        assert clean_text_content_late("the mean was $ 1 7. 9 0 6 $") == "the mean was 1 7. 906"
+
+    def test_only_an_x_between_digits_is_an_operator(self):
+        assert clean_text_content_late("code x 1 2 3 end") == "code x123 end"
+        assert clean_text_content_late("code 1 2 x a end") == "code 12xa end"
+
+    LITERAL_DOLLARS = [
+        "We recoded df$age_group and df$score_z before fitting.",
+        "Costs ranged from US$ 60 to US$ 1,419 per episode.",
+        "GDP was 54.9 US$ million, against 1414 US$ per unit_price.",
+        "Reads were trimmed with cutadapt -o $SAMPLE_R1.fq -p $SAMPLE_R2.fq.",
+        "adapt -a file:$ADAPTER -A file:$ADAPTER -o $SAMPLE.R1.fq",
+        "Intensity was around 35 MJ/$, while it fell to only 10 MJ/$ in 2000.",
+        "*P<0.05 between groups. $P<0.05, $$P<0.005 between isoforms.",
+        r"the consensus (D\w\w[LIMV][LIMV]\w{0,3}$, and D\w\w[LI][LI]\w{0,20}$) we",
+        'paste0("$", comma(mapdata$Cost_Off_Campus, digits = 0)),',
+    ]
+
+    def test_literal_dollars_in_document_text_are_not_math(self):
+        """Only DOCX writes ``$…$`` math into document text; elsewhere a
+        dollar is currency, R's ``df$col`` or a shell variable, and pairing
+        two of them deleted the dollars and the underscores between."""
+        for text in self.LITERAL_DOLLARS:
+            assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_document_math_spans_are_still_unwrapped(self):
+        docx = "We fit a model where $β_i=0$ for age_group."
+        assert clean_text_content_late(docx, from_ocr=False) == (
+            "We fit a model where βi=0 for age_group."
+        )
+        tex = r"\begin{document}$\textbf{q} = \textbf{q}P$\end{document}"
+        assert (
+            clean_text_content_late(tex, from_ocr=False) == r"\begin{document}q = qP\end{document}"
+        )
+
+    def test_paddle_inline_math_is_flattened_in_full(self):
+        """Paddle-OCR-VL writes inline math as ``\\(…\\)``; inside it ``_p``
+        and ``^2`` are LaTeX, as they are inside ``$…$``."""
+        text = r"The effect was large, \(\eta_p^2 = .12\), and \(d_z = 0.41\), see age_group."
+        assert clean_text_content_late(text) == (
+            r"The effect was large, \(ηp2 = .12\), and \(dz = 0.41\), see age_group."
+        )
+        assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_email_inside_a_math_span_keeps_its_underscore(self):
+        """A currency dollar can pair with a later one and put an address
+        inside a math span, where the single-character rule applies."""
+        text = "Pay US$ 20 by writing to john_smith@uni.edu, then $ back."
+        assert "john_smith@uni.edu" in clean_text_content_late(text)
+        assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_math_spans_the_parser_wrote_are_unwrapped_where_a_word_touches_them(self):
+        """DOCX writes each inline equation as ``$…$`` with no regard for its
+        neighbours, so "the $n$th" fails the tight-delimiter rule; the spans the
+        parser lists are unwrapped wherever they sit."""
+        text = "For the $n$th participant, each item$i$ and the $k$s counted."
+        spans = ("$n$", "$i$", "$k$")
+        assert clean_text_content_late(text, from_ocr=False, inline_math=spans) == (
+            "For the nth participant, each itemi and the ks counted."
+        )
+        assert clean_text_content_late(text, from_ocr=False) == text
+
+    def test_only_the_listed_spans_are_unwrapped(self):
+        text = "We recoded df$age_group$ before the $k$s were counted."
+        assert clean_text_content_late(text, from_ocr=False, inline_math=("$k$",)) == (
+            "We recoded df$age_group$ before the ks were counted."
+        )
+
+    def test_listed_spans_are_matched_left_to_right(self):
+        """Two equations around a plain letter must not pair up as another
+        listed span: "$a$x$b$" holds "$x$" as a substring."""
+        text = "Both $a$x$b$ and $x$ hold."
+        spans = ("$x$", "$a$", "$b$")
+        assert clean_text_content_late(text, from_ocr=False, inline_math=spans) == (
+            "Both axb and x hold."
+        )
+
+
+PATHOLOGICAL = {
+    "long token": "ACGT" * 12_500,
+    "email-like run": "a@b" + "-" * 50_000,
+    "dollars around words": "($a)" * 12_500,
+    "currency": "$5, " * 12_500,
+    "dollar words": "$a " * 16_667,
+    "unclosed paren math": "\\(a " * 12_500,
+}
+
+
+@pytest.mark.parametrize("from_ocr", [True, False], ids=["ocr", "document"])
+@pytest.mark.parametrize("text", PATHOLOGICAL.values(), ids=PATHOLOGICAL.keys())
+def test_late_cleanup_is_linear_on_long_inputs(text, from_ocr):
+    """Nothing caps sentence length, so an unanchored email pattern or a span
+    pattern that retried from every dollar sign made a 50k-character token
+    cost seconds (quadratic); each case now takes a few milliseconds."""
+    start = time.perf_counter()
+    clean_text_content_late(f"Seq: {text} end.", from_ocr=from_ocr)
+    assert time.perf_counter() - start < 0.5
