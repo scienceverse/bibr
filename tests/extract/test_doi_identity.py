@@ -1317,7 +1317,6 @@ def test_a_correction_notice_names_the_original_article_as_its_parent():
 @pytest.mark.parametrize(
     "tail",
     [
-        "doi: 10.1234/cited.5",
         "131-138. Doi: 10.1234/cited.5",
         "prevalence and predictors. Example J. (2018) 18:38-44. doi: 10.1234/cited.5",
         "DOI: 10.1234/cited.5, https://example.org/stable/5.",
@@ -1338,6 +1337,32 @@ def test_the_tail_of_a_reference_entry_is_a_cited_work(tail):
     [candidate] = selection.candidates
     assert candidate.semantic_context == "cited_work"
     assert selection.selected is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["DOI: 10.1234/own.5", "doi:10.1234/own.5.", "DOI: https://doi.org/10.1234/own.5"],
+)
+def test_a_lone_doi_line_after_cover_pages_names_the_paper(line):
+    # Two cover pages push the article's first page to page 3, where its DOI
+    # line sits in an untyped section. A line holding only the labelled DOI is
+    # not the tail of a reference entry.
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Root", CanonicalSection.UNKNOWN, "Downloaded from the repository on 1 May 2026.", 1),
+            ("Article", CanonicalSection.UNKNOWN, "A study of examples", 3),
+            ("Article", CanonicalSection.UNKNOWN, line, 3),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.semantic_context == "labelled_body"
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.5"
 
 
 @pytest.mark.parametrize("page", [3, 5, 30])

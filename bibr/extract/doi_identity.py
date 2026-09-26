@@ -181,16 +181,25 @@ _SELF_CITATION_RE = re.compile(
 # A reference entry's tail, split from it into a sentence of its own, opens
 # with the DOI label, a URL or the DOI, a page range or volume, or in lower case.
 _TAIL_OPENING_RE = re.compile(r"(?:doi\b|https?://|www\.|10\.\d)", re.IGNORECASE)
+# A line that is only the DOI label or resolver host and the DOI ("DOI: …",
+# "https://doi.org/…"): how a paper prints its own DOI as much as how a
+# reference entry ends, so it is not read as a tail.
+_LONE_DOI_LINE_RE = re.compile(
+    rf"(?:doi\s*[:.]?\s*(?:{_DOI_HOST})?|{_DOI_HOST})\s*10\.\d{{4,9}}/\S+\s*",
+    re.IGNORECASE,
+)
 
 
 def _reads_as_reference_tail(text: str) -> bool:
     """Whether *text* is the end of a reference entry split from its start.
 
-    "doi: 10.1186/…" alone, "131-138. Doi: …" or "prevalence rates. Clin J.
-    (2018) 18:38–44. doi: …": no prose sentence opens that way.
+    "131-138. Doi: …" or "prevalence rates. Clin J. (2018) 18:38–44. doi: …":
+    no prose sentence opens that way. A line holding nothing but the labelled
+    DOI is not a tail: a paper prints its own DOI that way too, after cover
+    pages as much as on its first page.
     """
     opening = text.lstrip()
-    if not opening:
+    if not opening or _LONE_DOI_LINE_RE.fullmatch(opening):
         return False
     return bool(
         _TAIL_OPENING_RE.match(opening)

@@ -550,7 +550,9 @@ released.
   `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside a citation
   (a reference entry outside the located reference list, or a figure's source
   note citing another work) never names the paper, and neither does the tail
-  of a reference entry split into a line of its own ("131-138. doi: …"). An
+  of a reference entry split into a line of its own ("131-138. doi: …"). A
+  line holding nothing but the labelled DOI ("DOI: …") is not such a tail, so
+  a paper's own DOI line after cover pages still names it. An
   eLife JATS or HTML file's labelled figure DOIs no longer raise
   `VAL_DOI_AMBIGUOUS` against its article-id.
 - A correction notice printed "DOI of original article: …" on its first page
