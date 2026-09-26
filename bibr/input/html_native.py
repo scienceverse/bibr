@@ -9,14 +9,16 @@ contract used by the other native inputs.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
-from io import StringIO
+from collections.abc import Iterator
 from typing import Any
 
 import pandas as pd
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
+from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.models import PaperAuthor, PaperMetadata
 from bibr.paper_contents import (
     CanonicalSection,
@@ -31,6 +33,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
+from bibr.structure.html_table import html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -49,6 +52,71 @@ _DROP_TAGS = {
 }
 _BLOCK_TEXT_TAGS = {"p", "blockquote", "pre"}
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+# Elements a browser lays out inline, MathML presentation markup included:
+# their text continues the word around them. Every other element is a word
+# boundary.
+_INLINE_TAGS = frozenset(
+    {
+        "a",
+        "abbr",
+        "acronym",
+        "b",
+        "bdi",
+        "bdo",
+        "big",
+        "cite",
+        "code",
+        "data",
+        "del",
+        "dfn",
+        "em",
+        "font",
+        "i",
+        "ins",
+        "kbd",
+        "label",
+        "mark",
+        "q",
+        "s",
+        "samp",
+        "small",
+        "span",
+        "strike",
+        "strong",
+        "sub",
+        "sup",
+        "time",
+        "tt",
+        "u",
+        "var",
+        "wbr",
+        "math",
+        "menclose",
+        "mfenced",
+        "mfrac",
+        "mi",
+        "mmultiscripts",
+        "mn",
+        "mo",
+        "mover",
+        "mpadded",
+        "mphantom",
+        "mprescripts",
+        "mroot",
+        "mrow",
+        "ms",
+        "mspace",
+        "msqrt",
+        "mstyle",
+        "msub",
+        "msubsup",
+        "msup",
+        "mtext",
+        "munder",
+        "munderover",
+        "semantics",
+    }
+)
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
 # above any real article/JATS/EPUB spine document, below what makes parsing a
 # DoS. Kept below the serve upload cap so it fails fast on the parse path.
@@ -61,10 +129,61 @@ def _tag_name(tag: Any) -> str:
     return (getattr(tag, "name", "") or "").lower()
 
 
+def _flatten(tag: Tag) -> str:
+    """Concatenate *tag*'s text the way a browser lays it out.
+
+    ``get_text(" ")`` put a space around every element, so ``H<sub>2</sub>O``
+    read "H 2 O", ``m<sup>6</sup>A`` "m 6 A" and a linked citation
+    "( Figure 1 )". Inline elements now join their neighbours, as they do in
+    the JATS parser; any other element still separates words. The strings
+    kept are the ones ``get_text`` keeps (no comments).
+
+    The walk keeps its own stack: html5lib does not bound nesting depth, and
+    legacy markup such as unclosed ``<font>`` or ``<span>`` tags nests every
+    later element one level deeper, past Python's recursion limit.
+
+    Whitespace between MathML elements is dropped as a renderer drops it,
+    except where it keeps two words apart (:mod:`bibr.input.mathml_whitespace`).
+    """
+    flat = FlatText()
+    name = _tag_name(tag)
+    serials = itertools.count()
+
+    # One frame per open element: its remaining children, whether the element
+    # separates words (a boundary goes in on entry and on exit), its name,
+    # whether it sits inside ``<math>``, and the serial numbers of the element
+    # and of its parent.
+    stack: list[tuple[Iterator[Any], bool, str, bool, int, int]] = [
+        (iter(tag.children), False, name, name == "math", next(serials), next(serials))
+    ]
+    while stack:
+        children, separates, name, in_math, serial, parent = stack[-1]
+        child = next(children, None)
+        if child is None:
+            stack.pop()
+            if separates:
+                flat.separate()
+        elif isinstance(child, Tag):
+            child_name = _tag_name(child)
+            separates = child_name not in _INLINE_TAGS
+            if separates or (child_name == "mspace" and mspace_separates(child.attrs)):
+                flat.separate()
+            in_child_math = in_math or child_name == "math"
+            stack.append(
+                (iter(child.children), separates, child_name, in_child_math, next(serials), serial)
+            )
+        elif type(child) in (NavigableString, CData):
+            if in_math:
+                flat.add_math(str(child), name, parent)
+            else:
+                flat.add(str(child))
+    return flat.join()
+
+
 def _text(tag: Any) -> str:
     if tag is None:
         return ""
-    text = collapse_ws(tag.get_text(" ", strip=True)).strip()
+    text = collapse_ws(_flatten(tag)).strip()
     return re.sub(r"\s+([,.;:!?])", r"\1", text)
 
 
@@ -249,6 +368,7 @@ class HtmlParser:
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
         )
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
@@ -313,6 +433,7 @@ class HtmlParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -340,6 +461,7 @@ class HtmlParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -552,20 +674,32 @@ class HtmlParser:
         return any(word in tokens for word in ("reference", "bibliography", "citation"))
 
     def _handle_table(self, tag: Tag) -> None:
+        if is_hidden_table(tag):
+            # A display:none table (a print-only or responsive duplicate of a
+            # visible one) is not part of the page as read.
+            return
         caption_tag = tag.find("caption")
         caption = _text(caption_tag) or None
+        label = caption_label(caption, "table")
         try:
-            dfs = pd.read_html(StringIO(str(tag)), flavor="html5lib")
+            df = html_table_frame(tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTML table parse failed: %s", exc)
-            return
-        if not dfs:
-            return
+            df = None
+        if df is None:
+            # No cell grid (an image-only table, say). A table whose caption
+            # prints a table label ("Table 3. ...") is still a table that
+            # mentions resolve to, so it is kept with its markup and no
+            # contents. Any other grid-less table is dropped: a spacer, or a
+            # layout table holding a figure ("Figure 1. ...").
+            if label is None:
+                return
+            df = pd.DataFrame()
         html = str(tag)
         self.tables.append(
             PaperTable(
                 table_id=self._table_counter,
-                df=dfs[0],
+                df=df,
                 tbl_html=html,
                 section_id=self._current_section_id,
                 caption=caption,
@@ -575,10 +709,10 @@ class HtmlParser:
                         page_number=None,
                         bbox=None,
                         tbl_html=html,
-                        df=dfs[0],
+                        df=df,
                     )
                 ],
-                label=caption_label(caption, "table"),
+                label=label,
             )
         )
         self._table_counter += 1

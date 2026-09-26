@@ -95,19 +95,52 @@ def test_reference_lines_keep_nonrepeated_top_page_continuation():
     assert "continues here." in [line.text for line in lines]
 
 
-@pytest.mark.slow
+def test_reference_lines_keep_mid_page_lines_that_match_edge_furniture():
+    # Gutter-aligned labels emitted as their own lines: "1." and "4." sit at a
+    # page edge on two pages, so "#." is furniture there, but the labels
+    # inside the pages are bibliography lines. So is a year-only
+    # continuation that matches the page-number key.
+    page_texts = {
+        5: [
+            "References",
+            "1.",
+            "Smith, J. A study. J 1, 1",
+            "2015",
+            "2.",
+            "Roe, R. Another. J 2, 2 (2002).",
+            "3.",
+            "Poe, P. Third. J 3, 3 (2003).",
+            "12",
+        ],
+        6: ["4.", "Lee, L. Fourth. J 4, 4 (2004).", "5.", "Kim, K. Fifth. J 5, 5 (2005).", "13"],
+    }
+    page_lines = {
+        page: [_line(text, page, 760.0 - 20.0 * i) for i, text in enumerate(texts)]
+        for page, texts in page_texts.items()
+    }
+
+    lines = reference_lines_from_pages(page_lines, header_page=5)
+
+    assert [line.text for line in lines] == [
+        "Smith, J. A study. J 1, 1",
+        "2015",
+        "2.",
+        "Roe, R. Another. J 2, 2 (2002).",
+        "3.",
+        "Poe, P. Third. J 3, 3 (2003).",
+        "Lee, L. Fourth. J 4, 4 (2004).",
+        "5.",
+        "Kim, K. Fifth. J 5, 5 (2005).",
+    ]
+
+
 def test_recover_reference_lines_from_gold_pdf():
-    pdf = Path("data/psych_science_pdf_oa/09567976211052476.pdf")
-    if not pdf.exists():
-        pytest.skip("gold PDF not present")
+    pdf = Path(__file__).parent.parent / "fixtures" / "ref_geometry_hanging_indent_sample.pdf"
     lines = recover_reference_lines(pdf.read_bytes())
     assert len(lines) > 20
     assert len({round(ln.x0) for ln in lines}) >= 2  # hanging-indent x0 levels
 
 
-@pytest.mark.slow
 def test_recover_reference_lines_no_text_layer_returns_empty():
-    pdf = Path("tests/fixtures/scanned_sample.pdf")
-    if not pdf.exists():
-        pytest.skip("fixture absent")
+    pdf = Path(__file__).parent.parent / "fixtures" / "scanned_sample.pdf"
     assert recover_reference_lines(pdf.read_bytes()) == []

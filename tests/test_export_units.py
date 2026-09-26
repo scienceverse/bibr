@@ -1245,6 +1245,99 @@ class TestExportUrlSanity:
         result = export_paper_to_json(paper)
         assert [u["href"] for u in result["url"]] == ["https://openai.com/research"]
 
+    def test_drops_script_capable_schemes_and_keeps_the_rest(self):
+        """x-security-4: link targets come from untrusted markup and readers
+        render url[].href as an anchor, so a click must never run script."""
+        urls = [
+            "javascript:alert(1)",
+            " JaVaScRiPt:alert(1)",
+            "java\nscript:alert(1)",
+            "vbscript:msgbox(1)",
+            "data:text/html;base64,PHNjcmlwdD4=",
+            "\x01javascript:alert(1)",  # a leading control character browsers skip
+            "https://osf.io/abcde/",
+            "mailto:author@example.org",
+            "info:doi/10.1371/journal.pone.0000001",
+            "ftp://ftp.example.org/data.csv",
+            "#fig1",
+        ]
+        paper = self._paper_with_links(urls)
+        result = export_paper_to_json(paper)
+        assert [u["href"] for u in result["url"]] == [
+            "https://osf.io/abcde/",
+            "mailto:author@example.org",
+            "info:doi/10.1371/journal.pone.0000001",
+            "ftp://ftp.example.org/data.csv",
+            "#fig1",
+        ]
+        assert [u["url_id"] for u in result["url"]] == [1, 2, 3, 4, 5]
+
+    def test_drops_a_script_capable_reference_url(self):
+        refs = [
+            PaperReference(
+                bib_id=i,
+                title="R",
+                first_page=None,
+                volume=None,
+                authors=None,
+                year=2020,
+                container=None,
+                url=url,
+            )
+            for i, url in enumerate(
+                [
+                    "javascript:alert(2)",
+                    "https://osf.io/x",
+                    "javascript://[%0aalert(1)",  # urlsplit raises on this netloc
+                    "http://www.example.org]",  # malformed, but no script: kept
+                ],
+                start=1,
+            )
+        ]
+        # Match rows come from an external record as deposited: no URL repair
+        # runs first, so the scheme check must skip the space and the tab itself.
+        refs[1].match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/x",
+                score=99.0,
+                url=" javascript:alert(3)",
+                license_url="java\tscript:alert(4)",
+            )
+        }
+        refs[3].match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/y",
+                score=99.0,
+                url="https://doi.org/10.1234/y",
+                license_url="https://creativecommons.org/licenses/by/4.0/",
+            )
+        }
+        metadata = PaperMetadata(doi="10.1234/test", title="Test Paper", references=refs)
+        metadata.match = {
+            MatchSource.CROSSREF: ExternalMatch(
+                doi="10.1234/test",
+                score=99.0,
+                url="javascript:alert(5)",
+                license_url="JAVASCRIPT:alert(6)",
+            )
+        }
+        result = export_paper_to_json(_minimal_paper(metadata=metadata), validate=True)
+        assert [b.get("url") for b in result["bib"]] == [
+            None,
+            "https://osf.io/x",
+            None,
+            "http://www.example.org]",
+        ]
+        assert [(m["url"], m["license_url"], m["license_spdx"]) for m in result["bib_match"]] == [
+            (None, None, None),
+            (
+                "https://doi.org/10.1234/y",
+                "https://creativecommons.org/licenses/by/4.0/",
+                "CC-BY-4.0",
+            ),
+        ]
+        assert [(m["url"], m["license_url"]) for m in result["metadata_match"]] == [(None, None)]
+
     def test_dropped_link_leaves_coded_warning(self):
         """Audit export-3: a silently dropped link must be recorded in
         extraction.warnings. Fails on base (no such warning)."""

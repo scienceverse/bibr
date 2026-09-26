@@ -148,13 +148,31 @@ def _is_correspondence_heading(text: str) -> bool:
     return first_alpha.isupper()
 
 
+def _first_processed_page(contents: PaperContents) -> int | None:
+    """Return the first page this parse saw, or None when the input has no pages.
+
+    "Page 1" in the front-matter rules means this page. Page numbers are
+    absolute so export provenance stays honest, so under page slicing
+    (``--pages 5-12``, serve ``start_page``) no sentence carries page 1 and a
+    literal comparison would silently never select anything. Unsliced the
+    minimum is 1, so the default is unchanged. Native parses (DOCX, JATS, HTML,
+    ePub) set page_number=None on every sentence; there the page tests are
+    dropped.
+    """
+    return min(
+        (sent.page_number for sent in contents.sentences if sent.page_number is not None),
+        default=None,
+    )
+
+
 def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelection:
     """Select one ordered, source-owned abstract candidate span.
 
     Section labels are context, never bulk authorization.  The selected block's
-    candidate order opens an abstract at explicit page-one evidence and closes
-    permanently at the first ownership, metadata, structural, page, or body
-    boundary.
+    candidate order opens an abstract at explicit evidence on the first
+    processed page and closes permanently at the first ownership, metadata,
+    structural, page, or body boundary.  Page-less (native) input skips the page
+    tests.
     """
 
     if resolution is None or resolution.selected_block_id is None:
@@ -168,6 +186,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
     from bibr.utils.text import normalize_text
 
     candidates = _selected_candidates(resolution)
+    front_page = _first_processed_page(contents)
     sections_by_id = {section.section_id: section for section in contents.sections}
     section_types = {
         section_id: section.section_type for section_id, section in sections_by_id.items()
@@ -261,7 +280,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
             candidate_ids
             and (body_anchor is None or all(text_id < body_anchor for text_id in candidate_ids))
         )
-        valid_page = candidate.page in {1, 2}
+        valid_page = front_page is None or candidate.page in {front_page, front_page + 1}
 
         if state == "seeking":
             if unsafe and (explicit or "abstract" in candidate.roles):
@@ -269,13 +288,13 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 break
             if not explicit:
                 continue
-            if candidate.page != 1:
+            if front_page is not None and candidate.page != front_page:
                 state = "stopped"
                 break
             if is_abstract_heading and not candidate_ids:
                 state = "heading_open"
                 previous_order = candidate.reading_order
-                previous_page = 1
+                previous_page = candidate.page
                 evidence_ids.append(candidate.candidate_id)
                 continue
             if not owned or not before_body:
@@ -292,7 +311,14 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
                 or not owned
                 or not before_body
                 or not valid_page
-                or (previous_page is not None and candidate.page < previous_page)
+                # Defensive: with no sentence pages (front_page None) every
+                # page passes, and a candidate's page comes from its
+                # provenance, which one candidate may carry and the next lack.
+                or (
+                    previous_page is not None
+                    and candidate.page is not None
+                    and candidate.page < previous_page
+                )
             ):
                 state = "stopped"
                 break
@@ -303,7 +329,7 @@ def select_abstract_span(contents: PaperContents, resolution) -> AbstractSelecti
 
         selected_ids.extend(candidate_ids)
         evidence_ids.append(candidate.candidate_id)
-        if candidate.page == 2:
+        if front_page is not None and candidate.page == front_page + 1:
             continuation = True
         previous_order = candidate.reading_order
         previous_page = candidate.page
@@ -591,7 +617,9 @@ def _apply_boundaries(
             classification_source="implicit",
             header_is_synthetic=True,
         )
-        contents.sections.append(new_sec)
+        _insert_after_source(
+            contents.sections, new_sec, seg_sentences[0].section_id, new_section_ids
+        )
         existing_types.add(canon)
         new_section_ids.add(next_section_id)
         next_section_id += 1
@@ -611,38 +639,34 @@ def _apply_boundaries(
         return False
 
     _rebuild_sections_text(contents, affected_old_sids | new_section_ids)
-    _reorder_sections_by_document_position(contents)
     return True
 
 
-def _reorder_sections_by_document_position(contents: PaperContents) -> None:
-    """Reorder sections to match the document's body-text flow.
+def _insert_after_source(
+    sections: list[PaperSection],
+    new_section: PaperSection,
+    source_section_id: int,
+    placed_ids: set[int],
+) -> None:
+    """Insert a synthesized section where its text is; nothing else moves.
 
-    Synthesized sections (e.g. an Introduction created from front-matter text
-    that had no explicit heading) are appended with the highest section_id but
-    contain low-text_id sentences.  This shuffles the section list so each
-    section sits where its first sentence appears in the document.
-
-    Sections without assigned sentences (orphan headers, figure/table/footnote
-    aggregators) keep their relative order.
+    The section goes right after the section its first sentence came from
+    (usually the title), behind any section already placed there
+    (``placed_ids``), so an Abstract and an Introduction cut from the same title
+    keep their order. The other sections keep their parse order, which is
+    document order, and ``enforce_section_sanity`` reads the list that way. A
+    sort by first sentence cannot place a heading that holds no text, such as
+    the title once its sentences move here or a "Method" heading whose
+    paragraphs sit in its subsections. A source missing from the list appends
+    the section.
     """
-    first_text_id_by_section: dict[int, int] = {}
-    for sent in contents.sentences:
-        sid = sent.section_id
-        if sid is None:
-            continue
-        prev = first_text_id_by_section.get(sid)
-        if prev is None or sent.text_id < prev:
-            first_text_id_by_section[sid] = sent.text_id
-
-    def _sort_key(sec: PaperSection) -> tuple[int, int, int]:
-        first_tid = first_text_id_by_section.get(sec.section_id)
-        if first_tid is not None:
-            return (0, first_tid, sec.section_id)
-        # Sections without sentences keep their relative position via section_id
-        return (1, sec.section_id, sec.section_id)
-
-    contents.sections.sort(key=_sort_key)
+    position = next(
+        (i + 1 for i, section in enumerate(sections) if section.section_id == source_section_id),
+        len(sections),
+    )
+    while position < len(sections) and sections[position].section_id in placed_ids:
+        position += 1
+    sections.insert(position, new_section)
 
 
 def _trim_bloated_abstract(contents: PaperContents) -> None:
@@ -707,22 +731,14 @@ def _apply_positional_abstract_fallback(contents: PaperContents) -> None:
     if first_body_text_id is None:
         return
 
-    # "Page 1" here means the first page this parse saw. Page numbers are
-    # absolute so export provenance stays honest, so under page slicing
-    # (``--pages 5-12``, serve ``start_page``) no sentence carries page 1 and
-    # a literal comparison would silently never select anything. Unsliced the
-    # minimum is 1, so the default is unchanged.
-    # Native parses (DOCX, JATS, HTML, ePub) set page_number=None on every
-    # sentence: min() over those raises TypeError, and comparing against a
-    # page would exclude everything. Where there are no pages, drop the test.
-    page_numbers = [sent.page_number for sent in contents.sentences if sent.page_number is not None]
-    front_page = min(page_numbers, default=1)
-    has_pages = bool(page_numbers)
+    # "Page 1" here means the first page this parse saw; where there are no
+    # pages (native input), drop the test.
+    front_page = _first_processed_page(contents)
     abstract_sents = [
         sent
         for sent in contents.sentences
         if sent.section_id == title_section.section_id
-        and (not has_pages or sent.page_number == front_page)
+        and (front_page is None or sent.page_number == front_page)
         and sent.text_id < first_body_text_id
         and (allowed_text_ids is None or sent.text_id in allowed_text_ids)
     ]

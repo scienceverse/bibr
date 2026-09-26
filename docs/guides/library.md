@@ -65,6 +65,15 @@ for r in results:
         print(r.path, r.error, r.failed_stage)
 ```
 
+`ChewFailure.outage` is `True` when an OCR or LLM service was down or
+unreachable, or a model or server could not start: the failure most likely
+says nothing about the file, which may well succeed later. If the pipeline crashes on a
+chunk of files, the files it left unfinished run again one by one, and only a
+file that crashes it on its own fails, with `error_code="chunk_error"`. Files
+that share a stem (`a/paper.pdf`, `b/paper.pdf`, `paper.xml`) get the ids
+`bibr batch` gives them, `<stem>-<sha256[:8]>`, so a batch's results can be
+joined and passed to `bibr.write_tables()`.
+
 For a list input, results keep the input order. For a directory input,
 files are processed in sorted order and anything that isn't
 {{ supported_extensions }} is skipped. An empty list returns `[]`; a directory
@@ -131,7 +140,7 @@ chew` CLI flags:
 | `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both |
 | `paper_id` | `--paper-id` | Paper ID override (single-file calls only) |
 | `batch_size` | `--batch-size` | Files per chunk in batch processing (batch calls only) |
-| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; `False` forces it off |
+| `consolidate` | `--consolidate` | Merge accepted Crossref matches into `bib` before export: `True` / `"fill"` fills only missing fields, `"replace"` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI (a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one); `False` forces it off |
 | `settings` | `.env` / environment | A `GlobalSettings` instance copied into the pipeline at construction |
 
 ```python

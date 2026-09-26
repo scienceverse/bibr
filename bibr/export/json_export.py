@@ -404,6 +404,37 @@ def _is_sane_url(url: str) -> bool:
     return "." in parts.netloc
 
 
+# Schemes a browser runs as script (or as an inline document) when the link is
+# followed. Link targets come from untrusted markup — HTML ``<a href>``, JATS
+# ``ext-link``/``uri``, DOCX hyperlinks — and readers render ``url[].href`` and
+# ``bib[].url`` as anchors. Everything else passes: the real corpora carry
+# ``info:``, ``ncbi-n:``, ``pdb:``, ``arxiv:``, ``mailto:`` and ``tel:`` links.
+_ACTIVE_URL_SCHEMES = frozenset({"javascript", "vbscript", "data"})
+_URL_SCHEME_RE = re.compile(r"([a-z][a-z0-9+.\-]*):", re.IGNORECASE)
+# What a browser's URL parser ignores before reading the scheme.
+_URL_LEADING_JUNK = "".join(map(chr, range(0x21)))
+
+
+def _has_active_scheme(url: str) -> bool:
+    """Whether following *url* would run script.
+
+    Reads the scheme as a browser does — leading control characters and spaces
+    stripped, tabs and newlines dropped anywhere, case ignored — and never
+    raises, so a URL malformed elsewhere is judged by its scheme alone.
+    """
+    cleaned = url.lstrip(_URL_LEADING_JUNK).translate({9: None, 10: None, 13: None})
+    match = _URL_SCHEME_RE.match(cleaned)
+    return match is not None and match.group(1).lower() in _ACTIVE_URL_SCHEMES
+
+
+def _without_active_scheme(url: str | None) -> str | None:
+    """*url*, or ``None`` when its scheme would run script in a browser."""
+    if url and _has_active_scheme(url):
+        logger.debug("Dropping script-capable URL from export: %r", url)
+        return None
+    return url
+
+
 def _normalize_export_url(url: str) -> str:
     """Strip PDF line-wrap artifacts from an extracted URL.
 
@@ -420,16 +451,18 @@ def _sane_export_links(links: list) -> tuple[list, list]:
 
     Normalizes before the sanity check so a wrapped URL is judged on its
     repaired form, not its raw (possibly truncated-looking) one. Callers warn
-    about *dropped* without re-running the predicate.
+    about *dropped* without re-running the predicate. A link whose scheme
+    would run script is left out of both lists: it is dropped silently.
     """
     kept = []
     dropped = []
     for link in links:
-        if _is_sane_url(_normalize_export_url(link.url)):
-            kept.append(link)
-        else:
+        href = _normalize_export_url(link.url)
+        if not _is_sane_url(href):
             logger.debug("Dropping malformed URL from export: %r", link.url)
             dropped.append(link)
+        elif _without_active_scheme(href) is not None:
+            kept.append(link)
     return kept, dropped
 
 
@@ -715,7 +748,8 @@ def _export_paper_payload(
 
     def _record_ids(m) -> dict[str, Any]:
         """License and funder identifiers of one external record."""
-        license_url = getattr(m, "license_url", None)
+        # Taken from the external record as deposited, like its ``url``.
+        license_url = _without_active_scheme(getattr(m, "license_url", None))
         funders = getattr(m, "funders", None)
         return {
             "license_url": license_url,
@@ -771,7 +805,7 @@ def _export_paper_payload(
                 # they carry the same wrap artifacts as ``url[].href`` and get
                 # the same repair. The downstream R consumer drops its own
                 # whitespace/trailing-dot patch on the strength of this release.
-                url=_normalize_export_url(r.url) if r.url else r.url,
+                url=_without_active_scheme(_normalize_export_url(r.url)) if r.url else r.url,
                 is_in_press=is_in_press,
                 arxiv=r.arxiv,
                 pmid=r.pmid,
@@ -807,7 +841,7 @@ def _export_paper_payload(
                         last_page=d.get("last_page"),
                         edition=d.get("edition"),
                         version=d.get("version"),
-                        url=d.get("url"),
+                        url=_without_active_scheme(d.get("url")),
                         **_record_ids(m),
                     )
                 )
@@ -842,7 +876,7 @@ def _export_paper_payload(
                     last_page=d.get("last_page"),
                     edition=d.get("edition"),
                     version=d.get("version"),
-                    url=d.get("url"),
+                    url=_without_active_scheme(d.get("url")),
                     **_record_ids(m),
                 )
             )

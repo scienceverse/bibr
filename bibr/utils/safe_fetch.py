@@ -84,6 +84,14 @@ _MIME_TO_EXTENSION = {
 }
 
 _CONTENT_DISPOSITION_FILENAME = re.compile(r'filename="?([^";]+)"?', re.IGNORECASE)
+# Characters no Windows file name may hold, plus the ASCII controls. The name is
+# joined to a temporary directory (``bibr mcp``'s chew_url), and on Windows a
+# drive-relative "D:evil.pdf" would discard that directory and land on drive D.
+_UNSAFE_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+# DOS device names, reserved on Windows whatever the extension ("NUL.pdf").
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL", *(f"{p}{i}" for p in ("COM", "LPT") for i in range(1, 10))}
+)
 
 
 @dataclass(frozen=True)
@@ -178,15 +186,27 @@ def _pin_netloc(ip: str) -> str:
     return f"[{ip}]" if ":" in ip else ip
 
 
+def _safe_file_name(name: str) -> str:
+    """*name* as a single file name that stays inside its directory on any OS."""
+    name = _UNSAFE_FILENAME_CHARS.sub("_", name).strip().rstrip(". ")
+    if name.split(".", 1)[0].upper() in _WINDOWS_DEVICE_NAMES:
+        name = "_" + name
+    return name
+
+
 def _pick_filename(headers: httpx.Headers, final_url: str, content_type: str | None) -> str:
-    """Derive a filename whose extension survives bibr's extension/MIME check."""
+    """Derive a filename whose extension survives bibr's extension/MIME check.
+
+    The server picks it (Content-Disposition, else the URL path), so it is cut
+    down to one plain path component before anyone joins it to a directory.
+    """
     candidate = ""
     disposition = headers.get("content-disposition", "")
     match = _CONTENT_DISPOSITION_FILENAME.search(disposition)
     if match:
-        candidate = PurePosixPath(match.group(1).replace("\\", "/")).name
+        candidate = _safe_file_name(PurePosixPath(match.group(1).replace("\\", "/")).name)
     if not candidate:
-        candidate = PurePosixPath(urlsplit(final_url).path).name
+        candidate = _safe_file_name(PurePosixPath(urlsplit(final_url).path).name)
     candidate = candidate[:200] or "download"
 
     if PurePosixPath(candidate).suffix.lower() in SUPPORTED_EXTENSIONS:

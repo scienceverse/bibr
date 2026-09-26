@@ -151,7 +151,7 @@ def _build_server(upload_stores):
 
     from bibr.config import Settings, validate_production_settings
     from bibr.serve.admission import base64_envelope
-    from bibr.serve.auth import PUBLIC_PATHS, check_bearer
+    from bibr.serve.auth import PUBLIC_PATHS, check_bearer, check_keyless_request
     from bibr.serve.deployments.pipeline import BibrPipelineAPI
     from bibr.serve.ingress import (
         INTERNAL_INFERENCE_PATH,
@@ -257,6 +257,11 @@ def _build_server(upload_stores):
     async def _auth_gate(request, call_next):  # pyright: ignore[reportUnusedFunction]
         if request.url.path == INTERNAL_INFERENCE_PATH:
             return JSONResponse({"detail": "Not Found"}, status_code=404)
+        # Keyless (loopback-only) serve: refuse DNS-rebound hosts and cross-site
+        # browser requests on every path, /mcp and the probes included.
+        refusal = check_keyless_request(request.method, request.headers)
+        if refusal is not None:
+            return JSONResponse({"detail": refusal[1]}, status_code=refusal[0])
         if request.url.path not in PUBLIC_PATHS:
             detail = check_bearer(request.headers.get("authorization"))
             if detail is not None:
