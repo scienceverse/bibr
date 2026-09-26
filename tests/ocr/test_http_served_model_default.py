@@ -80,3 +80,22 @@ def test_dry_run_preview_matches_the_resolved_identity(settings):
 
     identity = resolve_ocr_runtime_identity(RunConfig(ocr_backend="glm-http"), settings)
     assert _OCR_HTTP_DEFAULT_SERVED_NAME["glm-http"] == identity.model
+
+
+def test_serve_http_with_paddle_profile_agrees_on_the_paddle_alias(settings):
+    """The ocr-5 mismatch: candidates, static identity and serve defaults must
+    ask a Paddle serve-http endpoint for the Paddle served alias, not glm-ocr."""
+    from bibr.serve.pipeline import serve_ocr_defaults
+
+    settings.ocr.profile = "paddle"
+    expected = settings.ocr.paddle_served_model
+
+    candidates = resolve_backend_candidates("serve-http", settings)
+    assert candidates[0].model == expected
+
+    identity = resolve_ocr_runtime_identity(RunConfig(ocr_backend="serve-http"), settings)
+    assert identity.backend == "serve-http"
+    assert identity.model == expected
+    assert identity.profile == "paddle"
+
+    assert serve_ocr_defaults(settings) == (expected, "paddle")

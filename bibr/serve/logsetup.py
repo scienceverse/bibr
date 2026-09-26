@@ -20,6 +20,7 @@ import functools
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from bibr.utils.redact import install_secret_scrubbing
 
@@ -83,7 +84,7 @@ def configure_serve_logging(settings, *, stream=None) -> logging.Handler:
     return sink
 
 
-def configure_metering_logging(settings) -> None:
+def configure_metering_logging(settings, *, role: str = "api") -> None:
     """Ensure metering records are emitted, and (idempotently) attach a file sink.
 
     Sets the metering logger to INFO so records aren't dropped at source, and —
@@ -93,11 +94,25 @@ def configure_metering_logging(settings) -> None:
     auth gate (it deliberately logs 401s), so unauthenticated request spam would
     otherwise grow the log without bound and exhaust disk (audit M5). Idempotent
     across repeated ``build_server`` calls (tests) so handlers don't accumulate.
+
+    ``role`` selects the file: the API process writes ``METER_LOG_PATH``
+    itself, while the spawned inference worker (``role="worker"``) writes a
+    sibling ``<stem>.worker<suffix>`` file. ``RotatingFileHandler`` is not
+    multi-process safe — two processes rotating one path rename each other's
+    live file and drop records — so exactly one process may rotate each file.
     """
     metering_logger.setLevel(logging.INFO)
     log_path = settings.metering.log_path
     if not log_path:
         return
+    if role == "worker":
+        stemmed = Path(log_path)
+        suffix = stemmed.suffix
+        log_path = (
+            str(stemmed.with_name(f"{stemmed.stem}.worker{suffix}"))
+            if suffix
+            else f"{log_path}.worker"
+        )
     for handler in metering_logger.handlers:
         if getattr(handler, _METERING_SINK_MARKER, None) == log_path:
             return
@@ -154,6 +169,9 @@ def configure_worker_logging(settings) -> None:
     nothing configured in the API process reaches it; without this every
     per-extraction metering record — the ones carrying LLM token usage — was
     dropped at source, and worker warnings went out unformatted and unscrubbed.
+    The worker's metering file is a ``.worker``-suffixed sibling of
+    ``METER_LOG_PATH`` (see ``configure_metering_logging``): sharing one
+    rotating file between processes loses records at rollover.
     """
     configure_serve_logging(settings)
-    configure_metering_logging(settings)
+    configure_metering_logging(settings, role="worker")

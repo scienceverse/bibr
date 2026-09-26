@@ -155,10 +155,14 @@ uv run bibr doctor
 `bibr setup` starts with a short recommended setup flow. It prefers local/private
 processing where your hardware can support it and will ask before installing
 extras, using a cloud provider, or pointing at a private server. `bibr doctor`
-then checks keys, dependencies, launchers, and configured endpoints. It does
-not start managed OCR servers or prove model inference works; use setup's
-smoke test and a paper extraction for that. Use `bibr setup --advanced` for
-the detailed provider and backend picker.
+then lists the `.env` files it read and checks keys, dependencies, launchers,
+and configured endpoints. For an LLM provider (cloud, Ollama, or your own
+OpenAI-compatible server) it sends one short request, built the way extraction
+builds it. For a managed local LLM and for local OCR it runs the same launcher
+and hardware checks `bibr chew` runs before it starts. It does not start
+managed OCR servers or prove local model inference works; use setup's smoke
+test and a paper extraction for that. Use `bibr setup --advanced` for the
+detailed provider and backend picker.
 
 The recommended local setup writes the automatic local OCR selector:
 

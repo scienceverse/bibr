@@ -27,6 +27,7 @@ from bibr.validation import (
     IssueSeverity,
     ValidationIssue,
     abstract_suspicion_reasons,
+    payload_validation,
 )
 
 log = logging.getLogger(__name__)
@@ -218,22 +219,33 @@ def _check_bbox_space(payload: dict) -> list[ValidationIssue]:
 def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
     sections = _as_list(payload, "section")
     section_ids = {s.get("section_id") for s in sections if isinstance(s, dict)}
-    text_ids = {t.get("text_id") for t in _as_list(payload, "text") if isinstance(t, dict)}
+    texts = [t for t in _as_list(payload, "text") if isinstance(t, dict)]
+    text_ids = {t.get("text_id") for t in texts}
+    xrefs = [x for x in _as_list(payload, "xref") if isinstance(x, dict)]
+    xref_ids = {x.get("xref_id") for x in xrefs}
+    author_ids = {a.get("author_id") for a in _as_list(payload, "author") if isinstance(a, dict)}
+    affiliation_ids = {
+        a.get("affiliation_id") for a in _as_list(payload, "affiliation") if isinstance(a, dict)
+    }
+    funding_ids = {f.get("funding_id") for f in _as_list(payload, "funding") if isinstance(f, dict)}
+    figure_ids = {f.get("figure_id") for f in _as_list(payload, "figure") if isinstance(f, dict)}
+    table_ids = {t.get("table_id") for t in _as_list(payload, "table") if isinstance(t, dict)}
     targets = {
         "bib": {b.get("bib_id") for b in _as_list(payload, "bib") if isinstance(b, dict)},
-        "figure": {f.get("figure_id") for f in _as_list(payload, "figure") if isinstance(f, dict)},
-        "table": {t.get("table_id") for t in _as_list(payload, "table") if isinstance(t, dict)},
+        "figure": figure_ids,
+        "table": table_ids,
         "foot": {
             f.get("footnote_id") for f in _as_list(payload, "footnote") if isinstance(f, dict)
         },
     }
     dangling = 0
-    for x in _as_list(payload, "xref"):
-        if not isinstance(x, dict):
-            continue
+    for x in xrefs:
         pool = targets.get(x.get("xref_type"))
         xid = x.get("target_id")
         if pool is not None and xid is not None and xid not in pool:
+            dangling += 1
+        tid = x.get("text_id")
+        if tid is not None and tid not in text_ids:
             dangling += 1
     for s in sections:
         if not isinstance(s, dict):
@@ -241,15 +253,13 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
         p = s.get("parent_section_id")
         if p is not None and p not in section_ids:
             dangling += 1
-    for t in _as_list(payload, "text"):
-        if not isinstance(t, dict):
-            continue
+    for t in texts:
         sid = t.get("section_id")
         if sid is not None and sid not in section_ids:
             dangling += 1
-    # Rows that point at their printed text: reference entries, captions and
-    # footnotes.
-    for key in ("bib", "figure", "table", "footnote"):
+    # Rows that point at their printed text: reference entries, captions,
+    # footnotes, links and expressions.
+    for key in ("bib", "figure", "table", "footnote", "url", "eq"):
         for row in _as_list(payload, key):
             if not isinstance(row, dict):
                 continue
@@ -263,6 +273,59 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
             sid = row.get("section_id")
             if sid is not None and sid not in section_ids:
                 dangling += 1
+    for row in _as_list(payload, "affiliation"):
+        if not isinstance(row, dict):
+            continue
+        aids = row.get("author_ids")
+        if isinstance(aids, list):
+            dangling += sum(1 for aid in aids if aid not in author_ids)
+    for row in _as_list(payload, "affiliation_match"):
+        if not isinstance(row, dict):
+            continue
+        aid = row.get("affiliation_id")
+        if aid is not None and aid not in affiliation_ids:
+            dangling += 1
+    for row in _as_list(payload, "funding_match"):
+        if not isinstance(row, dict):
+            continue
+        fid = row.get("funding_id")
+        if fid is not None and fid not in funding_ids:
+            dangling += 1
+    for row in _as_list(payload, "bib_match"):
+        if not isinstance(row, dict):
+            continue
+        bid = row.get("bib_id")
+        if bid is not None and bid not in targets["bib"]:
+            dangling += 1
+    extraction = _as_dict(payload, "extraction")
+    for row in _as_list(extraction, "text_regions"):
+        if not isinstance(row, dict):
+            continue
+        tid = row.get("text_id")
+        if tid is not None and tid not in text_ids:
+            dangling += 1
+    for row in _as_list(extraction, "float_parts"):
+        if not isinstance(row, dict):
+            continue
+        otype = row.get("object_type")
+        pool = figure_ids if otype == "figure" else table_ids if otype == "table" else None
+        oid = row.get("object_id")
+        if pool is not None and oid is not None and oid not in pool:
+            dangling += 1
+    diagnostics = extraction.get("diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    for row in diagnostics.get("section_classification") or []:
+        if not isinstance(row, dict):
+            continue
+        sid = row.get("section_id")
+        if sid is not None and sid not in section_ids:
+            dangling += 1
+    for row in diagnostics.get("xref_tier") or []:
+        if not isinstance(row, dict):
+            continue
+        xid = row.get("xref_id")
+        if xid is not None and xid not in xref_ids:
+            dangling += 1
     if dangling:
         return [
             ValidationIssue(
@@ -275,18 +338,66 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
     return []
 
 
+def _check_duplicate_pk(payload: dict) -> list[ValidationIssue]:
+    dup_tables = 0
+    dup_rows = 0
+    for table, key in (
+        ("author", "author_id"),
+        ("affiliation", "affiliation_id"),
+        ("funding", "funding_id"),
+        ("text", "text_id"),
+        ("section", "section_id"),
+        ("bib", "bib_id"),
+        ("figure", "figure_id"),
+        ("table", "table_id"),
+        ("footnote", "footnote_id"),
+        ("url", "url_id"),
+        ("xref", "xref_id"),
+        ("eq", "eq_id"),
+    ):
+        seen: set[object] = set()
+        dups = 0
+        for row in _as_list(payload, table):
+            if not isinstance(row, dict):
+                continue
+            value = row.get(key)
+            if value is None or value in seen:
+                if value is not None:
+                    dups += 1
+                continue
+            seen.add(value)
+        if dups:
+            dup_tables += 1
+            dup_rows += dups
+    if dup_rows:
+        return [
+            ValidationIssue(
+                "VAL_DUPLICATE_PK",
+                IssueSeverity.ERROR,
+                f"{dup_rows} duplicate primary key(s) across {dup_tables} table(s)",
+                count=dup_rows,
+            )
+        ]
+    return []
+
+
 def _check_empty_eq(payload: dict) -> list[ValidationIssue]:
+    # Every exported row carries a non-empty comparator (unknown comparators
+    # are dropped at export), so an all-blank test never fires on real
+    # exports — while a null lhs coerced to '' by the LLM schema ships
+    # silently. Flag a blank side instead: an equation with no left- or
+    # right-hand side has no usable content.
     empty = sum(
         1
         for e in _as_list(payload, "eq")
-        if isinstance(e, dict) and not any(_text(e.get(k)) for k in ("lhs", "comp", "rhs"))
+        if isinstance(e, dict) and (not _text(e.get("lhs")) or not _text(e.get("rhs")))
     )
     if empty:
         return [
             ValidationIssue(
                 "VAL_EMPTY_EQ",
                 IssueSeverity.ERROR,
-                f"{empty} equation record(s) with empty lhs/comp/rhs",
+                f"{empty} equation record(s) with empty lhs or rhs",
                 count=empty,
             )
         ]
@@ -294,6 +405,13 @@ def _check_empty_eq(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_url_malformed(payload: dict) -> list[ValidationIssue]:
+    """Flag exported URLs with an http(s) scheme but no dotted host.
+
+    The exporter drops such links before they reach the gate (recording a
+    URL_MALFORMED_DROPPED warning instead), so on exporter output this check
+    is silent by construction. It stays as a guard for hand-built or older
+    payloads validated directly.
+    """
     bad = 0
     for u in _as_list(payload, "url"):
         if not isinstance(u, dict):
@@ -412,8 +530,11 @@ def _check_abstract_missing(payload: dict) -> list[ValidationIssue]:
 
 
 def _check_abstract_suspect(payload: dict) -> list[ValidationIssue]:
-    existing_issues = _as_list(_as_dict(payload, "validation"), "issues")
-    if any(
+    # The gate block lives at extraction.validation on schema 12 and at the
+    # root on older exports (both still circulate); read whichever is present.
+    block = payload_validation(payload) or {}
+    existing_issues = block.get("issues") if isinstance(block, dict) else []
+    if isinstance(existing_issues, list) and any(
         isinstance(issue, dict) and issue.get("code") == "VAL_ABSTRACT_SUSPECT"
         for issue in existing_issues
     ):
@@ -668,6 +789,7 @@ _CHECKS = (
     _check_author_outlier,
     _check_bbox_space,
     _check_dangling_ref,
+    _check_duplicate_pk,
     _check_empty_eq,
     _check_url_malformed,
     _check_title_generic,

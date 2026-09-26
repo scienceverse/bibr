@@ -166,7 +166,7 @@ class VllmOcrServer:
                 self._process = None
                 self._close_stderr_fh()
                 raise RuntimeError(
-                    f"PaddleOCR-VL vLLM process exited during startup (code {rc}): {tail[:500]}"
+                    f"PaddleOCR-VL vLLM process exited during startup (code {rc}): {tail[-500:]}"
                 )
             try:
                 status, _reason, body = request_bytes(models_url, timeout=5)

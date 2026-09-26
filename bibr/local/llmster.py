@@ -16,10 +16,15 @@ from typing import Any
 
 from bibr.config import snapshot_settings
 from bibr.exceptions import UpstreamServiceError
+from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM, request_bytes
 
 logger = logging.getLogger(__name__)
 
 CommandRunner = Callable[..., Any]
+
+# Every `lms` invocation funnels through run_lms_command, so one explicit
+# timeout covers daemon/status/server/ls/ps/load/unload alike.
+_LMS_COMMAND_TIMEOUT_S = 120
 
 
 def find_lms() -> str | None:
@@ -32,13 +37,31 @@ def run_lms_command(lms: str, args: list[str], *, json_output: bool = False) -> 
     """Run one non-interactive `lms` command and optionally decode JSON."""
 
     command = [lms, *args]
-    completed = subprocess.run(  # noqa: S603
-        command,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=120,
-    )
+    try:
+        completed = subprocess.run(  # noqa: S603
+            command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=_LMS_COMMAND_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # Name the hung subcommand: `load` of a big model is the usual
+        # suspect, but daemon/server/ps probes share this path.
+        rendered = shlex.join(command)
+        subcommand = " ".join(command[1:])
+        if command[1:2] == ["load"]:
+            hint = (
+                "The model may still be loading — retry, or lower "
+                "LLM_LLMSTER_CONTEXT_LENGTH / pick a smaller model so the load fits."
+            )
+        else:
+            hint = "Retry once the LM Studio daemon settles."
+        raise UpstreamServiceError(
+            "llmster",
+            f"`{rendered}` timed out after {_LMS_COMMAND_TIMEOUT_S}s "
+            f"(subcommand: {subcommand}). {hint}",
+        ) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
         rendered = shlex.join(command)
@@ -154,7 +177,19 @@ class LlmsterLlmServer:
             )
 
         loaded_models = self._runner(["ps", "--json"], json_output=True)
-        if any(self._identifier in _model_values(item) for item in _items(loaded_models)):
+        matching = [
+            item for item in _items(loaded_models) if self._identifier in _model_values(item)
+        ]
+        if matching:
+            self._check_reused_identifier(matching[0])
+            if not self._identifier_served():
+                raise UpstreamServiceError(
+                    "llmster",
+                    f"Identifier {self._identifier!r} is loaded in LM Studio but the "
+                    f"server on port {self._port} is not serving it — the daemon or "
+                    f"server was restarted, or the identifier was taken over. Run "
+                    f"`lms unload {self._identifier}` and retry.",
+                )
             logger.info("Reusing pre-existing llmster model identifier %s", self._identifier)
             return
 
@@ -170,6 +205,47 @@ class LlmsterLlmServer:
         self._runner(command)
         self._loaded_identifier = self._identifier
 
+    def _check_reused_identifier(self, item: dict[str, Any]) -> None:
+        """Reject a pre-existing identifier that provably serves another model.
+
+        `lms ps` items *may* expose the backing model (modelKey/key/path) next
+        to the identifier. When they do and none of those values is the
+        configured model, the identifier was taken over — reusing it would
+        silently run every request on the wrong model. When the item carries
+        no model identity (identifier-only entries), there is nothing to check
+        against and the liveness probe below is the only guard.
+        """
+        model_keys = {
+            str(item[key]) for key in ("modelKey", "model_key", "key", "path") if item.get(key)
+        }
+        if model_keys and self._model not in model_keys | _model_values(item):
+            raise UpstreamServiceError(
+                "llmster",
+                f"Identifier {self._identifier!r} is already loaded but points at "
+                f"{sorted(model_keys)[0]!r}, not the configured model {self._model!r}. "
+                f"Run `lms unload {self._identifier}` and retry — bibr will not "
+                "evict another model's identifier for you.",
+            )
+
+    def _identifier_served(self) -> bool:
+        """Whether the local server currently serves our identifier.
+
+        One loopback ``GET /v1/models`` per pipeline run (not per request).
+        Unreachable server → trust the CLI state: the server may still be
+        coming up after `server start`, and failing here would break the
+        normal cold-start path.
+        """
+        url = f"http://127.0.0.1:{self._port}/v1/models"
+        try:
+            status, _reason, body = request_bytes(url, timeout=10)
+            if status != 200:
+                raise ValueError(f"HTTP {status}")
+            payload = json.loads(body.decode("utf-8", "replace"))
+        except Exception:  # noqa: BLE001 — any transport failure means "unknown"
+            logger.debug("llmster liveness probe of %s failed; trusting `lms ps`", url)
+            return True
+        return any(self._identifier in _model_values(item) for item in _items(payload))
+
     def configure_llm_client(self) -> None:
         """Route bibr's existing Instructor client through LM Studio."""
 
@@ -178,6 +254,23 @@ class LlmsterLlmServer:
         settings.llm.base_url = f"http://127.0.0.1:{self._port}/v1"
         settings.llm.api_key = "lm-studio"
         settings.llm.model = self._identifier
+        if "timeout_seconds" not in settings.llm.model_fields_set:
+            # Cloud-shaped 30 s (60 s hard) kills local generations that emit
+            # thousands of tokens at laptop tok/s; serialize like the other
+            # managed local backends unless the user pinned the fields.
+            settings.llm.timeout_seconds = 300
+            logger.info("Local llmster backend — raising llm.timeout_seconds 30s->300s")
+        if "max_concurrency" not in settings.llm.model_fields_set:
+            settings.llm.max_concurrency = 1
+            logger.info("Local llmster backend — capping llm.max_concurrency to 1")
+        if "rate_limit_rpm" not in settings.llm.model_fields_set:
+            # Our own server has no external quota to protect; the cloud 60
+            # rpm default would only add dead time between serialized calls.
+            settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+            logger.info(
+                "Local llmster backend — raising llm.rate_limit_rpm to %d",
+                MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
         logger.info(
             "LLM configured: backend=llmster, model=%s, base_url=%s",
             self._identifier,

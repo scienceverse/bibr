@@ -146,6 +146,10 @@ def _walk_pdfium_outline(pdoc, page_heights: dict[int, float] | None = None) -> 
     except PdfiumError as exc:
         logger.debug("Could not read PDF outline: %s", exc)
         return []
+    try:
+        page_count = len(pdoc)
+    except Exception:  # noqa: BLE001 — duck-typed documents (tests); bound checks apply when known
+        page_count = None
 
     for bm in toc:
         title = (bm.get_title() or "").strip()
@@ -159,17 +163,28 @@ def _walk_pdfium_outline(pdoc, page_heights: dict[int, float] | None = None) -> 
         except PdfiumError:
             dest = None
         if dest is not None:
-            page_index, y_pdf = _dest_top_pdf(dest, view_top_index)
-            if page_index is not None:
+            try:
+                page_index, y_pdf = _dest_top_pdf(dest, view_top_index)
+            except Exception as exc:  # noqa: BLE001 — one bad destination must not lose the outline
+                logger.debug("Could not read outline destination: %s", exc)
+                page_index, y_pdf = None, None
+            # A stale bookmark may point past the last page (common in excerpts
+            # of proceedings volumes); keep the entry with no resolvable page
+            # instead of discarding the whole outline (audit input-parsers-26).
+            if page_index is not None and (page_count is None or 0 <= page_index < page_count):
                 page_no = page_index + 1
                 if y_pdf is not None:
-                    if page_index not in page_heights:
-                        page = pdoc[page_index]
-                        try:
-                            page_heights[page_index] = page.get_height()
-                        finally:
-                            page.close()
-                    height = page_heights[page_index]
+                    try:
+                        if page_index not in page_heights:
+                            page = pdoc[page_index]
+                            try:
+                                page_heights[page_index] = page.get_height()
+                            finally:
+                                page.close()
+                        height = page_heights[page_index]
+                    except Exception as exc:  # noqa: BLE001 — one bad bookmark must not lose the outline
+                        logger.debug("Could not read outline target page %d: %s", page_index, exc)
+                        height = None
                     if height:
                         # Flip to top-origin and normalize to a 0..1 fraction.
                         y_top = min(1.0, max(0.0, (height - y_pdf) / height))

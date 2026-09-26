@@ -347,7 +347,8 @@ MatchServiceLiteral = Literal[
 # reads) or TEI (what GROBID writes, for converters into this format).
 InputFormatLiteral = Literal["pdf", "docx", "jats", "tei", "html", "epub", "unknown"]
 
-# ``bibr.extract.equation_extractor._COMP_PATTERN`` after ``_normalize_comp``.
+# ``bibr.extract.equation_extractor._COMP_PATTERN`` after ``_normalize_comp``, which
+# maps the LaTeX relations it also reads (``_LATEX_COMPS``) into the same set.
 EqCompLiteral = Literal["=", "<", ">", "≤", "≥", "≈", "≠", "≪", "≫", "~"]
 
 SeverityLiteral = Literal["error", "warning"]
@@ -870,7 +871,10 @@ class TableExport(BaseModel):
     )
     # ``PaperTable.contents`` (bibr/paper_contents.py) stringifies every cell —
     # headers via ``str(c)``, data cells via ``str(value)`` — so the runtime
-    # shape is always a list of string rows, never numeric/None cells.
+    # shape is always a list of string rows. The parsers keep each cell's text
+    # as a string rather than letting pandas infer types (HTML tables go
+    # through ``bibr.structure.html_table``), so a data cell is the printed
+    # text: "2.50" stays "2.50", and an empty cell is "", never "nan".
     contents: list[list[str]] = Field(
         description="Cell text as rows of strings; the first row is the header. A table "
         "continued across pages has all its pieces' rows merged."

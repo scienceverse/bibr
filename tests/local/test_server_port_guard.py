@@ -126,13 +126,19 @@ class TestGuardHelper:
     def test_unidentifiable_probe_on_a_free_port_still_spawns(self):
         # An unusable /v1/models with nothing actually on the port (a stubbed or
         # proxied probe) must not be reported as a conflict — spawn normally.
+        # Uses an ephemeral free port, never a production default: with a
+        # leftover Rapid-MLX server on :8772 this asserted the wrong thing.
         def not_found(url, **_kwargs):
             return 404, "Not Found", b""
+
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
 
         assert (
             guard_managed_server_port(
                 "ocr",
-                base_url="http://127.0.0.1:8772",
+                base_url=f"http://127.0.0.1:{port}",
                 model="m",
                 server_label="Rapid-MLX",
                 request_fn=not_found,

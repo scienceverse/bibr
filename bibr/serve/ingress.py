@@ -512,6 +512,12 @@ def register_extract_route(
         try:
             stored, options = await persist_multipart_request(request, store)
             descriptor = stored.to_descriptor(options)
+            request_id = getattr(request.state, "request_id", None)
+            if request_id is not None:
+                # Link the worker-side extract record back to this request's
+                # per-request metering record (serve-8); the handoff ignores
+                # unknown keys, and decode_request re-sanitizes the value.
+                descriptor["request_id"] = request_id
             return await tracker.submit(
                 descriptor,
                 request_state=request.state,

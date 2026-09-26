@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import ClassVar
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+    LocalHttpError,
+    guard_managed_server_port,
+    request_bytes,
+)
 from bibr.local.ocr import HttpOcrClient, PaddleHttpOcrClient
 from bibr.ocr.registry import register
 
@@ -227,7 +232,14 @@ class RapidMlxServer:
             start_new_session=True,
             env=self._subprocess_env(),
         )
-        self._wait_until_healthy()
+        try:
+            self._wait_until_healthy()
+        except BaseException:
+            # BaseException, not Exception: the child runs in its own session
+            # and never sees the terminal's Ctrl-C, so a KeyboardInterrupt or
+            # task cancellation out of the health wait must still shut it down.
+            self.shutdown()
+            raise
 
     @property
     def base_url(self) -> str:
@@ -437,8 +449,14 @@ class _ManagedRapidMlxOcrClient:
         **_kw: object,
     ) -> None:
         self._settings = settings if settings is not None else snapshot_settings()
+        # The factory passes the raw requested model as `model_path` and the
+        # winning candidate's model as `model`: the explicit `--ocr-model`
+        # request wins, as on main; the candidate is the default when nothing
+        # was requested.
         self._model = model_path or model or getattr(self._settings.ocr, self._model_option)
         self._profile = profile
+        self._server: RapidMlxServer | None
+        self._http_client: HttpOcrClient | None
         self._server, self._http_client = self._start_generation()
         # rapid-mlx's MLLM vision-embedding cache (vllm_mlx MLLMBatchGenerator ->
         # VisionEmbeddingCache) retains full float32 pixel tensors for up to 100
@@ -455,6 +473,9 @@ class _ManagedRapidMlxOcrClient:
         self._recycle_lock = asyncio.Lock()
         self._drain_event = asyncio.Event()
         self._drain_event.set()
+        # Last restart failure, for waiters parked on the drain while a
+        # recycle fails beneath them (cleared by every successful start).
+        self._restart_error: Exception | None = None
 
     def _spawn_server(self) -> RapidMlxServer:
         return RapidMlxServer(
@@ -481,6 +502,7 @@ class _ManagedRapidMlxOcrClient:
             base_url=server.base_url,
             model=self._model,
             max_tokens=_RAPID_MLX_OCR_MAX_TOKENS,
+            settings=self._settings,
         )
 
     def _start_generation(self) -> tuple[RapidMlxServer, HttpOcrClient]:
@@ -503,24 +525,67 @@ class _ManagedRapidMlxOcrClient:
         async with self._recycle_lock:
             if self.loaded:
                 return
+            old_server, old_http = self._server, self._http_client
             loop = asyncio.get_running_loop()
             try:
                 server, http_client = await loop.run_in_executor(None, self._start_generation)
             except Exception as exc:
                 from bibr.exceptions import UpstreamServiceError
 
-                raise UpstreamServiceError(
+                failure = UpstreamServiceError(
                     "rapid-mlx",
                     f"OCR restart failed: {exc}",
                     original_error=exc,
-                ) from exc
+                )
+                # Stash the failure for waiters parked on the drain, and
+                # release the dead generation's pool/handles before dropping it.
+                self._restart_error = failure
+                await self._close_generation(old_server, old_http)
+                self._server, self._http_client = None, None
+                raise failure from exc
+            # Release the previous generation's pool/handles before it is replaced.
+            await self._close_generation(old_server, old_http)
             self._server, self._http_client = server, http_client
             self._request_count = 0
+            self._restart_error = None
+
+    @staticmethod
+    async def _close_generation(old_server, old_http) -> None:
+        """Best-effort shutdown of a superseded generation; never masks the new one."""
+        if old_http is not None:
+            try:
+                await old_http.shutdown()
+            except Exception as exc:  # noqa: BLE001 — shutdown must not fail a restart
+                logger.warning("Rapid-MLX OCR client shutdown failed: %s", exc)
+        if old_server is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, old_server.shutdown)
+            except Exception as exc:  # noqa: BLE001 — shutdown must not fail a restart
+                logger.warning("Rapid-MLX OCR server shutdown failed: %s", exc)
 
     async def recognize(self, image, prompt: str) -> str:
         await self._ensure_generation()
         await self._drain_event.wait()
-        assert self._http_client is not None  # noqa: S101 - ensured above
+        if self._http_client is None:
+            # Parked on the drain while a recycle failed beneath us: the
+            # recycler stashed the failure and left the generation empty, so
+            # one more _ensure_generation retries the restart before we fail
+            # loudly instead of the old bare AssertionError.
+            from bibr.exceptions import UpstreamServiceError
+
+            try:
+                await self._ensure_generation()
+            except Exception as exc:  # noqa: BLE001 — any restart error is named below
+                raise UpstreamServiceError(
+                    "rapid-mlx",
+                    f"OCR restart failed while parked: {self._restart_error or exc}",
+                ) from exc
+            if self._http_client is None:  # _ensure_generation installs or raises
+                raise UpstreamServiceError(
+                    "rapid-mlx",
+                    f"OCR restart failed while parked: {self._restart_error}",
+                )
         self._inflight += 1
         try:
             result = await self._http_client.recognize(image, prompt)
@@ -528,7 +593,16 @@ class _ManagedRapidMlxOcrClient:
             self._inflight -= 1
         self._request_count += 1
         if self._recycle_after and self._request_count >= self._recycle_after:
-            await self._recycle()
+            # OUR region already transcribed above: return it even when the
+            # restart fails. The failure stays stashed in _restart_error and
+            # the generation stays empty, so the next request's
+            # _ensure_generation retries (and surfaces) it.
+            try:
+                await self._recycle()
+            except Exception as exc:  # noqa: BLE001 — our result is already good
+                logger.warning(
+                    "Rapid-MLX OCR restart failed after %d regions: %s", self._request_count, exc
+                )
         return result
 
     async def _recycle(self) -> None:
@@ -560,13 +634,18 @@ class _ManagedRapidMlxOcrClient:
                 except Exception as exc:
                     from bibr.exceptions import UpstreamServiceError
 
-                    raise UpstreamServiceError(
+                    failure = UpstreamServiceError(
                         "rapid-mlx",
                         f"OCR restart failed: {exc}",
                         original_error=exc,
-                    ) from exc
+                    )
+                    # Parked waiters wake to a None client; stash the failure
+                    # so they can name it instead of hitting a bare assert.
+                    self._restart_error = failure
+                    raise failure from exc
                 self._server, self._http_client = server, http_client
                 self._request_count = 0
+                self._restart_error = None
             finally:
                 self._drain_event.set()
 
@@ -597,6 +676,13 @@ class PaddleRapidMlxOcrClient(_ManagedRapidMlxOcrClient):
 
     name: ClassVar[str] = "paddle-rapid-mlx"
     _model_option = "paddle_rapid_mlx_model"
+    # NOTE: the port/extra-args options below are shared with MlxVlmOcrServer's
+    # own server (paddle-mlx-vlm backend): both read paddle_mlx_port /
+    # paddle_mlx_extra_args. The two are consecutive fallback candidates in the
+    # automatic paddle chain, so a fallback run uses both in sequence — never
+    # at once, which is why the shared port does not collide. Separate
+    # PADDLE_RAPID_MLX_* settings are deferred to an owner decision (new knobs
+    # need docs + wizard surfacing pre-freeze).
     _port_option = "paddle_mlx_port"
     _extra_args_option = "paddle_mlx_extra_args"
     _strict_ocr_smoke = True
@@ -641,6 +727,13 @@ class RapidMlxLlmServer:
             self._settings.llm.model_fields_set.add("max_tokens")
         if "timeout_seconds" not in self._settings.llm.model_fields_set:
             self._settings.llm.timeout_seconds = 300
+        if "rate_limit_rpm" not in self._settings.llm.model_fields_set:
+            # Loopback: the limiter must not throttle local inference.
+            self._settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+            logger.info(
+                "Local rapid-mlx backend — raising llm.rate_limit_rpm to %d",
+                MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
         if "max_concurrency" not in self._settings.llm.model_fields_set:
             # Serialized by default despite server-side continuous batching: measured
             # 2026-07-09 on M4/16GB, 3 concurrent bibr-shaped calls ran 0.71x the speed

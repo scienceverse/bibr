@@ -28,6 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 from bibr.config_introspect import SettingDoc, iter_setting_docs
 from bibr.env_utils import read_dotenv
 from bibr.local.cli import ui
+from bibr.utils.redact import redact_url_secrets
 
 # The 4 settings a new user actually has to touch to get bibr running:
 # an LLM provider (defaults to Google/Gemini), an LLM key, an OCR backend,
@@ -89,8 +90,11 @@ def format_value(doc: SettingDoc, value: str) -> str:
     substring match that disagrees with the end-anchored rule here (it would
     also flag ``LLM_MAX_TOKENS``). There is no flag anywhere to skip this.
     """
-    if not doc.is_secret or not value:
+    if not value:
         return value
+    if not doc.is_secret:
+        # REDIS_URL and friends may carry a password in their user-info.
+        return redact_url_secrets(value) if doc.env_name.endswith("_URL") else value
     if len(value) <= 8:
         return "***"
     return f"{value[:4]}…{value[-4:]}"

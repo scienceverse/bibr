@@ -121,10 +121,83 @@ def test_worker_logging_installs_both_sinks(clean_logging, tmp_path):
     path = tmp_path / "meter.jsonl"
     configure_worker_logging(_settings(log_path=str(path)))
     assert len(_sinks()) == 1
+    # The worker rotates its own suffixed sibling: sharing one rotating file
+    # between the API and worker processes loses records at rollover.
     assert [getattr(h, "_bibr_metering_sink", None) for h in metering_logger.handlers][-1] == str(
-        path
+        tmp_path / "meter.worker.jsonl"
     )
     assert metering_logger.level == logging.INFO
+
+
+def test_worker_metering_path_suffixing(clean_logging, tmp_path):
+    configure_metering_logging(_settings(log_path=str(tmp_path / "meter.jsonl")), role="worker")
+    configure_metering_logging(_settings(log_path=str(tmp_path / "plain")), role="worker")
+    markers = [getattr(h, "_bibr_metering_sink", None) for h in metering_logger.handlers]
+    assert str(tmp_path / "meter.worker.jsonl") in markers
+    assert str(tmp_path / "plain.worker") in markers
+
+
+def test_api_and_worker_handlers_keep_every_record_across_rotation(clean_logging, tmp_path):
+    """Two role handlers (one process standing in for API + worker) lose nothing.
+
+    Each role writes its own file, so each rotation is single-writer and every
+    tagged record survives exactly once in its own file. On the pre-fix code
+    both handlers rotate the same path and records are lost to clobbered
+    backups.
+    """
+    import glob
+    import json
+
+    path = tmp_path / "meter.jsonl"
+    settings = _settings(log_path=str(path))
+    settings.metering.log_max_bytes = 1000
+    settings.metering.log_backup_count = 10
+    configure_metering_logging(settings)  # API role: METER_LOG_PATH itself
+    configure_metering_logging(settings, role="worker")  # worker: .worker sibling
+    handlers = {
+        str(path): next(
+            h
+            for h in metering_logger.handlers
+            if getattr(h, "_bibr_metering_sink", None) == str(path)
+        ),
+        str(tmp_path / "meter.worker.jsonl"): next(
+            h
+            for h in metering_logger.handlers
+            if getattr(h, "_bibr_metering_sink", None) == str(tmp_path / "meter.worker.jsonl")
+        ),
+    }
+
+    per_role = 100
+
+    def _write(handler, tag):
+        for seq in range(per_role):
+            handler.handle(
+                logging.LogRecord(
+                    metering_logger.name,
+                    logging.INFO,
+                    __file__,
+                    0,
+                    json.dumps({"tag": tag, "seq": seq}),
+                    (),
+                    None,
+                )
+            )
+
+    # One handler per simulated process: each rotates only its own file.
+    _write(handlers[str(path)], "api")
+    _write(handlers[str(tmp_path / "meter.worker.jsonl")], "worker")
+
+    kept: dict[str, set] = {}
+    for role_path, tag in ((str(path), "api"), (str(tmp_path / "meter.worker.jsonl"), "worker")):
+        seqs = set()
+        for rotated in glob.glob(role_path + "*"):
+            with open(rotated) as f:
+                for line in f.read().splitlines():
+                    record = json.loads(line)
+                    assert record["tag"] == tag
+                    seqs.add(record["seq"])
+        kept[tag] = seqs
+    assert kept == {"api": set(range(per_role)), "worker": set(range(per_role))}
 
 
 def test_litserve_hook_scrubs_the_handler_that_run_rebuilds(clean_logging):

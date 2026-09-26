@@ -380,8 +380,10 @@ class BaseSentenceSegmenter:
 
         from bibr.utils.device import report_device
         from bibr.utils.onnx_providers import (
+            cpu_ort_session_options,
             cuda_provider_available,
             get_ort_providers,
+            selected_device,
             session_device,
             shrink_arena_after_runs,
         )
@@ -443,6 +445,13 @@ class BaseSentenceSegmenter:
             "ort_providers": providers,
             "hub_prefix": self._resolved_model.hub_prefix,
         }
+        if selected_device(providers) != "cuda":
+            # CPU-only SaT session: skip ORT's CPU arena (audit-measured
+            # ~2.8 GB after one paper). Unverified for CUDA sessions, where
+            # the CUDA EP manages its own arena, so those keep the default.
+            cpu_options = cpu_ort_session_options()
+            if cpu_options is not None:
+                model_kwargs["ort_kwargs"] = {"sess_options": cpu_options}
         if self._resolved_model.tokenizer_name_or_path is not None:
             model_kwargs["tokenizer_name_or_path"] = self._resolved_model.tokenizer_name_or_path
         sat_target = self._model_name

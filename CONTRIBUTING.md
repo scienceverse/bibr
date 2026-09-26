@@ -159,6 +159,15 @@ for rehearsals, Trusted Publishing, and recovery from a partial release.
 - `tests/conftest.py` sets environment variables at module level so `GlobalSettings` doesn't fail
 - Mark integration tests with `@pytest.mark.slow`
 - Mock heavy models in unit tests; use `sys.modules` patching where needed
+- Keep unit tests offline: the autouse socket guard fails any test that opens
+  a non-loopback socket or resolves an external name. Tests that intentionally
+  reach the network (live API, Hub downloads) take `@pytest.mark.network`
+- Global `Settings` mutations and `bibr.*` logger levels are restored after
+  every test by autouse fixtures — no manual `model_fields_set` juggling
+- The torch-free ONNX bundles under `tests/fixtures/onnx` and the hermetic
+  LitServe/geometry fixtures are committed artifacts: regenerate them with
+  `scripts/generate_onnx_test_bundles.py` and
+  `scripts/generate_hermetic_test_fixtures.py` instead of editing by hand
 
 ## Contributor License Agreement
 

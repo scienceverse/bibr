@@ -151,3 +151,85 @@ def test_decode_otsl_ignores_surrounding_whitespace(raw):
     completions, i.e. the default PaddleOCR-VL path — became a phantom cell
     and the colspan was lost."""
     assert decode_otsl(raw).html == _SPANNED
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "<fcel>Group<lcel> <fcel>N<nl>",
+            '<table><tr><td colspan="2">Group</td><td>N</td></tr></table>',
+        ),
+        (
+            "<fcel>A<fcel>B<nl><ucel> <fcel>C<nl>",
+            '<table><tr><td rowspan="2">A</td><td>B</td></tr><tr><td>C</td></tr></table>',
+        ),
+        (
+            "<fcel>A<lcel><nl><ucel> <xcel><nl>",
+            '<table><tr><td rowspan="2" colspan="2">A</td></tr><tr></tr></table>',
+        ),
+        (
+            "<ecel> <fcel>A<ecel><nl>",
+            "<table><tr><td></td><td>A</td><td></td></tr></table>",
+        ),
+    ],
+)
+def test_decode_otsl_whitespace_after_continuation_keeps_spans(raw, expected):
+    """Whitespace-only content after a continuation/empty marker is layout,
+    not a cell: it must not flatten the table and lose its spans."""
+    result = decode_otsl(raw)
+
+    assert result.html == expected
+    assert result.warnings == ()
+
+
+def test_decode_otsl_stray_text_after_nl_opens_next_row():
+    """Text after a row terminator precedes the next row — attributing it to
+    the closed row shifts columns in the fallback rendering."""
+    result = decode_otsl("<fcel>a<fcel>b<nl>stray<fcel>c<fcel>d<nl>")
+
+    assert result.html == (
+        "<table><tr><td>a</td><td>b</td><td></td></tr>"
+        "<tr><td>stray</td><td>c</td><td>d</td></tr></table>"
+    )
+
+
+def test_decode_otsl_non_whitespace_after_continuation_stays_malformed():
+    """Guard: real text on a continuation marker is still a structure error."""
+
+    result = decode_otsl("<fcel>A<lcel>x<fcel>B<nl>")
+
+    assert result.warnings
+    assert result.warnings[0].code == WarningCode.OCR_TABLE_MALFORMED
+    assert "rowspan" not in result.html
+    assert "colspan" not in result.html
+
+
+def test_decode_otsl_anchor_space_is_content():
+    """Guard: a single space inside an anchor cell is kept, not stripped."""
+
+    result = decode_otsl("<fcel> <nl>")
+
+    assert result.html == "<table><tr><td> </td></tr></table>"
+    assert result.warnings == ()
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n\t "])
+def test_decode_otsl_blank_input_decodes_to_empty(raw):
+    """A blank table result carries no grid: decoding it to
+    ``<table></table>`` used to count as filled content and dilute the OCR
+    success-rate gate."""
+    result = decode_otsl(raw)
+
+    assert result.html == ""
+    assert result.warnings == ()
+
+
+def test_normalize_blank_paddle_table_is_empty():
+    from bibr.ocr.normalization import normalize_ocr_output
+    from bibr.ocr.profiles import PADDLE_PROFILE
+
+    normalized = normalize_ocr_output(PADDLE_PROFILE, "table", "   ")
+
+    assert normalized.content == ""
+    assert normalized.warnings == ()

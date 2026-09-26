@@ -1,5 +1,6 @@
 """Shared .env file read/write helpers."""
 
+import os
 from pathlib import Path
 
 
@@ -41,6 +42,26 @@ def _format_env_value(value: str) -> str:
         return value
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return f'"{escaped}"'
+
+
+def write_env_text(path: Path, text: str) -> None:
+    """Write *text* to the ``.env`` at *path*, owner-readable only when new.
+
+    A ``.env`` holds API keys, so a new file is created 0600 whatever the
+    umask, the way ``bibr config set`` (python-dotenv) creates one. An existing
+    file is rewritten in place, as before: it keeps its mode, owner and hard
+    links, and works in a directory the user cannot write and as a single-file
+    bind mount, where a rename over it would fail. A symlinked ``.env`` is
+    followed.
+    """
+    target = Path(os.path.realpath(path))
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        target.write_text(text, encoding="utf-8")
+        return
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -85,4 +106,4 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
             out_lines.append(f"{k}={_format_env_value(v)}")
 
     out_lines.append("")
-    path.write_text("\n".join(out_lines), encoding="utf-8")
+    write_env_text(path, "\n".join(out_lines))

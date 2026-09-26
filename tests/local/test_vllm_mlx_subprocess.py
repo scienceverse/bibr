@@ -248,3 +248,60 @@ def test_vllm_mlx_warmup_payload_matches_engine_mode(monkeypatch, multimodal):
         assert any(part.get("type") == "image_url" for part in content)
     else:
         assert isinstance(content, str), "text-only server must not receive an image payload"
+
+
+def test_startup_keyboard_interrupt_shuts_down_child(monkeypatch):
+    """Ctrl-C during the health wait still shuts down the child (11/13)."""
+    from bibr.local import ocr as mod
+    from bibr.local.http_runtime import LocalHttpError
+
+    proc = mock.MagicMock()
+    proc.poll.return_value = None
+    popens = []
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: popens.append((a, k)) or proc)
+
+    calls = []
+
+    def fake_request(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            # Pre-spawn port guard probe: nothing listening yet.
+            raise LocalHttpError("connection refused")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod, "request_bytes", fake_request)
+
+    with pytest.raises(KeyboardInterrupt):
+        mod.VllmMlxServer(model="x", port=8765)
+    assert len(popens) == 1  # the interrupt hit the health wait, not the guard
+    proc.terminate.assert_called_once()
+
+
+def test_startup_error_reports_tail_end(tmp_path):
+    """The exit error keeps the LAST 500 chars (the OOM line), not the first (7)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import ocr as mod
+
+    process = mock.MagicMock(returncode=1)
+    process.poll.return_value = 1
+    server = mod.VllmMlxServer.__new__(mod.VllmMlxServer)
+    server._settings = GlobalSettings()
+    server._model = "x"
+    server._port = 8766
+    server._process = process
+    server._stderr_fh = None
+    log = tmp_path / "vllm-mlx.log"
+    log.write_bytes(
+        b"\n".join(
+            f"INFO loading weights shard {i:3d}/200 into unified memory".encode()
+            for i in range(200)
+        )
+        + b"\nRuntimeError: Metal OOM: out of memory mapping weights into MTLBuffer\n"
+    )
+    server._stderr_log = log
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server._wait_until_ready()
+
+    assert "Metal OOM" in str(excinfo.value)
+    assert "shard   0/200" not in str(excinfo.value)

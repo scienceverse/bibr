@@ -21,29 +21,6 @@ class UnsupportedFileType(StrEnum):
     TEX = ".tex"  # just .tex isn't enough for us to infer anything, we need dependencies
 
 
-class SupportedMimeType(StrEnum):
-    """Mime types that bibr can process."""
-
-    PDF = "application/pdf"
-    DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    XML = "application/xml"
-    XML_TEXT = "text/xml"
-    HTML = "text/html"
-    XHTML = "application/xhtml+xml"
-    EPUB = "application/epub+zip"
-
-
-class UnsupportedMimeType(StrEnum):
-    """Mime types that bibr explicitly refuses."""
-
-    DOC = "application/msword"
-    EXE = "application/x-msdownload"
-    ZIP = "application/zip"  # Allowed for .docx/.epub by extension-specific validators.
-    TEX = "text/x-tex"
-
-
 # Convenience sets for quick lookups
 SUPPORTED_EXTENSIONS: set[str] = {ft.value for ft in SupportedFileType}
 UNSUPPORTED_EXTENSIONS: set[str] = {ft.value for ft in UnsupportedFileType}
-SUPPORTED_MIME_TYPES: set[str] = {mt.value for mt in SupportedMimeType}
-UNSUPPORTED_MIME_TYPES: set[str] = {mt.value for mt in UnsupportedMimeType}

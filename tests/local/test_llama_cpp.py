@@ -877,7 +877,9 @@ def test_startup_retry_falls_back_to_conservative_args(monkeypatch, caplog):
     def wait(self, timeout):
         attempts["n"] += 1
         if attempts["n"] == 1:
-            raise RuntimeError("llama.cpp exited during startup (code 1): bad --spec-type")
+            raise RuntimeError(
+                "llama.cpp exited during startup (code 1): error: unknown argument '--spec-type'"
+            )
         return None
 
     launched = _healthy_stub_server(monkeypatch, available=full, wait_side_effect=wait)
@@ -898,6 +900,40 @@ def test_startup_retry_falls_back_to_conservative_args(monkeypatch, caplog):
     assert "--no-context-shift" not in launched[1]
     assert launched[1][launched[1].index("--parallel") + 1] == "1"
     assert server.n_slots == 1
+    assert any("conservative" in r.message.lower() for r in caplog.records)
+    server._process = None
+    server.shutdown()
+
+
+def test_startup_retry_on_value_rejection(monkeypatch, caplog):
+    """A rejected flag VALUE also retries: llama.cpp wraps handler errors as
+    'error while handling argument "<flag>": <reason>' (common/arg.cpp), e.g.
+    --spec-type ngram-mod on a build from before ngram-mod existed."""
+    from bibr.local import llama_cpp
+
+    full = frozenset({"--kv-unified", "--spec-type", "--no-mmproj", "--no-context-shift"})
+    attempts = {"n": 0}
+
+    def wait(self, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError(
+                "llama.cpp exited during startup (code 1): "
+                'error while handling argument "--spec-type": '
+                "unknown speculative type: ngram-mod\n\nusage:\n"
+                "--spec-type [none|ngram-cache|ngram-simple]\n"
+            )
+        return None
+
+    launched = _healthy_stub_server(monkeypatch, available=full, wait_side_effect=wait)
+
+    with caplog.at_level(logging.WARNING):
+        server = llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+
+    assert attempts["n"] == 2  # first fails, retry succeeds
+    assert len(launched) == 2
+    assert "--spec-type" in launched[0]
+    assert "--spec-type" not in launched[1]
     assert any("conservative" in r.message.lower() for r in caplog.records)
     server._process = None
     server.shutdown()
@@ -1129,3 +1165,408 @@ def test_ocr_client_respects_env_explicit_concurrency(monkeypatch, tmp_path):
 
     assert settings.ocr.max_concurrent_regions == 4
     assert settings.ocr.concurrent_regions_per_file == 1
+
+
+# ---------------------------------------------------------------------------
+# local-runtimes sweep: explicit client tuning, quotes, stderr tail, retry,
+# identity flags, Ctrl-C cleanup, health-race grace (findings 4, 6, 7, 10, 12, 14, 15)
+# ---------------------------------------------------------------------------
+
+
+def _llm_server_with_isolated_settings(**env):
+    """LlamaCppLlmServer with a fresh GlobalSettings (no global mutation)."""
+    import os
+
+    from bibr.config import GlobalSettings
+    from bibr.local import llama_cpp
+
+    old = {key: os.environ.get(key) for key in env}
+    try:
+        os.environ.update({key: str(value) for key, value in env.items()})
+        settings = GlobalSettings()
+    finally:
+        for key, value in old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    server = object.__new__(llama_cpp.LlamaCppLlmServer)
+    server._settings = settings
+    server._server = MagicMock(base_url="http://127.0.0.1:8770", model="m", n_slots=2)
+    return server
+
+
+def test_llm_server_respects_explicit_token_caps():
+    """Explicit LLM_MAX_TOKENS / LLM_MAX_INPUT_CHARS survive configure (10)."""
+    server = _llm_server_with_isolated_settings(
+        LLM_LLAMA_CPP_CONTEXT_SIZE=65536,
+        LLM_MAX_TOKENS=16384,
+        LLM_MAX_INPUT_CHARS=100000,
+    )
+    assert "max_tokens" in server._settings.llm.model_fields_set
+    server.configure_llm_client()
+    assert server._settings.llm.max_tokens == 16384
+    assert server._settings.llm.max_input_chars == 100000
+
+
+def test_llm_server_caps_scale_with_context_size_when_unset(caplog):
+    """Unset caps derive from the launched context size, not fixed constants (10)."""
+    server = _llm_server_with_isolated_settings(LLM_LLAMA_CPP_CONTEXT_SIZE=65536)
+    for field in ("max_tokens", "max_input_chars", "ref_seg_window_chars"):
+        server._settings.llm.model_fields_set.discard(field)
+    with caplog.at_level(logging.INFO, logger="bibr.local.llama_cpp"):
+        server.configure_llm_client()
+    assert server._settings.llm.max_tokens == 16384  # 65536 // 4
+    assert server._settings.llm.max_input_chars == 96_000
+    # Default 16_000 is already under the 48_000 budget — left alone.
+    assert server._settings.llm.ref_seg_window_chars == 16_000
+
+
+def test_llm_server_default_context_keeps_historical_caps():
+    """At the default 16384-token context the derived caps equal the old constants."""
+    server = _llm_server_with_isolated_settings()
+    server._settings.llm.model_fields_set.discard("max_tokens")
+    server._settings.llm.model_fields_set.discard("max_input_chars")
+    server._settings.llm.model_fields_set.discard("ref_seg_window_chars")
+    server.configure_llm_client()
+    assert server._settings.llm.max_tokens == 4096
+    assert server._settings.llm.max_input_chars == 24_000
+    assert server._settings.llm.ref_seg_window_chars == 12_000
+
+
+def test_llm_server_warns_on_explicit_value_over_context(caplog):
+    """An explicit value that cannot fit the context logs a warning (10)."""
+    server = _llm_server_with_isolated_settings(
+        LLM_LLAMA_CPP_CONTEXT_SIZE=8192, LLM_MAX_TOKENS=16384
+    )
+    with caplog.at_level(logging.WARNING, logger="bibr.local.llama_cpp"):
+        server.configure_llm_client()
+    assert server._settings.llm.max_tokens == 16384  # kept, not replaced
+    assert any("max_tokens" in r.message for r in caplog.records)
+
+
+def test_llm_server_raises_rate_limit_rpm_when_unset():
+    """The managed server auto-raises the cloud 60 rpm cap like vllm/vllm-mlx (12)."""
+    server = _llm_server_with_isolated_settings()
+    server._settings.llm.model_fields_set.discard("rate_limit_rpm")
+    server.configure_llm_client()
+    assert server._settings.llm.rate_limit_rpm == 600
+
+
+def test_llm_server_respects_explicit_rate_limit_rpm():
+    """An explicit LLM_RATE_LIMIT_RPM suppresses the managed auto-raise (12)."""
+    server = _llm_server_with_isolated_settings(LLM_RATE_LIMIT_RPM=30)
+    server.configure_llm_client()
+    assert server._settings.llm.rate_limit_rpm == 30
+
+
+def test_split_extra_args_strips_windows_quotes(monkeypatch):
+    """Windows-branch tokens lose one surrounding quote pair (6)."""
+    import types as _types
+
+    from bibr.local import llama_cpp
+
+    monkeypatch.setattr(llama_cpp, "os", _types.SimpleNamespace(name="nt"))
+    parts = llama_cpp.split_extra_args(
+        '--chat-template-file "C:\\Users\\Jane Doe\\nx.jinja" -ctk f16'
+    )
+    assert parts == ["--chat-template-file", "C:\\Users\\Jane Doe\\nx.jinja", "-ctk", "f16"]
+    # Tokens without surrounding quotes, and partial quoting, are untouched.
+    assert llama_cpp.split_extra_args("--port 8770")[1] == "8770"
+    assert llama_cpp.split_extra_args('--flag ab"cd')[1] == 'ab"cd'
+
+
+def test_split_extra_args_posix_branch_keeps_quotes_stripped(monkeypatch):
+    """POSIX shlex already strips quotes — no double processing (6 guard)."""
+    import types as _types
+
+    from bibr.local import llama_cpp
+
+    monkeypatch.setattr(llama_cpp, "os", _types.SimpleNamespace(name="posix"))
+    parts = llama_cpp.split_extra_args('--chat-template-file "/tmp/my model/t.jinja"')
+    assert parts == ["--chat-template-file", "/tmp/my model/t.jinja"]
+
+
+def test_startup_error_reports_tail_end(monkeypatch, tmp_path):
+    """The exit error keeps the LAST 1000 chars (the actual error line), not the first (7)."""
+    from bibr.local import llama_cpp
+
+    log = tmp_path / "llama.log"
+    log.write_bytes(
+        b"\n".join(
+            f"load_tensors: layer {i:3d} assigned to device CUDA0".encode() for i in range(120)
+        )
+        + b"\nllama_model_load: error loading model: cudaMalloc failed: out of memory\n"
+    )
+
+    proc = MagicMock()
+    proc.poll.return_value = 1
+    proc.returncode = 1
+    server = object.__new__(llama_cpp.LlamaCppServer)
+    server._process = proc
+    server._port = 8770
+    server._model = "m"
+    server._stderr_fh = None
+    server._stderr_log = log
+    server._reused = False
+
+    with pytest.raises(RuntimeError) as excinfo:
+        llama_cpp.LlamaCppServer._wait_until_healthy(server, timeout=30)
+    assert "out of memory" in str(excinfo.value)
+
+
+def test_startup_no_retry_on_load_failure(monkeypatch):
+    """An OOM exit with optional feature args must NOT trigger the conservative retry (7)."""
+    from bibr.local import llama_cpp
+
+    full = frozenset({"--kv-unified", "--spec-type", "--no-mmproj"})
+
+    def wait(self, timeout):
+        raise RuntimeError(
+            "llama.cpp exited during startup (code 1): "
+            "llama_model_load: error loading model: cudaMalloc failed: out of memory"
+        )
+
+    launched = _healthy_stub_server(monkeypatch, available=full, wait_side_effect=wait)
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+    assert len(launched) == 1
+
+
+@pytest.mark.parametrize(
+    "flag", ["--port 9000", "--alias other", "-hf other/repo", "-hfr other/repo"]
+)
+def test_build_server_argv_rejects_identity_override(flag):
+    """Extra args must not move the server bibr polls — point at the port setting (14)."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local.llama_cpp import build_server_argv
+
+    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_PORT"):
+        build_server_argv(
+            ["llama-server"],
+            model="m",
+            port=8770,
+            context_size=8192,
+            extra_args=flag,
+            role="llm",
+            available=frozenset(),
+        )
+
+
+def test_build_server_argv_rejects_identity_override_ocr_role():
+    """The OCR role names its own extra-args and port settings (14)."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local.llama_cpp import build_server_argv
+
+    with pytest.raises(UpstreamServiceError, match="OCR_LLAMA_CPP_PORT"):
+        build_server_argv(
+            ["llama-server"],
+            model="m",
+            port=8771,
+            context_size=8192,
+            extra_args="--port 9000",
+            role="ocr",
+            available=frozenset(),
+        )
+
+
+def test_build_server_argv_allows_host_override():
+    """`--host` in extra args is honoured as on main: binding 0.0.0.0 still
+    answers the loopback health poll, so it is not an identity override."""
+    from bibr.local.llama_cpp import build_server_argv
+
+    argv = build_server_argv(
+        ["llama-server"],
+        model="m",
+        port=8770,
+        context_size=8192,
+        extra_args="--host 0.0.0.0",
+        role="llm",
+        available=frozenset(),
+    )
+    assert argv.count("--host") == 1
+    assert argv[argv.index("--host") + 1] == "0.0.0.0"  # noqa: S104
+
+
+def test_build_server_argv_names_setting_on_bad_quote():
+    """An unbalanced quote raises UpstreamServiceError naming the setting (14)."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local.llama_cpp import build_server_argv
+
+    with pytest.raises(UpstreamServiceError, match="LLM_LLAMA_CPP_EXTRA_ARGS"):
+        build_server_argv(
+            ["llama-server"],
+            model="m",
+            port=8770,
+            context_size=8192,
+            extra_args='--chat-template-file "oops',
+            role="llm",
+            available=frozenset(),
+        )
+
+
+def test_build_server_argv_bad_quote_leaks_no_log_handle(monkeypatch, tmp_path):
+    """Extra-args parsing fails before the stderr log handle is opened (11/14)."""
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import llama_cpp
+
+    opened = {"n": 0}
+
+    def fake_open(name, port):
+        opened["n"] += 1
+        raise AssertionError("must not open a log for a launch that never happens")
+
+    import bibr.utils.secure_temp as secure_temp
+
+    monkeypatch.setattr(secure_temp, "open_subprocess_log", fake_open)
+    monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: ["llama-server"])
+    with pytest.raises(UpstreamServiceError):
+        llama_cpp.LlamaCppServer(
+            model="m", port=8770, extra_args='--chat-template-file "oops', role="llm"
+        )
+    assert opened["n"] == 0
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["x", "--parallel", "4", "--kv-unified"], 4),
+        (["x", "--parallel", "2", "--kv-unified"], 2),
+        (["x", "--parallel", "1", "--kv-unified"], 1),
+        (["x", "-np", "4", "--kv-unified"], 4),
+        (["x", "--parallel=4", "--kv-unified"], 4),
+        (["x", "--parallel", "4"], 1),  # no kv-unified: per-slot context halves
+        (["x", "--kv-unified"], 1),  # no --parallel value
+        (["x", "--parallel", "many", "--kv-unified"], 1),  # garbage value
+    ],
+)
+def test_n_slots_reads_parallel_count(argv, expected):
+    """--parallel N yields N slots; garbage or missing values stay single-slot (14)."""
+    from bibr.local.llama_cpp import _n_slots_from_argv
+
+    assert _n_slots_from_argv(argv) == expected
+
+
+def test_ctrl_c_during_startup_shuts_down_server(monkeypatch):
+    """KeyboardInterrupt out of the health wait still kills the child (4)."""
+    import subprocess as real_subprocess
+
+    from bibr.local import llama_cpp
+
+    kids = []
+    real_popen = real_subprocess.Popen
+
+    def fake_popen(cmd, **kwargs):
+        proc = real_popen(  # noqa: S603 — `sleep` test double, not a model
+            ["sleep", "120"],
+            stdout=real_subprocess.DEVNULL,
+            stderr=real_subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        kids.append(proc)
+        return proc
+
+    monkeypatch.setattr(llama_cpp, "find_llama_server", lambda: ["llama-server"])
+    monkeypatch.setattr(llama_cpp, "supported_flags", lambda prefix: frozenset())
+    monkeypatch.setattr(llama_cpp, "probe_backend_kind", lambda *a, **k: "cpu")
+    monkeypatch.setattr(llama_cpp.subprocess, "Popen", fake_popen)
+
+    def ki_wait(self, timeout):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(llama_cpp.LlamaCppServer, "_wait_until_healthy", ki_wait)
+
+    with pytest.raises(KeyboardInterrupt):
+        llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+    assert kids and kids[0].poll() is not None
+
+
+def test_health_200_from_foreign_process_is_not_readiness():
+    """A /health 200 while our own process exits is a startup failure, not ready (15)."""
+    import http.server
+    import socketserver
+    import subprocess as real_subprocess
+    import sys
+    import threading
+
+    from bibr.local import llama_cpp
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        # Our own process: bind fails, exits 1 after 0.3 s (loser of a port race).
+        loser = real_subprocess.Popen(
+            [sys.executable, "-c", "import time, sys; time.sleep(0.3); sys.exit(1)"],
+            stdout=real_subprocess.DEVNULL,
+            stderr=real_subprocess.DEVNULL,
+        )
+        server = object.__new__(llama_cpp.LlamaCppServer)
+        server._process = loser
+        server._port = port
+        server._model = "m"
+        server._stderr_fh = None
+        server._stderr_log = None
+        server._reused = False
+        try:
+            with pytest.raises(RuntimeError, match="exited during startup"):
+                llama_cpp.LlamaCppServer._wait_until_healthy(server, timeout=30)
+        finally:
+            loser.wait()
+            httpd.shutdown()
+        assert loser.returncode == 1
+
+
+def test_health_200_with_live_process_is_readiness(monkeypatch):
+    """The grace recheck must not reject a genuinely healthy server (15 guard)."""
+    import http.server
+    import socketserver
+    import subprocess as real_subprocess
+    import threading
+
+    from bibr.local import http_runtime, llama_cpp
+
+    # tests/local/conftest.py refuses every probe; this test serves a real one.
+    monkeypatch.setattr(llama_cpp, "request_bytes", http_runtime.request_bytes)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), Handler) as httpd:
+        port = httpd.server_address[1]
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        proc = real_subprocess.Popen(
+            ["sleep", "30"],  # noqa: S603, S607 — `sleep` test double, not a model
+            stdout=real_subprocess.DEVNULL,
+            stderr=real_subprocess.DEVNULL,
+        )
+        server = object.__new__(llama_cpp.LlamaCppServer)
+        server._process = proc
+        server._port = port
+        server._model = "m"
+        server._stderr_fh = None
+        server._stderr_log = None
+        server._reused = False
+        try:
+            llama_cpp.LlamaCppServer._wait_until_healthy(server, timeout=30)
+        finally:
+            proc.terminate()
+            proc.wait()
+            httpd.shutdown()

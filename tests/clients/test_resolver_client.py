@@ -369,3 +369,36 @@ async def test_lookup_doi_allows_legit_doi_with_dots_in_suffix():
     out = await rc.lookup_doi("10.1016/j.foo.2024")
     assert out == {"doi": "10.1016/j.foo.2024"}
     await rc.close()
+
+
+# --- Response shapes ----------------------------------------------------------
+# The client promises the resolver never fails enrichment. A proxy or another
+# service answering with other JSON used to raise AttributeError out of
+# healthy(), which failed the paper's whole reference enrichment.
+
+
+@pytest.mark.parametrize("body", [["ok"], "ok", 1, None])
+async def test_health_non_object_body_is_unhealthy(body):
+    rc = _client(lambda request: httpx.Response(200, json=body))
+    assert await rc.healthy() is False
+    await rc.close()
+
+
+async def test_lookup_doi_non_object_body_is_a_miss():
+    rc = _client(lambda request: httpx.Response(200, json=["not", "a", "work"]))
+    assert await rc.lookup_doi("10.1/x") is None
+    await rc.close()
+
+
+async def test_lookup_doi_non_object_body_is_an_error_when_asked():
+    rc = _client(lambda request: httpx.Response(200, json=["not", "a", "work"]))
+    with pytest.raises(ValueError, match="not a work"):
+        await rc.lookup_doi("10.1/x", raise_on_error=True)
+    await rc.close()
+
+
+async def test_search_drops_candidates_that_are_not_objects():
+    body = {"candidates": [{"title": "Kept"}, "stray", None, 3]}
+    rc = _client(lambda request: httpx.Response(200, json=body))
+    assert await rc.search("A title", 2020, 5) == [{"title": "Kept"}]
+    await rc.close()

@@ -119,17 +119,26 @@ SUPP_NAMED_XREF_RE = re.compile(
 # The letter lookbehind blocks substring matches inside raw LaTeX and URLs
 # ("\leq 1" → "eq 1", "osf.io/geq9x" → "eq9") while still allowing an
 # OCR-flattened footnote marker glued to the word ("9Equations (1)").
+# A hyphen before a lowercase short form is rejected too: unit spellings
+# such as "CO2-eq. (39.1%)" would otherwise match from the "eq". A hyphen
+# before longhand "Equation" is a range dash ("Equation 5-Equation 7"),
+# so only the lowercase "eq" shape is refused. (An en dash is still
+# allowed everywhere: longhand ranges print "Equation 5–Equation 7".)
 # Dotted ids are captured whole so "Eq. (2.3)" isn't truncated to
 # "Eq. (2".  The close paren is consumed only when the open paren was
 # matched, so an enclosing parenthetical — "(see Equations 1 and 7)" —
-# keeps its own ")".
+# keeps its own ")". A trailing percent sign is rejected after the numbers
+# ("eq. (39.1%)" is a share, not an equation).
+# The match's word is captured so detect_xrefs can drop version-printed
+# software ("EQS 6", "EQS 6.1", see _is_software_version_mention).
 _EQ_NUM = r"\d+(?:\.\d+)*"
 _EQ_NUM_RANGE = rf"(?:\s*[-–]\s*{_EQ_NUM})?"
 _EQ_NUM_LIST = rf"(?:\s*(?:[,&]|\band\b)\s*{_EQ_NUM}{_EQ_NUM_RANGE})*"
 EQUATION_XREF_RE = re.compile(
-    r"(?<![A-Za-z])(?:Equations?|Eqs?\.?)\s*(?P<open>\()?"
+    r"(?<![A-Za-z])(?<!-(?=(?-i:eq)))(?P<word>(?:Equations?|Eqs?\.?))\s*(?P<open>\()?"
     rf"(?P<nums>{_EQ_NUM}{_EQ_NUM_RANGE}{_EQ_NUM_LIST})"
-    r"(?(open)\)?)",
+    r"(?(open)\)?)"
+    r"(?![\d.]*\s*%)",
     re.IGNORECASE,
 )
 
@@ -167,7 +176,9 @@ def _expand_nums(num_str: str) -> list[int]:
     """Expand a number sequence like ``"5-7"`` or ``"1, 3"`` into individual ints.
 
     Unlike bare ``NUM_SEP_RE.findall`` this properly fills in ranges so that
-    ``"5-7"`` yields ``[5, 6, 7]`` rather than ``[5, 7]``.
+    ``"5-7"`` yields ``[5, 6, 7]`` rather than ``[5, 7]``. A reversed range
+    (``"5-3"``) yields ``[]``: it is read as a typo or false positive, not
+    filled ascending (that recovery lives with the citation linker).
     """
     result: list[int] = []
     # Split on list separators first (comma, ampersand, "and")
@@ -261,6 +272,24 @@ def _printed_number(label: str) -> int:
     xref records, which no exported row is keyed by."""
     number = NUM_SEP_RE.search(label)
     return int(number.group()) if number else 0
+
+
+def _is_software_version_mention(match: re.Match[str]) -> bool:
+    """Whether an equation-pattern match names versioned software, not an equation.
+
+    Structural-equation software is cited bare and versioned ("EQS 6.1",
+    "EQS 6", Bentler): an all-caps short plural with no period. Real plural
+    references print "Eqs." or "eqs", and real bare short forms ("eq 5",
+    "eqs 4 and 8", "Eq (1)") take plain integers — so the caps-no-period
+    plural is dropped whatever the number shape, while the dotted-number
+    rule still covers the singular caps form ("EQ 2.3").
+    """
+    word = match.group("word")
+    if word == "EQS":
+        return True
+    if word == "EQ":
+        return "." in match.group("nums")
+    return False
 
 
 class _FloatIndex:
@@ -441,6 +470,8 @@ def detect_xrefs(
 
         # Equation xrefs — no validation
         for m in EQUATION_XREF_RE.finditer(sent.text):
+            if _is_software_version_mention(m):
+                continue
             nums = _expand_nums(m.group("nums"))
             for num in nums:
                 xrefs.append(

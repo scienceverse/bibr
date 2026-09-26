@@ -245,3 +245,327 @@ def test_single_author_without_email_stays_unflagged():
     authors = [PaperAuthor(author_id=1, given="A", family="One", affiliation="x")]
     AuthorEmailHarvester(contents).harvest(authors)
     assert authors[0].corresponding is False
+
+
+def test_unrelated_earlier_email_does_not_block_real_one():
+    """extract-metadata-8: an editorial-office address printed before the
+    corresponding author's own marker-anchored address must not be handed to
+    them (by surname-window proximity), blocking the real one."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "Editorial office: editor@appliedthings.org",
+            "Filler sentence one.",
+            "Filler sentence two.",
+            "Corresponding author: Jane Doe, jane.doe@uni.edu",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jane.doe@uni.edu"
+    assert jane.corresponding is True
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_elimination_fallback_needs_marker_or_name_match():
+    """extract-metadata-8: with no surname near any email (wide gap), the pure
+    elimination fallback must not hand an unrelated address to the single
+    corresponding author."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Editorial office: editor@appliedthings.org",
+            "Filler one.",
+            "Filler two.",
+            "Filler three.",
+            "Filler four.",
+            "Filler five.",
+            "Filler six.",
+            "Jane Doe and John Roe",
+            "Filler seven.",
+            "Filler eight.",
+            "Filler nine.",
+            "Filler ten.",
+            "Corresponding author: Jane Doe, jane.doe@uni.edu",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jane.doe@uni.edu"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_fallback_with_marker_assigns_real_correspondence_address():
+    """The elimination fallback is for genuine correspondence footers: a
+    'Corresponding author' line plus an 'E-mail:' line, far from every
+    surname, still reaches the single corresponding author."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Filler one.",
+            "Filler two.",
+            "Filler three.",
+            "Filler four.",
+            "Corresponding author: Jane Doe.",
+            "E-mail: jane.doe@uni.edu.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Doe").email == "jane.doe@uni.edu"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_mdpi_correspondence_line_without_name_skips_affiliation_address():
+    """MDPI layout: a co-author's affiliation address sits just above a
+    '* Correspondence:' line that names nobody, all far below the byline.
+    The strict pairing is exhaustive, so the affiliation address must not go
+    to the corresponding author by elimination and block her real address."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Article",
+            "Jane Doe 1,* , Ann Kim 2 , Bo Park 3 and John Roe 4",
+            "1 School of Public Health, Fudan University, Shanghai 200032, China",
+            "2 Department of Economics, Seoul National University, Seoul 08826, Korea",
+            "3 Department of Statistics, Yonsei University, Seoul 03722, Korea",
+            "4 Institute of Health Policy, Tokyo 113-8654, Japan; jroe77@u-tokyo.ac.jp (J.R.)",
+            "* Correspondence: jd2020@fudan.edu.cn; Tel.: +86-21-5423-7000",
+            "Received: 23 May 2020; Accepted: 23 July 2020; Published: 28 July 2020",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="Ann", family="Kim", affiliation="X"),
+        PaperAuthor(author_id=3, given="Bo", family="Park", affiliation="X"),
+        PaperAuthor(author_id=4, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jd2020@fudan.edu.cn"
+    assert jane.corresponding is True
+    assert all(a.email in (None, "") for a in authors if a.family != "Doe")
+
+
+def test_strict_pairing_blocks_unrelated_earlier_email_in_fallback():
+    """Elimination fallback with a strict pairing elsewhere: an editorial
+    address printed before the marker line must not go to the single
+    corresponding author — even with a correspondence marker in its window —
+    because the marker-line pairings are exhaustive."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        ["Jane Doe and John Roe"]
+        + [f"Filler {n}." for n in range(6)]
+        + ["Editorial office: editor@appliedthings.org", "* Correspondence: jd77@uni.edu"]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jd77@uni.edu"
+    assert jane.corresponding is True
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_plos_star_email_line_assigns_in_fallback():
+    """PLOS '* E-mail:' footnotes carry no correspondence marker, so the
+    fallback recognises the starred line itself as one."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        ["Jane Doe and John Roe"] + [f"Filler {n}." for n in range(6)] + ["* E-mail: jd77@uni.edu"]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Doe").email == "jd77@uni.edu"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_lower_ranked_candidate_with_name_match_wins():
+    """When the top-ranked candidate fails the gate, a lower-ranked
+    candidate whose local part names them still gets the address — instead
+    of the address being dropped (or going to the wrong author)."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        ["Ann Kim and Kouji Yamamoto", "Dept X; koujiy@yokohama-cu.ac.jp"]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Ann", family="Kim", affiliation="X"),
+        PaperAuthor(author_id=2, given="Kouji", family="Yamamoto", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Yamamoto").email == "koujiy@yokohama-cu.ac.jp"
+    assert next(a for a in authors if a.family == "Kim").email in (None, "")
+
+
+def test_two_letter_family_name_prefix_licenses_address():
+    """'lixh@' for Xiaohong Li: a 2-letter family name cannot match by
+    containment, but as the address's leading letters it still names her."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Mei Sun 2 , Xiaohong Li 2",
+            "2 Center, Fudan; sunmei@f.edu (M.S.); lixh@fudan.edu.cn (X.L.)",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Mei", family="Sun", affiliation="X", email="sunmei@f.edu"),
+        PaperAuthor(author_id=2, given="Xiaohong", family="Li", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Li").email == "lixh@fudan.edu.cn"
+
+
+def test_two_letter_given_token_does_not_license_address():
+    """'Yu' in Yu-Zhong Zhang must not hand him the address: only the family
+    name gets the 2-letter prefix rule, so a merely nearby opaque address
+    stays unassigned."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Yu-Zhong Zhang and Bo Chen",
+            "Dept X",
+            "Filler one.",
+            "Contact yuri@uni.edu for the dataset.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Yu-Zhong", family="Zhang", affiliation="X"),
+        PaperAuthor(author_id=2, given="Bo", family="Chen", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert all(a.email in (None, "") for a in authors)
+
+
+def test_short_local_part_does_not_license_address():
+    """A 2-letter local part ('do@' for Doe) matches by containment, but the
+    affinity gate needs 3+ letters — otherwise any initial would license any
+    nearby opaque address."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        ["Jane Doe and John Roe", "Dept X", "Contact do@uni.edu for details."]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert all(a.email in (None, "") for a in authors)
+
+
+def test_strict_paired_opaque_address_assigns_despite_distance():
+    """An opaque address printed on a correspondence-marker line is assigned
+    to the nearby author even at a distance with no name match — the pairing
+    is explicit, not proximity."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(["Jane Doe", "Dept X", "Correspondence: contact7@uni.edu"])
+    authors = [PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X")]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert authors[0].email == "contact7@uni.edu"
+    assert authors[0].corresponding is True
+
+
+def test_given_name_affinity_assigns_without_marker():
+    """A diminutive local part ('bathri' for Bathrinath) licenses the address
+    even with no correspondence marker anywhere nearby."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Bathrinath Sankaranarayanan and John Roe",
+            "Department of X",
+            "Filler sentence one.",
+            "Dr. S. Bathrinath can be contacted at bathri@gmail.com for samples.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Bathrinath", family="Sankaranarayanan", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Sankaranarayanan").email == "bathri@gmail.com"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_same_sentence_pairing_still_assigns_opaque_address():
+    """An address printed in the same sentence as the surname keeps the
+    historical pairing behaviour (no marker, no name match)."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "Jane Doe, contact@lab.org, provided the samples.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Doe").email == "contact@lab.org"
+    assert next(a for a in authors if a.family == "Doe").corresponding is False
+
+
+def test_distant_opaque_email_without_marker_is_dropped():
+    """Window proximity alone (surname nearby, nothing else) no longer
+    licenses an opaque address — it is left unassigned, not misassigned."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "The reagents came from contact@lab.org in a previous study.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert all(a.email in (None, "") for a in authors)

@@ -85,6 +85,7 @@ async def test_empty_pages_sets_error():
     assert fs.error is not None
     assert fs.error_code == "layout_failed"
     assert fs.failed_stage == "layout"
+    assert fs.error_outage is False  # this PDF's own failure
 
 
 @pytest.mark.asyncio
@@ -248,6 +249,7 @@ async def test_layout_startup_failure_spares_native_sibling(streaming):
     assert native.result_json == {"file": "paper.xml"}
     assert pdf.error_code == "layout_failed"
     assert pdf.original_error is failure
+    assert pdf.error_outage is True
 
 
 async def test_optional_preload_failure_defers_to_ocr_without_aborting_layout():

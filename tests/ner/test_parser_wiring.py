@@ -209,6 +209,7 @@ def test_parse_batch_empty_list_returns_empty():
 
 
 @pytest.mark.slow
+@pytest.mark.network  # real Hub checkpoint by design; opts out of the socket guard.
 def test_parse_batch_matches_individual_real_model():
     """Batching is a pure perf optimization: it must not change outputs.
 
