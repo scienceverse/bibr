@@ -680,4 +680,4 @@ async def test_pipeline_decides_each_field_once(tmp_path, monkeypatch):
     assert decisions.get("title").value == paper.metadata.title
     fields = result["extraction"]["fields"]
     assert fields["title"]["rule"] == decisions.get("title").rule
-    assert fields["bib"]["rule"] is None
+    assert "rule" not in fields["bib"]

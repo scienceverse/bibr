@@ -35,8 +35,8 @@ _SCHEMA_VERSION = "12.1"
 #     ``abstract``, ``keywords``, ``doi``, ``published``, ``journal``,
 #     ``funding_statement``, ``funding``, ``paper_type``, ``bib``) a record
 #     ``{state, source, issues, rule}``, where ``state`` is ``extracted``,
-#     ``absent``, ``abstained``, ``failed`` or ``not_attempted`` and ``rule``
-#     names the field decision's rule (optional for readers). Omitted when
+#     ``absent``, ``abstained``, ``failed`` or ``not_attempted`` and the
+#     optional ``rule`` names the field decision's rule. Omitted when
 #     the export was made outside the pipeline, so every 12.0 export is still
 #     a valid 12.1 reader input.
 #
@@ -1619,9 +1619,19 @@ class FieldRecordExport(BaseModel):
         default=None,
         description="The rule of the field's decision that chose the value or its absence, "
         "e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', "
-        "'abstract_section_fallback', 'correction_notice', 'abstained'. Null when the field "
-        "has no such decision.",
+        "'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the "
+        "field has no such decision (doi, bib), and in exports that predate it.",
     )
+
+    # A reader of an earlier 12.1 export finds no ``rule``.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("rule",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_rule(self, handler):
+        data = handler(self)
+        if data.get("rule") is None:
+            data.pop("rule", None)
+        return data
 
 
 class FieldStatesExport(BaseModel):

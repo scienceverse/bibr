@@ -236,7 +236,8 @@ def test_pipeline_export_carries_valid_fields(demo_paper):
         "issues": [],
         "rule": "extracted",
     }
-    assert fields["abstract"]["rule"] is None
+    # A field without a decision carries no rule.
+    assert "rule" not in fields["abstract"]
     PaperExport.model_validate(payload)
 
 

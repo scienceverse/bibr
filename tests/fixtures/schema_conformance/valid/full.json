@@ -445,8 +445,7 @@
       "doi": {
         "state": "extracted",
         "source": null,
-        "issues": [],
-        "rule": null
+        "issues": []
       },
       "published": {
         "state": "extracted",
@@ -481,8 +480,7 @@
       "bib": {
         "state": "extracted",
         "source": "llm",
-        "issues": [],
-        "rule": null
+        "issues": []
       }
     },
     "warnings": [
