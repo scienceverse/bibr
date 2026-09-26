@@ -385,6 +385,60 @@ async def _normalize_section_structure(
     enforce_section_sanity(contents.sections)
 
 
+def _front_matter_preparsed(contents, *, llm_active: bool):
+    """The preparsed record the metadata pass builds on, or ``None``.
+
+    Generic page meta (``preparsed_metadata_trusted`` False — an HTML page
+    with a bare ``<title>`` and no Highwire/Dublin Core/OPF front matter) is
+    not front matter an LLM run should lock in: it extracts from the printed
+    article instead. A no-LLM run has nothing better and keeps the record.
+    """
+    preparsed = getattr(contents, "preparsed_metadata", None)
+    if (
+        llm_active
+        and preparsed is not None
+        and not getattr(contents, "preparsed_metadata_trusted", True)
+    ):
+        return None
+    return preparsed
+
+
+# Fields an LLM run fills from an untrusted preparsed record when extraction
+# left them empty. Title, abstract and authors are what the gate exists for
+# (a site-suffixed <title>, the SEO blurb, a garbled byline), so they never
+# come from it.
+_UNTRUSTED_PREPARSED_FILL_FIELDS = (
+    "doi",
+    "pmid",
+    "pmcid",
+    "arxiv",
+    "language",
+    "keywords",
+    "journal",
+    "volume",
+    "issue",
+    "first_page",
+    "last_page",
+    "issn",
+    "publisher",
+    "published",
+    "license",
+)
+
+
+def _fill_from_untrusted_preparsed(contents, metadata, *, llm_active: bool) -> None:
+    """Fill fields the LLM pass left empty from a gated-off preparsed record."""
+    preparsed = getattr(contents, "preparsed_metadata", None)
+    if metadata is None or preparsed is None or metadata is preparsed:
+        return
+    if _front_matter_preparsed(contents, llm_active=llm_active) is not None:
+        return
+    for name in _UNTRUSTED_PREPARSED_FILL_FIELDS:
+        value = getattr(preparsed, name, None)
+        if value and not getattr(metadata, name, None):
+            setattr(metadata, name, list(value) if isinstance(value, list) else value)
+
+
 def _attach_front_matter_resolution(
     contents,
     expected_identity: ExpectedIdentity | None = None,
@@ -396,9 +450,10 @@ def _attach_front_matter_resolution(
 
     from bibr.extract.front_matter import resolve_front_matter
 
+    preparsed = _front_matter_preparsed(contents, llm_active=metadata_llm_active)
     target_required = bool(
         expected_identity is not None
-        and contents.preparsed_metadata is None
+        and preparsed is None
         and (
             expected_identity.doi_required
             or expected_identity.expected_doi is not None
@@ -406,7 +461,7 @@ def _attach_front_matter_resolution(
             or expected_identity.expected_title is not None
             or expected_identity.target_block_hint is not None
         )
-    ) or bool(metadata_llm_active and contents.preparsed_metadata is None)
+    ) or bool(metadata_llm_active and preparsed is None)
     resolution, issues = resolve_front_matter(
         contents,
         expected_identity=expected_identity,
@@ -549,7 +604,7 @@ async def _extract_metadata_and_equations(
 
     effective_settings = settings if settings is not None else snapshot_settings()
 
-    preparsed = contents.preparsed_metadata
+    preparsed = _front_matter_preparsed(contents, llm_active=not no_llm)
     extractor = None
 
     if no_llm:
@@ -1627,8 +1682,9 @@ async def post_parse(
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
             )
+            _fill_from_untrusted_preparsed(contents, paper_metadata, llm_active=not no_llm)
             metadata_ownership_scoped = bool(
-                contents.preparsed_metadata is None
+                _front_matter_preparsed(contents, llm_active=not no_llm) is None
                 and contents.front_matter_resolution is not None
                 and (not no_llm or any(issue.blocking for issue in front_matter_issues))
             )

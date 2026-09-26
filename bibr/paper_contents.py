@@ -782,6 +782,12 @@ class PaperContents:
     # references heading (navigation, "Download BibTeX"), which the filter
     # still has to drop.
     native_ref_strings_authoritative: bool = False
+    # False when ``preparsed_metadata`` came from generic page meta (a bare
+    # ``<title>``, a site description, ``<html lang>``) rather than structured
+    # front matter (Highwire, Dublin Core, ePub OPF). An LLM run then extracts
+    # the front matter from the printed article and only fills fields it left
+    # empty from the preparsed record; a no-LLM run keeps the record as before.
+    preparsed_metadata_trusted: bool = True
     # Internal diagnostics appended at the tail to preserve positional callers.
     reference_yield_receipt: ReferenceYieldReceipt | None = None
     reference_boundary_reason_flags: list[str] = field(default_factory=list)

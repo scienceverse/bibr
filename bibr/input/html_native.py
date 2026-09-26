@@ -267,15 +267,6 @@ def _flatten(tag: Tag) -> str:
                 flat.separate()
         elif isinstance(child, Tag):
             child_name = _tag_name(child)
-            if child_name == "img":
-                # An inline image contributes its alt text where it has one;
-                # otherwise it is a word boundary like any other element.
-                alt = str(child.get("alt") or "").strip()
-                if alt:
-                    flat.add(alt)
-                else:
-                    flat.separate()
-                continue
             separates = child_name not in _INLINE_TAGS
             if separates or (child_name == "mspace" and mspace_separates(child.attrs)):
                 flat.separate()
@@ -429,6 +420,121 @@ def _has_direct_inline_content(tag: Tag) -> bool:
 
 _REFERENCE_SPLIT_TAGS = ("p", "li", "ol", "ul", "table", "figure", "blockquote", "pre", "hr")
 
+# A float's label printed on its own, outside any caption: the header strip
+# publisher pages put above a figure ("Figure 3", "Table 1", "Video 2",
+# "Author response image 1", "Appendix 1—figure 2", "Key resources table"),
+# optionally with a supplements toggle ("Figure 3 with 2 supplements see
+# all"). As loose container text it is furniture, never prose.
+_FLOAT_WORD = (
+    r"(?:figure|fig\.?|table|video|movie|image|box|scheme|chart|audio|animation"
+    r"|chemical\s+structure|key\s+resources?\s+table|source\s+(?:data|code)"
+    r"|supplementary\s+file|figure\s+supplement)"
+)
+_FLOAT_LABEL_ONLY_RE = re.compile(
+    rf"^(?:(?:appendix|supplementary|supplemental|author\s+response)\s*[A-Z]?\d*\s*[—–-]?\s*)?"
+    rf"{_FLOAT_WORD}\.?(?:\s*[A-Z]?\d+(?:\.\d+)*[a-z]?)?"
+    rf"(?:\s*[—–-]\s*{_FLOAT_WORD}(?:\s*\d+)?)*"
+    r"[.:]?(?:\s+with\s+\d+\s+supplements?)?(?:\s+see\s+all)?$",
+    re.IGNORECASE,
+)
+# A lone bracketed year: the date fragment of a formatted citation block.
+_BARE_YEAR_RE = re.compile(r"^\(\s*\d{4}[a-z]?\s*\)[.,]?$")
+
+
+def _is_page_furniture(text: str) -> bool:
+    """True when loose container *text* is a float label or a lone year.
+
+    Only text that base never read (direct container strings and inline-only
+    divs/spans) passes through this filter; ``<p>``, list-item and heading
+    text is untouched.
+    """
+    text = text.strip()
+    return bool(_FLOAT_LABEL_ONLY_RE.match(text) or _BARE_YEAR_RE.match(text))
+
+
+_DOWNLOAD_LINK_RE = re.compile(r"^download\b", re.IGNORECASE)
+
+
+def _is_navigation_list(tag: Tag, heading_texts: frozenset[str]) -> bool:
+    """True for a list of bare links that navigates the page, not prose.
+
+    Every non-empty item must be link text only, and the links must be
+    buttons or download links (``<a class="button">Download BibTeX</a>``,
+    "Download .RIS"), or at least half of the items must jump to an anchor
+    on the same page under the text of one of the page's headings (a table
+    of contents such as "Abstract / Introduction / Methods"). A list of
+    author-name links or external resource links is not navigation.
+    """
+    items = [li for li in tag.find_all("li", recursive=False) if _text(li)]
+    if not items:
+        return False
+    jumps = 0
+    buttons = 0
+    for item in items:
+        anchors = item.find_all("a", href=True)
+        if not anchors:
+            return False
+        rest = _text(item)
+        for anchor in anchors:
+            rest = rest.replace(_text(anchor), "", 1)
+        if re.sub(r"[\W_]+", "", rest):
+            return False
+        hrefs = [str(anchor.get("href") or "") for anchor in anchors]
+        if (
+            all(href.startswith("#") and len(href) > 1 for href in hrefs)
+            and _text(item).lower() in heading_texts
+        ):
+            jumps += 1
+        classes = [
+            str(token).lower() for anchor in anchors for token in (anchor.get("class") or [])
+        ]
+        if "button" in classes or _DOWNLOAD_LINK_RE.match(_text(item)):
+            buttons += 1
+    return buttons == len(items) or jumps * 2 >= len(items)
+
+
+_CITATION_BLOCK_TOKENS = frozenset({"reference", "citation"})
+_CITATION_PROSE_TAGS = (
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "table",
+    "figure",
+    "blockquote",
+    "pre",
+)
+_BASE_REFERENCE_LIST_RE = re.compile(r"reference|bibliography|citation")
+
+
+def _is_citation_block(tag: Tag) -> bool:
+    """True for a formatted "cite this article" block outside the references.
+
+    Publisher pages print the article's own citation as a ``div.reference``
+    (or ``.citation``) of author, year, title, source and DOI parts. Outside
+    a references section it is page furniture: read as text it gave one
+    fragment per part ("(2021)", "eLife 10:e55070."), and its author list
+    used to become one reference string per author. It is skipped only when
+    it holds nothing read as body text before — no paragraph, heading,
+    table, figure or quote, and list items only in reference-named lists.
+    """
+    classes: Any = tag.get("class") or []
+    tokens = {str(token).lower() for token in (classes if isinstance(classes, list) else [classes])}
+    if not tokens & _CITATION_BLOCK_TOKENS:
+        return False
+    if tag.find(_CITATION_PROSE_TAGS) is not None:
+        return False
+    for item in tag.find_all("li"):
+        holder = item.parent
+        if not isinstance(holder, Tag) or not _BASE_REFERENCE_LIST_RE.search(
+            _attr_tokens(holder, "id", "class", "role", "aria-label")
+        ):
+            return False
+    return True
+
 
 def _map_heading(header: str) -> CanonicalSection:
     norm = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", header.lower()).strip()
@@ -485,6 +591,9 @@ class HtmlParser:
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_ref_strings: list[str] | None = None
         self._pending_url_links: list[tuple[str, str, int, int]] = []
+        # Lower-cased text of every heading on the page, for telling a table
+        # of contents from a list of links.
+        self._heading_texts: frozenset[str] = frozenset()
 
     @property
     def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
@@ -528,16 +637,22 @@ class HtmlParser:
         )
 
         root = soup.find("article") or soup.find("main") or soup.body or soup
+        self._heading_texts = frozenset(
+            _text(heading).lower() for heading in soup.find_all(list(_HEADING_TAGS))
+        )
         self._process_children(root)
 
         if not self.assembler.entries and not self.tables and not self.figures:
             raise ProcessingError("HTML input did not contain parseable article content")
 
         # Generic SEO meta is not front matter: without a structured title and
-        # article identity the preparsed record would lock in the <title>
-        # suffix, the site description and a garbled byline, and post_parse
-        # would skip the front-matter pass that reads the printed article.
-        preparsed = self._metadata if _has_trustworthy_front_matter(soup, self._metadata) else None
+        # article identity the record would lock in the <title> suffix, the
+        # site description and a garbled byline, and an LLM run would skip
+        # the front-matter pass that reads the printed article. The record is
+        # still returned, marked untrusted: a no-LLM run keeps it (its
+        # language, keywords and licence are right), an LLM run extracts the
+        # front matter and only fills fields left empty from it.
+        trusted = _has_trustworthy_front_matter(soup, self._metadata)
         return PaperContents(
             sentences=[],
             sections=self.sections,
@@ -547,8 +662,9 @@ class HtmlParser:
             figures=self.figures,
             xrefs=[],
             detected_title=self._detected_title,
-            preparsed_metadata=preparsed,
+            preparsed_metadata=self._metadata,
             native_ref_strings=self._native_ref_strings,
+            preparsed_metadata_trusted=trusted,
         )
 
     def _make_sentence(
@@ -664,16 +780,26 @@ class HtmlParser:
 
     @staticmethod
     def _remove_noise(soup: BeautifulSoup) -> None:
+        # find_all returns descendants of a matched tag after the tag itself;
+        # once the ancestor is decomposed they are dead (attrs None), so every
+        # pass skips tags already removed with an ancestor.
         for tag in soup.find_all(_DROP_TAGS):
-            tag.decompose()
+            if not tag.decomposed:
+                tag.decompose()
         for tag in soup.find_all(role=True):
+            if tag.decomposed:
+                continue
             role = str(tag.get("role") or "").lower()
             if role in {"navigation", "complementary", "banner", "contentinfo", "search"}:
                 tag.decompose()
         for tag in soup.find_all(True):
+            if tag.decomposed:
+                continue
             if str(tag.get("aria-hidden") or "").lower() == "true":
                 tag.decompose()
         for tag in soup.find_all(class_=True):
+            if tag.decomposed:
+                continue
             classes: list[str] = [str(token) for token in (tag.get("class") or [])]
             tokens = {token.lower() for token in classes}
             if tokens & _NOISE_CLASS_TOKENS:
@@ -682,7 +808,7 @@ class HtmlParser:
         # ePub document and would read as a paragraph; the <head> title the
         # metadata fallback uses is left alone.
         for tag in soup.find_all("title"):
-            if tag.find_parent("head") is None:
+            if not tag.decomposed and tag.find_parent("head") is None:
                 tag.decompose()
 
     def _parse_metadata(self, soup: BeautifulSoup) -> PaperMetadata:
@@ -852,7 +978,14 @@ class HtmlParser:
             # protocol link, a bare DOI anchor) is navigation chrome, not
             # prose — base dropped it the same way.
             return
+        if _is_page_furniture(text):
+            return
         if self._in_references():
+            if not any(char.isdigit() for char in text):
+                # Loose text in a references section with no year, volume or
+                # page is a lead-in ("The following previously published
+                # data sets were used"), not a reference; base never read it.
+                return
             self._append_reference(text)
             return
         deferred_index = self.assembler.append(text, None, self._current_section_id, True, False)
@@ -907,7 +1040,7 @@ class HtmlParser:
                 self._flush_pending_text(parts, links)
                 if self._in_references() or self._looks_like_reference_list(child):
                     self._handle_reference_items(child)
-                else:
+                elif not _is_navigation_list(child, self._heading_texts):
                     self._process_list(child)
             elif name == "li":
                 self._flush_pending_text(parts, links)
@@ -942,17 +1075,20 @@ class HtmlParser:
                     parts.append(" ")
             elif name in _VOID_INLINE_TAGS and not self._has_block_structure(child):
                 # A replaced element inside a running sentence (an inline
-                # image, an embedded object) stays inline — with its alt
-                # text where it has one — instead of splitting the sentence.
+                # image, an embedded object) stays inline instead of splitting
+                # the sentence. An image is a word boundary only, as in <p>
+                # text: its alt text is mostly icon chrome ("Is a
+                # corresponding author", "ORCID icon").
                 if not _skip_chrome:
                     if name == "img":
-                        alt = str(child.get("alt") or "").strip()
-                        if alt:
-                            parts.append(alt)
+                        parts.append(" ")
                     else:
                         flat = _flatten(child)
                         if flat.strip():
                             parts.append(flat)
+            elif not self._in_references() and _is_citation_block(child):
+                # The article's own formatted citation: furniture.
+                self._flush_pending_text(parts, links)
             elif self._has_block_structure(child):
                 # A container holding block markup — recurse rather than
                 # flatten it into one entry.
@@ -973,9 +1109,13 @@ class HtmlParser:
                 if _skip_chrome:
                     continue
                 # A container with direct text or only inline children: a
-                # div/section/span paragraph reads as one text block.
+                # div/section/span paragraph reads as one text block. It goes
+                # through the same buffer as loose inline text, so a
+                # link-only container (a download link) and a stand-alone
+                # float label stay out of the body like any other furniture.
                 self._flush_pending_text(parts, links)
-                self._handle_text_block(child)
+                self._buffer_inline(child, parts, links)
+                self._flush_pending_text(parts, links)
         self._flush_pending_text(parts, links)
 
     def _handle_heading(self, tag: Tag) -> None:

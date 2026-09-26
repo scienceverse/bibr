@@ -118,11 +118,14 @@ _INLINE_SKIP_TAGS: frozenset[str] = frozenset(
 
 # Word stores an Insert > Symbol character from the Symbol font as PUA
 # ``F0xx`` (``w:font="Symbol"``, ``w:char="F061"``), where ``xx`` is the
-# Adobe Symbol byte. Letters read as Greek and the 0xA0-0xFE block as the
-# mathematical and technical symbols below (per the Adobe Symbol encoding:
-# F0B1 ±, F0A3 ≤, F0B3 ≥, F0B4 ×, F0B9 ≠, F0BB ≈, F0B0 °, F0AE → — the
-# characters statistics text uses most). Extensible delimiter pieces have
-# no readable single character and stay skipped, as before.
+# Adobe Symbol byte. Letters read as Greek, and the symbol glyphs of the
+# font's built-in encoding as the characters below (F0B1 ±, F0A3 ≤, F0B3 ≥,
+# F0B4 ×, F0B9 ≠, F0BB ≈, F0B0 °, F0AE → — the characters statistics text
+# uses most; F0F1 is the right angle bracket and F0F2 the integral).
+# The ASCII digits and punctuation the font shares with Latin-1 read as
+# themselves (added after the table). Extensible delimiter and arrow pieces
+# (F060, F0BD/BE, F0E6-EF, F0F3-FE) have no readable single character and
+# stay skipped, as before.
 _SYMBOL_TEXT: dict[int, str] = {
     0x22: "∀",
     0x24: "∃",
@@ -156,6 +159,8 @@ _SYMBOL_TEXT: dict[int, str] = {
     0x58: "Ξ",
     0x59: "Ψ",
     0x5A: "Ζ",
+    0x5C: "∴",
+    0x5E: "⊥",
     0x61: "α",
     0x62: "β",
     0x63: "χ",
@@ -182,6 +187,7 @@ _SYMBOL_TEXT: dict[int, str] = {
     0x78: "ξ",
     0x79: "ψ",
     0x7A: "ζ",
+    0x7E: "∼",
     0xA0: "€",
     0xA1: "ϒ",
     0xA2: "′",
@@ -250,9 +256,16 @@ _SYMBOL_TEXT: dict[int, str] = {
     0xE3: "©",
     0xE4: "™",
     0xE5: "∑",
-    0xF9: "⟩",
-    0xFA: "∫",
+    0xF1: "⟩",
+    0xF2: "∫",
 }
+_SYMBOL_TEXT.update(
+    {
+        code: chr(code)
+        for code in (*range(0x21, 0x40), 0x5B, 0x5D, 0x5F, 0x7B, 0x7C, 0x7D)
+        if code not in _SYMBOL_TEXT
+    }
+)
 
 
 def _symbol_text(sym_el) -> str:
@@ -1314,12 +1327,17 @@ class DocxParser:
         # repeats the same merged cell for each spanned grid cell, so dedupe
         # by element: otherwise one note in a merged cell queues once per
         # span and every later footnote prints the wrong number.
-        seen_cells: set[int] = set()
+        # The elements themselves are kept, not just their ids: python-docx
+        # builds fresh proxies per row.cells call, and a freed proxy's id is
+        # reused by the next row's cells, so an id-only set skipped real
+        # cells in every row after the first.
+        seen_cells: dict[int, Any] = {}
         for row in rows:
             for cell in row.cells:
-                if id(cell._tc) in seen_cells:
+                tc = cell._tc
+                if seen_cells.get(id(tc)) is tc:
                     continue
-                seen_cells.add(id(cell._tc))
+                seen_cells[id(tc)] = tc
                 for para in cell.paragraphs:
                     self._enqueue_note_refs(self._paragraph_inline_text(para).note_refs)
         self._seen_content_block = True

@@ -259,8 +259,12 @@ class TestPreparsedGating:
         b"""<p>We tested 80 people.</p></article></body></html>"""
     )
 
-    def test_seo_only_page_returns_no_preparsed_metadata(self):
-        assert HtmlParser(self._SEO).parse().preparsed_metadata is None
+    def test_seo_only_page_is_marked_untrusted(self):
+        # The record stays (a no-LLM run keeps its language and licence);
+        # the flag tells an LLM run to extract the front matter instead.
+        contents = HtmlParser(self._SEO).parse()
+        assert contents.preparsed_metadata is not None
+        assert contents.preparsed_metadata_trusted is False
 
     def test_seo_description_is_not_the_abstract(self):
         parser = HtmlParser(self._SEO)
@@ -283,6 +287,7 @@ class TestPreparsedGating:
     def test_citation_front_matter_still_preparsed(self):
         contents = HtmlParser(self._CITED).parse()
         assert contents.preparsed_metadata is not None
+        assert contents.preparsed_metadata_trusted is True
         assert contents.preparsed_metadata.abstract == "Author-written abstract."
 
 
@@ -538,7 +543,7 @@ class TestDcFrontMatterGating:
     Gating on citation_title plus citation_author discarded every eLife page
     (dc.title plus a DOI, no citation_* tags): the export lost the article
     DOI to a component DOI picked from body text, plus the published date,
-    publisher, license and language. Fails on the gated code (preparsed None).
+    publisher, license and language. Fails on the gated code (untrusted).
     """
 
     _DC = (
@@ -553,7 +558,9 @@ class TestDcFrontMatterGating:
     )
 
     def test_dc_only_page_keeps_its_doi_and_front_matter(self):
-        meta = HtmlParser(self._DC).parse().preparsed_metadata
+        contents = HtmlParser(self._DC).parse()
+        assert contents.preparsed_metadata_trusted is True
+        meta = contents.preparsed_metadata
         assert meta is not None
         assert meta.doi == "10.7554/eLife.00013"
         assert meta.title == "A bacterial sulfonolipid triggers development"
@@ -570,7 +577,9 @@ class TestDcFrontMatterGating:
             b"""<meta name="citation_doi" content="10.1234/ed.2020"></head>"""
             b"""<body><article><h2>Intro</h2><p>Text.</p></article></body></html>"""
         )
-        meta = HtmlParser(html).parse().preparsed_metadata
+        contents = HtmlParser(html).parse()
+        assert contents.preparsed_metadata_trusted is True
+        meta = contents.preparsed_metadata
         assert meta is not None
         assert (meta.title, meta.doi) == ("Editorial", "10.1234/ed.2020")
 
@@ -582,7 +591,9 @@ class TestDcFrontMatterGating:
             b"""<meta name="dc.creator" content="John Doe"></head>"""
             b"""<body><article><h2>Intro</h2><p>Text.</p></article></body></html>"""
         )
-        meta = HtmlParser(html).parse().preparsed_metadata
+        contents = HtmlParser(html).parse()
+        assert contents.preparsed_metadata_trusted is True
+        meta = contents.preparsed_metadata
         assert meta is not None
         assert [(a.given, a.family) for a in meta.authors] == [
             ("Jane", "Smith"),
@@ -597,7 +608,9 @@ class TestDcFrontMatterGating:
             b"""<meta name="author" content="Jane Smith, John Doe, Ann Lee"></head>"""
             b"""<body><article><h2>Intro</h2><p>Text.</p></article></body></html>"""
         )
-        meta = HtmlParser(html).parse().preparsed_metadata
+        contents = HtmlParser(html).parse()
+        assert contents.preparsed_metadata_trusted is True
+        meta = contents.preparsed_metadata
         assert meta is not None
         assert [(a.given, a.family) for a in meta.authors] == [
             ("Jane", "Smith"),
@@ -699,18 +712,21 @@ class TestPageChromeIsNoise:
 
     def test_cite_formatter_lists_are_not_reference_lists(self):
         # A "cite this article" block reuses reference__* BEM classes for a
-        # single formatted citation; it must not open a References section
-        # or emit author-name reference strings.
+        # single formatted citation; it must not open a References section,
+        # emit author-name reference strings, or leave its parts in the body.
         parser = HtmlParser(
-            b"""<html><body><main><section><h2>Download links</h2>"""
+            b"""<html><body><main><section><h2>Download links</h2><p>Prose.</p>"""
             b"""<div class="reference"><ol class="reference__authors_list">"""
             b"""<li>Anmo J Kim</li><li>Aurel A Lazar</li></ol>"""
-            b"""<div class="reference__title">Some title</div></div>"""
+            b"""<span class="reference__authors_list_suffix">(2015)</span>"""
+            b"""<div class="reference__title">Some title</div>"""
+            b"""<div class="reference__origin"><i>eLife</i> <b>4</b>:e06651.</div></div>"""
             b"""</section></main></body></html>"""
         )
         contents = parser.parse()
         assert [s.header for s in contents.sections] == ["Root", "Download links"]
         assert (contents.native_ref_strings or []) == []
+        assert [e.text for e in parser.assembler.entries] == ["Prose."]
 
     def test_real_reference_list_class_still_counts(self):
         # Guard: the BEM exclusion must keep genuine bibliography lists.
@@ -773,7 +789,8 @@ class TestInlineWhitespaceAndReferences:
             b"""<div>Some text with <img alt="ABC"> and <output>42</output> units and end.</div>"""
             b"""<p>Next.</p></section></main></body></html>"""
         )
-        assert texts == ["Some text with ABC and 42 units and end.", "Next."]
+        # An image is a word boundary, as in <p> text; its alt is not read.
+        assert texts == ["Some text with and 42 units and end.", "Next."]
 
     def test_br_separates_and_hr_flushes_bare_section_text(self):
         texts = _html_texts(
@@ -1282,3 +1299,269 @@ class TestDocxTableCaptionPairing:
         contents = DocxParser(self._table_doc(build)).parse()
         assert [fig.caption for fig in contents.figures] == [None]
         assert [tbl.caption for tbl in contents.tables] == ["Table 1. Tabular data."]
+
+
+class TestNestedHiddenChrome:
+    """Noise removal must survive hidden containers that hold child elements.
+
+    Decomposing a matched tag while iterating find_all left its descendants
+    dead (attrs None); the next tag.get() raised AttributeError, so every
+    eLife page (aria-hidden separators with children, visuallyhidden spans
+    around counters) failed to parse.
+    """
+
+    def test_aria_hidden_element_with_a_child(self):
+        texts = _html_texts(
+            b"""<html><body><article><h2>Intro</h2>"""
+            b"""<p>Text <span aria-hidden="true"><i>x</i></span> here.</p></article></body></html>"""
+        )
+        assert texts == ["Text here."]
+
+    def test_visuallyhidden_element_with_a_child(self):
+        texts = _html_texts(
+            b"""<html><body><article><h2>Intro</h2>"""
+            b"""<p>Text <span class="visuallyhidden">(<span class="n">0</span> notes)</span>"""
+            b""" here.</p></article></body></html>"""
+        )
+        assert texts == ["Text here."]
+
+    def test_nested_landmark_roles(self):
+        texts = _html_texts(
+            b"""<html><body><div role="navigation"><div role="search">Find</div></div>"""
+            b"""<article><h2>Intro</h2><p>Body.</p></article></body></html>"""
+        )
+        assert texts == ["Body."]
+
+
+class TestPublisherFloatFurniture:
+    """eLife-shaped figure header strips and asset links are not prose."""
+
+    _PAGE = (
+        b"""<html><body><main><section><h2>Results</h2>"""
+        b"""<p class="paragraph">We saw an effect (Figure 2).</p>"""
+        b"""<div id="fig2" class="asset-viewer-inline">"""
+        b"""<div class="asset-viewer-inline__header_panel">"""
+        b"""<div class="asset-viewer-inline__header_text">"""
+        b"""<span class="asset-viewer-inline__header_text__prominent">Figure 2</span>"""
+        b""" with 2 supplements <a href="/articles/1/figures#fig2">see all</a></div>"""
+        b"""<div class="asset-viewer-inline__figure_access">"""
+        b"""<a href="https://example.org/fig2.jpg" download="Download">Download</a></div></div>"""
+        b"""<figure class="captioned-asset"><img src="fig2.jpg">"""
+        b"""<figcaption>Effect sizes by group.</figcaption></figure></div>"""
+        b"""<div class="asset-viewer-inline__header_text"><span>Table 1</span></div>"""
+        b"""<div class="asset-viewer-inline__header_text">Author response image 1</div>"""
+        b"""<div class="asset-viewer-inline__header_text">Appendix 1\xe2\x80\x94figure 2</div>"""
+        b"""<div><a href="https://example.org/f1-data1.xlsx">Download elife-1-fig1-data1-v1.xlsx</a></div>"""
+        b"""<div class="math-block"><math><mi>x</mi><mo>=</mo><mn>2</mn></math></div>"""
+        b"""<div class="message-bar">The following data sets were generated</div>"""
+        b"""<p>Figure 3</p>"""
+        b"""</section></main></body></html>"""
+    )
+
+    def test_labels_supplement_toggles_and_download_links_are_dropped(self):
+        texts = _html_texts(self._PAGE)
+        assert texts == [
+            "We saw an effect (Figure 2).",
+            "x=2",
+            "The following data sets were generated",
+            # Guard: a <p> is read exactly as before, even when it is a label.
+            "Figure 3",
+        ]
+
+    def test_figure_is_still_recorded(self):
+        contents = HtmlParser(self._PAGE).parse()
+        assert [fig.caption for fig in contents.figures] == ["Effect sizes by group."]
+
+    def test_prose_that_starts_with_a_float_word_is_kept(self):
+        texts = _html_texts(
+            b"""<html><body><main><section><h2>S</h2>"""
+            b"""<div>Figure 1 shows the effect.</div><div>Table salt was used.</div>"""
+            b"""</section></main></body></html>"""
+        )
+        assert texts == ["Figure 1 shows the effect.", "Table salt was used."]
+
+
+class TestCitationBlocks:
+    def test_citation_block_with_a_paragraph_is_still_read(self):
+        # Guard: only a block with nothing base read as body text is skipped.
+        texts = _html_texts(
+            b"""<html><body><main><section><h2>S</h2>"""
+            b"""<div class="citation"><p>Cite as: Smith (2020).</p><span>(2020)</span></div>"""
+            b"""</section></main></body></html>"""
+        )
+        assert texts == ["Cite as: Smith (2020)."]
+
+    def test_generic_list_inside_a_citation_block_is_still_read(self):
+        texts = _html_texts(
+            b"""<html><body><main><section><h2>S</h2><p>Prose.</p>"""
+            b"""<div class="citation"><ul><li>First point.</li></ul></div>"""
+            b"""</section></main></body></html>"""
+        )
+        assert texts == ["Prose.", "First point."]
+
+
+class TestInlineImageAltText:
+    def test_icon_alt_text_is_not_read_into_an_author_item(self):
+        texts = _html_texts(
+            b"""<html><body><main><section><h2>Authors</h2><ol>"""
+            b"""<li><a href="#a1">Jon Clardy</a>&nbsp;<picture>"""
+            b"""<img src="icon.png" alt="Is a corresponding author"></picture></li>"""
+            b"""</ol></section></main></body></html>"""
+        )
+        assert texts == ["Jon Clardy"]
+
+
+class TestDocxLaterRowCellFootnotes:
+    """Cell dedupe must compare elements, not reusable proxy ids.
+
+    python-docx builds new cell proxies for every row.cells call; the freed
+    proxies' ids come back for the next row, so an id() set skipped cells in
+    every row after the first and their notes were lost.
+    """
+
+    def _notes(self, doc, notes):
+        data = _inject_footnotes(_save(doc), notes)
+        parser = DocxParser(data)
+        parser.parse()
+        return [text for text, _sec, _idx, _kind in parser._pending_footnotes]
+
+    def test_footnote_in_a_second_row_cell(self):
+        doc = Document()
+        table = doc.add_table(rows=2, cols=3)
+        for col, head in enumerate(("h1", "h2", "h3")):
+            table.cell(0, col).text = head
+        table.cell(1, 0).text = "a"
+        table.cell(1, 1).text = "b"
+        _add_note_ref(table.cell(1, 1).paragraphs[0], "1")
+        table.cell(1, 2).text = "c"
+        assert self._notes(doc, {"1": "Note one."}) == ["Note one."]
+
+    def test_footnotes_in_every_cell_of_the_third_row(self):
+        doc = Document()
+        table = doc.add_table(rows=3, cols=3)
+        for row in range(3):
+            for col in range(3):
+                table.cell(row, col).text = f"r{row}c{col}"
+        for col, note in enumerate(("1", "2", "3")):
+            _add_note_ref(table.cell(2, col).paragraphs[0], note)
+        notes = {"1": "Note one.", "2": "Note two.", "3": "Note three."}
+        assert self._notes(doc, notes) == ["Note one.", "Note two.", "Note three."]
+
+    def test_footnote_in_a_vertical_merge_below_a_header_row_queues_once(self):
+        doc = Document()
+        table = doc.add_table(rows=3, cols=2)
+        table.cell(0, 0).text = "Group"
+        table.cell(0, 1).text = "Value"
+        table.cell(1, 0).merge(table.cell(2, 0))
+        table.cell(1, 0).paragraphs[0].add_run("Merged.")
+        _add_note_ref(table.cell(1, 0).paragraphs[0], "1")
+        table.cell(1, 1).text = "1"
+        table.cell(2, 1).text = "2"
+        assert self._notes(doc, {"1": "The only note."}) == ["The only note."]
+
+
+class TestDocxSymbolEncoding:
+    """w:sym Symbol-font codes follow the font's built-in encoding."""
+
+    def _text(self, char: str) -> str:
+        doc = Document()
+        _raw_paragraph(
+            doc,
+            "<w:r><w:t>a</w:t></w:r>"
+            f'<w:r><w:sym w:font="Symbol" w:char="{char}"/></w:r>'
+            "<w:r><w:t>b</w:t></w:r>",
+        )
+        _parser, texts = _docx_texts(_save(doc))
+        return texts[0]
+
+    def test_angle_bracket_and_integral(self):
+        assert self._text("F0F1") == "a⟩b"
+        assert self._text("F0F2") == "a∫b"
+
+    def test_bracket_pieces_are_not_read_as_characters(self):
+        # F0F9/F0FA are right-bracket pieces, not an angle bracket and an
+        # integral.
+        assert self._text("F0F9") == "ab"
+        assert self._text("F0FA") == "ab"
+
+    def test_shared_ascii_and_logic_symbols(self):
+        assert self._text("F03D") == "a=b"
+        assert self._text("F03C") == "a<b"
+        assert self._text("F05C") == "a∴b"
+
+
+class TestReferenceSectionLeadIns:
+    def test_digitless_lead_in_is_not_a_reference(self):
+        # eLife's second dataset list follows the first, which already
+        # opened a References section; its lead-in is not a citation.
+        parser = HtmlParser(
+            b"""<html><body><main><section><h2>Data availability</h2><p>Deposited.</p>"""
+            b"""<div class="message-bar">The following data sets were generated</div>"""
+            b"""<ol class="reference-list"><li>Smith J (2020) Data one. GEO GSE1.</li></ol>"""
+            b"""<div class="message-bar">The following previously published data sets were used</div>"""
+            b"""<ol class="reference-list"><li>Lee A (2019) Data two. GEO GSE2.</li></ol>"""
+            b"""<div>Doe K (2018) A flat div reference. J 1:2.</div>"""
+            b"""</section></main></body></html>"""
+        )
+        contents = parser.parse()
+        assert contents.native_ref_strings == [
+            "Smith J (2020) Data one. GEO GSE1.",
+            "Lee A (2019) Data two. GEO GSE2.",
+            "Doe K (2018) A flat div reference. J 1:2.",
+        ]
+        assert "The following data sets were generated" in [
+            entry.text for entry in parser.assembler.entries
+        ]
+
+
+class TestNavigationLists:
+    """Lists of bare page-navigation links are chrome, not body text.
+
+    Base opened a References section at the "cite this article" block, so
+    the copy/download buttons and the page's tab navigation after it were
+    reference strings; with the block skipped they must not become body
+    sentences either.
+    """
+
+    def test_button_download_and_jump_link_lists_are_dropped(self):
+        parser = HtmlParser(
+            b"""<html><body><main><section><h6>Cite this article</h6><p>Prose.</p>"""
+            b"""<div class="reference"><ol class="reference__authors_list">"""
+            b"""<li>Anmo J Kim</li></ol><div class="reference__title">T</div></div>"""
+            b"""<ol class="button-collection"><li><button>Copy to clipboard</button></li>"""
+            b"""<li><a href="/a.bib" class="button button--secondary">Download BibTeX</a></li></ol>"""
+            b"""<ul class="article-download-list"><li><a href="/a.bib">Download BibTeX</a></li>"""
+            b"""<li><a href="/a.ris">Download .RIS</a></li></ul>"""
+            b"""<ul class="view-selector__list"><li><a href="/a#content">Article</a></li>"""
+            b"""<li></li><li><a href="#abstract">Abstract</a></li>"""
+            b"""<li><a href="#s1">Introduction</a></li></ul>"""
+            b"""<p>Insight body text without a heading.</p></section>"""
+            b"""<section><h2>Abstract</h2><p>Abs.</p></section>"""
+            b"""<section><h2>Introduction</h2><p>Intro.</p></section>"""
+            b"""</main></body></html>"""
+        )
+        contents = parser.parse()
+        assert [e.text for e in parser.assembler.entries] == [
+            "Prose.",
+            "Insight body text without a heading.",
+            "Abs.",
+            "Intro.",
+        ]
+        assert (contents.native_ref_strings or []) == []
+
+    def test_author_and_resource_link_lists_stay(self):
+        texts = _html_texts(
+            b"""<html><body><main><section><h2>S</h2><p>Prose.</p>"""
+            b"""<ol class="author_list"><li><a href="/articles/1#x1">Jon Clardy</a></li>"""
+            b"""<li><a href="/articles/1#x2">Nicole King</a></li></ol>"""
+            b"""<ul><li><a href="https://osf.io/abc">https://osf.io/abc</a></li></ul>"""
+            b"""<ul><li>See <a href="#fig1">Figure 1</a> for details.</li></ul>"""
+            b"""</section></main></body></html>"""
+        )
+        assert texts == [
+            "Prose.",
+            "Jon Clardy",
+            "Nicole King",
+            "https://osf.io/abc",
+            "See Figure 1 for details.",
+        ]

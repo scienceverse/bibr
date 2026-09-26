@@ -333,12 +333,13 @@ def test_epub_identifier_doi_forms(identifier: str, expected: str):
 def test_epub_without_creators_keeps_title_and_doi_preparsed():
     """An OPF with a title and DOI but no dc:creator still carries
     structured identity — the export must keep its DOI. Fails on the gated
-    code (preparsed None)."""
+    code (untrusted, so an LLM run would drop the record)."""
     from bibr.input.epub_native import EpubParser
 
     epub_bytes = _make_epub_two_chapters(with_ch2=True, identifier="10.1234/abc")
     contents = EpubParser(epub_bytes).parse()
     assert contents.preparsed_metadata is not None
+    assert contents.preparsed_metadata_trusted is True
     assert contents.preparsed_metadata.doi == "10.1234/abc"
     assert contents.preparsed_metadata.title == "Sample"
 
