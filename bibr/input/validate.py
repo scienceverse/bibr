@@ -124,8 +124,9 @@ def _pdfium_open_verdict(file_content: bytes) -> str:
     """Open *file_content* with pypdfium2: ``ok``, ``password``, ``error``.
 
     Returns ``unavailable`` when pypdfium2 is not installed, so callers fall
-    back to the byte heuristics. Shared by the corruption and encryption
-    checks so both agree on what the reader itself accepts.
+    back to the byte heuristics. The PDF validation below computes this once
+    per file and derives both the corruption and the encryption verdicts from
+    it, so both agree on what the reader itself accepts.
     """
     try:
         import pypdfium2
@@ -161,7 +162,7 @@ def _pdfium_open_verdict(file_content: bytes) -> str:
         return "ok"
 
 
-def _check_pdf_corruption(file_content: bytes) -> bool:
+def _check_pdf_corruption(file_content: bytes, *, verdict: str | None = None) -> bool:
     """Check if a PDF file appears corrupted.
 
     pypdfium2 is ground truth when installed: a document it opens is readable
@@ -174,11 +175,14 @@ def _check_pdf_corruption(file_content: bytes) -> bool:
 
     Args:
         file_content: Raw PDF bytes.
+        verdict: A cached :func:`_pdfium_open_verdict` for these bytes, so the
+            document is opened once per file. Computed here when omitted.
 
     Returns:
         True if the file appears corrupted.
     """
-    verdict = _pdfium_open_verdict(file_content)
+    if verdict is None:
+        verdict = _pdfium_open_verdict(file_content)
     if verdict == "ok" or verdict == "password":
         return False
     if b"%PDF-" not in file_content[:1024]:
@@ -400,62 +404,37 @@ def _check_docx_encryption(file_content: bytes) -> bool:
         return False
 
 
-def _check_pdf_encryption(file_content: bytes) -> bool:
+def _check_pdf_encryption(file_content: bytes, *, verdict: str | None = None) -> bool:
     """Check if a PDF is encrypted by attempting to open it.
 
-    Uses pypdfium2 as the ground truth — only PDFs that actually require
-    a password to open are flagged as encrypted.  PDFs with restrictive
-    permissions (e.g. "no printing") that open without a password are
-    correctly treated as readable, and PDFs that merely mention the
-    literal ``/Encrypt`` in body text or comments no longer trigger a
-    false positive.
+    Uses the shared :func:`_pdfium_open_verdict` as ground truth — only PDFs
+    that actually require a password to open are flagged as encrypted. PDFs
+    with restrictive permissions (e.g. "no printing") that open without a
+    password are correctly treated as readable, and PDFs that merely mention
+    the literal ``/Encrypt`` in body text or comments no longer trigger a
+    false positive. The legacy tail scan runs only when pypdfium2 is not
+    installed.
 
     The :data:`bibr.ocr.utils.pdfium_lock` is held for the document
     lifetime — PDFium's global C state is not thread-safe.
 
     Args:
         file_content: Raw PDF bytes.
+        verdict: A cached :func:`_pdfium_open_verdict` for these bytes, so the
+            document is opened once per file. Computed here when omitted.
 
     Returns:
         True if the file is password-protected.
     """
-    try:
-        import pypdfium2
-
-        from bibr.ocr.utils import pdfium_lock
-
-        try:
-            import pypdfium2_raw
-
-            password_code: int | None = pypdfium2_raw.FPDF_ERR_PASSWORD
-        except ImportError:
-            password_code = None
-
-        with pdfium_lock:
-            try:
-                doc = pypdfium2.PdfDocument(file_content)
-            except pypdfium2.PdfiumError as exc:
-                # Primary detection: PDFium's numeric error code (FPDF_ERR_PASSWORD = 4).
-                # pypdfium2 exposes this as `PdfiumError.err_code` since the helper API
-                # was introduced; treat any other code as non-encryption (corruption,
-                # format error, etc.) and let the corruption check surface those.
-                err_code = getattr(exc, "err_code", None)
-                if err_code is not None:
-                    return bool(
-                        err_code == password_code if password_code is not None else err_code == 4
-                    )
-                # Fallback for older pypdfium2 builds that don't annotate the code.
-                msg = str(exc).lower()
-                return "password" in msg or "encrypt" in msg
-            try:
-                doc.close()
-            except Exception:  # noqa: S110
-                pass
-            return False
-    except ImportError:
-        # Fallback to the legacy tail scan only when pypdfium2 isn't installed.
-        tail = file_content[-16384:] if len(file_content) > 16384 else file_content
-        return b"/Encrypt" in tail
+    if verdict is None:
+        verdict = _pdfium_open_verdict(file_content)
+    if verdict == "password":
+        return True
+    if verdict in ("ok", "error"):
+        return False
+    # pypdfium2 is not installed: fall back to the legacy tail scan.
+    tail = file_content[-16384:] if len(file_content) > 16384 else file_content
+    return b"/Encrypt" in tail
 
 
 def validate_input_file(
@@ -533,8 +512,11 @@ def validate_input_file(
 
     # Format-specific checks
     if extension == ".pdf":
-        input_file.is_corrupted = _check_pdf_corruption(file_content)
-        input_file.is_encrypted = _check_pdf_encryption(file_content)
+        # One open derives both verdicts, so corruption and encryption agree
+        # on what the reader itself accepts.
+        pdf_verdict = _pdfium_open_verdict(file_content)
+        input_file.is_corrupted = _check_pdf_corruption(file_content, verdict=pdf_verdict)
+        input_file.is_encrypted = _check_pdf_encryption(file_content, verdict=pdf_verdict)
     elif extension == ".docx":
         input_file.is_corrupted = _check_docx_corruption(file_content)
         input_file.is_encrypted = _check_docx_encryption(file_content)

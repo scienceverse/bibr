@@ -111,6 +111,46 @@ class TestCheckPdfEncryption:
         assert _check_pdf_encryption(MINIMAL_PDF) is False
 
 
+def _minimal_encrypted_pdf_bytes() -> bytes:
+    """A genuinely password-protected PDF: a bare trailer carrying a V1/R2
+    ``/Encrypt`` dictionary, which PDFium refuses without a password
+    (FPDF_ERR_PASSWORD) even though the bytes are otherwise well-formed."""
+    owner = b"A" * 32
+    user = b"B" * 32
+    return (
+        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n"
+        b"trailer\n<< /Size 3 /Root 1 0 R /Encrypt << /Filter /Standard /V 1 /R 2 /O ("
+        + owner
+        + b") /U ("
+        + user
+        + b") /P -4 >> >>\n%%EOF"
+    )
+
+
+class TestPasswordProtectedPdfVerdicts:
+    """A password error means encrypted, not corrupt — even with reader-tolerated
+    framing bytes around the file. Both flags derive from the one shared open,
+    so this pins the password branch of the single verdict."""
+
+    def test_password_error_is_not_corruption(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_corruption(_minimal_encrypted_pdf_bytes()) is False
+
+    def test_password_error_is_encrypted(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_encryption(_minimal_encrypted_pdf_bytes()) is True
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/pdf")
+    def test_encrypted_pdf_with_bom_and_trailing_junk_validates_as_encrypted_only(self, mock_mime):
+        pytest.importorskip("pypdfium2")
+        blob = b"\xef\xbb\xbf" + _minimal_encrypted_pdf_bytes() + b" " * 12000
+        result = validate_input_file(Path("/tmp/enc.pdf"), blob)
+        assert result.is_corrupted is False
+        assert result.is_encrypted is True
+        assert result.is_valid is False
+
+
 class TestExtensionMimeConsistency:
     def test_pdf_consistent(self):
         assert _check_extension_mime_consistency(".pdf", "application/pdf") is True

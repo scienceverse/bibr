@@ -1,10 +1,12 @@
 """Real-byte limits for zip-member decompression.
 
-A zip central directory's declared ``file_size``/``compress_size`` are fully
-attacker-controlled, so zip-bomb defenses that only inspect declared sizes trust
-the attacker (audit M7/L10). These helpers decompress incrementally and enforce
-the limit on the *actual* bytes produced, stopping as soon as the cap is crossed
-so a bomb never fully materializes in memory.
+CPython's ZipExtFile already enforces a member's declared ``file_size`` when
+it is read — truncating the output and raising BadZipFile on the CRC mismatch
+a lying header causes — so a bomb cannot slip through on declared sizes
+alone. These helpers are defense in depth on top of that: they decompress
+incrementally and enforce the limit on the *actual* bytes produced, stopping
+as soon as the cap is crossed so the rejection stays at validation, however
+the archive is read downstream.
 """
 
 from __future__ import annotations
