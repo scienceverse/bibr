@@ -435,6 +435,50 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
+  exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
+  `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
+  now holds, as printed, scientific notation (also as JATS, HTML and PDF text
+  layers flatten the superscript, `× 10−5` and `10 −9`, and as OCR prints it,
+  `\times 10^{-5}`), decimal commas, mid-dot decimals and ranges. A comma after
+  a count is no decimal comma (`n = 9,7 cells` lists two groups), and a signed
+  number after a space is the next column of a table flattened to text, not
+  the end of a range (`β = 0.21 −0.05 0.47` gives `β = 0.21`). A value that
+  runs on into a fraction or a time (`BF10<1/3`, `t = 12:30`) is no longer
+  exported cut short; a count before a slash is kept, cut at the slash
+  (`n = 12/20 cells` gives `n = 12`).
+- Statistic names are read whole and exported as printed. A Greek letter,
+  superscript or Δ (also ∆, U+2206) belongs to the name, so `η²p = .12` and
+  `η 2 p` (partial eta squared) are no longer p-values, `ΔR²` is no longer
+  `R²` and `τp` no longer a p. That holds where a PDF text layer puts the
+  stacked scripts on lines of their own, `η\r\n2\r\np = 0.11` (a p-value
+  before) and `ηp\r\n2 = .61` (not read at all before), as the extractor now
+  reads each line break as one character. `p-value` and `P value`, `χ 2` (χ²
+  as text layers print it), `r(df)`, `H(df)`, `Z`, `g`, `χ²` without df,
+  `90% CI`, `r s` and `rs` (Spearman) and `d z` are recognised. A subscript
+  printed after a space, such as the `h` of a Holm-adjusted `p h`, is no
+  longer a statistic of its own. Consumers matching `p`, `χ²` or `ηp²` have to
+  fold these spellings.
+- `lhs`, `df` and `rhs` in `eq[]` are exported on one line: a run of
+  whitespace, line breaks included, is one space, as in the sentence text.
+  PDF text layers gave the lhs `Cohen’s \r\ndz`, the df `1, \r\n19` and the rhs
+  `[0.30, \r\n0.42]`.
+- Statistics that share parentheses or a formula with a recognised one are no
+  longer dropped: `BF10` in `(p < .001, BF10 = 12.3)`, a second count in one
+  clause, `\chi^2(1)` in `$\chi^2(1) = 3.84, p = .05$`. Statistics printed
+  together share a group whichever pass reads them.
+- No printed statistic is exported twice. Inline LaTeX (`$t(28) = 2.10$`) and
+  `Cohen's d` were exported again under a new group, while two identical
+  printed values were merged into one. LaTeX comparators (`\leq`, `\geqslant`,
+  `\neq`, …) are read, a LaTeX statistic splits its df, and a `$` before a
+  digit is currency unless it opens math. Group ids no longer skip numbers,
+  the LLM fallback continues the regex results' ids, and the broad pass no
+  longer rescans a long token from each of its characters.
+- `eq[]` spans no longer place a value at a longer one that begins with it
+  (`n = 1` at the `n = 16` earlier in the sentence), and locate a value that
+  late clean-up respaced (`10 − 6` printed as `10 −6`) and a name it printed
+  without its spaces (`η p 2`, read from MathML, printed as `ηp2`). Late
+  clean-up prints `\leqslant` and `\geqslant` as `≤` and `≥`, not `≤slant`.
 
 ### Added
 
