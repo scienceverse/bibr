@@ -182,6 +182,37 @@ This mode emits section recall, coverage, and a drop report. It has a separate
 output shape from metadata scoring, and returns before the metadata
 `--threshold` gate. Per-type section recall is diagnostic.
 
+## Scoring GROBID output
+
+The harness can score [GROBID](https://github.com/kermitt2/grobid) with the
+same metrics as bibr. `evaluation.grobid_run` sends each PDF to a GROBID
+server's `/api/processFulltextDocument` with consolidation off (bibr is scored
+before enrichment) and the printed reference and affiliation strings included.
+It writes one TEI file per paper, a failure record for each paper that did not
+convert, and a `manifest.json` with the GROBID version, the request
+parameters, and each PDF's SHA-256, wall time and attempts.
+`evaluation.grobid_tei` then writes each TEI file as a bibr export, with
+`extraction.producer` naming GROBID and `extraction.converter` the converter:
+
+```bash
+uv run python -m evaluation.grobid_run --grobid-url http://localhost:8070 \
+    --pdf-dir papers/ --out grobid-tei/
+uv run python -m evaluation.grobid_tei --tei-dir grobid-tei/ --out grobid-json/
+uv run python -m evaluation.evaluate \
+    --results-dir grobid-json/ \
+    --gold-dirs /path/to/gold \
+    --expected-ids grobid-tei/manifest.json \
+    --output grobid-eval.json
+```
+
+Pass the manifest to `--expected-ids`: a paper GROBID failed on has no
+prediction file, and the manifest keeps it in the denominator. The converter
+carries over every field the metrics credit when GROBID emits it, including
+reference DOIs at any level, editors kept apart from authors, and given names.
+GROBID does not classify body sections, so its body text is typed `unknown`.
+In the section-text benchmark only the label-independent `layout_recall` is
+comparable between the two tools.
+
 ## Interpreting results
 
 Compare runs on the same papers, gold revision, metric version, and extraction
