@@ -266,8 +266,10 @@ Reference parsing has its own strategy knob, `--refs` (or `REF_PARSE_STRATEGY`):
 
 - **`ner`** (default) — the default `geom` segmentation locates each
   reference with a local geometry model, cascading through layout-region
-  anchors, LLM segmentation, and CRF when earlier tiers cannot resolve it.
-  A local ModernBERT-CRF model parses the resulting entries. The core install
+  anchors, LLM segmentation, and CRF when earlier tiers cannot resolve it; a
+  segmentation of the section's printed lines replaces a fallback,
+  under-yielding or clearly weaker result. A local ModernBERT-CRF model parses
+  the resulting entries. The core install
   supports geometry and ONNX parsing; parsing has no per-reference LLM cost.
   `REF_SEG_STRATEGY=crf` requires the `torch` extra.
 - **`llm`** — parses references with the configured LLM in batches of up to

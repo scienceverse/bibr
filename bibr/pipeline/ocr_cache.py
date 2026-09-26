@@ -44,7 +44,9 @@ logger = logging.getLogger(__name__)
 # Version 9 preserves OCR completion evidence and warnings. Earlier bundles
 # cannot distinguish failed pages from empty pages, so invalidate them.
 # Version 10 stores the warnings as ``{code, message}`` objects.
-_CACHE_FORMAT_VERSION = 10
+# Version 11 adds the page text lines and URI links the reference line stream
+# reads; an older bundle would silently run the stream without them.
+_CACHE_FORMAT_VERSION = 11
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -265,6 +267,8 @@ def load_bundle(
         artifacts = payload["artifacts"]
         native_metadata = artifacts["native_metadata"]
         ref_line_geometry = artifacts["ref_line_geometry"]
+        ref_page_lines = artifacts["ref_page_lines"]
+        pdf_uri_links = artifacts["pdf_uri_links"]
         outline_data = artifacts["pdf_outline"]
         inspection_data = artifacts.get("pdf_inspection")
         if outline_data is None:
@@ -293,6 +297,8 @@ def load_bundle(
     fs.ocr_regions = regions
     fs.native_metadata = native_metadata
     fs.ref_line_geometry = ref_line_geometry
+    fs.ref_page_lines = ref_page_lines
+    fs.pdf_uri_links = pdf_uri_links
     fs.pdf_outline = pdf_outline
     fs.pdf_inspection = pdf_inspection
     _restore_quality(fs, quality)
@@ -321,6 +327,8 @@ def store(
         "artifacts": {
             "native_metadata": fs.native_metadata,
             "ref_line_geometry": fs.ref_line_geometry,
+            "ref_page_lines": fs.ref_page_lines,
+            "pdf_uri_links": fs.pdf_uri_links,
             "pdf_outline": (
                 [asdict(item) for item in fs.pdf_outline] if fs.pdf_outline is not None else None
             ),
