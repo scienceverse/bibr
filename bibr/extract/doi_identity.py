@@ -225,6 +225,8 @@ def _candidate_from_match(
         section_value == CanonicalSection.REFERENCES.value
         or (_REFERENCE_PREFIX_RE.match(text) and not _YEAR_LED_CITATION_RE.match(text))
         or marker_kind == "reference_doi"
+        # A reference entry the layout took for a running header or footer.
+        or (source_kind in {"header", "footer"} and _reads_as_citation(text))
     ):
         semantic_context = "reference"
         rejection_reason = "reference_candidate"
