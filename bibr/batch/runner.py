@@ -365,11 +365,6 @@ def _local_outcome(result: Any, started_at: str, finished_at: str, elapsed: floa
 # --- the run ------------------------------------------------------------------
 
 
-def _print(console: Any, message: str, **kwargs: Any) -> None:
-    if console is not None:
-        console.print(message, **kwargs)
-
-
 def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
     """The ``--dry-run`` payload, on stdout like ``bibr chew --dry-run``."""
     from rich.console import Console

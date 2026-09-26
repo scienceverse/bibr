@@ -393,6 +393,50 @@ released.
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
   still finish before the enrichment is reported partial.
+- Local classifier handling is stricter and the MCP tools fail safer (audit
+  sweep of client, core API, pipeline core and MCP findings):
+  - Anthropic thinking budgets no longer produce requests the API rejects
+    with a 400. With `LLM_THINKING_BUDGET` set, a per-task cap at or below
+    the budget (paper_type 512, classification 1024, title/equations 4096)
+    now runs without thinking at temperature 0, and budgets below the 1024
+    minimum are raised to it. Requests whose cap already fits the budget are
+    byte-identical.
+  - The two local classifiers no longer pick CUDA against the same free-VRAM
+    figure: the section decision sees the usable budget minus the paper
+    model's placed estimate, and a configured `OCR_BACKEND=paddle-vllm`
+    reserves the OCR server's 92% GPU claim up front. Tight cards that loaded
+    both models onto CUDA now keep the second on CPU.
+  - `ML_CLASSIFIERS_REQUIRED=true` is now enforced on the local pipeline, not
+    just in serve. A required classifier that fails to load fails the file
+    with code `classifier_required_failed` and a message naming the setting;
+    the run used to fall back to the LLM tier silently. Set
+    `ML_CLASSIFIERS_REQUIRED=false` to restore the fallback.
+  - `bibr mcp` chew tools report failure causes again: `chew_paper` and
+    `chew_url` wrap non-BibrError failures in a `ToolError` carrying the
+    exception type and a secret-scrubbed message (file name only, never the
+    full path or URL) instead of the detail-less "Error executing tool".
+  - `save_paper` writes only `.json` files and refuses to overwrite an
+    existing file unless `overwrite=True` is passed explicitly.
+  - `bibr mcp` without cloud credentials prints the one-line missing-key
+    message and exits 1 instead of dumping a traceback.
+  - The offline batch docs no longer claim batch runs prefill the LLM
+    response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
+  - The Crossref bulk DOI prefetch sends no request and seeds nothing when
+    both cache tiers are disabled, and leaves comma-bearing DOIs to their
+    individual lookup instead of failing the whole chunk's filter.
+  - `CACHE_TTL_SECONDS=0` (or negative) now means "no expiry" instead of
+    failing every Redis SET with "invalid expire time" and silently
+    disabling the result cache.
+  - `dir(bibr)` lists the lazy public API (`chew`, `Chewer`, `Result`,
+    `write_tables`, ...) without importing it, and `Result` answers the
+    plural table aliases (`figures`, `tables`, `affiliations`, `urls`,
+    `equations`).
+  - Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
+    "not implemented" warning instead of passing silently.
+  - Removed dead helpers with no callers anywhere (including tests):
+    `snapshot_download_no_symlink`, `onnxruntime_available`,
+    `ONNX_TOKENIZER`, `vllm_mlx_available`, `TAG_TO_IDX`, and
+    `bibr.batch.runner._print`.
 
 ## [0.5.1] - 2026-09-12
 

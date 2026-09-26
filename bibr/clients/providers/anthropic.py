@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, ClassVar
 
 import instructor
@@ -11,6 +12,14 @@ from bibr.config import snapshot_settings
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
+
+logger = logging.getLogger(__name__)
+
+# Anthropic rejects extended thinking unless 1024 <= budget_tokens <
+# max_tokens. The per-task caps in ``Settings.llm`` (paper_type 512,
+# classification 1024, title/equations 4096) can be at or below a configured
+# ``LLM_THINKING_BUDGET``, which the API answers with a 400.
+_MIN_THINKING_BUDGET = 1024
 
 
 @register
@@ -35,9 +44,21 @@ class AnthropicProvider:
         kwargs: dict = {"max_tokens": max_tokens or self._settings.llm.max_tokens}
         budget = self._settings.llm.thinking_budget
         if budget and budget > 0:
-            # Extended thinking only runs at the API's default temperature —
-            # sending any explicit value alongside it is rejected.
-            kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            effective = max(int(budget), _MIN_THINKING_BUDGET)
+            if kwargs["max_tokens"] <= effective:
+                # The task cap cannot fit thinking (budgets must stay below
+                # max_tokens) — send an ordinary temperature-0 call rather
+                # than a request the API rejects with a 400.
+                logger.debug(
+                    "thinking budget %d does not fit max_tokens %d — sending without thinking",
+                    effective,
+                    kwargs["max_tokens"],
+                )
+                kwargs["temperature"] = self._settings.llm.temperature
+            else:
+                # Extended thinking only runs at the API's default temperature —
+                # sending any explicit value alongside it is rejected.
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": effective}
         else:
             # Every other provider extracts at temperature 0 — google/groq/
             # ollama pin it, openai forwards ``LLM_TEMPERATURE`` (0.0 by

@@ -134,10 +134,14 @@ class ResponseCache:
     async def _set_raw(self, key: str, raw, *, ttl_seconds: int | None = None) -> None:
         """Store ``raw`` for ``key`` with TTL (the cache's own unless *ttl_seconds*).
 
-        Errors are logged and swallowed.
+        A non-positive TTL means "no expiry" and is sent without ``ex`` —
+        Redis rejects ``EX 0`` with "invalid expire time", which used to fail
+        every SET and silently disable the cache. Errors are logged and
+        swallowed.
         """
+        ttl = self._ttl if ttl_seconds is None else ttl_seconds
         try:
-            await self._redis.set(self._full_key(key), raw, ex=ttl_seconds or self._ttl)
+            await self._redis.set(self._full_key(key), raw, ex=ttl if ttl > 0 else None)
         except Exception as e:
             self._log_set_error(key, e)
 

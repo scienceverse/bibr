@@ -1218,14 +1218,14 @@ class CacheOptions(_BibrSettings):
     )
     # Opt-in disk cache for structured LLM responses, keyed on model + schema +
     # system + user text. A hit costs no tokens and no rate-limit slot. This is
-    # also the prefill target for the offline Message Batches path: a batch
-    # answers requests at half price and writes them here for a later run to
-    # find. Off by default — like the OCR cache, it never silently changes
+    # not written by the offline Message Batches path (bibr/clients/batch.py
+    # has no CLI or pipeline caller), so nothing prefills it today.
+    # Off by default — like the OCR cache, it never silently changes
     # results unless opted in. Env: CACHE_LLM.
     llm: bool = Field(
         False,
         description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
-        "system prompt and user text. Also the prefill target for offline batch runs. Off by "
+        "system prompt and user text. Not written by the offline batch layer. Off by "
         "default.",
     )
     # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm

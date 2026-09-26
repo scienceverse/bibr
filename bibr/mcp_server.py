@@ -43,6 +43,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.api import Chewer, ChewOptions
 from bibr.exceptions import BibrError
+from bibr.utils.redact import scrub_secrets
 from bibr.validation import payload_validation
 
 __all__ = ["build_server", "run_mcp"]
@@ -490,6 +491,11 @@ def build_server(
                     result = await chewer.achew_file(target, paper_id=paper_id, progress=tracker)
                 except BibrError as e:
                     raise ToolError(f"extraction failed for {target.name}: {e}") from e
+                except Exception as e:  # noqa: BLE001 — MCP drops non-ToolError detail
+                    raise ToolError(
+                        f"extraction failed for {target.name}: "
+                        f"{type(e).__name__}: {scrub_secrets(str(e))}"
+                    ) from e
         pid = store.add(result.data, source=str(target), requested_id=paper_id)
         summary = _summarize(pid, result.data, str(target))
         summary["seconds"] = round(time.monotonic() - started, 1)
@@ -521,7 +527,10 @@ def build_server(
         tracker = _McpProgress(ctx, asyncio.get_running_loop())
         with tempfile.TemporaryDirectory(prefix="bibr-mcp-url-") as tmp:
             target = Path(tmp) / fetched.filename
-            target.write_bytes(fetched.content)
+            try:
+                target.write_bytes(fetched.content)
+            except OSError as e:
+                raise ToolError(f"could not stage download {fetched.filename}: {e}") from e
             async with chew_lock:  # one paper at a time on the shared pipeline
                 with redirect_stdout(sys.stderr):
                     try:
@@ -530,6 +539,11 @@ def build_server(
                         )
                     except BibrError as e:
                         raise ToolError(f"extraction failed for {url}: {e}") from e
+                    except Exception as e:  # noqa: BLE001 — MCP drops non-ToolError detail
+                        raise ToolError(
+                            f"extraction failed for {fetched.filename}: "
+                            f"{type(e).__name__}: {scrub_secrets(str(e))}"
+                        ) from e
         pid = store.add(result.data, source=url, requested_id=paper_id)
         summary = _summarize(pid, result.data, url)
         summary["seconds"] = round(time.monotonic() - started, 1)
@@ -561,13 +575,21 @@ def build_server(
         return _summarize(pid, data, str(src))
 
     @server.tool()
-    async def save_paper(paper_id: str, path: str, compact: bool = False) -> dict[str, Any]:
+    async def save_paper(
+        paper_id: str, path: str, compact: bool = False, overwrite: bool = False
+    ) -> dict[str, Any]:
         """Write a paper's complete export JSON (schema-versioned, everything the
         query tools slice from) to the given path."""
         entry = store.get(paper_id)
         out = Path(path).expanduser()
+        if out.suffix.lower() != ".json":
+            raise ToolError(f"refusing to write {out}: save_paper writes only .json files")
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
+            if out.exists() and not overwrite:
+                raise ToolError(
+                    f"refusing to overwrite existing file {out} (pass overwrite=True to replace it)"
+                )
             kwargs: dict[str, Any] = {"separators": (",", ":")} if compact else {"indent": 2}
             await asyncio.to_thread(
                 out.write_text,
