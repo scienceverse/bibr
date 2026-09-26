@@ -1453,6 +1453,20 @@ class TestArtifactProvenance:
 
         assert METRICS_VERSION == 4
 
+    def test_evaluation_guide_states_the_current_metrics_version(self):
+        """The guide tells readers which definitions their saved artifacts carry.
+        A bump that skips it leaves them comparing numbers across versions."""
+        import re
+
+        from evaluation.evaluate import METRICS_VERSION
+
+        guide = Path(__file__).resolve().parents[1] / "docs/contributing/evaluation.md"
+        stated = re.findall(
+            r"current definitions are \*\*`metrics_version: (\d+)`\*\*",
+            guide.read_text(encoding="utf-8"),
+        )
+        assert stated == [str(METRICS_VERSION)]
+
     def test_records_bibr_commit(self, tmp_path):
         import json as _json
 

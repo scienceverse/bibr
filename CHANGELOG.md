@@ -223,6 +223,27 @@ released.
 - The `bibr demo` summary card showed an extracted title, DOI, paper type,
   domain and keywords as Markdown, so a crafted PDF could make the viewer's
   browser load an outside image or show a link. They are now shown literally.
+- `table[].contents` keeps the cell text the paper printed. The OCR engines
+  return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
+  too. That HTML was read with pandas type inference, so every column that
+  looked numeric was rewritten: "2.50" became "2.5", "007" became "7",
+  "1,234" became "1234", a decimal comma was read as a thousands separator
+  ("1,5" became "15", "0,25" became "25"), an integer column with one empty
+  cell came out as "12.0", and "TRUE" became "True". A cell printing "NA",
+  "n/a" or "None" came out empty from a PDF and as "nan" from HTML or ePub,
+  where every empty cell was "nan" too. A PDF table without a header row,
+  whose first row becomes the header, could get headers such as "2019.0".
+  Cells now keep their printed text and an empty cell is "", and tables keep
+  the shape they had before. A table printed as an image is now kept
+  with its caption and empty `contents`, so a mention of it resolves: in HTML
+  and ePub input a `<table>` with no cell text whose caption prints a table
+  label ("Table 3. ..."), in JATS a `<table-wrap>` with a label or caption but
+  no `<table>` with rows. An HTML table with a span such as `colspan="2px"` is no longer
+  dropped.
+- A table continued across pages no longer gets its repeated header as a data
+  row in the middle of `contents` when the later page prints the header with
+  different spacing, case, dashes or punctuation ("Mean(SD)" under
+  "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
@@ -248,9 +269,27 @@ released.
   after 11 papers and every later paper failed. Each ONNX Runtime run on CUDA
   now ends by freeing the memory it no longer uses (onnxruntime's arena
   shrinkage), so GPU memory follows the model calls in flight.
+- The OCR disk cache key now includes the layout checkpoint (`LAYOUT_MODEL_ID`),
+  the ONNX layout bundle (`LAYOUT_ONNX_MODEL_ID`, `LAYOUT_ONNX_REVISION`) and
+  `ML_RUNTIME`. It held only the torch revision, so moving the ONNX bundle,
+  which is what the default runtime loads, replayed the previous model's cached
+  regions.
 - JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
   `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
   a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
+- A GPU install could run bibr's ONNX models on the CPU. The core `onnxruntime`
+  package and the `gpu` extra's `onnxruntime-gpu` write the same `onnxruntime/`
+  directory, and `uv sync --extra gpu` writes both at once, so either build
+  could end up loaded. The documented remedy, `uv pip install
+  'onnxruntime-gpu[cuda,cudnn]'` after the sync, did nothing, because
+  `onnxruntime-gpu` was already installed. `bibr setup` now reinstalls the
+  `onnxruntime-gpu` version the sync chose, which writes the GPU build's files
+  last, and checks that the GPU build is the one that loads. The install guide
+  and the tester guide give the same step: `uv pip install --reinstall-package
+  onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"`. `onnxruntime` stays
+  installed, because `uv run` reinstalls a missing one and its files would
+  replace the GPU build's. When both packages are installed and the CPU build is
+  the one loaded, bibr logs a warning once, with the command that fixes it.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
@@ -325,9 +364,36 @@ released.
 - A PDF caption the layout model tags as a figure title that opens with
   "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
   found no table and fell back into the body text.
+- The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
+  `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
+  harness that are not part of this repository. The evaluator here,
+  `evaluation/evaluate.py`, records `metrics_version: 4`, as it did in 0.5.0 and
+  0.5.1. No metric definition has changed since v4, so saved v4 evaluations need
+  no re-scoring. Full printed names (`authors_fullname_f1`) were already its
+  primary author metric in 0.5.0, with family-name-only `authors_f1` as a
+  diagnostic.
 
 ### Added
 
+- PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
+  `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
+  still loads PP-DocLayoutV3; switching is a settings change behind an
+  evaluation gate (see the Configuration guide, "Layout model generation").
+  `scripts/export_onnx_layout.py` exports either generation, and the bundle
+  manifest's `architecture` selects the pre- and post-processing of the ONNX
+  runtime; the torch runtime loads V4 through `LAYOUT_MODEL_ID` once
+  transformers ships it. V4 keeps V3's 25 region labels. bibr uses the
+  rectangle enclosing each predicted quadrilateral and decodes V4's reading
+  order (a successor graph made acyclic, sorted topologically, with
+  relative-order votes breaking ties) in numpy, without scipy. It matches
+  transformers' processor except where scores tie exactly or are NaN, which a
+  trained head's output does not produce. A bundle or checkpoint whose label
+  list differs from the one bibr maps, or a V4 bundle that declares none, is
+  refused. Under the ONNX runtime a `LAYOUT_MODEL_ID` naming a different
+  checkpoint than the bundle's source is logged as unused.
+- `LAYOUT_MODEL_ID` names the torch layout checkpoint (default
+  `PaddlePaddle/PP-DocLayoutV3_safetensors`). The serve image bakes it next to
+  `LAYOUT_MODEL_REVISION`.
 - Parquet corpus tables. `bibr tables <exports> --out DIR`, `bibr.write_tables()`
   and `bibr batch` (into `<out>/tables/` after every run; `--no-tables` skips
   it) write any number of exports as one Parquet file per table: `paper` (one

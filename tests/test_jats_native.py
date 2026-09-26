@@ -698,3 +698,29 @@ def test_floats_take_their_label_from_the_label_element():
     table_xrefs = [(x.xref_type, x.xref_id, x.tier) for x in c.xrefs if x.xref_type != "figure"]
     assert table_xrefs == [("table", 2, "label"), ("table", 1, "label")]
     assert [(x.xref_id, x.tier) for x in c.xrefs if x.xref_type == "figure"] == [(1, "label")]
+
+
+def test_table_wrap_without_a_table_is_kept_with_its_caption():
+    """A table printed as an image has a <graphic> and no <table>. It was
+    dropped with its caption, so "Table 2" resolved nowhere; it is kept with
+    empty contents, as the HTML parser keeps a captioned image-only table. A
+    table-wrap with neither a table nor a label or caption is still dropped."""
+    xml = b"""
+    <article><front><article-meta>
+      <title-group><article-title>Image table</article-title></title-group>
+    </article-meta></front><body><sec><title>Results</title>
+      <p>Table 2 lists the values.</p>
+      <table-wrap><label>Table 1</label><caption><p>Counts.</p></caption>
+        <table><tr><th>N</th></tr><tr><td>12</td></tr></table></table-wrap>
+      <table-wrap><label>Table 2</label><caption><p>Scanned values.</p></caption>
+        <graphic xlink:href="t2.png" xmlns:xlink="http://www.w3.org/1999/xlink"/></table-wrap>
+      <table-wrap><graphic/></table-wrap>
+    </sec></body></article>
+    """
+    c = _segment(_parse(xml))
+
+    assert [(t.label, t.caption, t.contents, t.tbl_html) for t in c.tables] == [
+        ("1", "Table 1 Counts.", [["N"], ["12"]], c.tables[0].tbl_html),
+        ("2", "Table 2 Scanned values.", [], ""),
+    ]
+    assert [(x.xref_type, x.xref_id) for x in c.xrefs] == [("table", 2)]
