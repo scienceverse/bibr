@@ -92,6 +92,13 @@ class TestValidateOecdL1:
         assert validate_oecd_l1("Science") == ""
         assert validate_oecd_l1("Physics") == ""
 
+    def test_two_domain_hedge_stays_empty(self):
+        # "Humanities and Social Sciences" carries the distinctive tokens of
+        # two L1 labels; token_set_ratio scores 100 for either subset label,
+        # so the winner would be arbitrary — abstain instead.
+        assert validate_oecd_l1("Humanities and Social Sciences") == ""
+        assert validate_oecd_l1("Social Sciences and Humanities") == ""
+
 
 # ---------------------------------------------------------------------------
 # OECD L2 validation tests

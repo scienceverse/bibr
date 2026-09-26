@@ -189,6 +189,16 @@ def test_unparseable_date_like_tail_still_blocks_refinement():
     assert refine_publication_date("2020", source) == "2020"
 
 
+def test_month_first_unparseable_tail_still_blocks_refinement():
+    """A month-first tail with no day ('March 2021') is date-like: it fails
+    to parse and keeps the record ambiguous even with a valid labelled date
+    next to it. A digits-only date check would misread it as boilerplate."""
+    from bibr.extract.metadata_precision import refine_publication_date
+
+    source = "Published: March 2021\nPublished online: 11 April 2020"
+    assert refine_publication_date("2020", source) == "2020"
+
+
 @pytest.mark.parametrize(
     "published, expected",
     [

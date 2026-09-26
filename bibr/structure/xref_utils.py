@@ -119,21 +119,23 @@ SUPP_NAMED_XREF_RE = re.compile(
 # The letter lookbehind blocks substring matches inside raw LaTeX and URLs
 # ("\leq 1" → "eq 1", "osf.io/geq9x" → "eq9") while still allowing an
 # OCR-flattened footnote marker glued to the word ("9Equations (1)").
-# A hyphen before the word is rejected too: unit spellings such as
-# "CO2-eq. (39.1%)" would otherwise match from the "eq". (An en dash is
-# still allowed there: longhand ranges print "Equation 5–Equation 7".)
+# A hyphen before a lowercase short form is rejected too: unit spellings
+# such as "CO2-eq. (39.1%)" would otherwise match from the "eq". A hyphen
+# before longhand "Equation" is a range dash ("Equation 5-Equation 7"),
+# so only the lowercase "eq" shape is refused. (An en dash is still
+# allowed everywhere: longhand ranges print "Equation 5–Equation 7".)
 # Dotted ids are captured whole so "Eq. (2.3)" isn't truncated to
 # "Eq. (2".  The close paren is consumed only when the open paren was
 # matched, so an enclosing parenthetical — "(see Equations 1 and 7)" —
 # keeps its own ")". A trailing percent sign is rejected after the numbers
 # ("eq. (39.1%)" is a share, not an equation).
 # The match's word is captured so detect_xrefs can drop version-printed
-# software ("EQS 6.1", see _is_software_version_mention).
+# software ("EQS 6", "EQS 6.1", see _is_software_version_mention).
 _EQ_NUM = r"\d+(?:\.\d+)*"
 _EQ_NUM_RANGE = rf"(?:\s*[-–]\s*{_EQ_NUM})?"
 _EQ_NUM_LIST = rf"(?:\s*(?:[,&]|\band\b)\s*{_EQ_NUM}{_EQ_NUM_RANGE})*"
 EQUATION_XREF_RE = re.compile(
-    r"(?<![A-Za-z-])(?P<word>(?:Equations?|Eqs?\.?))\s*(?P<open>\()?"
+    r"(?<![A-Za-z])(?<!-(?=(?-i:eq)))(?P<word>(?:Equations?|Eqs?\.?))\s*(?P<open>\()?"
     rf"(?P<nums>{_EQ_NUM}{_EQ_NUM_RANGE}{_EQ_NUM_LIST})"
     r"(?(open)\)?)"
     r"(?![\d.]*\s*%)",
@@ -276,15 +278,18 @@ def _is_software_version_mention(match: re.Match[str]) -> bool:
     """Whether an equation-pattern match names versioned software, not an equation.
 
     Structural-equation software is cited bare and versioned ("EQS 6.1",
-    Bentler): an all-caps short form with no period and a dotted number.
-    Real dotted equation ids always print a period or parens ("Eq. (2.3)"),
-    and real bare short forms ("eq 5", "eqs 4 and 8", "Eq (1)") take plain
-    integers — so only the caps-plus-dotted shape is dropped.
+    "EQS 6", Bentler): an all-caps short plural with no period. Real plural
+    references print "Eqs." or "eqs", and real bare short forms ("eq 5",
+    "eqs 4 and 8", "Eq (1)") take plain integers — so the caps-no-period
+    plural is dropped whatever the number shape, while the dotted-number
+    rule still covers the singular caps form ("EQ 2.3").
     """
     word = match.group("word")
-    if word not in ("EQ", "EQS"):
-        return False
-    return "." in match.group("nums")
+    if word == "EQS":
+        return True
+    if word == "EQ":
+        return "." in match.group("nums")
+    return False
 
 
 class _FloatIndex:

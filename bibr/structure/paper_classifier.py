@@ -234,6 +234,13 @@ def validate_oecd_l1(raw: str | None) -> str:
     if synonym is not None:
         return synonym
 
+    # A two-domain hedge names two labels at once ("Humanities and Social
+    # Sciences"); fuzzy scoring would award 100 to either subset label, so
+    # abstain rather than resolve to one domain.
+    if _is_two_domain_hedge(raw_stripped):
+        logger.warning("Could not match OECD L1 label '%s' to any known domain", raw_stripped)
+        return ""
+
     result = _match_l2_label(raw_stripped, OECD_L1_LABELS)
     if result:
         return result
@@ -266,8 +273,9 @@ def _match_l2_label(raw: str | None, candidates: list[str]) -> str:
     """Shared scoring core: exact → case-insensitive → fuzzy over ``candidates``.
 
     Returns the canonical label or "". Callers supply the candidate set —
-    siblings of one L1 (:func:`validate_oecd_l2`) or every L2 label
-    (:func:`canonicalize_oecd_l2_any`).
+    siblings of one L1 (:func:`validate_oecd_l2`), every L2 label
+    (:func:`canonicalize_oecd_l2_any`), or every L1 label
+    (:func:`validate_oecd_l1`).
     """
     if not raw or not raw.strip() or not candidates:
         return ""
@@ -310,6 +318,33 @@ def _match_l2_label(raw: str | None, candidates: list[str]) -> str:
         return best_label
 
     return ""
+
+
+# Tokens that pick out exactly one L1 label under the shared normalization
+# above ("social" only names Social Sciences; "science(s)" names several, so
+# it picks out none). A two-domain hedge ("Humanities and Social Sciences")
+# carries the distinctive tokens of two labels, and token_set_ratio scores
+# 100 for either subset label — the winner is arbitrary. Such inputs abstain
+# in validate_oecd_l1 instead of resolving to one domain.
+_L1_TOKEN_LABEL_COUNT: dict[str, int] = {}
+for _l1_label in OECD_L1_LABELS:
+    for _token in set(re.findall(r"[a-z0-9]+", _normalize_l2_label(_l1_label))):
+        _L1_TOKEN_LABEL_COUNT[_token] = _L1_TOKEN_LABEL_COUNT.get(_token, 0) + 1
+_L1_DISTINCTIVE_TOKEN_LABEL: dict[str, str] = {}
+for _l1_label in OECD_L1_LABELS:
+    for _token in set(re.findall(r"[a-z0-9]+", _normalize_l2_label(_l1_label))):
+        if _L1_TOKEN_LABEL_COUNT[_token] == 1:
+            _L1_DISTINCTIVE_TOKEN_LABEL[_token] = _l1_label
+
+
+def _is_two_domain_hedge(raw_stripped: str) -> bool:
+    """Whether the input names the distinctive tokens of two L1 domains."""
+    hit_labels = {
+        _L1_DISTINCTIVE_TOKEN_LABEL[token]
+        for token in set(re.findall(r"[a-z0-9]+", _normalize_l2_label(raw_stripped)))
+        if token in _L1_DISTINCTIVE_TOKEN_LABEL
+    }
+    return len(hit_labels) >= 2
 
 
 def validate_oecd_l2(l1: str, raw: str | None) -> str:

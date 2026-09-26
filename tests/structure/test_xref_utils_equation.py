@@ -129,6 +129,26 @@ class TestEquationXrefUnitAndSoftwareNames:
         xrefs = _eq_xrefs(_sent("Model fit used the software EQS 6.1 (Bentler, 2005)."))
         assert xrefs == []
 
+    def test_eqs_integer_form_is_software_not_equation(self):
+        # The finding's own paper also cites "EQS 6 structural equations
+        # program manual": the integer form is the same SEM software, not an
+        # equation, whatever the number shape.
+        xrefs = _eq_xrefs(
+            _sent(
+                "Bentler, P. M. (2005). EQS 6 structural equations program manual. "
+                "Encino, CA: Multivariate Software."
+            )
+        )
+        assert xrefs == []
+        xrefs = _eq_xrefs(_sent("Models were estimated in EQS 6 (Bentler, 2006)."))
+        assert xrefs == []
+
+    def test_hyphen_before_lowercase_eq_unit_not_matched(self):
+        # The hyphen rule fires without a trailing "%": "CO2-eq. 3" is a
+        # unit with a count, not equation 3.
+        xrefs = _eq_xrefs(_sent("Emissions of 5 t CO2-eq. 3 times higher."))
+        assert xrefs == []
+
 
 class TestEquationXrefBareFormsPreserved:
     """Guards: real bare short forms observed in the gate192 exports and the
@@ -170,3 +190,17 @@ class TestEquationXrefBareFormsPreserved:
         # the second "Equation" is a range dash, not a unit hyphen.
         xrefs = _eq_xrefs(_sent("We simplify the full model (Equation 5–Equation 7) using a mean."))
         assert {x.xref_id for x in xrefs} == {5, 7}
+
+    def test_longhand_hyphen_range_matches_both_halves(self):
+        # OCR and text layers often flatten the range dash to a hyphen
+        # ("Equation 5-Equation 7"): the second half is a reference, not a
+        # unit spelling — only a hyphen before lowercase "eq" is refused.
+        xrefs = _eq_xrefs(_sent("As in Equation 5-Equation 7 above."))
+        assert {x.xref_id for x in xrefs} == {5, 7}
+
+    def test_caps_singular_eq_integer_still_matches(self):
+        # The software guard drops the all-caps plural ("EQS 6") whatever
+        # the number shape; the singular caps form is still a reference.
+        xrefs = _eq_xrefs(_sent("See EQ 5 for the system."))
+        assert len(xrefs) == 1
+        assert xrefs[0].xref_id == 5

@@ -92,7 +92,13 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
         for token in re.findall(r"[a-z0-9]+", name.lower()):
             if len(token) >= 3 and (token in local_compact or local_compact in token):
                 return True
-    return False
+    # A 2-letter family name (Li, Wu, He) cannot match by containment — it
+    # would hit any address — but as the address's leading letters ('lixh@'
+    # for Xiaohong Li) it still names the author. Given names stay at 3+
+    # chars: a 2-letter given token ('Yu' in Yu-Zhong) prefix-matches far too
+    # often and breaks same-surname disambiguation.
+    family_compact = re.sub(r"[^a-z0-9]", "", (family or "").lower())
+    return len(family_compact) == 2 and local_compact.startswith(family_compact)
 
 
 class AuthorEmailHarvester:
@@ -172,7 +178,9 @@ class AuthorEmailHarvester:
              their surname — never on window proximity alone.
           3. Final fallback: a single still-corresponding author missing an
              email gets it by elimination, only with a marker-paired address,
-             a correspondence marker in the window, or a name match.
+             a correspondence marker in the window (only when no sentence
+             pairs the marker with an explicit address), a '* E-mail:'
+             footnote line, or a name match.
              Anything else is skipped, leaving the author emailless for
              their real address instead of blocking it with someone else's.
 
@@ -267,7 +275,17 @@ class AuthorEmailHarvester:
 
                 if candidates:
                     candidates.sort(key=lambda c: (c[0], c[1], c[2]))
-                    _, _, _, family, author = candidates[0]
+                    _passing = [
+                        c
+                        for c in candidates
+                        if (
+                            email.lower() in strict_emails
+                            or c[0] == 0
+                            or _email_name_affinity(c[4].given, c[4].family, local_compact)
+                        )
+                    ]
+                    _, _, _, family, author = (_passing or candidates)[0]
+                    candidates = _passing or candidates
                     # The surname window alone must not license the address:
                     # the window routinely covers an unrelated earlier email
                     # (editorial office, lab, journal) next to the byline, and
@@ -298,11 +316,20 @@ class AuthorEmailHarvester:
                     if len(fallback) == 1:
                         # Elimination with no surname evidence at all: only an
                         # explicitly paired address, a correspondence marker in
-                        # the email's own window, or a name-matching address.
+                        # the email's own window, a PLOS '* E-mail:' line, or a
+                        # name-matching address. When some sentence pairs the
+                        # marker with explicit email(s), those pairings are
+                        # exhaustive and a bare window marker no longer counts.
                         candidate = fallback[0]
                         if (
                             email.lower() in strict_emails
-                            or window_has_marker
+                            or (
+                                not strict_emails
+                                and (
+                                    window_has_marker
+                                    or re.match(r"\s*\*\s*e-?mail", sent.text, re.I)
+                                )
+                            )
                             or _email_name_affinity(
                                 candidate.given, candidate.family, local_compact
                             )
