@@ -72,6 +72,7 @@ class WarningCode(StrEnum):
     CONSOLIDATE_WITHOUT_ENRICHMENT = "CONSOLIDATE_WITHOUT_ENRICHMENT"
     # Export content
     URL_MALFORMED_DROPPED = "URL_MALFORMED_DROPPED"
+    EPUB_SPINE_MEMBER_SKIPPED = "EPUB_SPINE_MEMBER_SKIPPED"
 
 
 DESCRIPTIONS: dict[WarningCode, str] = {
@@ -147,6 +148,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "off, so there were no matches to merge.",
     WarningCode.URL_MALFORMED_DROPPED: "A link was dropped from the export as malformed; "
     "the URL is lost from the payload.",
+    WarningCode.EPUB_SPINE_MEMBER_SKIPPED: "An ePub spine member was missing from the "
+    "archive; its text is absent from the export.",
 }
 
 

@@ -11,13 +11,14 @@ import io
 import logging
 import posixpath
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote
 
 from bibr.input.html_native import HtmlParser
 from bibr.input.xml_entities import parse_xml
 from bibr.input.zip_limits import ZipExpansionLimitError, read_zip_member_capped
 from bibr.paper_contents import PaperContents
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
@@ -25,9 +26,11 @@ logger = logging.getLogger(__name__)
 _EPUB_TOTAL_UNCOMPRESSED_MAX_BYTES = 256 * 1024 * 1024
 _EPUB_MAX_ENTRIES = 20_000
 _EPUB_MAX_COMPRESSION_RATIO = 100
-# Per-member real-byte cap: the declared total (above) is attacker-controlled and
-# a single spine document could still be huge, so bound each member on its actual
-# decompressed size (audit L10/M7).
+# Per-member real-byte cap. CPython's ZipExtFile already enforces the declared
+# file_size when a member is read — truncating the output and raising
+# BadZipFile on the CRC mismatch a lying header causes — so this cap is
+# defense in depth: it keeps the rejection at validation, however the archive
+# is read downstream (audit L10/M7).
 _EPUB_MAX_MEMBER_BYTES = 64 * 1024 * 1024
 # Every limit above is per member, so a spine that names one member N times
 # multiplies all of them. Bound the spine itself, and the bytes it actually
@@ -40,6 +43,14 @@ _EPUB_MAX_SPINE_BYTES = 64 * 1024 * 1024
 class EpubDocument:
     html_bytes: bytes
     metadata: dict
+    # Spine members named by the manifest but absent from the zip. Only
+    # missing members are skipped; anything else (an over-cap member, a CRC
+    # failure) rejects the book. Callers surface these so the loss is visible.
+    skipped_spine_members: list[str] = field(default_factory=list)
+
+
+class EpubSpineMemberMissingError(ValueError):
+    """A spine member named by the manifest is absent from the zip archive."""
 
 
 def _ln(el) -> str:
@@ -66,7 +77,7 @@ def _read_zip_member(zf: zipfile.ZipFile, name: str) -> bytes:
     try:
         zf.getinfo(name)
     except KeyError:
-        raise ValueError(f"ePub member missing: {name}") from None
+        raise EpubSpineMemberMissingError(f"ePub member missing: {name}") from None
     try:
         return read_zip_member_capped(zf, name, max_bytes=_EPUB_MAX_MEMBER_BYTES)
     except ZipExpansionLimitError as exc:
@@ -178,8 +189,11 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
         for path in spine_paths:
             try:
                 data = _read_zip_member(zf, path)
-            except Exception as exc:  # noqa: BLE001 — one missing chapter must not reject the book
-                logger.warning("Skipping unreadable ePub spine member %r: %s", path, exc)
+            except EpubSpineMemberMissingError as exc:
+                # Only a missing member is skipped: the expansion-limit
+                # ValueError and BadZipFile/CRC failures propagate and reject
+                # the book, as before.
+                logger.warning("Skipping missing ePub spine member %r: %s", path, exc)
                 skipped.append(path)
                 continue
             spine_bytes += len(data)
@@ -203,14 +217,14 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
         head_parts.append(f'<meta name="citation_author" content="{html.escape(author)}">')
     for keyword in metadata.get("keywords") or []:
         head_parts.append(f'<meta name="dc.subject" content="{html.escape(keyword)}">')
-    for field, meta_name in (
+    for name, meta_name in (
         ("publisher", "dc.publisher"),
         ("published", "dc.date"),
         ("license", "dc.rights"),
     ):
-        if metadata.get(field):
+        if metadata.get(name):
             head_parts.append(
-                f'<meta name="{meta_name}" content="{html.escape(str(metadata[field]))}">'
+                f'<meta name="{meta_name}" content="{html.escape(str(metadata[name]))}">'
             )
 
     # html5lib sniffs the encoding and falls back to windows-1252 without a
@@ -223,7 +237,9 @@ def read_epub_document(epub_bytes: bytes) -> EpubDocument:
         + "\n".join(body_parts)
         + "</article></body></html>"
     )
-    return EpubDocument(html_bytes=combined.encode("utf-8"), metadata=metadata)
+    return EpubDocument(
+        html_bytes=combined.encode("utf-8"), metadata=metadata, skipped_spine_members=skipped
+    )
 
 
 class EpubParser:
@@ -255,7 +271,19 @@ class EpubParser:
             raise ProcessingError(f"Failed to parse ePub: {exc}") from exc
 
         self._html_parser = HtmlParser(document.html_bytes)
-        return self._html_parser.parse()
+        contents = self._html_parser.parse()
+        # A skipped chapter leaves no text in the payload, so record each loss
+        # as a coded warning. PaperContents.processing_warnings reaches
+        # Paper.processing_warnings in post_parse and from there
+        # extraction.warnings, so the incomplete book is visible in the export.
+        for path in document.skipped_spine_members:
+            contents.processing_warnings.append(
+                ProcessingWarning(
+                    WarningCode.EPUB_SPINE_MEMBER_SKIPPED,
+                    f"Skipped missing ePub spine member {path!r}; its text is absent",
+                )
+            )
+        return contents
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
         if self._html_parser is None:

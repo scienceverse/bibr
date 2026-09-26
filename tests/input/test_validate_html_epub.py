@@ -226,11 +226,61 @@ def _make_epub_two_chapters(*, with_ch2: bool, identifier: str) -> bytes:
 def test_epub_skips_missing_spine_member():
     """One manifest item absent from the zip must not reject the whole book —
     the readable chapters still validate. Fails on base (corrupted=True)."""
-    result = validate_input_file(
-        Path("paper.epub"), _make_epub_two_chapters(with_ch2=False, identifier="10.1234/abc")
-    )
+    from bibr.input.epub_native import EpubParser
+
+    epub_bytes = _make_epub_two_chapters(with_ch2=False, identifier="10.1234/abc")
+    result = validate_input_file(Path("paper.epub"), epub_bytes)
     assert result.is_corrupted is False
     assert result.is_valid is True
+    # The lost chapter must be visible, not just a log line: the parse carries
+    # a coded warning that reaches extraction.warnings in the export.
+    contents = EpubParser(epub_bytes).parse()
+    codes = [w.code for w in contents.processing_warnings]
+    assert "EPUB_SPINE_MEMBER_SKIPPED" in codes
+    assert any("OEBPS/ch2.xhtml" in w.message for w in contents.processing_warnings)
+
+
+def _make_epub_two_chapters_with_bodies(*, ch1_body: str, ch2_body: str) -> bytes:
+    container_xml = b"""<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>"""
+    opf_xml = b"""<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="ch2" href="ch2.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/><itemref idref="ch2"/></spine>
+</package>"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+        zf.writestr("META-INF/container.xml", container_xml)
+        zf.writestr("OEBPS/content.opf", opf_xml)
+        zf.writestr("OEBPS/ch1.xhtml", ch1_body)
+        zf.writestr("OEBPS/ch2.xhtml", ch2_body)
+    return buf.getvalue()
+
+
+def test_epub_rejects_oversized_spine_member_alongside_readable_chapter(monkeypatch):
+    """An over-cap spine member rejects the book even when another chapter is
+    readable — only a *missing* member is skipped. Fails while the spine loop
+    swallows the expansion-limit rejection."""
+    from bibr.input import epub_native
+
+    monkeypatch.setattr(epub_native, "_EPUB_MAX_MEMBER_BYTES", 2048)
+    epub_bytes = _make_epub_two_chapters_with_bodies(
+        ch1_body="<html><body><p>Small chapter.</p></body></html>",
+        ch2_body="<html><body>" + "x" * 8192 + "</body></html>",
+    )
+    with pytest.raises(ValueError, match="exceeds 2048 bytes"):
+        epub_native.read_epub_document(epub_bytes)
+    result = validate_input_file(Path("paper.epub"), epub_bytes)
+    assert result.is_corrupted is True
+    assert result.is_valid is False
 
 
 def test_epub_all_spine_members_missing_is_still_corrupted():
