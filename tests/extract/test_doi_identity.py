@@ -1147,7 +1147,7 @@ def test_a_doi_ending_in_a_slash_ran_on_into_the_next_field():
         (CanonicalSection.ABSTRACT, 3, 3),
     ],
 )
-def test_a_doi_label_names_the_paper_only_in_the_front_matter(section_type, page, tier):
+def test_a_doi_label_outranks_other_candidates_only_in_the_front_matter(section_type, page, tier):
     from bibr.extract.doi_identity import collect_doi_candidates
 
     contents = _contents(
@@ -1177,3 +1177,115 @@ def test_a_doi_label_in_the_running_footer_still_names_the_paper():
     )
     assert selection.selected.selection_tier == 3
     assert selection.issues == ()
+
+
+def test_a_labelled_doi_outside_the_front_matter_names_the_paper_when_alone():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = (
+        "The present work has been shared as a preprint on an example server, "
+        "https://example.org/abc/, doi: 10.1234/own.9."
+    )
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                "References",
+                CanonicalSection.REFERENCES,
+                "Doe J (2020). Prior work. doi: 10.1234/x.1",
+                12,
+            ),
+            ("Acknowledgments", CanonicalSection.ACKNOWLEDGMENT, own, 15),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.9"
+    assert (selection.selected.selection_tier, selection.selected.semantic_context) == (
+        1,
+        "labelled_body",
+    )
+    assert selection.issues == ()
+
+
+def test_a_labelled_doi_outside_the_front_matter_never_beats_the_front_matter():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "https://doi.org/10.1234/own.1", 1),
+            (
+                "Discussion",
+                CanonicalSection.DISCUSSION,
+                "As shown before (doi: 10.1234/cited.2).",
+                7,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.1"
+    assert selection.issues == ()
+
+
+def test_two_labelled_dois_outside_the_front_matter_are_ambiguous():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                "Discussion",
+                CanonicalSection.DISCUSSION,
+                "As shown before (doi: 10.1234/cited.2).",
+                7,
+            ),
+            (
+                "Acknowledgments",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "Preprint doi: 10.1234/own.9.",
+                15,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+@pytest.mark.parametrize(
+    ("text", "selected"),
+    [
+        # A figure's source note cites another work.
+        (
+            "From: Doe J, Roe R, The Example Group (2009). Reporting items. "
+            "Example Med 6(7): e1000097. doi:10.1234/cited.3",
+            None,
+        ),
+        # The article citing itself is still its own DOI.
+        (
+            "Cite this article: Doe J, Roe R (2020). A study of examples. "
+            "Example J 1: 2. doi: 10.1234/own.9",
+            "10.1234/own.9",
+        ),
+    ],
+)
+def test_a_labelled_doi_in_a_citation_is_a_cited_work(text, selected):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("Summary", CanonicalSection.UNKNOWN, text, 24),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert (selection.selected.normalized if selection.selected else None) == selected

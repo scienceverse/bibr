@@ -345,6 +345,22 @@ def test_agreement_confirms_a_printed_body_doi():
     assert selection.selected.selection_tier == 1
 
 
+def test_agreement_picks_between_labelled_dois_outside_the_front_matter():
+    contents = _contents(
+        [
+            (CanonicalSection.TITLE, "A study of examples", 1),
+            (CanonicalSection.DISCUSSION, "As shown before (doi: 10.1234/cited.2).", 7),
+            (CanonicalSection.ACKNOWLEDGMENT, "Preprint doi: 10.1234/own.9.", 15),
+        ]
+    )
+
+    _candidates, selection = _select(contents, _evidence(metadata=[_xmp("10.1234/own.9")]))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.9"
+    assert selection.issues == ()
+
+
 @pytest.mark.parametrize(
     "text",
     [

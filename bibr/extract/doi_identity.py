@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from functools import partial
 from typing import TYPE_CHECKING
 
+from bibr.extract.ref_locator import _looks_like_terminal_reference_start
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
@@ -161,6 +162,29 @@ def _marker_kind(text: str, start: int) -> str:
 _YEAR_LED_CITATION_RE = re.compile(r"^\s*(?:19|20)\d{2}[.)]\s")
 
 
+# A source note that introduces a citation ("From: Moher D, … (2009) …").
+_SOURCE_NOTE_RE = re.compile(
+    r"^\s*(?:(?:adapted|reproduced|reprinted|modified)\s+)?(?:from|source)\s*:?\s*",
+    re.IGNORECASE,
+)
+# The article's own citation, which reads like any other.
+_SELF_CITATION_RE = re.compile(
+    r"\b(?:cite\s+this|how\s+to\s+cite|please\s+cite|recommended\s+citation|citation\s*:)",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_citation(text: str) -> bool:
+    """Whether *text* is a bibliographic citation (an author-date or numbered entry).
+
+    A figure's source note is one too once its "From:" label is set aside. The
+    article citing itself ("Cite this article: …", "Citation: …") is not.
+    """
+    if _SELF_CITATION_RE.search(text):
+        return False
+    return _looks_like_terminal_reference_start(_SOURCE_NOTE_RE.sub("", text, count=1))
+
+
 def _candidate_from_match(
     text: str,
     match: re.Match[str],
@@ -243,6 +267,13 @@ def _candidate_from_match(
     elif marker_kind == "explicit_doi" and in_front:
         semantic_context = "article_self"
         tier = EXPLICIT_SELF_ID
+    elif marker_kind == "explicit_doi":
+        # A DOI label outside the front matter never outranks the front matter,
+        # but it can still name the paper as the only DOI left standing (a
+        # preprint's "shared as a preprint …, doi: …" note), unless it is a
+        # cited work's DOI printed in a citation.
+        semantic_context = "cited_work" if _reads_as_citation(text) else "labelled_body"
+        tier = UNCONTESTED_UNTYPED
     elif marker_kind == "citation":
         semantic_context = "article_self"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
@@ -988,24 +1019,42 @@ def _agreeing_dois(candidates) -> frozenset[str]:
     )
 
 
-def _confirmed_by_agreement(
+def _select_below_front_matter(
     candidates: tuple[DoiCandidate, ...], agreeing: frozenset[str]
-) -> DoiCandidate | None:
-    """The one printed tier-1 DOI that a link target or the metadata also names.
+) -> DoiSelection:
+    """Name the paper from a tier-1 DOI when no candidate reaches tier 2.
 
     A tier-1 DOI alone does not name the paper: printed unmarked in the body it
-    is usually a cited work. When the PDF's metadata or a link target names the
-    same DOI, it is the paper's own, printed where the tiers do not look.
+    is usually a cited work. Two kinds still can. A DOI the PDF's metadata or
+    a link target also names is the paper's own, printed where the tiers do not
+    look. A DOI printed with a label outside the front matter and not in a
+    citation ("labelled_body") is the paper's own when it is the only such DOI:
+    two different ones are ambiguous and the selection abstains, unless the
+    metadata agrees with one.
     """
 
-    confirmed = [
+    pool = [
         c
         for c in candidates
         if c.rejection_reason is None
         and c.selection_tier == UNCONTESTED_UNTYPED
-        and c.normalized.casefold() in agreeing
+        and (c.semantic_context == "labelled_body" or c.normalized.casefold() in agreeing)
     ]
-    return confirmed[0] if len(_distinct_dois(confirmed)) == 1 else None
+    if not pool:
+        return DoiSelection(None, candidates, ())
+    resolved = _drop_truncated_prefixes(_prefer_agreeing(pool, agreeing))
+    if len(_distinct_dois(resolved)) == 1:
+        return DoiSelection(resolved[0], candidates, ())
+    issue = ValidationIssue(
+        code="VAL_DOI_AMBIGUOUS",
+        severity=IssueSeverity.WARNING,
+        message="Conflicting labelled DOI candidates outside the front matter",
+        origin_stage="identity",
+        evidence_ids=tuple(
+            f"text:{c.text_id}" if c.text_id is not None else c.source_kind for c in resolved
+        ),
+    )
+    return DoiSelection(None, candidates, (issue,))
 
 
 def _select_without_expected(
@@ -1018,8 +1067,7 @@ def _select_without_expected(
         if candidate.rejection_reason is None and candidate.selection_tier >= min_tier
     ]
     if not eligible:
-        confirmed = _confirmed_by_agreement(candidates, agreeing) if agreeing else None
-        return DoiSelection(confirmed, candidates, ())
+        return _select_below_front_matter(candidates, agreeing)
     highest_tier = max(candidate.selection_tier for candidate in eligible)
     highest = [candidate for candidate in eligible if candidate.selection_tier == highest_tier]
     if len(_distinct_dois(highest)) > 1:
