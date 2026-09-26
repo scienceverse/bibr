@@ -1343,14 +1343,13 @@ class DoiCandidateExport(BaseModel):
     input parsed without layout analysis, and a sentence printed on a later
     page than the region that began its paragraph.
 
-    A ``text_layer`` candidate is a DOI a PDF's text layer prints on page 1 or
-    2 where the parsed text does not hold it, such as a banner in the page
-    margin; ``region_index`` names the layout region it is printed in, or is
-    null outside every region. ``link_annotation``, ``pdf_info`` and
-    ``pdf_xmp`` rows are a DOI a link target, the document-information
-    dictionary or the XMP metadata names. They are never selected
-    (``rejection_reason`` ``agreement_only``); a printed candidate with the
-    same ``normalized`` DOI is the one they agree with.
+    A ``text_layer`` candidate is a DOI a PDF's visible text layer prints on
+    page 1 or 2 where the parsed text does not hold it, such as a banner in the
+    page margin; ``region_index`` names the layout region it is printed in, or
+    is null outside every region. ``link_annotation`` and ``pdf_info`` rows are
+    a DOI a link target or the document-information dictionary names. They
+    take no part in the selection (``rejection_reason`` ``agreement_only``) and
+    record what the PDF says beside its print.
     """
 
     model_config = _STRICT
@@ -1359,8 +1358,8 @@ class DoiCandidateExport(BaseModel):
     normalized: str = Field(description="The DOI normalized for comparison.")
     source_kind: str = Field(
         description="Where it was read: 'sentence', 'header', 'footer', 'structured_metadata', "
-        "'publication_region' or 'text_layer'; 'link_annotation', 'pdf_info' or 'pdf_xmp' for "
-        "an agreement-only row."
+        "'publication_region' or 'text_layer'; 'link_annotation' or 'pdf_info' for an "
+        "agreement-only row."
     )
     page: int | None = Field(description="1-based page, when known.")
     section_id: int | None = Field(description="section[].section_id, when known.")
@@ -1376,7 +1375,7 @@ class DoiCandidateExport(BaseModel):
     marker_kind: str = Field(
         description="Label printed before the DOI, e.g. 'article_doi', 'data_doi', "
         "'structured_doi' or 'first_published_as' (a repository banner); for a link row "
-        "'link_uri', for a metadata row the Info key or XMP property."
+        "'link_uri', for a document-information row its key."
     )
     repeated_header_footer_count: int = Field(
         description="On how many pages the same DOI appears as header or footer furniture."

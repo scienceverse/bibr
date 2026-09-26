@@ -530,9 +530,10 @@ released.
   masthead line the layout did not turn into a region, was exported with no
   DOI. The identity stage now also reads the text layer of pages 1 and 2, in
   any orientation, where the parsed text does not reach, including the banner
-  a publisher stamped on a scan. A banner's "first published as" names the
-  paper. A text-layer DOI printed in a reference entry, table or figure is
-  rejected like the region's text.
+  a publisher stamped on a scan. Invisible text (a scan's hidden OCR layer)
+  is not read. A banner's "first published as" names the paper. A text-layer
+  DOI printed in a reference entry, table or figure is rejected like the
+  region's text.
 - A footer DOI with the journal's ISSN on the next line ("…04.006" over
   "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
   (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
@@ -550,8 +551,12 @@ released.
   (a reference entry outside the located reference list, or a figure's source
   note citing another work) never names the paper, and neither does a reference
   entry the layout took for a running header, as when a file repeats its
-  reference list. An eLife JATS or HTML file's labelled figure DOIs no longer
-  raise `VAL_DOI_AMBIGUOUS` against its article-id.
+  reference list, or the tail of a reference entry split into a line of its
+  own ("131-138. doi: …"). An eLife JATS or HTML file's labelled figure DOIs
+  no longer raise `VAL_DOI_AMBIGUOUS` against its article-id.
+- A correction notice printed "DOI of original article: …" on its first page
+  and exported the corrected article's DOI as its own. That DOI is now the
+  notice's parent, like a "parent article DOI".
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
@@ -624,12 +629,9 @@ released.
   core-metadata extractor no longer looks for a DOI, and the no-LLM
   document-information fallback no longer fills one from a PDF's Subject or
   Keywords: a DOI the paper does not print is never exported. A PDF's
-  document-information and XMP DOIs and its DOI link targets are
+  document-information DOIs and its DOI link targets are recorded as
   `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
-  `pdf_info`, `pdf_xmp`, `link_annotation`). The metadata DOIs, and a link on
-  text other than the DOI itself (a journal citation line), can break a tie
-  between printed candidates of one tier, or confirm the one printed body DOI
-  that would otherwise go unselected, but never name the paper alone.
+  `pdf_info`, `link_annotation`); they take no part in the selection.
   `extraction.fields.doi.source` names the selected candidate's `source_kind`
   (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
   `native` for a JATS or HTML article-id) instead of `identity`. The export
