@@ -150,16 +150,28 @@ class TestContentControls:
 
 class TestTextBoxes:
     def test_text_inside_a_drawing_text_box_is_kept(self):
+        # Word 2010+ wraps text boxes as w:r/mc:AlternateContent/mc:Choice/
+        # w:drawing/.../w:txbxContent with a VML Fallback twin — that is the
+        # shape parsed here, not a bare w:txbxContent under w:drawing.
         document = f"""<?xml version="1.0"?>
-<w:document {_W} {_R}>
+<w:document {_W} {_R} xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
   <w:body>
     <w:p><w:r>
       <w:t>Body sentence.</w:t>
-      <w:drawing>
-        <w:txbxContent>
-          <w:p><w:r><w:t>Boxed pull quote.</w:t></w:r></w:p>
-        </w:txbxContent>
-      </w:drawing>
+      <mc:AlternateContent>
+        <mc:Choice Requires="wps">
+          <w:drawing>
+            <w:txbxContent>
+              <w:p><w:r><w:t>Box</w:t></w:r><w:r><w:t>ed pull quote.</w:t></w:r></w:p>
+            </w:txbxContent>
+          </w:drawing>
+        </mc:Choice>
+        <mc:Fallback>
+          <w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent>
+            <w:p><w:r><w:t>Boxed pull quote.</w:t></w:r></w:p>
+          </w:txbxContent></v:textbox></v:shape></w:pict>
+        </mc:Fallback>
+      </mc:AlternateContent>
     </w:r></w:p>
   </w:body>
 </w:document>"""
@@ -167,3 +179,5 @@ class TestTextBoxes:
         text = " ".join(s.text for s in contents.sentences)
 
         assert "Boxed pull quote." in text
+        # The Fallback twin must not duplicate the box text.
+        assert text.count("Boxed pull quote.") == 1

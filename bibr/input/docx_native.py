@@ -22,7 +22,7 @@ import base64
 import io
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -62,6 +62,7 @@ _NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
     "wp": "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing",
+    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
 }
 
 # Run-level children that end the run of text they sit in without carrying any
@@ -92,6 +93,99 @@ _HEADING_STYLE_LEVELS: dict[str, int] = {
     "heading 6": 6,
 }
 
+# Inline subtrees that carry no document text: deletions and tracked-move
+# sources (their text is not the paper as read), field codes and markers
+# (the result runs are ordinary w:r and are walked), content-control
+# properties, and the VML fallback twin of an AlternateContent drawing
+# (walking both would duplicate the text box).
+_INLINE_SKIP_TAGS: frozenset[str] = frozenset(
+    {
+        f"{{{_NS['w']}}}del",
+        f"{{{_NS['w']}}}moveFrom",
+        f"{{{_NS['w']}}}moveFromRangeStart",
+        f"{{{_NS['w']}}}moveFromRangeEnd",
+        f"{{{_NS['w']}}}delText",
+        f"{{{_NS['w']}}}instrText",
+        f"{{{_NS['w']}}}fldChar",
+        f"{{{_NS['w']}}}sdtPr",
+        f"{{{_NS['w']}}}sdtEndPr",
+        f"{{{_NS['mc']}}}Fallback",
+    }
+)
+
+# Word stores an Insert > Symbol character from the Symbol font as PUA
+# ``F0xx`` (``w:font="Symbol"``, ``w:char="F061"``), where ``xx`` is the
+# Adobe Symbol byte. Letters read as Greek; any other byte (decorative
+# glyphs from other symbol fonts) carries no readable text and stays
+# skipped, as before.
+_SYMBOL_GREEK: dict[int, str] = {
+    0x41: "Α",
+    0x42: "Β",
+    0x43: "Χ",
+    0x44: "Δ",
+    0x45: "Ε",
+    0x46: "Φ",
+    0x47: "Γ",
+    0x48: "Η",
+    0x49: "Ι",
+    0x4A: "ϑ",
+    0x4B: "Κ",
+    0x4C: "Λ",
+    0x4D: "Μ",
+    0x4E: "Ν",
+    0x4F: "Ο",
+    0x50: "Π",
+    0x51: "Θ",
+    0x52: "Ρ",
+    0x53: "Σ",
+    0x54: "Τ",
+    0x55: "Υ",
+    0x56: "ς",
+    0x57: "Ω",
+    0x58: "Ξ",
+    0x59: "Ψ",
+    0x5A: "Ζ",
+    0x61: "α",
+    0x62: "β",
+    0x63: "χ",
+    0x64: "δ",
+    0x65: "ε",
+    0x66: "φ",
+    0x67: "γ",
+    0x68: "η",
+    0x69: "ι",
+    0x6A: "ϕ",
+    0x6B: "κ",
+    0x6C: "λ",
+    0x6D: "μ",
+    0x6E: "ν",
+    0x6F: "ο",
+    0x70: "π",
+    0x71: "θ",
+    0x72: "ρ",
+    0x73: "σ",
+    0x74: "τ",
+    0x75: "υ",
+    0x76: "ϖ",
+    0x77: "ω",
+    0x78: "ξ",
+    0x79: "ψ",
+    0x7A: "ζ",
+}
+
+
+def _symbol_text(sym_el) -> str:
+    """Readable text for a ``w:sym`` element, or ``""`` when it has none."""
+    if sym_el.get(f"{{{_NS['w']}}}font") != "Symbol":
+        return ""
+    try:
+        code = int(sym_el.get(f"{{{_NS['w']}}}char") or "", 16)
+    except ValueError:
+        return ""
+    if code & 0xFF00 != 0xF000:
+        return ""
+    return _SYMBOL_GREEK.get(code & 0xFF, "")
+
 
 @dataclass
 class _Block:
@@ -99,6 +193,20 @@ class _Block:
 
     kind: str  # "paragraph" | "table"
     obj: object  # Paragraph or Table
+
+
+@dataclass
+class _InlineAccum:
+    """Text accumulated while walking one paragraph's inline XML."""
+
+    text: list[str] = field(default_factory=list)
+    # The ``$…$`` each inline equation became, for the late clean-up.
+    math: list[str] = field(default_factory=list)
+    # (kind, id) pairs — "footnote" and "endnote" ids collide otherwise.
+    note_refs: list[tuple[str, str]] = field(default_factory=list)
+    # Display-text buffers of enclosing hyperlinks, innermost last.
+    link_stack: list[list[str]] = field(default_factory=list)
+    had_image: bool = False
 
 
 def _iter_blocks(doc) -> list[_Block]:
@@ -139,6 +247,62 @@ def _heading_level_from_style(style_name: str | None) -> int | None:
     if not style_name:
         return None
     return _HEADING_STYLE_LEVELS.get(style_name)
+
+
+def _outline_level(paragraph_or_style_el) -> int | None:
+    """Level from a ``w:outlineLvl`` element (0-based), or ``None``."""
+    w = _NS["w"]
+    ppr = paragraph_or_style_el.find(f"{{{w}}}pPr")
+    if ppr is None:
+        return None
+    lvl = ppr.find(f"{{{w}}}outlineLvl")
+    if lvl is None:
+        return None
+    try:
+        return int(lvl.get(f"{{{w}}}val") or 0) + 1
+    except ValueError:
+        return None
+
+
+def _heading_level_for_paragraph(paragraph) -> int | None:
+    """Heading depth for a paragraph: style name, base styles, outline level.
+
+    Journal and APA templates define their own heading styles based on
+    ``Heading N`` — the exact-name lookup missed them, so whole IMRaD
+    structures parsed as body text. The base-style chain is walked bounded,
+    like :func:`_is_caption_style`. A ``w:outlineLvl`` (direct paragraph
+    formatting, then the style's) covers templates that set the level
+    without renaming the style.
+    """
+    style = getattr(paragraph, "style", None)
+    probe = style
+    for _ in range(8):  # base-style chains are short; a malformed cycle must end
+        if probe is None:
+            break
+        level = _HEADING_STYLE_LEVELS.get(getattr(probe, "name", None))
+        if level is not None:
+            return level
+        probe = getattr(probe, "base_style", None)
+    level = _outline_level(paragraph._element)
+    if level is not None:
+        return level
+    element = getattr(style, "element", None)
+    if element is not None:
+        return _outline_level(element)
+    return None
+
+
+def _looks_like_section_header(text: str) -> bool:
+    """True when lookup classification names *text* a section, not a title."""
+    try:
+        from bibr.structure.section_classifier import classify_headers_batch
+    except Exception:  # noqa: BLE001 — without the classifier, keep the old read
+        return False
+    try:
+        [(canon, _score)] = classify_headers_batch([text])
+    except Exception:  # noqa: BLE001 — same fallback
+        return False
+    return canon != CanonicalSection.UNKNOWN
 
 
 def _extract_image_blobs(paragraph, doc) -> list[tuple[bytes, str]]:
@@ -249,6 +413,87 @@ def _table_caption_blocks(blocks: list[_Block]) -> dict[int, int]:
     return captions
 
 
+def _nearest_figure_neighbour(blocks: list[_Block], index: int, step: int) -> int | None:
+    """Nearest block before/after *index* that can separate a picture from its
+    caption: empty paragraphs are skipped, as are tables (a float may sit
+    between a picture and its caption — 'under a table, but it names a
+    figure'). Any other block breaks the adjacency."""
+    index += step
+    while 0 <= index < len(blocks):
+        block = blocks[index]
+        if block.kind == "table":
+            index += step
+            continue
+        if not (
+            block.kind == "paragraph"
+            and not (block.obj.text or "").strip()
+            and not _has_picture(block.obj)
+        ):
+            return index
+        index += step
+    return None
+
+
+def _is_figure_caption(blocks: list[_Block], index: int) -> bool:
+    """Can the block at *index*, found next to a picture, be its caption?
+
+    It must be a Caption-styled paragraph, without a picture of its own,
+    that does not name a table.
+    """
+    block = blocks[index]
+    if (
+        block.kind != "paragraph"
+        or not _is_caption_style(getattr(block.obj, "style", None))
+        or _has_picture(block.obj)
+    ):
+        return False
+    text = (block.obj.text or "").strip()
+    # A labelled figure caption always qualifies; an unlabelled one next to a
+    # picture is its caption. Precedence over a neighbouring table's claim is
+    # settled by the table pairing, which runs first and marks its captions
+    # claimed.
+    return bool(text) and not _TABLE_CAPTION_START_RE.match(text)
+
+
+def _figure_caption_blocks(blocks: list[_Block], claimed: set[int]) -> dict[int, int]:
+    """Map each picture paragraph's index to that of its caption paragraph.
+
+    Captions pair by adjacency — the Caption-styled paragraph directly above
+    or below the picture (empty paragraphs between are skipped) — instead of
+    FIFO across the document, so an uncaptioned image (logo, icon, an extra
+    panel) no longer shifts every later caption. A caption between two
+    pictures could be either one's, so the side that the unambiguous
+    captions of the document sit on is tried first — above, on a tie.
+    Captions already claimed by tables are never re-paired.
+    """
+    above: dict[int, int] = {}
+    below: dict[int, int] = {}
+    for index, block in enumerate(blocks):
+        if block.kind != "paragraph" or not _has_picture(block.obj):
+            continue
+        for side, step in ((above, -1), (below, 1)):
+            neighbour = _nearest_figure_neighbour(blocks, index, step)
+            if (
+                neighbour is not None
+                and neighbour not in claimed
+                and _is_figure_caption(blocks, neighbour)
+            ):
+                side[index] = neighbour
+    shared = set(above.values()) & set(below.values())
+    votes_above = sum(caption not in shared for caption in above.values())
+    votes_below = sum(caption not in shared for caption in below.values())
+    captions: dict[int, int] = {}
+    for side in (above, below) if votes_above >= votes_below else (below, above):
+        for pic_index, caption_index in side.items():
+            if (
+                pic_index not in captions
+                and caption_index not in claimed
+                and caption_index not in captions.values()
+            ):
+                captions[pic_index] = caption_index
+    return captions
+
+
 class DocxParser:
     """Parses DOCX bytes directly into a :class:`PaperContents`.
 
@@ -291,8 +536,11 @@ class DocxParser:
         # Hyperlink captures awaiting text_id resolution at segmentation time.
         # Each entry: (url, link_text, section_id, deferred_text_index)
         self._pending_url_links: list[tuple[str, str, int, int]] = []
-        # Figures awaiting a Caption-styled paragraph immediately after
-        self._unfilled_caption_figures: list[PaperFigure] = []
+        # Whether any non-empty block has been seen: a Heading 1 reads as the
+        # paper title only while it is still the first content block.
+        self._seen_content_block = False
+        # Whether the last _flush_inline_acc call appended an entry.
+        self._last_flush_appended = False
 
     # ------------------------------------------------------------------
     # Public API (mirrors PDFParser)
@@ -339,21 +587,41 @@ class DocxParser:
         blocks = _iter_blocks(doc)
         # A table's caption paragraph leaves the body text, as a figure's does.
         table_captions = _table_caption_blocks(blocks)
-        caption_blocks = set(table_captions.values())
+        figure_captions = _figure_caption_blocks(blocks, set(table_captions.values()))
+        caption_blocks = set(table_captions.values()) | set(figure_captions.values())
+        # Which block each emitted figure came from, for caption pairing.
+        figure_blocks: dict[int, int] = {}
         for index, block in enumerate(blocks):
             if block.kind == "paragraph":
                 if index not in caption_blocks:
+                    before = len(self.figures)
                     self._handle_paragraph(block.obj)
+                    for fig in self.figures[before:]:
+                        figure_blocks[id(fig)] = index
             elif block.kind == "table":
                 caption_index = table_captions.get(index)
-                caption = (
-                    (blocks[caption_index].obj.text or "").strip()
+                caption_text = (
+                    "".join(self._paragraph_inline_text(blocks[caption_index].obj).text)
                     if caption_index is not None
-                    else None
+                    else ""
                 )
-                self._handle_table(block.obj, caption=caption)
+                self._handle_table(block.obj, caption=caption_text.strip() or None)
             elif block.kind == "math_para":
                 self._handle_math_para(block.obj)
+        # Pair each picture paragraph with its adjacent caption: every figure
+        # from one paragraph shares it (a multi-panel figure's panels), and a
+        # picture with no adjacent caption stays uncaptioned instead of
+        # shifting every later caption.
+        for pic_index, caption_index in figure_captions.items():
+            caption_text = "".join(
+                self._paragraph_inline_text(blocks[caption_index].obj).text
+            ).strip()
+            if not caption_text:
+                continue
+            for fig in self.figures:
+                if figure_blocks.get(id(fig)) == pic_index and not fig.caption:
+                    fig.caption = caption_text
+                    fig.label = caption_label(caption_text, "figure")
 
         return PaperContents(
             sentences=[],
@@ -581,194 +849,35 @@ class DocxParser:
     # ------------------------------------------------------------------
 
     def _handle_paragraph(self, paragraph) -> None:
-        style_name = getattr(paragraph.style, "name", None)
+        style = getattr(paragraph, "style", None)
+        style_name = getattr(style, "name", None)
 
-        # Quick path: heading paragraphs cannot host inline math/images/refs we care about.
-        plain = (paragraph.text or "").strip()
-        level = _heading_level_from_style(style_name)
+        level = _heading_level_for_paragraph(paragraph)
         if level is not None:
+            # Headings walk their runs with the same inline walker: a Title
+            # or Heading paragraph can anchor footnote/endnote references
+            # (author notes, funding, preregistration) and hide text inside
+            # content controls, like any other paragraph.
+            inline = self._paragraph_inline_text(paragraph)
+            plain = "".join(inline.text).strip()
             if plain:
                 self._handle_heading(plain, level, style_name)
+            self._enqueue_note_refs(inline.note_refs)
+            self._seen_content_block = True
             return
 
-        # Caption-styled paragraph: drain pending images, attach text as caption.
-        if self._unfilled_caption_figures and plain and _is_caption_style(paragraph.style):
-            fig = self._unfilled_caption_figures.pop(0)
-            fig.caption = plain
-            fig.label = caption_label(plain, "figure")
-            return
-
-        # Walk the paragraph XML in document order to interleave:
-        #   - w:t (text)
-        #   - w:footnoteReference / w:endnoteReference (note IDs)
-        #   - m:oMath (inline math → wrap in $...$)
-        #   - m:oMathPara (display math → emit as separate deferred entry)
-        #   - w:drawing (inline image → register as PaperFigure)
-        text_buf: list[str] = []
-        # The ``$…$`` each inline equation became, for the late clean-up.
-        math_buf: list[str] = []
-        # (kind, id) pairs — "footnote" and "endnote" ids collide otherwise.
-        pending_note_refs: list[tuple[str, str]] = []
-        had_image = False
-        w = _NS["w"]
-        m = _NS["m"]
-
-        def flush_body() -> None:
-            txt = "".join(text_buf).strip()
-            text_buf.clear()
-            inline_math = tuple(math_buf)
-            math_buf.clear()
-            if not txt:
-                return
-            # Footnote refs collected so far attach to this just-flushed entry.
-            deferred_idx = self.assembler.append(
-                txt, None, self._current_section_id, True, False, inline_math=inline_math
-            )
-            for kind, note_id in pending_note_refs:
-                source = self._footnotes_map if kind == "footnote" else self._endnotes_map
-                note_text = source.get(note_id, "").strip()
-                if note_text:
-                    self._pending_footnotes.append(
-                        (note_text, self._current_section_id, deferred_idx, kind)
-                    )
-            pending_note_refs.clear()
-
-        def walk_run(run_el, extra_buf: list[str] | None = None) -> None:
-            """Pull text/footnotes/math from a single ``w:r`` run.
-
-            If ``extra_buf`` is provided, text emitted into ``text_buf`` is
-            mirrored into it — used so a ``w:hyperlink`` wrapper can capture
-            its display text without re-implementing this walk.
-            """
-            nonlocal had_image
-
-            def emit_separator() -> None:
-                """Space for markup that ends a run of text, if not already spaced."""
-                if text_buf and text_buf[-1] and not text_buf[-1][-1].isspace():
-                    text_buf.append(" ")
-                    if extra_buf is not None:
-                        extra_buf.append(" ")
-
-            for run_child in run_el.iterchildren():
-                rt = run_child.tag
-                if rt == f"{{{w}}}t" and run_child.text:
-                    text_buf.append(run_child.text)
-                    if extra_buf is not None:
-                        extra_buf.append(run_child.text)
-                elif rt in _RUN_SEPARATORS:
-                    # A line break, tab or carriage return inside a run carries
-                    # no text of its own, so dropping it fused the words on
-                    # either side: a Shift+Enter title page collapsed to
-                    # "Cognitive load and recallJane SmithDepartment of...".
-                    # Word splits runs mid-word for formatting, so only these
-                    # explicit separators may contribute whitespace — adjacent
-                    # <w:t> must still concatenate untouched.
-                    emit_separator()
-                elif rt == f"{{{w}}}footnoteReference":
-                    fn_id = run_child.get(f"{{{w}}}id")
-                    if fn_id is not None:
-                        pending_note_refs.append(("footnote", fn_id))
-                elif rt == f"{{{w}}}endnoteReference":
-                    # Endnote references were dropped on the floor, so a
-                    # document using endnotes (the humanities convention for
-                    # bibliographies) exported none of them.
-                    en_id = run_child.get(f"{{{w}}}id")
-                    if en_id is not None:
-                        pending_note_refs.append(("endnote", en_id))
-                elif rt == f"{{{m}}}oMath":
-                    inline = _omml_to_text(run_child)
-                    if inline:
-                        math_buf.append(f"${inline}$")
-                        text_buf.append(math_buf[-1])
-                        if extra_buf is not None:
-                            extra_buf.append(math_buf[-1])
-                elif rt == f"{{{w}}}drawing":
-                    had_image = True
-                    # A drawing can be a text box rather than a picture, and
-                    # its paragraphs are real document text — pull quotes,
-                    # boxed methods notes, poster-style layouts. Nothing walked
-                    # into it, so that text was lost entirely.
-                    for txbx in run_child.iter(f"{{{w}}}txbxContent"):
-                        boxed = " ".join(
-                            t.text.strip() for t in txbx.iter(f"{{{w}}}t") if t.text
-                        ).strip()
-                        if boxed:
-                            text_buf.append(boxed)
-                            if extra_buf is not None:
-                                extra_buf.append(boxed)
-
-        def walk_runs_in_wrapper(wrapper_el, into_buf: list[str] | None = None) -> None:
-            """Walk ``w:r`` children of a wrapper (``w:hyperlink``, ``w:ins``).
-
-            ``into_buf``, if provided, mirrors text from each contained run via
-            ``walk_run``'s ``extra_buf`` parameter — used to capture hyperlink
-            display text for ``PaperURLLink.link_text`` while still keeping the
-            text inline in the paragraph stream.
-            """
-            for child in wrapper_el.iterchildren():
-                ctag = child.tag
-                if ctag == f"{{{w}}}r":
-                    walk_run(child, into_buf)
-                elif ctag in (f"{{{w}}}hyperlink", f"{{{w}}}ins"):
-                    walk_runs_in_wrapper(child, into_buf)
-
+        # Walk the paragraph XML in document order with one recursive inline
+        # walker. It descends into any wrapper (w:sdt/w:sdtContent, w:smartTag,
+        # w:customXml, w:fldSimple, w:moveTo, w:bdo, w:dir, and
+        # mc:AlternateContent taking only mc:Choice), skips deletions,
+        # move sources, field codes and the VML fallback twin, and maps
+        # w:sym and w:noBreakHyphen to readable text.
+        acc = _InlineAccum()
         for child in paragraph._element.iterchildren():
-            tag = child.tag
-            if tag == f"{{{m}}}oMathPara":
-                # Display math — flush any text so far, then emit math as own entry
-                flush_body()
-                math_text = " ".join(_omml_to_text(om) for om in child.iter(f"{{{m}}}oMath"))
-                math_text = math_text.strip()
-                if math_text:
-                    self.assembler.append(
-                        f"$${math_text}$$",
-                        None,
-                        self._current_section_id,
-                        needs_segmentation=False,
-                        is_formula=True,
-                    )
-            elif tag == f"{{{m}}}oMath":
-                inline = _omml_to_text(child)
-                if inline:
-                    math_buf.append(f"${inline}$")
-                    text_buf.append(math_buf[-1])
-            elif tag == f"{{{w}}}r":
-                # Run: walk for w:t, note references, m:oMath, w:drawing
-                walk_run(child)
-            elif tag == f"{{{w}}}hyperlink":
-                # Hyperlink: capture the URL from the relationship target, then
-                # walk nested runs so their text contributes to paragraph flow.
-                rel_id = child.get(f"{{{_NS['r']}}}id")
-                target_url: str | None = None
-                if rel_id is not None:
-                    rel = self._doc.part.rels.get(rel_id)
-                    if rel is not None:
-                        target_url = getattr(rel, "target_ref", None) or getattr(
-                            rel, "target", None
-                        )
-                link_text_buf: list[str] = []
-                walk_runs_in_wrapper(child, link_text_buf)
-                if target_url:
-                    link_text = "".join(link_text_buf).strip() or target_url
-                    # text_id is unknown until segmentation; record the deferred
-                    # entry index that *will* hold this paragraph's text. Since
-                    # we have not yet flushed, the next deferred index is
-                    # ``len(self._deferred_texts)`` — apply_segmentation resolves
-                    # it once sentences exist.
-                    self._pending_url_links.append(
-                        (
-                            target_url,
-                            link_text,
-                            self._current_section_id,
-                            len(self.assembler),
-                        )
-                    )
-            elif tag == f"{{{w}}}ins":
-                # Tracked-change insertion: walk its runs as paragraph-level text.
-                walk_runs_in_wrapper(child)
+            self._walk_inline(child, acc, collect_only=False)
 
         # Images: extract after the text walk so we know section context
-        if had_image:
+        if acc.had_image:
             for blob, _ext in _extract_image_blobs(paragraph, self._doc):
                 image_b64 = base64.b64encode(blob).decode("ascii")
                 fig = PaperFigure(
@@ -786,17 +895,230 @@ class DocxParser:
                     ],
                 )
                 self.figures.append(fig)
-                self._unfilled_caption_figures.append(fig)
                 self._figure_counter += 1
 
-        flush_body()
+        self._flush_inline_acc(acc)
+        flushed = self._last_flush_appended
+        self._last_flush_appended = False
+        if acc.had_image or flushed or acc.note_refs:
+            self._seen_content_block = True
+
+    def _paragraph_inline_text(self, paragraph) -> _InlineAccum:
+        """Walk a paragraph's runs without emitting: heading/caption/cell text."""
+        acc = _InlineAccum()
+        for child in paragraph._element.iterchildren():
+            self._walk_inline(child, acc, collect_only=True)
+        return acc
+
+    def _acc_text(self, acc: _InlineAccum, text: str) -> None:
+        """Append inline text, mirroring it into any enclosing hyperlink."""
+        acc.text.append(text)
+        if acc.link_stack:
+            acc.link_stack[-1].append(text)
+
+    def _acc_separator(self, acc: _InlineAccum) -> None:
+        """Space for markup that ends a run of text, if not already spaced."""
+        if acc.text and acc.text[-1] and not acc.text[-1][-1].isspace():
+            acc.text.append(" ")
+            if acc.link_stack:
+                acc.link_stack[-1].append(" ")
+
+    def _flush_inline_acc(self, acc: _InlineAccum) -> None:
+        txt = "".join(acc.text).strip()
+        acc.text.clear()
+        inline_math = tuple(acc.math)
+        acc.math.clear()
+        if not txt:
+            return
+        # Footnote refs collected so far attach to this just-flushed entry.
+        deferred_idx = self.assembler.append(
+            txt, None, self._current_section_id, True, False, inline_math=inline_math
+        )
+        for kind, note_id in acc.note_refs:
+            source = self._footnotes_map if kind == "footnote" else self._endnotes_map
+            note_text = source.get(note_id, "").strip()
+            if note_text:
+                self._pending_footnotes.append(
+                    (note_text, self._current_section_id, deferred_idx, kind)
+                )
+        acc.note_refs.clear()
+        self._last_flush_appended = True
+
+    def _enqueue_note_refs(self, refs: list[tuple[str, str]]) -> None:
+        """Queue heading/cell note references against the nearest body text."""
+        deferred_idx = len(self.assembler)
+        for kind, note_id in refs:
+            source = self._footnotes_map if kind == "footnote" else self._endnotes_map
+            note_text = source.get(note_id, "").strip()
+            if note_text:
+                self._pending_footnotes.append(
+                    (note_text, self._current_section_id, deferred_idx, kind)
+                )
+
+    def _walk_inline(self, el, acc: _InlineAccum, *, collect_only: bool) -> None:
+        """Pull text/footnotes/math/images from one inline element, recursively."""
+        w = _NS["w"]
+        m = _NS["m"]
+        mc = _NS["mc"]
+        tag = el.tag
+        if tag in _INLINE_SKIP_TAGS:
+            return
+        if tag == f"{{{w}}}r":
+            for child in el.iterchildren():
+                self._walk_inline(child, acc, collect_only=collect_only)
+        elif tag == f"{{{w}}}hyperlink":
+            # Capture the URL from the relationship target, then walk nested
+            # content so its text contributes to paragraph flow.
+            rel_id = el.get(f"{{{_NS['r']}}}id")
+            target_url: str | None = None
+            if rel_id is not None:
+                rel = self._doc.part.rels.get(rel_id)
+                if rel is not None:
+                    target_url = getattr(rel, "target_ref", None) or getattr(rel, "target", None)
+            acc.link_stack.append([])
+            for child in el.iterchildren():
+                self._walk_inline(child, acc, collect_only=collect_only)
+            link_text_buf = acc.link_stack.pop()
+            if target_url and not collect_only:
+                link_text = "".join(link_text_buf).strip() or target_url
+                # text_id is unknown until segmentation; record the deferred
+                # entry index that *will* hold this paragraph's text. Since
+                # we have not yet flushed, the next deferred index is
+                # ``len(self.assembler)`` — apply_segmentation resolves
+                # it once sentences exist.
+                self._pending_url_links.append(
+                    (
+                        target_url,
+                        link_text,
+                        self._current_section_id,
+                        len(self.assembler),
+                    )
+                )
+        elif tag in (
+            f"{{{w}}}ins",
+            f"{{{w}}}moveTo",
+            f"{{{w}}}smartTag",
+            f"{{{w}}}customXml",
+            f"{{{w}}}fldSimple",
+            f"{{{w}}}bdo",
+            f"{{{w}}}dir",
+        ):
+            # Tracked insertions and moves, smart tags, simple fields and
+            # bidirectional wrappers: all real document text, walked inline.
+            for child in el.iterchildren():
+                self._walk_inline(child, acc, collect_only=collect_only)
+        elif tag == f"{{{w}}}sdt":
+            # Inline content control (Word citations, Mendeley Cite): the
+            # payload lives under w:sdtContent; w:sdtPr carries no text.
+            for child in el.iterchildren():
+                if child.tag == f"{{{w}}}sdtContent":
+                    for grandchild in child.iterchildren():
+                        self._walk_inline(grandchild, acc, collect_only=collect_only)
+        elif tag == f"{{{mc}}}AlternateContent":
+            # Real Word drawings/text boxes wrap in AlternateContent with a
+            # VML Fallback twin — descend into the Choice only, or the text
+            # box (and picture) is walked twice.
+            for child in el.iterchildren():
+                if child.tag == f"{{{mc}}}Choice":
+                    for grandchild in child.iterchildren():
+                        self._walk_inline(grandchild, acc, collect_only=collect_only)
+                    break
+        elif tag == f"{{{m}}}oMathPara":
+            math_text = " ".join(_omml_to_text(om) for om in el.iter(f"{{{m}}}oMath"))
+            math_text = math_text.strip()
+            if not math_text:
+                return
+            if collect_only:
+                acc.math.append(f"$${math_text}$$")
+                self._acc_text(acc, f"$${math_text}$$")
+                return
+            # Display math — flush any text so far, then emit math as own entry
+            self._flush_inline_acc(acc)
+            self._seen_content_block = True
+            self.assembler.append(
+                f"$${math_text}$$",
+                None,
+                self._current_section_id,
+                needs_segmentation=False,
+                is_formula=True,
+            )
+        elif tag == f"{{{m}}}oMath":
+            inline = _omml_to_text(el)
+            if inline:
+                acc.math.append(f"${inline}$")
+                self._acc_text(acc, acc.math[-1])
+        elif tag == f"{{{w}}}t":
+            if el.text:
+                self._acc_text(acc, el.text)
+        elif tag in _RUN_SEPARATORS:
+            # A line break, tab or carriage return inside a run carries
+            # no text of its own, so dropping it fused the words on
+            # either side: a Shift+Enter title page collapsed to
+            # "Cognitive load and recallJane SmithDepartment of...".
+            # Word splits runs mid-word for formatting, so only these
+            # explicit separators may contribute whitespace — adjacent
+            # <w:t> must still concatenate untouched.
+            self._acc_separator(acc)
+        elif tag == f"{{{w}}}footnoteReference":
+            fn_id = el.get(f"{{{w}}}id")
+            if fn_id is not None:
+                acc.note_refs.append(("footnote", fn_id))
+        elif tag == f"{{{w}}}endnoteReference":
+            # Endnote references were dropped on the floor, so a
+            # document using endnotes (the humanities convention for
+            # bibliographies) exported none of them.
+            en_id = el.get(f"{{{w}}}id")
+            if en_id is not None:
+                acc.note_refs.append(("endnote", en_id))
+        elif tag == f"{{{w}}}drawing":
+            acc.had_image = True
+            # A drawing can be a text box rather than a picture, and
+            # its paragraphs are real document text — pull quotes,
+            # boxed methods notes, poster-style layouts. Nothing walked
+            # into it, so that text was lost entirely. Concatenate w:t
+            # within each boxed paragraph (Word splits runs mid-word)
+            # and separate paragraphs, instead of space-joining every
+            # w:t.
+            for txbx in el.iter(f"{{{w}}}txbxContent"):
+                parts = [
+                    "".join(t.text or "" for t in para.iter(f"{{{w}}}t"))
+                    for para in txbx.iter(f"{{{w}}}p")
+                ]
+                boxed = " ".join(part.strip() for part in parts if part.strip()).strip()
+                if boxed:
+                    # A boxed paragraph is its own paragraph visually — keep
+                    # word boundaries on both sides.
+                    self._acc_separator(acc)
+                    self._acc_text(acc, boxed)
+                    self._acc_separator(acc)
+        elif tag == f"{{{w}}}sym":
+            sym_text = _symbol_text(el)
+            if sym_text:
+                self._acc_text(acc, sym_text)
+        elif tag == f"{{{w}}}noBreakHyphen":
+            self._acc_text(acc, "-")
+        else:
+            # Any other wrapper (w:ins already handled, bookmarks,
+            # proofing markers, VML shapes, unknown tags): descend — the
+            # skip-list above names what carries no text.
+            for child in el.iterchildren():
+                self._walk_inline(child, acc, collect_only=collect_only)
 
     def _handle_heading(self, text: str, level: int, style_name: str | None) -> None:
-        # Capture the document Title style (or first Heading 1) as the paper title
-        if self._detected_title is None and style_name in (
-            "Title",
-            "Heading 1",
-            "heading 1",
+        # The Title style is the paper title. A first Heading 1 used to be
+        # taken too — but manuscripts often format the title by hand and use
+        # Heading 1 for section names, so an 'Introduction' heading became
+        # the detected title and post_parse typed that section TITLE. A
+        # Heading 1 still reads as the title when it is the first non-empty
+        # block and does not name a section ('Paper About X', not
+        # 'Introduction' or 'Abstract').
+        if self._detected_title is None and (
+            style_name == "Title"
+            or (
+                style_name in ("Heading 1", "heading 1")
+                and not self._seen_content_block
+                and not _looks_like_section_header(text)
+            )
         ):
             self._detected_title = text
 
@@ -829,6 +1151,7 @@ class DocxParser:
         math_text = math_text.strip()
         if not math_text:
             return
+        self._seen_content_block = True
         self.assembler.append(
             f"$${math_text}$$",
             None,
@@ -841,6 +1164,14 @@ class DocxParser:
         rows = list(table.rows)
         if not rows:
             return
+
+        # Footnote/endnote references inside table cells were lost with
+        # cell.text — collect them against the table's section.
+        for row in rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    self._enqueue_note_refs(self._paragraph_inline_text(para).note_refs)
+        self._seen_content_block = True
 
         cell_rows = [[cell.text.strip() for cell in row.cells] for row in rows]
         # Pad ragged rows so DataFrame construction is uniform

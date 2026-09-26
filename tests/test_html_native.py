@@ -303,6 +303,7 @@ def test_html_parser_accepts_input_under_cap(monkeypatch):
 def test_declared_identifiers_and_language_reach_the_metadata():
     html = b"""<html lang="de"><head>
       <meta name="citation_title" content="Identified">
+      <meta name="citation_author" content="Jane Smith">
       <meta name="citation_pmid" content="31234567">
       <meta name="citation_arxiv_id" content="2101.12345">
     </head><body><article><h1>Intro</h1><p>Text.</p></article></body></html>"""

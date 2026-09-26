@@ -9,6 +9,7 @@ contract used by the other native inputs.
 
 from __future__ import annotations
 
+import codecs
 import itertools
 import logging
 import re
@@ -19,7 +20,7 @@ import pandas as pd
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
 
 from bibr.input.mathml_whitespace import FlatText, mspace_separates
-from bibr.models import PaperAuthor, PaperMetadata
+from bibr.models import PaperAuthor, PaperMetadata, canonicalize_orcid
 from bibr.paper_contents import (
     CanonicalSection,
     PaperContents,
@@ -35,7 +36,7 @@ from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
 from bibr.structure.html_table import html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
-from bibr.utils.text import clean_extracted_url, collapse_ws
+from bibr.utils.text import clean_extracted_url, collapse_ws, normalize_doi
 
 logger = logging.getLogger(__name__)
 
@@ -117,11 +118,90 @@ _INLINE_TAGS = frozenset(
         "semantics",
     }
 )
+# Tags whose presence inside a container means the container holds block
+# structure and must be recursed into rather than read as one text block:
+# headings, text blocks, lists, floats, rules, and nested sectioning
+# containers (publisher HTML wraps each paragraph in its own div).
+_BLOCK_STRUCTURE_TAGS = frozenset(
+    {
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "blockquote",
+        "pre",
+        "ol",
+        "ul",
+        "li",
+        "dl",
+        "table",
+        "figure",
+        "hr",
+        "div",
+        "section",
+        "article",
+        "main",
+        "header",
+        "footer",
+        "center",
+        "hgroup",
+    }
+)
+_META_CHARSET_RE = re.compile(rb"<meta[^>]+charset\s*=\s*[\"']?\s*([A-Za-z0-9._-]+)", re.IGNORECASE)
+_XML_ENCODING_RE = re.compile(rb"<\?xml[^>]+encoding\s*=\s*[\"']([^\"']+)[\"']", re.IGNORECASE)
+# A site suffix on <title> ("Title | Journal", "Title - Site"): the separator
+# must be followed by more text, so "A-B" or "Methods: a study" never strip.
+_TITLE_SUFFIX_RE = re.compile(r"^\s*[|\-–—·»]\s+\S")
+
+
+def _decode_html_bytes(data: bytes) -> str:
+    """Decode raw HTML/XHTML bytes to text, honouring their charset.
+
+    html5lib sniffs only the BOM and a meta charset, ignoring the XML
+    declaration, and without chardet falls back to windows-1252 — so UTF-8
+    without a meta decodes as mojibake. Decode first: BOM, then strict
+    UTF-8, then a meta or XML-declared charset, then charset_normalizer,
+    finally UTF-8 with replacement.
+    """
+    if data.startswith(codecs.BOM_UTF8):
+        return data.decode("utf-8-sig")
+    if data.startswith((codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE)):
+        return data.decode("utf-32")
+    if data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        return data.decode("utf-16")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    head = bytes(data[:4096])
+    match = _META_CHARSET_RE.search(head) or _XML_ENCODING_RE.search(head)
+    if match:
+        charset = match.group(1).decode("ascii", errors="ignore")
+        try:
+            return data.decode(charset)
+        except (LookupError, UnicodeDecodeError):
+            pass
+    try:
+        from charset_normalizer import from_bytes as _detect_encoding
+    except ImportError:  # pragma: no cover — charset-normalizer is declared
+        _detect_encoding = None  # type: ignore[assignment]
+    if _detect_encoding is not None:
+        try:
+            detected = _detect_encoding(data).best()
+        except Exception:  # noqa: BLE001 — fall through to the replacement decode
+            detected = None
+        if detected is not None and str(detected).strip():
+            return str(detected)
+    return data.decode("utf-8", errors="replace")
+
+
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
 # above any real article/JATS/EPUB spine document, below what makes parsing a
 # DoS. Kept below the serve upload cap so it fails fast on the parse path.
 _MAX_HTML_BYTES = 48 * 1024 * 1024
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/\S+\b", re.IGNORECASE)
 _DATE_RE = re.compile(r"(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?")
 
 
@@ -239,6 +319,47 @@ def _split_person_name(value: str) -> tuple[str, str]:
     return " ".join(parts[:-1]), parts[-1]
 
 
+def _split_generic_author(value: str) -> list[str]:
+    """Split a generic ``<meta name=\"author\">`` value into individual names.
+
+    Publishers write these as ``'Jane Smith; John Doe'`` or ``'Jane Smith,
+    John Doe'``, while a single ``'Family, Given'`` name uses the comma the
+    other way round. A comma splits two names only when both sides read as
+    full names (two or more tokens each); otherwise ``_split_person_name``
+    keeps ``'Family, Given'`` intact.
+    """
+    names: list[str] = []
+    for piece in value.split(";"):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if "," in piece:
+            left, right = [part.strip() for part in piece.split(",", 1)]
+            if len(left.split()) > 1 and len(right.split()) > 1:
+                names.extend([left, right])
+                continue
+        names.append(piece)
+    return names
+
+
+def _has_citation_front_matter(soup: BeautifulSoup) -> bool:
+    """True when ``citation_*`` tags supply at least a title and one author."""
+    seen_title = False
+    seen_author = False
+    for tag in soup.find_all("meta"):
+        key = _normal_meta_key(tag.get("name") or tag.get("property") or "")
+        content = str(tag.get("content") or "").strip()
+        if not content:
+            continue
+        if key == "citation.title":
+            seen_title = True
+        elif key == "citation.author":
+            seen_author = True
+        if seen_title and seen_author:
+            return True
+    return False
+
+
 def _map_heading(header: str) -> CanonicalSection:
     norm = re.sub(r"^\s*\d+(?:\.\d+)*\.?\s*", "", header.lower()).strip()
     for canon, aliases in {
@@ -321,7 +442,7 @@ class HtmlParser:
             soup = (
                 self._parsed_soup
                 if self._parsed_soup is not None
-                else BeautifulSoup(self.html_bytes, "html5lib")
+                else BeautifulSoup(_decode_html_bytes(self.html_bytes), "html5lib")
             )
         except Exception as exc:
             raise ProcessingError(f"Failed to parse HTML: {exc}") from exc
@@ -342,6 +463,11 @@ class HtmlParser:
         if not self.assembler.entries and not self.tables and not self.figures:
             raise ProcessingError("HTML input did not contain parseable article content")
 
+        # Generic SEO meta is not front matter: without citation_* title and
+        # authors the preparsed record would lock in the <title> suffix, the
+        # site description and a garbled byline, and post_parse would skip
+        # the front-matter pass that reads the printed article instead.
+        preparsed = self._metadata if _has_citation_front_matter(soup) else None
         return PaperContents(
             sentences=[],
             sections=self.sections,
@@ -351,7 +477,7 @@ class HtmlParser:
             figures=self.figures,
             xrefs=[],
             detected_title=self._detected_title,
-            preparsed_metadata=self._metadata,
+            preparsed_metadata=preparsed,
             native_ref_strings=self._native_ref_strings,
         )
 
@@ -494,14 +620,28 @@ class HtmlParser:
             vals = values(*keys)
             return vals[0] if vals else ""
 
-        title = first("citation_title", "dc.title", "og.title") or _text(soup.find("title"))
+        title = first("citation_title", "dc.title", "og.title")
+        if not title:
+            # The <title> fallback carries the site chrome ("Title | Journal
+            # | Press"); drop the suffix when the first h1 is its prefix.
+            title = _text(soup.find("title"))
+            heading = _text(soup.find("h1"))
+            if (
+                title
+                and heading
+                and len(heading) < len(title)
+                and title.startswith(heading)
+                and _TITLE_SUFFIX_RE.match(title[len(heading) :])
+            ):
+                title = heading
         meta.title = title
 
         doi = first("citation_doi", "dc.identifier", "dc.identifier.doi")
-        match = _DOI_RE.search(doi)
-        meta.doi = (match.group(0) if match else doi).removeprefix("doi:").strip()
+        meta.doi = normalize_doi(doi) or ""
 
-        meta.abstract = first("citation_abstract", "dc.description", "description")
+        # The generic SEO "description" is the site's blurb, not the paper's
+        # abstract — it used to win over the printed ABSTRACT section.
+        meta.abstract = first("citation_abstract", "dc.description")
         meta.keywords = _split_keywords(values("citation_keywords", "keywords", "dc.subject"))
         meta.journal = first("citation_journal_title", "citation_journal_abbrev") or None
         meta.volume = first("citation_volume") or None
@@ -525,19 +665,52 @@ class HtmlParser:
         if not meta.license and license_link is not None:
             meta.license = str(license_link.get("href") or "").strip() or None
 
-        authors = values("citation_author", "dc.creator", "author")
+        # Authors come from the first source that has any — merging
+        # citation_author with dc.creator doubled every author. Affiliations,
+        # ORCIDs and emails following citation_author pair up by position.
         meta.authors = []
-        for idx, author in enumerate(authors, start=1):
-            given, family = _split_person_name(author)
-            if family or given:
+        citation_authors = values("citation_author")
+        dc_authors = values("dc.creator")
+        if citation_authors:
+            institutions = values("citation_author_institution")
+            orcids = values("citation_author_orcid")
+            emails = values("citation_author_email")
+            for idx, author in enumerate(citation_authors, start=1):
+                given, family = _split_person_name(author)
+                if not (family or given):
+                    continue
                 meta.authors.append(
                     PaperAuthor(
                         author_id=idx,
                         given=given,
                         family=family,
-                        affiliation="",
+                        affiliation=institutions[idx - 1].strip()
+                        if idx - 1 < len(institutions)
+                        else "",
+                        email=emails[idx - 1].strip() or None if idx - 1 < len(emails) else None,
+                        orcid=canonicalize_orcid(orcids[idx - 1])
+                        if idx - 1 < len(orcids)
+                        else None,
                     )
                 )
+        else:
+            names: list[str] = []
+            if dc_authors:
+                names = [name for name in dc_authors if name.strip()]
+            else:
+                for value in values("author"):
+                    names.extend(_split_generic_author(value))
+            for idx, name in enumerate(names, start=1):
+                given, family = _split_person_name(name)
+                if family or given:
+                    meta.authors.append(
+                        PaperAuthor(
+                            author_id=idx,
+                            given=given,
+                            family=family,
+                            affiliation="",
+                        )
+                    )
 
         overrides = self.metadata_overrides
         for field, value in overrides.items():
@@ -551,33 +724,111 @@ class HtmlParser:
         text = _text(heading)
         return text or None
 
+    @staticmethod
+    def _has_block_structure(tag: Tag) -> bool:
+        """True when *tag* holds block-level markup deeper down.
+
+        A container with direct text or only inline children (publisher
+        ``<div class=\"para\">`` paragraphs, ePub chapter ``<section>`` text)
+        reads as one text block; a container holding headings, paragraphs,
+        lists, floats or nested sectioning containers is recursed into.
+        """
+        return any(
+            isinstance(desc, Tag) and _tag_name(desc) in _BLOCK_STRUCTURE_TAGS
+            for desc in tag.descendants
+        )
+
+    def _flush_pending_text(self, parts: list[str], links: list[tuple[str, str]]) -> None:
+        """Emit text buffered at the current level as one deferred entry."""
+        text = re.sub(r"\s+([,.;:!?])", r"\1", collapse_ws("".join(parts))).strip()
+        parts.clear()
+        pending = links.copy()
+        links.clear()
+        if not text:
+            return
+        if self._in_references():
+            self._append_reference(text)
+            return
+        deferred_index = self.assembler.append(text, None, self._current_section_id, True, False)
+        for url, link_text in pending:
+            self._pending_url_links.append(
+                (url, link_text, self._current_section_id, deferred_index)
+            )
+
+    def _buffer_inline(self, tag: Tag, parts: list[str], links: list[tuple[str, str]]) -> None:
+        """Buffer an inline element's text and hyperlinks at the current level."""
+        parts.append(_flatten(tag))
+        anchors = list(tag.find_all("a", href=True))
+        if _tag_name(tag) == "a" and tag.get("href"):
+            # find_all covers descendants only — the anchor itself comes first.
+            anchors.insert(0, tag)
+        for anchor in anchors:
+            url = clean_extracted_url(str(anchor.get("href") or ""))
+            if url:
+                links.append((url, _text(anchor)))
+
     def _process_children(self, parent: Tag) -> None:
+        # Direct strings and inline elements at this level form their own
+        # paragraph ("Bare section text…" between a heading and a <p>); a
+        # block child flushes them first so document order is kept.
+        parts: list[str] = []
+        links: list[tuple[str, str]] = []
         for child in parent.children:
+            if type(child) in (NavigableString, CData):
+                if str(child).strip():
+                    parts.append(str(child))
+                continue
             if not isinstance(child, Tag):
                 continue
             name = _tag_name(child)
             if name in _HEADING_TAGS:
+                self._flush_pending_text(parts, links)
                 self._handle_heading(child)
             elif name in _BLOCK_TEXT_TAGS:
+                self._flush_pending_text(parts, links)
                 self._handle_text_block(child)
             elif name in {"ol", "ul"}:
+                self._flush_pending_text(parts, links)
                 if self._in_references() or self._looks_like_reference_list(child):
                     self._handle_reference_items(child)
                 else:
                     self._process_list(child)
             elif name == "li":
+                self._flush_pending_text(parts, links)
                 if self._in_references():
                     self._append_reference(_text(child))
                 else:
                     self._handle_text_block(child)
             elif name == "table":
+                self._flush_pending_text(parts, links)
                 self._handle_table(child)
             elif name == "figure":
+                self._flush_pending_text(parts, links)
                 self._handle_figure(child)
-            else:
-                # Every other element (known containers and unknown tags alike)
-                # may hold text deeper down — recurse rather than drop it.
+            elif name == "hr":
+                self._flush_pending_text(parts, links)
+            elif name in _INLINE_TAGS:
+                if self._has_block_structure(child):
+                    # Invalid nesting (an unclosed <b>/<font>/<span> higher up
+                    # nests whole sections inside this inline element) — the
+                    # block structure wins and is recursed into, not flattened.
+                    self._flush_pending_text(parts, links)
+                    self._process_children(child)
+                else:
+                    self._buffer_inline(child, parts, links)
+            elif name == "br":
+                parts.append(" ")
+            elif self._has_block_structure(child):
+                # A container holding block markup — recurse rather than
+                # flatten it into one entry.
+                self._flush_pending_text(parts, links)
                 self._process_children(child)
+            else:
+                # A container with direct text or only inline children: a
+                # div/section/span paragraph reads as one text block.
+                self._flush_pending_text(parts, links)
+                self._handle_text_block(child)
+        self._flush_pending_text(parts, links)
 
     def _handle_heading(self, tag: Tag) -> None:
         header = _text(tag)
@@ -673,13 +924,13 @@ class HtmlParser:
         tokens = _attr_tokens(tag, "id", "class", "role", "aria-label")
         return any(word in tokens for word in ("reference", "bibliography", "citation"))
 
-    def _handle_table(self, tag: Tag) -> None:
+    def _handle_table(self, tag: Tag, caption_override: str | None = None) -> None:
         if is_hidden_table(tag):
             # A display:none table (a print-only or responsive duplicate of a
             # visible one) is not part of the page as read.
             return
         caption_tag = tag.find("caption")
-        caption = _text(caption_tag) or None
+        caption = _text(caption_tag) or caption_override or None
         label = caption_label(caption, "table")
         try:
             df = html_table_frame(tag)
@@ -718,6 +969,17 @@ class HtmlParser:
         self._table_counter += 1
 
     def _handle_figure(self, tag: Tag) -> None:
+        # HTML5 wraps tables as <figure><figcaption>Table 1…</figcaption>
+        # <table>…</table></figure>. Without an image the figure is a table
+        # wrapper: route each nested table (with the figcaption as its
+        # caption) instead of recording a labelless figure and losing the
+        # table. A figure holding both stays a figure (a layout table).
+        tables = tag.find_all("table")
+        if tables and not tag.find(["img", "picture"]):
+            caption = _text(tag.find("figcaption")) or None
+            for table in tables:
+                self._handle_table(table, caption_override=caption)
+            return
         caption = _text(tag.find("figcaption"))
         if not caption:
             img = tag.find("img")
@@ -765,7 +1027,7 @@ def inspect_html(html_bytes: bytes) -> tuple[bool, BeautifulSoup | None]:
     ):
         return False, None
     try:
-        soup = BeautifulSoup(html_bytes, "html5lib")
+        soup = BeautifulSoup(_decode_html_bytes(html_bytes), "html5lib")
     except Exception:
         return False, None
     HtmlParser._remove_noise(soup)
