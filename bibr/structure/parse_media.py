@@ -24,6 +24,7 @@ from bibr.paper_contents import (
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
 from bibr.structure.float_images import composite_panel_image
 from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD, caption_label, normalize_label
+from bibr.structure.html_table import html_table_frame
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -103,6 +104,7 @@ class MediaHandlersMixin:
         page_number: int | None,
         *,
         source_index: int | None = None,
+        from_ocr: bool = True,
     ) -> str:
         caption_id = f"caption:{len(self._caption_candidates) + 1}"
         # Remember where the candidate was printed. ``CaptionCandidate`` is
@@ -110,6 +112,8 @@ class MediaHandlersMixin:
         # internal side map instead of widening that schema. Used to replay an
         # unowned candidate as body text (see ``replay_unowned_captions``).
         self._caption_candidate_sections[caption_id] = self._current_section_id
+        # Likewise whether OCR produced the text (``PaperSentence.from_ocr``).
+        self._caption_candidate_from_ocr[caption_id] = from_ocr
         self._caption_candidates.append(
             CaptionCandidate(
                 caption_id=caption_id,
@@ -133,7 +137,7 @@ class MediaHandlersMixin:
         # Detect format and parse accordingly. For HTML input, keep the source
         # markup verbatim: the VLM's rowspan/colspan and multi-level headers
         # carry structure a flat DataFrame cannot, and round-tripping through
-        # ``read_html`` -> ``to_html`` drops rowspan and injects
+        # the DataFrame -> ``to_html`` drops rowspan and injects
         # ``Unnamed: 0_level_0`` / ``class="dataframe"`` noise. The DataFrame is
         # still used for the flattened ``contents`` grid.
         source_html: str | None = None
@@ -237,13 +241,22 @@ class MediaHandlersMixin:
 
         self._figure_counter += 1
 
-    def _handle_table_caption(self, content: str, bbox: list | None, page_number: int) -> None:
+    def _handle_table_caption(
+        self,
+        content: str,
+        bbox: list | None,
+        page_number: int,
+        *,
+        from_ocr: bool = True,
+    ) -> None:
         """Collect a table-caption candidate without mutating any table."""
         self._expire_pending_table_label_fragment()
         text = content.strip()
         if not text:
             return
-        caption_id = self._add_caption_candidate(text, "table", bbox, page_number)
+        caption_id = self._add_caption_candidate(
+            text, "table", bbox, page_number, from_ocr=from_ocr
+        )
         pending = (text, bbox, page_number, caption_id)
         if self._BARE_TABLE_LABEL_RE.fullmatch(text):
             self._pending_bare_table_label = pending
@@ -260,6 +273,7 @@ class MediaHandlersMixin:
         *,
         region_meta: dict | None = None,
         source_label: str = "content",
+        from_ocr: bool = True,
     ) -> bool:
         """Buffer the next adjacent fragment until a table confirms ownership."""
         pending = getattr(self, "_pending_bare_table_label", None)
@@ -283,6 +297,7 @@ class MediaHandlersMixin:
             region_meta,
             source_label,
             self._source_region_index,
+            from_ocr,
         )
         return True
 
@@ -304,6 +319,7 @@ class MediaHandlersMixin:
             _region_meta,
             _source_label,
             fragment_source_index,
+            fragment_from_ocr,
         ) = staged
         label, label_bbox, label_page, caption_id = pending
         composed_bbox = self._merge_bboxes(label_bbox, fragment_bbox)
@@ -319,6 +335,7 @@ class MediaHandlersMixin:
             fragment_bbox,
             fragment_page,
             source_index=fragment_source_index,
+            from_ocr=fragment_from_ocr,
         )
         self._table_caption_fragments[caption_id] = fragment_id
         return caption_id
@@ -332,16 +349,28 @@ class MediaHandlersMixin:
             self._replay_table_caption_fragment(staged)
 
     def _replay_table_caption_fragment(self, staged: tuple) -> None:
-        _pending, content, bbox, page_number, region_meta, source_label, source_index = staged
+        (
+            _pending,
+            content,
+            bbox,
+            page_number,
+            region_meta,
+            source_label,
+            source_index,
+            from_ocr,
+        ) = staged
         if source_label in {"figure_title", "chart_title"}:
             self._handle_figure_caption(
                 content,
                 bbox,
                 page_number,
                 source_index=source_index,
+                from_ocr=from_ocr,
             )
         else:
-            self._handle_content(content, page_number, bbox, region_meta=region_meta)
+            self._handle_content(
+                content, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+            )
 
     def _prepare_table_caption_state_for_region(self, treatment: str, content: str) -> None:
         """Advance provisional caption state at every OCR region boundary."""
@@ -360,6 +389,7 @@ class MediaHandlersMixin:
         page_number: int,
         *,
         source_label: str | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Route a caption to figure or table handler based on content.
 
@@ -380,12 +410,13 @@ class MediaHandlersMixin:
             bbox,
             page_number,
             source_label=source_label or "figure_title",
+            from_ocr=from_ocr,
         ):
             return
         if self._LOOSE_TABLE_CAPTION_RE.match(text):
-            self._handle_table_caption(content, bbox, page_number)
+            self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
         else:
-            self._handle_figure_caption(content, bbox, page_number)
+            self._handle_figure_caption(content, bbox, page_number, from_ocr=from_ocr)
 
     @classmethod
     def _is_panel_label(cls, text: str) -> bool:
@@ -410,6 +441,7 @@ class MediaHandlersMixin:
         page_number: int,
         *,
         source_index: int | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Collect every figure-title region for lossless ownership accounting."""
         self._expire_pending_table_label_fragment()
@@ -422,6 +454,7 @@ class MediaHandlersMixin:
             bbox,
             page_number,
             source_index=source_index,
+            from_ocr=from_ocr,
         )
         if text.casefold() == "author manuscript":
             self._non_caption_candidate_reasons[caption_id] = ("publisher_noise",)
@@ -429,6 +462,20 @@ class MediaHandlersMixin:
             self._non_caption_candidate_reasons[caption_id] = ("doi_only_evidence",)
         elif re.fullmatch(r"p\s*[<=>≤≥]\s*\.?\d+", text, re.IGNORECASE):
             self._non_caption_candidate_reasons[caption_id] = ("table_note",)
+
+    def _caption_text_from_ocr(self) -> dict[str, bool]:
+        """Caption candidate text → whether OCR may have produced it.
+
+        A figure or table caption taken whole from one candidate read from the
+        PDF text layer is not OCR text. A caption composed from several
+        candidates, or rewritten for display, matches no candidate here and
+        keeps the OCR default, as does text any OCR candidate shares.
+        """
+        from_ocr: dict[str, bool] = {}
+        for candidate in self._caption_candidates:
+            flag = self._caption_candidate_from_ocr.get(candidate.caption_id, True)
+            from_ocr[candidate.text] = from_ocr.get(candidate.text, False) or flag
+        return from_ocr
 
     def replay_unowned_captions(self, receipt: CaptionAssignmentReceipt) -> int:
         """Re-emit caption candidates that never found an owner as body text.
@@ -476,6 +523,7 @@ class MediaHandlersMixin:
                     if candidate.bbox is not None
                     else None
                 ),
+                from_ocr=self._caption_candidate_from_ocr.get(candidate.caption_id, True),
             )
             replayed += 1
         if replayed:
@@ -1487,18 +1535,15 @@ class MediaHandlersMixin:
     def _parse_html_table(html: str) -> pd.DataFrame | None:
         """Parse an HTML ``<table>`` string into a DataFrame.
 
-        Uses :func:`pandas.read_html` with the ``html5lib`` parser (stdlib
-        fallback) to handle ``<tr>/<td>/<th>`` markup returned by the OCR
-        engine.  Returns ``None`` on any parse failure.
+        Handles the ``<tr>/<td>/<th>`` markup returned by the OCR engine with
+        :func:`~bibr.structure.html_table.html_table_frame`, so every cell is
+        the text as printed.  Returns ``None`` on any parse failure.
         """
         try:
-            from io import StringIO
-
-            dfs = pd.read_html(StringIO(html), flavor="html5lib")
-            if dfs:
-                df = dfs[0].fillna("")
-                # When OCR HTML lacks <th> tags, pandas assigns integer column
-                # names (0, 1, 2, …).  Promote the first data row to headers.
+            df = html_table_frame(html)
+            if df is not None:
+                # When OCR HTML lacks <th> tags, the columns are numbered
+                # (0, 1, 2, …).  Promote the first data row to headers.
                 if len(df) > 0 and all(isinstance(c, (int, float)) for c in df.columns):
                     df.columns = [str(v) for v in df.iloc[0]]
                     df = df.iloc[1:].reset_index(drop=True)

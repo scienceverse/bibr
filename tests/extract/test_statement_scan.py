@@ -1121,3 +1121,17 @@ def test_fallback_stops_when_another_category_starts_in_the_same_sentence():
     scan_statements_fallback(contents, metadata)
     assert metadata.funding_statement == "Funding: This work was supported by NSF grant 123."
     assert metadata.coi_statement == "Competing interests: The authors declare none."
+
+
+def test_boundary_exemptions_stay_linear_on_a_run_on_paragraph():
+    """Each licence boundary checks only the text just before it."""
+
+    import time
+
+    from bibr.extract.statement_scan import _boilerplate_boundary_for_field
+
+    text = "Data are available under the license " * 2_700
+    started = time.perf_counter()
+
+    assert _boilerplate_boundary_for_field("data_availability", text) is None
+    assert time.perf_counter() - started < 2.0

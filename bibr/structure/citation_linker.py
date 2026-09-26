@@ -178,10 +178,10 @@ NUMERIC_CITE_RE = re.compile(
 )
 
 # Tier 1b: Superscript citations ^{3}, ^{15,16}, ^{1-3}, ^{8,9}
-# Produced by OCR engines that render superscripts as LaTeX.  After
-# strip_inline_math() runs, $^{3}$ becomes ^{3}.  Note: strip_inline_math
-# and strip_latex_commands are deferred to finalize_text() (late-phase
-# cleaning) so these patterns are still intact at citation linking time.
+# Produced by OCR engines that render superscripts as LaTeX.  Note: unwrapping
+# inline math and flattening LaTeX are deferred to finalize_text()
+# (clean_text_content_late, late-phase cleaning) so these patterns are still
+# intact at citation linking time.
 # The (?<!\$) lookbehind excludes math-mode superscripts like $^{2}$
 # (e.g. ηp$^{2}$ for partial eta-squared) which are not citations, and
 # (?<!\}) excludes a braced LaTeX base ($\mathrm{cm}^{2}$) — whose closing
