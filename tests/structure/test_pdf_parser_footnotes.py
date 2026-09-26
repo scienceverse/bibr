@@ -153,6 +153,31 @@ def test_footnote_xref_keeps_formula_anchor_when_nothing_else_precedes():
     assert foot_xrefs[0].text_id == 11
 
 
+def _parser_with_entries(pages):
+    """Parser whose deferred entry *i* printed on ``pages[i]`` emitted text_id i + 1."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(json_result=[])
+    for index, page in enumerate(pages):
+        parser.assembler.append(f"Sentence {index + 1}.", page, 1, True)
+    parser._deferred_last_text_id = list(range(1, len(pages) + 1))
+    return parser
+
+
+def test_footnote_anchor_skips_an_entry_printed_after_the_note_page():
+    """An entry that starts on a later page never anchors a note."""
+    parser = _parser_with_entries([1, 2])
+
+    assert parser._find_nearest_text_id(2, page_limit=1) == 1
+    assert parser._find_nearest_text_id(2) == 2
+
+
+def test_pageless_entry_does_not_win_over_an_on_page_sentence():
+    """An entry without a page is only a fallback when nothing on the page precedes."""
+    assert _parser_with_entries([1, None])._find_nearest_text_id(2, page_limit=1) == 1
+    assert _parser_with_entries([None, 3])._find_nearest_text_id(2, page_limit=1) == 1
+
+
 def test_paper_figure_has_body_section_id_field():
     from dataclasses import fields
 

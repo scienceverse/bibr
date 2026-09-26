@@ -662,20 +662,34 @@ class TextHandlersMixin:
 
         With *page_limit* (the footnote's page), an entry joined across a
         page break resolves to its last sentence printed on or before that
-        page, not to a sentence that continues on the next one.
+        page, not to a sentence that continues on the next one. An entry
+        that starts after that page is passed over, and one without a page
+        is used only when no entry printed on or before the page precedes
+        the position.
         """
+        entries = self.assembler.entries
         skipped_fallback: int | None = None
+        pageless_fallback: int | None = None
         for i in range(min(max(0, deferred_idx - 1), len(self._deferred_last_text_id) - 1), -1, -1):
             tid = self._deferred_last_text_id[i]
             if tid is None:
+                continue
+            page = entries[i].page_number if i < len(entries) else None
+            if page_limit is not None and page is not None and page > page_limit:
                 continue
             if tid in skip_text_ids:
                 if skipped_fallback is None:
                     skipped_fallback = tid
                 continue
             if page_limit is not None:
+                if page is None:
+                    if pageless_fallback is None:
+                        pageless_fallback = tid
+                    continue
                 return self._last_text_id_through_page(i, tid, page_limit, skip_text_ids)
             return tid
+        if pageless_fallback is not None:
+            return pageless_fallback
         if skipped_fallback is not None:
             return skipped_fallback
         # Fallback: first sentence or 1

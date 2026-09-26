@@ -934,7 +934,9 @@ released.
   demoted to body text) needs a lowercase continuation on the same or the
   next page, from a body-width row that does not end in a URL, so
   front-matter rows and list items are not glued to what follows. A
-  footnote's xref anchors to the joined sentence printed on the note's page.
+  footnote's xref anchors to the joined sentence printed on the note's page,
+  never to text printed after the note, such as a caption replayed from the
+  next page.
   A paragraph ending in a closing quote or a footnote superscript, or in a
   bare URL followed by a capitalised row, is no longer glued to the next
   one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted

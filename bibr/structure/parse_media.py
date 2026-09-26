@@ -45,6 +45,9 @@ class MediaHandlersMixin:
     # re-keyed to canonical caption ids in ``_finalize_media``.
     _table_caption_fragments: dict[str, str]
     _confirmed_table_caption_owners: dict[str, int]
+    # Footnotes recorded before each caption candidate, initialised in
+    # ``PDFParser.__init__`` (tie-break for ``replay_unowned_captions``).
+    _caption_candidate_footnote_counts: dict[str, int]
 
     # Panel/sub-figure markers: "(a)", "(A)", "A", "A.", "b)", "(c) With BN".
     # A single letter (either case) with an optional paren/dot marker and an
@@ -132,6 +135,9 @@ class MediaHandlersMixin:
         self._caption_candidate_positions[caption_id] = len(self.assembler) + (
             1 if self._carry_over.has_pending() else 0
         )
+        # A footnote recorded before this point was printed before the
+        # caption, even when both recorded the same buffer position.
+        self._caption_candidate_footnote_counts[caption_id] = len(self._footnotes)
         # Likewise whether OCR produced the text (``PaperSentence.from_ocr``).
         self._caption_candidate_from_ocr[caption_id] = from_ocr
         self._caption_candidates.append(
@@ -555,8 +561,11 @@ class MediaHandlersMixin:
             )
         # Replays go back where the caption was printed, in capture order,
         # so text_id order keeps matching reading order. Each insert shifts
-        # the buffer, so later positions are adjusted and footnote anchors at
-        # or after the insert follow their entry.
+        # the buffer, so later positions are adjusted and footnote anchors
+        # after the insert follow their entry. A footnote at exactly the
+        # insert position follows it only when it was captured after the
+        # caption: a page-bottom note captured first was printed first, and
+        # shifting it would anchor it to a caption on the next page.
         pending.sort(key=lambda item: item[0])
         for inserted, (position, candidate, _assignment) in enumerate(pending):
             text = candidate.text.strip()
@@ -576,7 +585,10 @@ class MediaHandlersMixin:
                 ),
                 from_ocr=self._caption_candidate_from_ocr.get(candidate.caption_id, True),
             )
-            self._footnotes.shift_deferred_indices(insert_at)
+            self._footnotes.shift_deferred_indices(
+                insert_at,
+                ties_from=self._caption_candidate_footnote_counts.get(candidate.caption_id, 0),
+            )
             replayed += 1
         if replayed:
             logger.debug("Replayed %d unowned caption candidate(s) as body text", replayed)

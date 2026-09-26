@@ -1180,6 +1180,118 @@ def test_replay_ahead_of_footnote_shifts_its_anchor():
     assert foot_xrefs[0].text_id == caption_sent.text_id
 
 
+def test_footnote_captured_before_a_next_page_caption_keeps_its_anchor():
+    """A page-bottom note and a caption replayed from the next page can share
+    a deferred position (both after a pending paragraph). The note was
+    captured first, so the replay must not shift it past the caption: its
+    anchor stays on the note's page instead of the next page's caption."""
+    import re
+
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "doc_title", "A Study of Things", bbox=[100, 60, 900, 90]),
+                _region(1, "paragraph_title", "Method", bbox=[100, 300, 900, 320]),
+                _region(
+                    2,
+                    "text",
+                    "We sampled students. Participants were recruited from the local "
+                    "university and they",
+                    bbox=[100, 330, 900, 860],
+                ),
+                _region(3, "footnote", "1 Data source: survey office.", bbox=[100, 880, 900, 920]),
+            ],
+            [
+                _region(
+                    0,
+                    "figure_title",
+                    "Summary statistics for the sample by wave and group.",
+                    bbox=[100, 60, 900, 90],
+                ),
+                _region(
+                    1,
+                    "text",
+                    "Results were robust. We report them next.",
+                    bbox=[100, 420, 900, 700],
+                ),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    split = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+    parser.apply_segmentation(
+        contents, [split.split(text) for text in parser.assembler.segmentable_texts]
+    )
+    parser.create_content_sections(contents)
+
+    caption = next(s for s in contents.sentences if s.text.startswith("Summary statistics"))
+    foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot_xrefs) == 1
+    anchor = next(s for s in contents.sentences if s.text_id == foot_xrefs[0].text_id)
+    assert anchor.text_id < caption.text_id
+    assert anchor.page_number == 1
+    assert anchor.text.startswith("Participants were recruited")
+
+
+def test_footnote_captured_before_a_same_page_caption_keeps_its_anchor():
+    """The tie also arises on one page (note, then caption, below a paragraph
+    that continues overleaf); the page limit cannot tell them apart there,
+    so capture order must."""
+    import re
+
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "paragraph_title", "Method", bbox=[100, 100, 900, 130]),
+                _region(
+                    1,
+                    "text",
+                    "We sampled students. Participants were recruited from the local "
+                    "university and they",
+                    bbox=[100, 200, 900, 700],
+                ),
+                _region(2, "footnote", "1 Data source: survey office.", bbox=[100, 800, 900, 830]),
+                _region(
+                    3,
+                    "figure_title",
+                    "Summary statistics for the sample by wave and group.",
+                    bbox=[100, 850, 900, 880],
+                ),
+            ],
+            [
+                _region(
+                    0,
+                    "text",
+                    "completed the survey online. Data were cleaned.",
+                    bbox=[100, 100, 900, 300],
+                ),
+                _region(
+                    1,
+                    "text",
+                    "Results were robust. We report them next.",
+                    bbox=[100, 400, 900, 600],
+                ),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    split = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+    parser.apply_segmentation(
+        contents, [split.split(text) for text in parser.assembler.segmentable_texts]
+    )
+    parser.create_content_sections(contents)
+
+    foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot_xrefs) == 1
+    anchor = next(s for s in contents.sentences if s.text_id == foot_xrefs[0].text_id)
+    assert anchor.page_number == 1
+    assert anchor.text.startswith("Participants were recruited")
+
+
 def test_duplicated_bare_table_label_still_composes_with_fragment():
     """Two overlapping 'Table 2' regions plus a fragment compose one caption.
 

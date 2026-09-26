@@ -318,6 +318,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # caption_id → deferred-buffer position at capture time, so a replay
         # lands where the caption was printed instead of at the end.
         self._caption_candidate_positions: dict[str, int] = {}
+        # caption_id → footnotes already recorded at capture time. A footnote
+        # and a caption can record the same deferred position; this capture
+        # order says which one was printed first (see ``replay_unowned_captions``).
+        self._caption_candidate_footnote_counts: dict[str, int] = {}
         # caption_id → whether OCR produced the candidate's text (False for
         # the PDF text layer); rides to the sentences it becomes.
         self._caption_candidate_from_ocr: dict[str, bool] = {}
