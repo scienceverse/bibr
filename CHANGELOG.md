@@ -993,6 +993,52 @@ released.
   again, backed by committed synthetic fixtures
   (`scripts/generate_hermetic_test_fixtures.py`) instead of uncommitted
   corpus files.
+- `bibr chew` writing JSON to stdout is now valid JSON under every console
+  encoding. The startup stream setup replaced unencodable characters with
+  Python escapes (`\U0001d465`), which no JSON parser accepts; the export is
+  now written as UTF-8 bytes instead. File output already wrote UTF-8 and is
+  unchanged.
+- `bibr chew papers/ -o results/` with one paper in the directory no longer
+  writes a file named `results`. A trailing slash or an existing directory in
+  `-o` now means a directory even for a single resolved file, so the export
+  lands as `results/<stem>.json` and a later run with the same `-o`
+  writes into it again instead of crashing. A blocked `-o` is a clean exit 2
+  before any model loads, and `-o` is resolved before the pipeline is
+  constructed.
+- The automatic-OCR dry-run line no longer reports the Paddle served-model
+  alias as weights to download. For the default chain it cache-checks the
+  weight repo the launcher loads, so a cached
+  `PaddlePaddle/PaddleOCR-VL-1.6` renders `cached` instead of
+  `will download (size unknown)`.
+- A bad `--ocr-model`/`--ocr-profile` combination no longer blames `--pages`.
+  Option errors from the run configuration print as `Invalid option: …` with
+  exit 2 in both `chew` and `batch`.
+- Per-file failure hints follow the pipeline's structured `error_code`
+  instead of message substrings that never matched (or matched `rapid-mlx`
+  for `api` and blamed API keys for local runtime failures).
+- Building the CLI no longer needs installed package metadata. Running from
+  a source tree via `PYTHONPATH` used to crash before argparse ran; the
+  version now falls back to `?`, as the help screen already did.
+- The batch report no longer shows a phantom `enrich_prefetch` stage share.
+  That timer overlaps another stage's wall clock (the export stage already
+  excludes it from `total_seconds`), but the report divided by a sum that
+  included it, deflating the real stages. It now shares the export stage's
+  exclusion list.
+- Removed dead evaluation code with no in-repo callers: the unreferenced
+  `keywords_fuzzy_f1`, `authors_count_ratio` and `authors_order_score`
+  helpers, and the opposite-contract `validation_metrics.keywords_f1`
+  duplicate (the harness's `evaluate.keywords_f1` is the one scored). The
+  `title_soft_containment` docstring no longer promises a per-paper aggregate
+  that was never emitted.
+- Reference matching in the evaluator now runs once per paper instead of three
+  times: one shared `match_references` pass feeds `ref_matching_f1`,
+  `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
+  live in a single table that the per-pair loop gates on, instead of two
+  copies that had to stay in lockstep. Scores are unchanged: re-scoring stored
+  evaluation runs gives identical metrics, about three times faster.
+- The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
+  instead of the pure-Python table — same value, roughly three orders of
+  magnitude faster on long abstracts.
 
 ### Added
 
@@ -1037,6 +1083,10 @@ released.
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- Evaluation artifacts now record a `bibr_dirty` flag (uncommitted tracked
+  changes in the scoring checkout) and an `eval_code_sha256` digest over
+  `evaluation/*.py`, so a score from a patched worktree no longer stamps
+  the same provenance as unpatched code. No metric definition changed.
 - `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
   generated from the strict `PaperExport` models. `Result.model` is an instance
   of it when built from a dict, and it remains a `PaperExport` subclass.
@@ -1045,6 +1095,16 @@ released.
 
 ### Changed
 
+- `bibr chew --dry-run` now reports a Blockers section and exits 1 when the
+  real run would fail immediately: missing inputs, missing LLM credentials
+  (key lookup only, no client is built), an unstartable managed local LLM
+  backend, and the PDF OCR/image runtime. `bibr batch --dry-run` runs the
+  same local preflight (the PDF OCR/image runtime) the real run does and
+  exits 1 with it. A clean preview still exits 0.
+- Removed the shipped `bibr.metrics` package: the `PerformanceRecorder`
+  (whose only consumer was never published, and whose per-request peaks were
+  process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
+  no longer imports.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

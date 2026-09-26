@@ -31,7 +31,11 @@ from bibr.local.cli.doctor import (
     _probe_ocr_url,
     _run_doctor,
 )
-from bibr.local.cli.dry_run import _print_dry_run_plan
+from bibr.local.cli.dry_run import (
+    _dry_run_blockers,
+    _dry_run_cloud_credential_blocker,
+    _print_dry_run_plan,
+)
 from bibr.local.cli.inputs import (
     _collect_files,
     _find_stem_collisions,
@@ -44,6 +48,7 @@ from bibr.local.cli.parser import (
     _EXAMPLES,
     _build_parser,
     _get_version,
+    _safe_version,
     normalize_ocr_backend,
 )
 from bibr.local.cli.presets import _run_preset
@@ -51,10 +56,12 @@ from bibr.local.cli.process import (
     ChunkProcessor,
     _as_count,
     _format_validation_line,
+    _hint_for_file_error,
     _print_validation_line,
     _run_process,
     _validation_counts,
     _write_chunk_results,
+    _write_stdout_json,
 )
 from bibr.local.cli.run_config import (
     ResolvedRunConfig,
@@ -74,6 +81,8 @@ __all__ = [
     "_EXAMPLES",
     "_apply_runtime_settings",
     "_as_count",
+    "_dry_run_blockers",
+    "_dry_run_cloud_credential_blocker",
     "_build_parser",
     "_check_device",
     "_check_llm_local_backend",
@@ -83,6 +92,8 @@ __all__ = [
     "_find_stem_collisions",
     "_format_validation_line",
     "_get_version",
+    "_hint_for_file_error",
+    "_safe_version",
     "_managed_llm_model",
     "_managed_llm_weight_repo",
     "_opencv_unavailable_reason",
@@ -100,6 +111,7 @@ __all__ = [
     "_suffix_for_stdin_payload",
     "_validation_counts",
     "_write_chunk_results",
+    "_write_stdout_json",
     "_zip_payload_suffix",
     "main",
     "normalize_ocr_backend",
