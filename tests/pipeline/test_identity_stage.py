@@ -334,7 +334,7 @@ def test_the_doi_field_source_names_the_selected_source_kind():
 
 
 def test_only_the_identity_stage_writes_the_paper_doi():
-    """No other module assigns metadata.doi or builds PaperMetadata with a DOI.
+    """No other module assigns a ``.doi`` or builds or copies metadata with one.
 
     The native JATS and HTML parsers record the DOI the input declares on their
     preparsed record, which the identity stage reads as structured evidence.
@@ -343,8 +343,11 @@ def test_only_the_identity_stage_writes_the_paper_doi():
 
     import bibr
 
+    def names_doi(node) -> bool:
+        return isinstance(node, ast.Constant) and node.value == "doi"
+
     evidence_writers = {"input/jats_native.py", "input/html_native.py"}
-    writers = set()
+    writers: set[tuple[str, int]] = set()
     root = Path(bibr.__file__).parent
     for path in root.rglob("*.py"):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -355,31 +358,30 @@ def test_only_the_identity_stage_writes_the_paper_doi():
                 targets = node.targets
             elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
                 targets = [node.target]
-            for target in targets:
-                if (
-                    isinstance(target, ast.Attribute)
-                    and target.attr == "doi"
-                    and "meta" in ast.unparse(target.value).lower()
-                ):
-                    writers.add(relative)
-            if isinstance(node, ast.Call):
-                name = ast.unparse(node.func)
+            if any(isinstance(t, ast.Attribute) and t.attr == "doi" for t in targets):
+                writers.add((relative, node.lineno))
+            if not isinstance(node, ast.Call):
+                continue
+            name = ast.unparse(node.func)
+            doi_keyword = next((k for k in node.keywords if k.arg == "doi"), None)
+            empty = (
+                doi_keyword is not None
+                and isinstance(doi_keyword.value, ast.Constant)
+                and doi_keyword.value.value == ""
+            )
+            if name.endswith("PaperMetadata") and doi_keyword is not None and not empty:
+                writers.add((relative, node.lineno))
+            if name.split(".")[-1] == "replace" and doi_keyword is not None:
+                writers.add((relative, node.lineno))
+            if name == "setattr" and len(node.args) > 1 and names_doi(node.args[1]):
+                writers.add((relative, node.lineno))
+            if name.endswith("model_copy"):
                 for keyword in node.keywords:
-                    if (
-                        name.endswith("PaperMetadata")
-                        and keyword.arg == "doi"
-                        and not (
-                            isinstance(keyword.value, ast.Constant) and keyword.value.value == ""
-                        )
+                    if keyword.arg == "update" and any(
+                        names_doi(key) for key in getattr(keyword.value, "keys", ())
                     ):
-                        writers.add(relative)
-                if (
-                    name == "setattr"
-                    and len(node.args) > 1
-                    and ast.unparse(node.args[1]) == "'doi'"
-                ):
-                    writers.add(relative)
-                if name.endswith("model_copy") and "'doi'" in ast.unparse(node):
-                    writers.add(relative)
+                        writers.add((relative, node.lineno))
 
-    assert writers - evidence_writers == {"pipeline/stages/identity.py"}
+    assert {module for module, _line in writers} - evidence_writers == {
+        "pipeline/stages/identity.py"
+    }
