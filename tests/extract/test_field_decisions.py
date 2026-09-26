@@ -748,6 +748,11 @@ def test_unscoped_title_prefers_the_layout_title():
         "layout_title",
         "layout_title",
     )
+    # Each candidate appears once on the receipt.
+    assert [(v.candidate.source, v.accepted) for v in decision.considered] == [
+        ("llm", False),
+        ("layout_title", True),
+    ]
     same = _title("The Layout Title", scoped=False, detected_title="The Layout Title")
     assert (same.source, same.rule) == ("llm", "extracted")
 

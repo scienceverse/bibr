@@ -572,7 +572,13 @@ def decide_title(
     def use(candidate: FieldCandidate, new_rule: str, reason: str) -> None:
         nonlocal selected, rule
         if selected is not None:
-            considered.append(Verdict(selected, False, f"replaced by {candidate.source}"))
+            # The replaced candidate's verdict turns into a rejection.
+            considered[:] = [
+                Verdict(verdict.candidate, False, f"replaced by {candidate.source}")
+                if verdict.candidate is selected and verdict.accepted
+                else verdict
+                for verdict in considered
+            ]
         selected, rule = candidate, new_rule
         considered.append(Verdict(candidate, True, reason))
 
