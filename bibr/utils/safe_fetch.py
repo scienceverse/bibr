@@ -73,7 +73,6 @@ _DEFAULT_MAX_REDIRECTS = 5
 _DEFAULT_TIMEOUT_SECONDS = 90.0
 
 # Content-Type → extension for downloads whose URL carries no usable suffix.
-# Mirrors bibr.input.supported_files.SupportedMimeType.
 _MIME_TO_EXTENSION = {
     "application/pdf": ".pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",

@@ -374,3 +374,35 @@ def test_chunk_result_writer_uses_each_manifest_output_path(tmp_path):
     assert (processed, errors) == (2, 0)
     assert json.loads((tmp_path / "nested" / "paper-1.json").read_text()) == {"queue": 1}
     assert json.loads((tmp_path / "nested" / "paper-2.json").read_text()) == {"queue": 2}
+
+
+def test_manifest_hashes_large_inputs_without_read_bytes(tmp_path, monkeypatch):
+    """content_sha256 streams: multi-chunk files hash right with no whole read (18)."""
+    from bibr.local.manifest import load_manifest
+
+    source = tmp_path / "big.pdf"
+    payload = bytes(range(256)) * 9000  # ~2.3 MB: spans several 1 MiB chunks
+    source.write_bytes(payload)
+    manifest = tmp_path / "queue.jsonl"
+    _write_manifest(
+        manifest,
+        [
+            {
+                "input_path": "big.pdf",
+                "output_path": "big.json",
+                "queue_record_id": "record-1",
+            }
+        ],
+    )
+
+    real_read_bytes = Path.read_bytes
+
+    def _no_whole_read(self):
+        if self == source.resolve():
+            raise AssertionError("manifest must stream input bytes, not read_bytes()")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _no_whole_read)
+
+    [record] = load_manifest(manifest)
+    assert record.content_sha256 == hashlib.sha256(payload).hexdigest()

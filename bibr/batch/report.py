@@ -12,6 +12,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
+from bibr.pipeline.stages.export import _OVERLAPPED_TIMINGS
+
 TOP_WARNINGS = 10
 
 
@@ -78,6 +80,11 @@ def compute_report(
         if not isinstance(times, Mapping):
             continue
         for stage, seconds in times.items():
+            if str(stage) in _OVERLAPPED_TIMINGS:
+                # Timers that overlap another stage's wall clock (e.g. the
+                # prefetch runs under extract) are already inside that stage's
+                # share; counting them again deflates the real stages.
+                continue
             value = _number(seconds)
             if value is None:
                 continue

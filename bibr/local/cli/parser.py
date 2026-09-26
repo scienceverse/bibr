@@ -82,6 +82,19 @@ def _get_version() -> str:
     return version("bibr")
 
 
+def _safe_version() -> str:
+    """Installed version, or ``'?'`` when bibr has no package metadata.
+
+    A source-tree checkout run via ``PYTHONPATH`` (never pip-installed)
+    has no ``importlib.metadata`` entry; every command, including
+    ``doctor``, must still start so it can report the environment.
+    """
+    try:
+        return _get_version()
+    except Exception:
+        return "?"
+
+
 class _BibrParser(argparse.ArgumentParser):
     """Main-parser subclass that renders the designed help screen.
 
@@ -107,10 +120,7 @@ class _BibrParser(argparse.ArgumentParser):
                     for pseudo in action._choices_actions  # noqa: SLF001
                 ]
                 break
-        try:
-            ver = _get_version()
-        except Exception:
-            ver = "?"
+        ver = _safe_version()
         return render_main_help(ver, commands)
 
 
@@ -311,7 +321,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"bibr {_get_version()}",
+        version=f"bibr {_safe_version()}",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -358,7 +368,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Resolve and print the full run plan (input files, OCR/LLM config, "
             "reference strategies, enrichment, memory mode, models that would "
             "need downloading, output destinations) without processing anything. "
-            "No network calls, no model loads. Exits 0."
+            "No network calls, no model loads. Prints a Blockers section and "
+            "exits 1 when missing inputs or failing preflights would fail the "
+            "real run."
         ),
     )
 

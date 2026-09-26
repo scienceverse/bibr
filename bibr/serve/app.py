@@ -16,26 +16,22 @@ the async-job API (``JOBS_ENABLED``) and metering (``METER_ENABLED``) are
 on by default and independently toggleable.
 """
 
+import functools
 import json
 import logging
 import time
 import uuid
+from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def classifier_readiness(statuses) -> tuple[str, bool]:
-    """Summarize worker classifier states without initiating model loading."""
-    from bibr.pipeline.classifier_resources import ClassifierState
-
-    states = {status.state for status in statuses.values()}
-    if ClassifierState.FAILED_REQUIRED in states:
-        return ("failed_required", False)
-    if ClassifierState.DEGRADED in states:
-        return ("degraded", True)
-    if states <= {ClassifierState.READY, ClassifierState.UNCONFIGURED}:
-        return ("ready", True)
-    return ("loading", False)
+#: How long a non-``ok`` classifier verdict stays cached on ``/ready``. A probe
+#: that arrives while the worker is still downloading weights must not pin the
+#: process at 503 forever; a cached ``ok`` is never re-probed on the request
+#: path (no model load there), while failures are retried after this interval.
+_CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
 
 
 def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
@@ -55,13 +51,48 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
     )
     try:
         for model_id, revision in configured:
-            if model_id:
-                snapshot_download(model_id, revision=revision, local_files_only=True)
+            if not model_id:
+                continue
+            # A local directory or file counts as present when the
+            # configured runtime could load from it (resolve_runtime)
+            # without loading any model: torch loads the directory
+            # itself, so the ONNX bundle is required only when
+            # ML_RUNTIME=onnx. snapshot_download rejects
+            # filesystem paths outright, so without this a baked-in
+            # classifier is reported missing. Local-only: no Hub access,
+            # so this never slows the readiness probe.
+            if Path(str(model_id)).expanduser().exists():
+                from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
+
+                resolve_runtime(
+                    "classifier",
+                    settings=settings,
+                    bundle=functools.partial(find_onnx_bundle, model_id, revision),
+                    bundle_hint="publish an onnx/ bundle or run a torch runtime",
+                )
+                continue
+            snapshot_download(model_id, revision=revision, local_files_only=True)
     except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
         if settings.ml.classifiers_required:
             return ("failed_required", False)
         return ("degraded", True)
     return ("ok", True)
+
+
+def _request_metering_line(
+    *, request_id: str, method: str, path: str, status: int, duration_ms: int, outstanding: int
+) -> str:
+    """One JSON metering line, shared by the normal and 500 request paths."""
+    return json.dumps(
+        {
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "duration_ms": duration_ms,
+            "inference_outstanding": outstanding,
+        }
+    )
 
 
 def readiness_payload(
@@ -286,24 +317,45 @@ def _build_server(upload_stores):
         request_id = _sanitize_request_id(request.headers.get("x-request-id")) or uuid.uuid4().hex
         request.state.request_id = request_id
         start = time.perf_counter()
-        response = await call_next(request)
-        duration_ms = int((time.perf_counter() - start) * 1000)
-        response.headers["x-request-id"] = request_id
-        response.headers["x-bibr-duration-ms"] = str(duration_ms)
-        metering_logger.info(
-            json.dumps(
-                {
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status": response.status_code,
-                    "duration_ms": duration_ms,
-                    "inference_outstanding": getattr(
+        try:
+            response = await call_next(request)
+        except Exception:
+            # An unhandled route failure still emits its per-request metering
+            # record (status 500, with the request id) before Starlette's
+            # ServerErrorMiddleware turns it into the 500 response. The 500
+            # body itself is left to the error mapping, so no x-request-id
+            # header can be attached there without changing error body shapes.
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            metering_logger.info(
+                _request_metering_line(
+                    request_id=request_id,
+                    method=request.method,
+                    path=request.url.path,
+                    status=500,
+                    duration_ms=duration_ms,
+                    outstanding=getattr(
                         request.state,
                         "inference_outstanding",
                         server.app.state.inference_tracker.outstanding,
                     ),
-                }
+                )
+            )
+            raise
+        duration_ms = int((time.perf_counter() - start) * 1000)
+        response.headers["x-request-id"] = request_id
+        response.headers["x-bibr-duration-ms"] = str(duration_ms)
+        metering_logger.info(
+            _request_metering_line(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                duration_ms=duration_ms,
+                outstanding=getattr(
+                    request.state,
+                    "inference_outstanding",
+                    server.app.state.inference_tracker.outstanding,
+                ),
             )
         )
         return response
@@ -399,16 +451,22 @@ def _register_readiness_route(server, Settings) -> None:
     from fastapi import Request, Response
 
     from bibr.ocr.http_security import normalize_ocr_base_url, ocr_request_headers
+    from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
     from bibr.serve.auth import check_bearer
+    from bibr.serve.pipeline import serve_ocr_defaults
 
     ocr_base_url = normalize_ocr_base_url(Settings.OCR_BASE_URL)
-
     ocr_headers = ocr_request_headers(
         ocr_base_url,
         Settings.ocr.api_key,
         allow_insecure_http=Settings.ocr.allow_insecure_http,
     )
-    state: dict[str, object] = {}
+    # The served-model alias extraction requires on /v1/models — the same
+    # alias ServePipeline asks the server for, so /ready fails while the
+    # server is still loading it or serves a different name.
+    expected_ocr_model, _ = serve_ocr_defaults(Settings)
+    expected_ocr_model = expected_ocr_model or GLM_SERVED_MODEL_ALIAS
+    state: dict[str, Any] = {}
 
     async def _get_http_client() -> httpx.AsyncClient:
         client = state.get("http_client")
@@ -448,17 +506,60 @@ def _register_readiness_route(server, Settings) -> None:
         client = await _get_http_client()
         try:
             resp = await client.get(f"{ocr_base_url}/health")
-            checks["ocr"] = "ok" if resp.status_code == 200 else f"unhealthy ({resp.status_code})"
-            check_results.append(resp.status_code == 200)
+            if resp.status_code != 200:
+                checks["ocr"] = f"unhealthy ({resp.status_code})"
+                check_results.append(False)
+            else:
+                # /health answers without auth and before any model loads;
+                # extraction needs /v1/models to list the served alias with
+                # the same headers the backend sends, so probe that too.
+                try:
+                    models_resp = await client.get(f"{ocr_base_url}/v1/models")
+                    if models_resp.status_code == 401:
+                        checks["ocr"] = "unauthorized (401; check OCR_API_KEY)"
+                        check_results.append(False)
+                    elif models_resp.status_code != 200:
+                        checks["ocr"] = f"unhealthy ({models_resp.status_code})"
+                        check_results.append(False)
+                    else:
+                        try:
+                            served_ids = [item["id"] for item in models_resp.json()["data"]]
+                        except Exception:
+                            checks["ocr"] = "unhealthy (bad /v1/models body)"
+                            check_results.append(False)
+                        else:
+                            if expected_ocr_model in served_ids:
+                                checks["ocr"] = "ok"
+                                check_results.append(True)
+                            else:
+                                checks["ocr"] = f"model_missing ({expected_ocr_model})"
+                                check_results.append(False)
+                except Exception:
+                    logger.warning("Readiness OCR model check failed", exc_info=True)
+                    checks["ocr"] = "unreachable"
+                    check_results.append(False)
         except Exception:
             logger.warning("Readiness OCR check failed", exc_info=True)
             checks["ocr"] = "unreachable"
             check_results.append(False)
 
         classifier_check = state.get("classifier_check")
-        if not isinstance(classifier_check, tuple):
+        classifier_checked_at = state.get("classifier_check_at")
+        # A cached ``ok`` stands: re-probing it on every request would put
+        # model resolution on the probe path. Anything else is retried after a
+        # bounded interval, so a probe that raced worker startup (or a local
+        # path that has since appeared) recovers without a restart.
+        if (
+            not isinstance(classifier_check, tuple)
+            or not isinstance(classifier_checked_at, float)
+            or (
+                classifier_check[0] != "ok"
+                and time.monotonic() - classifier_checked_at >= _CLASSIFIER_CHECK_RETRY_SECONDS
+            )
+        ):
             classifier_check = await asyncio.to_thread(classifier_artifact_readiness, Settings)
             state["classifier_check"] = classifier_check
+            state["classifier_check_at"] = time.monotonic()
         classifier_status, classifier_ok = classifier_check
         checks["classifiers"] = classifier_status
         check_results.append(classifier_ok)

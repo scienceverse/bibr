@@ -734,16 +734,31 @@ def test_install_command_source_checkout_uses_uv_sync(tmp_path):
     assert "source checkout" in label
 
 
-def test_install_command_consumer_uv_project_uses_uv_add(tmp_path):
-    """After `uv add bibr`, setup must add extras to the consuming project."""
+def test_install_command_consumer_uv_project_uses_uv_add(tmp_path, monkeypatch):
+    """After `uv add bibr`, setup adds extras to the consuming project — but
+    only when bibr runs from that project's environment. Anywhere else, the
+    same directory must fall back to `uv pip install --python` so a stranger's
+    project is never edited."""
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "paper-lab"\n', encoding="utf-8")
+    venv = tmp_path / ".venv"
+    venv.mkdir()
+    monkeypatch.delenv("UV_PROJECT_ENVIRONMENT", raising=False)
 
+    monkeypatch.setattr(sys, "prefix", str(venv))
     command, label = _install_command_for_extras_for_test(
         {"ml", "local"}, cwd=tmp_path, uv_bin="/bin/uv"
     )
 
     assert command == ["/bin/uv", "add", "bibr[local,ml]"]
     assert "project dependency" in label
+
+    monkeypatch.setattr(sys, "prefix", "/elsewhere")
+    command, _label = _install_command_for_extras_for_test(
+        {"ml", "local"}, cwd=tmp_path, uv_bin="/bin/uv"
+    )
+
+    assert command[:4] == ["/bin/uv", "pip", "install", "--python"]
+    assert command[4] == sys.executable
 
 
 def test_install_command_without_uv_uses_current_python_pip(tmp_path):
@@ -960,6 +975,8 @@ def test_easy_private_server_prompts_for_urls(tmp_path, monkeypatch):
     monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
     monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
+    # The private-server tier now gets the LLM connection test too.
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", lambda settings: "OK")
 
     wizard.run()
 
@@ -968,6 +985,7 @@ def test_easy_private_server_prompts_for_urls(tmp_path, monkeypatch):
     assert "LLM_BASE_URL=https://llm.internal/v1" in content
     assert "LLM_API_KEY=local-key" in content
     assert "LLM_MODEL=nuextract" in content
+    assert "Connected" in wizard.console.export_text()
 
 
 def test_easy_private_server_default_llm_url_stays_private(monkeypatch):
@@ -2027,3 +2045,310 @@ def test_linux_local_plan_selects_the_vllm_extra():
     assert _platform_local_extra("linux", "x86_64", ocr_backend="glm-llama") == set()
     assert _platform_local_extra("darwin", "arm64", ocr_backend="paddle") == {"local"}
     assert _platform_local_extra("win32", "AMD64", ocr_backend="paddle") == set()
+
+
+# --- audit S8: setup-wizard findings ----------------------------------------
+
+
+def _cloud_setup():
+    return _build_recommended_setup(
+        platform_key=None,
+        accelerator_memory_gb=None,
+        system_memory_gb=1.0,
+        allow_cloud=True,
+    )
+
+
+def _drive_cloud_setup(monkeypatch, tmp_path, wizard, *, first_key, retry_key):
+    """Drive the recommended cloud flow through a mistyped-key retry."""
+    wizard.env_path = tmp_path / ".env"
+    monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
+
+    def fake_prompt(prompt, *args, **kwargs):
+        if prompt == "Google API key":
+            return first_key
+        if prompt == "API key":
+            return retry_key
+        return kwargs.get("default", "")
+
+    def fake_confirm(prompt, *args, **kwargs):
+        if "extras now" in prompt:
+            return False
+        if "LLM connection" in prompt:
+            return True
+        if "different API key" in prompt:
+            return True
+        if "test extraction" in prompt:
+            return False
+        return kwargs.get("default", True)
+
+    calls = {"n": 0}
+
+    def fake_ping(settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception("401 Unauthorized: invalid API key")
+        return "OK"
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", fake_ping)
+    wizard._finish_recommended_setup(_cloud_setup())
+
+
+def test_recommended_cloud_retry_persists_the_corrected_key(tmp_path, monkeypatch):
+    """A key fixed in the connection-test retry must reach .env, not just memory."""
+    wizard = _recording_wizard()
+    _drive_cloud_setup(
+        monkeypatch,
+        tmp_path,
+        wizard,
+        first_key="AIza-TYPO",
+        retry_key="AIza-CORRECT",
+    )
+
+    assert wizard.env_vars["GOOGLE_API_KEY"] == "AIza-CORRECT"
+    lines = [
+        line
+        for line in wizard.env_path.read_text().splitlines()
+        if line.startswith("GOOGLE_API_KEY")
+    ]
+    assert lines == ["GOOGLE_API_KEY=AIza-CORRECT"]
+
+
+def test_cloud_retry_skipped_write_leaves_env_alone(tmp_path, monkeypatch):
+    """Choosing 'skip' at the save step still means no .env write on retry."""
+    wizard = _recording_wizard()
+    wizard.env_path = tmp_path / ".env"
+    wizard.env_path.write_text("GOOGLE_API_KEY=sk-old-key-placeholder\n", encoding="utf-8")
+    monkeypatch.setattr("bibr.setup_wizard.PresetManager", MagicMock())
+
+    prompts = {"Google API key": "AIza-TYPO", "API key": "AIza-CORRECT"}
+
+    def fake_prompt(prompt, *args, **kwargs):
+        if prompt.startswith(str(wizard.env_path)):
+            return "skip"
+        return prompts.get(prompt, kwargs.get("default", ""))
+
+    def fake_confirm(prompt, *args, **kwargs):
+        if "extras now" in prompt:
+            return False
+        if "LLM connection" in prompt:
+            return True
+        if "different API key" in prompt:
+            return True
+        if "test extraction" in prompt:
+            return False
+        return kwargs.get("default", True)
+
+    calls = {"n": 0}
+
+    def fake_ping(settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise Exception("401 Unauthorized: invalid API key")
+        return "OK"
+
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", fake_prompt)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", fake_confirm)
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", fake_ping)
+    wizard._finish_recommended_setup(_cloud_setup())
+
+    assert wizard.env_vars["GOOGLE_API_KEY"] == "AIza-CORRECT"
+    assert wizard.env_path.read_text() == "GOOGLE_API_KEY=sk-old-key-placeholder\n"
+
+
+def test_install_command_pins_the_running_interpreter(tmp_path):
+    """Outside a project env, uv must install into sys.executable, not cwd's venv."""
+    from bibr.setup_wizard import _install_command_for_extras
+
+    unrelated = tmp_path / "other-project"
+    unrelated.mkdir()
+    (unrelated / ".venv").mkdir()  # a stranger's venv must not catch the install
+
+    cmd, _label = _install_command_for_extras({"ml"}, cwd=tmp_path, uv_bin="/usr/bin/uv")
+
+    assert cmd[:4] == ["/usr/bin/uv", "pip", "install", "--python"]
+    assert cmd[4] == sys.executable
+
+
+def test_advanced_step4_honours_the_step1_ml_decline(monkeypatch):
+    """Declining ml in step 1 gives a hint in step 4 — no install, no re-ask, no exit."""
+    wizard = _recording_wizard()
+    with patch("bibr.setup_wizard.Confirm.ask", return_value=False):
+        wizard._step_extras()
+    assert "ml" not in wizard.selected_extras
+
+    prompts = iter(["", "sat-6l-sm", "paddle", "ner"])
+    installs: list[str] = []
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: False)
+    monkeypatch.setattr(
+        wizard, "_install_selected_extras", lambda reason="": installs.append(reason)
+    )
+    monkeypatch.setattr(
+        "bibr.setup_wizard._install_command_for_extras",
+        lambda extras, **_k: (["uv", "pip", "install", f"bibr[{','.join(sorted(extras))}]"], ""),
+    )
+
+    wizard._step_external_services()
+
+    assert "ml" not in wizard.selected_extras
+    assert installs == []
+    text = wizard.console.export_text()
+    assert "declined in step 1" in text
+    # The hint names the command that adds the extra later.
+    assert "Add it later with: uv pip install 'bibr[ml]'" in text
+
+
+def test_advanced_step4_skips_install_when_step1_ml_is_present(monkeypatch):
+    """Accepting ml in step 1 must not reinstall it in step 4 once importable."""
+    wizard = _recording_wizard()
+    wizard.selected_extras = {"ml"}
+    prompts = iter(["", "sat-6l-sm", "paddle", "ner"])
+    installs: list[str] = []
+    monkeypatch.setattr("bibr.setup_wizard.Prompt.ask", lambda *a, **k: next(prompts))
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: False)
+    monkeypatch.setattr("bibr.setup_wizard._ml_extra_available", lambda: True)
+    monkeypatch.setattr(
+        wizard, "_install_selected_extras", lambda reason="": installs.append(reason)
+    )
+
+    wizard._step_external_services()
+
+    assert installs == []
+    assert "declined in step 1" not in wizard.console.export_text()
+
+
+def test_smoke_hint_keeps_bracketed_extra_names(monkeypatch):
+    """Install hints like 'bibr[torch]' must survive Rich markup, printed once."""
+    from bibr.exceptions import ConfigurationError, ProcessingError
+
+    wizard = _recording_wizard()
+    wizard.env_vars = {"OCR_BACKEND": "paddle"}
+    message = (
+        "ML_RUNTIME=torch but torch is not installed. Install it with pip install 'bibr[torch]'"
+    )
+    # chew() reports a bad setting wrapped: the pipeline raises
+    # ProcessingError('Layout initialization failed: ...') from the
+    # ConfigurationError (see bibr/pipeline/pipeline.py).
+    chained = ProcessingError(
+        f"Layout initialization failed: {message}",
+        error_code="layout_failed",
+        failed_stage="layout",
+    )
+    chained.__cause__ = ConfigurationError(message)
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    with patch("bibr.api.chew", side_effect=chained):
+        wizard._step_smoke_test()
+
+    text = wizard.console.export_text()
+    assert "pip install 'bibr[torch]'" in text
+    assert "\\[torch]" not in text
+    assert text.count("ML_RUNTIME=torch") == 1
+    assert "Unexpected error" not in text
+
+
+def test_caused_by_configuration_error_walks_the_chain():
+    """Bare, chained (cause/context) and unrelated failures classify correctly."""
+    from bibr.exceptions import ConfigurationError, ProcessingError
+    from bibr.setup_wizard import _caused_by_configuration_error
+
+    assert _caused_by_configuration_error(ConfigurationError("bad value"))
+    chained = ProcessingError("Layout initialization failed: bad value")
+    chained.__cause__ = ConfigurationError("bad value")
+    assert _caused_by_configuration_error(chained)
+    outer = ProcessingError("outer")
+    outer.__context__ = ConfigurationError("implicit context")
+    assert _caused_by_configuration_error(outer)
+    assert not _caused_by_configuration_error(RuntimeError("boom"))
+
+
+def test_install_failure_detail_keeps_bracketed_extra_names(monkeypatch, tmp_path):
+    """uv stderr naming 'bibr[vllm]' must print in full, not eaten as Rich markup."""
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("bibr.setup_wizard.shutil.which", lambda name: "/bin/uv")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Because bibr[vllm] depends on vllm>=0.24"
+        )
+
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", fake_run)
+    wizard = _recording_wizard()
+    wizard.selected_extras = {"vllm"}
+
+    with pytest.raises(SystemExit):
+        wizard._install_selected_extras()
+
+    text = wizard.console.export_text()
+    # The detail line, not the (always escaped) command line above it: without
+    # escape() Rich eats '[vllm]' as a style tag and prints 'Because bibr depends'.
+    assert "Because bibr[vllm] depends" in text
+    assert "vllm>=0.24" in text
+
+
+def test_smoke_import_error_hint_keeps_brackets(monkeypatch):
+    """An ImportError carrying the torch hint must print 'bibr[torch]' literally."""
+    from bibr.utils.ml_extra import TORCH_EXTRA_HINT
+
+    wizard = _recording_wizard()
+    err = ImportError(
+        f"Layout detection (LayoutDetector) requires the 'ml' extra: {TORCH_EXTRA_HINT}"
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    with patch("bibr.api.chew", side_effect=err):
+        wizard._step_smoke_test()
+
+    text = wizard.console.export_text()
+    # The message prints twice — the (always escaped) 'Test extraction failed'
+    # line and the hint. Without escape() in the hint branch, the second copy
+    # renders as "pip install 'bibr'".
+    assert text.count("bibr[torch]") == 2
+    assert "uv sync --extra torch" in text
+
+
+def test_connection_error_keeps_brackets(monkeypatch):
+    """A connect failure mentioning '[...]' must print it, not eat it as markup."""
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+        "GOOGLE_API_KEY": "AIza-test-key-placeholder",
+    }
+    answers = iter([True, False])
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: next(answers))
+
+    def fake_ping(_settings):
+        raise ConnectionError("model [llama3] not found on the server")
+
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", fake_ping)
+
+    wizard._offer_llm_connection_test()
+
+    text = wizard.console.export_text()
+    assert "Couldn't connect" in text
+    # Without escape() Rich eats '[llama3]' as a style tag ('model  not found').
+    assert "model [llama3] not found" in text
+
+
+def test_run_validation_tests_the_private_server_llm(monkeypatch):
+    """The private-server tier collects URL/key/model, so it gets the connection test."""
+    wizard = _recording_wizard()
+    calls = []
+    monkeypatch.setattr(wizard, "_offer_llm_connection_test", lambda: calls.append("llm"))
+    monkeypatch.setattr(wizard, "_offer_local_server_test", lambda: calls.append("local"))
+
+    setup = _build_recommended_setup(
+        platform_key=None,
+        accelerator_memory_gb=None,
+        system_memory_gb=1.0,
+        allow_cloud=False,
+    )
+    assert setup.tier == "private_server"
+    wizard._run_validation(setup)
+
+    assert calls == ["llm"]

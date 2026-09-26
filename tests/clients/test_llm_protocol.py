@@ -245,46 +245,52 @@ def test_openai_provider_per_call_max_tokens_override_without_base_url(monkeypat
     assert kwargs["max_completion_tokens"] == 8192
 
 
-def test_openai_provider_omits_cap_for_self_hosted_without_explicit_setting(monkeypatch):
+def test_openai_provider_omits_cap_for_self_hosted_without_explicit_setting():
     """Self-hosted servers (base_url set) reject caps above their unknown
     max_model_len. When the user hasn't explicitly set LLM_MAX_TOKENS, the
     global cap must be omitted."""
     from bibr.clients import providers
     from bibr.config import Settings
 
-    monkeypatch.setattr(Settings.llm, "base_url", "http://127.0.0.1:8000/v1")
-    monkeypatch.setattr(
-        Settings.llm,
-        "__pydantic_fields_set__",
-        Settings.llm.model_fields_set - {"max_tokens"},
-    )
+    # Manual save/restore: pydantic re-marks a field as explicit on every
+    # setattr, so monkeypatch undo of the values below would re-pollute the
+    # restored fields set. Restore values first, the set object last.
+    prev_base_url = Settings.llm.base_url
+    prev_fields = set(Settings.llm.model_fields_set)
+    Settings.llm.base_url = "http://127.0.0.1:8000/v1"
+    Settings.llm.__pydantic_fields_set__ = prev_fields - {"max_tokens"}
+    try:
+        provider = providers.get("openai")
 
-    provider = providers.get("openai")
+        kwargs = provider.call_kwargs(reasoning_effort=None)
+        assert "max_completion_tokens" not in kwargs
+    finally:
+        Settings.llm.base_url = prev_base_url
+        Settings.llm.__pydantic_fields_set__ = prev_fields
 
-    kwargs = provider.call_kwargs(reasoning_effort=None)
-    assert "max_completion_tokens" not in kwargs
 
-
-def test_openai_provider_keeps_per_call_cap_for_self_hosted(monkeypatch):
+def test_openai_provider_keeps_per_call_cap_for_self_hosted():
     """A task-specific cap is intentional and must survive the custom-base-URL
     compatibility path even when LLM_MAX_TOKENS itself was not configured."""
     from bibr.clients import providers
     from bibr.config import Settings
 
-    monkeypatch.setattr(Settings.llm, "base_url", "http://127.0.0.1:8000/v1")
-    monkeypatch.setattr(
-        Settings.llm,
-        "__pydantic_fields_set__",
-        Settings.llm.model_fields_set - {"max_tokens"},
-    )
+    # Manual save/restore (see above): monkeypatch undo would re-mark fields.
+    prev_base_url = Settings.llm.base_url
+    prev_fields = set(Settings.llm.model_fields_set)
+    Settings.llm.base_url = "http://127.0.0.1:8000/v1"
+    Settings.llm.__pydantic_fields_set__ = prev_fields - {"max_tokens"}
+    try:
+        provider = providers.get("openai")
+        kwargs_override = provider.call_kwargs(reasoning_effort=None, max_tokens=8192)
+        assert kwargs_override["max_tokens"] == 8192
+        assert "max_completion_tokens" not in kwargs_override
+    finally:
+        Settings.llm.base_url = prev_base_url
+        Settings.llm.__pydantic_fields_set__ = prev_fields
 
-    provider = providers.get("openai")
-    kwargs_override = provider.call_kwargs(reasoning_effort=None, max_tokens=8192)
-    assert kwargs_override["max_tokens"] == 8192
-    assert "max_completion_tokens" not in kwargs_override
 
-
-def test_openai_provider_keeps_cap_for_self_hosted_with_explicit_setting(monkeypatch):
+def test_openai_provider_keeps_cap_for_self_hosted_with_explicit_setting():
     """When the user explicitly sets LLM_MAX_TOKENS, the cap is kept even with
     base_url set — that's the opt-in for users who want a hard cap. Self-hosted
     OpenAI-compatible servers such as vllm-mlx commonly expose this as
@@ -293,22 +299,26 @@ def test_openai_provider_keeps_cap_for_self_hosted_with_explicit_setting(monkeyp
     from bibr.clients import providers
     from bibr.config import Settings
 
-    monkeypatch.setattr(Settings.llm, "base_url", "http://127.0.0.1:8000/v1")
-    monkeypatch.setattr(Settings.llm, "max_tokens", 4096)
-    monkeypatch.setattr(
-        Settings.llm,
-        "__pydantic_fields_set__",
-        Settings.llm.model_fields_set | {"max_tokens"},
-    )
+    # Manual save/restore (see above): monkeypatch undo would re-mark fields.
+    prev_base_url = Settings.llm.base_url
+    prev_max_tokens = Settings.llm.max_tokens
+    prev_fields = set(Settings.llm.model_fields_set)
+    Settings.llm.base_url = "http://127.0.0.1:8000/v1"
+    Settings.llm.max_tokens = 4096
+    Settings.llm.__pydantic_fields_set__ = prev_fields | {"max_tokens"}
+    try:
+        provider = providers.get("openai")
 
-    provider = providers.get("openai")
+        kwargs = provider.call_kwargs(reasoning_effort=None)
+        assert kwargs["max_tokens"] == 4096
+        assert "max_completion_tokens" not in kwargs
 
-    kwargs = provider.call_kwargs(reasoning_effort=None)
-    assert kwargs["max_tokens"] == 4096
-    assert "max_completion_tokens" not in kwargs
-
-    kwargs_override = provider.call_kwargs(reasoning_effort=None, max_tokens=8192)
-    assert kwargs_override["max_tokens"] == 8192
+        kwargs_override = provider.call_kwargs(reasoning_effort=None, max_tokens=8192)
+        assert kwargs_override["max_tokens"] == 8192
+    finally:
+        Settings.llm.base_url = prev_base_url
+        Settings.llm.max_tokens = prev_max_tokens
+        Settings.llm.__pydantic_fields_set__ = prev_fields
 
 
 def test_openai_provider_uses_json_schema_for_custom_base_url(monkeypatch):
