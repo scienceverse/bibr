@@ -123,10 +123,15 @@ class VllmMlxServer:
         )
 
         # Poll /health until ready or timeout
+        self._wait_until_ready()
+
+    def _wait_until_ready(self) -> None:
+        """Poll /health until the engine reports ``model_loaded`` or timeout."""
+        assert self._process is not None  # noqa: S101 — spawned by __init__ before this call
         timeout = self._settings.vllm_mlx.startup_timeout
         deadline = time.monotonic() + timeout
         poll_interval = 2.0
-        health_url = f"http://localhost:{port}/health"
+        health_url = f"http://localhost:{self._port}/health"
 
         try:
             while time.monotonic() < deadline:
@@ -137,7 +142,7 @@ class VllmMlxServer:
                     self._close_stderr_fh()
                     self._process = None
                     raise RuntimeError(
-                        f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[:500]}"
+                        f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[-500:]}"
                     )
                 try:
                     status, _reason, raw_body = request_bytes(health_url, timeout=5)
@@ -149,7 +154,9 @@ class VllmMlxServer:
                         # request pays the full paging cost and can blow past
                         # the per-request read-timeout.
                         if body.get("model_loaded"):
-                            logger.info("vllm-mlx server ready (model=%s, port=%d)", model, port)
+                            logger.info(
+                                "vllm-mlx server ready (model=%s, port=%d)", self._model, self._port
+                            )
                             self._warmup_model()
                             return
                 except (LocalHttpError, json.JSONDecodeError):

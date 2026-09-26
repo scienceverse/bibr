@@ -164,9 +164,7 @@ def _bicubic_passes(src: np.ndarray, out_h: int, out_w: int, *, round_between: b
     return out
 
 
-def _x_pass(
-    src: np.ndarray, out_w: int, ix: np.ndarray, wx: np.ndarray
-) -> np.ndarray:
+def _x_pass(src: np.ndarray, out_w: int, ix: np.ndarray, wx: np.ndarray) -> np.ndarray:
     """Column scaling, row blocks across threads when the image is tall.
 
     Blocks write disjoint row slices and each runs the same per-tap loop the

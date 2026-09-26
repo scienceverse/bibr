@@ -351,3 +351,56 @@ def test_two_agreeing_200s_with_live_process_is_readiness(monkeypatch):
 
     server._wait_until_healthy()
     assert len(calls) == 2
+
+
+def test_startup_error_reports_tail_end(tmp_path):
+    """The exit error keeps the LAST 500 chars (the OOM line), not the first (7)."""
+    process = MagicMock(returncode=1)
+    process.poll.return_value = 1
+    server = _bare_server(process)
+    log = tmp_path / "vllm.log"
+    log.write_bytes(
+        b"\n".join(
+            f"INFO loading weights shard {i:3d}/200 into unified memory".encode()
+            for i in range(200)
+        )
+        + b"\nRuntimeError: Metal OOM: Ran out of unified memory allocating weights\n"
+    )
+    server._stderr_log = log
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server._wait_until_healthy()
+
+    assert "Metal OOM" in str(excinfo.value)
+    assert "shard   0/200" not in str(excinfo.value)
+
+
+def test_second_probe_non_200_is_not_readiness(monkeypatch):
+    """A first 200 followed by a 503 second probe must not declare readiness.
+
+    Pins the `if status == 200` gate on the agreeing probe: without it the
+    first 200 alone would return.
+    """
+    from bibr.local import vllm_llm
+
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.return_value = None
+    calls = []
+
+    def request(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            return (200, "OK", b"{}")
+        return (503, "Service Unavailable", b"{}")
+
+    monkeypatch.setattr(mod, "request_bytes", request)
+    monkeypatch.setattr(server._settings.llm, "vllm_startup_timeout", 10)
+    monkeypatch.setattr(
+        vllm_llm.time, "monotonic", MagicMock(side_effect=[0, 1, 20, 20, 20, 20, 20])
+    )
+    monkeypatch.setattr(vllm_llm.time, "sleep", lambda s: None)
+    monkeypatch.setattr(server, "shutdown", MagicMock())
+
+    with pytest.raises(TimeoutError, match="did not become ready"):
+        server._wait_until_healthy()
+    assert len(calls) == 2

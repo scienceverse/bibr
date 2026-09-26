@@ -17,15 +17,24 @@ def test_x_pass_threaded_matches_single_worker(monkeypatch):
     Each row block runs the same per-tap accumulation into disjoint slices,
     so threads only overlap the strided gathers. A tall random array forces
     the multi-worker path; forcing one worker replays the old serial order.
+    Both are also checked against an independently computed reference loop,
+    so a worker that silently skips its block cannot hide behind a reused
+    output buffer.
     """
     rng = np.random.default_rng(11)
     src = rng.integers(0, 256, size=(3, 600, 500)).astype(np.float32)
     ix, wx = mod._resize_plan(500, 200)
+    c, h, _w = src.shape
+    reference = np.zeros((c, h, 200), dtype=np.float32)
+    for k in range(4):
+        reference += src[:, :, ix[:, k]] * wx[None, None, :, k]
     monkeypatch.setattr(mod, "_RESIZE_THREADS", 1)
     serial = mod._x_pass(src, 200, ix, wx)
+    assert np.array_equal(serial, reference)
     monkeypatch.setattr(mod, "_RESIZE_THREADS", 8)
     threaded = mod._x_pass(src, 200, ix, wx)
     assert np.array_equal(serial, threaded)
+    assert np.array_equal(threaded, reference)
 
 
 def test_resize_kernels_agree_with_threaded_x_pass(monkeypatch):

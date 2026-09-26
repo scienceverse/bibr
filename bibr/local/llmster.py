@@ -46,13 +46,21 @@ def run_lms_command(lms: str, args: list[str], *, json_output: bool = False) -> 
             timeout=_LMS_COMMAND_TIMEOUT_S,
         )
     except subprocess.TimeoutExpired as exc:
-        # A large-model `load` can outlast the timeout; surface which command
-        # hung and how to shrink it instead of a bare traceback.
+        # Name the hung subcommand: `load` of a big model is the usual
+        # suspect, but daemon/server/ps probes share this path.
+        rendered = shlex.join(command)
+        subcommand = " ".join(command[1:])
+        if command[1:2] == ["load"]:
+            hint = (
+                "The model may still be loading — retry, or lower "
+                "LLM_LLMSTER_CONTEXT_LENGTH / pick a smaller model so the load fits."
+            )
+        else:
+            hint = "Retry once the LM Studio daemon settles."
         raise UpstreamServiceError(
             "llmster",
-            f"`{shlex.join(command)}` timed out after {_LMS_COMMAND_TIMEOUT_S}s. "
-            "The model may still be loading — retry, or lower "
-            "LLMSTER_CONTEXT_LENGTH / pick a smaller model so the load fits.",
+            f"`{rendered}` timed out after {_LMS_COMMAND_TIMEOUT_S}s "
+            f"(subcommand: {subcommand}). {hint}",
         ) from exc
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout).strip()
@@ -246,6 +254,15 @@ class LlmsterLlmServer:
         settings.llm.base_url = f"http://127.0.0.1:{self._port}/v1"
         settings.llm.api_key = "lm-studio"
         settings.llm.model = self._identifier
+        if "timeout_seconds" not in settings.llm.model_fields_set:
+            # Cloud-shaped 30 s (60 s hard) kills local generations that emit
+            # thousands of tokens at laptop tok/s; serialize like the other
+            # managed local backends unless the user pinned the fields.
+            settings.llm.timeout_seconds = 300
+            logger.info("Local llmster backend — raising llm.timeout_seconds 30s->300s")
+        if "max_concurrency" not in settings.llm.model_fields_set:
+            settings.llm.max_concurrency = 1
+            logger.info("Local llmster backend — capping llm.max_concurrency to 1")
         if "rate_limit_rpm" not in settings.llm.model_fields_set:
             # Our own server has no external quota to protect; the cloud 60
             # rpm default would only add dead time between serialized calls.

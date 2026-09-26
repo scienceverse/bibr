@@ -67,9 +67,11 @@ class RefSegmenter:
         # The shift below is NOT inherited from the parser (RefParser parses
         # with add_special_tokens=False and applies no shift): it compensates
         # this checkpoint's own output alignment — one tag per input position,
-        # each position emitting its predecessor's tag — so it applies
-        # uniformly to EVERY window, first and overlapping alike. Shifting
-        # only the first window would misalign every later window by one.
+        # each position emitting the tag of its successor token (labels were
+        # aligned without [CLS] but fed with it; see
+        # scripts/train_segmenter_v4.py) — so it applies uniformly to EVERY
+        # window, first and overlapping alike. Shifting only the first window
+        # would misalign every later window by one.
         enc = self.tokenizer(
             text,
             truncation=False,

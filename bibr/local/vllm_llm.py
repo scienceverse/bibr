@@ -202,7 +202,7 @@ class VllmLlmServer:
                 tail = self._read_stderr_tail()
                 self._close_stderr_fh()
                 self._process = None
-                raise RuntimeError(f"vLLM process exited during startup (code {rc}): {tail[:500]}")
+                raise RuntimeError(f"vLLM process exited during startup (code {rc}): {tail[-500:]}")
             try:
                 status, _reason, _body = request_bytes(health_url, timeout=5)
                 if status == 200:

@@ -308,6 +308,35 @@ def test_api_key_uses_llm_key_for_same_provider():
     assert _api_key_for_provider("google", settings) == "sk-test-shared-key-placeholder"
 
 
+def test_api_key_ignores_llm_key_pointing_at_another_endpoint():
+    """Same provider string but `llm.base_url` set: the key may belong to a proxy (2).
+
+    With LLM_PROVIDER=openai and LLM_BASE_URL pointing at OpenRouter/a fleet
+    proxy, the LLM key must not be sent to api.openai.com for `--ocr openai`.
+    """
+    from bibr.local.ocr_cloud import _api_key_for_provider
+
+    settings = _vision_settings(
+        **{
+            "llm.provider": "openai",
+            "llm.base_url": "https://openrouter.ai/api/v1",
+            "llm.api_key": "sk-test-third-party-key-placeholder",
+        }
+    )
+    # OpenAI vision with no matching LLM key: leave unset for SDK env fallback.
+    assert _api_key_for_provider("openai", settings) is None
+
+    google_settings = _vision_settings(
+        **{
+            "llm.provider": "google",
+            "llm.base_url": "https://fleet-proxy.example/v1",
+            "llm.api_key": "sk-test-proxy-key-placeholder",
+            "GOOGLE_API_KEY": "sk-test-google-key-placeholder",
+        }
+    )
+    assert _api_key_for_provider("google", google_settings) == "sk-test-google-key-placeholder"
+
+
 async def test_aget_client_drops_placeholder_llm_key(monkeypatch):
     """End to end: a managed-local snapshot never sends its placeholder to Google (2)."""
     import instructor

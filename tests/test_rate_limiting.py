@@ -453,8 +453,8 @@ def _fakeredis_limiter(**kwargs):
 async def test_strict_interval_stores_whole_milliseconds():
     """The next-allowed stamp is an int-ms string, not a float (ml-2).
 
-    Float seconds lose sub-ms precision in Lua's doubles, drifting every
-    reservation by up to ~1ms.
+    Redis converts a Lua number reply to an integer, so float-second waits
+    came back truncated (a 0.3 s wait became 0) and callers never slept.
     """
     limiter, fake = _fakeredis_limiter(max_requests=1, window_seconds=0.2)
     await limiter.acquire()
@@ -474,6 +474,37 @@ async def test_strict_interval_enforces_spacing():
     await limiter.acquire()
     elapsed = time.monotonic() - t0
     assert elapsed >= 0.19
+
+
+@pytest.mark.asyncio
+async def test_strict_interval_holds_spacing_under_concurrency():
+    """Concurrent workers stay spaced: the key TTL covers the queued horizon (ml-2).
+
+    A TTL of 2x the interval expires the queued next-allowed stamp while
+    callers are still sleeping, so a late caller sees no key and fires
+    immediately (1.5x over-rate with 12 workers). The TTL now runs from the
+    queued horizon plus a margin, so every gap holds.
+    """
+    import asyncio
+    import time
+
+    interval = 0.1
+    workers, per_worker = 6, 3
+    limiter, _ = _fakeredis_limiter(max_requests=1, window_seconds=interval)
+    starts: list[float] = []
+
+    async def worker():
+        for _ in range(per_worker):
+            await limiter.acquire()
+            starts.append(time.monotonic())
+
+    t0 = time.monotonic()
+    await asyncio.gather(*(worker() for _ in range(workers)))
+    assert len(starts) == workers * per_worker
+    ordered = sorted(starts)
+    gaps = [b - a for a, b in zip(ordered, ordered[1:], strict=False)]
+    assert min(gaps) >= interval / 2, f"min gap {min(gaps) * 1000:.1f} ms"
+    assert (time.monotonic() - t0) >= (len(starts) - 1) * interval * 0.9
 
 
 @pytest.mark.asyncio

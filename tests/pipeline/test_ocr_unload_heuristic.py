@@ -81,3 +81,80 @@ def test_local_ocr_still_unloads_with_local_llm():
     """Non-cloud backends keep the old balanced/local unload behaviour (2 guard)."""
     assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx", None, "paddle") is True
     assert _should_unload_ocr_after_chunk("balanced", "vllm-mlx", None, None) is True
+
+
+# ---------------------------------------------------------------------------
+# local-runtimes sweep: the per-chunk call sites forward cfg.ocr_backend (2)
+# ---------------------------------------------------------------------------
+
+
+def _stage_ctx(*, ocr_backend, memory_mode="balanced", llm_backend="llama-cpp"):
+    """Minimal pipeline context driving the real OCR-stage teardown tail."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.context import RunConfig
+
+    settings = GlobalSettings()
+    cfg = RunConfig(memory_mode=memory_mode, llm_backend=llm_backend, ocr_backend=ocr_backend)
+    rm = MagicMock()
+    rm.ocr_runtime_identity = None
+    rm.ocr = MagicMock(loaded=False)
+    rm.shutdown_ocr = AsyncMock()
+    ctx = MagicMock()
+    ctx.config = cfg
+    ctx.settings = settings
+    ctx.resources = rm
+    ctx.alive.return_value = []
+    ctx.file_states = []
+    ctx.scratch = {}
+    ctx.signals = MagicMock(defer_ocr_teardown=False, ocr_init_error=None)
+    ctx.progress = MagicMock()
+    return ctx, rm
+
+
+@pytest.mark.asyncio
+async def test_ocr_stage_keeps_cloud_vision_loaded(monkeypatch):
+    """OcrStage must pass cfg.ocr_backend to the teardown check (2).
+
+    balanced + llama-cpp with gemini OCR keeps the client: dropping the
+    backend argument would unload it (the old per-chunk thrash).
+    """
+    from unittest.mock import AsyncMock
+
+    from bibr.pipeline.stages.ocr import OcrStage
+
+    monkeypatch.setattr(OcrStage, "_run_local", AsyncMock())
+    ctx, rm = _stage_ctx(ocr_backend="gemini")
+    await OcrStage()._run(ctx)
+    rm.shutdown_ocr.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ocr_stage_unloads_local_ocr_with_local_llm(monkeypatch):
+    """Same config with paddle OCR still unloads for the local LLM (2 guard)."""
+    from unittest.mock import AsyncMock
+
+    from bibr.pipeline.stages.ocr import OcrStage
+
+    monkeypatch.setattr(OcrStage, "_run_local", AsyncMock())
+    ctx, rm = _stage_ctx(ocr_backend="paddle")
+    await OcrStage()._run(ctx)
+    rm.shutdown_ocr.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_interleaved_stage_keeps_cloud_vision_loaded():
+    """InterleavedRenderOcrStage must pass cfg.ocr_backend too (2).
+
+    Its once-per-chunk teardown mirrors OcrStage's; dropping the backend
+    would tear down a weightless HTTPS client after every chunk.
+    """
+    from unittest.mock import AsyncMock
+
+    from bibr.pipeline.stages.render_ocr import InterleavedRenderOcrStage
+
+    stage = InterleavedRenderOcrStage(layout=AsyncMock(), native_text=AsyncMock(), ocr=AsyncMock())
+    ctx, rm = _stage_ctx(ocr_backend="gemini")
+    await stage.run(ctx)
+    rm.shutdown_ocr.assert_not_awaited()

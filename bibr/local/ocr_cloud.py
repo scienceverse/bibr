@@ -70,10 +70,13 @@ def _api_key_for_provider(provider: str, settings: Any) -> str | None:
 
     ``settings.llm.api_key`` is used only when it is a real key for the SAME
     cloud provider that serves both the LLM and vision calls (e.g. LLM on
-    Gemini + OCR on Gemini). A managed-local placeholder, or a key belonging
-    to a different provider (LLM on OpenAI + OCR on Gemini), falls through to
-    the vision provider's own key — a cross-provider key is always a 401, and
-    a placeholder is never a credential.
+    Gemini + OCR on Gemini) *and* the LLM calls go to that provider's own
+    endpoint: a set ``llm.base_url`` may point at another endpoint (a fleet
+    proxy, OpenRouter, DeepSeek) whose key must never be sent to the vision
+    provider. A managed-local placeholder, or a key belonging to a different
+    provider (LLM on OpenAI + OCR on Gemini), falls through to the vision
+    provider's own key — a cross-provider key is always a 401, and a
+    placeholder is never a credential.
     """
     vision = _PROVIDER_STRINGS.get(provider, provider)
     llm_key = settings.llm.api_key
@@ -81,7 +84,9 @@ def _api_key_for_provider(provider: str, settings: Any) -> str | None:
         llm_key = None
     if llm_key:
         llm_provider = _PROVIDER_STRINGS.get(settings.llm.provider, settings.llm.provider)
-        if llm_provider == vision:
+        llm_base_url = getattr(settings.llm, "base_url", None)
+        vision_base_url = getattr(settings.ocr_vision, "base_url", None)
+        if llm_provider == vision and (not llm_base_url or llm_base_url == vision_base_url):
             return llm_key
     if vision == "google":
         return settings.GOOGLE_API_KEY

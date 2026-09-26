@@ -205,7 +205,7 @@ def _models_server(served_ids):
 
 
 def test_load_timeout_surfaces_actionable_error(monkeypatch):
-    """A hung `lms load` maps to UpstreamServiceError naming the model (3)."""
+    """A hung `lms load` maps to UpstreamServiceError naming the command (3)."""
     import subprocess
 
     from bibr.local import llmster
@@ -215,10 +215,32 @@ def test_load_timeout_surfaces_actionable_error(monkeypatch):
 
     monkeypatch.setattr(llmster.subprocess, "run", hang)
 
-    with pytest.raises(UpstreamServiceError, match="org/model.*LLMSTER_CONTEXT_LENGTH"):
+    with pytest.raises(UpstreamServiceError) as excinfo:
         llmster.run_lms_command(
             "/usr/local/bin/lms", ["load", "org/model", "--identifier", "bibr-model"]
         )
+    message = str(excinfo.value)
+    assert "org/model" in message
+    assert "LLM_LLMSTER_CONTEXT_LENGTH" in message
+    assert "subcommand: load" in message
+
+
+def test_non_load_timeout_names_command_without_load_hint(monkeypatch):
+    """A hung probe (not `load`) names its subcommand and omits the load hint (3)."""
+    import subprocess
+
+    from bibr.local import llmster
+
+    def hang(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=args[0], timeout=120)
+
+    monkeypatch.setattr(llmster.subprocess, "run", hang)
+
+    with pytest.raises(UpstreamServiceError) as excinfo:
+        llmster.run_lms_command("/usr/local/bin/lms", ["ps", "--json"])
+    message = str(excinfo.value)
+    assert "subcommand: ps --json" in message
+    assert "LLM_LLMSTER_CONTEXT_LENGTH" not in message
 
 
 def test_reused_identifier_pointing_at_other_model_raises(monkeypatch):
@@ -311,3 +333,61 @@ def test_configure_llm_client_raises_rate_limit_rpm(monkeypatch):
     assert "rate_limit_rpm" in server._settings.llm.model_fields_set
     server.configure_llm_client()
     assert server._settings.llm.rate_limit_rpm == 30
+
+
+def test_configure_llm_client_raises_timeout_when_unset():
+    """Unset timeout auto-raises to 300 s like the other local backends (3)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import llmster
+
+    server = llmster.LlmsterLlmServer.__new__(llmster.LlmsterLlmServer)
+    server._identifier = "bibr-model"
+    server._port = 4321
+    server._settings = GlobalSettings()
+    server._settings.llm.model_fields_set.discard("timeout_seconds")
+    server.configure_llm_client()
+    assert server._settings.llm.timeout_seconds == 300
+
+
+def test_configure_llm_client_keeps_explicit_timeout():
+    """An explicit timeout survives configure (3 guard)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import llmster
+
+    server = llmster.LlmsterLlmServer.__new__(llmster.LlmsterLlmServer)
+    server._identifier = "bibr-model"
+    server._port = 4321
+    server._settings = GlobalSettings()
+    server._settings.llm.timeout_seconds = 45
+    assert "timeout_seconds" in server._settings.llm.model_fields_set
+    server.configure_llm_client()
+    assert server._settings.llm.timeout_seconds == 45
+
+
+def test_configure_llm_client_serializes_concurrency_when_unset():
+    """Unset concurrency serializes to 1 like vllm-mlx/rapid-mlx (3)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import llmster
+
+    server = llmster.LlmsterLlmServer.__new__(llmster.LlmsterLlmServer)
+    server._identifier = "bibr-model"
+    server._port = 4321
+    server._settings = GlobalSettings()
+    server._settings.llm.model_fields_set.discard("max_concurrency")
+    server.configure_llm_client()
+    assert server._settings.llm.max_concurrency == 1
+
+
+def test_configure_llm_client_keeps_explicit_concurrency():
+    """An explicit concurrency survives configure (3 guard)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import llmster
+
+    server = llmster.LlmsterLlmServer.__new__(llmster.LlmsterLlmServer)
+    server._identifier = "bibr-model"
+    server._port = 4321
+    server._settings = GlobalSettings()
+    server._settings.llm.max_concurrency = 4
+    assert "max_concurrency" in server._settings.llm.model_fields_set
+    server.configure_llm_client()
+    assert server._settings.llm.max_concurrency == 4

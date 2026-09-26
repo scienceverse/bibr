@@ -189,12 +189,12 @@ def test_model_only_client_constructor_uses_one_model_for_server_and_http(monkey
     assert http_factory.call_args.kwargs["model"] == "custom/PaddleOCR-VL"
 
 
-def test_candidate_model_beats_requested_model_path(monkeypatch):
-    """The factory's per-candidate `model` wins over the raw `model_path` (16).
+def test_requested_model_path_beats_candidate_model(monkeypatch):
+    """An explicit `--ocr-model` request wins over the candidate default.
 
-    The factory passes the winning candidate's resolved model as `model` and
-    the raw requested model as `model_path`; preferring `model_path` would
-    re-launch the requested model even when a fallback chain selected another.
+    The factory passes the raw requested model as `model_path` and the
+    winning candidate's model as `model`; the request must be launched, as
+    on main — the candidate is only the default when nothing was requested.
     """
     from bibr.config import GlobalSettings
     from bibr.local import mlx_vlm_ocr as mod
@@ -211,5 +211,5 @@ def test_candidate_model_beats_requested_model_path(monkeypatch):
         settings=GlobalSettings(),
     )
 
-    assert server_factory.call_args.kwargs["model"] == "candidate/PaddleOCR-VL"
-    assert http_factory.call_args.kwargs["model"] == "candidate/PaddleOCR-VL"
+    assert server_factory.call_args.kwargs["model"] == "requested/PaddleOCR-VL"
+    assert http_factory.call_args.kwargs["model"] == "requested/PaddleOCR-VL"

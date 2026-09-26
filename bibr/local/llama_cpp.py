@@ -68,7 +68,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--host": frozenset({"--host"}),
     "--port": frozenset({"--port"}),
     "--alias": frozenset({"--alias"}),
-    "-hf": frozenset({"-hf", "--hf-repo"}),
+    "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -249,7 +249,14 @@ def _strip_one_quote_pair(token: str) -> str:
 
 
 def split_extra_args(value: str, *, setting: str = "llama_cpp_extra_args") -> list[str]:
-    """Split user CLI arguments with the quoting rules of the host OS."""
+    """Split user CLI arguments with shlex using the host platform's rules.
+
+    Pass each flag and its value as separate tokens, quoting values that
+    contain spaces: ``--chat-template-file "C:\\path with space\\t.jinja"``.
+    That is the only supported form: ``--flag="value with space"`` still
+    splits at the space on Windows (non-POSIX shlex), as do JSON values
+    with escaped quotes, so use the separate-token form instead.
+    """
     posix = os.name != "nt"
     try:
         parts = shlex.split(value, posix=posix)
@@ -328,9 +335,11 @@ def _merge_cli_args(base: list[str], extra: list[str]) -> list[str]:
 def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
     """Runtime flags for *role*, gating optional features on *available*.
 
-    Every optional flag added here is also stripped by the startup-retry
-    fallback (via ``available=frozenset()``), so an older build that lists a
-    flag in ``--help`` but crashes on it still recovers to a safe launch.
+    The startup retry strips every optional flag added here when the stderr
+    tail matches an argument-parse error (see ``_ARG_ERROR_MARKERS``), so a
+    build whose ``--help`` lists a flag it does not actually accept still
+    recovers to a safe launch. Anything else — a crash, an OOM, any message
+    outside those markers — fails fast with no retry.
     """
     if role not in ("ocr", "llm"):
         raise ValueError(f"unknown llama.cpp server role {role!r} (expected 'ocr' or 'llm')")
@@ -406,7 +415,9 @@ def _n_slots_from_argv(argv: list[str]) -> int:
 
 # Server-identity flags a user must never override via extra args: bibr polls
 # the configured port/alias and would lose (then kill) a server that moved.
-_IDENTITY_OPTIONS = frozenset({"--port", "--host", "--alias", "-hf"})
+# `--host` is deliberately allowed: the base argv binds loopback and a user
+# `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf"})
 
 
 def _check_no_identity_override(extra: list[str], *, role: str) -> None:
@@ -422,7 +433,7 @@ def _check_no_identity_override(extra: list[str], *, role: str) -> None:
         if _canonical_option(bare) in _IDENTITY_OPTIONS:
             raise UpstreamServiceError(
                 "local inference",
-                f"{extra_setting} must not set {bare}: the managed server's host, port, "
+                f"{extra_setting} must not set {bare}: the managed server's port, "
                 f"alias and model are fixed, and bibr polls the configured port — it would "
                 f"time out and kill a healthy server that moved. Set {port_setting} to move "
                 "the server instead.",

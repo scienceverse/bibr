@@ -1301,7 +1301,7 @@ def test_startup_no_retry_on_load_failure(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "flag", ["--port 9000", "--host 0.0.0.0", "--alias other", "-hf other/repo"]
+    "flag", ["--port 9000", "--alias other", "-hf other/repo", "-hfr other/repo"]
 )
 def test_build_server_argv_rejects_identity_override(flag):
     """Extra args must not move the server bibr polls — point at the port setting (14)."""
@@ -1335,6 +1335,24 @@ def test_build_server_argv_rejects_identity_override_ocr_role():
             role="ocr",
             available=frozenset(),
         )
+
+
+def test_build_server_argv_allows_host_override():
+    """`--host` in extra args is honoured as on main: binding 0.0.0.0 still
+    answers the loopback health poll, so it is not an identity override."""
+    from bibr.local.llama_cpp import build_server_argv
+
+    argv = build_server_argv(
+        ["llama-server"],
+        model="m",
+        port=8770,
+        context_size=8192,
+        extra_args="--host 0.0.0.0",
+        role="llm",
+        available=frozenset(),
+    )
+    assert argv.count("--host") == 1
+    assert argv[argv.index("--host") + 1] == "0.0.0.0"  # noqa: S104
 
 
 def test_build_server_argv_names_setting_on_bad_quote():

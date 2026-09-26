@@ -117,10 +117,9 @@ class AsyncRedisRateLimiter:
         Enforce strict time interval between requests using Lua script for atomicity.
 
         All times cross into Lua as whole MILLISECONDS (ints). Passing float
-        seconds would lose sub-millisecond precision in Lua's doubles (a
-        millisecond-epoch float like 1758782312123.4567 has more significant
-        digits than a double holds), corrupting the stored next-allowed stamp
-        and the returned wait by up to ~1ms per call.
+        seconds would break spacing: Redis converts a Lua number reply to an
+        integer, so a fractional-second wait (e.g. 0.3 s) came back as 0 and
+        the caller never slept.
         """
         script = """
         local key = KEYS[1]
@@ -136,7 +135,7 @@ class AsyncRedisRateLimiter:
 
         local new_next = math.max(now_ms, next_allowed) + interval_ms
         redis.call('SET', key, new_next)
-        redis.call('PEXPIRE', key, math.ceil(interval_ms * 2))
+        redis.call('PEXPIRE', key, math.ceil(new_next - now_ms + interval_ms))
 
         return wait_ms
         """
@@ -196,8 +195,9 @@ class AsyncRedisRateLimiter:
         retries = 0
         while True:
             try:
-                # Whole milliseconds: Lua doubles cannot hold fractional-ms
-                # precision (see _acquire_strict_interval), so quantize here.
+                # Whole milliseconds: the strict-interval path reports waits in
+                # integer ms (Redis truncates Lua number replies), so quantize
+                # scores here for stable pruning and comparison.
                 now = int(time.time() * 1000) / 1000.0
                 window_start = now - self.window_seconds
                 member = f"{now}:{time.time_ns()}"
