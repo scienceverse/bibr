@@ -624,3 +624,77 @@ def test_postprocess_read_order_fallback_rb_selected_by_setting():
     det = _bare_detector(settings)
     regions = det._postprocess(dict(_TWO_COL_RESULT), 1000, 1000)
     assert [r["bbox_2d"][0] for r in regions] == [50, 50, 550, 550]
+
+
+def test_effective_layout_batch_defaults_to_cpu_single_page():
+    """Unset LAYOUT_BATCH_SIZE on CPU resolves to 1: batch 8 costs GBs of
+    ORT arena for no throughput gain."""
+    from bibr.config import GlobalSettings
+    from bibr.layout_utils import effective_layout_batch_size
+
+    assert effective_layout_batch_size(GlobalSettings(), "cpu") == 1
+
+
+def test_effective_layout_batch_keeps_eight_for_cuda():
+    from bibr.config import GlobalSettings
+    from bibr.layout_utils import effective_layout_batch_size
+
+    assert effective_layout_batch_size(GlobalSettings(), "cuda") == 8
+
+
+def test_effective_layout_batch_unknown_device_keeps_configured():
+    """An unknown device keeps the configured default (fail-safe)."""
+    from bibr.config import GlobalSettings
+    from bibr.layout_utils import effective_layout_batch_size
+
+    assert effective_layout_batch_size(GlobalSettings()) == 8
+    assert effective_layout_batch_size(GlobalSettings(), "mps") == 8
+
+
+def test_effective_layout_batch_explicit_setting_wins_on_cpu(monkeypatch):
+    """An operator-set LAYOUT_BATCH_SIZE is honored even on CPU."""
+    from bibr.config import GlobalSettings
+    from bibr.layout_utils import effective_layout_batch_size
+
+    monkeypatch.setenv("LAYOUT_BATCH_SIZE", "4")
+
+    assert effective_layout_batch_size(GlobalSettings(), "cpu") == 4
+    assert effective_layout_batch_size(GlobalSettings(), "cuda") == 4
+
+
+def test_local_layout_detect_sync_chunks_cpu_pages_singly():
+    """The local detector runs CPU pages one at a time by default."""
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.layout import LayoutDetector
+
+    det = object.__new__(LayoutDetector)
+    det._settings = GlobalSettings()
+    det._device = SimpleNamespace(type="cpu")
+    seen = []
+    det._detect_images = lambda chunk: seen.append(len(chunk)) or [[{}] for _ in chunk]
+
+    out = det._detect_sync([object()] * 5)
+
+    assert seen == [1, 1, 1, 1, 1]
+    assert len(out) == 5
+
+
+def test_local_layout_detect_sync_honors_explicit_batch_on_cpu(monkeypatch):
+    """An explicit LAYOUT_BATCH_SIZE still chunks by that size on CPU."""
+    from types import SimpleNamespace
+
+    from bibr.config import GlobalSettings
+    from bibr.local.layout import LayoutDetector
+
+    monkeypatch.setenv("LAYOUT_BATCH_SIZE", "4")
+    det = object.__new__(LayoutDetector)
+    det._settings = GlobalSettings()
+    det._device = SimpleNamespace(type="cpu")
+    seen = []
+    det._detect_images = lambda chunk: seen.append(len(chunk)) or [[{}] for _ in chunk]
+
+    det._detect_sync([object()] * 5)
+
+    assert seen == [4, 1]

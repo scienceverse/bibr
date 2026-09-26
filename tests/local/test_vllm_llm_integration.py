@@ -7,7 +7,10 @@ import importlib.util
 
 import pytest
 
-pytestmark = pytest.mark.slow
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.network,  # launches a real server and downloads its weights by design.
+]
 
 vllm_missing = importlib.util.find_spec("vllm") is None
 

@@ -204,11 +204,14 @@ def test_health_poll_returns_when_server_is_ready(monkeypatch):
     monkeypatch.setattr(Settings.llm, "vllm_startup_timeout", 10)
     monkeypatch.setattr(vllm_llm.time, "monotonic", MagicMock(side_effect=[0, 1]))
     monkeypatch.setattr(vllm_llm, "request_bytes", request)
+    monkeypatch.setattr(vllm_llm, "_HEALTH_GRACE_S", 0)
 
     server._wait_until_healthy()
 
-    process.poll.assert_called_once()
-    request.assert_called_once_with("http://localhost:9999/health", timeout=5)
+    # One 200 is not readiness: the grace re-probe must agree.
+    assert process.poll.call_count == 3
+    assert request.call_count == 2
+    request.assert_called_with("http://localhost:9999/health", timeout=5)
 
 
 def test_health_poll_reports_early_process_exit(tmp_path, monkeypatch):
@@ -302,3 +305,102 @@ def test_configure_llm_client_respects_explicit_rate_limit():
     server.configure_llm_client()
 
     assert server._settings.llm.rate_limit_rpm == 25
+
+
+def _mk_wait_server(monkeypatch):
+    """VllmLlmServer with a fake process and stubbed HTTP, driving the real wait."""
+    from bibr.config import GlobalSettings
+    from bibr.local import vllm_llm as mod
+
+    proc = MagicMock()
+    server = mod.VllmLlmServer.__new__(mod.VllmLlmServer)
+    server._settings = GlobalSettings()
+    server._model = "org/m"
+    server._port = 8872
+    server._process = proc
+    server._stderr_fh = None
+    server._read_stderr_tail = lambda n=2000: "boom"
+    server._close_stderr_fh = lambda: None
+    monkeypatch.setattr(mod, "_HEALTH_GRACE_S", 0.01)
+    return server, proc, mod
+
+
+def test_single_200_with_dying_process_is_not_readiness(monkeypatch):
+    """A lone 200 while our process dies must not declare readiness (15)."""
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.side_effect = [None, 1, 1]
+    proc.returncode = 1
+    calls = []
+    monkeypatch.setattr(
+        mod, "request_bytes", lambda url, **kw: calls.append(url) or (200, "OK", b"{}")
+    )
+
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        server._wait_until_healthy()
+    assert len(calls) == 1
+
+
+def test_two_agreeing_200s_with_live_process_is_readiness(monkeypatch):
+    """Two 200s with our process alive declare readiness (15 guard)."""
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.return_value = None
+    calls = []
+    monkeypatch.setattr(
+        mod, "request_bytes", lambda url, **kw: calls.append(url) or (200, "OK", b"{}")
+    )
+
+    server._wait_until_healthy()
+    assert len(calls) == 2
+
+
+def test_startup_error_reports_tail_end(tmp_path):
+    """The exit error keeps the LAST 500 chars (the OOM line), not the first (7)."""
+    process = MagicMock(returncode=1)
+    process.poll.return_value = 1
+    server = _bare_server(process)
+    log = tmp_path / "vllm.log"
+    log.write_bytes(
+        b"\n".join(
+            f"INFO loading weights shard {i:3d}/200 into unified memory".encode()
+            for i in range(200)
+        )
+        + b"\nRuntimeError: Metal OOM: Ran out of unified memory allocating weights\n"
+    )
+    server._stderr_log = log
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server._wait_until_healthy()
+
+    assert "Metal OOM" in str(excinfo.value)
+    assert "shard   0/200" not in str(excinfo.value)
+
+
+def test_second_probe_non_200_is_not_readiness(monkeypatch):
+    """A first 200 followed by a 503 second probe must not declare readiness.
+
+    Pins the `if status == 200` gate on the agreeing probe: without it the
+    first 200 alone would return.
+    """
+    from bibr.local import vllm_llm
+
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.return_value = None
+    calls = []
+
+    def request(url, **kw):
+        calls.append(url)
+        if len(calls) == 1:
+            return (200, "OK", b"{}")
+        return (503, "Service Unavailable", b"{}")
+
+    monkeypatch.setattr(mod, "request_bytes", request)
+    monkeypatch.setattr(server._settings.llm, "vllm_startup_timeout", 10)
+    monkeypatch.setattr(
+        vllm_llm.time, "monotonic", MagicMock(side_effect=[0, 1, 20, 20, 20, 20, 20])
+    )
+    monkeypatch.setattr(vllm_llm.time, "sleep", lambda s: None)
+    monkeypatch.setattr(server, "shutdown", MagicMock())
+
+    with pytest.raises(TimeoutError, match="did not become ready"):
+        server._wait_until_healthy()
+    assert len(calls) == 2

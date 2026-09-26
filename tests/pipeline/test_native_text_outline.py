@@ -35,6 +35,7 @@ def _adapt_outline_mock(monkeypatch):
         include_ref_geometry,
         min_chars,
         min_printable_ratio,
+        eligible_labels=None,
     ):
         import bibr.input.pdf_metadata as metadata_mod
         import bibr.input.pdf_outline as outline_mod
@@ -42,12 +43,10 @@ def _adapt_outline_mock(monkeypatch):
 
         layout = layout_results
         if fill_native_text:
-            layout = native_mod.fill_native_text_and_fonts(
-                pdf_bytes,
-                layout,
-                min_chars=min_chars,
-                min_printable_ratio=min_printable_ratio,
-            )
+            fill_kwargs = {"min_chars": min_chars, "min_printable_ratio": min_printable_ratio}
+            if eligible_labels is not None:
+                fill_kwargs["eligible_labels"] = eligible_labels
+            layout = native_mod.fill_native_text_and_fonts(pdf_bytes, layout, **fill_kwargs)
         metadata = metadata_mod.harvest_pdf_metadata(pdf_bytes, first_page_text)
         outline = outline_mod.extract_pdf_outline(pdf_bytes) if include_outline else []
         return PdfInspection((), layout, metadata, outline, [])
