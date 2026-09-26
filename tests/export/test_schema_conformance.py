@@ -100,21 +100,32 @@ def test_the_full_example_has_every_root_key_in_order():
 def _regenerate_full_example() -> None:
     """Rewrite ``valid/full.json`` from the shared demo paper (run this module)."""
     from bibr.export.json_export import _export_paper_payload
+    from bibr.extract.field_decisions import FieldCandidate, FieldDecision, FieldDecisions
     from bibr.extract.statement_scan import lexical_fallback_warning
-    from bibr.field_states import FieldScope, set_field_source
+    from bibr.field_states import FieldScope
     from bibr.paper_contents import PaperFigurePart
     from tests.export.conftest import _demo_paper, as_parsed
 
     paper = _demo_paper(with_refs=True)
     as_parsed(paper)
     # A pipeline run's field states (12.1): what the run attempted, and the
-    # steps that wrote the demo values.
-    paper.field_scope = FieldScope()
-    for field in ("title", "abstract", "keywords", "author", "published", "journal"):
-        set_field_source(paper.metadata, field, "llm")
-    set_field_source(paper.metadata, "paper_type", "classifier")
-    set_field_source(paper.metadata, "funding", "llm")
-    set_field_source(paper.metadata, "bib", "llm")
+    # decisions behind the demo values.
+    paper.field_scope = FieldScope(references_source="llm")
+    decisions = FieldDecisions()
+    for field, source, rule in (
+        ("title", "llm", "extracted"),
+        ("abstract", "llm", "extracted"),
+        ("keywords", "llm", "extracted"),
+        ("author", "llm", "extracted"),
+        ("published", "llm", "extracted"),
+        ("journal", "llm", "extracted"),
+        ("paper_type", "classifier", "classifier"),
+        ("funding_statement", "integrity_statement", "integrity_resolution"),
+        ("funding", "llm", "extracted"),
+    ):
+        candidate = FieldCandidate(field, source, None)
+        decisions.record(FieldDecision(field, None, candidate, rule))
+    paper.field_decisions = decisions
     paper.contents.sentences[
         1
     ].text = "It replicated prior work [1], t(28) = 3.42, see Table 1 and data."

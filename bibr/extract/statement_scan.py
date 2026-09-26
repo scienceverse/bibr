@@ -718,7 +718,11 @@ def scan_statements_fallback(contents: PaperContents, metadata: PaperMetadata) -
             author_aliases=author_aliases,
         )
         if captured:
-            setattr(metadata, field, captured)
+            from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+
+            apply_decision(
+                metadata, decide_value(field, FieldCandidate(field, "lexical_anchor", captured))
+            )
             contents.processing_warnings.append(lexical_fallback_warning(field))
 
 

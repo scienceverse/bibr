@@ -22,10 +22,20 @@ import pandas as pd
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
+from bibr.extract.field_decisions import (
+    Classification,
+    FieldCandidate,
+    FieldDecision,
+    apply_decision,
+    decide_authors,
+    decide_classification,
+    decide_value,
+    with_transforms,
+)
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
-from bibr.field_states import set_field_source
+from bibr.extract.title_subtitle import fold_printed_subtitle
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -344,7 +354,52 @@ def build_byline_group(resolution: FrontMatterResolution) -> BylineGroup:
 
 
 _NAME_TOKEN_RE = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
-_BYLINE_SUFFIX_STOP_WORDS = frozenset(
+# A translator credit printed under the byline ("Traducido del inglés por …",
+# "Translated by …", "Übersetzt von …") names someone who is not an author.
+# Folded tokens, as ``_name_tokens`` emits them.
+_TRANSLATOR_CREDIT_WORDS = frozenset(
+    {
+        "translated",
+        "translation",
+        "translator",
+        "traduccion",
+        "traducido",
+        "traducida",
+        "traductor",
+        "traductora",
+        "traduit",
+        "traduite",
+        "traduction",
+        "traducteur",
+        "traductrice",
+        "ubersetzt",
+        "ubersetzung",
+        "ubersetzer",
+        "ubersetzerin",
+        "traducao",
+        "traduzido",
+        "traduzida",
+        "tradutor",
+        "tradutora",
+        "vertaald",
+        "vertaling",
+        "vertaler",
+        "tradotto",
+        "tradotta",
+        "traduzione",
+        "traduttore",
+        "traduttrice",
+    }
+)
+# The word that hands the credit to the translator's name: "… by", "… de",
+# "… por", "… par", "… von", "… door", "… da", "… di".
+_TRANSLATOR_CREDIT_PREPOSITIONS = frozenset(
+    {"by", "de", "del", "por", "par", "von", "door", "da", "di", "dal"}
+)
+# How far back from a name the credit word may sit: "translated from the
+# original French by" is six tokens.
+_TRANSLATOR_CREDIT_WINDOW = 8
+_BYLINE_SUFFIX_STOP_WORDS = _TRANSLATOR_CREDIT_WORDS | frozenset(
     {
         "abstract",
         "affiliation",
@@ -482,12 +537,83 @@ def _fold_broken_diacritics(value: str) -> str:
     return without_marks.translate(_LATIN_BASE_TRANSLATION)
 
 
+# Surname prefixes printed with an inner capital ("McDonald", "DeKay",
+# "VanderWeele", "AlQahtani"). Any other lower-to-upper step inside a word is
+# two words whose space the PDF text layer never emitted: it positions the
+# next word instead of printing a space glyph, so "Selin Deniz Aksoy"
+# extracts as "Selin DenizAksoy".
+_CASE_JOIN_PREFIXES = frozenset(
+    {
+        "abd",
+        "abdel",
+        "abdul",
+        "abu",
+        "al",
+        "ben",
+        "bin",
+        "da",
+        "dal",
+        "das",
+        "de",
+        "del",
+        "della",
+        "des",
+        "di",
+        "do",
+        "dos",
+        "du",
+        "el",
+        "fitz",
+        "ibn",
+        "la",
+        "le",
+        "lo",
+        "mac",
+        "mc",
+        "ni",
+        "st",
+        "te",
+        "ten",
+        "ter",
+        "van",
+        "vande",
+        "vanden",
+        "vander",
+        "von",
+    }
+)
+_LETTER_RUN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def _case_join_words(word: str) -> list[str]:
+    """Split *word* at every lower-to-upper step not owned by a surname prefix."""
+
+    words: list[str] = []
+    start = 0
+    for index in range(1, len(word) - 1):
+        if not (word[index - 1].islower() and word[index].isupper() and word[index + 1].islower()):
+            continue
+        if word[start:index].casefold() in _CASE_JOIN_PREFIXES:
+            continue
+        words.append(word[start:index])
+        start = index
+    words.append(word[start:])
+    return words
+
+
+def _split_case_joins(value: str) -> str:
+    return _LETTER_RUN_RE.sub(lambda match: " ".join(_case_join_words(match.group(0))), value)
+
+
 def _name_tokens(value: str) -> tuple[str, ...]:
     # Marker stripping happens here, before casefolding, so that every name
     # comparison in this module is symmetric: printed byline text and extracted
     # author values are folded the same way, whichever side carries the marker.
-    normalized = _strip_attached_markers(
-        _fold_broken_diacritics(value).translate(_NAME_PUNCTUATION_TRANSLATION)
+    # Case joins split after it, once "Aksoy1" has lost its marker.
+    normalized = _split_case_joins(
+        _strip_attached_markers(
+            _fold_broken_diacritics(value).translate(_NAME_PUNCTUATION_TRANSLATION)
+        )
     )
     return tuple(token.casefold() for token in _NAME_TOKEN_RE.findall(normalized))
 
@@ -639,9 +765,71 @@ def grounded_authors_in_context(
     return grounded, rejected
 
 
+def _follows_translator_credit(preceding: tuple[str, ...]) -> bool:
+    window = preceding[-_TRANSLATOR_CREDIT_WINDOW:]
+    return bool(
+        window
+        and window[-1] in _TRANSLATOR_CREDIT_PREPOSITIONS
+        and not _TRANSLATOR_CREDIT_WORDS.isdisjoint(window[:-1])
+    )
+
+
+def _is_translator_credit(author: PaperAuthor, context_tokens: tuple[str, ...]) -> bool:
+    """Whether *author* is printed only as the name a translator credit hands off to.
+
+    A translator who is also an author is printed in the byline as well, and
+    that occurrence keeps them.
+    """
+
+    starts = [
+        start
+        for variant in _author_token_variants(author)
+        for start, _ in _find_token_sequences(context_tokens, variant)
+    ]
+    return bool(starts) and all(
+        _follows_translator_credit(context_tokens[:start]) for start in starts
+    )
+
+
+# Initials the text layer glued to the surname after them: "Kerem B.Yalcin"
+# comes back as given "Kerem", family "B.Yalcin".
+_GLUED_INITIALS_RE = re.compile(r"((?:[^\W\d_]\.)+)(?=[^\W\d_]{2})", re.UNICODE)
+
+
+def _unglue_leading_initials(given: str, family: str) -> tuple[str, str] | None:
+    match = _GLUED_INITIALS_RE.match(family)
+    if match is None or not family[match.end()].isupper():
+        return None
+    initials = match.group(1)
+    if not all(char.isupper() for char in initials if char != "."):
+        return None
+    return f"{given} {initials}".strip(), family[match.end() :]
+
+
+# Email addresses, URLs and their labels in a byline row are Latin whatever
+# script the names are printed in.
+_ADDRESS_FRAGMENT_RE = re.compile(r"\S*(?:@|://|www\.)\S*|\b(?:e-?mail|orcid)\b", re.IGNORECASE)
+# A script with less of the byline's letters than this is not the script the
+# byline prints its names in.
+_BYLINE_SCRIPT_MIN_SHARE = 0.2
+
+
+def _letter_scripts(value: str) -> dict[str, int]:
+    """Count the letters of *value* by Unicode script ("LATIN", "CYRILLIC", "CJK")."""
+
+    counts: dict[str, int] = {}
+    for char in value:
+        if not char.isalpha():
+            continue
+        script = unicodedata.name(char, "").split(" ", 1)[0]
+        if script and script != "MODIFIER":
+            counts[script] = counts.get(script, 0) + 1
+    return counts
+
+
 def _has_name_like_residual(tokens: list[str] | tuple[str, ...]) -> bool:
     residual = list(tokens)
-    while residual and (residual[0] in {"and", "et"} or residual[0].isdigit()):
+    while residual and (residual[0] in _BYLINE_CONJUNCTION_TOKENS or residual[0].isdigit()):
         residual.pop(0)
     bounded: list[str] = []
     for token in residual:
@@ -676,11 +864,42 @@ def _has_unmatched_author_evidence(
     return _has_name_like_residual(suffix)
 
 
+# The word a byline joins its last two names with: "and", French "et", Dutch
+# "en", German "und", Danish/Norwegian "og", Swedish "och", Indonesian "dan".
+# The new words match in lower or upper case only, so a capitalised given name
+# ("Dan", "En") is never taken for one.
+_BYLINE_CONJUNCTION_RE = re.compile(
+    r"\s*(?:;|&|\b(?i:and)\b|\b(?:et|en|und|og|och|dan|ET|EN|UND|OG|OCH)\b)\s*"
+)
+# Spanish "y", Portuguese/Italian "e" and Catalan/Polish "i" also join one
+# person's two surnames ("Ramón y Cajal", "Puig i Cadafalch"). They split only
+# in lower case (an upper-case letter is an initial) and only between two
+# names of at least two words each.
+_BYLINE_SURNAME_JOINER_RE = re.compile(r"(\s+[yei]\s+)")
+_BYLINE_CONJUNCTION_TOKENS = frozenset(
+    {"and", "et", "en", "und", "og", "och", "dan", "y", "e", "i"}
+)
+
+
+def _split_surname_joiners(chunk: str) -> list[str]:
+    pieces = _BYLINE_SURNAME_JOINER_RE.split(chunk)
+    merged = [pieces[0]]
+    for joiner, piece in zip(pieces[1::2], pieces[2::2], strict=True):
+        left_name = merged[-1].rsplit(",", 1)[-1]
+        right_name = piece.split(",", 1)[0]
+        if len(_name_tokens(left_name)) >= 2 and len(_name_tokens(right_name)) >= 2:
+            merged.append(piece)
+        else:
+            merged[-1] += joiner + piece
+    return merged
+
+
 def _split_byline_entries(value: str) -> tuple[tuple[str, ...], ...]:
     chunks = [
-        chunk.strip()
-        for chunk in re.split(r"\s*(?:;|&|\band\b)\s*", value, flags=re.IGNORECASE)
-        if chunk.strip()
+        piece.strip()
+        for chunk in _BYLINE_CONJUNCTION_RE.split(value)
+        for piece in _split_surname_joiners(chunk)
+        if piece.strip()
     ]
     entries: list[tuple[str, ...]] = []
     for chunk in chunks:
@@ -875,6 +1094,154 @@ def _restore_leading_parenthetical(
     return next(iter(restorations.values())) if len(restorations) == 1 else None
 
 
+# A short label set off from the rest of a printed title row by a colon, full
+# stop or dash: "Research Report: ...", "Case report. ...", "FIELD NOTES – ...".
+# A full stop counts only before a space, so "e.g." and decimals do not split a
+# row.
+_TITLE_LABEL_SEPARATOR_RE = re.compile(r"\s*[:.]\s+|\s*[–—]\s*|\s+-\s+")
+# The same label printed as a row of its own above the title: "Review:". Only a
+# colon marks such a row as continuing into the next one; an article-type kicker
+# ("ORIGINAL PAPER", "Case report") prints no colon.
+_TITLE_LABEL_ROW_RE = re.compile(r"(?P<label>[^:]+?)\s*:")
+_TITLE_LABEL_MAX_CHARS = 40
+_TITLE_LABEL_MAX_WORDS = 5
+# A comma, bracket, quote, slash, year or "et al." makes a prefix a citation or
+# a running head ("Smith, J. (2020).", "Zhao et al.:"), and so does a word that
+# introduces one ("To cite this version:", "Cómo citar:", "Для цитирования:").
+_NOT_A_TITLE_LABEL_RE = re.compile(
+    r"[,;()\[\]{}\"“”„‘’«»|/]|\d{4}|\bet\.?\s+al\b"
+    r"|\b(?:cite|citation|citer|citar|citare|zitier\w*|cytow\w*|цитир\w*|цитат\w*)\b",
+    re.IGNORECASE,
+)
+# Field labels name the row instead of belonging to it: "Title: ...".
+_TITLE_FIELD_LABELS = frozenset(
+    {
+        "title",
+        "article title",
+        "paper title",
+        "full title",
+        "short title",
+        "running title",
+        "running head",
+        "titel",
+        "titre",
+        "titolo",
+        "título",
+        "tytuł",
+        "název",
+        "название",
+        "abstract",
+        "summary",
+        "highlights",
+        "key points",
+        "keywords",
+        "key words",
+        "doi",
+        "source",
+        "article type",
+        "special issue",
+    }
+)
+
+
+def _is_title_label(label: str) -> bool:
+    """Whether a short prefix of the printed title row is title text.
+
+    The title is what the heading prints, so a label printed inside the title
+    heading ("Research Report:", "Case report.", "Opinion:") belongs to it even
+    when it names the article type. Numbering, citation and running-head
+    prefixes, field labels and page furniture ("Open access") do not.
+    """
+
+    stripped = label.strip()
+    if (
+        not stripped
+        or len(stripped) > _TITLE_LABEL_MAX_CHARS
+        or len(stripped.split()) > _TITLE_LABEL_MAX_WORDS
+        or not any(character.isalpha() for character in stripped)
+        or _NOT_A_TITLE_LABEL_RE.search(stripped)
+        or _ENUMERATOR_RE.fullmatch(stripped)
+    ):
+        return False
+    normalized = _normalize_for_grounding(stripped)
+    return normalized not in _TITLE_FIELD_LABELS and normalized not in FRONT_MATTER_FURNITURE_LABELS
+
+
+def _continues_into_title(normalized_title: str, printed: str) -> bool:
+    """Whether the model title is exactly *printed*, or *printed* then a subtitle row."""
+
+    rest = _normalize_for_grounding(printed)
+    return len(rest) >= _TITLE_GROUNDING_MIN_LENGTH and (
+        normalized_title == rest or normalized_title.startswith(f"{rest} ")
+    )
+
+
+def _restore_leading_label(
+    title: str,
+    resolution: FrontMatterResolution,
+    printed_rows: Mapping[int, str] | None,
+) -> tuple[str, str] | None:
+    """Put back a leading label the model dropped from the printed title.
+
+    Two printed shapes: the label opens the title row ("Research Report: ...")
+    or is a row of its own ending in a colon, directly above the row where the
+    model title starts ("Review:" over the rest). Only the selected record's
+    title rows can supply a label. Abstains when rows
+    disagree on the label, or when another title row of the record prints the
+    title without it: then the label may be a kicker the model was right to
+    drop. Returns the restored title and the candidate the label came from.
+    """
+
+    normalized = _normalize_for_grounding(title)
+    selected = _selected_block_candidates(resolution)
+    restorations: dict[str, tuple[str, str]] = {}
+    label_sources: set[str] = set()
+    for index, candidate in enumerate(selected):
+        if "title" not in candidate.roles:
+            continue
+        for source in _grounding_sources((candidate,), printed_rows):
+            printed = source.strip()
+            for separator in _TITLE_LABEL_SEPARATOR_RE.finditer(printed):
+                if separator.start() > _TITLE_LABEL_MAX_CHARS:
+                    break
+                if not _continues_into_title(normalized, printed[separator.end() :]):
+                    continue
+                if _is_title_label(printed[: separator.start()]):
+                    label = printed[: separator.end()].strip()
+                    # A dash fused to the next word stays fused.
+                    space = " " if printed[separator.end() - 1].isspace() else ""
+                    restorations.setdefault(
+                        _normalize_for_grounding(label),
+                        (f"{label}{space}{title.strip()}", candidate.candidate_id),
+                    )
+                    label_sources.add(candidate.candidate_id)
+                break
+        row = _TITLE_LABEL_ROW_RE.fullmatch(candidate.raw_text.strip())
+        if (
+            row is not None
+            and index + 1 < len(selected)
+            and _is_title_label(row.group("label"))
+            and _continues_into_title(normalized, selected[index + 1].raw_text)
+        ):
+            label = candidate.raw_text.strip()
+            restorations.setdefault(
+                _normalize_for_grounding(label),
+                (f"{label} {title.strip()}", candidate.candidate_id),
+            )
+            label_sources.update((candidate.candidate_id, selected[index + 1].candidate_id))
+    if len(restorations) != 1:
+        return None
+    for candidate in selected:
+        if "title" not in candidate.roles or candidate.candidate_id in label_sources:
+            continue
+        if any(
+            _normalize_for_grounding(source) == normalized
+            for source in _grounding_sources((candidate,), printed_rows)
+        ):
+            return None
+    return next(iter(restorations.values()))
+
+
 def ground_title_to_printed_text(
     title: str,
     resolution: FrontMatterResolution | None,
@@ -890,25 +1257,31 @@ def ground_title_to_printed_text(
     deliberately narrow — it fires only on a near-copy of a single printed row —
     because the model legitimately joins a title split across regions, and a
     loose rule would truncate those. Everything ungrounded that is not a
-    near-copy is reported and left alone. The one exception is a leading
-    parenthetical such as "(Rural)", which a model drops as if it were an
-    annotation: the rest still occurs verbatim, so it is restored from the
-    selected title row unless it is numbering or an article-type label.
+    near-copy is reported and left alone. The exceptions are a leading
+    parenthetical such as "(Rural)" and a leading label such as "Research
+    Report:", which a model drops as if they were annotations: the rest still
+    occurs verbatim, so they are restored from the selected title rows unless
+    they are numbering, a field label or page furniture (a parenthetical
+    article type such as "(Review)" stays dropped too).
     """
 
     normalized = _normalize_for_grounding(title)
     if len(normalized) < _TITLE_GROUNDING_MIN_LENGTH:
         return title, None
 
-    restored = (
-        _restore_leading_parenthetical(title, resolution, printed_rows)
-        if resolution is not None
-        else None
-    )
-    if restored is not None:
+    for restore, what in (
+        (_restore_leading_parenthetical, "parenthetical"),
+        (_restore_leading_label, "label"),
+    ):
+        if resolution is None:
+            break
+        restored = restore(title, resolution, printed_rows)
+        if restored is None:
+            continue
         restored_title, candidate_id = restored
         logger.info(
-            "Title regrounded to its printed leading parenthetical: %r -> %r",
+            "Title regrounded to its printed leading %s: %r -> %r",
+            what,
             title[:80],
             restored_title[:80],
         )
@@ -916,11 +1289,11 @@ def ground_title_to_printed_text(
             code="VAL_TITLE_REGROUNDED",
             severity=IssueSeverity.WARNING,
             message=(
-                "Extracted title dropped the leading parenthetical printed in the "
+                f"Extracted title dropped the leading {what} printed in the "
                 "selected title row; restored it"
             ),
             origin_stage="extract",
-            evidence_ids=(candidate_id, "reason:title_leading_parenthetical_dropped"),
+            evidence_ids=(candidate_id, f"reason:title_leading_{what}_dropped"),
             count=1,
         )
 
@@ -1293,6 +1666,21 @@ def _normalize_affiliation_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", translated).strip()
 
 
+@dataclass
+class _AuthorProposal:
+    """An author list the extractor produced, with what it did to it."""
+
+    source: str
+    value: list[PaperAuthor]
+    transforms: list[str]
+    veto: str | None = None
+
+    def candidate(self) -> FieldCandidate:
+        return FieldCandidate(
+            "author", self.source, self.value, transforms=tuple(self.transforms), veto=self.veto
+        )
+
+
 class CoreMetadataExtractor:
     """Extracts the paper's own metadata (not references) via the LLM."""
 
@@ -1316,8 +1704,10 @@ class CoreMetadataExtractor:
         self._explicit_classifier_runtime = settings is not None or classifier_resources is not None
         self._front_matter_resolution = front_matter_resolution
         self.validation_issues: list[ValidationIssue] = []
-        # Which step decided paper_type, for ``extraction.fields``.
+        # Which step classified the paper, and the trained classifier's
+        # prediction when the LLM relabelled its low-confidence paper type.
         self._paper_type_source = "llm"
+        self._classifier_prediction: Classification | None = None
         self.locator = locator or RefLocator(contents, settings=self._settings)
         if email_harvester is not None:
             self._email_harvester = email_harvester
@@ -1352,7 +1742,9 @@ class CoreMetadataExtractor:
                 logger.warning(
                     "Front-matter selection abstained; skipping core metadata extraction."
                 )
-                return PaperMetadata(doi="", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi="", title="", keywords=[], authors=[]), "abstained"
+                )
 
             cutoff_iloc = self.locator.get_cutoff_index()
             allowed_text_ids = resolution.allowed_text_ids if resolution is not None else None
@@ -1368,7 +1760,9 @@ class CoreMetadataExtractor:
 
             if not full_text:
                 logger.warning("No metadata text available to extract.")
-                return PaperMetadata(doi="", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi="", title="", keywords=[], authors=[]), "no_front_matter_text"
+                )
 
             table_text = author_table_context(self.contents, resolution)
             if table_text:
@@ -1435,7 +1829,10 @@ class CoreMetadataExtractor:
                     "core_metadata_call_failed",
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
-                return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
+                return self._undecided(
+                    PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[]),
+                    "core_metadata_failed",
+                )
             recorded = getattr(llm_metadata, "_field_failures", None)
             field_failures = dict(recorded) if isinstance(recorded, dict) else {}
             title_call_failed = "title" in field_failures
@@ -1469,50 +1866,82 @@ class CoreMetadataExtractor:
             if isinstance(repair_note, str):
                 self._record_metadata_warning(WarningCode.LLM_RESPONSE_REPAIRED, repair_note)
 
+            # Author candidates in precedence order. The recovery and the CRediT
+            # harvest are produced only while no usable list is in hand, so they
+            # can never replace or reorder what the extraction found.
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
+            authors, transforms = self._sanitize_authors(authors, full_text)
+            veto = None
             if resolution is not None:
-                authors = self._drop_fabricated_authors(authors, full_text, resolution)
-
-            author_source = "llm"
+                kept = self._drop_fabricated_authors(authors, full_text, resolution)
+                if authors and not kept:
+                    veto = "fabricated: absent from the extraction context"
+                elif authors and not self._drop_transliterated_authors(kept, full_text, resolution):
+                    veto = "romanised: written in a script the byline does not print"
+            author_trail = [_AuthorProposal("llm", authors, transforms, veto)]
+            usable = authors if veto is None else []
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
-            if not authors:
+            if not usable:
                 recovered = await self._recover_empty_authors(
                     context=byline_recovery_context(resolution) or authors_text or full_text,
                 )
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
-                    authors = self._convert_llm_authors(llm_metadata.authors)
-                    author_source = "llm_recovery"
+                    usable, transforms = self._sanitize_authors(
+                        self._convert_llm_authors(llm_metadata.authors), full_text
+                    )
+                    author_trail.append(_AuthorProposal("llm_recovery", usable, transforms))
+                else:
+                    author_trail.append(
+                        _AuthorProposal(
+                            "llm_recovery",
+                            [],
+                            [],
+                            None if recovered is not None else "recovery did not complete",
+                        )
+                    )
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
-            if not authors:
-                authors = self._harvest_credit_authors()
-                if authors:
-                    author_source = "credit_statement"
+            if not usable:
+                usable = self._harvest_credit_authors()
+                author_trail.append(_AuthorProposal("credit_statement", usable, []))
             # Keep the complete frame so affiliation footnotes and repeated-name reconciliation
             # can inspect evidence on later pages.
-            self._reconcile_numbered_affiliations(authors, self.sentences_df)
-            self._reconcile_repeated_name_affiliations(authors, self.sentences_df)
-            self._email_harvester.demote_implausible_flags(authors)
+            affiliations_before = [author.affiliation for author in usable]
+            self._reconcile_numbered_affiliations(usable, self.sentences_df)
+            self._reconcile_repeated_name_affiliations(usable, self.sentences_df)
+            if [author.affiliation for author in usable] != affiliations_before:
+                author_trail[-1].transforms.append("affiliations_reconciled")
+            self._email_harvester.demote_implausible_flags(usable)
 
             # Title/abstract must resolve BEFORE classification: the trained
             # classifier consumes them as input. Order is behavior-neutral for
-            # the LLM-validation path (which ignores title/abstract).
+            # the LLM-validation path (which ignores title/abstract). Post-parse
+            # decides the title after its fallbacks; the classifier and the
+            # correction-notice guard see the extracted one.
             model_title = strip_affiliation_markers(llm_metadata.title or "")
             title, title_issue = ground_title_to_printed_text(
                 model_title, resolution, full_text, printed_rows=self._printed_rows()
             )
+            title_transforms: list[str] = []
+            title_evidence: list[str] = []
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
+                if title != model_title:
+                    title_transforms.append("regrounded")
+                    title_evidence.extend(title_issue.evidence_ids)
+            title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=usable)
+            if subtitle_issue is not None:
+                self.validation_issues.append(subtitle_issue)
+                title_transforms.append("subtitle_folded")
+                title_evidence.extend(subtitle_issue.evidence_ids)
             abstract = (llm_metadata.abstract or "").strip()
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
 
-            paper_type, oecd_l1, oecd_l2 = "", "", ""
-            paper_type_confidence: float | None = None
-            oecd_confidence: float | None = None
+            classifications: list[FieldCandidate] = []
             if not skip_classifier:
                 (
                     paper_type,
@@ -1523,17 +1952,29 @@ class CoreMetadataExtractor:
                 ) = await self._classify_paper(
                     title, abstract, llm_metadata, classification_context
                 )
+                classifications.append(
+                    FieldCandidate(
+                        "paper_type",
+                        self._paper_type_source,
+                        Classification(
+                            paper_type, paper_type_confidence, oecd_l1, oecd_l2, oecd_confidence
+                        ),
+                    )
+                )
+                if self._paper_type_source == "llm_label" and self._classifier_prediction:
+                    classifications.append(
+                        FieldCandidate(
+                            "paper_type",
+                            "classifier",
+                            self._classifier_prediction,
+                            veto="paper type below the confidence threshold; relabelled",
+                        )
+                    )
 
             is_notice, notice_type = self._apply_correction_notice_guard(title)
+            notice = notice_type if is_notice else None
+            notice_veto = f"correction notice ({notice_type})" if is_notice else None
             if is_notice:
-                authors = []
-                abstract = ""
-                keywords = []
-                oecd_l1 = ""
-                oecd_l2 = ""
-                oecd_confidence = None
-                paper_type = notice_type
-                paper_type_confidence = None
                 logger.info(
                     "Correction-notice guard fired (kind=%s); "
                     "suppressing fabricated authors/abstract/keywords/oecd",
@@ -1555,48 +1996,29 @@ class CoreMetadataExtractor:
                     )
                 )
 
-            metadata = PaperMetadata(
-                doi=doi if doi else "",
-                title=title,
-                abstract=abstract,
-                keywords=keywords,
-                authors=authors,
-                oecd_l1=oecd_l1,
-                oecd_l2=oecd_l2,
-                oecd_confidence=oecd_confidence,
-                paper_type=paper_type,
-                paper_type_confidence=paper_type_confidence,
-                journal=llm_metadata.journal,
-                volume=llm_metadata.volume,
-                issue=llm_metadata.issue,
-                first_page=llm_metadata.first_page,
-                last_page=llm_metadata.last_page,
-                issn=llm_metadata.issn,
-                publisher=llm_metadata.publisher,
-                published=published,
-                license=llm_metadata.license,
+            author_decision = decide_authors(
+                [proposal.candidate() for proposal in author_trail], notice=notice
             )
-            metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
-            for field, source in (
-                ("title", "llm" if title == model_title else "title_grounding"),
-                ("abstract", "llm"),
-                ("keywords", "llm"),
-                ("published", "llm"),
-                ("journal", "llm"),
-                ("author", author_source),
-                ("paper_type", "correction_notice" if is_notice else self._paper_type_source),
-            ):
-                set_field_source(metadata, field, source)
-
-            self._email_harvester.harvest(metadata.authors)
-            self.validation_issues.extend(
-                repair_author_partitions(metadata.authors, precision_context)
+            final_authors = author_decision.value
+            contacts_before = [(author.email, author.corresponding) for author in final_authors]
+            self._email_harvester.harvest(final_authors)
+            partition_issues = repair_author_partitions(final_authors, precision_context)
+            self.validation_issues.extend(partition_issues)
+            author_decision = with_transforms(
+                author_decision,
+                *(
+                    ["emails_harvested"]
+                    if [(author.email, author.corresponding) for author in final_authors]
+                    != contacts_before
+                    else []
+                ),
+                *(["partitions_repaired"] if partition_issues else []),
             )
 
             if resolution is not None and not is_notice:
                 self.validation_issues.extend(
                     assess_author_grounding(
-                        metadata.authors,
+                        final_authors,
                         build_byline_group(resolution),
                     )
                 )
@@ -1607,16 +2029,78 @@ class CoreMetadataExtractor:
             # found nothing either). Surface it so eval/monitoring can see it
             # instead of shipping an empty author list quietly. A notice
             # legitimately has no authors — the guard handles that, don't warn.
-            if not metadata.authors and not is_notice:
+            if not final_authors and not is_notice:
                 self._record_metadata_warning(
                     WarningCode.AUTHORS_EMPTY, f"0 authors extracted (title={title[:60]!r})"
                 )
 
+            # The record carries the title, abstract and keywords as proposals
+            # for post-parse to decide; the fields only this extractor produces
+            # are decided here.
+            metadata = PaperMetadata(
+                doi=doi if doi else "",
+                title=title,
+                abstract="" if is_notice else abstract,
+                keywords=[] if is_notice else keywords,
+                volume=llm_metadata.volume,
+                issue=llm_metadata.issue,
+                first_page=llm_metadata.first_page,
+                last_page=llm_metadata.last_page,
+                issn=llm_metadata.issn,
+                license=llm_metadata.license,
+            )
+            metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
+            ledger = metadata._field_decisions
+            ledger.propose(
+                FieldCandidate(
+                    "title",
+                    "llm" if title == model_title else "title_grounding",
+                    title,
+                    evidence_ids=tuple(title_evidence),
+                    transforms=tuple(title_transforms),
+                )
+            )
+            ledger.propose(FieldCandidate("abstract", "llm", abstract, veto=notice_veto))
+            ledger.propose(FieldCandidate("keywords", "llm", keywords, veto=notice_veto))
+            for decision in (
+                author_decision,
+                decide_value(
+                    "published",
+                    FieldCandidate(
+                        "published",
+                        "llm",
+                        published,
+                        transforms=(
+                            ("precision_refined",) if published != llm_metadata.published else ()
+                        ),
+                    ),
+                ),
+                decide_value("journal", FieldCandidate("journal", "llm", llm_metadata.journal)),
+                decide_value(
+                    "publisher", FieldCandidate("publisher", "llm", llm_metadata.publisher)
+                ),
+                decide_classification(classifications, notice=notice),
+            ):
+                apply_decision(metadata, decision)
             return metadata
 
         except ValueError as e:
             logger.error(f"Metadata extraction failed: {e}")
             raise
+
+    @staticmethod
+    def _undecided(metadata: PaperMetadata, rule: str) -> PaperMetadata:
+        """Record that the fields only this extractor produces got no candidate."""
+
+        for decision in (
+            FieldDecision("author", [], None, rule),
+            FieldDecision("published", None, None, rule),
+            FieldDecision("journal", None, None, rule),
+            FieldDecision("publisher", None, None, rule),
+            FieldDecision("paper_type", Classification(), None, rule),
+        ):
+            apply_decision(metadata, decision)
+        return metadata
 
     def _record_metadata_warning(self, code: WarningCode, message: str) -> None:
         """Log and persist a metadata-extraction warning onto
@@ -1716,6 +2200,155 @@ class CoreMetadataExtractor:
             f"discarded {len(authors)} author(s) absent from the extraction context",
         )
         return []
+
+    def _drop_transliterated_authors(
+        self,
+        authors: list[PaperAuthor],
+        context: str,
+        resolution: FrontMatterResolution,
+    ) -> list[PaperAuthor]:
+        """Delete an author list the model romanised instead of copying.
+
+        A byline printed in Cyrillic came back as "N. O. Petrova". The
+        fabrication guard stands aside once a byline is printed, because a name
+        that fails to match it is usually a script, OCR or marker difference.
+        This case has positive evidence instead: each name is written in a
+        script the byline hardly uses, and none of them is printed in the
+        extraction context, where a paper that prints both forms carries the
+        romanised one. All-or-nothing, like the fabrication guard; the
+        empty-author recovery then retries against the byline alone.
+        """
+
+        if not authors:
+            return authors
+        byline = build_byline_group(resolution)
+        printed = _letter_scripts(_ADDRESS_FRAGMENT_RE.sub(" ", " ".join(byline.raw_texts)))
+        total = sum(printed.values())
+        if not total:
+            return authors
+        for author in authors:
+            scripts = _letter_scripts(f"{author.given} {author.family}")
+            if len(scripts) != 1:
+                return authors
+            (script,) = scripts
+            if printed.get(script, 0) / total >= _BYLINE_SCRIPT_MIN_SHARE:
+                return authors
+        grounded, _ = grounded_authors_in_context(authors, context)
+        if grounded:
+            return authors
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_AUTHOR_FABRICATED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"Discarded {len(authors)} extracted author(s): written in a script the "
+                    "selected byline does not print them in"
+                ),
+                origin_stage="extract",
+                evidence_ids=(
+                    "reason:authors_script_mismatch",
+                    *(f"author:{author.author_id}" for author in authors),
+                    *byline.candidate_ids,
+                ),
+                count=len(authors),
+            )
+        )
+        self._record_metadata_warning(
+            WarningCode.AUTHORS_FABRICATED,
+            f"discarded {len(authors)} author(s) romanised from the printed byline",
+        )
+        return []
+
+    def _drop_translator_credits(
+        self,
+        authors: list[PaperAuthor],
+        context: str,
+    ) -> list[PaperAuthor]:
+        """Remove people the front matter credits only as the translator.
+
+        A "Traducido del inglés por …" line under the byline made the
+        translator a second author.
+        """
+
+        context_tokens = _name_tokens(context)
+        kept: list[PaperAuthor] = []
+        dropped: list[PaperAuthor] = []
+        for author in authors:
+            (dropped if _is_translator_credit(author, context_tokens) else kept).append(author)
+        if not dropped:
+            return authors
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_AUTHOR_TRANSLATOR_DROPPED",
+                severity=IssueSeverity.WARNING,
+                message=(
+                    f"Discarded {len(dropped)} extracted author(s) printed only as the translator"
+                ),
+                origin_stage="extract",
+                evidence_ids=(
+                    "reason:translator_credit",
+                    *(f"author:{author.author_id}" for author in dropped),
+                ),
+                count=len(dropped),
+            )
+        )
+        for author_id, author in enumerate(kept, start=1):
+            author.author_id = author_id
+        return kept
+
+    def _repair_glued_names(self, authors: list[PaperAuthor]) -> None:
+        """Split a family name glued to the word printed before it.
+
+        PDFs often position the next word instead of printing a space glyph,
+        and the text layer then reads "Kerem B.Yalcin1, Selin DenizAksoy1".
+        The model copies that verbatim, so the given name loses its initial or
+        middle name to the family name. Glued initials move back to the given
+        name unconditionally: an initial is never part of a surname. A
+        lower-to-upper join splits only when the paper prints the spaced form
+        somewhere, such as a contribution statement; otherwise the join may be
+        the printed spelling, as in "DeLaCruz".
+        """
+
+        printed: str | None = None
+        for author in authors:
+            if not author.family or "organization" in (author.role or []):
+                continue
+            repaired = _unglue_leading_initials(author.given, author.family)
+            if repaired is None and _LETTER_RUN_RE.fullmatch(author.family):
+                words = _case_join_words(author.family)
+                if len(words) > 1:
+                    if printed is None:
+                        printed = " ".join(self.sentences_df["text"].dropna().astype(str))
+                    spaced = r"\s+".join(re.escape(word) for word in words)
+                    if re.search(rf"(?<![^\W\d_]){spaced}(?![^\W\d_])", printed):
+                        repaired = (f"{author.given} {' '.join(words[:-1])}".strip(), words[-1])
+            if repaired is None:
+                continue
+            author.given, author.family = repaired
+            self.validation_issues.append(
+                ValidationIssue(
+                    code="VAL_AUTHOR_PARTITION_REPAIRED",
+                    severity=IssueSeverity.WARNING,
+                    message="Split a family name glued to the given name printed before it",
+                    origin_stage="extract",
+                    evidence_ids=(f"author:{author.author_id}", "reason:glued_family_name"),
+                )
+            )
+
+    def _sanitize_authors(
+        self, authors: list[PaperAuthor], context: str
+    ) -> tuple[list[PaperAuthor], list[str]]:
+        """Drop translator credits and split glued names; say which repairs applied."""
+
+        kept = self._drop_translator_credits(authors, context)
+        repairs = len(self.validation_issues)
+        self._repair_glued_names(kept)
+        transforms = []
+        if len(kept) != len(authors):
+            transforms.append("translator_credits_dropped")
+        if len(self.validation_issues) != repairs:
+            transforms.append("glued_names_split")
+        return kept, transforms
 
     def _record_author_anomaly(self, llm_authors, cleaned: list[PaperAuthor]) -> None:
         """Record ONE ``AUTHORS_ANOMALY`` warning when the author sanitizer had
@@ -2277,6 +2910,7 @@ class CoreMetadataExtractor:
         stay ``None``.
         """
         self._paper_type_source = "llm"
+        self._classifier_prediction = None
         if not self._settings.ml.paper_classifier_model_id:
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=llm_metadata.oecd_domain,
@@ -2410,6 +3044,9 @@ class CoreMetadataExtractor:
                 logger.warning("paper_type LLM escalation failed: %s", e)
                 label = None
             if label is not None and getattr(label, "paper_type", None):
+                self._classifier_prediction = Classification(
+                    paper_type, paper_type_confidence, oecd_l1, oecd_l2, oecd_confidence
+                )
                 paper_type = label.paper_type
                 paper_type_confidence = label.confidence
                 self._paper_type_source = "llm_label"

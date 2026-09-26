@@ -749,6 +749,24 @@ def test_attach_text_quality_high_when_regions_populated():
     assert paper.processing_warnings == []
 
 
+def _decide_unscoped_title(detected, llm_title, *, journal=None, publisher=None, resolution=None):
+    """The title decision of an unscoped run, where the layout title is weighed."""
+    from bibr.extract.field_decisions import FieldCandidate, decide_title
+
+    return decide_title(
+        FieldCandidate("title", "llm", llm_title),
+        resolution=resolution,
+        detected_title=detected,
+        sections=[],
+        journal=journal,
+        publisher=publisher,
+        scoped=False,
+        abstained=False,
+        prefer_byline_adjacent=False,
+        doc_info=None,
+    )
+
+
 class TestResolveTitleMastheadGuard:
     """Prefer an extracted article title when the layout title has specific masthead evidence.
 
@@ -756,14 +774,9 @@ class TestResolveTitleMastheadGuard:
 
     @staticmethod
     def _run(detected_title, llm_title, journal, publisher=None):
-        from types import SimpleNamespace
-
-        from bibr.pipeline.stages.post_parse import _resolve_title
-
-        contents = SimpleNamespace(detected_title=detected_title, sections=[])
-        meta = SimpleNamespace(title=llm_title, journal=journal, publisher=publisher)
-        _resolve_title(contents, meta)
-        return meta.title
+        return _decide_unscoped_title(
+            detected_title, llm_title, journal=journal, publisher=publisher
+        ).value
 
     def test_masthead_exact_journal_match_uses_llm_title(self):
         # srep45484: layout grabbed "SCIENTIFIC REPORTS" == journal.
@@ -870,14 +883,11 @@ class TestExactGenericArticleTitles:
 
     @staticmethod
     def _run(detected, llm_title, *, grounded, roles=frozenset({"title"})):
-        from types import SimpleNamespace
-
         from bibr.extract.front_matter import (
             FrontMatterBlock,
             FrontMatterCandidate,
             FrontMatterResolution,
         )
-        from bibr.pipeline.stages.post_parse import _resolve_title
 
         candidate = FrontMatterCandidate(
             candidate_id="title-candidate",
@@ -909,14 +919,7 @@ class TestExactGenericArticleTitles:
             allowed_text_ids=frozenset({1}),
             allowed_section_ids=frozenset({1}),
         )
-        contents = SimpleNamespace(
-            detected_title=detected,
-            sections=[],
-            front_matter_resolution=resolution,
-        )
-        meta = SimpleNamespace(title=llm_title, journal=None, publisher=None)
-        _resolve_title(contents, meta)
-        return meta.title
+        return _decide_unscoped_title(detected, llm_title, resolution=resolution).value
 
     def test_exact_generic_label_yields_to_grounded_non_generic_title(self):
         real = "Effects of X on Y"
@@ -1052,9 +1055,7 @@ class TestResolveSelectedTitle:
         )
 
     @classmethod
-    def _case(cls, selected, *, llm_title=None, journal=None, publisher=None):
-        from types import SimpleNamespace
-
+    def _case(cls, selected, *, journal=None, publisher=None):
         from bibr.extract.front_matter import FrontMatterBlock, FrontMatterResolution
 
         block = FrontMatterBlock(
@@ -1073,39 +1074,35 @@ class TestResolveSelectedTitle:
             allowed_text_ids=frozenset(),
             allowed_section_ids=frozenset(),
         )
-        contents = SimpleNamespace(
-            detected_title="Outside Banner Title",
-            sections=[],
-            front_matter_resolution=resolution,
-        )
-        metadata = SimpleNamespace(title=llm_title, journal=journal, publisher=publisher)
-        return contents, metadata, []
+        return resolution, {"journal": journal, "publisher": publisher}
 
     def test_null_llm_title_uses_one_safe_selected_title(self):
-        from bibr.pipeline.stages.post_parse import _resolve_selected_title
+        from bibr.extract.title_candidates import selected_title_candidate
 
-        contents, metadata, issues = self._case(
+        resolution, record = self._case(
             [self._candidate("title", "Grounded selected title", roles={"title"})],
         )
 
-        assert _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert metadata.title == "Grounded selected title"
+        candidate, _ = selected_title_candidate(resolution, **record)
+        assert candidate.value == "Grounded selected title"
+        assert candidate.source == "front_matter_candidate"
+        issues = candidate.issues
         assert issues[-1].code == "VAL_TITLE_RECOVERED"
         assert issues[-1].evidence_ids == ("title",)
         assert not issues[-1].blocking
 
     def test_normalized_duplicate_copies_collapse_to_one_candidate(self):
-        from bibr.pipeline.stages.post_parse import _resolve_selected_title
+        from bibr.extract.title_candidates import selected_title_candidate
 
-        contents, metadata, issues = self._case(
+        resolution, record = self._case(
             [
                 self._candidate("a", "Grounded selected title", roles={"title"}),
                 self._candidate("b", "Grounded  Selected  Title", roles={"title"}),
             ],
         )
 
-        assert _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert metadata.title == "Grounded selected title"
+        candidate, _ = selected_title_candidate(resolution, **record)
+        assert candidate.value == "Grounded selected title"
 
     @pytest.mark.parametrize(
         "selected",
@@ -1126,27 +1123,26 @@ class TestResolveSelectedTitle:
         ],
     )
     def test_unsafe_or_ambiguous_selected_titles_remain_null(self, selected):
-        from bibr.pipeline.stages.post_parse import _resolve_selected_title
+        from bibr.extract.title_candidates import selected_title_candidate
 
-        contents, metadata, issues = self._case(
+        resolution, record = self._case(
             [self._candidate(*args) for args in selected],
             journal="Scientific Reports",
             publisher="Nature Publishing Group",
         )
 
-        assert not _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert not metadata.title
-        assert issues == []
+        candidate, _ = selected_title_candidate(resolution, **record)
+        assert candidate is None
 
     def test_abstention_never_recovers(self):
-        from bibr.pipeline.stages.post_parse import _resolve_selected_title
+        from bibr.extract.title_candidates import selected_title_candidate
 
-        contents, metadata, issues = self._case(
+        resolution, record = self._case(
             [self._candidate("title", "Grounded selected title", roles={"title"})],
         )
-        contents.front_matter_resolution = contents.front_matter_resolution.__class__(
-            candidates=contents.front_matter_resolution.candidates,
-            blocks=contents.front_matter_resolution.blocks,
+        resolution = resolution.__class__(
+            candidates=resolution.candidates,
+            blocks=resolution.blocks,
             selected_block_id=None,
             selection_method="abstained",
             reason_flags=("multiple_plausible_blocks",),
@@ -1154,8 +1150,9 @@ class TestResolveSelectedTitle:
             allowed_section_ids=frozenset(),
         )
 
-        assert not _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert not metadata.title
+        candidate, reason = selected_title_candidate(resolution, **record)
+        assert candidate is None
+        assert reason == "no selected record"
 
     async def test_ownership_scope_recovers_selected_title_and_ignores_outside_evidence(
         self, monkeypatch

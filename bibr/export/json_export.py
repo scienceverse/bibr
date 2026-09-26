@@ -602,15 +602,16 @@ def _field_states(paper: Paper, *, present: dict[str, bool], warnings: list) -> 
     """
     from bibr.field_states import FieldScope, build_field_states
 
-    meta = paper.metadata
+    decisions = getattr(paper, "field_decisions", None)
     selection = paper.doi_selection
     records = build_field_states(
         present=present,
-        sources=getattr(meta, "_field_sources", None) or {},
+        sources=decisions.sources() if decisions is not None else {},
         scope=paper.field_scope or FieldScope(),
         issues=paper.validation_issues,
         warnings=[ProcessingWarning.from_dict(row) for row in warnings],
         doi_selected=selection is not None and selection.selected is not None,
+        rules=decisions.rules() if decisions is not None else None,
     )
     return FieldStatesExport.model_validate(
         {field: record.to_dict() for field, record in records.items()}

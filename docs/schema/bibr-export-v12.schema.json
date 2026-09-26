@@ -1806,6 +1806,15 @@
           "title": "Issues",
           "type": "array"
         },
+        "rule": {
+          "default": null,
+          "description": "The rule of the field's decision that chose the value or its absence, e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', 'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the field has no such decision (doi, bib), and in exports that predate it.",
+          "title": "Rule",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "source": {
           "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', 'native' (declared by the input); for a failed field the step that failed. Null when unknown or when nothing was produced.",
           "title": "Source",

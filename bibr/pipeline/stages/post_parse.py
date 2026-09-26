@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 import logging
 import os
 import re
 import time
-import unicodedata
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import LlmCallError, ProcessingError
-from bibr.field_states import FieldScope, set_field_source
+from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import NAME_CHAR_CLS
 
@@ -683,21 +681,51 @@ async def _extract_metadata_and_equations(
     return results[0]
 
 
-def _note_extraction_sources(contents, paper_metadata, parse_strategy: str | None) -> None:
-    """Note the source of what metadata extraction produced, for ``extraction.fields``.
+def _decide_record_fields(paper_metadata, *, native: bool, doc_info_authors=None) -> None:
+    """Decide the fields the core extractor decides, when it did not run.
 
-    Front matter the input declares (JATS, HTML meta tags) is ``native``; the
-    core extractor notes its own sources. The reference list comes from the
-    input's structured citations or the configured parser.
+    An input that declares its front matter (JATS, HTML) supplies its own
+    authors, publication date, journal and publisher; a run without an LLM has
+    none, and the PDF doc-info may fill the authors (*doc_info_authors*, given
+    only when the doc-info may fill).
     """
-    if contents.preparsed_metadata is not None:
-        for field in ("title", "abstract", "keywords", "published", "journal", "author"):
-            set_field_source(paper_metadata, field, "native")
-        set_field_source(paper_metadata, "funding_statement", "native")
-    set_field_source(
+    from bibr.extract.field_decisions import (
+        Classification,
+        FieldDecision,
+        apply_decision,
+        decide_authors,
+        decide_value,
+        field_decisions_of,
+        incumbent_candidate,
+    )
+
+    ledger = field_decisions_of(paper_metadata)
+    if ledger is not None and "author" in ledger:
+        return
+    source = "native" if native else None
+    authors = [incumbent_candidate(paper_metadata, "author", source=source)]
+    if doc_info_authors is not None:
+        authors.append(doc_info_authors)
+    apply_decision(paper_metadata, decide_authors(authors))
+    for name in ("published", "journal", "publisher"):
+        apply_decision(
+            paper_metadata,
+            decide_value(name, incumbent_candidate(paper_metadata, name, source=source)),
+        )
+    apply_decision(
         paper_metadata,
-        "bib",
-        "native" if contents.native_references is not None else str(parse_strategy or "llm"),
+        FieldDecision(
+            "paper_type",
+            Classification(
+                paper_metadata.paper_type,
+                paper_metadata.paper_type_confidence,
+                paper_metadata.oecd_l1,
+                paper_metadata.oecd_l2,
+                paper_metadata.oecd_confidence,
+            ),
+            None,
+            "not_classified",
+        ),
     )
 
 
@@ -744,33 +772,62 @@ def _finalize_abstract_and_keywords(
     *,
     resolution=None,
     validation_issue_sink: list[ValidationIssue] | None = None,
+    native: bool = False,
+    doc_info_keywords=None,
+    abstained: bool = False,
 ) -> None:
-    """Extraction policy, finalized once per paper (mutates ``paper_metadata``):
+    """Decide the abstract and keywords, once per paper (writes ``paper_metadata``):
 
     - abstract: prefer the LLM-extracted string (clean, deduplicated); fall
       back to joining ABSTRACT-typed section sentences only when the LLM
       produced nothing usable. The LLM string wins because layout regions
       (running headers, copyright lines, affiliation blocks) routinely flow
       into the abstract section and would corrupt a blind join.
-    - keywords: recover from KEYWORD-typed sections when LLM extraction missed
-      them. Without LLM the keywords section often spills into the intro, so
-      only the first sentence is used and anything that doesn't look like a
-      keyword list (long or sentence-like entries) is rejected.
-    - commentary guard (residual #1): the OCR layout model mislabels a
-      commentary's opening body as an ABSTRACT region; both the LLM string and
-      the section fallback can carry that body text. Suppress it here — using
-      the FINAL keywords, so a genuine commentary with a keywords block is
-      preserved.
+    - keywords: the extracted list, else the PDF doc-info's (*doc_info_keywords*,
+      given only when the doc-info may fill), else the KEYWORD-typed sections.
+      Without LLM the keywords section often spills into the intro, so only
+      the first sentence is used and anything that doesn't look like a keyword
+      list (long or sentence-like entries) is rejected.
+    - a correction notice's extracted abstract and keywords are never used
+      (the core extractor vetoes them); nothing is chosen when front-matter
+      selection *abstained*.
 
-    This lives in post-parse, not the export layer: ``json_export`` serializes
+    *native* says the input declared the incumbent values (JATS, HTML). This
+    lives in post-parse, not the export layer: ``json_export`` serializes
     metadata verbatim and must not re-derive it.
     """
+    from bibr.extract.field_decisions import (
+        FieldCandidate,
+        apply_decision,
+        decide_abstract,
+        decide_keywords,
+        incumbent_candidate,
+    )
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.implicit_sections import select_abstract_span
 
+    source = "native" if native else None
+    abstract_incumbent = incumbent_candidate(paper_metadata, "abstract", source=source)
+    keywords_incumbent = incumbent_candidate(paper_metadata, "keywords", source=source)
+    if abstained:
+        for decision in (
+            decide_abstract(
+                abstract_incumbent,
+                fallback=None,
+                explicitly_absent=False,
+                printed_abstract=False,
+                abstained=True,
+            ),
+            decide_keywords(keywords_incumbent, doc_info=None, section=None, abstained=True),
+        ):
+            apply_decision(paper_metadata, decision)
+        return
+
     selection = select_abstract_span(contents, resolution) if resolution is not None else None
 
-    abstract_text = (paper_metadata.abstract or "").strip()
+    extracted_abstract = (
+        (abstract_incumbent.value or "").strip() if abstract_incumbent.veto is None else ""
+    )
     # A layout hint or positional inference can name body prose "Abstract".
     # Preserve a completed extraction's explicit null unless the document has
     # a printed abstract heading in the selected span. Missing fields and
@@ -792,42 +849,55 @@ def _finalize_abstract_and_keywords(
         and not section.header_is_synthetic
         for section in contents.sections
     )
-    if not abstract_text and (not explicit_absence or printed_abstract):
-        if selection is not None:
-            abstract_text = selection.text
-        else:
-            abstract_section_ids = set()
-            for s in contents.sections:
-                if s.section_type == CanonicalSection.ABSTRACT:
-                    abstract_section_ids.add(s.section_id)
-                elif s.section_type in (CanonicalSection.UNKNOWN, None) and s.header:
-                    from bibr.utils.text import normalize_text
+    fallback = None
+    if selection is not None:
+        fallback = FieldCandidate(
+            "abstract",
+            "abstract_section",
+            selection.text,
+            evidence_ids=tuple(selection.evidence_ids),
+        )
+    else:
+        abstract_section_ids = set()
+        for s in contents.sections:
+            if s.section_type == CanonicalSection.ABSTRACT:
+                abstract_section_ids.add(s.section_id)
+            elif s.section_type in (CanonicalSection.UNKNOWN, None) and s.header:
+                from bibr.utils.text import normalize_text
 
-                    if normalize_text(s.header) == "abstract":
-                        abstract_section_ids.add(s.section_id)
-            if abstract_section_ids:
-                abstract_text = " ".join(
+                if normalize_text(s.header) == "abstract":
+                    abstract_section_ids.add(s.section_id)
+        if abstract_section_ids:
+            fallback = FieldCandidate(
+                "abstract",
+                "abstract_section",
+                " ".join(
                     sent.text
                     for sent in contents.sentences
                     if sent.section_id in abstract_section_ids and not sent.is_display_formula
-                )
+                ),
+            )
+    # The text the suspicion check reads: the extracted string, or the
+    # fallback's text before the final strip.
+    abstract_text = extracted_abstract
+    if not abstract_text and (not explicit_absence or printed_abstract) and fallback is not None:
+        abstract_text = fallback.value
 
-    keywords = paper_metadata.keywords
-    if not keywords:
-        kw_section_ids = {
-            s.section_id for s in contents.sections if s.section_type == CanonicalSection.KEYWORDS
-        }
-        if kw_section_ids:
-            kw_sentences = [
-                sent.text for sent in contents.sentences if sent.section_id in kw_section_ids
-            ]
-            if kw_sentences:
-                raw = kw_sentences[0].rstrip(" .;")
-                candidates = [k.strip() for k in raw.split(",") if k.strip()]
-                if 1 <= len(candidates) <= 15 and all(
-                    len(k) <= 80 and "." not in k for k in candidates
-                ):
-                    keywords = candidates
+    section_keywords = None
+    kw_section_ids = {
+        s.section_id for s in contents.sections if s.section_type == CanonicalSection.KEYWORDS
+    }
+    if kw_section_ids:
+        kw_sentences = [
+            sent.text for sent in contents.sentences if sent.section_id in kw_section_ids
+        ]
+        if kw_sentences:
+            raw = kw_sentences[0].rstrip(" .;")
+            candidates = [k.strip() for k in raw.split(",") if k.strip()]
+            if 1 <= len(candidates) <= 15 and all(
+                len(k) <= 80 and "." not in k for k in candidates
+            ):
+                section_keywords = FieldCandidate("keywords", "keywords_section", candidates)
 
     if abstract_text and selection is not None and validation_issue_sink is not None:
         reasons = _abstract_suspicion_reasons(contents, abstract_text, selection)
@@ -845,552 +915,22 @@ def _finalize_abstract_and_keywords(
                 )
             )
 
-    paper_metadata.abstract = abstract_text.strip()
-    paper_metadata.keywords = keywords
-
-
-# Layout doc_title vs LLM title reconciliation (masthead guard). A journal /
-# publisher name shorter than this is too generic to treat a match as a
-# masthead signal.
-_MASTHEAD_MIN_NAME_CHARS = 6
-# detected_title fuzzy ratio at/above which it "is" the journal/publisher name.
-_MASTHEAD_NAME_RATIO = 0.90
-# detected vs LLM title ratio at/above which they agree (keep the verbatim
-# layout title even on a masthead match — avoids overriding when the LLM merely
-# paraphrased a genuine title).
-_TITLE_AGREE_RATIO = 0.85
-# Use a narrow masthead grammar: a URL or ISSN is stronger page-furniture evidence than a volume
-# label or bare DOI.
-_MASTHEAD_MARKER_RE = re.compile(r"https?://|www\.|ISSN\s*\d{4}", re.IGNORECASE)
-
-
-def _normalize_for_match(s: str) -> str:
-    """Lowercase, collapse whitespace, strip surrounding punctuation."""
-    return re.sub(r"\s+", " ", s.strip().lower()).strip(" .:;,-")
-
-
-def _title_ratio(a: str, b: str) -> float:
-    return difflib.SequenceMatcher(None, _normalize_for_match(a), _normalize_for_match(b)).ratio()
-
-
-def _name_matches(detected_norm: str, name: str | None) -> bool:
-    if not name:
-        return False
-    n = _normalize_for_match(name)
-    if len(n) < _MASTHEAD_MIN_NAME_CHARS:
-        return False
-    return n in detected_norm or difflib.SequenceMatcher(None, detected_norm, n).ratio() >= (
-        _MASTHEAD_NAME_RATIO
-    )
-
-
-def _detected_title_is_masthead(detected: str, journal: str | None, publisher: str | None) -> bool:
-    """True when the layout-detected title is really a masthead/banner.
-
-    Layout detection can label the journal or publisher banner as a document title. Matching an independently extracted journal/publisher name or finding a banner-only URL/ISSN marker provides specific evidence that the text is page furniture.
-    """
-    d = _normalize_for_match(detected)
-    if _name_matches(d, journal) or _name_matches(d, publisher):
-        return True
-    return bool(_MASTHEAD_MARKER_RE.search(detected))
-
-
-# Reject a composite heading only when every content token belongs to the heading vocabulary,
-# using accent-insensitive matching.
-_BODY_HEADING_WORDS = frozenset(
-    {
-        # presentation / introduction
-        "apresentacao",
-        "presentacion",
-        "presentazione",
-        "presentation",
-        "introducao",
-        "introduccion",
-        "introduzione",
-        "introduction",
-        # method / materials
-        "metodologia",
-        "metodologias",
-        "metodologie",
-        "methodologie",
-        "metodo",
-        "metodos",
-        "metodi",
-        "methode",
-        "methodes",
-        "materiais",
-        "materiales",
-        "materiali",
-        "materiel",
-        "materiels",
-        "procedimentos",
-        "procedimientos",
-        # results / analysis
-        "resultado",
-        "resultados",
-        "resultat",
-        "resultats",
-        "risultati",
-        "risultato",
-        "analise",
-        "analises",
-        "analisis",
-        "analisi",
-        "analyse",
-        "analyses",
-        "dados",
-        "datos",
-        "dati",
-        "donnees",
-        # discussion / conclusion
-        "discussao",
-        "discussoes",
-        "discusion",
-        "discusiones",
-        "discussione",
-        "discussioni",
-        "discussion",
-        "conclusao",
-        "conclusoes",
-        "conclusion",
-        "conclusiones",
-        "conclusione",
-        "conclusioni",
-        "conclusions",
-        "consideracoes",
-        "consideraciones",
-        "considerazioni",
-        "considerations",
-        "sintese",
-        "sintesi",
-        "synthese",
-        "limitacoes",
-        "limitaciones",
-        "limitazioni",
-        "recomendacoes",
-        "recomendaciones",
-        "raccomandazioni",
-        "recommandations",
-        "final",
-        "finais",
-        "finales",
-        "finali",
-        # framing / literature
-        "revisao",
-        "revision",
-        "revisione",
-        "revue",
-        "literatura",
-        "letteratura",
-        "litterature",
-        "fundamentacao",
-        "fundamentacion",
-        "fundamentos",
-        "teorica",
-        "teorico",
-        "teoricos",
-        "theorique",
-        "objetivo",
-        "objetivos",
-        "obiettivi",
-        "obiettivo",
-        "objectif",
-        "objectifs",
-        "hipotese",
-        "hipoteses",
-        "hipotesis",
-        "ipotesi",
-        "hypothese",
-        "hypotheses",
-        # front/back matter
-        "resumo",
-        "resumen",
-        "riassunto",
-        "resume",
-        "palavras",
-        "palabras",
-        "parole",
-        "chave",
-        "clave",
-        "chiave",
-        "cle",
-        "cles",
-        "agradecimentos",
-        "agradecimientos",
-        "ringraziamenti",
-        "remerciements",
-        "referencias",
-        "riferimenti",
-        "bibliografia",
-        "bibliografias",
-    }
-)
-# Function words and articles that carry no heading/title signal on their own.
-_HEADING_FILLER_WORDS = frozenset(
-    {
-        "a",
-        "ai",
-        "al",
-        "alla",
-        "and",
-        "as",
-        "com",
-        "con",
-        "da",
-        "das",
-        "de",
-        "degli",
-        "dei",
-        "del",
-        "della",
-        "delle",
-        "dello",
-        "des",
-        "di",
-        "do",
-        "dos",
-        "du",
-        "e",
-        "ed",
-        "el",
-        "em",
-        "en",
-        "et",
-        "gli",
-        "i",
-        "il",
-        "in",
-        "la",
-        "las",
-        "le",
-        "les",
-        "lo",
-        "los",
-        "na",
-        "nas",
-        "no",
-        "nos",
-        "o",
-        "of",
-        "os",
-        "para",
-        "per",
-        "pour",
-        "the",
-        "u",
-        "um",
-        "uma",
-        "un",
-        "una",
-        "unas",
-        "uno",
-        "unos",
-        "y",
-    }
-)
-_HEADING_TOKEN_RE = re.compile(r"[^\W\d_]+")
-# A printed heading is short; beyond this the row is prose, not a heading.
-_MAX_HEADING_TOKENS = 8
-
-
-def _strip_accents(value: str) -> str:
-    return "".join(
-        char for char in unicodedata.normalize("NFD", value) if not unicodedata.combining(char)
-    )
-
-
-def _is_ordinary_body_heading(normalized: str) -> bool:
-    """Whether a normalized row is a bare body heading rather than a title.
-
-    Complements ``_ORDINARY_HEADING_TEXT``'s exact-membership test: numbering
-    and function words are dropped, and the row is a heading only when every
-    remaining token is heading vocabulary.
-    """
-
-    tokens = _HEADING_TOKEN_RE.findall(_strip_accents(normalized))
-    if not tokens or len(tokens) > _MAX_HEADING_TOKENS:
-        return False
-    content = [token for token in tokens if token not in _HEADING_FILLER_WORDS]
-    return bool(content) and all(token in _BODY_HEADING_WORDS for token in content)
-
-
-def _title_text_is_unsafe(text: str, normalized: str, region_label: str, paper_metadata) -> bool:
-    """Shared text-level filters for any printed row proposed as the title.
-
-    Journal furniture, generic article labels, bare section headings and
-    mastheads all fail closed: asserting a wrong title is worse than asserting
-    none.
-    """
-
-    from bibr.extract.front_matter import (
-        _ORDINARY_HEADING_TEXT,
-        _looks_like_masthead,
-        is_exact_front_matter_furniture,
-    )
-    from bibr.utils.metadata import is_exact_generic_article_label
-
-    return bool(
-        not text
-        or is_exact_generic_article_label(text)
-        or is_exact_front_matter_furniture(text)
-        or normalized in _ORDINARY_HEADING_TEXT
-        or _is_ordinary_body_heading(normalized)
-        or _looks_like_masthead(text, region_label)
-        or _detected_title_is_masthead(text, paper_metadata.journal, paper_metadata.publisher)
-    )
-
-
-def _selected_front_matter_block(contents):
-    """The resolved front-matter block, or None when there is no ownership."""
-
-    resolution = getattr(contents, "front_matter_resolution", None)
-    if resolution is None or resolution.selected_block_id is None:
-        return None
-    return next(
-        (block for block in resolution.blocks if block.block_id == resolution.selected_block_id),
-        None,
-    )
-
-
-def _safe_title_candidate(candidate, paper_metadata) -> bool:
-    """Whether one selected-record candidate may stand in as the article title."""
-
-    text = candidate.raw_text.strip()
-    return not (
-        "title" not in candidate.roles
-        or not candidate.roles.isdisjoint({"abstract", "affiliation", "byline", "doi"})
-        or _title_text_is_unsafe(
-            text,
-            candidate.normalized_text,
-            (candidate.region_label or "").casefold(),
-            paper_metadata,
-        )
-    )
-
-
-def _resolve_selected_title(
-    contents,
-    paper_metadata,
-    *,
-    validation_issue_sink: list[ValidationIssue],
-) -> bool:
-    """Recover a null LLM title from exactly one safe selected-record candidate.
-
-    Reads only the selected front-matter block's title candidates — never the
-    global detected title or unknown-section headers. Ambiguity (two distinct
-    candidates after normalization), mastheads, journal furniture, generic
-    article labels, bare section headings, and composite title+byline/abstract/
-    affiliation/DOI rows all fail closed and leave the title null.
-    """
-
-    from bibr.validation import IssueSeverity, ValidationIssue
-
-    selected_block = _selected_front_matter_block(contents)
-    if selected_block is None:
-        return False
-    resolution = contents.front_matter_resolution
-
-    by_id = {candidate.candidate_id: candidate for candidate in resolution.candidates}
-    safe = [
-        candidate
-        for candidate_id in selected_block.title_candidate_ids
-        if (candidate := by_id.get(candidate_id)) is not None
-        and _safe_title_candidate(candidate, paper_metadata)
-    ]
-
-    distinct: dict[str, object] = {}
-    for candidate in safe:
-        distinct.setdefault(_normalize_for_match(candidate.raw_text), candidate)
-    if len(distinct) != 1:
-        return False
-    candidate = next(iter(distinct.values()))
-    paper_metadata.title = candidate.raw_text
-    validation_issue_sink.append(
-        ValidationIssue(
-            code="VAL_TITLE_RECOVERED",
-            severity=IssueSeverity.WARNING,
-            message="Recovered null model title from the selected front-matter record",
-            origin_stage="extract",
-            evidence_ids=(candidate.candidate_id,),
-            blocking=False,
-        )
-    )
-    logger.info(
-        "Selected-title fallback recovered the null model title from candidate %s",
-        candidate.candidate_id,
-    )
-    return True
-
-
-def _resolve_detected_title_fallback(
-    contents,
-    paper_metadata,
-    *,
-    validation_issue_sink: list[ValidationIssue],
-) -> bool:
-    """Last-resort: accept the layout ``detected_title`` for a still-null title.
-
-    Under ownership scope, a null model title and no safe selected candidate can leave title=None even when layout has the printed title. Reuse the selected-title filters without enabling the broader unknown-header scan. This path only fills an absent title.
-    """
-
-    from bibr.extract.front_matter import _normalize_text
-    from bibr.validation import IssueSeverity, ValidationIssue
-
-    if paper_metadata.title:
-        return False
-    detected = (getattr(contents, "detected_title", None) or "").strip()
-    if _title_text_is_unsafe(detected, _normalize_text(detected), "doc_title", paper_metadata):
-        return False
-
-    paper_metadata.title = detected
-    validation_issue_sink.append(
-        ValidationIssue(
-            code="VAL_TITLE_RECOVERED",
-            severity=IssueSeverity.WARNING,
-            message="Recovered null model title from the layout-detected title",
-            origin_stage="extract",
-            blocking=False,
-        )
-    )
-    logger.info("Detected-title fallback recovered the null model title: %r", detected)
-    return True
-
-
-def _prefer_byline_adjacent_title(
-    contents,
-    paper_metadata,
-    *,
-    validation_issue_sink: list[ValidationIssue],
-    settings,
-) -> bool:
-    """Prefer the printed title row that sits directly above the byline.
-
-    Multilingual front matter may print the original title above the byline and a translation above another abstract. This path can replace an asserted title, so it is gated by PIPELINE_TITLE_PREFER_BYLINE_ADJACENT and defaults off pending broader validation.
-    """
-
-    from bibr.validation import IssueSeverity, ValidationIssue
-
-    if not getattr(getattr(settings, "pipeline", None), "title_prefer_byline_adjacent", False):
-        return False
-    llm_title = (paper_metadata.title or "").strip()
-    if not llm_title:
-        return False
-    selected_block = _selected_front_matter_block(contents)
-    if selected_block is None:
-        return False
-
-    owned = set(selected_block.candidate_ids) | set(selected_block.title_candidate_ids)
-    in_block = [
-        candidate
-        for candidate in contents.front_matter_resolution.candidates
-        if candidate.candidate_id in owned
-    ]
-    byline_order = min(
-        (candidate.reading_order for candidate in in_block if "byline" in candidate.roles),
-        default=None,
-    )
-    if byline_order is None:
-        return False
-    above = [
-        candidate
-        for candidate in in_block
-        if candidate.reading_order < byline_order
-        and _safe_title_candidate(candidate, paper_metadata)
-    ]
-    if not above:
-        return False
-    candidate = max(above, key=lambda item: item.reading_order)
-
-    wanted = _normalize_for_match(llm_title)
-    if (
-        wanted in _normalize_for_match(candidate.raw_text)
-        or _title_ratio(candidate.raw_text, llm_title) >= _TITLE_AGREE_RATIO
+    for decision in (
+        decide_abstract(
+            abstract_incumbent,
+            fallback=fallback,
+            explicitly_absent=explicit_absence,
+            printed_abstract=printed_abstract,
+            abstained=False,
+        ),
+        decide_keywords(
+            keywords_incumbent,
+            doc_info=doc_info_keywords,
+            section=section_keywords,
+            abstained=False,
+        ),
     ):
-        return False
-
-    paper_metadata.title = candidate.raw_text
-    validation_issue_sink.append(
-        ValidationIssue(
-            code="VAL_TITLE_BYLINE_ADJACENT",
-            severity=IssueSeverity.WARNING,
-            message="Preferred the printed title row directly above the byline over the model title",
-            origin_stage="extract",
-            evidence_ids=(candidate.candidate_id,),
-            blocking=False,
-        )
-    )
-    logger.info(
-        "Byline-adjacency title preference replaced %r with candidate %s",
-        llm_title,
-        candidate.candidate_id,
-    )
-    return True
-
-
-def _resolve_title(contents, paper_metadata) -> None:
-    """Prefer the layout-detected title; otherwise fall back to the first
-    unclassified non-canonical header.
-
-    When the layout title is specifically identified as a journal or publisher banner and disagrees with the language model, prefer the language-model title. Disagreement alone is insufficient: the masthead evidence must be specific.
-    """
-    from bibr.paper_contents import CanonicalSection
-
-    detected = contents.detected_title
-    llm_title = paper_metadata.title
-    if detected:
-        from bibr.utils.metadata import is_exact_generic_article_label
-
-        resolution = getattr(contents, "front_matter_resolution", None)
-        grounded_llm_title = False
-        if (
-            llm_title
-            and not is_exact_generic_article_label(llm_title)
-            and resolution is not None
-            and resolution.selected_block_id is not None
-        ):
-            selected = {
-                candidate_id
-                for block in resolution.blocks
-                if block.block_id == resolution.selected_block_id
-                for candidate_id in block.title_candidate_ids
-            }
-            wanted = _normalize_for_match(llm_title)
-            grounded_llm_title = any(
-                candidate.candidate_id in selected
-                and "title" in candidate.roles
-                and candidate.roles.isdisjoint({"abstract", "byline", "affiliation", "doi"})
-                and wanted
-                and wanted in _normalize_for_match(candidate.raw_text)
-                for candidate in resolution.candidates
-            )
-        if is_exact_generic_article_label(detected) and grounded_llm_title:
-            paper_metadata.title = llm_title
-        elif (
-            llm_title
-            and _detected_title_is_masthead(
-                detected, paper_metadata.journal, paper_metadata.publisher
-            )
-            and _title_ratio(detected, llm_title) < _TITLE_AGREE_RATIO
-        ):
-            # Layout labeled the journal or publisher banner as the document title; the language
-            # model has the article title from the full front matter.
-            logger.info(
-                "Masthead-title guard: layout doc_title %r matches journal/publisher; "
-                "using LLM title %r instead",
-                detected,
-                llm_title,
-            )
-            paper_metadata.title = llm_title
-        else:
-            paper_metadata.title = detected
-    if not paper_metadata.title:
-        _canonical_headers = {s.value for s in CanonicalSection if s != CanonicalSection.UNKNOWN}
-        for sec in contents.sections:
-            if sec.level > 0 and sec.section_type == CanonicalSection.UNKNOWN:
-                header_lower = sec.header.lower().strip()
-                if header_lower and header_lower not in _canonical_headers:
-                    paper_metadata.title = sec.header
-                    break
+        apply_decision(paper_metadata, decision)
 
 
 async def _link_citations(
@@ -1594,8 +1134,14 @@ async def post_parse(
     """
     from bibr.clients.llm import LLMClient, new_usage_context_key, usage_file_context
     from bibr.config import snapshot_settings
+    from bibr.extract.field_decisions import (
+        apply_decision,
+        decide_title,
+        field_decisions_of,
+        incumbent_candidate,
+    )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
-    from bibr.paper import _merge_ocr_metadata
+    from bibr.paper import _merge_ocr_metadata, doc_info_candidates
 
     # Single LLMClient for the entire post-parse pipeline — shared across
     # section classification, implicit section detection, and metadata extraction
@@ -1683,7 +1229,6 @@ async def post_parse(
                 on_references_ready=on_references_ready,
                 memory_mode=memory_mode,
             )
-            _note_extraction_sources(contents, paper_metadata, parse_strategy)
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
                 and contents.front_matter_resolution is not None
@@ -1693,55 +1238,51 @@ async def post_parse(
                 metadata_ownership_scoped
                 and contents.front_matter_resolution.selected_block_id is None
             )
-            from bibr.utils.metadata import is_exact_generic_article_label
+            native_metadata = contents.preparsed_metadata is not None
+            # The OCR/doc-info metadata may fill empty fields only when no
+            # front-matter record owns them.
+            doc_info = (
+                doc_info_candidates(ocr_metadata)
+                if ocr_metadata and not metadata_ownership_scoped
+                else {}
+            )
+            # The core extractor decides the authors and the fields only it
+            # produces; decide them here when it did not run. The doc-info
+            # authors are in hand before the author-name snapshot below, which
+            # grounds named funding declarations, is taken.
+            _decide_record_fields(
+                paper_metadata, native=native_metadata, doc_info_authors=doc_info.get("author")
+            )
 
-            # Ownership-scoped null-title safety net: one safe selected-record
-            # candidate may replace a null LLM title, then — still only when the
-            # title is otherwise absent — the layout detected title, under the
-            # same filters. `_resolve_title`'s unknown-header scan stays skipped
-            # under ownership scope. With a title in hand the only (default-off)
-            # policy is byline adjacency for multilingual front matter.
-            if metadata_ownership_scoped and not metadata_abstained and not paper_metadata.title:
-                if _resolve_selected_title(
-                    contents,
-                    paper_metadata,
-                    validation_issue_sink=metadata_issues,
-                ):
-                    set_field_source(paper_metadata, "title", "front_matter_candidate")
-                elif _resolve_detected_title_fallback(
-                    contents,
-                    paper_metadata,
-                    validation_issue_sink=metadata_issues,
-                ):
-                    set_field_source(paper_metadata, "title", "layout_title")
-            elif (
-                metadata_ownership_scoped
-                and not metadata_abstained
-                and _prefer_byline_adjacent_title(
-                    contents,
-                    paper_metadata,
-                    validation_issue_sink=metadata_issues,
-                    settings=effective_settings,
-                )
-            ):
-                set_field_source(paper_metadata, "title", "byline_adjacent")
-            if not metadata_ownership_scoped or is_exact_generic_article_label(
-                contents.detected_title
-            ):
-                title_before = paper_metadata.title
-                _resolve_title(contents, paper_metadata)
-                if paper_metadata.title != title_before:
-                    set_field_source(
-                        paper_metadata,
-                        "title",
-                        "layout_title"
-                        if paper_metadata.title == contents.detected_title
-                        else "section_header",
+            # The title: the extracted one, the ownership-scoped null-title
+            # safety net (one safe selected-record title row, then the layout
+            # title under the same filters), byline adjacency for multilingual
+            # front matter (default off), the layout title and unknown-header
+            # scan outside ownership scope, then the doc-info.
+            title_decision = decide_title(
+                incumbent_candidate(
+                    paper_metadata, "title", source="native" if native_metadata else None
+                ),
+                resolution=contents.front_matter_resolution,
+                detected_title=contents.detected_title,
+                sections=contents.sections,
+                journal=paper_metadata.journal,
+                publisher=paper_metadata.publisher,
+                scoped=metadata_ownership_scoped,
+                abstained=metadata_abstained,
+                prefer_byline_adjacent=bool(
+                    getattr(
+                        getattr(effective_settings, "pipeline", None),
+                        "title_prefer_byline_adjacent",
+                        False,
                     )
+                ),
+                doc_info=doc_info.get("title"),
+            )
+            apply_decision(paper_metadata, title_decision)
+            metadata_issues.extend(title_decision.issues)
 
-            # OCR/doc-info fallback can supply authors when primary extraction
-            # abstains. Merge it before freezing the author-name snapshot used
-            # to ground named funding declarations.
+            # The OCR/doc-info DOI fills an empty DOI outside ownership scope.
             if ocr_metadata and not metadata_ownership_scoped:
                 _merge_ocr_metadata(paper_metadata, ocr_metadata)
 
@@ -1780,24 +1321,20 @@ async def post_parse(
                     validation_issue_sink=metadata_issues,
                 )
 
-            # Extraction policy (abstract fallback, keyword recovery,
-            # commentary guard) finalizes metadata here — the export layer
-            # serializes it verbatim.
-            if not metadata_abstained:
-                abstract_before = paper_metadata.abstract
-                keywords_before = paper_metadata.keywords
-                _finalize_abstract_and_keywords(
-                    contents,
-                    paper_metadata,
-                    resolution=(
-                        contents.front_matter_resolution if metadata_ownership_scoped else None
-                    ),
-                    validation_issue_sink=metadata_issues,
-                )
-                if paper_metadata.abstract and not (abstract_before or "").strip():
-                    set_field_source(paper_metadata, "abstract", "abstract_section")
-                if paper_metadata.keywords and not keywords_before:
-                    set_field_source(paper_metadata, "keywords", "keywords_section")
+            # The abstract and keywords are decided here (extracted values,
+            # section and doc-info fallbacks) — the export layer serializes
+            # them verbatim.
+            _finalize_abstract_and_keywords(
+                contents,
+                paper_metadata,
+                resolution=(
+                    contents.front_matter_resolution if metadata_ownership_scoped else None
+                ),
+                validation_issue_sink=metadata_issues,
+                native=native_metadata,
+                doc_info_keywords=doc_info.get("keywords"),
+                abstained=metadata_abstained,
+            )
 
             # Superscript cleanup runs last: it needs the ``^{N}`` markers
             # preserved through citation detection above, and must follow
@@ -1827,7 +1364,6 @@ async def post_parse(
                     file_hash,
                     integrity_resolution=integrity_resolution,
                 )
-                set_field_source(paper_metadata, "funding", "llm")
             extraction_completed = True
 
         except ProcessingError as exc:
@@ -1907,7 +1443,13 @@ async def post_parse(
         no_llm=no_llm,
         native_metadata=contents.preparsed_metadata is not None,
         references_off=parse_strategy == "off",
+        # The reference list comes from the input's structured citations or
+        # the configured parser.
+        references_source=(
+            "native" if contents.native_references is not None else str(parse_strategy or "llm")
+        ),
     )
+    paper.field_decisions = field_decisions_of(paper_metadata)
     paper.enrichment_prefetch = prefetch_handle
     paper.validation_issues.extend(front_matter_issues)
     paper.validation_issues.extend(metadata_issues)

@@ -16,7 +16,7 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
   tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
   declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
   `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
-  `bib` it records `{state, source, issues}`. `state` is `extracted` (a value
+  `bib` it records `{state, source, issues, rule}`. `state` is `extracted` (a value
   was exported), `absent` (the extractor ran and found none), `abstained`
   (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
   `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
@@ -26,10 +26,42 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
   `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
   `classifier`, `llm_label`, `correction_notice`, `identity`,
   `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
-  and `issues` the codes of the warnings and validation issues that explain the
-  state. The block is built from facts the pipeline already records and is
-  omitted for a Paper exported outside the pipeline. The conformance fixtures
-  gain a 12.0 reader example and an invalid field record.
+  `issues` the codes of the warnings and validation issues that explain the
+  state, and `rule` the rule of the field's decision that chose the value or
+  its absence (`extracted`, `selected_record_title`, `layout_title_fallback`,
+  `abstract_section_fallback`, `correction_notice`, `abstained`, ...; null for
+  `doi` and `bib`). The block is built from facts the pipeline already records
+  and is omitted for a Paper exported outside the pipeline. The conformance
+  fixtures gain a 12.0 reader example and an invalid field record.
+
+### Changed — one decision point per metadata field
+
+- The title, authors, abstract, keywords, publication date, journal,
+  publisher, paper type (with the OECD fields), the four research-integrity
+  statements, structured funding and parsed affiliations are each decided
+  once, by one rule in `bibr.extract.field_decisions`, from the candidates their
+  producers propose: the model's answer and its grounding repairs, the
+  selected-record and layout title fallbacks, the unclassified-heading scan,
+  the Abstract and Keywords sections, the PDF doc-info, the empty-author
+  recovery and the CRediT statement, the paper classifier and its LLM relabel,
+  the correction-notice guard, and the integrity-statement resolution. Once the
+  record exists that module is their only writer, and a test fails when
+  another module assigns them. Not covered: the DOI, which the identity stage
+  decides; the fields a record is built with (volume, issue, pages, ISSN,
+  licence, language and the identifiers), which have one producer each; the
+  JATS and HTML readers, which build the record they hand over; structured
+  funding and affiliations in a run without an LLM, where nothing parses them;
+  and the contribution roles the structured-integrity call adds to the decided
+  authors in place, which the author receipt records as a `contribution_roles`
+  transform.
+  The rules keep the precedence of the write sites they replace, so exported
+  values are unchanged except one provenance case: when the author call fails
+  and the empty-author recovery returns only a translator credit,
+  `extraction.fields.author.source` now names the step that failed (`llm`)
+  instead of `llm_recovery`. Each field's receipt (the candidates considered,
+  the one used, the repairs applied to it and the rule) is kept on
+  `Paper.field_decisions`, and `extraction.fields` takes its `source` and
+  `rule` from it.
 
 ### Changed — export schema 12.0 (breaking)
 
@@ -744,6 +776,18 @@ released.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
+- A subtitle or a numbered series part printed on its own row under the title,
+  such as "Careers in garden design" followed by "4. Planting schemes", is now
+  part of the title. The metadata LLM sees both rows but often returned only the
+  first, and title grounding accepted that because the first row is printed
+  verbatim. When the model title is exactly the selected record's title row or
+  rows, the row printed directly under them is now appended, joined with ": "
+  (with a space when the title already ends in punctuation such as "?" or ":"),
+  and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_subtitle_row_dropped`. The row must be short and on the same
+  page. It is left out when it reads as a byline or an extracted author's name,
+  an affiliation, a date, citation or DOI line, an article-type label or section
+  heading, or a parallel title in another language or script.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title
@@ -754,6 +798,34 @@ released.
   `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
   "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
   still left out.
+- A paper that prints its title in two languages, the original and then a
+  translation, now gets the title printed first. The title prompts had no rule
+  for parallel titles, so the metadata LLM often returned the English
+  translation, or joined both versions into one title. The authors prompts had
+  no such rule either, so a byline printed in two scripts could come back
+  romanised, and the title and the authors could come from different language
+  versions of the same front matter. The title/keywords and merged
+  core-metadata prompts now ask for the version printed first, verbatim in the
+  language and script it is printed in, never translated and never joined to
+  the other version. A title quoted in a citation line or a running header does
+  not count. The authors prompts now copy the byline printed first when it is
+  printed in two scripts or languages, and never transliterate or romanise a
+  name. The abstract rule is unchanged: of parallel abstracts, the printed
+  English version is still preferred.
+- A title that opens with a printed label, such as "Research Report: …",
+  "Case report. …" or "Opinion: …", keeps it; so does a title whose label is
+  printed on a row of its own ending in a colon, such as "Review:" above the
+  rest of the title. The metadata LLM dropped such labels the same way it
+  dropped a leading parenthetical, and grounding accepted the rest because it is
+  still printed verbatim. Grounding now restores a label of up to five words
+  that is set off by a colon, full stop or dash in the selected record's title
+  row, and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_label_dropped`. Numbering ("1.", "IV."), field labels
+  ("Title:", "Running title:"), citation lines ("To cite this article:",
+  "Smith et al.:"), page furniture ("Open access") and an article-type kicker
+  printed above the title without a colon are still left out, and nothing is
+  restored when another title row of the record prints the title without the
+  label.
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
@@ -1331,6 +1403,40 @@ released.
   (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
   untouched, as is the reversed-range policy (`5-3` yields no rows), which is
   now documented on `_expand_nums`.
+- The byline check that reports authors missing from the extracted list
+  (`VAL_AUTHOR_MISSING`) read a byline joined with French "et", Dutch "en",
+  German "und", Danish or Norwegian "og", Swedish "och" or Indonesian "dan"
+  as one fewer name than it prints. It split names only on ";", "&" and
+  "and". Spanish "y", Portuguese and Italian "e", and Catalan and Polish "i"
+  also separate two names now, but only in lower case and only when the words
+  on both sides are full names of two or more words, so one person's two
+  surnames, as in "Ramón y Cajal", stay together.
+- A translator credited under the byline, as in "Traducido del inglés por …",
+  "Translated by …" or "Übersetzt von …", was extracted as an author. A name
+  printed only right after such a credit in the front matter is now dropped
+  from the author list, with a `VAL_AUTHOR_TRANSLATOR_DROPPED` warning
+  (evidence `reason:translator_credit`). A translator who is also printed in
+  the byline stays.
+- When a PDF positions a word instead of printing a space before it, the text
+  layer glues the two together, and a byline such as "Kerem B.Yalcin, Selin
+  DenizAksoy" came back with family names "B.Yalcin" and "DenizAksoy". Initials
+  glued to the family name now move back to the given name. A family name
+  joined at a lower-to-upper case step is split, and its first part moved to
+  the given name, when the paper prints the spaced form elsewhere, for example
+  in its contribution statement. Both repairs add a
+  `VAL_AUTHOR_PARTITION_REPAIRED` warning with evidence
+  `reason:glued_family_name`. Author grounding also reads such a join as two
+  words, so a correctly spaced name still matches the glued byline, while
+  surname prefixes such as "McDonald" or "DeKay" stay one word.
+- The metadata LLM can romanise a byline printed in another script, returning
+  "N. O. Petrova" for a Cyrillic byline, even though it is asked for verbatim
+  names. When every extracted name is in a script the selected byline barely
+  uses (under a fifth of its letters, ignoring email addresses and URLs) and
+  none of them is printed in the extraction context, the list is now
+  discarded like a fabricated one: `VAL_AUTHOR_FABRICATED` with evidence
+  `reason:authors_script_mismatch`, then the empty-author recovery retries
+  against the byline alone. Papers that also print the romanised names keep
+  them.
 
 ### Added
 

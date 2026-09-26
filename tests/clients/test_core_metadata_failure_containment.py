@@ -308,7 +308,13 @@ async def test_failed_author_call_without_a_credit_statement_keeps_the_llm_sourc
 
     # The CRediT harvest found nothing, so it is not the source of the field.
     assert metadata.authors == []
-    assert metadata._field_sources["author"] == "llm"
+    decision = metadata._field_decisions.get("author")
+    assert decision.source == "llm"
+    assert [(v.candidate.source, v.accepted) for v in decision.considered] == [
+        ("llm", False),
+        ("llm_recovery", False),
+        ("credit_statement", False),
+    ]
 
 
 # ---------------------------------------------------------------------------

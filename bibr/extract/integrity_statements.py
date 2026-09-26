@@ -947,19 +947,45 @@ def apply_integrity_resolution(
     metadata: PaperMetadata,
     resolution: IntegrityStatementResolution,
 ) -> None:
-    """Materialize mode-effective scalars without replacing native values."""
+    """Decide the statement scalars: the mode-effective statement, never replacing native values.
+
+    A statement of an input that declares its metadata (JATS, HTML) keeps the
+    ``native`` source, since its text is the input's own.
+    """
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_statement
+
     native_metadata = contents.preparsed_metadata is not None
     for field in _FIELDS:
         current = getattr(metadata, field)
         selected = resolution.candidate_indices(field)
+        incumbent = (
+            FieldCandidate(field, "native" if native_metadata else None, current)
+            if current is not None
+            else None
+        )
         if current is not None and (native_metadata or resolution.mode != "active" or not selected):
+            apply_decision(metadata, decide_statement(field, incumbent, None, keep_incumbent=True))
             continue
         rendered = render_integrity_statement(contents, resolution, field)
-        setattr(metadata, field, rendered)
+        lexical = bool(
+            {resolution.candidates[index].method for index in selected}
+            & {"legacy_lexical_capture", "anchored_paragraph"}
+        )
+        source = (
+            "native" if native_metadata else "lexical_anchor" if lexical else "integrity_statement"
+        )
+        apply_decision(
+            metadata,
+            decide_statement(
+                field,
+                incumbent,
+                FieldCandidate(field, source, rendered),
+                keep_incumbent=False,
+            ),
+        )
         if rendered is None:
             continue
-        lexical_methods = {resolution.candidates[index].method for index in selected}
-        if lexical_methods & {"legacy_lexical_capture", "anchored_paragraph"}:
+        if lexical:
             warning = lexical_fallback_warning(field)
             if warning not in contents.processing_warnings:
                 contents.processing_warnings.append(warning)
