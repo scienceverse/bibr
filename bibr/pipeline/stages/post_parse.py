@@ -1886,7 +1886,9 @@ class PostParseStage:
         ctx.progress.stage_start(self.name)
         t0 = time.monotonic()
         alive = ctx.alive()
-        sem = asyncio.Semaphore(ctx.settings.pipeline.max_concurrent_post_parse)
+        # Clamped: settings load rejects 0, but an injected settings object can
+        # still carry it, and Semaphore(0) would hang every task forever.
+        sem = asyncio.Semaphore(max(1, ctx.settings.pipeline.max_concurrent_post_parse))
         # Start enrichment's network prefetch under the LLM tail only when this
         # run will actually enrich (post_parse itself skips it for refs=off /
         # no_llm / no references).

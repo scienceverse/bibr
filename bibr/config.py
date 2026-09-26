@@ -1,6 +1,8 @@
+import contextlib
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Any, Literal, cast
 from urllib.parse import quote as _url_quote
@@ -21,6 +23,7 @@ from pydantic_settings import (
     NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
+    SettingsError,
 )
 
 # Safe at import time: bibr.exceptions has no bibr dependencies, so no cycle.
@@ -110,6 +113,13 @@ def _section(prefix: str) -> SettingsConfigDict:
         env_file_encoding="utf-8",
         env_prefix=prefix,
         extra="ignore",
+        # An empty value falls back to the field default (it is ignored, the
+        # way an unset variable is), and the literal ``null`` sets None on
+        # nullable fields — so uncommenting any ``bibr config example --full``
+        # line loads, and section fields can be set to their documented null
+        # from the environment just like top-level fields already could.
+        env_ignore_empty=True,
+        env_parse_none_str="null",
     )
 
 
@@ -119,9 +129,9 @@ class _NoInterpolationDotEnvSource(DotEnvSettingsSource):
     Interpolation is on by default in python-dotenv (used under the hood by
     pydantic-settings) and silently shell-expands ``${VAR}`` references inside
     values — e.g. an API key or Redis password literally containing ``${HOME}``
-    is mangled on load, and bibr's own ``env_utils.parse_env`` reads the literal
-    value, so the loaded config diverges from what ``preset diff``/``show``
-    displays. bibr always wants ``.env`` values read verbatim.
+    is mangled on load. bibr always wants ``.env`` values read verbatim, and
+    ``env_utils.parse_env`` shares this reader so ``preset diff``/``show``
+    displays exactly what the runtime loads.
     """
 
     def _read_env_file(self, file_path: Path):
@@ -286,7 +296,7 @@ class LlmOptions(_BibrSettings):
 
     model_config = _section("LLM_")
 
-    provider: str = Field(
+    provider: Literal["google", "openai", "anthropic", "groq", "ollama"] = Field(
         "google",
         description='LLM provider: "google" (default), "openai", "anthropic", "groq", or "ollama".',
     )
@@ -343,6 +353,7 @@ class LlmOptions(_BibrSettings):
     )
     rate_limit_rpm: int = Field(
         60,
+        ge=1,
         description="LLM rate limit in requests per minute. Guards a cloud provider's quota, "
         "so it is auto-lowered to 10 for the ollama provider and auto-raised for a managed "
         "local server (which has no external quota) — both unless set explicitly.",
@@ -459,11 +470,13 @@ class LlmOptions(_BibrSettings):
     # Default LLM backend for chew when --llm isn't passed: "cloud" or a
     # managed local server ("local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"). Written by
     # `bibr setup` when the user picks the local path.
-    backend: str = Field(
-        "cloud",
-        description='Default LLM backend for chew when --llm is not passed: "cloud" or a managed '
-        'local server ("local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"). '
-        "Written by `bibr setup`.",
+    backend: Literal["cloud", "local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"] = (
+        Field(
+            "cloud",
+            description='Default LLM backend for chew when --llm is not passed: "cloud" or a managed '
+            'local server ("local", "vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "llmster"). '
+            "Written by `bibr setup`.",
+        )
     )
     local_model: str | None = Field(
         None,
@@ -473,7 +486,10 @@ class LlmOptions(_BibrSettings):
         "under MLX, which lacks fast nvfp4 kernels). `bibr setup` writes it explicitly.",
     )
     local_mem_fraction: float = Field(
-        0.85, description="GPU memory fraction reserved for the managed local LLM server (0.0-1.0)."
+        0.85,
+        ge=0.0,
+        le=1.0,
+        description="GPU memory fraction reserved for the managed local LLM server (0.0-1.0).",
     )
     vllm_mlx_port: int = Field(8767, description="Port for the managed vllm-mlx LLM server.")
     # Extra CLI args appended to the managed ``vllm_mlx.server`` command
@@ -560,15 +576,17 @@ class LlmOptions(_BibrSettings):
     # strict grammar satisfy it with required fields only and skip optional
     # ones (e.g. drop authors); "json" (json_object) keeps output valid JSON
     # but lets the prompt drive full field population. Ignored for real OpenAI.
-    instructor_mode: str = Field(
-        "",
-        description='Instructor structured-output mode for custom-base_url (local) servers: "" '
-        '(default, strict JSON_SCHEMA) or "json" (json_object, looser but more complete on small '
-        "models). Ignored for real OpenAI.",
+    instructor_mode: Literal["", "json", "md_json", "markdown_json", "json_schema", "tools"] = (
+        Field(
+            "",
+            description='Instructor structured-output mode for custom-base_url (local) servers: "" '
+            '(default, strict JSON_SCHEMA) or "json" (json_object, looser but more complete on small '
+            "models). Ignored for real OpenAI.",
+        )
     )
     # Structured-output backend selector. Native NuExtract templates are
     # experimental and explicit-only pending runtime-specific qualification.
-    structured_backend: str = Field(
+    structured_backend: Literal["auto", "instructor", "nuextract-native"] = Field(
         "auto",
         description='Structured-output backend: "auto" (default), "instructor", or '
         '"nuextract-native". Auto uses Instructor; native NuExtract templates are '
@@ -582,6 +600,22 @@ class LlmOptions(_BibrSettings):
         60,
         description="Poll interval in seconds for the offline batch LLM layer's job status checks.",
     )
+
+    @field_validator("provider", "backend", "structured_backend", mode="before")
+    @classmethod
+    def _lower_llm_choice(cls, v):
+        """Normalize choice-like values so the Literal check is case-insensitive."""
+        return v.strip().lower() if isinstance(v, str) else v
+
+    @field_validator("instructor_mode", mode="before")
+    @classmethod
+    def _normalize_instructor_mode(cls, v):
+        """Normalize the instructor mode: case-insensitive, with ``json_object`` accepted as
+        the ``json`` alias the field description itself suggests."""
+        if not isinstance(v, str):
+            return v
+        mode = v.strip().lower()
+        return "json" if mode == "json_object" else mode
 
 
 class OcrOptions(_BibrSettings):
@@ -705,10 +739,11 @@ class OcrOptions(_BibrSettings):
         validation_alias=AliasChoices("OCR_LOCAL_GPUS", "OCR_SGLANG_GPUS"),
     )
     max_concurrent_files: int = Field(
-        4, description="Max concurrent files being OCR'd simultaneously."
+        4, ge=1, description="Max concurrent files being OCR'd simultaneously."
     )
     max_concurrent_regions: int = Field(
         16,
+        ge=1,
         description="Max concurrent OCR region requests server-wide "
         "(default 16 x OCR_LOCAL_GPUS; keep <= 16 per server instance to avoid detokenizer "
         "stalls). Binds every OCR path, and is the cap used on its own when files run one at "
@@ -716,6 +751,7 @@ class OcrOptions(_BibrSettings):
     )
     concurrent_regions_per_file: int = Field(
         6,
+        ge=1,
         description="Max concurrent OCR region requests per file (prevents one file starving "
         "others when files overlap). Never exceeds OCR_MAX_CONCURRENT_REGIONS.",
     )
@@ -768,6 +804,8 @@ class OcrOptions(_BibrSettings):
     # without false-positives on legitimately empty pages.
     min_success_rate: float = Field(
         0.5,
+        ge=0.0,
+        le=1.0,
         description="Mark a file failed (code ocr_mostly_failed) when fewer than this fraction of "
         "OCR-needed regions return content. Set to 0 to disable.",
     )
@@ -783,6 +821,12 @@ class OcrOptions(_BibrSettings):
         '(default, keep resident in balanced mode unless a local LLM shares the GPU), "always" '
         '(legacy per-chunk teardown), or "never".',
     )
+
+    @field_validator("backend", mode="before")
+    @classmethod
+    def _lower_ocr_backend(cls, v):
+        """Normalize the backend name so the Literal check is case-insensitive."""
+        return v.strip().lower() if isinstance(v, str) else v
 
     @model_validator(mode="after")
     def validate_profile(self) -> "OcrOptions":
@@ -813,7 +857,9 @@ class OcrVisionOptions(_BibrSettings):
     )
     model: str = Field("gemini-3-flash-preview", description="Vision LLM model for OCR.")
     base_url: str | None = Field(None, description="Vision LLM base URL override.")
-    rate_limit_rpm: int = Field(30, description="Vision LLM rate limit in requests per minute.")
+    rate_limit_rpm: int = Field(
+        30, ge=1, description="Vision LLM rate limit in requests per minute."
+    )
     max_tokens: int = Field(16384, description="Vision LLM max completion tokens.")
     timeout_seconds: int = Field(60, description="Vision LLM request timeout in seconds.")
 
@@ -995,6 +1041,7 @@ class CrossrefOptions(_BibrSettings):
     )
     rate_limit_rpm: int = Field(
         200,
+        ge=1,
         description="Crossref rate limit in requests per minute "
         "(raise to 600 if you set an email or have an API key).",
     )
@@ -1026,7 +1073,7 @@ class CrossrefOptions(_BibrSettings):
     # concurrency only fills the pipeline — it never raises the request rate.
     # Sized so the 200 RPM polite pool stays saturated at ~4s/search latency.
     enrich_concurrency: int = Field(
-        12, description="Pipeline-fill parallelism for Crossref reference lookups."
+        12, ge=1, description="Pipeline-fill parallelism for Crossref reference lookups."
     )
     # Per-paper wall-clock budget (seconds) for the whole enrichment stage.
     enrich_timeout: float = Field(
@@ -1036,7 +1083,7 @@ class CrossrefOptions(_BibrSettings):
     # single hung Crossref call cannot monopolize a concurrency slot for the
     # entire per-paper budget.
     request_timeout: float = Field(
-        15.0, description="Per-HTTP-request timeout in seconds for Crossref calls."
+        15.0, gt=0, description="Per-HTTP-request timeout in seconds for Crossref calls."
     )
     # In-process LRU cache for works/search responses — duplicate refs across
     # a batch (and repeat serve requests) skip the API. 0 disables.
@@ -1123,7 +1170,7 @@ class RorOptions(_BibrSettings):
         "limit, 50 without a client ID and 2000 with one.",
     )
     request_timeout: float = Field(
-        10.0, description="Per-HTTP-request timeout in seconds for ROR calls."
+        10.0, gt=0, description="Per-HTTP-request timeout in seconds for ROR calls."
     )
     enrich_timeout: float = Field(
         60.0,
@@ -1159,11 +1206,12 @@ class ResolverOptions(_BibrSettings):
     # Per-request timeout (seconds) for single resolver calls (/search, /works, /health).
     timeout: float = Field(
         10.0,
+        gt=0,
         description="Per-request timeout in seconds for resolver calls (/search, /works, /health).",
     )
     # Max candidates to request from the resolver /search endpoint.
     limit: int = Field(
-        20, description="Max candidates to request from the resolver /search endpoint."
+        20, ge=1, description="Max candidates to request from the resolver /search endpoint."
     )
     # Max concurrent /search calls when prefetching a reference list's title searches.
     search_concurrency: int = Field(
@@ -1219,10 +1267,11 @@ class ResolverOptions(_BibrSettings):
     @classmethod
     def _split_sources(cls, v):
         """Accept a comma-separated env string or a list; normalize to lowercased tokens."""
-        items = v.split(",") if isinstance(v, str) else v
-        if isinstance(items, (list, tuple)):
-            return [str(s).strip().lower() for s in items if str(s).strip()]
-        return v
+        # Route through the shared CSV/JSON splitter (not a JSON-less comma
+        # split) so the JSON form pydantic-settings decodes natively keeps
+        # working alongside the comma-separated form the field descriptions
+        # prescribe; ``lower=True`` keeps the previous lowercasing.
+        return _split_csv_env(v, lower=True)
 
 
 class CacheOptions(_BibrSettings):
@@ -1433,6 +1482,8 @@ class MlOptions(_BibrSettings):
     # Set to 0.0 to disable.
     section_classifier_min_confidence: float = Field(
         0.5,
+        ge=0.0,
+        le=1.0,
         description="Type-head softmax probability below which a section-classifier prediction "
         "collapses to UNKNOWN. Set to 0.0 to disable.",
     )
@@ -1481,6 +1532,8 @@ class MlOptions(_BibrSettings):
     # escalated to an LLM, so this threshold only gates paper_type escalation.
     paper_classifier_min_confidence: float = Field(
         0.5,
+        ge=0.0,
+        le=1.0,
         description="paper_type-head softmax probability below which a paper-classifier "
         "prediction is escalated to the LLM fallback (label_paper_type).",
     )
@@ -1499,6 +1552,8 @@ class MlOptions(_BibrSettings):
     # (paper_type has its own LLM escalation).
     paper_classifier_l2_min_confidence: float = Field(
         0.5,
+        ge=0.0,
+        le=1.0,
         description="OECD L2 (subdomain) head softmax probability below which the subdomain is "
         "emitted as null instead of a low-confidence label. 0.0 = always emit.",
     )
@@ -1643,7 +1698,7 @@ class RapidMlxOptions(_BibrSettings):
     max_concurrent_requests: int = Field(
         4, description="Admission cap for managed Rapid-MLX servers."
     )
-    spec_decode: str = Field(
+    spec_decode: Literal["auto", "mtp", "none"] = Field(
         "auto",
         description="Speculative decoding for the managed Rapid-MLX LLM server: 'auto' "
         "(attempt native MTP for Qwen3.5/3.6 models, relaunching without it when the "
@@ -1674,6 +1729,12 @@ class RapidMlxOptions(_BibrSettings):
         description="HOME override for managed Rapid-MLX subprocesses; Rapid-MLX stores some "
         "runtime files under the home directory.",
     )
+
+    @field_validator("spec_decode", mode="before")
+    @classmethod
+    def _lower_spec_decode(cls, v):
+        """Normalize the spec-decode choice so the Literal check is case-insensitive."""
+        return v.strip().lower() if isinstance(v, str) else v
 
 
 class PipelineOptions(_BibrSettings):
@@ -1742,7 +1803,7 @@ class PipelineOptions(_BibrSettings):
         "to prevent compact many-page PDFs from exhausting render memory.",
     )
     max_concurrent_post_parse: int = Field(
-        4, description="Max concurrent post-parse tasks per request."
+        4, ge=1, description="Max concurrent post-parse tasks per request."
     )
     # Cloud-LLM only: with a remote LLM there is no OCR->LLM VRAM handoff, so
     # each OCR window's back half (parse -> extract -> enrich -> export) can
@@ -1957,6 +2018,10 @@ class GlobalSettings(_BibrSettings):
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
+        # Same empty/null policy as the sections (see ``_section``): an empty
+        # value falls back to the default, the literal ``null`` sets None.
+        env_ignore_empty=True,
+        env_parse_none_str="null",
     )
 
     # Top-level survivors (not clustered into any sub-model)
@@ -2101,12 +2166,16 @@ class GlobalSettings(_BibrSettings):
     # Per-paper geometry confidence below which segmentation cascades to the LLM.
     REF_GEOM_SEG_CASCADE_THRESHOLD: float = Field(
         0.90,
+        ge=0.0,
+        le=1.0,
         description="Per-paper geometry confidence below which reference segmentation cascades to the LLM.",
     )
     # A decisive boundary classifier can still lose anchors during alignment.
     # Decline when too few labeled boundaries survive, regardless of confidence.
     REF_GEOM_MIN_ALIGN_YIELD: float = Field(
         0.5,
+        ge=0.0,
+        le=1.0,
         description="Alignment-yield (aligned/labeled boundaries) below which the geometry segmenter "
         "declines regardless of confidence, cascading to the next tier.",
     )
@@ -2141,6 +2210,8 @@ class GlobalSettings(_BibrSettings):
     # missing anchors. Keep the region result as a reserve if LLM recovery fails.
     REF_SEG_MIN_SOURCE_RECALL: float = Field(
         0.6,
+        ge=0.0,
+        le=1.0,
         description="Fraction of reference-section source records the region tier must recover as "
         "segments; below it, escalate to the LLM tier instead of accepting the segmentation. "
         "0 disables the backstop.",
@@ -2255,16 +2326,6 @@ class GlobalSettings(_BibrSettings):
     # ------------------------------------------------------------------
     # Validators (rewritten against nested form)
     # ------------------------------------------------------------------
-    @model_validator(mode="before")
-    @classmethod
-    def empty_str_to_none(cls, data):
-        """Treat empty-string env values as None / defaults for top-level fields."""
-        if isinstance(data, dict):
-            for k, v in list(data.items()):
-                if v == "":
-                    data[k] = None
-        return data
-
     @field_validator("REF_SEG_STRATEGY", "REF_PARSE_STRATEGY", mode="before")
     @classmethod
     def lower_ref_strategy(cls, v):
@@ -2474,6 +2535,21 @@ def _env_prefix_for_model(model_name: str) -> str:
     return ""
 
 
+def _env_prefix_for_attr(section_attr: str) -> str:
+    """Env-var prefix for a ``GlobalSettings`` section attribute (e.g. ``llm`` -> ``LLM_``).
+
+    Companion to :func:`_env_prefix_for_model` for error paths that only know
+    the attribute name (a nested ``ValidationError`` loc starts with it).
+    """
+    for name, finfo in GlobalSettings.model_fields.items():
+        if name != section_attr:
+            continue
+        ann = finfo.annotation
+        if isinstance(ann, type):
+            return cast(str, getattr(ann, "model_config", {}).get("env_prefix", "") or "")
+    return ""
+
+
 def _configuration_error(exc: ValidationError) -> ConfigurationError:
     """Translate a pydantic ``ValidationError`` into a ``ConfigurationError``.
 
@@ -2485,14 +2561,22 @@ def _configuration_error(exc: ValidationError) -> ConfigurationError:
     """
     import re
 
-    prefix = _env_prefix_for_model(exc.title)
     problems: list[str] = []
     for err in exc.errors():
         loc = err.get("loc") or ()
-        field = str(loc[-1]) if loc else exc.title
-        # Top-level fields are already the bare env-var name; sub-model fields
-        # are prefix + FIELD_NAME.
-        env_var = field if not prefix else f"{prefix}{field.upper()}"
+        if len(loc) >= 2 and isinstance(loc[0], str):
+            # Nested section error from ``GlobalSettings`` (e.g.
+            # ``('llm', 'rate_limit_rpm')``): resolve the section prefix live
+            # so the message names the real env var (``LLM_RATE_LIMIT_RPM``).
+            section_prefix = _env_prefix_for_attr(loc[0])
+            field = str(loc[-1])
+            env_var = f"{section_prefix}{field.upper()}" if section_prefix else field
+        else:
+            prefix = _env_prefix_for_model(exc.title)
+            field = str(loc[-1]) if loc else exc.title
+            # Top-level fields are already the bare env-var name; sub-model fields
+            # are prefix + FIELD_NAME.
+            env_var = field if not prefix else f"{prefix}{field.upper()}"
         expected = (err.get("ctx") or {}).get("expected")
         if not loc:
             # A model-level validator reports ``loc == ()`` and ``input`` == the
@@ -2514,6 +2598,54 @@ def _configuration_error(exc: ValidationError) -> ConfigurationError:
         body = "\n".join(f"  - {p}" for p in problems)
         message = f"Invalid configuration:\n{body}\nFix these in your .env or environment."
     return ConfigurationError(message, problems=problems)
+
+
+@contextlib.contextmanager
+def _overlaid_environ(overrides: Mapping[str, str]):
+    """Temporarily layer *overrides* over ``os.environ`` (restored on exit)."""
+    sentinel = object()
+    saved = {key: os.environ.get(key, sentinel) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def validate_env_overrides(overrides: Mapping[str, str]) -> "GlobalSettings":
+    """Build a ``GlobalSettings`` with *overrides* layered over the environment.
+
+    The single parser shared by ``PresetManager.apply_to_settings`` and
+    ``bibr config set``: NoDecode/CSV/JSON parsing, Literal and constraint
+    checks, field/model validators, alias handling and the auto-tune
+    model_validators all run, because this constructs the real model. Process
+    env and the ``.env`` chain underneath still apply; *overrides* win, the
+    way process env beats dotenv. Errors surface as
+    :class:`~bibr.exceptions.ConfigurationError` naming the setting(s) to
+    fix, via :func:`_configuration_error`.
+    """
+    str_overrides: dict[str, str] = {}
+    for key, value in overrides.items():
+        if isinstance(value, str):
+            str_overrides[key] = value
+        else:
+            # Preset files are JSON: a hand-edited non-string (number, bool,
+            # list, dict) is serialized to its env spelling — JSON for
+            # containers so the NoDecode/CSV splitters and dict fields parse
+            # it the way the ``.env`` form would.
+            try:
+                str_overrides[key] = json.dumps(value)
+            except (TypeError, ValueError):
+                str_overrides[key] = str(value)
+    with _overlaid_environ(str_overrides):
+        try:
+            return GlobalSettings()
+        except ValidationError as exc:
+            raise _configuration_error(exc) from exc
 
 
 class _SettingsProxy:
@@ -2550,6 +2682,23 @@ class _SettingsProxy:
                 inst = GlobalSettings()
             except ValidationError as exc:
                 raise _configuration_error(exc) from exc
+            except SettingsError as exc:
+                # pydantic-settings raises a bare SettingsError (not a
+                # ValidationError) when a dotenv/env value cannot even be
+                # decoded (e.g. malformed JSON for a dict field). Surface it
+                # as a ConfigurationError naming the field instead of a raw
+                # traceback.
+                import re
+
+                match = re.search(r'field "([^"]+)"', str(exc))
+                field = match.group(1) if match else "configuration"
+                # Never echo a secret field's value back: the raw decode
+                # error can carry the offending text.
+                detail = "could not be parsed" if _is_secret_name(field) else str(exc)
+                raise ConfigurationError(
+                    f"Invalid value for {field} — {detail}. Fix it in your .env or environment.",
+                    problems=[f"Invalid value for {field}"],
+                ) from exc
             object.__setattr__(self, "_instance", inst)
         return inst
 

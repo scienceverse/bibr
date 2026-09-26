@@ -213,6 +213,58 @@ released.
 
 ### Fixed
 
+- Settings, presets and `config set` now go through one parser, and numeric
+  and choice-like settings are validated at load. `bibr preset apply`/`use`
+  and `bibr config set` validate through the real settings model, so a preset
+  or written value behaves exactly like the same line in `.env`: comma lists
+  arrive parsed, `Literal`/case validators run, and the Ollama RPM and OCR
+  region auto-tunes apply. A preset value that fails validation raises a
+  `ConfigurationError` naming the preset and the setting instead of applying
+  half the preset or crashing with a traceback, and unknown preset keys are
+  still reported. `bibr preset show/diff/save/use/rm` with a bad preset name
+  (for example a name with a space or `..`) and `chew --preset` with such a
+  name now exit 1 with a message naming the preset instead of printing a
+  traceback. Values that used to be accepted and are now rejected, each with
+  an error naming the setting:
+  - `LLM_PROVIDER`, `LLM_BACKEND`, `LLM_INSTRUCTOR_MODE`,
+    `LLM_STRUCTURED_BACKEND` and `RAPID_MLX_SPEC_DECODE` only accept their
+    documented choices (matching case-insensitively, so `OLLAMA` still works
+    and now normalizes to `ollama` instead of skipping auto-tune; the
+    description's own `json_object` spelling of `LLM_INSTRUCTOR_MODE` now
+    means `json`). `OCR_BACKEND` stays free-form on purpose: private OCR
+    aliases with an explicit `OCR_PROFILE` still load.
+  - `LLM_RATE_LIMIT_RPM`, `OCR_VISION_RATE_LIMIT_RPM`,
+    `CROSSREF_RATE_LIMIT_RPM`, `OCR_MAX_CONCURRENT_FILES`,
+    `OCR_MAX_CONCURRENT_REGIONS`, `OCR_CONCURRENT_REGIONS_PER_FILE`,
+    `CROSSREF_ENRICH_CONCURRENCY`, `BIBR_RESOLVER_LIMIT` and
+    `PIPELINE_MAX_CONCURRENT_POST_PARSE` reject `0` (previously accepted, then
+    a zero RPM raised `ZeroDivisionError` on the first LLM call and a zero
+    concurrency deadlocked the counting semaphore; the two pipeline semaphore
+    sites additionally clamp to 1 for injected settings objects).
+    `CROSSREF_REQUEST_TIMEOUT`, `ROR_REQUEST_TIMEOUT`
+    and `BIBR_RESOLVER_TIMEOUT` reject `0`. (`BIBR_RESOLVER_SEARCH_CONCURRENCY`
+    already had its bound.)
+  - `LLM_LOCAL_MEM_FRACTION`, `OCR_MIN_SUCCESS_RATE`,
+    `ML_SECTION_CLASSIFIER_MIN_CONFIDENCE`,
+    `ML_PAPER_CLASSIFIER_MIN_CONFIDENCE`,
+    `ML_PAPER_CLASSIFIER_L2_MIN_CONFIDENCE`,
+    `REF_GEOM_SEG_CASCADE_THRESHOLD`, `REF_GEOM_MIN_ALIGN_YIELD` and
+    `REF_SEG_MIN_SOURCE_RECALL` reject values outside `0`–`1`.
+- `parse_env` (used by `preset save`/`diff`/`show`) now reads `.env` files
+  with the same dotenv parser the runtime uses, so inline comments, `export`
+  prefixes and quoted escapes no longer bake comment text or quote
+  characters into snapshot values. `merge_env` rewrites every duplicate
+  definition of a key (including `export KEY=` lines), so the runtime can no
+  longer read back an older duplicate. The `*_MAX_TOKENS` tuning knobs,
+  `JOBS_KEY_PREFIX` and similar keys are no longer mistaken for secrets and
+  excluded from snapshots.
+- An empty `.env` value now falls back to the setting's default and the
+  literal `null` sets `None`, matching the documented semantics; `bibr
+  config example --full` renders lists as comma values and `None` defaults
+  as `null`, so every one of its lines loads unchanged when uncommented.
+  `BIBR_RESOLVER_SOURCES` also accepts the JSON-array form the resolver
+  itself parses.
+
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that

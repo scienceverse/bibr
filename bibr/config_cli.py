@@ -15,6 +15,7 @@ never redacted while ``LLM_API_KEY`` always is.
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import os
 import shutil
@@ -23,7 +24,6 @@ from pathlib import Path
 from typing import NamedTuple
 
 from dotenv import set_key
-from pydantic import TypeAdapter, ValidationError
 
 from bibr.config_introspect import SettingDoc, iter_setting_docs
 from bibr.env_utils import read_dotenv
@@ -121,11 +121,21 @@ def _default_display(doc: SettingDoc) -> str:
     Secret fields always default to ``None`` (never a real placeholder) —
     rendered as an empty string, same as any other unset default. Booleans
     are lowercased to match ``.env`` convention; computed (factory) defaults
-    have no static value worth printing.
+    have no static value worth printing. List defaults render as the
+    comma-separated form the fields accept (never the Python ``repr``:
+    ``CORS_ALLOW_METHODS=['*']`` would load as the literal string
+    ``"['*']"`` and break CORS preflight).
     """
     raw = doc.default_repr
     if raw in ("None", "(computed)"):
         return ""
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            items = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            items = None
+        if isinstance(items, list):
+            return ",".join(str(item) for item in items)
     if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
         return raw[1:-1]
     if raw == "True":
@@ -136,22 +146,44 @@ def _default_display(doc: SettingDoc) -> str:
 
 
 def validate_value(doc: SettingDoc, raw: str):
-    """Validate *raw* (a plain string) against *doc*'s real pydantic annotation.
+    """Validate *raw* (a plain string) against *doc*'s real settings model.
 
     Returns the coerced Python value on success. Raises ``ValueError`` with a
-    pydantic-produced message on failure — for ``Literal`` fields this lists
-    the allowed choices. Only ``err["msg"]`` from the pydantic error is used
-    (never ``str(exc)``, which embeds the raw input value) so an invalid
-    value for a secret field can never leak through the error text.
+    message naming the setting on failure — for ``Literal`` fields this lists
+    the allowed choices. The candidate is overlaid on the current environment
+    and a fresh ``GlobalSettings`` built (see
+    :func:`bibr.config.validate_env_overrides`), so field metadata
+    (``NoDecode``, ``gt``/``ge``/``le``, ``pattern``), ``mode="before"``
+    validators (CSV splitting, case normalization) and cross-field rules all
+    run exactly as they do at load time. Only the error message from the
+    translated ``ConfigurationError`` is used (never ``str(exc)`` on the raw
+    pydantic error, which embeds the input value) so an invalid value for a
+    secret field can never leak through the error text.
     """
-    adapter = TypeAdapter(doc.annotation)
+    from bibr.config import validate_env_overrides
+    from bibr.exceptions import ConfigurationError
+
     try:
-        if doc.annotation is str:
-            return adapter.validate_python(raw)
-        return adapter.validate_strings(raw)
-    except ValidationError as exc:
-        message = "; ".join(err["msg"] for err in exc.errors())
-        raise ValueError(message) from exc
+        fresh = validate_env_overrides({doc.env_name: raw})
+    except ConfigurationError as exc:
+        raise ValueError(str(exc)) from exc
+    section_attr, field_name = _locate_doc_field(doc)
+    if section_attr is not None:
+        return getattr(getattr(fresh, section_attr), field_name)
+    return getattr(fresh, field_name)
+
+
+def _locate_doc_field(doc: SettingDoc) -> tuple[str | None, str]:
+    """Map *doc* to ``(section_attr, field_name)`` on ``GlobalSettings``."""
+    from bibr.config import GlobalSettings
+
+    for attr, finfo in GlobalSettings.model_fields.items():
+        ann = finfo.annotation
+        if isinstance(ann, type):
+            prefix = getattr(ann, "model_config", {}).get("env_prefix", "") or ""
+            if prefix and prefix == doc.section:
+                return attr, doc.field_name
+    return None, doc.field_name
 
 
 def render_env_example(full: bool = False) -> str:
@@ -198,7 +230,13 @@ def render_env_example(full: bool = False) -> str:
         for doc in by_section[section]:
             if doc.description:
                 lines.append(f"# {doc.description}")
-            lines.append(f"# {doc.env_name}={_default_display(doc)}")
+            default = _default_display(doc)
+            if default == "" and doc.default_repr == "None":
+                # Spell the null explicitly: uncommenting ``KEY=`` would also
+                # fall back to the default, but ``null`` documents how to set
+                # a nullable field back to None from the environment.
+                default = "null"
+            lines.append(f"# {doc.env_name}={default}")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

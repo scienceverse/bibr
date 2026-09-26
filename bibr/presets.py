@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bibr.env_utils import merge_env
+from bibr.exceptions import ConfigurationError
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -32,27 +33,23 @@ _DEFAULT_DIR = Path.home() / ".bibr" / "presets"
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SCHEMA_VERSION = 1
 
-# Keys that look like secrets are filtered out of snapshots. We intentionally
-# match conservatively: any key whose name contains one of these markers is
-# treated as a secret. Values themselves are never inspected — too easy to
-# false-positive on legitimate config strings (URLs, hashes, ...).
-_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
-
-# Always-snapshot exception list: keys whose name happens to contain a marker
-# but which are config, not credentials. Compared case-insensitively.
-_NON_SECRET_OVERRIDES = frozenset(
-    {
-        # CrossRef rate-limit knob — has _LIMIT_, no marker hit; here for clarity.
-        "CROSSREF_RATE_LIMIT_RPM",
-        "LLM_RATE_LIMIT_RPM",
-    }
-)
-
+# Secret filtering is delegated to ``bibr.config._is_secret_name`` — the same
+# end-anchored rule the repr redaction and the cache-fingerprint scrub share —
+# so the three cannot drift. A bare substring match here used to classify
+# every ``*_MAX_TOKENS`` tuning knob and ``JOBS_KEY_PREFIX`` as a secret,
+# silently dropping them from saved presets while ``preset diff`` reported a
+# match. Values themselves are never inspected — too easy to false-positive
+# on legitimate config strings (URLs, hashes, ...).
 _ACTIVE_PRESET_KEY = "BIBR_ACTIVE_PRESET"
 
 
-class InvalidPresetError(Exception):
-    pass
+class InvalidPresetError(ConfigurationError):
+    """A preset name is invalid, a preset file is corrupt, or its values fail validation.
+
+    Subclasses :class:`~bibr.exceptions.ConfigurationError` (a ``BibrError``)
+    so every ``bibr preset`` / ``chew --preset`` misuse renders as a clean
+    error naming the preset or setting instead of a Python traceback.
+    """
 
 
 def effective_env_file() -> Path:
@@ -75,13 +72,12 @@ def effective_env_file() -> Path:
 
 def is_secret_key(name: str) -> bool:
     """Return True if *name* should be excluded from a preset snapshot."""
-    upper = name.upper()
-    if upper in _NON_SECRET_OVERRIDES:
-        return False
-    return any(marker in upper for marker in _SECRET_MARKERS)
+    from bibr.config import _is_secret_name
+
+    return _is_secret_name(name)
 
 
-def redact_value(name: str, value: str, *, max_plain: int = 12) -> str:
+def redact_value(name: str, value: str) -> str:
     """Mask *value* if *name* looks like a secret.
 
     Short non-secrets are returned verbatim. Secrets are shown as
@@ -89,8 +85,6 @@ def redact_value(name: str, value: str, *, max_plain: int = 12) -> str:
     enough to recognize the credential without exposing it. Values shorter
     than 8 characters are masked entirely.
     """
-    if not is_secret_key(name) and len(value) <= max(max_plain, 1):
-        return value
     if not is_secret_key(name):
         return value
     if len(value) < 8:
@@ -98,53 +92,47 @@ def redact_value(name: str, value: str, *, max_plain: int = 12) -> str:
     return f"{value[:4]}…{value[-2:]}"
 
 
-# Map env-var prefix → ``Settings`` attribute name. Order matters: longer
-# prefixes (``OCR_VISION_``) must be checked before shorter ones (``OCR_``)
-# when dispatching keys to sections.
-_PREFIX_TO_SECTION: tuple[tuple[str, str], ...] = (
-    ("BIBR_RESOLVER_", "resolver"),
-    ("OCR_VISION_", "ocr_vision"),
-    ("VLLM_MLX_", "vllm_mlx"),
-    ("RAPID_MLX_", "rapid_mlx"),
-    ("CROSSREF_", "crossref"),
-    ("PIPELINE_", "pipeline"),
-    ("LAYOUT_", "layout"),
-    ("CACHE_", "cache"),
-    ("REDIS_", "redis"),
-    ("CORS_", "cors"),
-    ("AUTH_", "auth"),
-    ("METER_", "metering"),
-    ("JOBS_", "jobs"),
-    ("LLM_", "llm"),
-    ("OCR_", "ocr"),
-    ("FIG_", "fig"),
-    ("CB_", "cb"),
-    ("ML_", "ml"),
-)
+def _setting_lookup() -> dict[str, tuple[str | None, str]]:
+    """Map every known env-var name to ``(section_attr, field_name)``.
 
-
-def _coerce_value(field_type: type, raw: str):
-    """Coerce a string env value to the type the pydantic field expects.
-
-    Mirrors how pydantic-settings parses ``.env`` strings, but for the
-    in-memory setattr path used by ``apply_to_settings``. We handle the
-    common scalar shapes; anything else is left as a string and pydantic
-    validation will error out cleanly.
+    Derived live from the settings models (each section's
+    ``model_config['env_prefix']``, like ``config._env_prefix_for_model``)
+    plus ``validation_alias`` spellings, so it cannot drift as sections are
+    added — the previous hand-kept ``_PREFIX_TO_SECTION`` table was missing
+    the ``ROR_`` and ``MCP_`` prefixes and aliases such as
+    ``OCR_SGLANG_GPUS``. ``section_attr`` is None for top-level fields
+    (``WTPSPLIT_MODEL``, ``OCR_BASE_URL``, ...); the field name is the
+    model's attribute, not the env spelling.
     """
-    # ``str | None`` and similar unions: descend into the non-None arg.
-    origin_args = getattr(field_type, "__args__", ())
-    if origin_args:
-        for arg in origin_args:
-            if arg is not type(None):
-                field_type = arg
-                break
-    if field_type is bool:
-        return raw.strip().lower() in ("1", "true", "yes", "on")
-    if field_type is int:
-        return int(raw)
-    if field_type is float:
-        return float(raw)
-    return raw
+    from bibr.config import GlobalSettings
+    from bibr.config_introspect import iter_setting_docs
+
+    section_attrs: dict[str, str] = {}
+    for attr, finfo in GlobalSettings.model_fields.items():
+        ann = finfo.annotation
+        if isinstance(ann, type):
+            prefix = getattr(ann, "model_config", {}).get("env_prefix", "") or ""
+            if prefix:
+                section_attrs[prefix] = attr
+    lookup: dict[str, tuple[str | None, str]] = {}
+    for doc in iter_setting_docs():
+        section_attr = section_attrs.get(doc.section)
+        for spelling in (doc.env_name, *doc.aliases):
+            lookup[spelling] = (section_attr, doc.field_name)
+            lookup[spelling.upper()] = (section_attr, doc.field_name)
+    return lookup
+
+
+def _resolve_setting(key: str) -> tuple[str | None, str] | None:
+    """Map an env-var name to ``(section_attr, field_name)`` on GlobalSettings.
+
+    Returns ``None`` for unknown keys. Top-level (un-clustered) keys yield
+    ``(None, field_name)`` — this also covers keys like ``OCR_BASE_URL``
+    that share a section's prefix but live on the top-level model.
+    """
+    lookup = _setting_lookup()
+    hit = lookup.get(key)
+    return hit if hit is not None else lookup.get(key.upper())
 
 
 class PresetManager:
@@ -201,7 +189,13 @@ class PresetManager:
         path = self._path(name)
         if not path.exists():
             raise FileNotFoundError(f"Preset {name!r} not found at {path}")
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise InvalidPresetError(
+                f"Preset {name!r} at {path} is not valid JSON: {exc}. "
+                "Fix or delete the file, then retry."
+            ) from exc
         return self._unwrap(raw)
 
     def delete(self, name: str) -> None:
@@ -234,41 +228,57 @@ class PresetManager:
         """Mutate *settings* in place using the preset's keys.
 
         Returns the list of keys that could not be applied (no matching
-        section field and no matching top-level field). The caller may
-        log them; pydantic still re-validates on next read so ill-typed
-        values raise clearly.
+        setting). The caller may log them.
 
-        This is the in-memory counterpart to :meth:`apply` — used by
-        ``bibr chew --preset NAME`` so that a single run can adopt preset
-        settings without writing to ``.env``.
+        The preset is applied through the real settings parser, not raw
+        ``setattr``: its keys are overlaid on the current environment and a
+        fresh ``GlobalSettings`` is built (see
+        :func:`bibr.config.validate_env_overrides`), so list/dict parsing,
+        ``Literal`` and constraint checks, validators, aliases and the
+        auto-tune model_validators all run exactly as they do for ``.env``.
+        Only the touched sections (and top-level fields) are copied back
+        onto *settings* — the way ``setup_wizard._reload_settings_in_place``
+        copies sections — so unrelated in-memory values are preserved. This
+        also works on the ``bibr.config.Settings`` proxy, which has no
+        ``model_fields`` of its own. A preset value that fails validation
+        raises :class:`InvalidPresetError` naming the preset and the
+        setting; nothing is applied in that case.
 
-        Dispatch order: section by env-prefix → top-level
+        Dispatch order: section by live env-prefix mapping → top-level
         ``GlobalSettings`` field. The fallback catches keys like
         ``OCR_BASE_URL`` that share a section's prefix but actually live
         on the top-level model (legacy, predates the nested-settings
         refactor — see ``bibr/config.py``).
         """
+        from bibr.config import validate_env_overrides
+
         data = self.load(name)
+        targets: dict[str, tuple[str | None, str]] = {}
         unknown: list[str] = []
-        for key, value in data.items():
+        for key in data:
             if key == _ACTIVE_PRESET_KEY:
                 continue
-            section_attr, field_name = _resolve_setting(key)
-            if section_attr is not None:
-                section = getattr(settings, section_attr, None)
-                if section is not None and hasattr(section, field_name):
-                    field = type(section).model_fields.get(field_name)
-                    coerced = _coerce_value(field.annotation, value) if field else value
-                    setattr(section, field_name, coerced)
-                    continue
-                # Section matched the prefix but doesn't expose the field —
-                # fall through to the top-level lookup.
-            if hasattr(settings, key):
-                field = type(settings).model_fields.get(key)
-                coerced = _coerce_value(field.annotation, value) if field else value
-                setattr(settings, key, coerced)
+            resolved = _resolve_setting(key)
+            if resolved is None:
+                unknown.append(key)
                 continue
-            unknown.append(key)
+            targets[key] = resolved
+        if not targets:
+            return unknown
+        try:
+            fresh = validate_env_overrides({key: data[key] for key in targets})
+        except ConfigurationError as exc:
+            problems = getattr(exc, "problems", None) or [str(exc)]
+            raise InvalidPresetError(
+                f"Preset {name!r} is invalid: {exc}",
+                problems=[f"Preset {name!r}: {problem}" for problem in problems],
+            ) from exc
+        touched_sections = {section for section, _ in targets.values() if section is not None}
+        for section in touched_sections:
+            setattr(settings, section, getattr(fresh, section))
+        for section, field_name in targets.values():
+            if section is None:
+                setattr(settings, field_name, getattr(fresh, field_name))
         return unknown
 
     # ------------------------------------------------------------------
@@ -366,15 +376,3 @@ class PresetManager:
                 if not is_secret_key(k):
                     only_in_env[k] = env[k]
         return changed, only_in_preset, only_in_env
-
-
-def _resolve_setting(key: str) -> tuple[str | None, str]:
-    """Map an env-var name to ``(section_attr, field_name)`` on GlobalSettings.
-
-    Returns ``(None, key)`` for top-level (un-clustered) keys; the caller
-    should ``setattr(settings, key, value)`` directly.
-    """
-    for prefix, section_attr in _PREFIX_TO_SECTION:
-        if key.startswith(prefix):
-            return section_attr, key[len(prefix) :].lower()
-    return None, key

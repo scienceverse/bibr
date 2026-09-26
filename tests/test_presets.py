@@ -246,6 +246,13 @@ def test_is_secret_key_recognizes_common_shapes():
         "OCR_BACKEND",
         "CROSSREF_RATE_LIMIT_RPM",
         "LLM_RATE_LIMIT_RPM",
+        "LLM_MAX_TOKENS",
+        "LLM_TITLE_MAX_TOKENS",
+        "REF_PARSE_MAX_TOKENS",
+        "OCR_VISION_MAX_TOKENS",
+        "FIG_MAX_TOKENS",
+        "JOBS_KEY_PREFIX",
+        "CORS_ALLOW_CREDENTIALS",
     ]:
         assert not is_secret_key(k), k
 
@@ -342,14 +349,16 @@ def test_diff_against_categorizes_keys(manager, tmp_path):
     env_dict = {
         "LLM_PROVIDER": "google",  # changed
         "LLM_MODEL": "gpt-5",  # same
-        "CROSSREF_API_EMAIL": "me@x.com",  # only in env (non-secret)
+        "LLM_MAX_TOKENS": "4096",  # only in env (non-secret)
+        "CROSSREF_API_EMAIL": "me@x.com",  # only in env, secret → hidden from diff
         "GOOGLE_API_KEY": "AIzaSy",  # only in env, secret → hidden from diff
         "BIBR_ACTIVE_PRESET": "ref",  # ignored
     }
     changed, only_in_preset, only_in_env = manager.diff_against("ref", env_dict)
     assert changed == {"LLM_PROVIDER": ("google", "openai")}
     assert only_in_preset == {"EXTRA": "x"}
-    assert only_in_env == {"CROSSREF_API_EMAIL": "me@x.com"}
+    assert only_in_env == {"LLM_MAX_TOKENS": "4096"}
+    assert "CROSSREF_API_EMAIL" not in only_in_env
     assert "GOOGLE_API_KEY" not in only_in_env
     assert "BIBR_ACTIVE_PRESET" not in only_in_env
 

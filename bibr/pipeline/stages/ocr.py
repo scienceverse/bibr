@@ -1218,7 +1218,9 @@ class OcrStage:
                 ),
             )
         )
-        file_sem = asyncio.Semaphore(ctx.settings.ocr.max_concurrent_files)
+        # Clamped: settings load rejects 0, but an injected settings object can
+        # still carry it, and Semaphore(0) would hang every task forever.
+        file_sem = asyncio.Semaphore(max(1, ctx.settings.ocr.max_concurrent_files))
 
         async def _process(fs) -> None:
             async with file_sem:
