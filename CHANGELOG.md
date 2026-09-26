@@ -965,49 +965,65 @@ released.
   `extraction.timings`, so the `enrich` stage time is reported on both paths.
 - The HTML and DOCX native parsers now walk inline markup recursively instead
   of reading a fixed tag list. In HTML, the direct text of `div`/`section`
-  containers is kept instead of dropped (on the 984 eLife corpus pages every
-  file gains 14 to 179 previously dropped text entries and none loses any),
-  and an inline element that wraps block content (as an unclosed `<b>` nests
-  whole footer sections inside itself) is recursed into rather than flattened,
-  so its headings still section the page. A `<figure>` that only wraps a
-  `<table>` now parses as a table with the figure's caption (on 568 of the
-  pages; 1,107 converted figure captions resurface as table captions and none
-  with text is lost (caption-less figures surface as caption-less tables,
-  some gaining the table's own `<caption>` the figure wrapper had hidden;
-  ten figures wrap several tables, each of which is kept), while a figure
-  with an image
-  still parses as a figure. HTML bytes are decoded from the BOM, the `<meta
-  charset>` declaration and the XML declaration with strict codec lookup, so a
-  mislabelled page no longer mojibakes or throws. JATS output is unchanged on
-  all 6,191 JATS corpus files.
+  containers is kept instead of dropped, with the spaces between inline
+  siblings preserved; page chrome is still left out (buttons and other form
+  controls, `visuallyhidden`/`sr-only` spans, `aria-hidden` subtrees, links
+  inside section headers, and fragments made up only of link text). A `<div>`
+  reference that nests its parts in inner `div` elements parses as one
+  reference string rather than one per part, and an inline element that wraps
+  block content (as an unclosed `<b>` nests whole footer sections inside
+  itself) is recursed into rather than flattened, so its headings still
+  section the page. A `<figure>` that only wraps a `<table>` now parses as a
+  table with the figure's caption, while a figure with an image still parses
+  as a figure; when the figure wraps several tables only the first takes the
+  `figcaption`, so captions and labels are not duplicated. The formatter's
+  own "cite this article" lists (`reference__authors_list` and similar) read
+  as body text, not as references. Spine documents' `<head>` contents
+  (`title`, `meta`, `link`, `base`) never become body paragraphs, and an
+  inline image contributes its `alt` text instead of splitting the sentence.
+  HTML bytes are decoded from the BOM, then as strict UTF-8, then from the
+  declared label through the WHATWG label table (so `iso-8859-1` reads as
+  windows-1252 and a `utf-16` label on 8-bit bytes reads as UTF-8), then from
+  the XML declaration, falling back to windows-1252 as before when nothing
+  declares an encoding.
 - HTML front-matter metadata is stricter about what it claims. Authors come
-  from the first populated source instead of merging every scheme, so
-  affiliations, ORCIDs and emails pair with the right author and no longer
-  double up; a generic `<meta name="author">` list is split on separators
-  while a single "Family, Given" name stays one author. DOIs are validated and
-  normalised, so a non-DOI identifier is no longer exported as a DOI. The
-  `<title>` site suffix (" | Journal") is stripped only when the rest matches
-  the printed heading, and the generic SEO `description` is no longer exported
-  as the abstract. Preparsed metadata is now set only when citation front
-  matter (`citation_title` plus authors) is present, so a page without any
-  defers to the printed sections instead of locking in the site title and
-  blurb. On the eLife pages 592 SEO descriptions leave the abstract field and
-  555 of those pages keep a printed Abstract section the pipeline prefers; 37
-  abstract-less Insights pieces lose their one-line SEO summary in no-LLM runs
-  (LLM runs still read the text).
+  from the first populated source instead of merging every scheme; a generic
+  `<meta name="author">` list is split on every comma when each part reads
+  as a full name, while a single "Family, Given" name stays one author. Each
+  `citation_author_institution`, `citation_author_email` and
+  `citation_author_orcid` attaches in document order to the `citation_author`
+  it follows, with several institutions joined, instead of pairing by list
+  position. DOIs are validated and normalised, so a non-DOI identifier is no
+  longer exported as a DOI. The `<title>` site suffix (" | Journal") is
+  stripped only when the rest matches the printed heading, and the generic
+  SEO `description` is no longer exported as the abstract. Preparsed metadata
+  is now set only when structured front matter with an identity is present —
+  a Highwire, Dublin Core or ePub OPF title together with authors or a DOI —
+  so Dublin Core pages, ePubs without a listed creator, and author-less pages
+  with a DOI keep their DOI, date, publisher, licence and language, while a
+  page with only a site title and blurb still defers to the printed sections.
 - The DOCX walker reads runs nested in `w:sdt`, `w:smartTag`, `w:fldSimple`
   and tracked-move destinations, symbol characters and non-breaking hyphens,
-  while tracked deletions and field instructions are still skipped; text in
-  drawing text boxes is read even when only the `mc:Choice` fallback carries
-  it. Custom heading styles that derive from a Heading style count as headings
-  (with `w:outlineLvl` honoured), while hand-formatted text and a lone
-  "Introduction" heading no longer promote themselves to the detected title,
-  which now comes only from the Title style. Footnote and endnote references
-  anchored in headings and table cells are queued against the nearest body
-  text and emitted instead of dropped. Figure captions still pair with the
-  nearest picture, skipping icon-only drawings. There is no DOCX corpus in
-  the sandbox, so these are pinned by regression tests that fail on the
-  previous code and pass now.
+  while tracked deletions, field instructions and ruby readings are still
+  skipped; content controls showing Word's placeholder prompt contribute no
+  text. Symbol-font characters read through the full Adobe Symbol encoding,
+  so `± ≤ ≥ × ° → ≠ ≈` survive alongside the Greek letters. Text in drawing
+  text boxes is read even when only the `mc:Choice` branch carries it, and
+  legacy VML text boxes read with the same per-paragraph joins. Custom
+  heading styles that derive from a Heading style count as headings, while
+  styles derived from Title (pandoc-style Author, Date, Subtitle) stay body
+  text; `w:outlineLvl` is honoured except that val 9 (ECMA-376 body text)
+  stays body text. Hand-formatted text and a lone exact section heading such
+  as "Introduction" do not promote themselves to the detected title, which a
+  longer first Heading 1 such as "Methods for measuring sleep in older
+  adults" still claims. Footnote and endnote references anchored in headings,
+  table cells and captions are queued against the nearest body text and
+  emitted instead of dropped, with merged table cells deduplicated so each
+  note keeps its number; table cells read through the same inline walker as
+  headings, so content-control citations in cells survive. Figure captions
+  pair only with a picture that actually yields a figure — a linked picture
+  or a picture inside a heading leaves its caption as body text — and a table
+  sitting between a picture and its caption no longer breaks the pairing.
 
 ### Added
 

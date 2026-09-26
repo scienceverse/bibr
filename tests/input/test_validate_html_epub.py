@@ -328,3 +328,33 @@ def test_epub_identifier_doi_forms(identifier: str, expected: str):
         _make_epub_two_chapters(with_ch2=True, identifier=identifier)
     )
     assert doc.metadata.get("doi") == expected
+
+
+def test_epub_without_creators_keeps_title_and_doi_preparsed():
+    """An OPF with a title and DOI but no dc:creator still carries
+    structured identity — the export must keep its DOI. Fails on the gated
+    code (preparsed None)."""
+    from bibr.input.epub_native import EpubParser
+
+    epub_bytes = _make_epub_two_chapters(with_ch2=True, identifier="10.1234/abc")
+    contents = EpubParser(epub_bytes).parse()
+    assert contents.preparsed_metadata is not None
+    assert contents.preparsed_metadata.doi == "10.1234/abc"
+    assert contents.preparsed_metadata.title == "Sample"
+
+
+def test_epub_spine_title_does_not_become_body_text():
+    """Each spine chapter's <head><title> lands in the combined body and
+    must not read as a paragraph. Fails on the branch (title as text)."""
+    from bibr.input.epub_native import EpubParser
+
+    epub_bytes = _make_epub_two_chapters_with_bodies(
+        ch1_body="<html><head><title>Chapter One Title</title></head>"
+        "<body><p>Chapter one.</p></body></html>",
+        ch2_body="<html><head><title>Chapter Two Title</title></head>"
+        "<body><p>Chapter two.</p></body></html>",
+    )
+    parser = EpubParser(epub_bytes)
+    parser.parse()
+    texts = [entry.text for entry in parser.assembler.entries]
+    assert texts == ["Chapter one.", "Chapter two."]

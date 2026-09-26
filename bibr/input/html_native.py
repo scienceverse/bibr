@@ -18,6 +18,7 @@ from typing import Any
 
 import pandas as pd
 from bs4 import BeautifulSoup, CData, NavigableString, Tag
+from webencodings import lookup as _lookup_label  # type: ignore[import-untyped]
 
 from bibr.input.mathml_whitespace import FlatText, mspace_separates
 from bibr.models import PaperAuthor, PaperMetadata, canonicalize_orcid
@@ -50,7 +51,23 @@ _DROP_TAGS = {
     "form",
     "iframe",
     "svg",
+    # Form controls and buttons are page chrome, never article prose.
+    "button",
+    "datalist",
+    "input",
+    "option",
+    "select",
+    "textarea",
 }
+# Screen-reader-only classes (the visuallyhidden spans around viewer links
+# and download descriptions) and hidden subtrees carry no visible prose.
+_NOISE_CLASS_TOKENS = frozenset({"visuallyhidden", "visually-hidden", "sr-only"})
+# Replaced/void elements that sit inside a running sentence (an inline
+# image, a form value, an embedded object): they carry no block structure,
+# so they buffer inline instead of splitting the sentence around them.
+_VOID_INLINE_TAGS = frozenset(
+    {"img", "input", "output", "object", "video", "audio", "canvas", "picture", "embed"}
+)
 _BLOCK_TEXT_TAGS = {"p", "blockquote", "pre"}
 _HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
 # Elements a browser lays out inline, MathML presentation markup included:
@@ -163,8 +180,12 @@ def _decode_html_bytes(data: bytes) -> str:
     html5lib sniffs only the BOM and a meta charset, ignoring the XML
     declaration, and without chardet falls back to windows-1252 — so UTF-8
     without a meta decodes as mojibake. Decode first: BOM, then strict
-    UTF-8, then a meta or XML-declared charset, then charset_normalizer,
-    finally UTF-8 with replacement.
+    UTF-8 (so an undeclared UTF-8 page reads correctly), then a meta or
+    XML-declared charset resolved through the WHATWG label table (so
+    ``iso-8859-1`` reads as windows-1252, as browsers do, and a stray
+    ``utf-16`` label on 8-bit bytes reads as UTF-8 instead of CJK
+    garbage), finally windows-1252 with replacement, the html5lib and
+    browser default for an undeclared legacy page.
     """
     if data.startswith(codecs.BOM_UTF8):
         return data.decode("utf-8-sig")
@@ -179,23 +200,24 @@ def _decode_html_bytes(data: bytes) -> str:
     head = bytes(data[:4096])
     match = _META_CHARSET_RE.search(head) or _XML_ENCODING_RE.search(head)
     if match:
-        charset = match.group(1).decode("ascii", errors="ignore")
-        try:
-            return data.decode(charset)
-        except (LookupError, UnicodeDecodeError):
-            pass
-    try:
-        from charset_normalizer import from_bytes as _detect_encoding
-    except ImportError:  # pragma: no cover — charset-normalizer is declared
-        _detect_encoding = None  # type: ignore[assignment]
-    if _detect_encoding is not None:
-        try:
-            detected = _detect_encoding(data).best()
-        except Exception:  # noqa: BLE001 — fall through to the replacement decode
-            detected = None
-        if detected is not None and str(detected).strip():
-            return str(detected)
-    return data.decode("utf-8", errors="replace")
+        label = match.group(1).decode("ascii", errors="ignore").strip().lower()
+        if label in {"utf-16", "utf-16le", "utf-16be", "utf16", "utf_16"}:
+            # WHATWG: a utf-16 meta label without a BOM means UTF-8.
+            try:
+                return data.decode("utf-8")
+            except UnicodeDecodeError:
+                pass
+        else:
+            try:
+                encoding = _lookup_label(label)
+            except Exception:  # noqa: BLE001 — unknown label reads as legacy below
+                encoding = None
+            if encoding is not None:
+                try:
+                    return data.decode(encoding.name)
+                except (LookupError, UnicodeDecodeError):
+                    pass
+    return data.decode("windows-1252", errors="replace")
 
 
 # Upper bound on HTML fed to the pure-Python html5lib parser (audit L9). Well
@@ -245,6 +267,15 @@ def _flatten(tag: Tag) -> str:
                 flat.separate()
         elif isinstance(child, Tag):
             child_name = _tag_name(child)
+            if child_name == "img":
+                # An inline image contributes its alt text where it has one;
+                # otherwise it is a word boundary like any other element.
+                alt = str(child.get("alt") or "").strip()
+                if alt:
+                    flat.add(alt)
+                else:
+                    flat.separate()
+                continue
             separates = child_name not in _INLINE_TAGS
             if separates or (child_name == "mspace" and mspace_separates(child.attrs)):
                 flat.separate()
@@ -334,30 +365,69 @@ def _split_generic_author(value: str) -> list[str]:
         if not piece:
             continue
         if "," in piece:
-            left, right = [part.strip() for part in piece.split(",", 1)]
-            if len(left.split()) > 1 and len(right.split()) > 1:
-                names.extend([left, right])
+            parts = [part.strip() for part in piece.split(",")]
+            nonempty = [part for part in parts if part]
+            if len(nonempty) > 1 and all(len(part.split()) > 1 for part in nonempty):
+                names.extend(nonempty)
                 continue
         names.append(piece)
     return names
 
 
-def _has_citation_front_matter(soup: BeautifulSoup) -> bool:
-    """True when ``citation_*`` tags supply at least a title and one author."""
-    seen_title = False
-    seen_author = False
+def _has_trustworthy_front_matter(soup: BeautifulSoup, metadata: PaperMetadata) -> bool:
+    """True when meta tags carry structured article identity, not just SEO.
+
+    A ``citation_title`` or ``dc.title`` together with authors, a valid DOI,
+    a PMID or an arXiv id covers Highwire, Dublin Core (eLife pages carry
+    ``dc.title`` plus a DOI and no ``citation_*`` tags) and ePub OPF records
+    (title plus DOI but no creator). Anything else — a bare ``<title>``/``og``
+    title, a generic description, a byline alone — defers to the printed
+    article instead of locking in site chrome.
+    """
+    seen_structured_title = False
     for tag in soup.find_all("meta"):
-        key = _normal_meta_key(tag.get("name") or tag.get("property") or "")
+        key = _normal_meta_key(str(tag.get("name") or tag.get("property") or ""))
         content = str(tag.get("content") or "").strip()
         if not content:
             continue
-        if key == "citation.title":
-            seen_title = True
-        elif key == "citation.author":
-            seen_author = True
-        if seen_title and seen_author:
-            return True
+        if key in ("citation.title", "dc.title"):
+            seen_structured_title = True
+            break
+    if not seen_structured_title:
+        return False
+    return bool(metadata.authors or metadata.doi or metadata.pmid or metadata.arxiv)
+
+
+def _has_non_link_text(text: str, pending_links: list[tuple[str, str]]) -> bool:
+    """True when *text* holds words beyond the buffered hyperlink texts."""
+    rest = text
+    for _, link_text in pending_links:
+        norm = collapse_ws(link_text).strip()
+        if norm:
+            rest = rest.replace(norm, "", 1)
+    return bool(rest.strip())
+
+
+def _has_direct_inline_content(tag: Tag) -> bool:
+    """True when *tag* mixes direct prose with nested block markup.
+
+    A reference ``<div>`` holding author/year spans next to title/source
+    ``<div>`` parts is one reference to flatten, while a wrapper holding
+    only nested ``<div>`` references recurses into one entry per child.
+    Whitespace-only strings do not count as prose.
+    """
+    for child in tag.children:
+        if type(child) in (NavigableString, CData):
+            if str(child).strip():
+                return True
+        elif isinstance(child, Tag):
+            child_name = _tag_name(child)
+            if child_name in _INLINE_TAGS or child_name in _VOID_INLINE_TAGS:
+                return True
     return False
+
+
+_REFERENCE_SPLIT_TAGS = ("p", "li", "ol", "ul", "table", "figure", "blockquote", "pre", "hr")
 
 
 def _map_heading(header: str) -> CanonicalSection:
@@ -463,11 +533,11 @@ class HtmlParser:
         if not self.assembler.entries and not self.tables and not self.figures:
             raise ProcessingError("HTML input did not contain parseable article content")
 
-        # Generic SEO meta is not front matter: without citation_* title and
-        # authors the preparsed record would lock in the <title> suffix, the
-        # site description and a garbled byline, and post_parse would skip
-        # the front-matter pass that reads the printed article instead.
-        preparsed = self._metadata if _has_citation_front_matter(soup) else None
+        # Generic SEO meta is not front matter: without a structured title and
+        # article identity the preparsed record would lock in the <title>
+        # suffix, the site description and a garbled byline, and post_parse
+        # would skip the front-matter pass that reads the printed article.
+        preparsed = self._metadata if _has_trustworthy_front_matter(soup, self._metadata) else None
         return PaperContents(
             sentences=[],
             sections=self.sections,
@@ -596,16 +666,32 @@ class HtmlParser:
     def _remove_noise(soup: BeautifulSoup) -> None:
         for tag in soup.find_all(_DROP_TAGS):
             tag.decompose()
-        for tag in soup.find_all(attrs={"role": True}):
+        for tag in soup.find_all(role=True):
             role = str(tag.get("role") or "").lower()
             if role in {"navigation", "complementary", "banner", "contentinfo", "search"}:
+                tag.decompose()
+        for tag in soup.find_all(True):
+            if str(tag.get("aria-hidden") or "").lower() == "true":
+                tag.decompose()
+        for tag in soup.find_all(class_=True):
+            classes: list[str] = [str(token) for token in (tag.get("class") or [])]
+            tokens = {token.lower() for token in classes}
+            if tokens & _NOISE_CLASS_TOKENS:
+                tag.decompose()
+        # A spine chapter's <head><title> lands in the body of the combined
+        # ePub document and would read as a paragraph; the <head> title the
+        # metadata fallback uses is left alone.
+        for tag in soup.find_all("title"):
+            if tag.find_parent("head") is None:
                 tag.decompose()
 
     def _parse_metadata(self, soup: BeautifulSoup) -> PaperMetadata:
         meta = PaperMetadata(doi="", title="")
         lookup: dict[str, list[str]] = {}
         for tag in soup.find_all("meta"):
-            key = _normal_meta_key(tag.get("name") or tag.get("property") or tag.get("itemprop"))
+            key = _normal_meta_key(
+                str(tag.get("name") or tag.get("property") or tag.get("itemprop") or "")
+            )
             content = str(tag.get("content") or "").strip()
             if key and content:
                 lookup.setdefault(key, []).append(content)
@@ -666,17 +752,36 @@ class HtmlParser:
             meta.license = str(license_link.get("href") or "").strip() or None
 
         # Authors come from the first source that has any — merging
-        # citation_author with dc.creator doubled every author. Affiliations,
-        # ORCIDs and emails following citation_author pair up by position.
+        # citation_author with dc.creator doubled every author. Each
+        # citation_author_institution, _email and _orcid follows its own
+        # citation_author in document order (Highwire), and one author can
+        # carry several institutions — so the tags are walked in order and
+        # each one attaches to the most recent author, instead of zipping
+        # the flattened lists by position.
         meta.authors = []
         citation_authors = values("citation_author")
         dc_authors = values("dc.creator")
         if citation_authors:
-            institutions = values("citation_author_institution")
-            orcids = values("citation_author_orcid")
-            emails = values("citation_author_email")
-            for idx, author in enumerate(citation_authors, start=1):
-                given, family = _split_person_name(author)
+            pending: list[dict[str, Any]] = []
+            for tag in soup.find_all("meta"):
+                key = _normal_meta_key(
+                    str(tag.get("name") or tag.get("property") or tag.get("itemprop") or "")
+                )
+                content = str(tag.get("content") or "").strip()
+                if not content:
+                    continue
+                if key == "citation.author":
+                    pending.append(
+                        {"name": content, "affiliations": [], "email": None, "orcid": None}
+                    )
+                elif pending and key == "citation.author.institution":
+                    pending[-1]["affiliations"].append(content)
+                elif pending and key == "citation.author.email" and not pending[-1]["email"]:
+                    pending[-1]["email"] = content
+                elif pending and key == "citation.author.orcid" and not pending[-1]["orcid"]:
+                    pending[-1]["orcid"] = canonicalize_orcid(content)
+            for idx, entry in enumerate(pending, start=1):
+                given, family = _split_person_name(entry["name"])
                 if not (family or given):
                     continue
                 meta.authors.append(
@@ -684,13 +789,9 @@ class HtmlParser:
                         author_id=idx,
                         given=given,
                         family=family,
-                        affiliation=institutions[idx - 1].strip()
-                        if idx - 1 < len(institutions)
-                        else "",
-                        email=emails[idx - 1].strip() or None if idx - 1 < len(emails) else None,
-                        orcid=canonicalize_orcid(orcids[idx - 1])
-                        if idx - 1 < len(orcids)
-                        else None,
+                        affiliation="; ".join(entry["affiliations"]),
+                        email=entry["email"],
+                        orcid=entry["orcid"],
                     )
                 )
         else:
@@ -746,6 +847,11 @@ class HtmlParser:
         links.clear()
         if not text:
             return
+        if pending and not _has_non_link_text(text, pending):
+            # A container holding nothing but links (a section-header
+            # protocol link, a bare DOI anchor) is navigation chrome, not
+            # prose — base dropped it the same way.
+            return
         if self._in_references():
             self._append_reference(text)
             return
@@ -767,16 +873,26 @@ class HtmlParser:
             if url:
                 links.append((url, _text(anchor)))
 
-    def _process_children(self, parent: Tag) -> None:
+    def _process_children(self, parent: Tag, *, _skip_chrome: bool = False) -> None:
         # Direct strings and inline elements at this level form their own
         # paragraph ("Bare section text…" between a heading and a <p>); a
         # block child flushes them first so document order is kept.
+        # Inside <header>/<footer> only headings and block prose are read —
+        # section-header links ("Request a detailed protocol") and date/DOI
+        # furniture are chrome that base dropped the same way.
         parts: list[str] = []
         links: list[tuple[str, str]] = []
         for child in parent.children:
             if type(child) in (NavigableString, CData):
+                if _skip_chrome:
+                    continue
                 if str(child).strip():
                     parts.append(str(child))
+                elif str(child):
+                    # A whitespace-only string between inline siblings is the
+                    # word boundary ("Smith <i>J</i> Doe"); collapse_ws folds
+                    # runs, and a lone boundary flushes to nothing.
+                    parts.append(" ")
                 continue
             if not isinstance(child, Tag):
                 continue
@@ -807,23 +923,55 @@ class HtmlParser:
                 self._handle_figure(child)
             elif name == "hr":
                 self._flush_pending_text(parts, links)
+            elif name in {"header", "footer"}:
+                self._flush_pending_text(parts, links)
+                self._process_children(child, _skip_chrome=True)
             elif name in _INLINE_TAGS:
+                if _skip_chrome and not self._has_block_structure(child):
+                    continue
                 if self._has_block_structure(child):
                     # Invalid nesting (an unclosed <b>/<font>/<span> higher up
                     # nests whole sections inside this inline element) — the
                     # block structure wins and is recursed into, not flattened.
                     self._flush_pending_text(parts, links)
-                    self._process_children(child)
+                    self._process_children(child, _skip_chrome=_skip_chrome)
                 else:
                     self._buffer_inline(child, parts, links)
             elif name == "br":
-                parts.append(" ")
+                if not _skip_chrome:
+                    parts.append(" ")
+            elif name in _VOID_INLINE_TAGS and not self._has_block_structure(child):
+                # A replaced element inside a running sentence (an inline
+                # image, an embedded object) stays inline — with its alt
+                # text where it has one — instead of splitting the sentence.
+                if not _skip_chrome:
+                    if name == "img":
+                        alt = str(child.get("alt") or "").strip()
+                        if alt:
+                            parts.append(alt)
+                    else:
+                        flat = _flatten(child)
+                        if flat.strip():
+                            parts.append(flat)
             elif self._has_block_structure(child):
                 # A container holding block markup — recurse rather than
                 # flatten it into one entry.
                 self._flush_pending_text(parts, links)
-                self._process_children(child)
+                if (
+                    self._in_references()
+                    and name == "div"
+                    and _has_direct_inline_content(child)
+                    and child.find([*_REFERENCE_SPLIT_TAGS, *_HEADING_TAGS]) is None
+                ):
+                    # One structured reference (author/year spans next to
+                    # title/source divs): flatten it into a single reference
+                    # string instead of one per inner div.
+                    self._append_reference(_text(child))
+                else:
+                    self._process_children(child, _skip_chrome=_skip_chrome)
             else:
+                if _skip_chrome:
+                    continue
                 # A container with direct text or only inline children: a
                 # div/section/span paragraph reads as one text block.
                 self._flush_pending_text(parts, links)
@@ -922,7 +1070,11 @@ class HtmlParser:
     @staticmethod
     def _looks_like_reference_list(tag: Tag) -> bool:
         tokens = _attr_tokens(tag, "id", "class", "role", "aria-label")
-        return any(word in tokens for word in ("reference", "bibliography", "citation"))
+        # BEM sub-elements (reference__authors_list, reference__abstracts)
+        # name the parts of one formatted citation, not a bibliography —
+        # matching them turned every "cite this article" block into a bogus
+        # References section of author-name fragments.
+        return bool(re.search(r"reference(?!__)|bibliography|citation(?!__)", tokens))
 
     def _handle_table(self, tag: Tag, caption_override: str | None = None) -> None:
         if is_hidden_table(tag):
@@ -977,8 +1129,11 @@ class HtmlParser:
         tables = tag.find_all("table")
         if tables and not tag.find(["img", "picture"]):
             caption = _text(tag.find("figcaption")) or None
-            for table in tables:
-                self._handle_table(table, caption_override=caption)
+            for position, table in enumerate(tables):
+                # The figcaption names the figure's first table; repeating it
+                # on every nested table duplicated the caption and the label
+                # that xrefs resolve against.
+                self._handle_table(table, caption_override=caption if position == 0 else None)
             return
         caption = _text(tag.find("figcaption"))
         if not caption:

@@ -151,19 +151,22 @@ class TestContentControls:
 class TestTextBoxes:
     def test_text_inside_a_drawing_text_box_is_kept(self):
         # Word 2010+ wraps text boxes as w:r/mc:AlternateContent/mc:Choice/
-        # w:drawing/.../w:txbxContent with a VML Fallback twin — that is the
-        # shape parsed here, not a bare w:txbxContent under w:drawing.
+        # w:drawing/wp:anchor/a:graphic/a:graphicData/wps:wsp/wps:txbx/
+        # w:txbxContent with a VML Fallback twin — that is the shape parsed
+        # here.
         document = f"""<?xml version="1.0"?>
-<w:document {_W} {_R} xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+<w:document {_W} {_R} xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
   <w:body>
     <w:p><w:r>
       <w:t>Body sentence.</w:t>
       <mc:AlternateContent>
         <mc:Choice Requires="wps">
           <w:drawing>
-            <w:txbxContent>
-              <w:p><w:r><w:t>Box</w:t></w:r><w:r><w:t>ed pull quote.</w:t></w:r></w:p>
-            </w:txbxContent>
+            <wp:anchor><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+              <wps:wsp><wps:txbx><w:txbxContent>
+                <w:p><w:r><w:t>Box</w:t></w:r><w:r><w:t>ed pull quote.</w:t></w:r></w:p>
+              </w:txbxContent></wps:txbx></wps:wsp>
+            </a:graphicData></a:graphic></wp:anchor>
           </w:drawing>
         </mc:Choice>
         <mc:Fallback>

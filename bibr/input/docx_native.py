@@ -23,6 +23,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 import pandas as pd
 
@@ -96,7 +97,8 @@ _HEADING_STYLE_LEVELS: dict[str, int] = {
 # Inline subtrees that carry no document text: deletions and tracked-move
 # sources (their text is not the paper as read), field codes and markers
 # (the result runs are ordinary w:r and are walked), content-control
-# properties, and the VML fallback twin of an AlternateContent drawing
+# properties, the ruby pronunciation (w:rt duplicates the w:rubyBase it
+# annotates), and the VML fallback twin of an AlternateContent drawing
 # (walking both would duplicate the text box).
 _INLINE_SKIP_TAGS: frozenset[str] = frozenset(
     {
@@ -109,16 +111,25 @@ _INLINE_SKIP_TAGS: frozenset[str] = frozenset(
         f"{{{_NS['w']}}}fldChar",
         f"{{{_NS['w']}}}sdtPr",
         f"{{{_NS['w']}}}sdtEndPr",
+        f"{{{_NS['w']}}}rt",
         f"{{{_NS['mc']}}}Fallback",
     }
 )
 
 # Word stores an Insert > Symbol character from the Symbol font as PUA
 # ``F0xx`` (``w:font="Symbol"``, ``w:char="F061"``), where ``xx`` is the
-# Adobe Symbol byte. Letters read as Greek; any other byte (decorative
-# glyphs from other symbol fonts) carries no readable text and stays
-# skipped, as before.
-_SYMBOL_GREEK: dict[int, str] = {
+# Adobe Symbol byte. Letters read as Greek and the 0xA0-0xFE block as the
+# mathematical and technical symbols below (per the Adobe Symbol encoding:
+# F0B1 ±, F0A3 ≤, F0B3 ≥, F0B4 ×, F0B9 ≠, F0BB ≈, F0B0 °, F0AE → — the
+# characters statistics text uses most). Extensible delimiter pieces have
+# no readable single character and stay skipped, as before.
+_SYMBOL_TEXT: dict[int, str] = {
+    0x22: "∀",
+    0x24: "∃",
+    0x27: "∋",
+    0x2A: "∗",
+    0x2D: "−",
+    0x40: "≅",
     0x41: "Α",
     0x42: "Β",
     0x43: "Χ",
@@ -171,6 +182,76 @@ _SYMBOL_GREEK: dict[int, str] = {
     0x78: "ξ",
     0x79: "ψ",
     0x7A: "ζ",
+    0xA0: "€",
+    0xA1: "ϒ",
+    0xA2: "′",
+    0xA3: "≤",
+    0xA4: "⁄",
+    0xA5: "∞",
+    0xA6: "ƒ",
+    0xA7: "♣",
+    0xA8: "♦",
+    0xA9: "♥",
+    0xAA: "♠",
+    0xAB: "↔",
+    0xAC: "←",
+    0xAD: "↑",
+    0xAE: "→",
+    0xAF: "↓",
+    0xB0: "°",
+    0xB1: "±",
+    0xB2: "″",
+    0xB3: "≥",
+    0xB4: "×",
+    0xB5: "∝",
+    0xB6: "∂",
+    0xB7: "•",
+    0xB8: "÷",
+    0xB9: "≠",
+    0xBA: "≡",
+    0xBB: "≈",
+    0xBC: "…",
+    0xBF: "↵",
+    0xC0: "ℵ",
+    0xC1: "ℑ",
+    0xC2: "ℜ",
+    0xC3: "℘",
+    0xC4: "⊗",
+    0xC5: "⊕",
+    0xC6: "∅",
+    0xC7: "∩",
+    0xC8: "∪",
+    0xC9: "⊃",
+    0xCA: "⊇",
+    0xCB: "⊄",
+    0xCC: "⊂",
+    0xCD: "⊆",
+    0xCE: "∈",
+    0xCF: "∉",
+    0xD0: "∠",
+    0xD1: "∇",
+    0xD2: "®",
+    0xD3: "©",
+    0xD4: "™",
+    0xD5: "∏",
+    0xD6: "√",
+    0xD7: "⋅",
+    0xD8: "¬",
+    0xD9: "∧",
+    0xDA: "∨",
+    0xDB: "⇔",
+    0xDC: "⇐",
+    0xDD: "⇑",
+    0xDE: "⇒",
+    0xDF: "⇓",
+    0xE0: "◊",
+    0xE1: "⟨",
+    0xE2: "®",
+    0xE3: "©",
+    0xE4: "™",
+    0xE5: "∑",
+    0xF9: "⟩",
+    0xFA: "∫",
 }
 
 
@@ -184,7 +265,7 @@ def _symbol_text(sym_el) -> str:
         return ""
     if code & 0xFF00 != 0xF000:
         return ""
-    return _SYMBOL_GREEK.get(code & 0xFF, "")
+    return _SYMBOL_TEXT.get(code & 0xFF, "")
 
 
 @dataclass
@@ -192,7 +273,7 @@ class _Block:
     """A document block — either a paragraph or a table."""
 
     kind: str  # "paragraph" | "table"
-    obj: object  # Paragraph or Table
+    obj: Any  # Paragraph or Table
 
 
 @dataclass
@@ -207,6 +288,19 @@ class _InlineAccum:
     # Display-text buffers of enclosing hyperlinks, innermost last.
     link_stack: list[list[str]] = field(default_factory=list)
     had_image: bool = False
+
+
+def _is_placeholder_sdt(sdt_el) -> bool:
+    """True when a content control shows Word's placeholder, not content.
+
+    Journal title-page templates contain empty controls whose
+    ``w:sdtPr`` carries ``w:showingPlcHdr``; the ``w:sdtContent`` then holds
+    the prompt ("Click or tap here to enter text."), which is Word's chrome
+    rather than the paper.
+    """
+    w = _NS["w"]
+    sdt_pr = sdt_el.find(f"{{{w}}}sdtPr")
+    return sdt_pr is not None and sdt_pr.find(f"{{{w}}}showingPlcHdr") is not None
 
 
 def _iter_blocks(doc) -> list[_Block]:
@@ -233,7 +327,11 @@ def _iter_blocks(doc) -> list[_Block]:
                 # manager. Only the body's direct children were walked, so
                 # every paragraph inside one was invisible to the parse. The
                 # payload lives under ``w:sdtContent``; the surrounding
-                # ``w:sdtPr`` properties carry no document text.
+                # ``w:sdtPr`` properties carry no document text. An empty
+                # control still showing Word's placeholder prompt contributes
+                # no paper text.
+                if _is_placeholder_sdt(child):
+                    continue
                 for sdt_child in child.iterchildren():
                     if sdt_child.tag == f"{{{_NS['w']}}}sdtContent":
                         walk(sdt_child)
@@ -259,9 +357,23 @@ def _outline_level(paragraph_or_style_el) -> int | None:
     if lvl is None:
         return None
     try:
-        return int(lvl.get(f"{{{w}}}val") or 0) + 1
+        value = int(lvl.get(f"{{{w}}}val") or 0)
     except ValueError:
         return None
+    # ECMA-376: 9 is body text, not an outline level — a paragraph carrying
+    # it (Word writes it for "Outline level: Body Text") stays body text.
+    if value < 0 or value > 8:
+        return None
+    return value + 1
+
+
+# Heading styles proper: the base-style chain below resolves custom styles
+# derived from these, but never from "Title" — pandoc/Quarto reference docs
+# base their Author/Date/Subtitle styles on Title, and those are front
+# matter, not sections.
+_BASE_HEADING_STYLE_LEVELS: dict[str, int] = {
+    name: level for name, level in _HEADING_STYLE_LEVELS.items() if name != "Title"
+}
 
 
 def _heading_level_for_paragraph(paragraph) -> int | None:
@@ -275,11 +387,17 @@ def _heading_level_for_paragraph(paragraph) -> int | None:
     without renaming the style.
     """
     style = getattr(paragraph, "style", None)
-    probe = style
+    style_name = getattr(style, "name", None)
+    if isinstance(style_name, str):
+        level = _HEADING_STYLE_LEVELS.get(style_name)
+        if level is not None:
+            return level
+    probe = getattr(style, "base_style", None)
     for _ in range(8):  # base-style chains are short; a malformed cycle must end
         if probe is None:
             break
-        level = _HEADING_STYLE_LEVELS.get(getattr(probe, "name", None))
+        name = getattr(probe, "name", None)
+        level = _BASE_HEADING_STYLE_LEVELS.get(name) if isinstance(name, str) else None
         if level is not None:
             return level
         probe = getattr(probe, "base_style", None)
@@ -299,10 +417,13 @@ def _looks_like_section_header(text: str) -> bool:
     except Exception:  # noqa: BLE001 — without the classifier, keep the old read
         return False
     try:
-        [(canon, _score)] = classify_headers_batch([text])
+        [(canon, score)] = classify_headers_batch([text])
     except Exception:  # noqa: BLE001 — same fallback
         return False
-    return canon != CanonicalSection.UNKNOWN
+    # Only an exact-alias hit counts: a word-boundary substring hit (score
+    # 0.95) fires on any title containing a section word ("Methods for
+    # measuring sleep in older adults"), which rejected real titles.
+    return canon != CanonicalSection.UNKNOWN and score == 1.0
 
 
 def _extract_image_blobs(paragraph, doc) -> list[tuple[bytes, str]]:
@@ -343,15 +464,36 @@ def _has_picture(paragraph) -> bool:
     return bool(paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"))
 
 
-def _nearest_block(blocks: list[_Block], index: int, step: int) -> int | None:
+def _has_embedded_picture(paragraph) -> bool:
+    """True when a picture paragraph holds an embedded (not linked) image.
+
+    A linked picture (``r:link``) never yields a figure — there is no blob
+    to extract — so its caption must stay body text rather than pair with
+    nothing and vanish.
+    """
+    for blip in paragraph._element.findall(f".//{{{_NS['w']}}}drawing//{{{_NS['a']}}}blip"):
+        if blip.get(f"{{{_NS['r']}}}embed") is not None:
+            return True
+    return False
+
+
+def _nearest_block(
+    blocks: list[_Block], index: int, step: int, *, skip_tables: bool = False
+) -> int | None:
     """Index of the nearest block before (``step=-1``) or after (``step=1``)
     *index* that is not an empty paragraph."""
     index += step
     while 0 <= index < len(blocks):
         block = blocks[index]
+        if skip_tables and block.kind == "table":
+            # A float may sit between a picture and its caption ("under a
+            # table, but it names a figure") — look past it. Any other block
+            # breaks the adjacency.
+            index += step
+            continue
         if not (
             block.kind == "paragraph"
-            and not (block.obj.text or "").strip()
+            and not (getattr(block.obj, "text", None) or "").strip()
             and not _has_picture(block.obj)
         ):
             return index
@@ -373,7 +515,7 @@ def _is_table_caption(blocks: list[_Block], index: int) -> bool:
         or _has_picture(block.obj)
     ):
         return False
-    text = (block.obj.text or "").strip()
+    text = (getattr(block.obj, "text", None) or "").strip()
     if not text or _FIGURE_CAPTION_START_RE.match(text):
         return False
     if _TABLE_CAPTION_START_RE.match(text):
@@ -413,27 +555,6 @@ def _table_caption_blocks(blocks: list[_Block]) -> dict[int, int]:
     return captions
 
 
-def _nearest_figure_neighbour(blocks: list[_Block], index: int, step: int) -> int | None:
-    """Nearest block before/after *index* that can separate a picture from its
-    caption: empty paragraphs are skipped, as are tables (a float may sit
-    between a picture and its caption — 'under a table, but it names a
-    figure'). Any other block breaks the adjacency."""
-    index += step
-    while 0 <= index < len(blocks):
-        block = blocks[index]
-        if block.kind == "table":
-            index += step
-            continue
-        if not (
-            block.kind == "paragraph"
-            and not (block.obj.text or "").strip()
-            and not _has_picture(block.obj)
-        ):
-            return index
-        index += step
-    return None
-
-
 def _is_figure_caption(blocks: list[_Block], index: int) -> bool:
     """Can the block at *index*, found next to a picture, be its caption?
 
@@ -447,7 +568,7 @@ def _is_figure_caption(blocks: list[_Block], index: int) -> bool:
         or _has_picture(block.obj)
     ):
         return False
-    text = (block.obj.text or "").strip()
+    text = (getattr(block.obj, "text", None) or "").strip()
     # A labelled figure caption always qualifies; an unlabelled one next to a
     # picture is its caption. Precedence over a neighbouring table's claim is
     # settled by the table pairing, which runs first and marks its captions
@@ -471,8 +592,17 @@ def _figure_caption_blocks(blocks: list[_Block], claimed: set[int]) -> dict[int,
     for index, block in enumerate(blocks):
         if block.kind != "paragraph" or not _has_picture(block.obj):
             continue
+        if (
+            not _has_embedded_picture(block.obj)
+            or _heading_level_for_paragraph(block.obj) is not None
+        ):
+            # A linked picture yields no figure (no blob to extract), and a
+            # picture inside a heading paragraph never becomes one either —
+            # claiming the adjacent caption would attach it to nothing and
+            # delete its text.
+            continue
         for side, step in ((above, -1), (below, 1)):
-            neighbour = _nearest_figure_neighbour(blocks, index, step)
+            neighbour = _nearest_block(blocks, index, step, skip_tables=True)
             if (
                 neighbour is not None
                 and neighbour not in claimed
@@ -600,11 +730,13 @@ class DocxParser:
                         figure_blocks[id(fig)] = index
             elif block.kind == "table":
                 caption_index = table_captions.get(index)
-                caption_text = (
-                    "".join(self._paragraph_inline_text(blocks[caption_index].obj).text)
-                    if caption_index is not None
-                    else ""
-                )
+                caption_text = ""
+                if caption_index is not None:
+                    caption_acc = self._paragraph_inline_text(blocks[caption_index].obj)
+                    caption_text = "".join(caption_acc.text)
+                    # A note anchored on the caption (a sourced table) queues
+                    # like a heading note — its text is walked, not emitted.
+                    self._enqueue_note_refs(caption_acc.note_refs)
                 self._handle_table(block.obj, caption=caption_text.strip() or None)
             elif block.kind == "math_para":
                 self._handle_math_para(block.obj)
@@ -613,9 +745,9 @@ class DocxParser:
         # picture with no adjacent caption stays uncaptioned instead of
         # shifting every later caption.
         for pic_index, caption_index in figure_captions.items():
-            caption_text = "".join(
-                self._paragraph_inline_text(blocks[caption_index].obj).text
-            ).strip()
+            caption_acc = self._paragraph_inline_text(blocks[caption_index].obj)
+            caption_text = "".join(caption_acc.text).strip()
+            self._enqueue_note_refs(caption_acc.note_refs)
             if not caption_text:
                 continue
             for fig in self.figures:
@@ -910,6 +1042,23 @@ class DocxParser:
             self._walk_inline(child, acc, collect_only=True)
         return acc
 
+    def _acc_boxed_text(self, txbx_el, acc: _InlineAccum) -> None:
+        """Append one legacy/VML text box's paragraphs with word boundaries.
+
+        The same per-paragraph join the ``w:drawing`` branch uses: runs
+        concatenate untouched inside a paragraph (Word splits runs mid-word)
+        and paragraphs separate, wherever the ``w:txbxContent`` sits.
+        """
+        w = _NS["w"]
+        for para in txbx_el.iter(f"{{{w}}}p"):
+            part = "".join(t.text or "" for t in para.iter(f"{{{w}}}t")).strip()
+            if part:
+                # A boxed paragraph is its own paragraph visually — keep
+                # word boundaries on both sides.
+                self._acc_separator(acc)
+                self._acc_text(acc, part)
+                self._acc_separator(acc)
+
     def _acc_text(self, acc: _InlineAccum, text: str) -> None:
         """Append inline text, mirroring it into any enclosing hyperlink."""
         acc.text.append(text)
@@ -1009,7 +1158,10 @@ class DocxParser:
                 self._walk_inline(child, acc, collect_only=collect_only)
         elif tag == f"{{{w}}}sdt":
             # Inline content control (Word citations, Mendeley Cite): the
-            # payload lives under w:sdtContent; w:sdtPr carries no text.
+            # payload lives under w:sdtContent; w:sdtPr carries no text. An
+            # empty control still showing the placeholder prompt is skipped.
+            if _is_placeholder_sdt(el):
+                return
             for child in el.iterchildren():
                 if child.tag == f"{{{w}}}sdtContent":
                     for grandchild in child.iterchildren():
@@ -1075,22 +1227,14 @@ class DocxParser:
             # A drawing can be a text box rather than a picture, and
             # its paragraphs are real document text — pull quotes,
             # boxed methods notes, poster-style layouts. Nothing walked
-            # into it, so that text was lost entirely. Concatenate w:t
-            # within each boxed paragraph (Word splits runs mid-word)
-            # and separate paragraphs, instead of space-joining every
-            # w:t.
+            # into it, so that text was lost entirely.
             for txbx in el.iter(f"{{{w}}}txbxContent"):
-                parts = [
-                    "".join(t.text or "" for t in para.iter(f"{{{w}}}t"))
-                    for para in txbx.iter(f"{{{w}}}p")
-                ]
-                boxed = " ".join(part.strip() for part in parts if part.strip()).strip()
-                if boxed:
-                    # A boxed paragraph is its own paragraph visually — keep
-                    # word boundaries on both sides.
-                    self._acc_separator(acc)
-                    self._acc_text(acc, boxed)
-                    self._acc_separator(acc)
+                self._acc_boxed_text(txbx, acc)
+        elif tag == f"{{{w}}}txbxContent":
+            # A legacy VML text box (w:pict/v:shape/v:textbox) reaches here
+            # through the generic descend instead — join it per paragraph
+            # the same way, or its paragraphs fuse into the running text.
+            self._acc_boxed_text(el, acc)
         elif tag == f"{{{w}}}sym":
             sym_text = _symbol_text(el)
             if sym_text:
@@ -1166,14 +1310,33 @@ class DocxParser:
             return
 
         # Footnote/endnote references inside table cells were lost with
-        # cell.text — collect them against the table's section.
+        # cell.text — collect them against the table's section. python-docx
+        # repeats the same merged cell for each spanned grid cell, so dedupe
+        # by element: otherwise one note in a merged cell queues once per
+        # span and every later footnote prints the wrong number.
+        seen_cells: set[int] = set()
         for row in rows:
             for cell in row.cells:
+                if id(cell._tc) in seen_cells:
+                    continue
+                seen_cells.add(id(cell._tc))
                 for para in cell.paragraphs:
                     self._enqueue_note_refs(self._paragraph_inline_text(para).note_refs)
         self._seen_content_block = True
 
-        cell_rows = [[cell.text.strip() for cell in row.cells] for row in rows]
+        # Cell text comes from the same inline walker as headings and
+        # captions — cell.text skips content controls, smart tags and simple
+        # fields, so a citation in a cell read as "". Paragraphs join with
+        # newlines, exactly as cell.text joins them.
+        cell_rows = [
+            [
+                "\n".join(
+                    "".join(self._paragraph_inline_text(para).text) for para in cell.paragraphs
+                ).strip()
+                for cell in row.cells
+            ]
+            for row in rows
+        ]
         # Pad ragged rows so DataFrame construction is uniform
         width = max(len(r) for r in cell_rows)
         cell_rows = [r + [""] * (width - len(r)) for r in cell_rows]
