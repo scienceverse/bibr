@@ -262,6 +262,24 @@ def _map_heading(header: str) -> CanonicalSection:
     return CanonicalSection.UNKNOWN
 
 
+def _resolve_link_sentence(candidates, url: str, link_text: str, fallback_id: int | None):
+    """Pick the sentence of one deferred entry that holds an anchor (as JATS)."""
+    if link_text:
+        needle = link_text.strip()
+        if needle:
+            for sent in candidates:
+                if needle in sent.text:
+                    return sent
+    for sent in candidates:
+        if url in sent.text:
+            return sent
+    if fallback_id is not None:
+        for sent in candidates:
+            if sent.text_id == fallback_id:
+                return sent
+    return candidates[-1] if candidates else None
+
+
 class HtmlParser:
     """Parses article HTML/XHTML bytes into :class:`PaperContents`."""
 
@@ -373,6 +391,7 @@ class HtmlParser:
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
         """Populate sentences from externally-produced segment lists."""
+        start_paragraph = self._paragraph_counter
         self.sentences, self._sentence_counter, self._paragraph_counter = self.assembler.emit(
             all_segments,
             sentence_factory=self._make_sentence,
@@ -380,15 +399,25 @@ class HtmlParser:
             paragraph_counter=self._paragraph_counter,
         )
 
+        by_paragraph: dict[int, list] = {}
+        for sent in self.sentences:
+            by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
         for url, link_text, section_id, deferred_index in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
-            text_id = self.assembler.last_text_id[deferred_index]
-            if text_id is None:
+            fallback_id = self.assembler.last_text_id[deferred_index]
+            if fallback_id is None:
                 continue
-            sentence = next((s for s in self.sentences if s.text_id == text_id), None)
-            paragraph_id = sentence.paragraph_id if sentence is not None else 0
+            entry_para = start_paragraph + deferred_index + 1
+            candidates = by_paragraph.get(entry_para, [])
+            if not candidates:
+                continue
+            sentence = _resolve_link_sentence(candidates, url, link_text or "", fallback_id)
+            if sentence is None:
+                continue
+            text_id = sentence.text_id
+            paragraph_id = sentence.paragraph_id
             self.links.append(
                 PaperURLLink(
                     url=url,
