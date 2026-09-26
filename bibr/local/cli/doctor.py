@@ -383,12 +383,74 @@ def _check_device(ok, warn, fail) -> None:
     except ImportError:
         # Core install: bibr's own models run on ONNX Runtime, so report the
         # provider it would pick rather than calling a missing torch a failure.
-        from bibr.utils.onnx_providers import get_ort_providers, selected_device
+        # A broken onnxruntime reads as cpu here; the ONNX Runtime check that
+        # follows reports it with the repair.
+        from bibr.utils.onnx_providers import cuda_provider_available
 
-        device = selected_device(get_ort_providers(model_name="doctor"))
+        device = "cuda" if cuda_provider_available() else "cpu"
         ok(f"Device: {device} (ONNX Runtime; torch not installed)")
     except Exception as e:  # noqa: BLE001
         fail(f"Device: {e}")
+
+
+def _check_onnx_runtime(ok, warn, fail) -> None:
+    """Report the onnxruntime build that loads (CPU or GPU) and its version.
+
+    bibr's own models run on ONNX Runtime whether or not torch is installed,
+    and the device line above reports torch's device when it is. The core
+    ``onnxruntime`` and the gpu extra's ``onnxruntime-gpu`` write the same
+    ``onnxruntime/`` directory: the build that loads is whichever wheel's
+    files were written last, and uninstalling one deletes files the other
+    needs. Both states are silent at run time, so they are checked here.
+    """
+    import shlex
+
+    from rich.markup import escape
+
+    from bibr.utils.onnx_providers import (
+        _installed_builds,
+        import_onnxruntime,
+        onnxruntime_gpu_reinstall_command,
+        onnxruntime_repair_command,
+    )
+
+    try:
+        ort = import_onnxruntime()
+    except ConfigurationError:
+        fail(
+            "ONNX Runtime: onnxruntime is installed, but its files are missing",
+            hint=escape(f"Reinstall it: {shlex.join(onnxruntime_repair_command())}"),
+        )
+        return
+    except ImportError:
+        fail("ONNX Runtime: not installed", hint="Reinstall bibr; onnxruntime is a core dependency")
+        return
+
+    try:
+        gpu_loaded = "CUDAExecutionProvider" in ort.get_available_providers()
+    except Exception as e:  # noqa: BLE001
+        fail(f"ONNX Runtime: {e}")
+        return
+    version = getattr(ort, "__version__", "unknown version")
+    if gpu_loaded:
+        ok(f"ONNX Runtime: GPU build {version}")
+        return
+
+    builds = _installed_builds()
+    if builds is not None:
+        _cpu_version, gpu_version, installer = builds
+        command = onnxruntime_gpu_reinstall_command(
+            gpu_version, uv="uv" if installer == "uv" else None
+        )
+        warn(
+            f"ONNX Runtime: CPU build {version} loaded, though onnxruntime-gpu {gpu_version} "
+            "is installed; ONNX models run on CPU",
+            hint=escape(
+                f"Reinstall the GPU build so its files are written last: {shlex.join(command)}"
+            ),
+        )
+        return
+    ok(f"ONNX Runtime: CPU build {version}")
 
 
 def _check_ref_strategies(ok, fail) -> None:
@@ -720,6 +782,7 @@ def _run_doctor() -> None:
     # --- Pipeline -------------------------------------------------------------
     ui.section(console, "Pipeline")
     _check_device(ok, warn, fail)
+    _check_onnx_runtime(ok, warn, fail)
     if config_ok:
         _check_ref_strategies(ok, fail)
 
