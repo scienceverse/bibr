@@ -281,6 +281,22 @@ def _payloads(sources: Iterable[Any]) -> Iterator[tuple[str, Mapping[str, Any] |
         yield str(path), payload, None
 
 
+def _flush_tables(tables: list[_Table], labels: list[str]) -> None:
+    """Flush every table, naming the table and its buffered papers on failure.
+
+    *labels* are the sources buffered since the last flush — the papers an
+    Arrow type error at flush time can come from.
+    """
+    for table in tables:
+        try:
+            table.flush()
+        except Exception as exc:  # noqa: BLE001 — re-raised naming table and papers
+            papers = ", ".join(labels[:5])
+            if len(labels) > 5:
+                papers += f", … ({len(labels)} papers)"
+            raise ValueError(f"table {table.name} (papers {papers}): {exc}") from exc
+
+
 def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     """Write the exports in *sources* as one Parquet file per table in *out_dir*.
 
@@ -288,8 +304,9 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     export JSON files (or :class:`ExportFile`, a path with its parsed data);
     files that are not bibr exports, and the :class:`bibr.ChewFailure` slots
     of a batch, are skipped and listed in the report. Every export is
-    validated with the lenient 12.x reader, so one from another major version
-    raises :class:`pydantic.ValidationError`.
+    validated with the lenient 12.x reader, and rows are converted from that
+    validated model, so one from another major version raises
+    :class:`pydantic.ValidationError`.
     A ``paper_id`` seen twice raises :class:`ValueError`: it is the key that
     joins the tables. The files are written to a temporary directory and
     moved into *out_dir* only when every source was read, replacing earlier
@@ -310,41 +327,53 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
     seen: dict[str, str] = {}
     skipped: list[tuple[str, str]] = []
     papers = 0
+    pending: list[str] = []
     completed = False
     try:
         for label, payload, reason in _payloads(sources):
             if payload is None:
                 skipped.append((label, reason or "skipped"))
                 continue
-            PaperExportReader.model_validate(payload)
-            paper_id = str(payload["paper_id"])
+            data = PaperExportReader.model_validate(payload).model_dump(mode="json")
+            paper_id = str(data["paper_id"])
             if paper_id in seen:
                 raise ValueError(
                     f"paper_id {paper_id!r} appears in both {seen[paper_id]} and {label}; "
                     "paper_id joins the tables, so it must be unique across the corpus"
                 )
             seen[paper_id] = label
-            paper.rows.append(
-                {
-                    name: conv(_dig(payload, path))
-                    for (name, conv), (_, path, _) in zip(
-                        paper.columns, _PAPER_COLUMNS, strict=True
-                    )
-                }
-            )
-            for table in tables[1:]:
-                for row in _dig(payload, paths[table.name]) or []:
-                    if isinstance(row, Mapping):
-                        table.rows.append(
-                            {"paper_id": paper_id}
-                            | {name: conv(row.get(name)) for name, conv in table.columns}
+            try:
+                paper.rows.append(
+                    {
+                        name: conv(_dig(data, path))
+                        for (name, conv), (_, path, _) in zip(
+                            paper.columns, _PAPER_COLUMNS, strict=True
                         )
+                    }
+                )
+                for table in tables[1:]:
+                    for row in _dig(data, paths[table.name]) or []:
+                        if isinstance(row, Mapping):
+                            table.rows.append(
+                                {"paper_id": paper_id}
+                                | {name: conv(row.get(name)) for name, conv in table.columns}
+                            )
+            except Exception as exc:  # noqa: BLE001 — re-raised naming the paper
+                raise ValueError(f"{label} (paper_id {paper_id}): {exc}") from exc
             papers += 1
+            # An in-memory dict has no file name; its paper_id says which paper it was.
+            pending.append(f"{label} (paper_id {paper_id})" if label == "<dict>" else label)
             if papers % _PAPERS_PER_ROW_GROUP == 0:
-                for table in tables:
-                    table.flush()
-        for table in tables:
-            table.close()
+                _flush_tables(tables, pending)
+                pending = []
+        try:
+            for table in tables:
+                table.close()
+        except Exception as exc:  # noqa: BLE001 — re-raised naming table and papers
+            names = ", ".join(pending[:5])
+            if len(pending) > 5:
+                names += f", … ({len(pending)} papers)"
+            raise ValueError(f"table {table.name} (papers {names}): {exc}") from exc
         files = {}
         for table in tables:
             files[table.name] = out / table.path.name
