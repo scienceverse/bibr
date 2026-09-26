@@ -1042,6 +1042,8 @@ class TestEligibleLabels:
 
     def test_no_unexpected_labels(self):
         """Guard against accidental additions. Update this test when adding labels."""
+        from bibr.ocr.native_text import HEADER_FOOTER_LABELS, resolve_eligible_labels
+
         expected = {
             "text",
             "content",
@@ -1057,3 +1059,10 @@ class TestEligibleLabels:
             "seal",
         }
         assert expected == DEFAULT_ELIGIBLE_LABELS
+        # Running headers/footers are opt-in behind OCR_NATIVE_TEXT_HEADER_FOOTER.
+        assert {"header", "footer"} == HEADER_FOOTER_LABELS
+        assert resolve_eligible_labels(False) == DEFAULT_ELIGIBLE_LABELS
+        assert resolve_eligible_labels(True) == DEFAULT_ELIGIBLE_LABELS | {
+            "header",
+            "footer",
+        }

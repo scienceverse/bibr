@@ -426,6 +426,8 @@ class Ledger:
             "n_refs": summary.get("n_refs"),
             "n_matched": summary.get("n_matched"),
             "n_sentences": summary.get("n_sentences"),
+            "n_validation_errors": summary.get("n_validation_errors"),
+            "n_validation_warnings": summary.get("n_validation_warnings"),
             "warnings": summary.get("warnings"),
             "bibr_version": context.bibr_version,
             "build_sha": context.build_sha,

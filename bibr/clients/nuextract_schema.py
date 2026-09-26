@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import math
 import types
 from collections.abc import Mapping
@@ -29,6 +30,10 @@ class NativeSchemaContract:
     template: dict[str, Any]
     wire_schema: dict[str, Any]
     nullable_paths: frozenset[str]
+    # Whether the builder already ran the static wire-shape check below.
+    # Builder-made contracts skip the per-parse re-check; hand-assembled
+    # ones (tests) still pay it.
+    shape_checked: bool = False
 
 
 class _UnsupportedWireSchema(ValueError):
@@ -664,7 +669,27 @@ def native_wire_value_is_valid(
         return False
 
 
-def native_contract_for_model(response_model: type[BaseModel]) -> NativeSchemaContract:
+def contract_wire_value_is_valid(value: Any, *, contract: NativeSchemaContract) -> bool:
+    """Validate one decoded completion against a builder-made contract.
+
+    The builder checks the static wire shape once (recorded on the
+    contract), so the per-parse path only matches the value. Hand-assembled
+    contracts still pay the shape check, exactly as
+    :func:`native_wire_value_is_valid` would.
+    """
+    if not isinstance(contract.wire_schema, dict) or not isinstance(contract.template, dict):
+        return False
+    try:
+        if not contract.shape_checked and not _wire_shape_is_supported(
+            contract.wire_schema, contract.template
+        ):
+            return False
+        return _wire_value_matches(value, contract.wire_schema, contract.template)
+    except Exception:
+        return False
+
+
+def _build_native_contract(response_model: type[BaseModel]) -> NativeSchemaContract:
     """Build a faithful, strict NuExtract contract without mutating the model schema."""
     if not isinstance(response_model, type) or not issubclass(response_model, BaseModel):
         raise TypeError("response_model must be a Pydantic BaseModel subclass")
@@ -722,4 +747,23 @@ def native_contract_for_model(response_model: type[BaseModel]) -> NativeSchemaCo
         template=copy.deepcopy(template),
         wire_schema=wire_schema,
         nullable_paths=frozenset(nullable_paths),
+        shape_checked=_wire_shape_is_supported(wire_schema, template),
     )
+
+
+@functools.cache
+def _cached_native_contract(response_model: type[BaseModel]) -> NativeSchemaContract:
+    """One built contract per response model; callers get copies, never this."""
+    return _build_native_contract(response_model)
+
+
+def native_contract_for_model(response_model: type[BaseModel]) -> NativeSchemaContract:
+    """Return the NuExtract contract for *response_model*, memoized per model.
+
+    The expensive projection (schema dereference plus the numind converter)
+    runs once per model; every call returns an independent deep copy, so
+    mutating the result never affects later calls.
+    """
+    if not isinstance(response_model, type) or not issubclass(response_model, BaseModel):
+        raise TypeError("response_model must be a Pydantic BaseModel subclass")
+    return copy.deepcopy(_cached_native_contract(response_model))

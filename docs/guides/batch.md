@@ -22,9 +22,10 @@ Any mix of:
 
 | Input | Behaviour |
 |---|---|
-| a manifest text file (any extension bibr does not process: `.txt`, `.lst`, …) | one path per line; blank lines and lines starting with `#` are ignored; relative entries resolve against the manifest's directory; a directory entry is walked recursively |
+| a manifest text file (`.txt`, `.lst`, `.list`, `.manifest`, or no extension) | one path per line; blank lines and lines starting with `#` are ignored; relative entries resolve against the manifest's directory; a directory entry is walked recursively |
 | a directory | walked recursively for `.pdf`, `.docx`, `.xml`, `.html`/`.htm`, `.epub`, sorted |
 | a file | processed as given |
+| any other file | skipped with a warning (a stray binary in a shell glob never aborts the run) |
 
 Missing entries are reported (and counted in the dry run) but never abort the
 run. Every file is identified by its **`paper_id`** — the file stem — and its

@@ -413,11 +413,6 @@ def _local_outcome(result: Any, started_at: str, finished_at: str, elapsed: floa
 # --- the run ------------------------------------------------------------------
 
 
-def _print(console: Any, message: str, **kwargs: Any) -> None:
-    if console is not None:
-        console.print(message, **kwargs)
-
-
 def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
     """The ``--dry-run`` payload, on stdout like ``bibr chew --dry-run``."""
     from rich.console import Console
@@ -444,7 +439,8 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
             f"{len(discovery.manifests)} manifests {ui.SEP} "
             f"{len(discovery.directories)} directories {ui.SEP} "
             f"{len(discovery.missing)} missing {ui.SEP} "
-            f"{len(discovery.unsupported)} unsupported",
+            f"{len(discovery.unsupported)} unsupported {ui.SEP} "
+            f"{len(discovery.unreadable)} unreadable",
         )
     )
 
@@ -577,6 +573,8 @@ def run_batch(
         ui.warn(console, f"not found: {missing}")
     for unsupported in discovery.unsupported:
         ui.warn(console, f"unsupported file type, skipped: {unsupported}")
+    for unreadable in discovery.unreadable:
+        ui.warn(console, f"unreadable manifest, skipped: {unreadable}")
     for empty in discovery.empty_dirs:
         ui.warn(console, f"no supported files in: {empty}")
     if not discovery.files:
@@ -589,6 +587,14 @@ def run_batch(
 
     if options.dry_run:
         _print_plan(options, plan, ledger)
+        # Same preflight the real run does below: without it the preview
+        # exits 0 for runs that fail immediately, contradicting the plan
+        # check ``docs/guides/batch.md`` promises.
+        if options.local is not None and options.local.preflight is not None and plan.to_run:
+            problem = options.local.preflight([item.path for item in plan.to_run])
+            if problem:
+                ui.error(console, problem)
+                return EXIT_FAILURES
         return EXIT_OK
 
     if options.local is not None and options.local.preflight is not None and plan.to_run:

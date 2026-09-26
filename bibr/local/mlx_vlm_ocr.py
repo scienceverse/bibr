@@ -236,12 +236,16 @@ class PaddleMlxVlmOcrClient:
         **_kw: object,
     ) -> None:
         effective = settings if settings is not None else snapshot_settings()
-        effective_model = model_path or model
-        self._server = MlxVlmOcrServer(model=effective_model, settings=effective)
+        # The factory passes the raw requested model as `model_path` and the
+        # winning candidate's model as `model`: the explicit `--ocr-model`
+        # request wins, as on main; the candidate is the default when nothing
+        # was requested.
+        requested_model = model_path or model
+        self._server = MlxVlmOcrServer(model=requested_model, settings=effective)
         try:
             self._http_client = PaddleHttpOcrClient(
                 base_url=self._server.base_url,
-                model=effective_model or effective.ocr.paddle_mlx_model,
+                model=requested_model or effective.ocr.paddle_mlx_model,
                 profile=profile,
                 settings=effective,
             )

@@ -209,3 +209,34 @@ def test_uv_bootstrap_pins_a_supported_interpreter_on_python_314(monkeypatch):
         "vllm",
         "serve",
     ]
+
+
+def test_startup_error_reports_tail_end(tmp_path):
+    """The exit error keeps the LAST 500 chars (the OOM line), not the first (7)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import vllm_ocr
+
+    process = MagicMock(returncode=1)
+    process.poll.return_value = 1
+    server = vllm_ocr.VllmOcrServer.__new__(vllm_ocr.VllmOcrServer)
+    server._settings = GlobalSettings()
+    server._model = "PaddlePaddle/PaddleOCR-VL-1.6"
+    server._port = 9123
+    server._process = process
+    server._stderr_fh = None
+    server._close_stderr_fh = lambda: None
+    log = tmp_path / "paddle-vllm.log"
+    log.write_bytes(
+        b"\n".join(
+            f"INFO loading weights shard {i:3d}/200 into unified memory".encode()
+            for i in range(200)
+        )
+        + b"\nRuntimeError: CUDA OOM: out of memory allocating attention workspace\n"
+    )
+    server._stderr_log = log
+
+    with pytest.raises(RuntimeError) as excinfo:
+        server._wait_until_ready()
+
+    assert "CUDA OOM" in str(excinfo.value)
+    assert "shard   0/200" not in str(excinfo.value)

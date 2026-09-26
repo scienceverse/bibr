@@ -214,5 +214,7 @@ async def test_native_backend_delegates_payload_construction(monkeypatch):
         system="System",
         messages=[{"role": "user", "content": "Document"}],
         max_tokens=123,
+        # create() builds the contract once and hands it over (audit S8).
+        contract=nuextract.native_contract_for_model(TitleKeywordsLLM),
     )
     assert seen == expected_kwargs

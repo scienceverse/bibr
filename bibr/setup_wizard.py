@@ -168,6 +168,27 @@ def _looks_like_auth_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _AUTH_ERROR_MARKERS)
 
 
+def _caused_by_configuration_error(exc: BaseException) -> bool:
+    """Whether *exc* is or wraps a :class:`ConfigurationError`.
+
+    chew() reports a bad setting wrapped — the pipeline raises
+    ``ProcessingError('Layout initialization failed: ...')`` from the
+    ``ConfigurationError`` — so walk ``__cause__``/``__context__``, not just
+    the top exception.
+    """
+    from bibr.exceptions import ConfigurationError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConfigurationError):
+            return True
+        cause = current.__cause__
+        current = cause if cause is not None else current.__context__
+    return False
+
+
 SetupPrompt = Literal["install_extras", "cloud_api_key", "private_server_url", "smoke_test"]
 SetupTier = Literal["fully_local", "mostly_local", "private_server", "cloud_fallback"]
 
@@ -687,6 +708,23 @@ def _project_name(cwd: Path) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _runs_in_project_env(cwd: Path) -> bool:
+    """Whether this interpreter is the environment of the project at *cwd*.
+
+    ``uv add`` edits the project uv finds from *cwd*; it only lands in the
+    interpreter running bibr when that interpreter IS the project
+    environment (``cwd/.venv`` or ``UV_PROJECT_ENVIRONMENT``). Otherwise the
+    extras must go through ``uv pip install --python sys.executable``.
+    """
+    candidate = os.environ.get("UV_PROJECT_ENVIRONMENT", "")
+    if not candidate:
+        candidate = str(cwd / ".venv")
+    try:
+        return Path(sys.prefix).resolve() == Path(candidate).expanduser().resolve()
+    except OSError:
+        return False
+
+
 def _extras_spec(extras: set[str]) -> str:
     return ",".join(sorted(extras))
 
@@ -714,14 +752,17 @@ def _install_command_for_extras(
             "Installing extras for this bibr source checkout",
         )
 
-    if uv_bin and project_name:
+    if uv_bin and project_name and _runs_in_project_env(cwd):
         return (
             [uv_bin, "add", spec],
             "Adding bibr extras to this project dependency",
         )
     if uv_bin:
+        # ``--python`` pins the install to the interpreter running bibr: uv
+        # otherwise picks a venv from VIRTUAL_ENV or cwd, which may belong
+        # to an unrelated project (or not exist at all).
         return (
-            [uv_bin, "pip", "install", spec],
+            [uv_bin, "pip", "install", "--python", sys.executable, spec],
             "Installing bibr extras into the current uv environment",
         )
     return (
@@ -771,7 +812,9 @@ class SetupWizard:
         self.console = Console()
         self.env_vars: dict[str, str] = {}
         self.selected_extras: set[str] = set()
+        self._declined_extras: set[str] = set()
         self._extras_installed = False
+        self._env_written = False
         self.env_path = Path.cwd() / ".env"
 
     # ---- public -----------------------------------------------------------
@@ -914,7 +957,9 @@ class SetupWizard:
         backend = self.env_vars.get("LLM_BACKEND")
         if backend in ("vllm", "vllm-mlx", "rapid-mlx", "llama-cpp"):
             self._offer_local_server_test()
-        elif setup.tier == "cloud_fallback":
+        elif setup.tier in ("cloud_fallback", "private_server"):
+            # The private-server URL, key and model were just collected; a
+            # wrong one otherwise passes setup silently and fails the first chew.
             self._offer_llm_connection_test()
 
     def run_advanced(self) -> None:
@@ -1043,6 +1088,9 @@ class SetupWizard:
         for key, desc in _available_extras().items():
             if Confirm.ask(f"  [cyan]{key}[/cyan] — {desc}", default=False):
                 self.selected_extras.add(key)
+            else:
+                # Remember the decline: step 4 must not install it anyway.
+                self._declined_extras.add(key)
 
         if self.selected_extras:
             self._install_selected_extras()
@@ -1091,7 +1139,9 @@ class SetupWizard:
             ui.ok(self.console, "Extras installed")
         else:
             detail = result.stderr.strip() or result.stdout.strip() or f"{cmd_label} failed"
-            self.console.print(f"[red]{cmd_label} failed:[/red]\n  [dim]{detail}[/dim]")
+            from rich.markup import escape
+
+            self.console.print(f"[red]{cmd_label} failed:[/red]\n  [dim]{escape(detail)}[/dim]")
             if config_saved:
                 self.console.print(
                     "[dim]Your configuration was already saved to .env before this "
@@ -1237,7 +1287,9 @@ class SetupWizard:
                     base_url, api_key, allow_insecure_http=self._allows_insecure_llm_http()
                 )
             except ValueError as exc:
-                ui.error(self.console, str(exc))
+                from rich.markup import escape
+
+                ui.error(self.console, escape(str(exc)))
                 if Confirm.ask("Send the key over plain HTTP anyway?", default=False):
                     self.env_vars["LLM_ALLOW_INSECURE_HTTP"] = "true"
                     return base_url
@@ -1354,7 +1406,9 @@ class SetupWizard:
             ui.ok(self.console, f"Server healthy at {server.base_url}")
             server.shutdown()
         except Exception as e:  # noqa: BLE001
-            ui.error(self.console, f"Local server test failed: {e}")
+            from rich.markup import escape
+
+            ui.error(self.console, f"Local server test failed: {escape(str(e))}")
             self.console.print(
                 "[dim]Config kept — fix and retry with `bibr chew --llm local`.[/dim]"
             )
@@ -1387,12 +1441,15 @@ class SetupWizard:
             self.console.print("[dim]Skipped.[/dim]")
             return
 
+        from rich.markup import escape
+
         from bibr.clients.llm import ping_llm
         from bibr.exceptions import ConfigurationError
 
         provider = self.env_vars.get("LLM_PROVIDER", "")
         key_env = LLM_DEFAULTS[provider]["key_env"] if provider in LLM_DEFAULTS else ""
         api_key = self.env_vars.get(key_env, "") if key_env else ""
+        retried_key = False
 
         while True:
             try:
@@ -1400,12 +1457,22 @@ class SetupWizard:
                     # The provider adapter extraction uses, so this sends what
                     # the first ``bibr chew`` will send.
                     reply = ping_llm(_connection_test_settings(self.env_vars))
-                ui.ok(self.console, f"Connected — LLM responded: {reply.strip()}")
+                ui.ok(self.console, f"Connected — LLM responded: {escape(reply.strip())}")
+                if retried_key and key_env and self._env_written:
+                    # The key first saved to .env was rejected; persist the
+                    # corrected one so .env matches the key just tested.
+                    try:
+                        _merge_env(self.env_path, {key_env: api_key})
+                    except OSError as exc:
+                        self.console.print(
+                            f"[dim]Couldn't save the corrected key to "
+                            f"{self.env_path}: {escape(str(exc))}[/dim]"
+                        )
                 break
             except ConfigurationError as exc:
                 # An invalid value already in .env, ~/.bibr/.env or the
                 # environment, not in the answers: chew stops on it too.
-                ui.error(self.console, f"Can't test the connection: {exc}")
+                ui.error(self.console, f"Can't test the connection: {escape(str(exc))}")
                 self.console.print(
                     "[dim]That value comes from your existing configuration, not from "
                     "this setup. `bibr chew` stops on it too until it is fixed or "
@@ -1414,7 +1481,7 @@ class SetupWizard:
                 break
             except Exception as exc:
                 msg = _redact(str(exc), api_key)
-                ui.error(self.console, f"Couldn't connect: {msg}")
+                ui.error(self.console, f"Couldn't connect: {escape(msg)}")
                 if provider == "ollama":
                     # Ollama takes no key; what the user can change is the URL.
                     if not Confirm.ask("Retry with a different Ollama base URL?", default=True):
@@ -1430,6 +1497,7 @@ class SetupWizard:
                     break
                 api_key = Prompt.ask("API key", password=True)
                 self.env_vars[key_env] = api_key
+                retried_key = True
 
     def _step_external_services(self) -> None:
         ui.step(self.console, 4, 6, "Models & external services")
@@ -1534,13 +1602,31 @@ class SetupWizard:
         # machine the GPU/MPS path and the CRF segmenter the wizard's defaults
         # can reach.
         if "ml" not in self.selected_extras and not _ml_extra_available():
-            self.selected_extras.add("ml")
-            reason = "PDF layout detection runs fastest with the ml extra"
-            if refs == "ner":
-                reason = (
-                    "PDF layout detection and NER reference parsing run fastest with the ml extra"
+            if "ml" in self._declined_extras:
+                # The step-1 answer stands: a hint only, no install, no re-ask.
+                from rich.markup import escape
+
+                try:
+                    later_cmd, _label = _install_command_for_extras(
+                        {"ml"}, cwd=Path.cwd(), uv_bin=shutil.which("uv")
+                    )
+                    later = f" Add it later with: {escape(shlex.join(later_cmd))}"
+                except RuntimeError:
+                    later = ""
+                self.console.print(
+                    "[dim]Skipped the ml extra (declined in step 1): layout "
+                    "detection and reference parsing run on the ONNX runtime "
+                    f"instead of torch.{later}[/dim]"
                 )
-            self._install_selected_extras(reason)
+            else:
+                self.selected_extras.add("ml")
+                reason = "PDF layout detection runs fastest with the ml extra"
+                if refs == "ner":
+                    reason = (
+                        "PDF layout detection and NER reference parsing run fastest "
+                        "with the ml extra"
+                    )
+                self._install_selected_extras(reason)
 
     def _step_memory_mode(self) -> None:
         """Pin the auto-detected memory mode into .env so it is visible/editable.
@@ -1589,6 +1675,7 @@ class SetupWizard:
                 return
             if action == "merge":
                 _merge_env(self.env_path, _with_llm_routing(self.env_vars))
+                self._env_written = True
                 ui.ok(self.console, f"Merged new settings into {self.env_path}")
                 if save_preset_name:
                     self._save_preset(save_preset_name)
@@ -1597,6 +1684,7 @@ class SetupWizard:
                 return
 
         _write_env_fresh(self.env_path, _with_llm_routing(self.env_vars))
+        self._env_written = True
         ui.ok(self.console, f"Wrote {self.env_path}")
         if save_preset_name:
             self._save_preset(save_preset_name)
@@ -1630,7 +1718,9 @@ class SetupWizard:
                 f"Switch with [cyan]bibr preset use {name}[/cyan]",
             )
         except Exception as exc:
-            self.console.print(f"[yellow]! Couldn't save preset:[/yellow] {exc}")
+            from rich.markup import escape
+
+            self.console.print(f"[yellow]! Couldn't save preset:[/yellow] {escape(str(exc))}")
 
     def _smoke_test_note(self) -> str:
         """Honest first-run download note for the configured OCR backend."""
@@ -1676,6 +1766,8 @@ class SetupWizard:
         already written to disk by this point, so every branch here just
         informs, it never re-raises.
         """
+        from rich.markup import escape
+
         from bibr.exceptions import UpstreamServiceError
 
         doctor_line = "[dim]Run `bibr doctor` for a full check.[/dim]"
@@ -1685,7 +1777,17 @@ class SetupWizard:
         if isinstance(exc, ImportError):
             # ml_import_error() (bibr/utils/ml_extra.py) already bakes the
             # exact `uv sync --extra ...` line into the message.
-            return f"[dim]{_redact(str(exc), api_key)}[/dim]\n{doctor_line}"
+            return f"[dim]{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
+
+        if _caused_by_configuration_error(exc):
+            # _step_smoke_test already printed the message in full; say once
+            # what to do about it instead of labelling it unexpected. chew()
+            # reports a bad setting wrapped (a ProcessingError whose cause is
+            # the ConfigurationError), so walk the chain, not just the top.
+            return (
+                "[dim]Fix the configuration value above in your .env, then "
+                f"rerun the test.[/dim]\n{doctor_line}"
+            )
 
         if isinstance(exc, UpstreamServiceError):
             service = (exc.service_name or "").lower()
@@ -1703,11 +1805,11 @@ class SetupWizard:
                         "[dim]The LLM provider rejected the request — check your "
                         f"local LLM server logs.[/dim]\n{doctor_line}"
                     )
-            return f"[dim]{_redact(str(exc), api_key)}[/dim]\n{doctor_line}"
+            return f"[dim]{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
 
         return (
             f"[dim]Unexpected error — your configuration is already saved: "
-            f"{_redact(str(exc), api_key)}[/dim]\n{doctor_line}"
+            f"{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
         )
 
     def _step_smoke_test(
@@ -1715,6 +1817,8 @@ class SetupWizard:
         header: str | None = None,
         confirm_default: bool = False,
     ) -> None:
+        from rich.markup import escape
+
         ui.phase(self.console, header or ui.step_label(6, 6, "Test extraction"))
         self.console.print(
             "Run a quick pipeline smoke test on a synthetic sample paper shipped "
@@ -1736,7 +1840,7 @@ class SetupWizard:
         try:
             _reload_settings_in_place()
         except Exception as exc:  # noqa: BLE001 — best-effort; fall back to current Settings
-            self.console.print(f"[dim]Couldn't reload settings from .env: {exc}[/dim]")
+            self.console.print(f"[dim]Couldn't reload settings from .env: {escape(str(exc))}[/dim]")
 
         try:
             resource = resources.files("bibr.data").joinpath("sample_paper.pdf")
@@ -1759,7 +1863,7 @@ class SetupWizard:
                 key_env = self._llm_key_env_hint()
                 api_key = self.env_vars.get(key_env, "") if key_env else ""
                 msg = _redact(str(exc), api_key)
-                ui.error(self.console, f"Test extraction failed: {msg}")
+                ui.error(self.console, f"Test extraction failed: {escape(msg)}")
                 self.console.print(self._smoke_failure_hint(exc))
                 return
 
@@ -1771,7 +1875,7 @@ class SetupWizard:
         n_refs = len(data.get("bib") or [])
         ui.ok(self.console, f"Pipeline smoke test succeeded ({elapsed:.1f}s)")
         self.console.print(
-            f"  [dim]Title:[/dim] {title}\n"
+            f"  [dim]Title:[/dim] {escape(title)}\n"
             f"  [dim]Authors:[/dim] {n_authors}\n"
             f"  [dim]References:[/dim] {n_refs}"
         )

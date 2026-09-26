@@ -11,7 +11,7 @@ import logging
 
 from bibr.layout.registry import register
 from bibr.layout_base import BaseLayoutDetector
-from bibr.layout_utils import _LABEL_TO_TASK, LABEL_TASK_MAPPING
+from bibr.layout_utils import _LABEL_TO_TASK, LABEL_TASK_MAPPING, effective_layout_batch_size
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,11 @@ class LayoutDetector(BaseLayoutDetector):
         if not images:
             return []
 
-        batch_size = self._settings.layout.batch_size
+        # On CPU the effective batch is 1 unless LAYOUT_BATCH_SIZE was set
+        # explicitly: batch 8 costs GBs of ORT arena for no throughput gain.
+        batch_size = effective_layout_batch_size(
+            self._settings, getattr(self._device, "type", None)
+        )
         all_results: list[list[dict]] = []
         for i in range(0, len(images), batch_size):
             chunk = images[i : i + batch_size]
