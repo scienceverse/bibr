@@ -117,3 +117,73 @@ def test_assign_paper_ids_identical_bytes_get_an_ordinal(tmp_path):
     items = assign_paper_ids([a1, a2])
     sha8 = sha256_file(a1)[:8]
     assert [i.paper_id for i in items] == [f"same-{sha8}", f"same-{sha8}-2"]
+
+
+def test_recorded_ids_stay_when_a_same_named_file_joins_the_inputs(tmp_path):
+    """Growing a corpus must not rename a paper the ledger already has."""
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    b = _pdf(tmp_path / "b" / "paper.pdf", b"b")
+    recorded = [{"paper_id": "paper", "path": str(a), "status": "ok"}]
+
+    items = assign_paper_ids([a, b], recorded=recorded)
+
+    assert [i.paper_id for i in items] == ["paper", f"paper-{sha256_file(b)[:8]}"]
+    # ...and on the next run both keep their ids, whatever the input order.
+    recorded.append({"paper_id": items[1].paper_id, "path": str(b), "status": "ok"})
+    again = assign_paper_ids([b, a], recorded=recorded)
+    assert [i.paper_id for i in again] == [items[1].paper_id, "paper"]
+
+
+def test_recorded_suffixed_id_stays_after_its_twin_leaves(tmp_path):
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    recorded = [{"paper_id": "paper-0badc0de", "path": str(a), "status": "ok"}]
+    assert [i.paper_id for i in assign_paper_ids([a], recorded=recorded)] == ["paper-0badc0de"]
+
+
+def test_unrecorded_inputs_keep_the_stem_rules(tmp_path):
+    """A moved corpus (paths not in the ledger) resolves exactly as before."""
+    a = _pdf(tmp_path / "moved" / "a.pdf")
+    recorded = [{"paper_id": "a", "path": "/old/place/a.pdf", "status": "ok"}]
+    assert [i.paper_id for i in assign_paper_ids([a], recorded=recorded)] == ["a"]
+
+
+def test_the_run_info_stem_is_reserved_for_bibr_batch(tmp_path):
+    """<out>/run_info.json is the runner's own file; the library writes none."""
+    from bibr.batch.manifest import RESERVED_IDS
+    from bibr.batch.runner import RUN_INFO_FILENAME
+
+    info = _pdf(tmp_path / "Run_Info.pdf", b"paper")
+    recorded = [{"paper_id": "Run_Info", "path": str(info)}]
+    items = assign_paper_ids([info], recorded=recorded, reserved=RESERVED_IDS)
+    assert [i.paper_id for i in items] == [f"Run_Info-{sha256_file(info)[:8]}"]
+    assert Path(RUN_INFO_FILENAME).stem in RESERVED_IDS
+    assert [i.paper_id for i in assign_paper_ids([info])] == ["Run_Info"]
+
+
+def test_a_recorded_id_is_kept_by_the_first_input_that_claims_it(tmp_path):
+    """Two paths recorded under one id (each ran alone once) would overwrite
+    each other's export: the first keeps it, the other gets a suffix."""
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    b = _pdf(tmp_path / "b" / "Paper.pdf", b"b")
+    recorded = [
+        {"paper_id": "paper", "path": str(a), "status": "ok"},
+        {"paper_id": "PAPER", "path": str(b), "status": "ok"},
+    ]
+    items = assign_paper_ids([a, b], recorded=recorded)
+    assert [i.paper_id for i in items] == ["paper", f"Paper-{sha256_file(b)[:8]}"]
+
+
+def test_the_latest_recorded_id_of_a_path_wins(tmp_path):
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    recorded = [
+        {"paper_id": "paper", "path": str(a), "status": "failed"},
+        {"paper_id": "paper-0badc0de", "path": str(a), "status": "ok"},
+    ]
+    assert [i.paper_id for i in assign_paper_ids([a], recorded=recorded)] == ["paper-0badc0de"]
+
+
+def test_an_unreadable_colliding_file_still_gets_a_unique_id(tmp_path):
+    a = _pdf(tmp_path / "a" / "paper.pdf", b"a")
+    missing = tmp_path / "b" / "paper.pdf"  # vanished between discovery and planning
+    items = assign_paper_ids([a, missing])
+    assert [i.paper_id for i in items] == [f"paper-{sha256_file(a)[:8]}", "paper"]
