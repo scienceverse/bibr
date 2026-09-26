@@ -2176,3 +2176,48 @@ class TestConsortiumMembers:
             ("The Consortium", "", [ORGANIZATION_ROLE]),
             ("Member", "Member Lab", []),
         ]
+
+
+class TestLinkSentenceFallbacks:
+    """The chain after the anchor offset: display text, URL, entry fallback, last."""
+
+    @staticmethod
+    def _sents(*texts):
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(text=t, text_id=i) for i, t in enumerate(texts, start=1)]
+
+    @pytest.mark.parametrize(
+        "module", ["bibr.input.jats_native", "bibr.input.html_native"], ids=["jats", "html"]
+    )
+    @pytest.mark.parametrize(
+        ("link_text", "url", "fallback_id", "offset", "expected"),
+        [
+            # The offset lands on sentence 1, which holds neither the text nor
+            # the URL, so the display-text search picks sentence 2.
+            ("the data", "https://x.org/d", None, 0, 2),
+            # No display text: the URL search picks the sentence printing it.
+            ("", "https://x.org/d", None, None, 3),
+            # Neither is printed: the entry's recorded sentence wins.
+            ("gone", "https://y.org/", 1, None, 1),
+            # Nothing matches and no fallback: the entry's last sentence.
+            ("gone", "https://y.org/", None, None, 3),
+        ],
+    )
+    def test_fallback_order(self, module, link_text, url, fallback_id, offset, expected):
+        import importlib
+
+        resolve = importlib.import_module(module)._resolve_link_sentence
+        sents = self._sents("Intro text.", "See the data here.", "At https://x.org/d too.")
+        entry = " ".join(s.text for s in sents)
+        picked = resolve(sents, url, link_text, fallback_id, entry, offset)
+        assert picked.text_id == expected
+
+    @pytest.mark.parametrize(
+        "module", ["bibr.input.jats_native", "bibr.input.html_native"], ids=["jats", "html"]
+    )
+    def test_no_candidates_resolves_to_none(self, module):
+        import importlib
+
+        resolve = importlib.import_module(module)._resolve_link_sentence
+        assert resolve([], "https://x.org", "x", None, "", None) is None
