@@ -1011,7 +1011,7 @@ class TestLlmEscalation:
         assert llm_calls == [["stimuli"]]
         assert results[0][0] == CanonicalSection.METHODS
 
-    async def test_llm_overwrite_keeps_model_is_top_level(self, monkeypatch):
+    async def test_llm_overwrite_resets_is_top_level_pending_measurement(self, monkeypatch):
         """Deferred with the escalation narrowing: the LLM overwrite resets
         is_top_level to None (as on main), pending a val-set hierarchy
         measurement. The trained model's top/sub bit is not followed yet."""

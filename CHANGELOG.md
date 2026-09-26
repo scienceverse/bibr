@@ -344,6 +344,10 @@ released.
 
 ### Added
 
+- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
+  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
+  under the same printable-ratio gate as body text. Default output is
+  unchanged; enable it to compare.
 - PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
   `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
   still loads PP-DocLayoutV3; switching is a settings change behind an
@@ -401,8 +405,9 @@ released.
   for the life of the session. The smaller footprint costs about 10% more
   wall time on CPU.
 - In aggressive memory mode the NER reference parser loads on CPU rather than
-  the GPU and is released after post-parse. Balanced mode keeps it loaded
-  across files in one process, and CUDA behavior is unchanged.
+  the GPU and is released after post-parse. Balanced and keep-all modes keep
+  the previous device choice (CUDA when available) and keep it loaded across
+  files in one process; set `NER_DEVICE` to override.
 - The equation fallback sends fewer methods/results sentences to the LLM:
   sentences whose digit-bearing parentheticals are only author-year citations,
   bare years, or figure, table, supplement, equation or section references are
@@ -412,10 +417,6 @@ released.
   sentences with digit-bearing parentheticals are skipped, all
   citation/reference-only; no equation in the stored exports came from a
   skipped sentence.
-- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
-  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
-  under the same printable-ratio gate as body text. Default output is
-  unchanged; enable it to compare.
 
 ## [0.5.1] - 2026-09-12
 
