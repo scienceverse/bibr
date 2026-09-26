@@ -7,6 +7,7 @@ import base64
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import UpstreamServiceError
@@ -17,6 +18,7 @@ from bibr.ocr.otsl import check_otsl_completeness
 from bibr.ocr.profiles import (
     GLM_PROFILE,
     OcrProfile,
+    OcrRuntimeIdentity,
     OcrTask,
     resolve_ocr_profile,
     resolve_ocr_runtime_identity,
@@ -101,6 +103,134 @@ def _backend_region_count(file_states) -> int:
 
 async def _no_engine_recognize(_image, _prompt: str) -> str:
     raise RuntimeError("OCR backend invoked although no region needed it; no engine was started")
+
+
+@dataclass(frozen=True)
+class OcrIdentityResolution:
+    """Outcome of the shared automatic-chain identity state machine.
+
+    ``identity`` is None only when startup failed — the targets were already
+    failed and the caller must return early. ``engine_ready`` means the
+    concrete runtime was adopted via ``await_ocr`` in this call, so the
+    caller skips its later plain engine start.
+    """
+
+    identity: OcrRuntimeIdentity | None
+    engine_ready: bool
+
+
+def fail_ocr_targets(targets: list, exc: BaseException, *, stage: str, log: bool = True) -> None:
+    """Mark OCR-needing files failed instead of aborting the chunk.
+
+    Only files still needing OCR are targeted: files already served from the
+    regions cache, or native parses that never needed the engine, keep their
+    output. Callers pass the pending set, not ``ctx.alive()``.
+    """
+    for fs in targets:
+        if fs.error is None:
+            fs.set_error(
+                f"OCR backend init failed: {exc}",
+                code="ocr_failed",
+                stage=stage,
+                exc=exc,
+                outage=True,
+            )
+    if log:
+        logger.warning("OCR backend init failed", exc_info=exc)
+
+
+async def resolve_ocr_identity(
+    ctx,
+    *,
+    needs_backend: bool,
+    fail_targets: list,
+    stage: str = "ocr",
+    strict: bool = False,
+) -> OcrIdentityResolution:
+    """Resolve the OCR runtime identity for one window (both OCR stages).
+
+    Owns the automatic-chain (``ocr_backend == \"paddle\"``) state machine in
+    one place: a stale runtime whose process died unseen is cleared, a
+    retained loaded client is reused, otherwise the chain starts the engine
+    and adopts the selected concrete runtime. A window that needs no backend
+    (native text covers every region, or — pre-layout — nothing to look up)
+    keeps a local static fallback without persisting it: persisting it used
+    to make the next window reuse Paddle prompts, profile and provenance
+    while a GLM engine did the work.
+
+    On startup failure the targets are failed, the chunk-scoped marker is
+    recorded so later windows fast-fail, and the resolution carries None.
+    When startup reports success without a concrete identity, the bundle
+    probe (``strict=True``) raises while OcrStage keeps the compatibility
+    seam for injected, already-ready clients.
+    """
+    cfg = ctx.config
+    settings = ctx.settings
+    rm = ctx.resources
+    requested_backend = cfg.ocr_backend or settings.ocr.backend
+    automatic_backend = requested_backend == "paddle"
+    identity = ctx.scratch.get("ocr_runtime_identity")
+
+    runtime_identity = getattr(rm, "ocr_runtime_identity", None)
+    runtime_client = getattr(rm, "ocr", None)
+    runtime_loaded = bool(getattr(runtime_client, "loaded", False))
+    if (
+        automatic_backend
+        and isinstance(runtime_identity, OcrRuntimeIdentity)
+        and not runtime_loaded
+    ):
+        # A managed process can die without going through shutdown_ocr().
+        # Its identity is no longer evidence for the next client: clear it
+        # so the original selector runs and records the replacement.
+        rm.ocr_runtime_identity = None
+        runtime_identity = None
+        identity = None
+        ctx.scratch.pop("ocr_runtime_identity", None)
+    if (
+        automatic_backend
+        and identity is None
+        and isinstance(runtime_identity, OcrRuntimeIdentity)
+        and runtime_loaded
+    ):
+        # A retained automatic client selected this concrete runtime in an
+        # earlier process_chunk context. Reuse it for this context's
+        # profile, cache key, and provenance.
+        identity = runtime_identity
+        ctx.scratch["ocr_runtime_identity"] = identity
+    if automatic_backend and identity is None and needs_backend:
+        # A hard init failure in an earlier window of this chunk must not
+        # re-run the slow, doomed engine constructor here.
+        prior_init_error = ctx.signals.ocr_init_error
+        if prior_init_error is not None:
+            fail_ocr_targets(fail_targets, prior_init_error, stage=stage, log=False)
+            return OcrIdentityResolution(None, False)
+        # An automatic chain has no exact cache identity until startup
+        # chooses a concrete candidate. This trades a cold-cache startup
+        # for correct cache/provenance separation between fallback models.
+        try:
+            await rm.await_ocr()
+        except Exception as e:  # noqa: BLE001
+            ctx.signals.ocr_init_error = e
+            fail_ocr_targets(fail_targets, e, stage=stage)
+            return OcrIdentityResolution(None, False)
+        runtime_identity = getattr(rm, "ocr_runtime_identity", None)
+        if isinstance(runtime_identity, OcrRuntimeIdentity):
+            identity = runtime_identity
+            ctx.scratch["ocr_runtime_identity"] = identity
+            return OcrIdentityResolution(identity, True)
+        injected = getattr(rm, "_ocr", None)
+        if strict and not getattr(injected, "loaded", False):
+            raise RuntimeError("OCR startup completed without a concrete runtime identity")
+        # Compatibility seam for injected, already-ready clients that
+        # do not participate in managed candidate identity selection.
+        identity = resolve_ocr_runtime_identity(cfg, settings)
+        ctx.scratch["ocr_runtime_identity"] = identity
+        return OcrIdentityResolution(identity, False)
+    if identity is None:
+        identity = resolve_ocr_runtime_identity(cfg, settings)
+        if not automatic_backend:
+            ctx.scratch["ocr_runtime_identity"] = identity
+    return OcrIdentityResolution(identity, False)
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -734,86 +864,20 @@ class OcrStage:
         settings = ctx.settings
         requested_backend = cfg.ocr_backend or settings.ocr.backend
         automatic_backend = requested_backend == "paddle"
-        identity = ctx.scratch.get("ocr_runtime_identity")
-        from bibr.ocr.profiles import OcrRuntimeIdentity
-
-        runtime_identity = getattr(rm, "ocr_runtime_identity", None)
-        runtime_client = getattr(rm, "ocr", None)
-        runtime_loaded = bool(getattr(runtime_client, "loaded", False))
-        if (
-            automatic_backend
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and not runtime_loaded
-        ):
-            # A managed process can die without going through shutdown_ocr().
-            # Its identity is no longer evidence for the next client: clear it
-            # so the original selector runs and records the replacement.
-            rm.ocr_runtime_identity = None
-            runtime_identity = None
-            identity = None
-            ctx.scratch.pop("ocr_runtime_identity", None)
-        if (
-            automatic_backend
-            and identity is None
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and runtime_loaded
-        ):
-            # A retained automatic client selected this concrete runtime in an
-            # earlier process_chunk context. Reuse it for this context's
-            # profile, cache key, and provenance.
-            identity = runtime_identity
-            ctx.scratch["ocr_runtime_identity"] = identity
-        automatic_needs_resolution = automatic_backend and identity is None
-        prior_init_error = ctx.signals.ocr_init_error
-        if prior_init_error is not None:
-            for fs in ctx.alive():
-                fs.set_error(
-                    f"OCR backend init failed: {prior_init_error}",
-                    code="ocr_failed",
-                    stage=self.name,
-                    exc=prior_init_error,
-                    outage=True,
-                )
-            return
-        if (
-            automatic_needs_resolution
-            and identity is None
-            and _backend_region_count(ctx.alive()) == 0
-        ):
-            # Native text covers every region of this window, so nothing will
-            # call the backend: no concrete runtime — and no engine — is needed.
-            automatic_needs_resolution = False
-        if automatic_needs_resolution and identity is None:
-            # An automatic chain has no exact cache identity until startup
-            # chooses a concrete candidate. This trades a cold-cache startup
-            # for correct cache/provenance separation between fallback models.
-            try:
-                await rm.await_ocr()
-            except Exception as e:  # noqa: BLE001
-                ctx.signals.ocr_init_error = e
-                for fs in ctx.alive():
-                    fs.set_error(
-                        f"OCR backend init failed: {e}",
-                        code="ocr_failed",
-                        stage=self.name,
-                        exc=e,
-                        outage=True,
-                    )
-                logger.warning("OCR backend init failed", exc_info=True)
-                return
-            runtime_identity = getattr(rm, "ocr_runtime_identity", None)
-            if isinstance(runtime_identity, OcrRuntimeIdentity):
-                identity = runtime_identity
-                ctx.scratch["ocr_runtime_identity"] = identity
-            else:
-                # Compatibility seam for injected, already-ready clients that
-                # do not participate in managed candidate identity selection:
-                # retain the static identity and still run their explicit
-                # wait_for_server readiness check below.
-                automatic_needs_resolution = False
+        # Shared automatic-chain identity state machine (see
+        # ``resolve_ocr_identity``): stale/retained runtimes, engine start,
+        # and the static fallback. ``eligible`` — not ``ctx.alive()`` — is
+        # the failure set, so native parses and cache hits are never failed
+        # for an engine they never needed.
+        resolution = await resolve_ocr_identity(
+            ctx,
+            needs_backend=_backend_region_count(ctx.alive()) > 0,
+            fail_targets=self._eligible_files(ctx),
+            stage=self.name,
+        )
+        identity = resolution.identity
         if identity is None:
-            identity = resolve_ocr_runtime_identity(cfg, settings)
-            ctx.scratch["ocr_runtime_identity"] = identity
+            return
         cache_on = ocr_cache.is_enabled(settings)
         alive = ctx.alive()
         if cache_on:
@@ -852,24 +916,37 @@ class OcrStage:
         # regions were all filled natively never pays for OCR startup.
         total_regions = _backend_region_count(pending)
         engine_needed = total_regions > 0
+        if engine_needed and not resolution.engine_ready and ctx.signals.ocr_init_error is not None:
+            # Chunk-scoped fast-fail for every backend. resolve_ocr_identity
+            # covers the automatic chain before its startup; explicit backends
+            # (and an automatic window arriving with a retained or static
+            # identity) reach the engine start below, so check here — after
+            # the regions-cache probe — that only pending files fail while
+            # cache hits and native parses survive.
+            fail_ocr_targets(pending, ctx.signals.ocr_init_error, stage=self.name, log=False)
+            return
         if engine_needed:
             try:
-                if not automatic_needs_resolution:
+                if not resolution.engine_ready:
                     await rm.await_ocr()  # always async, regardless of whether preload ran
-                if not automatic_needs_resolution and hasattr(rm.ocr, "wait_for_server"):
+                if not resolution.engine_ready and hasattr(rm.ocr, "wait_for_server"):
                     await rm.ocr.wait_for_server()
             except Exception as e:  # noqa: BLE001
                 ctx.signals.ocr_init_error = e
-                for fs in ctx.alive():
-                    fs.set_error(
-                        f"OCR backend init failed: {e}",
-                        code="ocr_failed",
-                        stage=self.name,
-                        exc=e,
-                        outage=True,
-                    )
-                logger.warning("OCR backend init failed", exc_info=True)
+                fail_ocr_targets(pending, e, stage=self.name)
                 return
+            if automatic_backend:
+                # The engine that actually started selects the concrete
+                # runtime: adopt it when this window arrived with a stale
+                # static fallback. Defensive — current code no longer persists
+                # one, but the injected-client compatibility seam (or a future
+                # caller) could still hand one to the engine start. Prompts,
+                # profile, region limit, cache key and provenance below must
+                # describe this runtime.
+                started = getattr(rm, "ocr_runtime_identity", None)
+                if isinstance(started, OcrRuntimeIdentity) and started != identity:
+                    identity = started
+                    ctx.scratch["ocr_runtime_identity"] = identity
         else:
             logger.info(
                 "OCR engine not started: native text covers every region of %d file(s)",

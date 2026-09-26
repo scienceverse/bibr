@@ -37,6 +37,8 @@ from bibr.pipeline.stages.ocr import (
     OcrStage,
     _is_remote_ocr,
     _should_unload_ocr_after_chunk,
+    fail_ocr_targets,
+    resolve_ocr_identity,
 )
 
 if TYPE_CHECKING:
@@ -85,83 +87,40 @@ class InterleavedRenderOcrStage:
         has a later regions-only probe for standalone use, but only this
         fused local stage can avoid layout/native work as well.
         """
-        from bibr.ocr.profiles import OcrRuntimeIdentity, resolve_ocr_runtime_identity
         from bibr.pipeline import ocr_cache
 
         alive = ctx.alive()
-        identity = ctx.scratch.get("ocr_runtime_identity")
-        requested_backend = ctx.config.ocr_backend or ctx.settings.ocr.backend
         # Files that could actually reach the OCR backend. Native parses
         # (DOCX/JATS/HTML) already carry ``contents`` and cache hits carry
         # ``ocr_regions``; a chunk with neither must not pay — or fail on —
         # OCR startup, mirroring ``LayoutStage``'s ``_needs_ocr`` guard.
         pending = [fs for fs in alive if fs.contents is None and fs.ocr_regions is None]
-        runtime_identity = getattr(ctx.resources, "ocr_runtime_identity", None)
-        runtime_client = getattr(ctx.resources, "ocr", None)
-        runtime_loaded = bool(getattr(runtime_client, "loaded", False))
-        if (
-            requested_backend == "paddle"
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and not runtime_loaded
-        ):
-            ctx.resources.ocr_runtime_identity = None
-            runtime_identity = None
-            identity = None
-            ctx.scratch.pop("ocr_runtime_identity", None)
-        if (
-            requested_backend == "paddle"
-            and identity is None
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and runtime_loaded
-        ):
-            identity = runtime_identity
-            ctx.scratch["ocr_runtime_identity"] = identity
-        if requested_backend == "paddle" and identity is None and pending:
-            if not ocr_cache.is_enabled(ctx.settings):
-                # With no bundle to look up nothing here needs the concrete
-                # runtime identity. Leave the automatic chain unresolved so
-                # OcrStage starts it after native text is known — and only if
-                # a region still needs the backend.
-                return pending
-            # A hard init failure in an earlier window of this chunk must not
-            # re-run the slow, doomed engine constructor here.
-            prior_error = ctx.signals.ocr_init_error
-            if prior_error is not None:
-                self._fail_ocr_init(pending, prior_error, log=False)
-                return []
-            # The automatic chain must choose a concrete runtime before this
-            # complete-bundle lookup; its selected identity is cache evidence.
-            #
-            # Shared-resource init failures (missing model, unreachable server)
-            # must fail per-file rather than crash the whole chunk: ``run_stage``
-            # wraps stages in try/*finally* only and ``process_chunk`` has no
-            # handler, so an escaping exception would abort every file in the
-            # chunk — including ones that never needed OCR. ``OcrStage`` guards
-            # the identical call for exactly this reason.
-            try:
-                await ctx.resources.await_ocr()
-                identity = ctx.resources.ocr_runtime_identity
-                if identity is None:
-                    injected = getattr(ctx.resources, "_ocr", None)
-                    if not getattr(injected, "loaded", False):
-                        raise RuntimeError(
-                            "OCR startup completed without a concrete runtime identity"
-                        )
-                    # Tests and library integrations can inject an already-ready
-                    # client before the managed startup path runs. Such a client
-                    # has no selected candidate to record, so retain a stable
-                    # static identity for this compatibility seam only. A real
-                    # automatic startup still must provide its concrete identity.
-                    identity = resolve_ocr_runtime_identity(ctx.config, ctx.settings)
-            except Exception as e:  # noqa: BLE001 - shared-resource boundary
-                ctx.signals.ocr_init_error = e
-                self._fail_ocr_init(pending, e)
-                return []
-            ctx.scratch["ocr_runtime_identity"] = identity
+        cache_on = ocr_cache.is_enabled(ctx.settings)
+        # Shared-resource init failures (missing model, unreachable server)
+        # must fail per-file rather than crash the whole chunk: ``run_stage``
+        # wraps stages in try/*finally* only and ``process_chunk`` has no
+        # handler, so an escaping exception would abort every file in the
+        # chunk — including ones that never needed OCR. ``OcrStage`` guards
+        # the identical call for exactly this reason.
+        try:
+            resolution = await resolve_ocr_identity(
+                ctx,
+                needs_backend=bool(pending) and cache_on,
+                fail_targets=pending,
+                stage=self.name,
+                strict=True,
+            )
+        except Exception as e:  # noqa: BLE001 - shared-resource boundary
+            ctx.signals.ocr_init_error = e
+            self._fail_ocr_init(pending, e)
+            return []
+        identity = resolution.identity
         if identity is None:
-            identity = resolve_ocr_runtime_identity(ctx.config, ctx.settings)
-            ctx.scratch["ocr_runtime_identity"] = identity
-        if ocr_cache.is_enabled(ctx.settings):
+            # resolve_ocr_identity returns None only after a startup failure
+            # (the targets were already failed and the chunk marker recorded),
+            # so there is no bundle to look up here.
+            return []
+        if cache_on:
             for fs in pending:
                 if ocr_cache.load_bundle(fs, ctx.config, identity, ctx.settings):
                     fs.free_pre_ocr()
@@ -172,17 +131,7 @@ class InterleavedRenderOcrStage:
 
     def _fail_ocr_init(self, targets: list, exc: BaseException, *, log: bool = True) -> None:
         """Mark the OCR-needing files failed instead of aborting the chunk."""
-        for fs in targets:
-            if fs.error is None:
-                fs.set_error(
-                    f"OCR backend init failed: {exc}",
-                    code="ocr_failed",
-                    stage=self.name,
-                    exc=exc,
-                    outage=True,
-                )
-        if log:
-            logger.warning("OCR backend init failed", exc_info=exc)
+        fail_ocr_targets(targets, exc, stage=self.name, log=log)
 
     async def run(self, ctx: PipelineContext) -> None:
         cfg = ctx.config
