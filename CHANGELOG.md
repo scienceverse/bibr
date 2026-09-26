@@ -370,6 +370,31 @@ released.
 - Building the CLI no longer needs installed package metadata. Running from
   a source tree via `PYTHONPATH` used to crash before argparse ran; the
   version now falls back to `?`, as the help screen already did.
+- The batch report no longer shows a phantom `enrich_prefetch` stage share.
+  That timer overlaps another stage's wall clock (the export stage already
+  excludes it from `total_seconds`), but the report divided by a sum that
+  included it, deflating the real stages. It now shares the export stage's
+  exclusion list.
+- Removed dead evaluation code with no in-repo callers: the `PerformanceRecorder`
+  (whose only consumer was never published, and whose per-request peaks were
+  process-lifetime maxima), the unreferenced `keywords_fuzzy_f1`,
+  `authors_count_ratio` and `authors_order_score` helpers, and the
+  opposite-contract `validation_metrics.keywords_f1` duplicate (the harness's
+  `evaluate.keywords_f1` is the one scored). The `title_soft_containment`
+  docstring no longer promises a per-paper aggregate that was never emitted.
+- Reference matching in the evaluator now runs once per paper instead of three
+  times: one shared `match_references` pass feeds `ref_matching_f1`,
+  `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
+  exist in a single table instead of two copies that had to stay in lockstep.
+  Scores are unchanged; the gate192 re-score is identical metric-for-metric
+  and about three times faster.
+- The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
+  instead of the pure-Python table — same value, roughly three orders of
+  magnitude faster on long abstracts.
+- Evaluation artifacts now record a `bibr_dirty` flag (uncommitted tracked
+  changes in the scoring checkout) and an `eval_code_sha256` digest over
+  `evaluation/*.py`, so a score from a patched worktree no longer stamps
+  the same provenance as unpatched code. No metric definition changed.
 
 ### Added
 
