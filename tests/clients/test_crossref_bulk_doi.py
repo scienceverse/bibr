@@ -184,16 +184,17 @@ async def test_empty_input_makes_no_request(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prefetch_is_a_noop_when_the_lru_is_disabled(monkeypatch):
-    """cache_size=0 means nothing can be seeded in-process; the prefetch still
-    must not crash or poison the per-ref path."""
+    """cache_size=0 with no Redis tier means nothing can be seeded; the
+    prefetch sends no request and counts nothing rather than reporting
+    phantom seeds for entries it could not store."""
     client = _client(cache_size=0)
 
-    async def fake_request(path, params=None):  # noqa: ARG001
-        return _bulk_response([_item("10.1/a")])
+    async def explode(*_a, **_kw):
+        raise AssertionError("no request expected")
 
-    monkeypatch.setattr(client, "_request", fake_request)
+    monkeypatch.setattr(client, "_request", explode)
 
-    assert await client.prefetch_works_by_doi(["10.1/a"]) == 1
+    assert await client.prefetch_works_by_doi(["10.1/a"]) == 0
     assert client._cache_peek("works:10.1/a") is None
 
 

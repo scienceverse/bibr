@@ -164,7 +164,7 @@ Configure caching:
 | `REDIS_URL` | Redis connection URL | auto-generated |
 | `REDIS_PASSWORD` | Redis password | (none) |
 | `CACHE_VERSION` | Cache key prefix version | auto-computed from source hash |
-| `CACHE_TTL_SECONDS` | Cache TTL | `86400` (24h) |
+| `CACHE_TTL_SECONDS` | Cache TTL (`0` = no expiry) | `86400` (24h) |
 | `CACHE_OPERATION_TIMEOUT_SECONDS` | Maximum wait for one cache operation | `5` |
 
 ## Request metering
@@ -172,9 +172,12 @@ Configure caching:
 With `METER_ENABLED=true` (the default), non-probe HTTP responses carry
 `x-request-id` and `x-bibr-duration-ms`. A valid client-supplied `x-request-id`
 is echoed; otherwise the server generates one. Request and extraction records
-go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds a
-rotating JSONL file. Cache hits do not count the original extraction's LLM
-tokens as new usage.
+go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds
+rotating JSONL files: the API process writes request records to `METER_LOG_PATH`
+itself, while the worker writes extraction records (the only ones carrying
+LLM token usage) to the sibling `<stem>.worker<suffix>` file. Each process
+rotates only its own file, so usage tallies must read both files. Cache hits
+do not count the original extraction's LLM tokens as new usage.
 
 ## Error responses
 

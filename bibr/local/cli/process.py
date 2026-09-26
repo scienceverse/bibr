@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bibr.local.cli import ui
-from bibr.local.cli.dry_run import _print_dry_run_plan
+from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan
 from bibr.local.cli.inputs import (
     _find_stem_collisions,
     _prepare_output_path,
@@ -124,6 +124,66 @@ def _print_actual_ocr_summary(console, resources) -> None:
         console.print(f"  [dim]Fallback reason:[/dim] {fallback_reason}")
 
 
+def _write_stdout_json(json_str: str) -> None:
+    """Write the export payload to stdout as UTF-8 bytes.
+
+    ``main()`` configures stdout with ``errors=\"backslashreplace\"`` so
+    status glyphs survive legacy consoles — but that turns unencodable
+    characters (e.g. math italic U+1D465) into ``\\U0001d465``/``\\x81``
+    escapes that are not legal JSON. Bypass the text wrapper and emit
+    UTF-8 (the JSON interchange encoding) directly; fall back to
+    ``print()`` when stdout has no buffer (captured StringIO in tests).
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(json_str.encode("utf-8") + b"\n")
+        buffer.flush()
+    else:
+        print(json_str)
+
+
+def _hint_for_file_error(fs) -> str:
+    """Hint for a failed file, keyed by its structured ``error_code``.
+
+    The pipeline sets ``fs.error_code`` (``unsupported_format``,
+    ``encrypted_file``, ``ocr_failed``, ``llm_server_failed``, …) while
+    the human message varies — substring matching on it misfires
+    (``'api'`` matches ``'rapid-mlx'`` and any path containing ``'api'``)
+    and misses (``'Unsupported file format'`` contains no
+    ``'unsupported format'``). A state without a code falls back to the
+    pipeline's real message wordings, never to a bare ``'api'`` substring.
+    """
+    code = getattr(fs, "error_code", None)
+    if code == "unsupported_format":
+        from bibr.input.supported_files import SupportedFileType
+
+        formats = ", ".join(file_type.value for file_type in SupportedFileType)
+        return f"\n         [dim]bibr accepts {formats} files[/dim]"
+    if code == "encrypted_file":
+        return "\n         [dim]Remove the password and try again[/dim]"
+    if code in ("ocr_failed", "ocr_mostly_failed"):
+        return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if code == "llm_server_failed":
+        return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
+    if code is not None:
+        return ""
+    err_lower = str(fs.error or "").lower()
+    if "unsupported file format" in err_lower:
+        from bibr.input.supported_files import SupportedFileType
+
+        formats = ", ".join(file_type.value for file_type in SupportedFileType)
+        return f"\n         [dim]bibr accepts {formats} files[/dim]"
+    if "password-protected" in err_lower or "password" in err_lower:
+        return "\n         [dim]Remove the password and try again[/dim]"
+    if "ocr backend init failed" in err_lower or "ocr failed" in err_lower:
+        return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if "llm server start failed" in err_lower:
+        return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
+    if "api key" in err_lower:
+        return "\n         [dim]Check your API keys with: bibr doctor[/dim]"
+    return ""
+
+
 def _write_chunk_results(
     file_states: list,
     *,
@@ -146,19 +206,7 @@ def _write_chunk_results(
     for fs in file_states:
         if fs.error:
             err_msg = str(fs.error)
-            hint = ""
-            err_lower = err_msg.lower()
-            if "unsupported format" in err_lower:
-                from bibr.input.supported_files import SupportedFileType
-
-                formats = ", ".join(file_type.value for file_type in SupportedFileType)
-                hint = f"\n         [dim]bibr accepts {formats} files[/dim]"
-            elif "encrypted" in err_lower:
-                hint = "\n         [dim]Remove the password and try again[/dim]"
-            elif "ocr failed" in err_lower:
-                hint = "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
-            elif "connection" in err_lower or "api" in err_lower:
-                hint = "\n         [dim]Check your API keys with: bibr doctor[/dim]"
+            hint = _hint_for_file_error(fs)
             console.print(f"  [red]✗ {fs.path.name}:[/red] {err_msg}{hint}")
             errors += 1
             continue
@@ -187,7 +235,7 @@ def _write_chunk_results(
             console.print(f"  [green]✓ {fs.path.name}[/green] → {out_file}")
             _print_validation_line(console, fs.result_json)
         elif output_path is None:
-            print(json_str)
+            _write_stdout_json(json_str)
             if not is_batch:
                 total_elapsed = time.monotonic() - total_t0
                 console.print(f"  [green]✓[/green] Done ({total_elapsed:.1f}s)")
@@ -347,8 +395,8 @@ async def _run_process(args) -> None:
     try:
         config = resolve_run_config(args)
     except ValueError as e:
-        ui.error(console, f"Invalid --pages value: {e}")
-        sys.exit(1)
+        ui.error(console, f"Invalid option: {e}")
+        sys.exit(2)
 
     console.print(_format_run_summary(config))
 
@@ -445,7 +493,10 @@ async def _run_process(args) -> None:
     # guards above so a colliding batch still hard-errors under --dry-run
     # (the same collision output — that's the intended reuse) instead of
     # previewing a plan for files that would never write successfully.
+    # The cheap preflights run here too and print as a Blockers section:
+    # without them the preview exits 0 for runs that fail immediately.
     if args.dry_run:
+        blockers = _dry_run_blockers(config, files, missing_count)
         _print_dry_run_plan(
             args,
             config,
@@ -454,8 +505,22 @@ async def _run_process(args) -> None:
             manifest_outputs=[record.output_path for record in manifest_records]
             if source_mode == "manifest"
             else None,
+            blockers=blockers or None,
         )
+        if blockers:
+            sys.exit(1)
         return
+
+    # Resolve -o before the pipeline loads: a path blocked by an existing
+    # file used to crash after model loads, outside the aclose() cleanup.
+    if source_mode == "manifest":
+        output_path = None
+    else:
+        try:
+            output_path = _prepare_output_path(args.output, is_batch=is_batch)
+        except OSError as exc:
+            ui.error(console, f"Cannot write output {args.output!r}: {exc}")
+            sys.exit(2)
 
     # Create pipeline
     from bibr.local.pipeline import LocalPipeline
@@ -479,11 +544,6 @@ async def _run_process(args) -> None:
         consolidate=config.consolidate,
         ref_seg_strategy=config.ref_seg,
         ref_parse_strategy=config.refs,
-    )
-
-    # Determine output handling
-    output_path = (
-        None if source_mode == "manifest" else _prepare_output_path(args.output, is_batch=is_batch)
     )
 
     chunk_size = min(config.chunk_size, len(files))

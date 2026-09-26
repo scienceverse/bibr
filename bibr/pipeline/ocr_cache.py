@@ -148,6 +148,7 @@ def _key(
         f"native_text={int(effective.ocr.native_text_enabled)}",
         f"native_text_min_chars={effective.ocr.native_text_min_chars}",
         f"native_text_min_printable_ratio={effective.ocr.native_text_min_printable_ratio}",
+        f"native_text_header_footer={int(effective.ocr.native_text_header_footer)}",
         f"outline_headings={int(effective.pipeline.outline_headings)}",
         f"ref_seg={_effective_ref_seg(cfg, effective)}",
         # Which *weights* produced the cached artifacts. A complete entry lets

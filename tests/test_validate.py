@@ -111,6 +111,46 @@ class TestCheckPdfEncryption:
         assert _check_pdf_encryption(MINIMAL_PDF) is False
 
 
+def _minimal_encrypted_pdf_bytes() -> bytes:
+    """A genuinely password-protected PDF: a bare trailer carrying a V1/R2
+    ``/Encrypt`` dictionary, which PDFium refuses without a password
+    (FPDF_ERR_PASSWORD) even though the bytes are otherwise well-formed."""
+    owner = b"A" * 32
+    user = b"B" * 32
+    return (
+        b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n"
+        b"trailer\n<< /Size 3 /Root 1 0 R /Encrypt << /Filter /Standard /V 1 /R 2 /O ("
+        + owner
+        + b") /U ("
+        + user
+        + b") /P -4 >> >>\n%%EOF"
+    )
+
+
+class TestPasswordProtectedPdfVerdicts:
+    """A password error means encrypted, not corrupt — even with reader-tolerated
+    framing bytes around the file. Both flags derive from the one shared open,
+    so this pins the password branch of the single verdict."""
+
+    def test_password_error_is_not_corruption(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_corruption(_minimal_encrypted_pdf_bytes()) is False
+
+    def test_password_error_is_encrypted(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_encryption(_minimal_encrypted_pdf_bytes()) is True
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/pdf")
+    def test_encrypted_pdf_with_bom_and_trailing_junk_validates_as_encrypted_only(self, mock_mime):
+        pytest.importorskip("pypdfium2")
+        blob = b"\xef\xbb\xbf" + _minimal_encrypted_pdf_bytes() + b" " * 12000
+        result = validate_input_file(Path("/tmp/enc.pdf"), blob)
+        assert result.is_corrupted is False
+        assert result.is_encrypted is True
+        assert result.is_valid is False
+
+
 class TestExtensionMimeConsistency:
     def test_pdf_consistent(self):
         assert _check_extension_mime_consistency(".pdf", "application/pdf") is True
@@ -157,9 +197,14 @@ def _minimal_docx_bytes(*, include_document=True) -> bytes:
 
 
 # OLE Compound File magic — what an encrypted (password-protected) Office
-# file starts with, with the EncryptedPackage stream name present.
+# file starts with. MS-CFB directory entry names are UTF-16LE on disk, so the
+# fixture carries the EncryptedPackage stream name in that encoding (a plain
+# ASCII embedding would pass a byte search no real file can satisfy).
 _ENCRYPTED_DOCX = (
-    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 56 + b"EncryptedPackage" + b"\x00" * 100
+    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    + b"\x00" * 56
+    + "EncryptedPackage".encode("utf-16-le")
+    + b"\x00" * 100
 )
 
 
@@ -455,3 +500,131 @@ def test_pdf_content_under_xml_extension_is_rejected(tmp_path):
     result = validate_input_file(f, pdf)
     assert result.is_supported is False
     assert result.is_valid is False
+
+
+# Audit input-parsers-22: the EncryptedPackage stream name is UTF-16LE on disk.
+def _cfb_bytes(name_payload: bytes) -> bytes:
+    return b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 56 + name_payload + b"\x00" * 100
+
+
+class TestEncryptedDocxNameEncoding:
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/octet-stream")
+    def test_ascii_name_is_not_an_encrypted_package(self, mock_mime):
+        """The pre-fix fixture embedded the name in ASCII, which no real CFB
+        file contains — it must read as a legacy .doc (corrupted), not as an
+        encrypted file. Fails on base, where ASCII matched."""
+        result = validate_input_file(Path("/tmp/paper.docx"), _cfb_bytes(b"EncryptedPackage"))
+        assert result.is_encrypted is False
+        assert result.is_corrupted is True
+        assert result.is_valid is False
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/octet-stream")
+    def test_utf16le_name_is_encrypted(self, mock_mime):
+        result = validate_input_file(
+            Path("/tmp/paper.docx"),
+            _cfb_bytes("EncryptedPackage".encode("utf-16-le")),
+        )
+        assert result.is_encrypted is True
+        assert result.is_corrupted is False
+        assert result.is_valid is False
+
+
+# Audit input-parsers-23: PDFium opens files the byte heuristics reject.
+def _real_pdf_bytes() -> bytes:
+    pdfium = pytest.importorskip("pypdfium2")
+    pdf = pdfium.PdfDocument.new()
+    pdf.new_page(72, 72)
+    buf = io.BytesIO()
+    pdf.save(buf)
+    return buf.getvalue()
+
+
+class TestPdfReaderTolerantCorruption:
+    def test_leading_bom_before_header_is_not_corrupted(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_corruption(b"\xef\xbb\xbf" + _real_pdf_bytes()) is False
+
+    def test_trailing_junk_after_eof_is_not_corrupted(self):
+        pytest.importorskip("pypdfium2")
+        assert _check_pdf_corruption(_real_pdf_bytes() + b" " * 12000) is False
+
+    def test_header_past_first_kibibyte_is_still_corrupted(self):
+        pytest.importorskip("pypdfium2")
+        blob = b"\x00" * 2000 + _real_pdf_bytes()
+        assert _check_pdf_corruption(blob) is True
+
+
+# Audit input-parsers-29: NCBI efetch <pmc-articleset> wrappers.
+_PMC_SINGLE = (
+    b'<pmc-articleset><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+    b"<front><article-meta><title-group><article-title>T</article-title></title-group>"
+    b"</article-meta></front><body><p>Hi.</p></body></article></pmc-articleset>"
+)
+_PMC_MULTI = (
+    b"<pmc-articleset><article><front/></article><article><front/></article></pmc-articleset>"
+)
+
+
+class TestPmcArticleset:
+    def test_single_article_wrapper_is_jats(self):
+        from bibr.input.validate import _check_jats_article
+
+        corrupted, is_article = _check_jats_article(_PMC_SINGLE)
+        assert (corrupted, is_article) == (False, True)
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/xml")
+    def test_single_article_wrapper_validates(self, mock_mime):
+        result = validate_input_file(Path("/tmp/PMC123.xml"), _PMC_SINGLE)
+        assert result.is_corrupted is False
+        assert result.is_valid is True
+
+    def test_single_article_wrapper_parses(self):
+        from bibr.input.jats_native import JatsParser
+
+        contents = JatsParser(_PMC_SINGLE).parse()
+        assert contents.preparsed_metadata.title == "T"
+
+    @patch("bibr.input.validate.detect_mime_type", return_value="application/xml")
+    def test_multi_article_set_rejected_with_count(self, mock_mime):
+        with pytest.raises(InputValidationError, match="contains 2 <article>"):
+            validate_input_file(Path("/tmp/PMC123.xml"), _PMC_MULTI)
+
+    def test_multi_article_set_does_not_parse(self):
+        from bibr.exceptions import ProcessingError
+        from bibr.input.jats_native import JatsParser
+
+        with pytest.raises(ProcessingError, match="contains 2 <article>"):
+            JatsParser(_PMC_MULTI).parse()
+
+
+# Audit input-parsers-30: a lying central-directory size must still be rejected
+# (kept as defense in depth; CPython itself refuses the read with BadZipFile).
+class TestDocxLyingDeclaredSize:
+    def test_patched_central_directory_size_is_corrupted(self):
+        import zipfile
+
+        from bibr.input.validate import _check_docx_corruption
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", "<Types/>")
+            zf.writestr("word/document.xml", "<document>" + "x" * 5000 + "</document>")
+        raw = bytearray(buf.getvalue())
+        # Locate the central-directory header for word/document.xml and lie
+        # about its uncompressed size (1000 instead of ~5021).
+        lying = None
+        blob = bytes(raw)
+        pos = 0
+        while (at := blob.find(b"\x50\x4b\x01\x02", pos)) >= 0:
+            name_len = int.from_bytes(blob[at + 28 : at + 30], "little")
+            name = blob[at + 46 : at + 46 + name_len]
+            if name == b"word/document.xml":
+                raw[at + 24 : at + 28] = (1000).to_bytes(4, "little")
+                lying = bytes(raw)
+                break
+            pos = at + 1
+        assert lying is not None
+        with zipfile.ZipFile(io.BytesIO(lying)) as zf:
+            with pytest.raises(zipfile.BadZipFile):
+                zf.open("word/document.xml").read()
+        assert _check_docx_corruption(lying) is True
