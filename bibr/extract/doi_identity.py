@@ -589,6 +589,23 @@ _DOI_CLOSERS = frozenset(".,;:)]}>\"'\u2019\u201d")
 _BANNER_RE = re.compile(r"\bfirst\s+published\s+as\b", re.IGNORECASE)
 
 
+def _cut_unclosed(text: str) -> str:
+    """*text* up to its first ``(`` that no ``)`` closes.
+
+    A DOI's own parentheses are balanced (``…(20)30183-5``, a SICI
+    ``(SICI)``). The text layer can run a DOI into an invisible neighbouring
+    text run, such as ``(0123456789().,-volV)`` after the DOI line of some
+    publishers, and the never-closed ``(`` is where the DOI ended.
+    """
+    open_at: list[int] = []
+    for index, ch in enumerate(text):
+        if ch == "(":
+            open_at.append(index)
+        elif ch == ")" and open_at:
+            open_at.pop()
+    return text[: open_at[0]] if open_at else text
+
+
 def _region_at(regions: list, point: tuple[float, float]):
     """The smallest layout region on the page that contains *point*."""
     x, y = point
@@ -667,6 +684,12 @@ def _text_layer_candidates(
         )
         if candidate is None:
             continue
+        cut = _cut_unclosed(candidate.raw)
+        if cut != candidate.raw:
+            normalized = _canonical_doi(cut)
+            if normalized is None:
+                continue
+            candidate = replace(candidate, raw=cut, normalized=normalized)
         if banner and candidate.rejection_reason is None:
             candidate = replace(
                 candidate,
@@ -810,6 +833,12 @@ def _with_pdf_evidence(
                 reading.normalized
             ):
                 return True
+            # Longer than the parse's reading by more than an end a parse can
+            # lose: the text layer ran the DOI into the text after it.
+            if reading.normalized.startswith(candidate.normalized) and not _LOST_END_RE.match(
+                reading.normalized[len(candidate.normalized) :]
+            ):
+                return True
             if (
                 reading.region_index is not None
                 and candidate.page == reading.page
@@ -831,8 +860,9 @@ def _with_pdf_evidence(
 
 _FURNITURE_SOURCES = frozenset({"header", "footer"})
 _NUMERIC_EXTENSION_RE = re.compile(r"^[/.]\d")
-# The end a parse can lose off a printed DOI: a few characters, none a letter.
-_LOST_END_RE = re.compile(r"^[-._;()/:0-9]{1,4}$")
+# The end a parse can lose off a printed DOI: a few characters, at most two of
+# them if a letter is among them (a Springer check letter, ``-x``).
+_LOST_END_RE = re.compile(r"^(?:[-._;()/:0-9]{1,4}|[-._;()/:A-Za-z0-9]{1,2})$")
 
 
 def _distinct_dois(candidates: list[DoiCandidate]) -> set[str]:

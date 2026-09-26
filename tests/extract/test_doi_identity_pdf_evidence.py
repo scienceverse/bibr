@@ -374,6 +374,38 @@ def test_a_complete_text_layer_reading_beats_a_parse_that_lost_the_end():
     assert selection.selected.source_kind == "text_layer"
 
 
+@pytest.mark.parametrize("parsed", [True, False])
+def test_a_reading_run_into_an_invisible_neighbour_ends_at_the_unclosed_parenthesis(parsed):
+    contents = _contents(_TITLE_ONLY, footers=["https://doi.org/10.1234/own.9"] if parsed else [])
+    line = _line(1, "https://doi.org/10.1234/own.9(0123456789().,-volV)(0123456789().,-volV)")
+
+    candidates, selection = _select(contents, _evidence([line]))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.9"
+    assert selection.issues == ()
+    readings = [c for c in candidates if c.source_kind == "text_layer"]
+    assert [c.normalized for c in readings] == ([] if parsed else ["10.1234/own.9"])
+
+
+@pytest.mark.parametrize(
+    ("printed", "selected"),
+    [
+        # A check letter the parse lost: the complete printed reading wins.
+        ("https://doi.org/10.1234/s1-2020-01838-x", "10.1234/s1-2020-01838-x"),
+        # Text glued on after the DOI is not part of it.
+        ("https://doi.org/10.1234/s1-2020-01838Received", "10.1234/s1-2020-01838"),
+    ],
+)
+def test_a_longer_text_layer_reading_joins_only_for_an_end_the_parse_lost(printed, selected):
+    contents = _contents([(CanonicalSection.TITLE, "https://doi.org/10.1234/s1-2020-01838", 1)])
+
+    _candidates, selection = _select(contents, _evidence([_line(1, printed)]))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == selected
+
+
 def test_without_pdf_evidence_the_pool_is_unchanged():
     contents = _contents(
         [(CanonicalSection.TITLE, "https://doi.org/10.1234/abc.5", 1)],
