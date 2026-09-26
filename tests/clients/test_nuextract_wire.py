@@ -910,3 +910,125 @@ def test_the_template_placeholder_is_still_rejected_when_numeric(reference_contr
         wire_schema=reference_contract.wire_schema,
         template=reference_contract.template,
     )
+
+
+# --- audit S8: the native contract is built once per model, not per call ---
+
+
+def _stub_backend(monkeypatch, raw: str):
+    """A NuExtractNativeBackend whose client returns *raw* for every call."""
+    completion = SimpleNamespace(
+        choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=raw))],
+        usage=None,
+    )
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            return completion
+
+    backend = NuExtractNativeBackend(settings=_settings())
+    monkeypatch.setattr(
+        backend,
+        "_get_client",
+        lambda: SimpleNamespace(chat=SimpleNamespace(completions=_FakeCompletions())),
+    )
+    return backend
+
+
+async def test_create_builds_the_contract_once(monkeypatch):
+    """One LLM call builds the contract once and parses the same title."""
+    import bibr.clients.nuextract_schema as schema
+
+    builds = {"n": 0}
+    real_build = schema.native_contract_for_model
+
+    def counting(model):
+        builds["n"] += 1
+        return real_build(model)
+
+    monkeypatch.setattr(nuextract, "native_contract_for_model", counting)
+    backend = _stub_backend(monkeypatch, json.dumps(valid_title_payload()))
+
+    result, _completion = await backend.create(
+        response_model=TitleKeywordsLLM,
+        system="SYS",
+        messages=[{"role": "user", "content": "DOCUMENT"}],
+        want_completion=True,
+    )
+
+    assert builds["n"] == 1
+    assert result.title == "A real title"
+
+
+def test_repeated_contract_calls_share_one_build(monkeypatch):
+    """Memoized contracts stay equal and independent: mutating one is safe."""
+
+    class LocalTitle(BaseModel):
+        title: str
+
+    import bibr.clients.nuextract_schema as schema
+
+    builds = {"n": 0}
+    real_build = schema._build_native_contract
+
+    def counting(model):
+        builds["n"] += 1
+        return real_build(model)
+
+    monkeypatch.setattr(schema, "_build_native_contract", counting)
+    # A cold cache entry: the class object is fresh to this test.
+    schema._cached_native_contract.cache_clear()
+    try:
+        first = schema.native_contract_for_model(LocalTitle)
+        second = schema.native_contract_for_model(LocalTitle)
+    finally:
+        schema._cached_native_contract.cache_clear()
+
+    assert builds["n"] == 1
+    assert first == second
+    assert first.template is not second.template
+    first.template["title"] = "changed"
+    assert schema.native_contract_for_model(LocalTitle).template["title"] != "changed"
+
+
+def test_contract_parse_skips_the_static_shape_recheck(monkeypatch):
+    """The builder checks the wire shape once; parses only match values."""
+    import bibr.clients.nuextract_schema as schema
+
+    contract = schema.native_contract_for_model(TitleKeywordsLLM)
+    assert contract.shape_checked
+    raw = json.dumps(valid_title_payload())
+
+    shapes = {"n": 0}
+    real_shape = schema._wire_shape_is_supported
+
+    def counting_shape(wire_schema, template):
+        shapes["n"] += 1
+        return real_shape(wire_schema, template)
+
+    monkeypatch.setattr(schema, "_wire_shape_is_supported", counting_shape)
+    for _ in range(2):
+        _parse(raw, contract=contract)
+
+    assert shapes["n"] == 0
+
+    hand_built = NativeSchemaContract(
+        response_model=contract.response_model,
+        template=dict(contract.template),
+        wire_schema=dict(contract.wire_schema),
+        nullable_paths=contract.nullable_paths,
+    )
+    assert (
+        nuextract.parse_native_completion(
+            raw,
+            finish_reason="stop",
+            contract=hand_built,
+            model="m",
+            input_tokens=0,
+            completion_tokens=0,
+            total_tokens=0,
+            cached_input_tokens=0,
+        ).title
+        == "A real title"
+    )
+    assert shapes["n"] > 0  # hand-assembled contracts still pay the check

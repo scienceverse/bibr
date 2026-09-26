@@ -148,6 +148,80 @@ def test_other_major_versions_are_refused(payload, tmp_path):
         write_tables([old], tmp_path)
 
 
+# --- audit S8: rows convert from the validated model, errors name the paper ---
+
+
+def test_lax_coercible_int_does_not_abort_the_corpus_write(payload, tmp_path):
+    """A converter-shaped string int lax-validates, so it must also write."""
+    import pyarrow.parquet as pq
+
+    payload = copy.deepcopy(payload)
+    assert payload["text"]
+    payload["text"][0]["page_number"] = "2"
+
+    report = write_tables([payload], tmp_path)
+
+    assert report.papers == 1
+    rows = pq.read_table(tmp_path / "text.parquet").to_pylist()
+    assert len(rows) == len(payload["text"])
+    assert rows[0]["page_number"] == 2
+
+
+def test_wrong_typed_field_still_fails_closed(payload, tmp_path):
+    """A value even lax validation rejects never reaches the tables (both trees agree)."""
+    from pydantic import ValidationError
+
+    payload = copy.deepcopy(payload)
+    payload["text"][0]["page_number"] = "not-a-number"
+    with pytest.raises(ValidationError):
+        write_tables([payload], tmp_path)
+
+
+def test_flush_failure_names_the_table_and_the_papers(tmp_path):
+    """A residual Arrow error at flush time points at the table and its papers."""
+    from bibr.export.tables import _flush_tables
+
+    class _FailingTable:
+        name = "text"
+
+        def flush(self):
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError, match=r"table text.*papers a\.pdf, b\.pdf"):
+        _flush_tables([_FailingTable()], ["a.pdf", "b.pdf"])
+
+
+def test_int64_overflow_names_the_table_and_the_source(payload, tmp_path):
+    """A value past int64 passes lax validation but cannot land in Parquet.
+
+    The single-paper corpus takes the close() path (no mid-run flush), so
+    this pins the close wrapper: the table and the buffered source name the
+    failure instead of a bare OverflowError escaping.
+    """
+    payload = copy.deepcopy(payload)
+    payload["text"][0]["page_number"] = 2**70
+    with pytest.raises(ValueError, match=r"table text.*papers <dict> \(paper_id "):
+        write_tables([payload], tmp_path)
+
+
+def test_row_conversion_failure_names_the_paper_id(payload, tmp_path, monkeypatch):
+    """A per-paper conversion failure names the label and its paper_id."""
+    import bibr.export.tables as tables_mod
+
+    payload = copy.deepcopy(payload)
+    real_dig = tables_mod._dig
+
+    def failing_dig(data, path):
+        rows = real_dig(data, path)
+        if path == tables_mod.TABLES["bib"][0]:
+            raise RuntimeError("boom")
+        return rows
+
+    monkeypatch.setattr(tables_mod, "_dig", failing_dig)
+    with pytest.raises(ValueError, match=rf"\(paper_id {payload['paper_id']}\)"):
+        write_tables([payload], tmp_path)
+
+
 def test_results_are_accepted(payload, tmp_path):
     from bibr.api import Result
 
