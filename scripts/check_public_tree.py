@@ -28,7 +28,9 @@ PUBLIC_PDFS = frozenset(
     {
         "bibr/data/sample_paper.pdf",
         "tests/fixtures/cropbox_offset_sample.pdf",
+        "tests/fixtures/native_text_bbox_bleed_sample.pdf",
         "tests/fixtures/native_text_sample.pdf",
+        "tests/fixtures/ref_geometry_hanging_indent_sample.pdf",
         "tests/fixtures/scanned_sample.pdf",
     }
 )

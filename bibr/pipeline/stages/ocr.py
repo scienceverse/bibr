@@ -7,6 +7,7 @@ import base64
 import logging
 import time
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import UpstreamServiceError
@@ -17,14 +18,18 @@ from bibr.ocr.otsl import check_otsl_completeness
 from bibr.ocr.profiles import (
     GLM_PROFILE,
     OcrProfile,
+    OcrRuntimeIdentity,
     OcrTask,
     resolve_ocr_profile,
     resolve_ocr_runtime_identity,
 )
+from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
 from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.redact import describe_error, redact_urls
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
+from bibr.utils.transient import is_service_outage
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -40,10 +45,27 @@ logger = logging.getLogger(__name__)
 REMOTE_OCR_BACKENDS = frozenset(
     {"glm-http", "paddle-http", "serve-http", "gemini", "openai", "anthropic"}
 )
+# Cloud vision-LLM OCR backends hold no local weights: the client is a thin
+# HTTPS handle, so per-chunk teardown only forces re-handshakes (and a fresh
+# key read) with no VRAM to reclaim. Kept separate from REMOTE_OCR_BACKENDS,
+# which also covers self-hosted HTTP proxies with their own lifecycle.
+CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
 
 # Shared GPU execution is serialized by the runtime; keep this concurrency default aligned with
 # the settings model.
 CONCURRENT_MANAGED_OCR_BACKENDS = frozenset({"paddle-vllm"})
+
+
+def _ocr_server_gone(exc: BaseException) -> bool:
+    """Did an OCR request fail because the server is gone, after the
+    transport's retries: a refused or dropped connection, an open breaker?
+
+    A 429/502/503 answer is left out. The server answered, so it is up but
+    busy, and after about 1.5 s of retries one busy answer must not cost the
+    whole file: the region ships blank with a warning, as it did before, and
+    ``ocr_mostly_failed`` still catches a server that answers nothing else.
+    """
+    return is_service_outage(exc, http_status=False)
 
 
 def _local_region_limit(settings: GlobalSettings, backend: str) -> int:
@@ -86,6 +108,134 @@ def _backend_region_count(file_states) -> int:
 
 async def _no_engine_recognize(_image, _prompt: str) -> str:
     raise RuntimeError("OCR backend invoked although no region needed it; no engine was started")
+
+
+@dataclass(frozen=True)
+class OcrIdentityResolution:
+    """Outcome of the shared automatic-chain identity state machine.
+
+    ``identity`` is None only when startup failed — the targets were already
+    failed and the caller must return early. ``engine_ready`` means the
+    concrete runtime was adopted via ``await_ocr`` in this call, so the
+    caller skips its later plain engine start.
+    """
+
+    identity: OcrRuntimeIdentity | None
+    engine_ready: bool
+
+
+def fail_ocr_targets(targets: list, exc: BaseException, *, stage: str, log: bool = True) -> None:
+    """Mark OCR-needing files failed instead of aborting the chunk.
+
+    Only files still needing OCR are targeted: files already served from the
+    regions cache, or native parses that never needed the engine, keep their
+    output. Callers pass the pending set, not ``ctx.alive()``.
+    """
+    for fs in targets:
+        if fs.error is None:
+            fs.set_error(
+                f"OCR backend init failed: {exc}",
+                code="ocr_failed",
+                stage=stage,
+                exc=exc,
+                outage=True,
+            )
+    if log:
+        logger.warning("OCR backend init failed", exc_info=exc)
+
+
+async def resolve_ocr_identity(
+    ctx,
+    *,
+    needs_backend: bool,
+    fail_targets: list,
+    stage: str = "ocr",
+    strict: bool = False,
+) -> OcrIdentityResolution:
+    """Resolve the OCR runtime identity for one window (both OCR stages).
+
+    Owns the automatic-chain (``ocr_backend == \"paddle\"``) state machine in
+    one place: a stale runtime whose process died unseen is cleared, a
+    retained loaded client is reused, otherwise the chain starts the engine
+    and adopts the selected concrete runtime. A window that needs no backend
+    (native text covers every region, or — pre-layout — nothing to look up)
+    keeps a local static fallback without persisting it: persisting it used
+    to make the next window reuse Paddle prompts, profile and provenance
+    while a GLM engine did the work.
+
+    On startup failure the targets are failed, the chunk-scoped marker is
+    recorded so later windows fast-fail, and the resolution carries None.
+    When startup reports success without a concrete identity, the bundle
+    probe (``strict=True``) raises while OcrStage keeps the compatibility
+    seam for injected, already-ready clients.
+    """
+    cfg = ctx.config
+    settings = ctx.settings
+    rm = ctx.resources
+    requested_backend = cfg.ocr_backend or settings.ocr.backend
+    automatic_backend = requested_backend == "paddle"
+    identity = ctx.scratch.get("ocr_runtime_identity")
+
+    runtime_identity = getattr(rm, "ocr_runtime_identity", None)
+    runtime_client = getattr(rm, "ocr", None)
+    runtime_loaded = bool(getattr(runtime_client, "loaded", False))
+    if (
+        automatic_backend
+        and isinstance(runtime_identity, OcrRuntimeIdentity)
+        and not runtime_loaded
+    ):
+        # A managed process can die without going through shutdown_ocr().
+        # Its identity is no longer evidence for the next client: clear it
+        # so the original selector runs and records the replacement.
+        rm.ocr_runtime_identity = None
+        runtime_identity = None
+        identity = None
+        ctx.scratch.pop("ocr_runtime_identity", None)
+    if (
+        automatic_backend
+        and identity is None
+        and isinstance(runtime_identity, OcrRuntimeIdentity)
+        and runtime_loaded
+    ):
+        # A retained automatic client selected this concrete runtime in an
+        # earlier process_chunk context. Reuse it for this context's
+        # profile, cache key, and provenance.
+        identity = runtime_identity
+        ctx.scratch["ocr_runtime_identity"] = identity
+    if automatic_backend and identity is None and needs_backend:
+        # A hard init failure in an earlier window of this chunk must not
+        # re-run the slow, doomed engine constructor here.
+        prior_init_error = ctx.signals.ocr_init_error
+        if prior_init_error is not None:
+            fail_ocr_targets(fail_targets, prior_init_error, stage=stage, log=False)
+            return OcrIdentityResolution(None, False)
+        # An automatic chain has no exact cache identity until startup
+        # chooses a concrete candidate. This trades a cold-cache startup
+        # for correct cache/provenance separation between fallback models.
+        try:
+            await rm.await_ocr()
+        except Exception as e:  # noqa: BLE001
+            ctx.signals.ocr_init_error = e
+            fail_ocr_targets(fail_targets, e, stage=stage)
+            return OcrIdentityResolution(None, False)
+        runtime_identity = getattr(rm, "ocr_runtime_identity", None)
+        if isinstance(runtime_identity, OcrRuntimeIdentity):
+            identity = runtime_identity
+            ctx.scratch["ocr_runtime_identity"] = identity
+            return OcrIdentityResolution(identity, True)
+        injected = getattr(rm, "_ocr", None)
+        if strict and not getattr(injected, "loaded", False):
+            raise RuntimeError("OCR startup completed without a concrete runtime identity")
+        # Compatibility seam for injected, already-ready clients that
+        # do not participate in managed candidate identity selection.
+        identity = resolve_ocr_runtime_identity(cfg, settings)
+        ctx.scratch["ocr_runtime_identity"] = identity
+        return OcrIdentityResolution(identity, False)
+    if identity is None:
+        identity = resolve_ocr_runtime_identity(cfg, settings)
+        if not automatic_backend:
+            ctx.scratch["ocr_runtime_identity"] = identity
+    return OcrIdentityResolution(identity, False)
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
@@ -173,19 +323,6 @@ def _deduplicate_formula_text_regions(
     return pages
 
 
-def _norm_alnum(s: str) -> str:
-    """Lowercased alphanumeric-only projection of *s* for duplicate detection."""
-    return "".join(c for c in s.lower() if c.isalnum())
-
-
-# Content-based reference dedup: minimum fuzzy score for a reference region's
-# normalized content to count as already present in the page's text regions,
-# and the minimum needle length below which only exact containment is trusted
-# (short needles fuzzy-match too easily).
-_CONTENT_DUP_MIN_SCORE = 95
-_CONTENT_DUP_MIN_CHARS = 30
-
-
 def _deduplicate_reference_regions(
     pages: list[list[dict]], settings: GlobalSettings | None = None
 ) -> list[list[dict]]:
@@ -199,7 +336,10 @@ def _deduplicate_reference_regions(
     that confuse downstream LLM extraction.
 
     Pass 1 drops a ``reference`` region when >=50% of its area overlaps
-    with a ``reference_content`` region (or vice versa).
+    with ``reference_content`` regions (or vice versa) whose text already
+    holds its own. Geometry alone is not enough: an aggregate box over four
+    entries with entry boxes for only two would take the other two with it.
+    A kept box's duplicated entry boxes are shadowed by the parser.
 
     Pass 2 handles the same double-detection against per-entry ``text``
     regions (data/prereg.pdf pages 22-23): a full-column ``reference`` region
@@ -210,6 +350,11 @@ def _deduplicate_reference_regions(
     content is blanked.  The region itself is KEPT, because it still keys the
     References section (``_handle_section_hint``) and emits the layout hint
     used by section-classification fallbacks.
+
+    Both passes tolerate OCR noise between the two reads, but not a run of
+    text the other regions lack (``alnum_text_covered``): a region holding a
+    line or a DOI that no text region has, such as the end of a reference
+    continued from the previous page, keeps its content.
     """
     containment_threshold = _effective_settings(settings).layout.containment_threshold
 
@@ -233,24 +378,25 @@ def _deduplicate_reference_regions(
             bbox = region.get("bbox_2d")
             if not bbox:
                 continue
-            for rc_r in ref_content_regions:
-                rc_bbox = rc_r["bbox_2d"]
-                if (
-                    _bbox_containment(bbox, rc_bbox) > containment_threshold
-                    or _bbox_containment(rc_bbox, bbox) > containment_threshold
-                ):
-                    to_remove.add(i)
-                    break
+            overlapping = [
+                rc_r
+                for rc_r in ref_content_regions
+                if _bbox_containment(bbox, rc_r["bbox_2d"]) > containment_threshold
+                or _bbox_containment(rc_r["bbox_2d"], bbox) > containment_threshold
+            ]
+            if overlapping and alnum_text_covered(
+                alnum_key(region.get("content") or ""),
+                alnum_key("".join(rc_r.get("content") or "" for rc_r in overlapping)),
+            ):
+                to_remove.add(i)
 
         if to_remove:
             page_regions[:] = [r for i, r in enumerate(page_regions) if i not in to_remove]
 
     # Pass 2: content-based suppression against plain text regions.
-    from rapidfuzz import fuzz
-
     _TEXT_BLOB_LABELS = {"text", "content", "reference_content"}
     for page_regions in pages:
-        blob = _norm_alnum(
+        blob = alnum_key(
             "".join(
                 r.get("content") or ""
                 for r in page_regions
@@ -264,16 +410,8 @@ def _deduplicate_reference_regions(
                 continue
             if region.get("_native_text_candidate") is not None:
                 continue
-            ref_norm = _norm_alnum(region.get("content") or "")
-            # A needle longer than the blob cannot be contained in it —
-            # blanking would lose the uncovered tail.
-            if not ref_norm or len(ref_norm) > len(blob):
-                continue
-            duplicated = ref_norm in blob or (
-                len(ref_norm) >= _CONTENT_DUP_MIN_CHARS
-                and fuzz.partial_ratio(ref_norm, blob) >= _CONTENT_DUP_MIN_SCORE
-            )
-            if duplicated:
+            ref_norm = alnum_key(region.get("content") or "")
+            if ref_norm and alnum_text_covered(ref_norm, blob):
                 logger.info(
                     "Blanked duplicate reference region (%d chars already "
                     "covered by text regions on the page)",
@@ -301,7 +439,10 @@ def _postprocess_ocr_regions(
 
     Runs formula-number merging, hyphenated-word merging, and bullet-point
     inference using standalone functions from ``bibr.ocr.postprocess``.
+    Regions filled from the PDF text layer (``_native_text_used``) skip the
+    OCR-artifact cleanup; they are only trimmed.
     """
+    from bibr.ocr.normalization import strip_one_balanced_formula_wrapper
     from bibr.ocr.postprocess import (
         clean_ocr_content,
         format_bullet_points,
@@ -318,39 +459,46 @@ def _postprocess_ocr_regions(
 
     for page_regions in pages:
         # 0. Clean raw OCR output: strip \t, collapse repeated punctuation,
-        #    remove hallucinated repetitions, normalise numbered lists.
+        #    remove hallucinated repetitions, normalise numbered lists. Text
+        #    from the PDF text layer has none of these artifacts, and the
+        #    repairs damage it ("U.S." -> "U. S.", a dot-leader table of
+        #    contents cut after its first entry), so it is only trimmed.
         for region in page_regions:
             content = region.get("content")
-            if content:
-                region["content"] = clean_ocr_content(content)
+            if not content:
+                continue
+            if region.get("_native_text_used"):
+                region["content"] = content.strip()
+            else:
+                region["content"] = clean_ocr_content(
+                    content, formula=region.get("label") == "formula"
+                )
 
         # 1. Pre-wrap formula content in $$\n...\n$$ so that
         #    merge_formula_numbers can detect endswith("\n$$") for \tag{}.
         #    PDFParser._handle_formula won't double-wrap: it checks
-        #    startswith("$") first.
+        #    startswith("$") first. Only a wrapper whose opening delimiter
+        #    the final one closes is removed ("\\(a\\) + \\(b\\)" is two
+        #    formulas), and a single "$...$" pair too, which would otherwise
+        #    end up nested inside the "$$".
         for region in page_regions:
             if region.get("label") == "formula":
                 content = region.get("content", "")
                 if content:
-                    inner = content
-                    if (
-                        inner.startswith("$$")
-                        and inner.endswith("$$")
-                        or inner.startswith("\\[")
-                        and inner.endswith("\\]")
-                        or inner.startswith("\\(")
-                        and inner.endswith("\\)")
-                    ):
-                        inner = inner[2:-2].strip()
+                    inner = strip_one_balanced_formula_wrapper(content, single_dollar=True)
                     region["content"] = "$$\n" + inner + "\n$$"
 
         # 2. Normalise bullet markers so format_bullet_points can detect
-        #    existing bullet context for gap-filling.
+        #    existing bullet context for gap-filling. "* " is the Markdown
+        #    bullet OCR emits; in the text layer it is a printed asterisk
+        #    ("* p < .05"), so only bullet glyphs are rewritten there.
         for region in page_regions:
             if region.get("native_label") == "text":
                 content = region.get("content", "")
                 if content and (
-                    content.startswith("·") or content.startswith("•") or content.startswith("* ")
+                    content.startswith("·")
+                    or content.startswith("•")
+                    or (content.startswith("* ") and not region.get("_native_text_used"))
                 ):
                     region["content"] = "- " + content[1:].lstrip()
 
@@ -569,21 +717,29 @@ async def _ocr_page_regions_impl(
             finish_reason: str | None = None
             if isinstance(result, asyncio.CancelledError):
                 raise result
-            if isinstance(result, BibrError):
-                # Systemic backend failures (auth, config) must not be silently
-                # converted to blank content — propagate to fail the page.
+            if isinstance(result, BaseException) and (
+                isinstance(result, BibrError) or _ocr_server_gone(result)
+            ):
+                # Systemic backend failures (auth, config, an OCR server that
+                # went down: connection refused or dropped once the transport's
+                # retries ran out) must not be silently converted to blank
+                # content — propagate to fail the page. A busy answer
+                # (429/502/503) is not one of them: see _ocr_server_gone.
                 raise result
             if isinstance(result, BaseException):
                 # The region ships blank. Without an export-visible warning
                 # three failed regions in a 40-page paper look like missing
-                # paragraphs behind a clean receipt.
+                # paragraphs behind a clean receipt. The export names the
+                # error but not the OCR endpoint; the log keeps the raw text.
+                where = f"page {page_idx + 1}, region {orig_idx}, task {task_type}"
                 warning = ProcessingWarning(
                     WarningCode.OCR_REGION_FAILED,
-                    "OCR failed for a region; its text is missing "
-                    f"(page {page_idx + 1}, region {orig_idx}, task {task_type}): "
-                    f"{type(result).__name__}: {result}",
+                    f"OCR failed for a region; its text is missing ({where}): "
+                    f"{describe_error(result)}",
                 )
-                logger.warning(warning.message)
+                logger.warning(
+                    "OCR failed for a region (%s): %s: %s", where, type(result).__name__, result
+                )
                 if warning_sink is not None:
                     warning_sink(warning)
             else:
@@ -649,6 +805,7 @@ def _should_unload_ocr_after_chunk(
     memory_mode: str,
     llm_backend: str,
     settings: GlobalSettings | None = None,
+    ocr_backend: str | None = None,
 ) -> bool:
     """Whether to tear down the OCR engine at the end of an OCR stage.
 
@@ -663,6 +820,10 @@ def _should_unload_ocr_after_chunk(
       backend follows (``vllm`` / ``vllm-mlx``, or the unresolved ``local``
       alias).
 
+    Cloud vision OCR (gemini/openai/anthropic) never unloads between chunks:
+    the client holds no local weights, so teardown only forces a re-handshake
+    (and a fresh key read) with no VRAM to reclaim.
+
     ``OCR_UNLOAD_BETWEEN_CHUNKS`` overrides the heuristic: ``always`` forces the
     per-chunk teardown, ``never`` keeps OCR loaded, ``auto`` (default) applies
     the rules above.
@@ -671,6 +832,11 @@ def _should_unload_ocr_after_chunk(
     if override == "always":
         return True
     if override == "never":
+        return False
+    backend = ocr_backend
+    if backend is None and settings is not None:
+        backend = settings.ocr.backend
+    if backend in CLOUD_VISION_OCR_BACKENDS:
         return False
     if memory_mode == "keep_all":
         return False
@@ -713,81 +879,20 @@ class OcrStage:
         settings = ctx.settings
         requested_backend = cfg.ocr_backend or settings.ocr.backend
         automatic_backend = requested_backend == "paddle"
-        identity = ctx.scratch.get("ocr_runtime_identity")
-        from bibr.ocr.profiles import OcrRuntimeIdentity
-
-        runtime_identity = getattr(rm, "ocr_runtime_identity", None)
-        runtime_client = getattr(rm, "ocr", None)
-        runtime_loaded = bool(getattr(runtime_client, "loaded", False))
-        if (
-            automatic_backend
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and not runtime_loaded
-        ):
-            # A managed process can die without going through shutdown_ocr().
-            # Its identity is no longer evidence for the next client: clear it
-            # so the original selector runs and records the replacement.
-            rm.ocr_runtime_identity = None
-            runtime_identity = None
-            identity = None
-            ctx.scratch.pop("ocr_runtime_identity", None)
-        if (
-            automatic_backend
-            and identity is None
-            and isinstance(runtime_identity, OcrRuntimeIdentity)
-            and runtime_loaded
-        ):
-            # A retained automatic client selected this concrete runtime in an
-            # earlier process_chunk context. Reuse it for this context's
-            # profile, cache key, and provenance.
-            identity = runtime_identity
-            ctx.scratch["ocr_runtime_identity"] = identity
-        automatic_needs_resolution = automatic_backend and identity is None
-        prior_init_error = ctx.signals.ocr_init_error
-        if prior_init_error is not None:
-            for fs in ctx.alive():
-                fs.set_error(
-                    f"OCR backend init failed: {prior_init_error}",
-                    code="ocr_failed",
-                    stage=self.name,
-                    exc=prior_init_error,
-                )
-            return
-        if (
-            automatic_needs_resolution
-            and identity is None
-            and _backend_region_count(ctx.alive()) == 0
-        ):
-            # Native text covers every region of this window, so nothing will
-            # call the backend: no concrete runtime — and no engine — is needed.
-            automatic_needs_resolution = False
-        if automatic_needs_resolution and identity is None:
-            # An automatic chain has no exact cache identity until startup
-            # chooses a concrete candidate. This trades a cold-cache startup
-            # for correct cache/provenance separation between fallback models.
-            try:
-                await rm.await_ocr()
-            except Exception as e:  # noqa: BLE001
-                ctx.signals.ocr_init_error = e
-                for fs in ctx.alive():
-                    fs.set_error(
-                        f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
-                    )
-                logger.warning("OCR backend init failed", exc_info=True)
-                return
-            runtime_identity = getattr(rm, "ocr_runtime_identity", None)
-            if isinstance(runtime_identity, OcrRuntimeIdentity):
-                identity = runtime_identity
-                ctx.scratch["ocr_runtime_identity"] = identity
-            else:
-                # Compatibility seam for injected, already-ready clients that
-                # do not participate in managed candidate identity selection:
-                # retain the static identity and still run their explicit
-                # wait_for_server readiness check below.
-                automatic_needs_resolution = False
+        # Shared automatic-chain identity state machine (see
+        # ``resolve_ocr_identity``): stale/retained runtimes, engine start,
+        # and the static fallback. ``eligible`` — not ``ctx.alive()`` — is
+        # the failure set, so native parses and cache hits are never failed
+        # for an engine they never needed.
+        resolution = await resolve_ocr_identity(
+            ctx,
+            needs_backend=_backend_region_count(ctx.alive()) > 0,
+            fail_targets=self._eligible_files(ctx),
+            stage=self.name,
+        )
+        identity = resolution.identity
         if identity is None:
-            identity = resolve_ocr_runtime_identity(cfg, settings)
-            ctx.scratch["ocr_runtime_identity"] = identity
+            return
         cache_on = ocr_cache.is_enabled(settings)
         alive = ctx.alive()
         if cache_on:
@@ -826,20 +931,37 @@ class OcrStage:
         # regions were all filled natively never pays for OCR startup.
         total_regions = _backend_region_count(pending)
         engine_needed = total_regions > 0
+        if engine_needed and not resolution.engine_ready and ctx.signals.ocr_init_error is not None:
+            # Chunk-scoped fast-fail for every backend. resolve_ocr_identity
+            # covers the automatic chain before its startup; explicit backends
+            # (and an automatic window arriving with a retained or static
+            # identity) reach the engine start below, so check here — after
+            # the regions-cache probe — that only pending files fail while
+            # cache hits and native parses survive.
+            fail_ocr_targets(pending, ctx.signals.ocr_init_error, stage=self.name, log=False)
+            return
         if engine_needed:
             try:
-                if not automatic_needs_resolution:
+                if not resolution.engine_ready:
                     await rm.await_ocr()  # always async, regardless of whether preload ran
-                if not automatic_needs_resolution and hasattr(rm.ocr, "wait_for_server"):
+                if not resolution.engine_ready and hasattr(rm.ocr, "wait_for_server"):
                     await rm.ocr.wait_for_server()
             except Exception as e:  # noqa: BLE001
                 ctx.signals.ocr_init_error = e
-                for fs in ctx.alive():
-                    fs.set_error(
-                        f"OCR backend init failed: {e}", code="ocr_failed", stage=self.name, exc=e
-                    )
-                logger.warning("OCR backend init failed", exc_info=True)
+                fail_ocr_targets(pending, e, stage=self.name)
                 return
+            if automatic_backend:
+                # The engine that actually started selects the concrete
+                # runtime: adopt it when this window arrived with a stale
+                # static fallback. Defensive — current code no longer persists
+                # one, but the injected-client compatibility seam (or a future
+                # caller) could still hand one to the engine start. Prompts,
+                # profile, region limit, cache key and provenance below must
+                # describe this runtime.
+                started = getattr(rm, "ocr_runtime_identity", None)
+                if isinstance(started, OcrRuntimeIdentity) and started != identity:
+                    identity = started
+                    ctx.scratch["ocr_runtime_identity"] = identity
         else:
             logger.info(
                 "OCR engine not started: native text covers every region of %d file(s)",
@@ -893,7 +1015,7 @@ class OcrStage:
             # (InterleavedRenderOcrStage) run OCR per file-window yet tear the
             # engine down just once for the whole chunk, not once per window.
             if not ctx.signals.defer_ocr_teardown and _should_unload_ocr_after_chunk(
-                cfg.memory_mode, cfg.llm_backend, settings
+                cfg.memory_mode, cfg.llm_backend, settings, cfg.ocr_backend
             ):
                 await rm.shutdown_ocr()
 
@@ -1018,8 +1140,15 @@ class OcrStage:
                         ProcessingWarning(
                             WarningCode.OCR_PAGE_FAILED,
                             "OCR failed for a page; its text is missing "
-                            f"(page {page_idx + 1}): {type(r).__name__}: {r}",
+                            f"(page {page_idx + 1}): {describe_error(r)}",
                         )
+                    )
+                    logger.warning(
+                        "OCR failed for page %d of %s: %s: %s",
+                        page_idx + 1,
+                        fs.path.name,
+                        type(r).__name__,
+                        r,
                     )
                     clean_pages.append([])
                 else:
@@ -1027,23 +1156,30 @@ class OcrStage:
             fs.ocr_pages_attempted = len(page_results)
             fs.ocr_pages_failed = len(errors)
 
-            # A systemic upstream OCR outage (e.g. circuit breaker open) on ANY
-            # page fails the whole file — never emit a partial result with
-            # silently blank pages.
+            # A systemic upstream OCR outage (e.g. circuit breaker open, an
+            # OCR server that died mid-file) on ANY page fails the whole file
+            # — never emit a partial result with silently blank pages. It is
+            # an outage, so a resumed ``bibr batch`` runs the file again. An
+            # UpstreamServiceError goes first: the serve answers 502 for it but
+            # 422 for a raw transport error, so a breaker that opened after an
+            # earlier page's refused connection must still give the 502.
             upstream = next((e for e in errors if isinstance(e, UpstreamServiceError)), None)
+            if upstream is None:
+                upstream = next((e for e in errors if _ocr_server_gone(e)), None)
             if upstream is not None:
                 fs.set_error(
-                    f"OCR upstream service failed: {upstream}",
+                    f"OCR upstream service failed: {redact_urls(str(upstream))}",
                     code="ocr_failed",
                     stage=self.name,
                     exc=upstream,
+                    outage=True,
                 )
                 return
 
             # Only fail the file if ALL pages failed.
             if errors and len(errors) == len(page_results):
                 fs.set_error(
-                    f"OCR failed for all pages: {errors[0]}",
+                    f"OCR failed for all pages: {describe_error(errors[0])}",
                     code="ocr_failed",
                     stage=self.name,
                     exc=errors[0],
@@ -1066,7 +1202,9 @@ class OcrStage:
             # exported timings alongside the local path.
             fs.stage_times["ocr"] = time.monotonic() - fs_t0
         except Exception as e:  # noqa: BLE001
-            fs.set_error(f"OCR failed: {e}", code="ocr_failed", stage=self.name, exc=e)
+            fs.set_error(
+                f"OCR failed: {describe_error(e)}", code="ocr_failed", stage=self.name, exc=e
+            )
             logger.warning("OCR failed for %s", fs.path.name, exc_info=True)
 
     async def _run_remote(self, ctx, ocr_fn) -> None:

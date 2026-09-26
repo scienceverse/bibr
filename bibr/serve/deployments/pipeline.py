@@ -439,10 +439,13 @@ class BibrPipelineAPI(ls.LitAPI):
                     # the same way a code change does.
                     prefix=cache_namespace(self._settings),
                 )
-                logger.info(
-                    "Response cache enabled (TTL=%ds)",
-                    self._settings.cache.ttl_seconds,
-                )
+                if self._settings.cache.ttl_seconds > 0:
+                    logger.info(
+                        "Response cache enabled (TTL=%ds)",
+                        self._settings.cache.ttl_seconds,
+                    )
+                else:
+                    logger.info("Response cache enabled (no expiry)")
         except Exception as e:
             logger.warning("Response cache not available: %s", e)
 
@@ -580,14 +583,18 @@ class BibrPipelineAPI(ls.LitAPI):
 
         # decode_request computes this while streaming. Direct embedders that
         # bypass decode retain a compatibility fallback.
-        digest = inputs.get("content_hash")
+        digest: str | None = inputs.get("content_hash")
         if digest is None:
             import hashlib
 
             digest = await asyncio.to_thread(lambda: hashlib.sha256(content).hexdigest())
         file_hash = digest[:16]
+        # The cache is shared by every caller, so it is keyed on the full
+        # SHA-256: 64 bits can be collided on purpose, and the colliding upload
+        # would then be answered with the first one's extraction. The extension
+        # picks the parser, so the same bytes as .html and .xml are two results.
         cache_key = self._cache_key(
-            file_hash,
+            digest,
             start_page,
             end_page,
             include_figures,
@@ -596,6 +603,7 @@ class BibrPipelineAPI(ls.LitAPI):
             refs=eff_refs,
             ref_seg=eff_ref_seg,
             crossref=effective_crossref,
+            input_format=Path(filename).suffix,
         )
 
         if not self._cache:
@@ -1066,7 +1074,7 @@ class BibrPipelineAPI(ls.LitAPI):
 
     @staticmethod
     def _cache_key(
-        file_hash: str,
+        content_hash: str,
         start_page: int | None,
         end_page: int | None,
         include_figures: bool,
@@ -1075,8 +1083,11 @@ class BibrPipelineAPI(ls.LitAPI):
         refs: str | None = None,
         ref_seg: str | None = None,
         crossref: bool = False,
+        input_format: str | None = None,
     ) -> str:
-        key = f"json:{file_hash}"
+        """Response-cache key: the full SHA-256 of the upload (never the 16-hex
+        ``file_hash`` display id) plus every option that changes the export."""
+        key = f"json:{content_hash}"
         if start_page is not None:
             key += f":sp{start_page}"
         if end_page is not None:
@@ -1093,6 +1104,8 @@ class BibrPipelineAPI(ls.LitAPI):
             key += f":rseg:{ref_seg}"
         if crossref:
             key += ":enrich"
+        if input_format:
+            key += f":fmt:{input_format.lstrip('.').lower()}"
         return key
 
     @staticmethod
@@ -1103,6 +1116,7 @@ class BibrPipelineAPI(ls.LitAPI):
             ProcessingError,
             UpstreamServiceError,
         )
+        from bibr.utils.redact import redact_urls
 
         if isinstance(exc, InputValidationError):
             kind = "input_validation"
@@ -1125,7 +1139,9 @@ class BibrPipelineAPI(ls.LitAPI):
         return {
             "success": False,
             "paper_json": None,
-            "error": message,
+            # The 4xx/5xx body and the job error reach the caller: they never
+            # name an internal endpoint (the log line above keeps it).
+            "error": redact_urls(message),
             "error_kind": kind,
             "error_code": error_code,
             "safe_diagnostics": (

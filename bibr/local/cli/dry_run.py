@@ -14,6 +14,9 @@ from bibr.local.cli.run_config import (
     ResolvedRunConfig,
     _managed_llm_model,
     _managed_llm_weight_repo,
+    _preflight_local_backend,
+    _preflight_ocr_runtime,
+    _preflight_opencv,
 )
 from bibr.ocr.profiles import GLM_SERVED_MODEL_ALIAS
 
@@ -84,7 +87,19 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     backend = config.ocr_backend
     if backend == "paddle":
         candidate = resolve_backend_candidates(backend, Settings)[0]
-        return candidate.model, candidate.model
+        # Served identity vs weight repo: the first candidate's display model
+        # may be a server alias (paddle-vllm advertises
+        # ``Settings.ocr.paddle_served_model``), while the HF cache holds the
+        # repo its launcher loads (``Settings.ocr.paddle_model``). Map through
+        # the same per-backend weight field the explicit-backend path uses so
+        # the cache check cannot miss on the alias.
+        weight_field = _OCR_LOCAL_WEIGHT_FIELD.get(candidate.backend)
+        weight_repo = (
+            config.ocr_model or getattr(Settings.ocr, weight_field)
+            if weight_field is not None
+            else candidate.model
+        )
+        return candidate.model, weight_repo
     if backend == "paddle-http":
         return config.ocr_model or Settings.ocr.paddle_served_model, None
     if backend in _OCR_HTTP_DEFAULT_SERVED_NAME:
@@ -332,6 +347,10 @@ def _dry_run_output_destinations(
     output_path = Path(args.output)
     if is_batch:
         return [f"{f.name} -> {output_path / f'{f.stem}.json'}" for f in files]
+    if args.output.endswith(("/", "\\")):
+        # Same directory intent ``_prepare_output_path`` acts on at write
+        # time (it creates the directory there; the preview must not).
+        return [f"{files[0].name} -> {output_path / f'{files[0].stem}.json'}"]
     target = _resolve_single_output_path(output_path, files[0])
     return [f"{files[0].name} -> {target}"]
 
@@ -343,6 +362,7 @@ def _print_dry_run_plan(
     *,
     is_batch: bool,
     manifest_outputs: list[Path] | None = None,
+    blockers: list[str] | None = None,
 ) -> None:
     """Print the full resolved run plan and return — the ``--dry-run`` payload.
 
@@ -431,4 +451,85 @@ def _print_dry_run_plan(
     ):
         print(f"  {line}")
 
+    if blockers:
+        ui.section(out, f"Blockers ({len(blockers)})")
+        for blocker in blockers:
+            out.print(f"  [red]{ui.FAIL}[/red] {blocker}", soft_wrap=True)
+        out.print("[dim]The real run exits 1 on these; fix them before processing.[/dim]")
+
     out.print("\n[dim]Dry run — no files were processed.[/dim]")
+
+
+def _dry_run_cloud_credential_blocker() -> str | None:
+    """Missing-key verdict for a cloud LLM without building a client.
+
+    ``--dry-run`` previews without touching any client machinery (no
+    httpx, no model loads), so it cannot call ``preflight_credentials``
+    (that builds a real provider client). This mirrors each bundled
+    provider adapter's key lookup verbatim — same Settings fields, same
+    messages (see ``bibr/clients/providers/*.py``) — and returns ``None``
+    when the real run's check would pass. Third-party providers stay the
+    real run's job to vet.
+    """
+    from bibr.clients import providers
+    from bibr.config import snapshot_settings
+
+    # A concrete snapshot, not the lazy proxy: ``providers.get`` takes a
+    # ``GlobalSettings | None`` (see ``llm._get_provider``), and the copy
+    # freezes the same values the real run's credential check reads.
+    effective = snapshot_settings()
+    name = (effective.llm.provider or "").lower()
+    try:
+        providers.get(name, settings=effective)
+    except ValueError as exc:
+        return str(exc)
+    llm = effective.llm
+    if name == "google":
+        if not (llm.api_key or effective.GOOGLE_API_KEY):
+            return (
+                "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
+            )
+    elif name == "anthropic":
+        if not (llm.api_key or effective.ANTHROPIC_API_KEY):
+            return (
+                "Anthropic API key required. "
+                "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
+            )
+    elif name == "groq":
+        if not (llm.api_key or effective.GROQ_API_KEY):
+            return "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
+    elif name == "openai" and not llm.api_key and not llm.base_url:
+        return "OpenAI API key required. Set LLM_API_KEY environment variable."
+    return None
+
+
+def _dry_run_blockers(config, files: list, missing_count: int) -> list[str]:
+    """Cheap preflight verdicts for ``--dry-run``: blockers the real run exits 1 on.
+
+    Covers missing inputs, LLM credentials (provider key lookup only —
+    no client is built), the managed local-LLM backend, and the PDF
+    OCR/image runtime. Nothing is constructed or downloaded; every probe
+    is local and cheap.
+    """
+    blockers: list[str] = []
+    if missing_count:
+        blockers.append(f"{missing_count} input(s) not found — the real run counts them as errors.")
+    if not config.no_llm and config.llm_backend == "cloud":
+        credential_blocker = _dry_run_cloud_credential_blocker()
+        if credential_blocker is not None:
+            blockers.append(credential_blocker)
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
+
+    if not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+        err = _preflight_local_backend(config.llm_backend)
+        if err:
+            blockers.append(err)
+    if any(p.suffix.lower() == ".pdf" for p in files):
+        opencv_problem = _preflight_opencv()
+        if opencv_problem is not None:
+            message, repair = opencv_problem
+            blockers.append(f"{message} (repair with: {repair})")
+        ocr_reason = _preflight_ocr_runtime(config)
+        if ocr_reason is not None:
+            blockers.append(ocr_reason)
+    return blockers

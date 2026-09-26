@@ -65,7 +65,7 @@ examples:
   bibr batch manifest.txt --out results/ --dry-run    # show the plan, run nothing
   bibr batch manifest.txt --out results/ --retry-failed --limit 50
   bibr batch manifest.txt --out results/ \\
-      --serve-url http://gpu-box:8000 --concurrency 2 --max-concurrency 4
+      --serve-url https://bibr.example.org --concurrency 2 --max-concurrency 4
   bibr batch report results/                          # ledger summary (--json for JSON)
 
 ledger: <out>/outcomes.jsonl — one JSON line per attempt (status, error_code,
@@ -80,6 +80,19 @@ def _get_version() -> str:
     from importlib.metadata import version
 
     return version("bibr")
+
+
+def _safe_version() -> str:
+    """Installed version, or ``'?'`` when bibr has no package metadata.
+
+    A source-tree checkout run via ``PYTHONPATH`` (never pip-installed)
+    has no ``importlib.metadata`` entry; every command, including
+    ``doctor``, must still start so it can report the environment.
+    """
+    try:
+        return _get_version()
+    except Exception:
+        return "?"
 
 
 class _BibrParser(argparse.ArgumentParser):
@@ -107,10 +120,7 @@ class _BibrParser(argparse.ArgumentParser):
                     for pseudo in action._choices_actions  # noqa: SLF001
                 ]
                 break
-        try:
-            ver = _get_version()
-        except Exception:
-            ver = "?"
+        ver = _safe_version()
         return render_main_help(ver, commands)
 
 
@@ -311,7 +321,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"bibr {_get_version()}",
+        version=f"bibr {_safe_version()}",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -358,7 +368,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Resolve and print the full run plan (input files, OCR/LLM config, "
             "reference strategies, enrichment, memory mode, models that would "
             "need downloading, output destinations) without processing anything. "
-            "No network calls, no model loads. Exits 0."
+            "No network calls, no model loads. Prints a Blockers section and "
+            "exits 1 when missing inputs or failing preflights would fail the "
+            "real run."
         ),
     )
 
@@ -372,7 +384,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "and an append-only <out>/outcomes.jsonl ledger (one line per attempt). "
             "Re-running the same command resumes: papers whose latest ledger line is "
             "'ok' are skipped, failed ones too unless --retry-failed, everything runs "
-            "again with --force. Without --serve-url the corpus runs through one warm "
+            "again with --force. A paper that was interrupted, or refused by the serve's "
+            "token, runs again anyway, and so does one that crashed or hit a service "
+            "outage, until it has failed that way three times. "
+            "Without --serve-url the corpus runs through one warm "
             "local pipeline in chunks of --batch-size (the 'bibr chew' options apply); "
             "with --serve-url papers go to a bibr serve async job API with adaptive "
             "concurrency. 'bibr batch report <out>' summarizes a ledger."
@@ -416,7 +431,11 @@ def _build_parser() -> argparse.ArgumentParser:
     batch.add_argument(
         "--retry-failed",
         action="store_true",
-        help="Also re-run papers whose latest ledger line is 'failed'",
+        help=(
+            "Also re-run papers whose latest ledger line is 'failed' (without it, an "
+            "interruption or a rejected token runs again anyway, and a crash or a service "
+            "outage until the paper has failed that way three times)"
+        ),
     )
     batch.add_argument(
         "--force",
@@ -466,6 +485,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Bearer token (default: AUTH_API_KEY or BIBR_SERVE_TOKEN from the "
             "environment, else AUTH_API_KEY from .env)"
+        ),
+    )
+    remote.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Send the bearer token over plain http:// to a public host. Loopback and "
+            "private-network hosts (LAN, tailnet, single-label names) never need it; "
+            "plain http to a LAN host is allowed with a warning."
         ),
     )
     remote.add_argument(

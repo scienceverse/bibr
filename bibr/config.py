@@ -155,6 +155,45 @@ def _is_secret_name(name: str) -> bool:
     return str(name).lower().endswith(_SECRET_NAME_MARKERS)
 
 
+def _redacted_url(name: str, value):
+    """A ``*url`` field's value with its user-info password and query secrets
+    masked (``REDIS_PASSWORD`` is URL-encoded into ``redis.url``); else unchanged."""
+    if isinstance(value, str) and str(name).lower().endswith("url"):
+        from bibr.utils.redact import redact_url_secrets
+
+        return redact_url_secrets(value)
+    return value
+
+
+def _with_redis_password(url: str, password: str) -> str:
+    """*url* with URL-encoded *password* in its user-info, unless it carries one.
+
+    A user name is kept (``redis://default@host`` for a Redis 6 ACL user), and
+    a password containing ``@ : / ? #`` still authenticates. A host-less
+    ``unix:///path/redis.sock`` gets ``unix://:password@/path/redis.sock``,
+    which redis-py reads the same way.
+    """
+    parsed = urlparse(url)
+    if parsed.password is not None:
+        return url
+    user, _, hostport = parsed.netloc.rpartition("@")
+    netloc = f"{user}:{_url_quote(password, safe='')}@{hostport}"
+    return urlunparse(parsed._replace(netloc=netloc))
+
+
+def _redis_server(url: str) -> tuple[str, str | int] | None:
+    """The server *url* connects to: its socket path, or its host and port."""
+    parsed = urlparse(url)
+    if parsed.scheme == "unix":
+        return ("unix", parsed.path) if parsed.path else None
+    return (parsed.hostname, parsed.port or 6379) if parsed.hostname else None
+
+
+def _same_redis_server(url: str, other: str) -> bool:
+    server = _redis_server(url)
+    return server is not None and server == _redis_server(other)
+
+
 def _split_csv_env(value, *, lower: bool = False):
     """Accept a comma-separated env string or a list; normalize to tokens.
 
@@ -190,8 +229,9 @@ class _BibrSettings(BaseSettings):
     ``${VAR}`` in ``.env`` values is never shell-interpolated on load.
 
     ``repr()`` and ``model_dump()`` mask secret-named fields (API keys, passwords,
-    tokens) so a stray ``logger.debug(settings)`` / ``model_dump()`` can't leak
-    plaintext credentials (audit M3). The stored value is untouched — only its
+    tokens), and the password inside ``*url`` fields, so a stray
+    ``logger.debug(settings)`` / ``model_dump()`` can't leak plaintext
+    credentials (audit M3). The stored value is untouched — only its
     serialized/printed form is redacted.
     """
 
@@ -200,7 +240,7 @@ class _BibrSettings(BaseSettings):
             if value is not None and _is_secret_name(name):
                 yield name, "***"
             else:
-                yield name, value
+                yield name, _redacted_url(str(name), value)
 
     @model_serializer(mode="wrap")
     def _redact_secrets_on_dump(self, handler):
@@ -209,6 +249,8 @@ class _BibrSettings(BaseSettings):
             for key, value in data.items():
                 if value is not None and not isinstance(value, dict) and _is_secret_name(key):
                     data[key] = "***"
+                else:
+                    data[key] = _redacted_url(key, value)
         return data
 
     def __init__(self, **kwargs):
@@ -268,6 +310,13 @@ class LlmOptions(_BibrSettings):
     )
     base_url: str | None = Field(
         None, description="Base URL override for custom OpenAI-compatible endpoints."
+    )
+    allow_insecure_http: bool = Field(
+        False,
+        description="Send the LLM API key over plain http:// to a public LLM_BASE_URL or "
+        "OCR_VISION_BASE_URL host. Loopback and private-network hosts (RFC 1918 or tailnet "
+        "addresses, single-label names, .local/.internal/.lan/.ts.net) never need it; public "
+        "hosts default to HTTPS-only.",
     )
     chat_template_kwargs: dict[str, Any] = Field(
         default_factory=dict,
@@ -500,7 +549,8 @@ class LlmOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp LLM server command. "
-            "Overrides bibr defaults for the same flags. Role-based LLM defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based LLM defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, plus probe-gated "
             "--parallel 2 --kv-unified, --spec-type ngram-mod, and --no-mmproj when supported "
             "(else --parallel 1)."
@@ -594,12 +644,18 @@ class OcrOptions(_BibrSettings):
         "olragon/PaddleOCR-VL-1.6-8bit",
         description="Model id for the managed Paddle MLX OCR server.",
     )
-    paddle_mlx_port: int = Field(8775, description="Port for the managed Paddle MLX OCR server.")
+    paddle_mlx_port: int = Field(
+        8775,
+        description="Port for the managed Paddle MLX OCR server (shared with the "
+        "paddle-rapid-mlx fallback candidate, which runs in sequence, never alongside).",
+    )
     paddle_mlx_startup_timeout: int = Field(
         600, description="Startup timeout in seconds for the managed Paddle MLX OCR server."
     )
     paddle_mlx_extra_args: str = Field(
-        "", description="Extra CLI args appended to the managed Paddle MLX OCR server command."
+        "",
+        description="Extra CLI args appended to the managed Paddle MLX OCR server command "
+        "(shared with the paddle-rapid-mlx fallback candidate; use only flags both CLIs accept).",
     )
     paddle_rapid_mlx_model: str = Field(
         "olragon/PaddleOCR-VL-1.6-8bit",
@@ -619,7 +675,8 @@ class OcrOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp OCR server command. "
-            "Overrides bibr defaults for the same flags. Role-based OCR defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based OCR defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, --parallel 1 "
             "(OCR image encode serializes across slots, so it stays single-slot)."
         ),
@@ -639,6 +696,13 @@ class OcrOptions(_BibrSettings):
         0.85,
         description="Minimum fraction of printable characters a native-text extraction must have "
         "to be trusted; below this the page falls back to OCR.",
+    )
+    native_text_header_footer: bool = Field(
+        False,
+        description="Read header/footer regions from the PDF text layer instead of OCR "
+        "on born-digital PDFs, under the same printable-ratio gate as body text. "
+        "Off by default pending an eval of DOI furniture and front-matter effects; "
+        "enable to A/B. Short running heads use the short-text allowance.",
     )
     local_gpus: int = Field(
         1,
@@ -873,7 +937,14 @@ class LayoutOptions(_BibrSettings):
         0.5,
         description="Minimum overlap fraction for one detected region to be treated as contained in another.",
     )
-    batch_size: int = Field(8, ge=1, description="Page batch size for layout model inference.")
+    batch_size: int = Field(
+        8,
+        ge=1,
+        description="Page batch size for layout model inference. The configured value is "
+        "the non-CPU batch; on CPU the local and serve detectors run one page at a time "
+        "unless this was set explicitly (a CPU batch of 8 grows the ORT CPU arena to "
+        "several GB with no throughput gain).",
+    )
     # Coalescing window (ms) for the serve GpuBatcher: how long the layout
     # micro-batcher keeps gathering pages from concurrent requests after the
     # first queued page before flushing a partial batch. A single paper's
@@ -997,7 +1068,8 @@ class CrossrefOptions(_BibrSettings):
     # job data (which needs noeviction). Env: CROSSREF_CACHE_REDIS_URL
     cache_redis_url: str | None = Field(
         None,
-        description="Redis URL for the shared Crossref response cache. Falls back to REDIS_URL when unset.",
+        description="Redis URL for the shared Crossref response cache. Falls back to REDIS_URL "
+        "when unset; REDIS_PASSWORD is added when it names the same Redis host and port.",
     )
     # TTL for shared-cache entries, seconds (default 30 days). allkeys-lru
     # handles memory pressure; the TTL bounds staleness from upstream
@@ -1104,6 +1176,7 @@ class ResolverOptions(_BibrSettings):
     # Max concurrent /search calls when prefetching a reference list's title searches.
     search_concurrency: int = Field(
         8,
+        ge=1,
         description="Max concurrent /search calls when prefetching a reference list's title searches.",
     )
     # Assert the resolver is backed by the same corpus as CrossRef. When True, a
@@ -1171,7 +1244,10 @@ class CacheOptions(_BibrSettings):
         description="Cache version namespace; invalidates stored entries on change. Defaults to a "
         "hash of the code — override only to pin or force-invalidate manually.",
     )
-    ttl_seconds: int = Field(86400, description="Result cache entry TTL in seconds.")
+    ttl_seconds: int = Field(
+        86400,
+        description="Result cache entry TTL in seconds. 0 or a negative value means no expiry.",
+    )
     distributed_singleflight: bool = Field(
         True,
         description="Coalesce identical Redis-backed cache misses across workers. Fail-open.",
@@ -1222,14 +1298,14 @@ class CacheOptions(_BibrSettings):
     )
     # Opt-in disk cache for structured LLM responses, keyed on model + schema +
     # system + user text. A hit costs no tokens and no rate-limit slot. This is
-    # also the prefill target for the offline Message Batches path: a batch
-    # answers requests at half price and writes them here for a later run to
-    # find. Off by default — like the OCR cache, it never silently changes
+    # not written by the offline Message Batches path (bibr/clients/batch.py
+    # has no CLI or pipeline caller), so nothing prefills it today.
+    # Off by default — like the OCR cache, it never silently changes
     # results unless opted in. Env: CACHE_LLM.
     llm: bool = Field(
         False,
         description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
-        "system prompt and user text. Also the prefill target for offline batch runs. Off by "
+        "system prompt and user text. Not written by the offline batch layer. Off by "
         "default.",
     )
     # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm
@@ -1375,13 +1451,16 @@ class MlOptions(_BibrSettings):
         description="Type-head softmax probability below which a section-classifier prediction "
         "collapses to UNKNOWN. Set to 0.0 to disable.",
     )
-    # When the trained classifier's prediction collapses to UNKNOWN (softmax
-    # below ``section_classifier_min_confidence``), escalate those headers to
-    # the batched LLM classifier instead of discarding the header. Only fires
-    # on misses, so the added cost is a fraction of a call per paper.
+    # When the trained classifier's prediction is UNKNOWN — either collapsed
+    # below ``section_classifier_min_confidence`` or confidently predicted as
+    # the model's own 'unknown' class — escalate those headers to the batched
+    # LLM classifier instead of discarding the header. Fires for every UNKNOWN,
+    # so on papers with many topic subheadings most non-alias headings reach
+    # the LLM; narrowing that to collapses-only needs a val-set measurement.
     section_classifier_llm_escalation: bool = Field(
         True,
-        description="Escalate section headers that collapse to UNKNOWN to the batched LLM "
+        description="Escalate section headers the trained classifier leaves UNKNOWN "
+        "(below-confidence collapses and confident unknown predictions) to the batched LLM "
         "classifier instead of discarding them.",
     )
     # Override the device the classifier runs on. ``None`` picks automatically
@@ -1760,7 +1839,8 @@ class JobsOptions(_BibrSettings):
     redis_url: str | None = Field(
         None,
         description="Redis URL for JOBS_STORE=redis. Falls back to REDIS_URL (the cache's "
-        "Redis) when unset; startup fails if neither is set.",
+        "Redis) when unset; startup fails if neither is set. REDIS_PASSWORD is added when it "
+        "names the same Redis host and port.",
     )
     key_prefix: str = Field(
         "bibr:jobs",
@@ -2289,7 +2369,12 @@ class GlobalSettings(_BibrSettings):
 
     @model_validator(mode="after")
     def set_redis_url(self) -> "GlobalSettings":
-        """Set a default redis.url if not provided, using redis.password."""
+        """Set a default redis.url if not provided, using redis.password.
+
+        The password also goes into JOBS_REDIS_URL and CROSSREF_CACHE_REDIS_URL
+        when they name the same Redis server (another database on it, say); a
+        separate server keeps whatever credentials its own URL carries.
+        """
         import logging
 
         logger = logging.getLogger("bibr.config")
@@ -2301,12 +2386,17 @@ class GlobalSettings(_BibrSettings):
             #       must check before initializing.
         elif self.redis.password:
             try:
-                parsed = urlparse(self.redis.url)
-                if parsed.password is None and "@" not in parsed.netloc:
-                    new_netloc = f":{_url_quote(self.redis.password, safe='')}@{parsed.netloc}"
-                    self.redis.url = urlunparse(parsed._replace(netloc=new_netloc))
+                self.redis.url = _with_redis_password(self.redis.url, self.redis.password)
             except (ValueError, AttributeError) as e:
                 logger.warning(f"Failed to inject redis.password into redis.url: {e}")
+        if self.redis.password and self.redis.url:
+            for section, field in ((self.jobs, "redis_url"), (self.crossref, "cache_redis_url")):
+                url = getattr(section, field)
+                try:
+                    if url and _same_redis_server(url, self.redis.url):
+                        setattr(section, field, _with_redis_password(url, self.redis.password))
+                except (ValueError, AttributeError) as e:
+                    logger.warning(f"Failed to inject redis.password into {field}: {e}")
         return self
 
 

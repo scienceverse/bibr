@@ -43,7 +43,7 @@ def _capture_transport(captured: dict):
     return httpx.MockTransport(handler)
 
 
-def _sequence_transport(responses: list[tuple[str, str]], payloads: list[dict]):
+def _sequence_transport(responses: list[tuple[str, str | None]], payloads: list[dict]):
     """Return successive OCR choices while recording every request payload."""
     calls = 0
 
@@ -158,7 +158,62 @@ class TestRecognize:
         assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
 
     @pytest.mark.asyncio
-    async def test_retries_structurally_incomplete_stopped_paddle_table(self):
+    @pytest.mark.parametrize("cap", [8192, 16384])
+    async def test_does_not_retry_when_first_table_budget_meets_recovery_budget(self, cap):
+        """Pin: with an OCR_GENERATION_MAX_TOKENS override at or above the
+        recovery budget, a length-truncated table keeps its (longer) first
+        output and costs exactly one request."""
+        pytest.importorskip("cv2")
+        from bibr.ocr.profiles import resolve_ocr_profile
+
+        profile = resolve_ocr_profile(
+            explicit="paddle",
+            backend="serve-http",
+            model="paddle-ocr-vl-1.6",
+            max_tokens=cap,
+        )
+        payloads: list[dict] = []
+        backend = _make_backend(
+            _sequence_transport(
+                [("<fcel>A<fcel>B", "length")],
+                payloads,
+            ),
+            model="paddle-ocr-vl-1.6",
+            profile=profile,
+        )
+
+        out = await backend.recognize(_tiny_image(), profile.prompt_for("table"))
+
+        assert out == "<fcel>A<fcel>B"
+        assert out.finish_reason == "length"
+        assert [payload["max_tokens"] for payload in payloads] == [cap]
+
+    @pytest.mark.asyncio
+    async def test_retries_structurally_incomplete_table_without_finish_reason(self):
+        """Structural truncation retries only when no finish reason is reported."""
+        pytest.importorskip("cv2")
+        from bibr.ocr.profiles import PADDLE_PROFILE
+
+        payloads: list[dict] = []
+        backend = _make_backend(
+            _sequence_transport(
+                [
+                    ("<fcel>A<fcel>B<nl><fcel>C<nl>", None),
+                    ("<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>", "stop"),
+                ],
+                payloads,
+            ),
+            profile=PADDLE_PROFILE,
+        )
+
+        out = await backend.recognize(_tiny_image(), "Table Recognition:")
+
+        assert out == "<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>"
+        assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_stop_terminated_ragged_paddle_table(self):
+        """A stop-terminated ragged grid reproduces identically at temperature 0."""
         pytest.importorskip("cv2")
         from bibr.ocr.profiles import PADDLE_PROFILE
 
@@ -176,8 +231,8 @@ class TestRecognize:
 
         out = await backend.recognize(_tiny_image(), "Table Recognition:")
 
-        assert out == "<fcel>A<fcel>B<nl><fcel>C<fcel>D<nl>"
-        assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+        assert out == "<fcel>A<fcel>B<nl><fcel>C<nl>"
+        assert [payload["max_tokens"] for payload in payloads] == [4096]
 
     @pytest.mark.asyncio
     async def test_does_not_retry_complete_paddle_table(self):
@@ -237,6 +292,24 @@ class TestRecognize:
         assert out == "<fcel>A"
         assert out.finish_reason == "length"
         assert [payload["max_tokens"] for payload in payloads] == [4096, 8192]
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_malformed_but_complete_paddle_table(self, monkeypatch):
+        """A closed grid with broken spans reproduces deterministically — a
+        retry only burns a second full table generation."""
+        from bibr.ocr.backend import OcrText
+        from bibr.ocr.profiles import PADDLE_PROFILE
+
+        backend = _make_backend(_ok_transport(), profile=PADDLE_PROFILE)
+        malformed = "<fcel>A<fcel>B<nl><ucel><xcel><nl>"
+        post = AsyncMock(return_value=OcrText(malformed, finish_reason="stop"))
+        monkeypatch.setattr(backend, "_post_with_retry", post)
+        monkeypatch.setattr("bibr.ocr.image_utils.encode_region_for_ocr", lambda *args: "aW1n")
+
+        out = await backend.recognize(_tiny_image(), "Table Recognition:")
+
+        assert out == malformed
+        assert post.await_count == 1
 
     @pytest.mark.asyncio
     async def test_recovery_error_falls_back_to_initial_table(self, monkeypatch):

@@ -37,17 +37,12 @@ Runtime = Literal["onnx", "torch"]
 ONNX_DIRNAME = "onnx"
 ONNX_MANIFEST = "bibr_onnx.json"
 ONNX_MODEL = "model.onnx"
-ONNX_TOKENIZER = "tokenizer.json"
 MANIFEST_SCHEMA_VERSION = 1
 
 
 def torch_available() -> bool:
     """True when torch is installed (checked without importing it)."""
     return importlib.util.find_spec("torch") is not None
-
-
-def onnxruntime_available() -> bool:
-    return importlib.util.find_spec("onnxruntime") is not None
 
 
 def read_onnx_manifest(bundle_dir: str | Path) -> dict[str, Any]:
