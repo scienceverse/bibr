@@ -368,16 +368,14 @@ released.
   no signal the model returns a training-prior artifact, so the extractor
   skips it and takes the LLM path with the full classification text. Skipping
   is missing input, not an outage, so no `PAPER_CLASSIFIER_DEGRADED` warning
-  is recorded. One gate192 paper (`10.15083_0002005574`) reaches the
-  classifier with an empty title+abstract in its exports; the other six
-  empty-title exports never ran classification.
+  is recorded.
 - Bare OECD L1 short forms an LLM may return now validate: `Humanities`,
   `Engineering`, `Medicine`, `Agriculture` (plus `Agricultural Sciences` and
   `Medical Sciences`) canonicalize through the shared token-set matcher and a
   two-entry synonym map, instead of dropping to empty. A string naming two
   domains at once (`Humanities and Social Sciences`) stays empty instead of
-  resolving to one of them. Every other label string observed in the gate192
-  exports maps exactly as before.
+  resolving to one of them. Every other observed label string maps exactly
+  as before.
 - Equation cross-references no longer fire on unit spellings or software
   names. A hyphen before a lowercase short form kills `CO2-eq.` matches while
   a hyphen before longhand `Equation` still reads as a range dash (`Equation
@@ -385,9 +383,8 @@ released.
   shares like `eq. (39.1%)`, and an all-caps `EQS` with no period is dropped
   as the SEM package's name, dotted or not (`EQS 6.1`, `EQS 6`). Bare printed
   forms (`eq 5`, `eqs 4 and 8`, `Eq (1)`) and dotted ids (`Eq. (2.3)`) still
-  match. Of the equation contents in the gate192 exports, only `EQS 6.1`
-  (two rows), `EQS 6` and `eq. (39.1` stop emitting; equation/section recall
-  on the JATS corpora is unchanged. Per-number expansion of ranges
+  match. Equation and section recall against the JATS corpora's gold links
+  is unchanged. Per-number expansion of ranges
   (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
   untouched, as is the reversed-range policy (`5-3` yields no rows), which is
   now documented on `_expand_nums`.
