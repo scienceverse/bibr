@@ -59,36 +59,63 @@ def test_nuextract_backend_refuses_a_public_http_base_url():
     assert NuExtractNativeBackend(_settings("http://10.0.0.7:8000/v1"))._get_client()
 
 
+def _vision_client(settings):
+    from bibr.local.ocr_cloud import CloudOcrClient
+
+    c = CloudOcrClient.__new__(CloudOcrClient)
+    c._client = None
+    c._provider = "openai"
+    c._loaded = True
+    c._init_lock = asyncio.Lock()
+    c._settings = settings
+    return c
+
+
 def test_vision_ocr_refuses_a_public_http_base_url(monkeypatch):
     pytest.importorskip("instructor")
-    from bibr.local.ocr_cloud import CloudOcrClient
 
     built = []
     monkeypatch.setattr(
         "instructor.from_provider", lambda *a, **kw: built.append(kw) or object(), raising=False
     )
-    settings = _settings("unused")
+    # The LLM and vision calls share one OpenAI-compatible endpoint, so the
+    # vision client forwards the LLM key to it.
+    settings = _settings("http://vision.example.org/v1")
     settings.ocr_vision.base_url = "http://vision.example.org/v1"
-
-    def client():
-        c = CloudOcrClient.__new__(CloudOcrClient)
-        c._client = None
-        c._provider = "openai"
-        c._loaded = True
-        c._init_lock = asyncio.Lock()
-        c._settings = settings
-        return c
 
     # OCR_ALLOW_INSECURE_HTTP (on by default in docker-compose) is the OCR
     # server's opt-out: the vision endpoint gets the LLM key, so it stays refused.
     settings.ocr.allow_insecure_http = True
     with pytest.raises(ValueError, match="LLM API key over plain HTTP"):
-        asyncio.run(client()._aget_client())
+        asyncio.run(_vision_client(settings)._aget_client())
     assert built == []
 
     settings.llm.allow_insecure_http = True
-    asyncio.run(client()._aget_client())
+    asyncio.run(_vision_client(settings)._aget_client())
     assert built[0]["base_url"] == "http://vision.example.org/v1"
+    assert built[0]["api_key"] == "llm-key-placeholder"
+
+
+def test_vision_ocr_refuses_the_sdk_environment_key_over_plain_http(monkeypatch):
+    pytest.importorskip("instructor")
+
+    built = []
+    monkeypatch.setattr(
+        "instructor.from_provider", lambda *a, **kw: built.append(kw) or object(), raising=False
+    )
+    # The LLM key belongs to another endpoint, so the vision client passes no
+    # key and the OpenAI SDK would send OPENAI_API_KEY from the environment.
+    settings = _settings("https://llm.example.org/v1")
+    settings.ocr_vision.base_url = "http://vision.example.org/v1"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env-placeholder")
+    with pytest.raises(ValueError, match="LLM API key over plain HTTP"):
+        asyncio.run(_vision_client(settings)._aget_client())
+    assert built == []
+
+    # No key anywhere: nothing crosses the network, so the client is built.
+    monkeypatch.delenv("OPENAI_API_KEY")
+    asyncio.run(_vision_client(settings)._aget_client())
+    assert "api_key" not in built[0]
 
 
 # --- bibr setup and bibr doctor send the key too --------------------------------

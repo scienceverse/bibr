@@ -525,9 +525,11 @@ released.
   provider when it is a real key for the same provider and the LLM is not
   pointed at another endpoint — cross-provider keys, managed-local
   placeholders and a set `llm.base_url` fall through to the provider's own
-  key or SDK env fallback. Cloud vision backends (`gemini`, `openai`,
-  `anthropic`) are no longer torn down between chunks: there are no local
-  weights to reclaim.
+  key or SDK env fallback. The plain-HTTP refusal for a public vision
+  endpoint now also covers that fallback: an `OPENAI_API_KEY` the OpenAI SDK
+  would send is refused like a forwarded LLM key. Cloud vision backends
+  (`gemini`, `openai`, `anthropic`) are no longer torn down between chunks:
+  there are no local weights to reclaim.
 - Rate limiter: the strict-interval Redis Lua script works in whole
   milliseconds (Redis truncates a Lua number reply to an integer, so a
   fractional-second wait became 0), and the key TTL spans the queued

@@ -1527,14 +1527,17 @@ def test_health_200_from_foreign_process_is_not_readiness():
         assert loser.returncode == 1
 
 
-def test_health_200_with_live_process_is_readiness():
+def test_health_200_with_live_process_is_readiness(monkeypatch):
     """The grace recheck must not reject a genuinely healthy server (15 guard)."""
     import http.server
     import socketserver
     import subprocess as real_subprocess
     import threading
 
-    from bibr.local import llama_cpp
+    from bibr.local import http_runtime, llama_cpp
+
+    # tests/local/conftest.py refuses every probe; this test serves a real one.
+    monkeypatch.setattr(llama_cpp, "request_bytes", http_runtime.request_bytes)
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):

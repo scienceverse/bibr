@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 from typing import Any, ClassVar
 
@@ -174,9 +175,13 @@ class CloudOcrClient:
 
                 # The vision endpoint gets the LLM provider's key, so the LLM
                 # opt-out governs it (OCR_ALLOW_INSECURE_HTTP, on by default in
-                # docker-compose, is for the OCR server's own token).
+                # docker-compose, is for the OCR server's own token). With no
+                # key passed, the OpenAI SDK sends OPENAI_API_KEY instead.
+                sent_key = api_key
+                if sent_key is None and instructor_provider == "openai":
+                    sent_key = os.environ.get("OPENAI_API_KEY")
                 refuse_plaintext_llm_key(
-                    cfg.base_url, api_key, allow_insecure_http=settings.llm.allow_insecure_http
+                    cfg.base_url, sent_key, allow_insecure_http=settings.llm.allow_insecure_http
                 )
                 kwargs["base_url"] = cfg.base_url
 
