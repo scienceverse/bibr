@@ -168,6 +168,42 @@ def test_html_segmentation_populates_links_and_content_sections():
     assert contents.sections_text
 
 
+def test_html_anchor_in_first_sentence_is_recorded_once_there():
+    html = (
+        b"<!doctype html><html><body><article><h2>Intro</h2>"
+        b'<p>Data are at <a href="https://example.org/data">https://example.org/data</a>. '
+        b"Second sentence follows here.</p>"
+        b"</article></body></html>"
+    )
+    parser = HtmlParser(html)
+    contents = parser.parse()
+    parser._contents = contents
+    parser.apply_segmentation(
+        contents,
+        [["Data are at https://example.org/data.", "Second sentence follows here."]],
+    )
+    assert [(link.url, link.text_id) for link in contents.links] == [
+        ("https://example.org/data", 1)
+    ]
+
+
+def test_html_short_anchor_text_resolves_to_the_sentence_holding_it():
+    html = (
+        b"<!doctype html><html><body><article><h2>Intro</h2>"
+        b"<p>There are more results here and there. Download "
+        b'<a href="https://x.example.org/d">here</a>.</p>'
+        b"</article></body></html>"
+    )
+    parser = HtmlParser(html)
+    contents = parser.parse()
+    parser._contents = contents
+    parser.apply_segmentation(
+        contents,
+        [["There are more results here and there.", "Download here."]],
+    )
+    assert [(link.url, link.text_id) for link in contents.links] == [("https://x.example.org/d", 2)]
+
+
 def test_epub_spine_metadata_and_references_delegate_to_html_parser():
     parser = EpubParser(_make_epub_bytes())
     contents = parser.parse()
