@@ -93,6 +93,10 @@ class Pipeline:
         self._config = config
         self._settings = settings
         validate_stage_contracts(self._stages)
+        # No figure-analysis stage consumes the FIG_EXTRACT tier yet — resolve
+        # it here so a non-"off" tier warns once per process instead of
+        # passing silently (see RunConfig.figure_extract_tier).
+        config.figure_extract_tier(settings)
 
     @property
     def settings(self) -> GlobalSettings:

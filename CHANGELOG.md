@@ -510,6 +510,70 @@ released.
   thread's current event loop is left alone.
 - `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
   not the `paper_id` twice.
+- llama.cpp server: an explicit `LLM_MAX_TOKENS`/`LLM_MAX_INPUT_CHARS`/
+  `LLM_REF_SEG_WINDOW_CHARS` is kept with a warning, while unset values
+  scale with `LLM_LLAMA_CPP_CONTEXT_SIZE`.
+- llama.cpp server: `*_LLAMA_CPP_EXTRA_ARGS` documents the separate-token
+  form (`--flag value`, not `--flag=value`) and names the setting on bad
+  quoting, and `-hfr` joins the `--hf-repo` aliases for the
+  identity-override check.
+- llama.cpp server: startup failures report the END of the stderr tail, and
+  the conservative-args retry fires only on argument-parse errors (unknown
+  flags and rejected flag values) — load and OOM failures fail fast. A
+  `/health` 200 is accepted only if the
+  process is still alive after a short grace period, so a port-racing
+  sibling's server is not mistaken for ours.
+- llama.cpp server: Ctrl-C during startup shuts down the child instead of
+  orphaning it; `--parallel N` is parsed for any N.
+- llmster: an `lms` timeout names the subcommand that timed out, and the
+  `load` hint suggests `LLM_LLMSTER_CONTEXT_LENGTH`. Reusing a pre-loaded
+  identifier validates it still serves that model. Unset `LLM_TIMEOUT_SECONDS`,
+  `LLM_MAX_CONCURRENCY` and `LLM_RATE_LIMIT_RPM` are raised to 300 s, 1 and
+  600 for the loopback server, matching the other local backends.
+- vLLM LLM server: readiness needs a second agreeing `/health` 200 after a
+  grace period, and startup failures report the END of the stderr tail.
+- vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
+  the other managed servers; startup failures report the END of the stderr
+  tail, as does the paddle vLLM OCR server.
+- Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
+  server like the other local backends.
+- Rapid-MLX OCR: a failed engine restart no longer discards the region that
+  triggered it — the caller gets its own transcription, and the restart
+  error surfaces on the next request where the generation is retried.
+  Callers parked on the recycle drain retry the failed restart once, and
+  get an `UpstreamServiceError` naming the failure instead of a bare
+  assert when the retry fails too, and replacing a dead generation
+  shuts down its HTTP pool and handles first.
+- `resolve_llm_backend` accepts the pipeline's settings when checking
+  rapid-mlx availability instead of only the global snapshot.
+- Cloud vision OCR: `settings.llm.api_key` is only forwarded to a vision
+  provider when it is a real key for the same provider and the LLM is not
+  pointed at another endpoint — cross-provider keys, managed-local
+  placeholders and a set `llm.base_url` fall through to the provider's own
+  key or SDK env fallback. The plain-HTTP refusal for a public vision
+  endpoint now also covers that fallback: an `OPENAI_API_KEY` the OpenAI SDK
+  would send is refused like a forwarded LLM key. Cloud vision backends
+  (`gemini`, `openai`, `anthropic`) are no longer torn down between chunks:
+  there are no local weights to reclaim.
+- Rate limiter: the strict-interval Redis Lua script works in whole
+  milliseconds (Redis truncates a Lua number reply to an integer, so a
+  fractional-second wait became 0), and the key TTL spans the queued
+  horizon so concurrent sleepers do not lose their place; the sliding
+  window quantizes to the same. The strict-interval key is now
+  `rate_limit:<resource>:next_allowed_ms`: it stores epoch milliseconds
+  while older releases stored epoch seconds under `next_allowed`, so the
+  two never read each other's values when old and new processes share one
+  Redis.
+- Circuit breaker: a waiter that times out no longer forces the breaker
+  back to OPEN under a still-running probe — only the probe's completion
+  owns the transition (a provably dead probe still fails fast).
+- Batch manifests: `content_sha256` streams inputs in 1 MiB chunks instead
+  of loading whole files. Validation still recomputes the hash for bytes
+  entering the pipeline, so the up-front manifest pass remains for now.
+- Layout preprocessing threads the resize column pass in row blocks; output
+  is bit-identical to the serial loop. The OOM batch-halving retry restores
+  torch.compile padding afterwards instead of leaving it disabled.
+
 - A failed LLM call now says how it failed. Every LLM task raised a bare
   `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
   answered all of them with 502, so a response truncated at the token limit
@@ -1122,9 +1186,205 @@ released.
   again, backed by committed synthetic fixtures
   (`scripts/generate_hermetic_test_fixtures.py`) instead of uncommitted
   corpus files.
+- `bibr chew` writing JSON to stdout is now valid JSON under every console
+  encoding. The startup stream setup replaced unencodable characters with
+  Python escapes (`\U0001d465`), which no JSON parser accepts; the export is
+  now written as UTF-8 bytes instead. File output already wrote UTF-8 and is
+  unchanged.
+- `bibr chew papers/ -o results/` with one paper in the directory no longer
+  writes a file named `results`. A trailing slash or an existing directory in
+  `-o` now means a directory even for a single resolved file, so the export
+  lands as `results/<stem>.json` and a later run with the same `-o`
+  writes into it again instead of crashing. A blocked `-o` is a clean exit 2
+  before any model loads, and `-o` is resolved before the pipeline is
+  constructed.
+- The automatic-OCR dry-run line no longer reports the Paddle served-model
+  alias as weights to download. For the default chain it cache-checks the
+  weight repo the launcher loads, so a cached
+  `PaddlePaddle/PaddleOCR-VL-1.6` renders `cached` instead of
+  `will download (size unknown)`.
+- A bad `--ocr-model`/`--ocr-profile` combination no longer blames `--pages`.
+  Option errors from the run configuration print as `Invalid option: …` with
+  exit 2 in both `chew` and `batch`.
+- Per-file failure hints follow the pipeline's structured `error_code`
+  instead of message substrings that never matched (or matched `rapid-mlx`
+  for `api` and blamed API keys for local runtime failures).
+- Building the CLI no longer needs installed package metadata. Running from
+  a source tree via `PYTHONPATH` used to crash before argparse ran; the
+  version now falls back to `?`, as the help screen already did.
+- The batch report no longer shows a phantom `enrich_prefetch` stage share.
+  That timer overlaps another stage's wall clock (the export stage already
+  excludes it from `total_seconds`), but the report divided by a sum that
+  included it, deflating the real stages. It now shares the export stage's
+  exclusion list.
+- Removed dead evaluation code with no in-repo callers: the unreferenced
+  `keywords_fuzzy_f1`, `authors_count_ratio` and `authors_order_score`
+  helpers, and the opposite-contract `validation_metrics.keywords_f1`
+  duplicate (the harness's `evaluate.keywords_f1` is the one scored). The
+  `title_soft_containment` docstring no longer promises a per-paper aggregate
+  that was never emitted.
+- Reference matching in the evaluator now runs once per paper instead of three
+  times: one shared `match_references` pass feeds `ref_matching_f1`,
+  `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
+  live in a single table that the per-pair loop gates on, instead of two
+  copies that had to stay in lockstep. Scores are unchanged: re-scoring stored
+  evaluation runs gives identical metrics, about three times faster.
+- The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
+  instead of the pure-Python table — same value, roughly three orders of
+  magnitude faster on long abstracts.
+- Input validation no longer rejects readable files. A password-protected DOCX
+  is reported as password-protected instead of corrupted: the CFB check
+  searched for an ASCII `EncryptedPackage` stream name that real files store as
+  UTF-16LE. A PDF that pypdfium2 opens is no longer rejected for bytes before
+  `%PDF-` or data after `%%EOF`; the reader's open verdict is the corruption
+  verdict, with the byte heuristics kept as a fallback. A PMC efetch download
+  (`<pmc-articleset>` wrapping exactly one `<article>`) validates and parses;
+  multi-article sets are still rejected, with a message naming the count. All
+  3,927 PMC/eLife/PLOS corpus files validate exactly as before.
+- One stale PDF bookmark no longer discards the whole outline; entries whose
+  destination lies past the last page keep their title with no resolvable page.
+  An ePub with one missing spine file now exports its readable chapters instead
+  of failing, failing only when no spine member is readable, and each skipped
+  chapter is recorded as an `EPUB_SPINE_MEMBER_SKIPPED` entry in
+  `extraction.warnings` instead of vanishing silently. An over-cap or
+  corrupt spine member still rejects the book. `dc:identifier` values in
+  `doi:`, `urn:doi:` and `https://doi.org/` form are recognised as DOIs
+  alongside bare `10.` strings.
+- The export gate's `VAL_EMPTY_EQ` now fires on a blank `lhs` or a blank
+  `rhs`, the shape a null equation side ships as, instead of only on an
+  all-blank row the exporter cannot produce. A link dropped from the export as
+  malformed is recorded as a `URL_MALFORMED_DROPPED` entry in
+  `extraction.warnings` instead of vanishing silently. `VAL_DANGLING_REF` now
+  covers `xref`/`url`/`eq` text ids, affiliation author ids, the three match
+  tables and the `extraction` id lists, and a new `VAL_DUPLICATE_PK` flags
+  repeated primary keys. The all-blank shape the old check fired on still
+  fires; nothing previously flagged goes quiet.
+- Impossible printed dates such as `31 April 2020` no longer export as
+  `published_date: '2020-04-31'`; the value falls back to `YYYY-MM`. Valid
+  dates, leap days included, are unchanged.
+- A checkpointed (`-o`) export now consolidates like the unsinked export (so
+  the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the file, and the file
+  is rewritten only when consolidation ran) and replays the enriched run's
+  `extraction.timings`, so the `enrich` stage time is reported on both paths.
+- Anthropic thinking budgets no longer produce requests the API rejects
+  with a 400. With `LLM_THINKING_BUDGET` set, a task cap sends thinking only
+  when it leaves at least 1024 tokens above the budget for the answer;
+  smaller caps run without thinking at temperature 0. Budgets below the 1024
+  minimum are raised to it and logged.
+- `bibr mcp` chew tools report failure causes again: `chew_paper` and
+  `chew_url` wrap non-`BibrError` failures in a `ToolError` carrying the
+  exception type and a secret-scrubbed message with the file name only,
+  never the full path or URL, instead of the detail-less "Error executing
+  tool". `BibrError` messages are scrubbed the same way, and `chew_url`
+  reports the downloaded file name rather than the URL.
+- `bibr mcp` without cloud credentials prints the one-line missing-key
+  message and exits 1 instead of dumping a traceback. Only the startup
+  credential check is reported that way; a `ValueError` from the running
+  server session keeps its traceback, and `bibr.chew()`/`Chewer` still raise
+  the provider's `ValueError`.
+- The offline batch docs no longer claim batch runs prefill the LLM
+  response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
+- The Crossref bulk DOI prefetch sends no request and seeds nothing when
+  both cache tiers are disabled, and leaves comma-bearing DOIs to their
+  individual lookup instead of failing the whole chunk's filter.
+- `CACHE_TTL_SECONDS=0` (or negative) now means "no expiry" instead of
+  failing every Redis SET with "invalid expire time" and silently
+  disabling the result cache.
+- `dir(bibr)` lists the lazy public API (`chew`, `Chewer`, `Result`,
+  `write_tables`, ...) without importing it, and `Result` answers the
+  plural table aliases (`figures`, `tables`, `affiliations`, `urls`,
+  `equations`).
+- Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
+  "not implemented" warning instead of passing silently.
+- `bibr serve` cache-miss waiters no longer give up after a flat 10 seconds and
+  pay for a duplicate extraction. Unless the operator set an explicit wait, the
+  wait budget now follows the pipeline timeout, and a waiter whose owner's
+  lease disappears re-reads the cache once before falling back (the owner's
+  publish may have landed between the waiter's read and its lease check) and
+  otherwise takes over only after atomically acquiring the lease, so exactly
+  one waiter extracts instead of every waiter at once.
+- `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
+  to report them degraded without ever checking the directory): a local
+  directory counts as present when the configured runtime could load from
+  it (the ONNX bundle is required only for `ML_RUNTIME=onnx`), re-checks
+  a failed classifier verdict after a bounded
+  interval instead of caching it forever, and still loads no model on the
+  request path. It also probes the OCR server's `/v1/models` for the
+  served-model alias the backend will ask for, so a healthy `/health` with
+  the wrong models listed no longer reads ready; a 401 there is reported as
+  unauthorized (check the key), not as a missing model. The backend's startup
+  wait remembers the last non-200 status for the same reason, cleared by any
+  later 200.
+- `bibr serve` keeps a failed `serve-http` OCR backend — one that owns a
+  cross-request readiness cooldown — instead of discarding it, so the
+  backend's own cooldown fail-fasts later requests instead of every request
+  paying a full poll. The published instance is never shut down. Clients
+  without such a cooldown are still discarded on failure.
+- On the `/papers/extract` and `/jobs` routes, `bibr serve` extraction
+  metering records now carry the `request_id` of the request that submitted
+  them (and the `job_id` for async jobs), so the worker-side `extract`
+  record joins back to the API-side request record.
+  Unhandled route failures also emit their request record with status 500
+  before the 500 response is built; the 500 body itself is unchanged.
+- The served-model choice for HTTP OCR endpoints now lives in one place. With
+  `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
+  own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
+  defaults and `--dry-run` now agree on the paddle alias, and the dry-run
+  preview prints the resolved alias.
+- The author-email harvester no longer hands an unrelated nearby address to an
+  author with no email. Ranked candidates pass the gate first, so a
+  lower-ranked candidate whose local part names the author wins over a nearer
+  one it does not name; a candidate is assigned only when the address sits on
+  a correspondence-marker line, its local part names the author (family or
+  given token, covering forms like `bathri@` for Bathrinath, plus a 2-letter
+  family name leading the address, as in `lixh@` for Xiaohong Li), or the
+  surname is printed in the same sentence. The single-corresponding-author
+  elimination fallback accepts a correspondence marker in the window, or a
+  PLOS-style `* E-mail:` line, only when no sentence pairs the marker with an
+  explicit address — those pairings are exhaustive. An editorial-office or
+  affiliation address printed before the real one is therefore skipped,
+  leaving the author empty for their own address instead of consuming them
+  with someone else's. On the JATS benchmark (3,617 gold addresses) this
+  assigns more addresses correctly than before (3,299 vs 3,287) with fewer
+  misassignments (38 vs 82); the addresses it newly leaves empty are opaque
+  ones with no textual link to any name (initials, numbers, transliterations
+  the harvester cannot match), which are left empty rather than guessed.
+- A `Published by ...` / `Published under ...` line no longer blocks
+  publication-date refinement for the whole record. Those tails carry no date,
+  so the label is skipped and scanning continues; only a date-like tail that
+  fails to parse still marks the record ambiguous. A history label mid-line
+  after prose is still ignored, and already-full dates are untouched.
+- The trained paper classifier no longer runs on an empty title+abstract. With
+  no signal the model returns a training-prior artifact, so the extractor
+  skips it and takes the LLM path with the full classification text. Skipping
+  is missing input, not an outage, so no `PAPER_CLASSIFIER_DEGRADED` warning
+  is recorded.
+- Bare OECD L1 short forms an LLM may return now validate: `Humanities`,
+  `Engineering`, `Medicine`, `Agriculture` (plus `Agricultural Sciences` and
+  `Medical Sciences`) canonicalize through the shared token-set matcher and a
+  two-entry synonym map, instead of dropping to empty. A string naming two
+  domains at once (`Humanities and Social Sciences`) stays empty instead of
+  resolving to one of them. Every other observed label string maps exactly
+  as before.
+- Equation cross-references no longer fire on unit spellings or software
+  names. A hyphen before a lowercase short form kills `CO2-eq.` matches while
+  a hyphen before longhand `Equation` still reads as a range dash (`Equation
+  5-Equation 7` keeps both halves), a `%` directly trailing the number kills
+  shares like `eq. (39.1%)`, and an all-caps `EQS` with no period is dropped
+  as the SEM package's name, dotted or not (`EQS 6.1`, `EQS 6`). Bare printed
+  forms (`eq 5`, `eqs 4 and 8`, `Eq (1)`) and dotted ids (`Eq. (2.3)`) still
+  match. Equation and section recall against the JATS corpora's gold links
+  is unchanged. Per-number expansion of ranges
+  (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
+  untouched, as is the reversed-range policy (`5-3` yields no rows), which is
+  now documented on `_expand_nums`.
 
 ### Added
 
+- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
+  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
+  under the same printable-ratio gate as body text. Default output is
+  unchanged; enable it to compare.
 - PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
   `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
   still loads PP-DocLayoutV3; switching is a settings change behind an
@@ -1162,6 +1422,10 @@ released.
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- Evaluation artifacts now record a `bibr_dirty` flag (uncommitted tracked
+  changes in the scoring checkout) and an `eval_code_sha256` digest over
+  `evaluation/*.py`, so a score from a patched worktree no longer stamps
+  the same provenance as unpatched code. No metric definition changed.
 - `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
   generated from the strict `PaperExport` models. `Result.model` is an instance
   of it when built from a dict, and it remains a `PaperExport` subclass.
@@ -1170,6 +1434,23 @@ released.
 
 ### Changed
 
+- `bibr chew --dry-run` now reports a Blockers section and exits 1 when the
+  real run would fail immediately: missing inputs, missing LLM credentials
+  (key lookup only, no client is built), an unstartable managed local LLM
+  backend, and the PDF OCR/image runtime. `bibr batch --dry-run` runs the
+  same local preflight (the PDF OCR/image runtime) the real run does and
+  exits 1 with it. A clean preview still exits 0.
+- Removed the shipped `bibr.metrics` package: the `PerformanceRecorder`
+  (whose only consumer was never published, and whose per-request peaks were
+  process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
+  no longer imports.
+- `bibr serve` no longer runs two rotating writers against one
+  `METER_LOG_PATH`. The API process writes request records to `METER_LOG_PATH`
+  itself while the worker writes extraction records — the only ones carrying
+  `llm_usage_totals` — to the sibling `<stem>.worker<suffix>` file, each
+  process rotating only its own file, so records are neither lost nor
+  duplicated across rotation. Operators tallying token usage must read both
+  files: `METER_LOG_PATH` alone holds no extraction records.
 - The identity stage is the only step that sets `metadata.doi`. The
   core-metadata extractor no longer looks for a DOI, and the no-LLM
   document-information fallback no longer fills one from a PDF's Subject or
@@ -1185,6 +1466,26 @@ released.
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
   still finish before the enrichment is reported partial.
+- On CPU-only machines the layout detector runs one page at a time unless
+  `LAYOUT_BATCH_SIZE` is set explicitly. Batching pages on CPU only grows
+  memory use without running faster.
+- CPU sessions for the layout detector and the sentence segmenter no longer
+  use the ONNX Runtime CPU arena, which otherwise holds its peak allocation
+  for the life of the session. The smaller footprint costs about 10% more
+  wall time on CPU.
+- In aggressive memory mode the NER reference parser loads on CPU rather than
+  the GPU and is released after post-parse. Balanced and keep-all modes keep
+  the previous device choice (CUDA when available) and keep it loaded across
+  files in one process; set `NER_DEVICE` to override.
+- The equation fallback sends fewer methods/results sentences to the LLM:
+  sentences whose digit-bearing parentheticals are only author-year citations,
+  bare years, or figure, table, supplement, equation or section references are
+  skipped — unless the surrounding prose carries digits of its own, in which
+  case they are still sent, as is any sentence with statistic-like content.
+  Measured over three public JATS corpora (3927 papers), about 18% of
+  sentences with digit-bearing parentheticals are skipped, all
+  citation/reference-only; no equation in the stored exports came from a
+  skipped sentence.
 
 ### Security
 
@@ -1264,6 +1565,20 @@ released.
   unix-socket URL gets it as before (`unix://:password@/path/redis.sock`), and so
   does a sibling URL on the same socket. A URL on a different server, or with its
   own password, is left alone.
+- `ML_CLASSIFIERS_REQUIRED=true` is now enforced on the local pipeline, not
+  just in serve. A required classifier that fails to load fails the file
+  with code `classifier_required_failed` and a message naming the setting.
+  The run used to continue silently without the classifiers; set
+  `ML_CLASSIFIERS_REQUIRED=false` to allow the run to continue without them.
+- `save_paper` writes only `.json` files and refuses to overwrite an
+  existing file unless `overwrite=True` is passed explicitly.
+
+### Removed
+
+- Dead helpers with no callers anywhere (including tests):
+  `snapshot_download_no_symlink`, `onnxruntime_available`,
+  `ONNX_TOKENIZER`, `vllm_mlx_available`, `TAG_TO_IDX`, and
+  `bibr.batch.runner._print`.
 
 ## [0.5.1] - 2026-09-12
 

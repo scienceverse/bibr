@@ -115,40 +115,45 @@ class AsyncRedisRateLimiter:
     async def _acquire_strict_interval(self):
         """
         Enforce strict time interval between requests using Lua script for atomicity.
+
+        All times cross into Lua as whole MILLISECONDS (ints). Passing float
+        seconds would break spacing: Redis converts a Lua number reply to an
+        integer, so a fractional-second wait (e.g. 0.3 s) came back as 0 and
+        the caller never slept.
         """
         script = """
         local key = KEYS[1]
-        local interval = tonumber(ARGV[1])
-        local now = tonumber(ARGV[2])
+        local interval_ms = tonumber(ARGV[1])
+        local now_ms = tonumber(ARGV[2])
 
-        local next_allowed = redis.call('GET', key)
-        if not next_allowed then
-            next_allowed = 0
-        else
-            next_allowed = tonumber(next_allowed)
+        local next_allowed = tonumber(redis.call('GET', key) or 0)
+
+        local wait_ms = 0
+        if next_allowed > now_ms then
+            wait_ms = next_allowed - now_ms
         end
 
-        local wait_time = 0
-        if next_allowed > now then
-            wait_time = next_allowed - now
-        end
-
-        local new_next = math.max(now, next_allowed) + interval
+        local new_next = math.max(now_ms, next_allowed) + interval_ms
         redis.call('SET', key, new_next)
-        redis.call('PEXPIRE', key, math.ceil(interval * 2000))
+        redis.call('PEXPIRE', key, math.ceil(new_next - now_ms + interval_ms))
 
-        return wait_time
+        return wait_ms
         """
         retries = 0
         while True:
             try:
-                now = time.time()
-                key = f"rate_limit:{self.resource_id}:next_allowed"
+                now_ms = int(time.time() * 1000)
+                interval_ms = int(round(self.window_seconds * 1000))
+                # ``_ms`` suffix: the stamp is epoch milliseconds, while older
+                # releases stored epoch seconds under ``next_allowed``. A
+                # distinct key keeps the two from reading each other's values
+                # when old and new processes share one Redis (rolling deploy).
+                key = f"rate_limit:{self.resource_id}:next_allowed_ms"
                 # Using eval directly on the connection
-                wait_time = await self.redis.eval(script, 1, key, self.window_seconds, now)
+                wait_ms = await self.redis.eval(script, 1, key, interval_ms, now_ms)
 
-                # Convert from string/float if needed (redis returns string or int usually)
-                wait_time = float(wait_time)
+                # Lua returns whole milliseconds; back to seconds for asyncio.
+                wait_time = float(wait_ms) / 1000.0
 
                 if wait_time > 0:
                     logger.debug(f"Rate limiting {self.resource_id}: sleeping for {wait_time:.3f}s")
@@ -194,7 +199,10 @@ class AsyncRedisRateLimiter:
         retries = 0
         while True:
             try:
-                now = time.time()
+                # Whole milliseconds: the strict-interval path reports waits in
+                # integer ms (Redis truncates Lua number replies), so quantize
+                # scores here for stable pruning and comparison.
+                now = int(time.time() * 1000) / 1000.0
                 window_start = now - self.window_seconds
                 member = f"{now}:{time.time_ns()}"
                 expire_seconds = int(self.window_seconds) + 10

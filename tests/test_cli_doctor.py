@@ -1242,6 +1242,9 @@ def test_check_ocr_backend_vision_needs_a_key(
     from bibr.local.cli import _check_ocr_backend
 
     monkeypatch.setattr(Settings.ocr, "backend", backend)
+    # A configured LLM key counts only when the LLM runs on the vision provider.
+    monkeypatch.setattr(Settings.llm, "provider", backend)
+    monkeypatch.setattr(Settings.llm, "base_url", None)
     monkeypatch.setattr(Settings.llm, "api_key", llm_key)
     monkeypatch.setattr(Settings, "GOOGLE_API_KEY", google_key)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -1252,6 +1255,22 @@ def test_check_ocr_backend_vision_needs_a_key(
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
 
     assert rec.calls == [expected]
+
+
+def test_check_ocr_backend_vision_ignores_another_providers_llm_key(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend
+
+    monkeypatch.setattr(Settings.ocr, "backend", "openai")
+    monkeypatch.setattr(Settings.llm, "provider", "gemini")
+    monkeypatch.setattr(Settings.llm, "base_url", None)
+    monkeypatch.setattr(Settings.llm, "api_key", "AIza-test-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    rec = _Recorder()
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert rec.calls == [_NO_OPENAI_KEY]
 
 
 def test_doctor_reports_an_unknown_llm_backend(monkeypatch):
