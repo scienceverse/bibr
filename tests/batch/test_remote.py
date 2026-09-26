@@ -650,3 +650,92 @@ def test_configured_value_reads_env_and_honours_dotenv_kill_switch(monkeypatch):
     monkeypatch.delenv("BIBR_BUILD_SHA")
     assert configured_value("BIBR_BUILD_SHA") is None
     assert configured_value("NOT_A_BIBR_SETTING") is None
+
+
+# --- audit S8: a finished result that fails to download is not re-submitted ---
+
+
+async def test_transient_fetch_error_retries_the_same_job(tmp_path):
+    """A reset connection while downloading a succeeded result re-fetches job1."""
+    serve = FakeServe()
+    real_handler = serve.handler
+    result_calls = {"n": 0}
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/result"):
+            result_calls["n"] += 1
+            if result_calls["n"] == 1:
+                raise httpx.ReadTimeout("connection reset", request=request)
+        return real_handler(request)
+
+    clock = _Clock()
+    sleeper = _Sleeper(clock)
+    executor = RemoteExecutor(
+        RemoteOptions(serve_url="http://serve", token="t", poll_interval=1.0, retries=3),  # noqa: S106
+        transport=httpx.MockTransport(flaky),
+        sleep=sleeper,
+        clock=clock,
+        rng=_NoJitter(),
+    )
+    (item,) = _items(tmp_path, "good")
+
+    _, [(_, outcome)] = await _run(executor, [item])
+
+    assert outcome.ok
+    assert len(serve.submits) == 1  # job1's computed result is kept, not re-run
+    assert outcome.extra["job_id"] == "job1"
+    assert outcome.extra["retries"] == 0  # the same-job fetch retry is not a re-submit
+    assert [s for s in sleeper.calls if s >= 5.0]  # backoff before the re-fetch
+
+
+async def test_persistent_fetch_error_still_falls_back_to_a_resubmit(tmp_path):
+    """A result that never downloads keeps the old fallback: re-submit, then fail."""
+    serve = FakeServe()
+
+    def down(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/result"):
+            raise httpx.ReadTimeout("connection reset", request=request)
+        return serve.handler(request)
+
+    clock = _Clock()
+    sleeper = _Sleeper(clock)
+    executor = RemoteExecutor(
+        RemoteOptions(serve_url="http://serve", token="t", poll_interval=1.0, retries=1),  # noqa: S106
+        transport=httpx.MockTransport(down),
+        sleep=sleeper,
+        clock=clock,
+        rng=_NoJitter(),
+    )
+    (item,) = _items(tmp_path, "good")
+
+    _, [(_, outcome)] = await _run(executor, [item])
+
+    assert not outcome.ok
+    assert outcome.error_code == "connection_error"
+    assert outcome.extra["job_id"] == "job2"  # the fallback re-submit ran
+    assert len(serve.submits) == 2
+
+
+async def test_process_reads_the_input_file_once(tmp_path, monkeypatch):
+    """The ledger sha comes from the uploaded bytes: one open, not two reads."""
+    import hashlib
+
+    serve = FakeServe()
+    executor, _sleeper = _executor(serve)
+    (item,) = _items(tmp_path, "good")
+    opens = {"n": 0}
+    real_open = Path.open
+
+    def counting_open(self, *args, **kwargs):
+        if self == item.path:
+            opens["n"] += 1
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counting_open)
+    outcome = await executor.process(executor.client(), item)
+
+    assert outcome.ok
+    # read_bytes() opens once; a second open would be the old sha256_file pass.
+    assert opens["n"] == 1
+    assert outcome.sha256 == hashlib.sha256(item.path.read_bytes()).hexdigest()
+    assert outcome.size == item.path.stat().st_size

@@ -187,3 +187,49 @@ def test_an_unreadable_colliding_file_still_gets_a_unique_id(tmp_path):
     missing = tmp_path / "b" / "paper.pdf"  # vanished between discovery and planning
     items = assign_paper_ids([a, missing])
     assert [i.paper_id for i in items] == [f"paper-{sha256_file(a)[:8]}", "paper"]
+
+
+# --- audit S8: only manifest-like files are read as manifests ---
+
+
+def test_top_level_stray_files_are_unsupported_not_manifests(tmp_path):
+    """A shell glob sweeping up a binary or prose file must not abort the batch."""
+    binary = tmp_path / "old.doc"
+    binary.write_bytes(bytes([0xD0, 0xCF, 0x11, 0xE0, 0x80, 0x41]) * 30)
+    prose = tmp_path / "notes.md"
+    prose.write_text("See paper a.pdf for details\n", encoding="utf-8")
+
+    found = discover_inputs([binary, prose])
+
+    assert found.files == []
+    assert found.missing == []
+    assert found.unsupported == [binary, prose]
+    assert found.problems == 2
+
+
+def test_unreadable_manifest_like_file_names_itself(tmp_path):
+    """A binary .txt names itself in unreadable instead of raising a bare codec error."""
+    binary = tmp_path / "list.txt"
+    binary.write_bytes(bytes([0xD0, 0xCF, 0x11, 0xE0, 0x80, 0x41]) * 30)
+
+    found = discover_inputs([binary])
+
+    assert found.files == []
+    assert found.manifests == []
+    assert len(found.unreadable) == 1
+    assert str(binary) in found.unreadable[0]
+    assert found.problems == 1
+
+
+def test_txt_and_extensionless_files_are_still_manifests(tmp_path):
+    """The manifest-like suffixes keep working, including no suffix at all."""
+    a = _pdf(tmp_path / "a.pdf")
+    manifest = tmp_path / "m.list"
+    manifest.write_text(f"{a}\n")
+    assert discover_inputs([str(manifest)]).files == [a]
+
+    bare = tmp_path / "manifest"
+    bare.write_text(f"{a}\n")
+    found = discover_inputs([str(bare)])
+    assert found.files == [a]
+    assert found.manifests == [bare]

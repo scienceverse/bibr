@@ -370,3 +370,36 @@ def test_bounded_text():
     assert bounded_text(None) is None
     assert bounded_text("short") == "short"
     assert len(bounded_text("y" * 2000, 10)) == 10
+
+
+# --- audit S8: the ledger keeps the documented validation counts ---
+
+
+def test_record_ok_line_carries_validation_counts(tmp_path):
+    """summarize_export computes n_validation_*, and the ledger line keeps them."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    item = _item(tmp_path)
+    export = _export(
+        schema_version="12.0",
+        extraction={
+            **_export()["extraction"],
+            "validation": {"errors": 2, "warnings": 5, "issues": []},
+        },
+    )
+    entry = ledger.record(item, Outcome("ok", export=export), context=CTX)
+
+    assert entry["n_validation_errors"] == 2
+    assert entry["n_validation_warnings"] == 5
+    on_disk = json.loads(ledger.path.read_text().splitlines()[-1])
+    assert on_disk["n_validation_errors"] == 2
+    assert on_disk["n_validation_warnings"] == 5
+
+
+def test_record_failed_line_leaves_validation_counts_empty(tmp_path):
+    """A failed paper has no export to validate: the fields stay null, not invented."""
+    ledger = Ledger(tmp_path / "outcomes.jsonl")
+    item = _item(tmp_path)
+    entry = ledger.record(item, Outcome("failed", error_code="chunk_error"), context=CTX)
+
+    assert entry["n_validation_errors"] is None
+    assert entry["n_validation_warnings"] is None

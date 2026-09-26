@@ -577,6 +577,8 @@ def run_batch(
         ui.warn(console, f"not found: {missing}")
     for unsupported in discovery.unsupported:
         ui.warn(console, f"unsupported file type, skipped: {unsupported}")
+    for unreadable in discovery.unreadable:
+        ui.warn(console, f"unreadable manifest, skipped: {unreadable}")
     for empty in discovery.empty_dirs:
         ui.warn(console, f"no supported files in: {empty}")
     if not discovery.files:

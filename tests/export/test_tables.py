@@ -148,6 +148,49 @@ def test_other_major_versions_are_refused(payload, tmp_path):
         write_tables([old], tmp_path)
 
 
+# --- audit S8: rows convert from the validated model, errors name the paper ---
+
+
+def test_lax_coercible_int_does_not_abort_the_corpus_write(payload, tmp_path):
+    """A converter-shaped string int lax-validates, so it must also write."""
+    import pyarrow.parquet as pq
+
+    payload = copy.deepcopy(payload)
+    assert payload["text"]
+    payload["text"][0]["page_number"] = "2"
+
+    report = write_tables([payload], tmp_path)
+
+    assert report.papers == 1
+    rows = pq.read_table(tmp_path / "text.parquet").to_pylist()
+    assert len(rows) == len(payload["text"])
+    assert rows[0]["page_number"] == 2
+
+
+def test_wrong_typed_field_still_fails_closed(payload, tmp_path):
+    """A value even lax validation rejects never reaches the tables (both trees agree)."""
+    from pydantic import ValidationError
+
+    payload = copy.deepcopy(payload)
+    payload["text"][0]["page_number"] = "not-a-number"
+    with pytest.raises(ValidationError):
+        write_tables([payload], tmp_path)
+
+
+def test_flush_failure_names_the_table_and_the_papers(tmp_path):
+    """A residual Arrow error at flush time points at the table and its papers."""
+    from bibr.export.tables import _flush_tables
+
+    class _FailingTable:
+        name = "text"
+
+        def flush(self):
+            raise ValueError("boom")
+
+    with pytest.raises(ValueError, match=r"table text.*papers a\.pdf, b\.pdf"):
+        _flush_tables([_FailingTable()], ["a.pdf", "b.pdf"])
+
+
 def test_results_are_accepted(payload, tmp_path):
     from bibr.api import Result
 

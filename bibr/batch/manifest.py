@@ -7,9 +7,11 @@ Inputs are any mix of:
 * **directories** — searched recursively for the extensions bibr supports;
 * **individual files**.
 
-A file argument whose extension bibr cannot process (``.txt``, ``.lst``, ...)
-is read as a manifest. Discovery never fails on a missing entry: the path is
-recorded in :attr:`Discovery.missing` and the caller decides how loud to be.
+A file argument with a manifest-like suffix (``.txt``, ``.lst``, ``.list``,
+``.manifest``, or no suffix) is read as a manifest; any other file bibr
+cannot process is reported as unsupported instead of being decoded.
+Discovery never fails on a missing entry: the path is recorded in
+:attr:`Discovery.missing` and the caller decides how loud to be.
 """
 
 from __future__ import annotations
@@ -23,6 +25,11 @@ from typing import Any
 from bibr.input.supported_files import SUPPORTED_EXTENSIONS
 
 _HASH_CHUNK = 1024 * 1024
+# File suffixes read as manifests when passed as file arguments. Anything
+# else bibr cannot process goes to Discovery.unsupported: a stray binary
+# from a shell glob must not abort the batch with a UnicodeDecodeError, and
+# prose files must not become 'not found' manifest entries.
+MANIFEST_SUFFIXES = frozenset({".txt", ".lst", ".list", ".manifest", ""})
 # Stems ``bibr batch`` does not give a paper as its id: ``<out>/<paper_id>.json``
 # would be the runner's own ``run_info.json``.
 RESERVED_IDS = frozenset({"run_info"})
@@ -52,10 +59,13 @@ class Discovery:
     missing: list[str] = field(default_factory=list)
     empty_dirs: list[Path] = field(default_factory=list)
     unsupported: list[Path] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
 
     @property
     def problems(self) -> int:
-        return len(self.missing) + len(self.unsupported) + len(self.empty_dirs)
+        return (
+            len(self.missing) + len(self.unsupported) + len(self.empty_dirs) + len(self.unreadable)
+        )
 
 
 def is_supported(path: Path) -> bool:
@@ -77,10 +87,22 @@ def parse_manifest_lines(text: str) -> list[str]:
     return entries
 
 
+def is_manifest_like(path: Path) -> bool:
+    """Whether a file argument should be read as a manifest (see :data:`MANIFEST_SUFFIXES`)."""
+    return path.suffix.lower() in MANIFEST_SUFFIXES
+
+
 def _read_manifest(manifest: Path, found: Discovery, seen: set[Path]) -> None:
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError) as exc:
+        # A binary or unreadable manifest-like file names itself instead of
+        # aborting discovery with a path-less codec error.
+        found.unreadable.append(f"{manifest}: not readable as a manifest ({exc})")
+        return
     found.manifests.append(manifest)
     base = manifest.parent
-    for entry in parse_manifest_lines(manifest.read_text(encoding="utf-8")):
+    for entry in parse_manifest_lines(text):
         candidate = Path(entry).expanduser()
         if not candidate.is_absolute():
             candidate = base / candidate
@@ -131,8 +153,10 @@ def discover_inputs(inputs: Sequence[str | Path]) -> Discovery:
         elif path.is_file():
             if is_supported(path):
                 _add_files([path], found, seen)
-            else:
+            elif is_manifest_like(path):
                 _read_manifest(path, found, seen)
+            else:
+                found.unsupported.append(path)
         else:
             found.missing.append(str(raw))
     return found

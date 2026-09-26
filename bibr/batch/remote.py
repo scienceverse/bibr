@@ -31,6 +31,7 @@ Backpressure and failure policy (mirrors the bibr-training campaign script):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -49,7 +50,7 @@ from bibr.batch.ledger import (
     bounded_text,
     utc_now_iso,
 )
-from bibr.batch.manifest import BatchItem, sha256_file
+from bibr.batch.manifest import BatchItem
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,9 @@ TRANSIENT_MARKERS = (
 # The serve's ``PIPELINE_TIMEOUT`` fails a job with 504: the paper was too slow.
 PIPELINE_TIMEOUT = "pipeline_timeout"
 MAX_POLL_ERRORS = 5
+# A finished result that fails to download is fetched again from the same
+# job before the paper is re-submitted from scratch.
+MAX_FETCH_ERRORS = 3
 MAX_POLL_INTERVAL = 15.0
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -310,7 +314,7 @@ class RemoteExecutor:
         last_transient: TransientError | None = None
         timeout_retried = False
         try:
-            sha256 = sha256_file(item.path)
+            # One read: the hash comes from the bytes already in hand.
             data = item.path.read_bytes()
         except OSError as exc:
             return self._finish(
@@ -321,6 +325,7 @@ class RemoteExecutor:
                 size=None,
                 retries=0,
             )
+        sha256 = hashlib.sha256(data).hexdigest()
         size = len(data)
 
         for attempt in range(self.options.retries + 1):
@@ -546,31 +551,48 @@ class RemoteExecutor:
         )
 
     async def _fetch_result(self, client: httpx.AsyncClient, job_id: str) -> dict[str, Any]:
-        try:
-            response = await client.get(f"/papers/jobs/{job_id}/result", timeout=600.0)
-        except httpx.TransportError as exc:
-            raise TransientError(
-                "connection_error", f"{type(exc).__name__}: {exc}", job_id=job_id
-            ) from exc
-        status = response.status_code
-        if status >= 500 or status == 409:
-            raise TransientError(
-                f"http_{status}", bounded_text(response.text, 300) or "", job_id=job_id
-            )
-        if status != 200:
-            raise PermanentError(
-                f"http_{status}",
-                bounded_text(response.text, 500) or "",
-                http_status=status,
-                job_id=job_id,
-            )
-        try:
-            export = response.json()
-        except ValueError:
-            raise PermanentError("bad_result_json", "result is not JSON", job_id=job_id) from None
-        if not isinstance(export, dict):
-            raise PermanentError("bad_result_json", "result is not a JSON object", job_id=job_id)
-        return export
+        # Transient download failures retry against the same job: the result
+        # is already computed, so only a persistently failing fetch falls
+        # back to a full re-submit via TransientError.
+        errors = 0
+        while True:
+            try:
+                response = await client.get(f"/papers/jobs/{job_id}/result", timeout=600.0)
+            except httpx.TransportError as exc:
+                errors += 1
+                if errors > MAX_FETCH_ERRORS:
+                    raise TransientError(
+                        "connection_error", f"{type(exc).__name__}: {exc}", job_id=job_id
+                    ) from exc
+                await self._sleep(self._backoff(errors - 1))
+                continue
+            status = response.status_code
+            if status >= 500 or status == 409:
+                errors += 1
+                if errors > MAX_FETCH_ERRORS:
+                    raise TransientError(
+                        f"http_{status}", bounded_text(response.text, 300) or "", job_id=job_id
+                    )
+                await self._sleep(self._backoff(errors - 1))
+                continue
+            if status != 200:
+                raise PermanentError(
+                    f"http_{status}",
+                    bounded_text(response.text, 500) or "",
+                    http_status=status,
+                    job_id=job_id,
+                )
+            try:
+                export = response.json()
+            except ValueError:
+                raise PermanentError(
+                    "bad_result_json", "result is not JSON", job_id=job_id
+                ) from None
+            if not isinstance(export, dict):
+                raise PermanentError(
+                    "bad_result_json", "result is not a JSON object", job_id=job_id
+                )
+            return export
 
     # -- the run ---------------------------------------------------------
 
