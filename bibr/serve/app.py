@@ -16,6 +16,7 @@ the async-job API (``JOBS_ENABLED``) and metering (``METER_ENABLED``) are
 on by default and independently toggleable.
 """
 
+import functools
 import json
 import logging
 import time
@@ -31,20 +32,6 @@ logger = logging.getLogger(__name__)
 #: process at 503 forever; a cached ``ok`` is never re-probed on the request
 #: path (no model load there), while failures are retried after this interval.
 _CLASSIFIER_CHECK_RETRY_SECONDS = 30.0
-
-
-def classifier_readiness(statuses) -> tuple[str, bool]:
-    """Summarize worker classifier states without initiating model loading."""
-    from bibr.pipeline.classifier_resources import ClassifierState
-
-    states = {status.state for status in statuses.values()}
-    if ClassifierState.FAILED_REQUIRED in states:
-        return ("failed_required", False)
-    if ClassifierState.DEGRADED in states:
-        return ("degraded", True)
-    if states <= {ClassifierState.READY, ClassifierState.UNCONFIGURED}:
-        return ("ready", True)
-    return ("loading", False)
 
 
 def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[str, bool]:
@@ -66,10 +53,11 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
         for model_id, revision in configured:
             if not model_id:
                 continue
-            # A local directory or file resolves exactly as the loaders
-            # resolve it (resolve_runtime) without loading any model: torch
-            # loads the directory itself, so the ONNX bundle is required
-            # only when ML_RUNTIME=onnx. snapshot_download rejects
+            # A local directory or file counts as present when the
+            # configured runtime could load from it (resolve_runtime)
+            # without loading any model: torch loads the directory
+            # itself, so the ONNX bundle is required only when
+            # ML_RUNTIME=onnx. snapshot_download rejects
             # filesystem paths outright, so without this a baked-in
             # classifier is reported missing. Local-only: no Hub access,
             # so this never slows the readiness probe.
@@ -79,7 +67,7 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
                 resolve_runtime(
                     "classifier",
                     settings=settings,
-                    bundle=lambda _m=model_id, _r=revision: find_onnx_bundle(_m, _r),
+                    bundle=functools.partial(find_onnx_bundle, model_id, revision),
                     bundle_hint="publish an onnx/ bundle or run a torch runtime",
                 )
                 continue

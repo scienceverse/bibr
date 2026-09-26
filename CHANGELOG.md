@@ -350,9 +350,9 @@ released.
   one waiter extracts instead of every waiter at once.
 - `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
   to report them degraded without ever checking the directory): a local
-  directory counts as present exactly when the loaders could use it (torch
-  loads the directory itself; the ONNX bundle is required only when
-  `ML_RUNTIME=onnx`), re-checks a failed classifier verdict after a bounded
+  directory counts as present when the configured runtime could load from
+  it (the ONNX bundle is required only for `ML_RUNTIME=onnx`), re-checks
+  a failed classifier verdict after a bounded
   interval instead of caching it forever, and still loads no model on the
   request path. It also probes the OCR server's `/v1/models` for the
   served-model alias the backend will ask for, so a healthy `/health` with
@@ -365,14 +365,12 @@ released.
   backend's own cooldown fail-fasts later requests instead of every request
   paying a full poll. The published instance is never shut down. Clients
   without such a cooldown are still discarded on failure.
-- `bibr serve` extraction metering records now carry the `request_id` of the
-  request that submitted them (and the `job_id` for async jobs), so the
-  worker-side `extract` record joins back to the API-side request record.
+- On the `/papers/extract` and `/jobs` routes, `bibr serve` extraction
+  metering records now carry the `request_id` of the request that submitted
+  them (and the `job_id` for async jobs), so the worker-side `extract`
+  record joins back to the API-side request record.
   Unhandled route failures also emit their request record with status 500
   before the 500 response is built; the 500 body itself is unchanged.
-- The export stage's periodic collection keeps its full `gc.collect()` between
-  chunks; only its misleading comment is corrected (a full sweep holds the
-  GIL throughout, so the executor offload never spared the event loop).
 - The served-model choice for HTTP OCR endpoints now lives in one place. With
   `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
   own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve

@@ -10,22 +10,6 @@ def test_serve_image_prefetches_both_classifier_revisions():
     assert "snapshot_download" in dockerfile
 
 
-def test_classifier_readiness_distinguishes_degraded_and_required_failure():
-    from bibr.pipeline.classifier_resources import ClassifierState, ClassifierStatus
-    from bibr.serve.app import classifier_readiness
-
-    degraded = {
-        "paper": ClassifierStatus(ClassifierState.DEGRADED, "cpu", "missing"),
-        "section": ClassifierStatus(ClassifierState.READY, "cpu"),
-    }
-    required = {
-        **degraded,
-        "paper": ClassifierStatus(ClassifierState.FAILED_REQUIRED, "cpu", "missing"),
-    }
-    assert classifier_readiness(degraded) == ("degraded", True)
-    assert classifier_readiness(required) == ("failed_required", False)
-
-
 def test_artifact_readiness_checks_local_cache_only():
     from types import SimpleNamespace
 

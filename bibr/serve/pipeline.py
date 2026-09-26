@@ -83,8 +83,8 @@ class ServePipeline(Pipeline):
         from bibr.serve import ocr_backend  # noqa: F401
 
         # Served-model name for the co-located OCR server: the ``glm-ocr``
-        # alias, or the Paddle alias under ``OCR_BACKEND=paddle-http``; set
-        # ``OCR_MODEL`` to target any other served model — vLLM 404s on a
+        # alias, or the Paddle alias under ``OCR_BACKEND=paddle-http`` or
+        # ``OCR_PROFILE=paddle``; set ``OCR_MODEL`` to target any other served model — vLLM 404s on a
         # mismatch.
         settings_snapshot = snapshot_settings(settings)
         ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)
