@@ -119,6 +119,7 @@ def test_repeating_body_text_demoted_as_running_header():
     ("Sexual imprinting & eye color DeBruine et al. preprint v.2") is tagged
     ``text`` by GLM-OCR, not a heading, so it bypassed the heading-only
     detection and leaked into the References block, corrupting segmentation.
+    The banner sits in the top margin band, like real page furniture.
     """
     header = "Sexual imprinting & eye color DeBruine et al. preprint v.2"
     pages = [
@@ -127,11 +128,11 @@ def test_repeating_body_text_demoted_as_running_header():
             _text("Smith, J. (2020). A real reference. Journal of Examples, 1, 1-9."),
         ],
         [
-            _text(header),
+            _text(header, y=40),
             _text("Jones, A. (2019). Another reference here. Journal of Things, 2, 10-20."),
         ],
         [
-            _text(header),
+            _text(header, y=40),
             _text("Brown, B. (2018). A third reference here. Journal of Stuff, 3, 21-30."),
         ],
     ]
@@ -151,10 +152,11 @@ def test_repeating_body_text_with_whitespace_noise_still_demoted():
 
     The same header is OCR'd with different internal whitespace on different
     pages; whitespace-normalized comparison must still recognise the repeat.
+    The banner sits in the top margin band, like real page furniture.
     """
     pages = [
-        [_text("Running  Header\nWith Spacing")],
-        [_text("Running Header With  Spacing")],
+        [_text("Running  Header\nWith Spacing", y=40)],
+        [_text("Running Header With  Spacing", y=40)],
     ]
     parser = PDFParser(json_result=pages)
     parser._mark_running_headers()
@@ -181,7 +183,10 @@ def test_long_repeated_body_block_not_demoted():
 
 
 def test_repeated_body_header_diverted_from_reference_content():
-    """End-to-end: the repeated body-text header must not reach section content."""
+    """End-to-end: the repeated body-text header must not reach section content.
+
+    The banner sits in the top margin band, like real page furniture.
+    """
     header = "Sexual imprinting & eye color DeBruine et al. preprint v.2"
     pages = [
         [
@@ -189,11 +194,11 @@ def test_repeated_body_header_diverted_from_reference_content():
             _text("Smith, J. (2020). A real reference. Journal of Examples, 1, 1-9."),
         ],
         [
-            _text(header),
+            _text(header, y=40),
             _text("Jones, A. (2019). Another reference here. Journal of Things, 2, 10-20."),
         ],
         [
-            _text(header),
+            _text(header, y=40),
             _text("Brown, B. (2018). A third reference here. Journal of Stuff, 3, 21-30."),
         ],
     ]
@@ -275,3 +280,52 @@ def test_footer_band_repeats_are_demoted():
     # The page-1 occurrence keeps its existing title reprieve; the repeat in
     # the footer band is demoted.
     assert (1, 1) in parser._running_header_regions
+
+
+def test_repeated_mid_column_body_sentence_is_not_a_running_header():
+    """A short body sentence repeated mid-column on two pages stays in the body.
+
+    Two-study papers legitimately repeat boilerplate (analysis notes, table
+    notes) mid-column; repetition alone must not divert it to headers.
+    """
+    repeated = "All analyses were conducted in R (R Core Team, 2021)."
+    pages = [
+        [
+            _heading("paragraph_title", "Method", y=300),
+            _text(repeated, y=500),
+            _text("Participants were 120 students.", y=560),
+        ],
+        [
+            _heading("paragraph_title", "Method", y=300),
+            _text(repeated, y=500),
+            _text("Participants were 200 adults.", y=560),
+        ],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (0, 1) not in parser._running_header_regions
+    assert (1, 1) not in parser._running_header_regions
+
+
+def test_repeated_mid_column_body_sentence_survives_full_parse():
+    """End-to-end: the repeated mid-column sentence reaches the body text."""
+    repeated = "All analyses were conducted in R (R Core Team, 2021)."
+    pages = [
+        [
+            _heading("paragraph_title", "Method", y=300),
+            _text(repeated, y=500),
+            _text("Participants were 120 students.", y=560),
+        ],
+        [
+            _heading("paragraph_title", "Method", y=300),
+            _text(repeated, y=500),
+            _text("Participants were 200 adults.", y=560),
+        ],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser.parse()
+    deferred = " ".join(t[0] for t in parser._deferred_texts)
+
+    assert deferred.count(repeated) == 2
+    assert repeated not in parser.detected_headers

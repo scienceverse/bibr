@@ -1,9 +1,11 @@
 """Heading / section-hint region handlers for :class:`PDFParser`.
 
-Extracted from :mod:`bibr.structure.pdf_parser` as :class:`HeadingHandlersMixin`.
-Methods move verbatim (only ``text_repair`` helper calls are spelled with their
-public names); shared state (``self.sections``, counters, caption/hint trackers)
-lives on :class:`PDFParser` and is reached through ``self``.
+:class:`HeadingHandlersMixin` classifies heading regions (section boundary,
+caption, body-text demotion, publisher-noise drop), opens sections with
+numbering-aware levels, reuses hint-created Abstract/References sections,
+and joins split front-page titles. Shared state (``self.sections``,
+counters, caption/hint trackers) lives on :class:`PDFParser` and is reached
+through ``self``.
 """
 
 import logging
@@ -41,6 +43,12 @@ _SECTION_HINT_NAMES: dict[str, str] = {
     "abstract": "Abstract",
     "reference": "References",
     "reference_content": "References",
+}
+
+# Canonical class of each hint-created section, for reuse matching.
+_SECTION_HINT_CANONICAL: dict[str, CanonicalSection] = {
+    "abstract": CanonicalSection.ABSTRACT,
+    "references": CanonicalSection.REFERENCES,
 }
 
 # A reference-list lead-in that OCR occasionally promotes to a heading, e.g.
@@ -151,6 +159,10 @@ class HeadingHandlersMixin:
             self._emit_content_without_promotion(text, page_number, bbox, from_ocr=from_ocr)
             return
 
+        # Only a real section boundary flushes a pending cross-page
+        # carry-over. Headings dropped as publisher noise or rerouted to
+        # captions/body above must not split a paragraph in flight.
+        self._flush_carry_over()
         # Only a real section boundary invalidates stale caption tracking.
         self._caption_barriers.append(self._source_region_index)
         self._terminal_reference_tail_section_id = None
@@ -158,6 +170,7 @@ class HeadingHandlersMixin:
         # Capture doc_title on page 1 as the detected paper title.
         # Skip text that looks like a copyright/permission/license notice
         # (these sometimes precede the actual title on page 1).
+        captured_title = False
         if (
             label == "doc_title"
             and self._is_front_page(page_number)
@@ -173,12 +186,56 @@ class HeadingHandlersMixin:
             text = _TITLE_BADGE_GLYPH_RE.sub("", text)
             self._detected_title = text
             logger.debug("Detected doc_title on page 1: %s", self._detected_title[:80])
+            captured_title = True
+
+        # A front-page title split across doc_title regions continues the
+        # title instead of opening a stray level-1 section: still on the
+        # title section, nothing emitted since, vertically adjacent.
+        if (
+            label == "doc_title"
+            and self._is_front_page(page_number)
+            and self._detected_title is not None
+            and self._title_section_id is not None
+            and self._current_section_id == self._title_section_id
+            and len(self.assembler) == self._title_assembler_len
+            and self._title_bbox is not None
+            and self._is_bbox_nearby(self._title_bbox, self._title_page, bbox, page_number)
+        ):
+            continuation = _TITLE_BADGE_GLYPH_RE.sub("", text)
+            self._detected_title = f"{self._detected_title} {continuation}".strip()
+            for section in self.sections:
+                if section.section_id == self._title_section_id:
+                    section.header = self._detected_title
+                    section.provenance.append(
+                        Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))
+                    )
+                    break
+            self._title_bbox = self._merge_bboxes(self._title_bbox, bbox_to_tuple(bbox))
+            logger.debug("Extended split doc_title on page 1: %s", self._detected_title[:80])
+            return
 
         # If a section hint already created a section with the same name,
         # reuse it instead of creating a duplicate (e.g., "reference" hint
         # creates "References" section, then a "References" heading appears).
+        # The match is on the canonical class, not the literal string, so a
+        # printed "Literature Cited" or "5 References" reuses the hint's
+        # "References" section instead of leaving it empty beside a synthetic
+        # one. ("Reference List" is not a classifier alias and still misses.)
         text_lower = text.lower().strip()
         hint_section_id = self._hint_section_lookup.get(text_lower)
+        if hint_section_id is None:
+            from bibr.structure.section_classifier import _classify_lookup
+
+            heading_type, _score = _classify_lookup(normalize_text(text))
+            for hint_key, section_id in self._hint_section_lookup.items():
+                if (
+                    hint_key == "references"
+                    and heading_type == CanonicalSection.REFERENCES
+                    or hint_key == "abstract"
+                    and heading_type == CanonicalSection.ABSTRACT
+                ):
+                    hint_section_id = section_id
+                    break
         if hint_section_id is not None:
             self._current_section_id = hint_section_id
             for section in self.sections:
@@ -226,6 +283,11 @@ class HeadingHandlersMixin:
         )
         self.sections.append(section)
         self._current_section_id = self._section_counter
+        if captured_title:
+            self._title_section_id = section.section_id
+            self._title_bbox = bbox_to_tuple(bbox)
+            self._title_page = page_number
+            self._title_assembler_len = len(self.assembler)
 
     def _classify_heading_disposition(self, label: str, text: str) -> HeadingDisposition:
         """Classify a heading region exactly once into its terminal treatment."""
@@ -381,13 +443,28 @@ class HeadingHandlersMixin:
         elif hint_name:
             # Check if a heading-created section with the same name already
             # exists (heading came before the hint region).  If so, reuse it
-            # instead of creating a duplicate.
+            # instead of creating a duplicate. The match is on the canonical
+            # class, not the literal string, so a printed "Literature Cited"
+            # or "Bibliography" heading owns the hint's entries instead of
+            # standing empty beside a synthetic "References" section.
             hint_lower = hint_name.lower()
             existing = None
-            for sec in self.sections:
-                if sec.header.lower() == hint_lower and sec.level > 0:
-                    existing = sec
-                    break
+            target_type = _SECTION_HINT_CANONICAL.get(hint_lower)
+            if target_type is not None:
+                from bibr.structure.section_classifier import _classify_lookup
+
+                for sec in reversed(self.sections):
+                    if sec.level <= 0 or sec.section_id in self._hint_section_ids:
+                        continue
+                    current_type, _score = _classify_lookup(normalize_text(sec.header))
+                    if current_type == target_type:
+                        existing = sec
+                        break
+            if existing is None:
+                for sec in self.sections:
+                    if sec.header.lower() == hint_lower and sec.level > 0:
+                        existing = sec
+                        break
 
             if existing is not None:
                 self._current_section_id = existing.section_id

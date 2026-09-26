@@ -117,3 +117,45 @@ class TestFrontPageHelper:
 
     def test_empty_frame_falls_back_to_one(self):
         assert _front_page(pd.DataFrame({"page_number": []})) == 1
+
+
+def test_sliced_body_prose_keeps_citation_superscripts():
+    """chew(pages=5-12): mid-paper prose before the first heading is not a byline."""
+    pages = [[] for _ in range(4)]
+    pages.append(
+        _page(
+            _text("Sleep supports consolidation$^{4,5}$."),
+            {"label": "paragraph_title", "content": "Method", "bbox_2d": [0, 30, 100, 60]},
+        )
+    )
+    parser = PDFParser(pages, first_page_index=4)
+    parser.parse()
+
+    assert [e.text for e in parser.assembler.entries] == ["Sleep supports consolidation$^{4,5}$."]
+
+
+def test_title_section_byline_is_stripped():
+    """Unsliced title-then-byline: markers go even though a heading precedes."""
+    pages = [
+        _page(
+            _heading(TITLE),
+            _text("Jane Doe$^{1,2}$ and John Roe$^{3}$"),
+        )
+    ]
+    parser = PDFParser(pages, first_page_index=0)
+    parser.parse()
+
+    assert parser._detected_title == TITLE
+    assert [e.text for e in parser.assembler.entries] == ["Jane Doe and John Roe"]
+
+
+def test_sliced_long_prose_row_is_not_byline_shaped():
+    """A long row on the sliced front page keeps its markers even unstripped."""
+    parser = PDFParser([], first_page_index=4)
+    parser._current_section_id = 0
+    text = "Sleep supports consolidation across repeated testing sessions in older adults$^{4,5}$."
+    assert len(text) > 60
+    parser._handle_content(text, 5, bbox=[0, 0, 1, 1])
+    parser._flush_carry_over()
+
+    assert [e.text for e in parser.assembler.entries] == [text]

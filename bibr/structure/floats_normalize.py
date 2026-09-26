@@ -153,9 +153,11 @@ def merge_figure_panels_with_remap(
     """Collapse per-panel figures into their labeled same-page figure.
 
     Figures whose caption is a bare panel marker are absorbed by the nearest
-    labeled figure on the same page — following first (panels usually precede
-    their caption in reading order), else preceding. Caption-less figures are
-    absorbed only when spatially near the group being assembled (missing bbox
+    labeled figure on the same page — the vertically nearest group bbox when
+    bboxes are available (required to be near, as in pass 2), else following
+    first (panels usually precede their caption in reading order), else
+    preceding. Caption-less figures are absorbed only when spatially near
+    the group being assembled (missing bbox
     info falls back to trusting sequential order, matching
     ``_is_bbox_nearby``). Absorbed figures donate their provenance, and their
     crop when the survivor has none. Figures with no target are always kept —
@@ -172,23 +174,49 @@ def merge_figure_panels_with_remap(
     absorbed: dict[int, int] = {}  # index -> target index
     group_bbox: dict[int, list[float] | None] = {}  # target index -> union bbox
 
+    def _vertical_gap(a: list[float], b: list[float]) -> float:
+        if a[3] <= b[1]:
+            return b[1] - a[3]
+        if b[3] <= a[1]:
+            return a[1] - b[3]
+        return 0.0
+
     def nearest_target(i: int, fig: PaperFigure) -> int | None:
+        same_page = [
+            j
+            for j in range(len(figures))
+            if j != i and is_target[j] and figures[j].page_number == fig.page_number
+        ]
+        panel_bbox = _figure_bbox(fig)
+        geometric = [
+            j
+            for j in same_page
+            if panel_bbox is not None and group_bbox.get(j, _figure_bbox(figures[j])) is not None
+        ]
+        if geometric:
+            # Bboxes available: join the vertically nearest group, as pass 2
+            # does — list order alone would steal a panel sitting next to the
+            # previous figure. Ties prefer the following target.
+            best: int | None = None
+            best_key: tuple[float, int] = (0.0, 0)
+            for j in geometric:
+                group = group_bbox.get(j, _figure_bbox(figures[j]))
+                assert group is not None  # noqa: S101 — filtered above
+                if not _vertically_near(panel_bbox, group):
+                    continue
+                # Ties prefer the following target, as the order rule does.
+                key = (_vertical_gap(panel_bbox, group), 0 if j > i else 1)
+                if best is None or key < best_key:
+                    best, best_key = j, key
+            return best
         following = next(
-            (
-                j
-                for j in range(i + 1, len(figures))
-                if is_target[j] and figures[j].page_number == fig.page_number
-            ),
+            (j for j in range(i + 1, len(figures)) if j in same_page),
             None,
         )
         if following is not None:
             return following
         return next(
-            (
-                j
-                for j in range(i - 1, -1, -1)
-                if is_target[j] and figures[j].page_number == fig.page_number
-            ),
+            (j for j in range(i - 1, -1, -1) if j in same_page),
             None,
         )
 

@@ -1,14 +1,14 @@
 """Body-text / formula / footnote region handlers for :class:`PDFParser`.
 
-Extracted from :mod:`bibr.structure.pdf_parser` as :class:`TextHandlersMixin`.
-Methods move verbatim (only ``text_repair.bbox_to_tuple`` is spelled with its
-public name, and the static ``_should_join`` now references
-``TextHandlersMixin._has_terminal_punct`` rather than ``PDFParser`` to avoid a
-circular import); shared state (``self.assembler``, carry-over, counters) lives
-on :class:`PDFParser` and is reached through ``self``.
+:class:`TextHandlersMixin` accumulates body text with cross-page continuity
+(carry-over joins, URL-wrap bridges), buffers footnotes for relocation to
+footnote sections, and emits display formulas. Shared state
+(``self.assembler``, carry-over, counters) lives on :class:`PDFParser` and
+is reached through ``self``.
 """
 
 import logging
+import re
 from collections.abc import Set as AbstractSet
 
 from bibr.input.consolidate_text import (
@@ -32,9 +32,49 @@ from bibr.utils.text import clean_extracted_url, normalize_text
 
 logger = logging.getLogger(__name__)
 
+# Trailing closers that can follow sentence-terminal punctuation: a paragraph
+# ending in a quotation ("...study.\"") is finished, not continued.
+_TRAILING_CLOSERS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb"
+# A footnote marker after the period ("samples.$^{1}$", "samples.\u00b9") is
+# not a sentence continuation either. LaTeX ``$^{...}$``/``^{...}`` tails and
+# literal Unicode superscript runs are stripped before the terminal check.
+_TRAILING_SUPERSCRIPT_RE = re.compile(
+    r"(?:\$\s*\^\s*\{[^}]*\}\s*\$|\^\{[^}]*\}|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079]+)\s*$"
+)
+# A byline-shaped row is short and unterminated ("Jane Doe^{1,2} and John
+# Roe^{3}"); body prose usually ends in terminal punctuation. Only rows of
+# this shape are stripped on a sliced front page with no title yet.
+_BYLINE_SHAPED_MAX_CHARS = 200
+
 
 class TextHandlersMixin:
     """Content, formula, footnote, URL, and continuity handlers for ``PDFParser``."""
+
+    def _is_byline_zone(self, page_number: int, text: str = "") -> bool:
+        """True when affiliation-marker stripping applies to *text*.
+
+        The byline zone is the front page while the detected-title section
+        is current (the normal title-then-byline layout the old
+        "no heading yet" gate never matched), or — with no heading at all —
+        the absolute first page. A sliced front page is usually mid-paper
+        prose with numeric citation superscripts, so there only a short,
+        unterminated, byline-shaped row is stripped.
+        """
+        if self._is_front_page(page_number) and (
+            self._title_section_id is not None
+            and self._current_section_id == self._title_section_id
+        ):
+            return True
+        if self._current_section_id != 0:
+            return False
+        if page_number == 1:
+            return True
+        if not self._is_front_page(page_number):
+            return False
+        stripped = text.strip()
+        return bool(stripped) and (
+            len(stripped) <= _BYLINE_SHAPED_MAX_CHARS and not self._has_terminal_punct(stripped)
+        )
 
     def _handle_content(
         self,
@@ -54,10 +94,10 @@ class TextHandlersMixin:
         if not text:
             return
 
-        # Strip affiliation markers (e.g. "Author ^{1,2}") from pre-section
-        # content on page 1 (the author byline zone).  These are NOT citation
-        # superscripts and would otherwise produce spurious bib xrefs.
-        if self._is_front_page(page_number) and self._current_section_id == 0:
+        # Strip affiliation markers (e.g. "Author ^{1,2}") in the byline zone.
+        # These are NOT citation superscripts and would otherwise produce
+        # spurious bib xrefs.
+        if self._is_byline_zone(page_number, text):
             text = strip_affiliation_markers(text)
 
         self._start_publisher_note_back_matter(text, page_number, bbox)
@@ -74,7 +114,9 @@ class TextHandlersMixin:
 
         heading = self._promotable_content_heading(text, region_meta)
         if heading is not None:
-            self._flush_carry_over()
+            # No flush here: _handle_heading flushes only for a real
+            # SECTION_HEADING, so a row demoted back to body/caption below
+            # can still join an unfinished same-page carry-over.
             self._handle_heading("paragraph_title", heading, page_number, bbox, from_ocr=from_ocr)
             return
 
@@ -143,9 +185,6 @@ class TextHandlersMixin:
         text = clean_text_content(content.strip())
         if not text:
             return
-
-        if self._is_front_page(page_number) and self._current_section_id == 0:
-            text = strip_affiliation_markers(text)
 
         prov = Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))
 
@@ -260,9 +299,12 @@ class TextHandlersMixin:
         if not text:
             return
 
-        # Flush carry-over so deferred text position is accurate
-        self._flush_carry_over()
-
+        # Do not flush the carry-over here: a footnote at the bottom of page
+        # N (or any non-text region) may sit between the two halves of a
+        # paragraph that crosses the page break, and flushing would split it
+        # in two. The recorded index accounts for the pending entry, which
+        # is appended next, so the xref anchor still lands on the paragraph
+        # that will be flushed next.
         # Record (text, page, body_section_id, deferred_text_index).
         # The deferred_text_index lets us find the nearest preceding sentence
         # after segmentation populates real text_ids.
@@ -270,7 +312,7 @@ class TextHandlersMixin:
             text=text,
             page_number=page_number,
             body_section_id=self._current_section_id,
-            deferred_text_index=len(self.assembler),
+            deferred_text_index=len(self.assembler) + (1 if self._carry_over.has_pending() else 0),
             from_ocr=from_ocr,
         )
 
@@ -352,11 +394,41 @@ class TextHandlersMixin:
 
     @staticmethod
     def _has_terminal_punct(text: str) -> bool:
-        """Return True if text ends with sentence-terminal punctuation."""
+        """Return True if text ends with sentence-terminal punctuation.
+
+        Trailing closing quotes/brackets and footnote-superscript tails
+        (``$^{1}$``, ``¹``) are stripped first: a paragraph ending
+        ``...study."`` or ``...samples.¹`` is finished, not continued.
+        """
         stripped = text.rstrip()
         if not stripped:
             return True
-        return stripped[-1] in ".!?:;)]"
+        core = stripped
+        for _ in range(4):
+            reduced = _TRAILING_SUPERSCRIPT_RE.sub("", core).rstrip()
+            reduced = reduced.rstrip(_TRAILING_CLOSERS)
+            if reduced == core:
+                break
+            core = reduced
+        if not core:
+            return True
+        return core[-1] in ".!?:;)]"
+
+    @staticmethod
+    def _ends_with_bare_url(text: str) -> bool:
+        """True when the final token is a complete URL/DOI, not a wrap.
+
+        A region ending ``...at https://osf.io/abc12`` ends its paragraph;
+        the next region starts a new one. A hyphenated wrap (``.../Lak-``)
+        never matches: the trailing hyphen is not a URL character the
+        joiner treats as complete.
+        """
+        token = text.rstrip().rsplit(None, 1)[-1] if text.strip() else ""
+        if not token or token.endswith("-"):
+            return False
+        if URL_RE.fullmatch(token):
+            return True
+        return bool(DOI_URL_CONTEXT_RE.search(token))
 
     @staticmethod
     def _should_join(prev_text: str, next_text: str) -> bool:
@@ -365,11 +437,17 @@ class TextHandlersMixin:
         Both lowercase continuations (hyphenation) and capitalized
         continuations (cross-column breaks where the next column starts a
         new clause within the same sentence) are valid joins. The caller
-        The caller separately applies stricter guards to cross-page joins.
+        separately applies stricter guards to cross-page joins.
         """
         if not prev_text or not next_text:
             return False
-        return not TextHandlersMixin._has_terminal_punct(prev_text)
+        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
+            return True
+        if TextHandlersMixin._has_terminal_punct(prev_text):
+            return False
+        # A bare trailing URL/DOI ends the paragraph: without this, the next
+        # paragraph (often in the other column) is glued onto the URL.
+        return not TextHandlersMixin._ends_with_bare_url(prev_text)
 
     @staticmethod
     def _starts_with_lowercase(text: str) -> bool:

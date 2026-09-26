@@ -72,8 +72,17 @@ class FootnoteBuffer:
         self._seen.add(key)
         self._records.append((text, page_number, body_section_id, deferred_text_index, from_ocr))
 
-    def is_empty(self) -> bool:
-        return not self._records
+    def shift_deferred_indices(self, position: int, delta: int = 1) -> None:
+        """Shift every record at or after *position* by *delta*.
+
+        Inserting a deferred entry ahead of a footnote moves the entry the
+        footnote's ``deferred_text_index`` points at, so the anchor follows
+        it (see ``replay_unowned_captions``).
+        """
+        self._records = [
+            (text, page, section, index + delta if index >= position else index, from_ocr)
+            for text, page, section, index, from_ocr in self._records
+        ]
 
     def __iter__(self) -> Iterator[tuple[str, int, int, int, bool]]:
         """Iterate records in insertion order without consuming the buffer."""

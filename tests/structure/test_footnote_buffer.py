@@ -7,7 +7,6 @@ def test_buffer_starts_empty():
     from bibr.structure.footnote_buffer import FootnoteBuffer
 
     fb = FootnoteBuffer()
-    assert fb.is_empty()
     assert list(fb) == []
 
 
@@ -16,7 +15,6 @@ def test_record_adds_entry():
 
     fb = FootnoteBuffer()
     fb.record(text="A footnote", page_number=2, body_section_id=5, deferred_text_index=10)
-    assert not fb.is_empty()
     assert list(fb) == [("A footnote", 2, 5, 10, True)]
 
 
@@ -32,7 +30,7 @@ def test_iteration_preserves_order():
         ("B", 2, 1, 20, True),
     ]
     # Iteration does not consume — buffer still holds the records.
-    assert not fb.is_empty()
+    assert list(fb) != []
     assert list(fb) == out
 
 

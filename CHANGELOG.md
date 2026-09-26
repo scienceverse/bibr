@@ -929,6 +929,34 @@ released.
   again, backed by committed synthetic fixtures
   (`scripts/generate_hermetic_test_fixtures.py`) instead of uncommitted
   corpus files.
+- PDF paragraphs that run across a page break no longer split in two when a
+  footnote or a figure intervenes, and a paragraph ending in a closing quote,
+  a footnote superscript or a trailing URL is no longer glued to the next
+  one. Repeated mid-column body text is no longer demoted as a running
+  header: only a repeated line in the margin band is. Affiliation markers
+  are stripped in the byline zone (the front page while the title section is
+  current, or the absolute first page), so body citation superscripts on a
+  sliced front page survive.
+- A title split across two `doc_title` regions is now joined into one title
+  section instead of truncating `detected_title` and stranding a level-1
+  section that later headings parent under. Numbered study headings ("2
+  Study 1", "3. Experiment 2") now open scopes like unnumbered ones, so the
+  second study's Method/Results no longer fold under the first study's.
+  Reference and abstract hint regions reuse a printed heading ("Literature
+  Cited", "5 References", "Bibliography") on its canonical class instead of
+  leaving an empty printed section beside a synthetic one.
+- PDF float accounting no longer duplicates caption text that de-duplication
+  already consumed, and unowned captions replay where they were printed
+  instead of after all body text. Uppercase and unmarked panel labels ("A",
+  "A.", "(A)") are recognised as panel evidence. Dotted table labels ("Table
+  3.1") no longer reserve a printed id, continuation pages sharing one
+  printed label no longer raise a false id-conflict warning, and floats keep
+  document order instead of being resorted by id. Header-only tables (a
+  `<th>` header with no rows, or a markdown header plus separator) are kept
+  instead of dropped; a one-row region without `<th>` still drops, since that
+  shape is usually a publisher label or masthead box. A bare panel marker
+  joins the vertically nearest same-page figure group instead of the next
+  labelled figure in list order.
 
 ### Added
 

@@ -315,6 +315,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # capture time so an unowned candidate can be replayed as body text
         # under its own section rather than whatever section parsing ended in.
         self._caption_candidate_sections: dict[str, int] = {}
+        # caption_id → deferred-buffer position at capture time, so a replay
+        # lands where the caption was printed instead of at the end.
+        self._caption_candidate_positions: dict[str, int] = {}
         # caption_id → whether OCR produced the candidate's text (False for
         # the PDF text layer); rides to the sentences it becomes.
         self._caption_candidate_from_ocr: dict[str, bool] = {}
@@ -340,6 +343,13 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
 
         # First doc_title on page 1 (used as authoritative paper title)
         self._detected_title: str | None = None
+        # The section a front-page split title opened, with the buffer state
+        # at capture: a second adjacent doc_title region continues the title
+        # instead of opening a stray section.
+        self._title_section_id: int | None = None
+        self._title_bbox: list | tuple | None = None
+        self._title_page: int | None = None
+        self._title_assembler_len: int = 0
 
         # Running-header de-dupe: set of (page_idx_0based, region_index_within_page)
         # tuples for heading regions whose normalized content appears on multiple
@@ -807,7 +817,14 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
         for occurrences in seen_body.values():
             if len({pi for pi, _ in occurrences}) >= 2:
-                self._running_header_regions.update(occurrences)
+                # Repetition alone is not evidence (see the heading path
+                # above): multi-study papers legitimately repeat short body
+                # rows mid-column. Require the geometry of actual page
+                # furniture; a missing bbox still falls back to demotion.
+                demoted = [occ for occ in occurrences if self._is_in_margin_band(*occ)]
+                if not demoted:
+                    continue
+                self._running_header_regions.update(demoted)
 
         # All ``doc_title`` regions after the *real* title are running
         # headers. The anchor is the first doc_title that is not a
@@ -1025,8 +1042,6 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 continue
 
             if treatment == "heading":
-                # Flush any carry-over before a heading
-                self._flush_carry_over()
                 self._handle_heading(effective_label, content, page_number, bbox, from_ocr=from_ocr)
 
             elif treatment == "section_hint":
@@ -1060,7 +1075,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
 
             elif treatment == "figure":
-                self._flush_carry_over()
+                # Figures emit no text rows, so — like tables — they keep an
+                # unfinished prose carry-over alive across the region; the
+                # normal heading/section and continuation guards still
+                # prevent unrelated text from being joined.
                 self._handle_figure(
                     page_number,
                     bbox,

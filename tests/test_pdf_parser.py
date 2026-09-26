@@ -120,13 +120,28 @@ class TestLabelTreatment:
 
         assert contents.detected_title is None
 
-    def test_doc_title_first_wins(self, mock_wtpsplit):
-        """Only the first doc_title on page 1 is captured."""
+    def test_doc_title_adjacent_continuation_extends_title(self, mock_wtpsplit):
+        """An adjacent second doc_title is a split-title continuation: it
+        extends the title instead of opening a stray section."""
         json_result = [
             [
                 _region(0, "doc_title", "Real Title"),
                 _region(1, "doc_title", "Subtitle or Author"),
                 _region(2, "text", "Body."),
+            ]
+        ]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == "Real Title Subtitle or Author"
+
+    def test_doc_title_first_wins_when_far_apart(self, mock_wtpsplit):
+        """A second doc_title far from the title section still opens its own
+        section instead of extending the title."""
+        json_result = [
+            [
+                _region(0, "doc_title", "Real Title", bbox=[0, 0, 100, 30]),
+                _region(1, "doc_title", "Subtitle or Author", bbox=[0, 500, 100, 530]),
+                _region(2, "text", "Body.", bbox=[0, 540, 100, 560]),
             ]
         ]
         contents = _parse_and_segment(json_result)
@@ -1321,12 +1336,15 @@ class TestMultiSlotPendingCaptions:
         contents = _parse_and_segment(json_result)
 
         assert len(contents.figures) == 2
-        # Printed IDs determine final ordering after ownership reconciliation.
-        captioned, uncaptioned = contents.figures
+        # Floats stay in document order (not resorted by printed id): the
+        # far uncaptioned figure comes first, the captioned one second.
+        assert [figure.figure_id for figure in contents.figures] == [2, 1]
+        captioned = next(figure for figure in contents.figures if figure.caption is not None)
+        uncaptioned = next(figure for figure in contents.figures if figure.caption is None)
         assert captioned.figure_id == 1
+        assert uncaptioned.figure_id == 2
         assert captioned.caption == "Figure 1: Correct"
         assert captioned.provenance[0].bbox == (100.0, 85.0, 500.0, 300.0)
-        assert uncaptioned.figure_id == 2
         assert uncaptioned.caption is None
         assert uncaptioned.provenance[0].bbox == (100.0, 700.0, 500.0, 900.0)
 

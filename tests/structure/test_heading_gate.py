@@ -175,3 +175,79 @@ class TestBoldContentHeadingRescue:
         # branch must not promote what the gate would demote.
         headers = _headers_for_text_region("Table 2 Caption", _font_bold=True)
         assert "Table 2 Caption" not in headers
+
+
+def _doc_title_page(*regions):
+    return list(regions)
+
+
+def _title_region(index, content, bbox):
+    return {"label": "doc_title", "content": content, "bbox_2d": bbox}
+
+
+def test_split_front_page_title_joins_into_one_section():
+    """Two adjacent doc_title regions form one title, not a stray section."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _doc_title_page(
+            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            _title_region(1, "# the Stroop Interference Effect", [100, 105, 900, 140]),
+            {"label": "paragraph_title", "content": "## Abstract", "bbox_2d": [100, 160, 900, 190]},
+            {
+                "label": "paragraph_title",
+                "content": "## Introduction",
+                "bbox_2d": [100, 300, 900, 330],
+            },
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == (
+        "A Large-Scale Registered Replication of the Stroop Interference Effect"
+    )
+    title_sections = [s for s in parser.sections if s.level == 1 and s.section_id != 0]
+    assert len(title_sections) == 1
+    assert title_sections[0].header == parser._detected_title
+    intro = next(s for s in parser.sections if s.header == "Introduction")
+    assert intro.parent_section_id == title_sections[0].section_id
+
+
+def test_nonadjacent_second_doc_title_still_opens_a_section():
+    """Guard: a far-away second doc_title is not a continuation."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _doc_title_page(
+            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            _title_region(1, "# the Stroop Interference Effect", [100, 600, 900, 640]),
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == "A Large-Scale Registered Replication of"
+    assert len([s for s in parser.sections if s.section_id != 0]) == 2
+
+
+def test_text_between_titles_blocks_continuation():
+    """Guard: body text emitted between two doc_titles blocks the join."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _doc_title_page(
+            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            {
+                "label": "text",
+                "content": "An author line sits between.",
+                "bbox_2d": [100, 105, 900, 130],
+            },
+            _title_region(2, "# the Stroop Interference Effect", [100, 135, 900, 170]),
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == "A Large-Scale Registered Replication of"
+    assert len([s for s in parser.sections if s.section_id != 0]) == 2
