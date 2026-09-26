@@ -259,34 +259,33 @@ class PresetManager:
         The preset's values are validated through the real settings parser
         first (see :func:`bibr.config.validate_env_overrides`), so a preset
         holding an invalid value fails naming the preset file instead of
-        corrupting ``.env`` for every later run.
+        corrupting ``.env`` for every later run. Ownership is decided by
+        difference, not by name: the preset is rejected when it adds any
+        failure beyond what the current environment already reports (see
+        :func:`bibr.config.baseline_problems`), which also catches
+        model-level errors, alias spellings and lowercase keys that never
+        mention the preset's own key.
         """
         data = self.load(name)
         if any(key != _ACTIVE_PRESET_KEY for key in data):
-            from bibr.config import validate_env_overrides
+            from bibr.config import baseline_problems, validate_env_overrides
 
             candidate = {key: data[key] for key in data if key != _ACTIVE_PRESET_KEY}
             try:
                 validate_env_overrides(candidate)
             except ConfigurationError as exc:
-                problems = getattr(exc, "problems", None) or [str(exc)]
-                own = [
-                    p
-                    for p in problems
-                    if any(
-                        p.startswith(key) or p.startswith(f"Invalid value for {key}")
-                        for key in candidate
-                    )
-                ]
-                if own:
+                problems = list(getattr(exc, "problems", None) or [str(exc)])
+                new = [p for p in problems if p not in baseline_problems()]
+                if new:
                     path = self._path(name)
+                    prefixed = [f"Preset {name!r}: {problem}" for problem in new]
+                    body = "\n".join(f"  - {problem}" for problem in prefixed)
                     raise InvalidPresetError(
-                        f"Preset {name!r} at {path} is invalid: {exc} "
-                        f"Fix the preset file at {path}.",
-                        problems=[f"Preset {name!r}: {problem}" for problem in own],
+                        f"Preset {name!r} at {path} is invalid:\n{body}\nFix the preset file.",
+                        problems=prefixed,
                     ) from exc
-                # Only unrelated settings are invalid — the preset itself is
-                # fine, so still write it (its keys will mask nothing extra).
+                # Only unrelated settings are invalid — the preset adds no new
+                # failure, so still write it.
         data[_ACTIVE_PRESET_KEY] = name
         merge_env(env_path, data)
 
@@ -337,10 +336,12 @@ class PresetManager:
             fresh = validate_env_overrides({key: data[key] for key in targets})
         except ConfigurationError as exc:
             path = self._path(name)
-            problems = getattr(exc, "problems", None) or [str(exc)]
+            problems = list(getattr(exc, "problems", None) or [str(exc)])
+            prefixed = [f"Preset {name!r}: {problem}" for problem in problems]
+            body = "\n".join(f"  - {problem}" for problem in prefixed)
             raise InvalidPresetError(
-                f"Preset {name!r} at {path} is invalid: {exc} Fix the preset file at {path}.",
-                problems=[f"Preset {name!r}: {problem}" for problem in problems],
+                f"Preset {name!r} at {path} is invalid:\n{body}\nFix the preset file.",
+                problems=prefixed,
             ) from exc
         touched_sections = {section for section, _ in targets.values() if section is not None}
         # Auto-tune model_validators can write sections the preset did not

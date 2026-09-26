@@ -18,6 +18,7 @@ import argparse
 import ast
 import difflib
 import os
+import re
 import shutil
 from collections.abc import Iterable
 from pathlib import Path
@@ -145,6 +146,58 @@ def _default_display(doc: SettingDoc) -> str:
     return raw
 
 
+def _repair_overrides(baseline: set[str], doc: SettingDoc) -> dict[str, str]:
+    """Default ``.env`` spellings for the known settings behind *baseline*.
+
+    Maps each baseline problem line back to its setting (case-insensitively,
+    through aliases) and renders that setting's default via
+    :func:`_default_display` — every such line loads by construction. Unknown
+    names (the model-level ``OCR_OCROPTIONS`` mis-name) are skipped: they
+    cannot be neutralized this way. The setting being set is never repaired —
+    the candidate is merged last and wins.
+    """
+    by_spelling: dict[str, SettingDoc] = {}
+    for other in iter_setting_docs():
+        by_spelling.setdefault(other.env_name.upper(), other)
+        for alias in other.aliases:
+            by_spelling.setdefault(alias.upper(), other)
+    repairs: dict[str, str] = {}
+    for problem in sorted(baseline):
+        match = re.match(r"(?:Invalid value for )?([A-Za-z0-9_]+(?: / [A-Za-z0-9_]+)*)", problem)
+        if not match:
+            continue
+        for name in match.group(1).split(" / "):
+            target = by_spelling.get(name.strip().upper())
+            if target is None or target.env_name == doc.env_name:
+                continue
+            repairs.setdefault(target.env_name, _default_display(target))
+    return repairs
+
+
+def _validate_value_clean(doc: SettingDoc, raw: str):
+    """Build the candidate with every known env var removed and dotenv off.
+
+    Historical fallback for reading back the coerced value when unrelated
+    settings are broken. It drops ``.env`` context, so a context-dependent
+    candidate fails here — the caller then keeps the raw string.
+    """
+    from bibr.config import DOTENV_DISABLE_VAR, validate_env_overrides
+
+    known = {d.env_name for d in iter_setting_docs()}
+    known |= {a for d in iter_setting_docs() for a in d.aliases}
+    saved = {key: os.environ.pop(key) for key in list(known) if key in os.environ}
+    had_disable = os.environ.get(DOTENV_DISABLE_VAR)
+    os.environ[DOTENV_DISABLE_VAR] = "1"
+    try:
+        return validate_env_overrides({doc.env_name: raw})
+    finally:
+        os.environ.update(saved)
+        if had_disable is None:
+            os.environ.pop(DOTENV_DISABLE_VAR, None)
+        else:
+            os.environ[DOTENV_DISABLE_VAR] = had_disable
+
+
 def validate_value(doc: SettingDoc, raw: str):
     """Validate *raw* (a plain string) against *doc*'s real settings model.
 
@@ -159,49 +212,42 @@ def validate_value(doc: SettingDoc, raw: str):
     translated ``ConfigurationError`` is used (never ``str(exc)`` on the raw
     pydantic error, which embeds the input value) so an invalid value for a
     secret field can never leak through the error text.
+
+    Ownership is decided by difference, not by name: the candidate fails
+    only when it adds a problem beyond what the environment already reports
+    (see :func:`bibr.config.baseline_problems`). A value that is valid only
+    together with ``.env`` context (a private ``OCR_BACKEND`` with its
+    ``OCR_PROFILE`` in ``.env``) is therefore accepted even while an
+    unrelated key is broken — instead of rebuilding in a stripped
+    environment that drops the context, only the unrelated broken keys are
+    neutralized to their defaults to read back the coerced value.
     """
-    from bibr.config import validate_env_overrides
+    from bibr.config import baseline_problems, validate_env_overrides
     from bibr.exceptions import ConfigurationError
 
-    names = {doc.env_name, *doc.aliases, doc.env_name.upper(), *(a.upper() for a in doc.aliases)}
     try:
         fresh = validate_env_overrides({doc.env_name: raw})
     except ConfigurationError as exc:
-        problems = getattr(exc, "problems", None) or [str(exc)]
-        own = [
-            p
-            for p in problems
-            if any(
-                p.startswith(name) or p.startswith(f"Invalid value for {name}") for name in names
-            )
-        ]
-        if own:
-            raise ValueError("; ".join(own)) from exc
-        # The candidate itself is fine — only unrelated settings are
-        # invalid. Rebuild with a clean environment so the candidate's
-        # coerced value can still be returned (``config set`` then writes
-        # it, matching the old tree which wrote the value).
-        import os
-
-        from bibr.config import DOTENV_DISABLE_VAR
-        from bibr.config_introspect import iter_setting_docs
-
-        known = {d.env_name for d in iter_setting_docs()}
-        known |= {a for d in iter_setting_docs() for a in d.aliases}
-        saved = {key: os.environ.pop(key) for key in list(known) if key in os.environ}
-        had_disable = os.environ.get(DOTENV_DISABLE_VAR)
-        os.environ[DOTENV_DISABLE_VAR] = "1"
+        problems = list(getattr(exc, "problems", None) or [str(exc)])
+        baseline = baseline_problems()
+        new = [p for p in problems if p not in baseline]
+        if new:
+            raise ValueError("; ".join(new)) from exc
+        # The candidate adds no new problems — only unrelated settings are
+        # invalid. Neutralize just those keys (keeping the .env context a
+        # context-dependent candidate needs) to read back its coerced value.
+        repairs = _repair_overrides(baseline, doc)
         try:
-            fresh = validate_env_overrides({doc.env_name: raw})
-        except ConfigurationError as exc2:
-            problems2 = getattr(exc2, "problems", None) or [str(exc2)]
-            raise ValueError("; ".join(problems2)) from exc2
-        finally:
-            os.environ.update(saved)
-            if had_disable is None:
-                os.environ.pop(DOTENV_DISABLE_VAR, None)
-            else:
-                os.environ[DOTENV_DISABLE_VAR] = had_disable
+            fresh = validate_env_overrides({**repairs, doc.env_name: raw})
+        except ConfigurationError:
+            try:
+                fresh = _validate_value_clean(doc, raw)
+            except ConfigurationError:
+                # Valid in context but no clean build can spell its coerced
+                # value (context-dependent and the baseline itself resists
+                # repair): hand back the raw string — `config set` writes it
+                # verbatim, and load-time parsing coerces it, as before.
+                return raw
     section_attr, field_name = _locate_doc_field(doc)
     if section_attr is not None:
         return getattr(getattr(fresh, section_attr), field_name)

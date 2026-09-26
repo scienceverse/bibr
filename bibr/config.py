@@ -295,6 +295,7 @@ def _is_dict_annotation(annotation) -> bool:
 
 def _is_plain_str_annotation(annotation) -> bool:
     """Whether *annotation* is exactly ``str`` (nullable or not)."""
+    import types
     import typing
 
     ann = annotation
@@ -306,10 +307,22 @@ def _is_plain_str_annotation(annotation) -> bool:
     if ann is str:
         return True
     origin = typing.get_origin(ann)
-    if origin is typing.Union or str(type(origin)) == "<class 'types.UnionType'>":
+    if origin is typing.Union or isinstance(ann, types.UnionType):
         non_none = [a for a in typing.get_args(ann) if a is not type(None)]
         return len(non_none) == 1 and non_none[0] is str
     return False
+
+
+# Section fields where a blank keeps its empty-string spelling instead of
+# mapping to None. The per-call reasoning-effort overrides distinguish the
+# two: ``None`` inherits ``llm.reasoning_effort`` while ``""`` is falsy, so
+# ``OpenAIProvider.call_kwargs`` omits the parameter for that call. The
+# pre-fix tree kept the blank as ``""`` (omitting it for the authors and
+# citation calls); the literal ``null`` still spells ``None`` (inherit).
+_BLANK_MEANS_OMIT_FIELDS = frozenset({"reasoning_effort_authors", "reasoning_effort_citations"})
+_BLANK_MEANS_OMIT_ENV_NAMES = frozenset(
+    {"LLM_REASONING_EFFORT_AUTHORS", "LLM_REASONING_EFFORT_CITATIONS"}
+)
 
 
 class _BibrSettings(BaseSettings):
@@ -363,7 +376,11 @@ class _BibrSettings(BaseSettings):
 
         - nullable fields (``str | None``, ``int | None``, ``Literal | None``,
           ...) → None, so ``LLM_REASONING_EFFORT=`` still omits the parameter
-          and ``ML_*_MODEL_ID=`` still disables the model;
+          and ``ML_*_MODEL_ID=`` still disables the model. The per-call
+          overrides ``LLM_REASONING_EFFORT_AUTHORS`` /
+          ``LLM_REASONING_EFFORT_CITATIONS`` keep ``""`` instead: ``None``
+          inherits the global effort while ``""`` omits the parameter for
+          that call (see ``_BLANK_MEANS_OMIT_FIELDS``);
         - list fields → left alone (the CSV splitter turns ``""`` into ``[]``,
           so ``BIBR_RESOLVER_SOURCES=`` still means the resolver's own tier);
         - plain ``str`` fields → left alone (``""`` stays ``""``, as before);
@@ -388,6 +405,7 @@ class _BibrSettings(BaseSettings):
             if value != "":
                 continue
             finfo = fields.get(key)
+            fname = key if finfo is not None else None
             if finfo is None:
                 # Init kwargs may use an alias spelling (``OCR_SGLANG_GPUS``);
                 # resolve it to the field so the same rule applies.
@@ -400,10 +418,18 @@ class _BibrSettings(BaseSettings):
                         names = (alias,)
                     if key in names:
                         finfo = candidate
+                        fname = _fname
                         break
                 if finfo is None:
                     continue
             ann = finfo.annotation
+            if _is_plain_str_annotation(ann) and (
+                fname in _BLANK_MEANS_OMIT_FIELDS
+                or (isinstance(key, str) and key.upper() in _BLANK_MEANS_OMIT_ENV_NAMES)
+            ):
+                # A blank per-call override omits the parameter for that call;
+                # mapping it to None would inherit the global effort instead.
+                continue
             if _allows_none(ann):
                 data[key] = None
             elif _is_list_annotation(ann):
@@ -2859,6 +2885,23 @@ def validate_env_overrides(overrides: Mapping[str, str]) -> "GlobalSettings":
             raise _configuration_error(exc) from exc
         except SettingsError as exc:
             raise _settings_error(exc) from exc
+
+
+def baseline_problems() -> set[str]:
+    """Problems the current environment already reports, with no overrides.
+
+    The ownership check shared by ``PresetManager.apply`` and ``bibr config
+    set``: a candidate is at fault only for problems absent from this set.
+    Matching names is unreliable — a model-level validator reports
+    ``OCR_OCROPTIONS`` for an ``OCR_BACKEND`` mistake, an alias value error
+    surfaces under the canonical spelling, and preset keys may be lowercase
+    — so callers compare whole problem lines instead.
+    """
+    try:
+        validate_env_overrides({})
+    except ConfigurationError as exc:
+        return set(getattr(exc, "problems", None) or [str(exc)])
+    return set()
 
 
 class _SettingsProxy:

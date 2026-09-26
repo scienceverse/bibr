@@ -649,6 +649,8 @@ def test_preset_show_redacts_third_party_secrets(manager, monkeypatch, capsys):
 
 _BLANK_CLEAN_VARS = (
     "LLM_REASONING_EFFORT",
+    "LLM_REASONING_EFFORT_AUTHORS",
+    "LLM_REASONING_EFFORT_CITATIONS",
     "LLM_BASE_URL",
     "LLM_API_KEY",
     "ML_PAPER_CLASSIFIER_MODEL_ID",
@@ -1044,3 +1046,136 @@ def test_preset_use_cli_bad_name_exits_cleanly(manager, tmp_path, monkeypatch, c
     assert exc_info.value.code == 1
     out = capsys.readouterr()
     assert "Traceback" not in out.out + out.err
+
+
+# --- fix round 2: per-call blank omits; ownership by difference --------------
+
+
+def test_blank_per_call_reasoning_effort_omits_the_parameter(blank_env, monkeypatch):
+    """A blank per-call override omits reasoning_effort; the global still applies.
+
+    The blank keeps its empty-string spelling: ``None`` would inherit the
+    global effort, so mapping it to None sends the global effort to the
+    authors/citation calls instead of omitting the parameter.
+    """
+    from bibr.clients.providers.openai import OpenAIProvider
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_AUTHORS", "")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_CITATIONS", "")
+    settings = GlobalSettings()
+    assert settings.llm.reasoning_effort_authors == ""
+    assert settings.llm.reasoning_effort_citations == ""
+    provider = OpenAIProvider(settings)
+    assert "reasoning_effort" not in provider.call_kwargs(settings.llm.reasoning_effort_authors)
+    assert "reasoning_effort" not in provider.call_kwargs(settings.llm.reasoning_effort_citations)
+    assert provider.call_kwargs(None)["reasoning_effort"] == "high"
+
+
+def test_null_per_call_reasoning_effort_inherits_the_global(blank_env, monkeypatch):
+    """The literal null still spells 'inherit' for the per-call overrides."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_AUTHORS", "null")
+    settings = GlobalSettings()
+    assert settings.llm.reasoning_effort_authors is None
+
+
+def test_preset_use_rejects_model_level_error_without_writing(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """A backend without a profile is rejected even though no key names it."""
+    monkeypatch.delenv("OCR_PROFILE", raising=False)
+    manager.save("private", {"OCR_BACKEND": "private-foo"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="OCR_PROFILE"):
+        manager.apply("private", env_path)
+    assert "private-foo" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_rejects_alias_spelling_without_writing(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """An alias key with a bad value is rejected under its canonical spelling."""
+    for var in ("OCR_LOCAL_GPUS", "OCR_SGLANG_GPUS"):
+        monkeypatch.delenv(var, raising=False)
+    manager.save("alias", {"OCR_SGLANG_GPUS": "abc"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="OCR_LOCAL_GPUS"):
+        manager.apply("alias", env_path)
+    assert "abc" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_rejects_lowercase_key_without_writing(manager, tmp_path, clean_env):
+    """A lowercase preset key is validated case-insensitively, not written."""
+    manager.save("lower", {"llm_provider": "bogus"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="LLM_PROVIDER"):
+        manager.apply("lower", env_path)
+    assert "bogus" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_writes_when_only_unrelated_key_broken(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """Guard: a valid preset still applies when an unrelated setting is broken."""
+    monkeypatch.setenv("LAYOUT_DPI", "0")
+    manager.save("good", {"LLM_PROVIDER": "openai"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    manager.apply("good", env_path)
+    assert "LLM_PROVIDER=openai" in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_prefix_overlap_still_writes(manager, tmp_path, clean_env, monkeypatch):
+    """Guard: a valid key sharing a prefix with a broken one still applies."""
+    monkeypatch.setenv("CROSSREF_ENRICH_CONCURRENCY", "0")
+    manager.save("enrich", {"CROSSREF_ENRICH": "true"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    manager.apply("enrich", env_path)
+    assert "CROSSREF_ENRICH=true" in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_error_names_the_file_not_dotenv(manager, tmp_path, clean_env):
+    """Preset errors say 'Fix the preset file', once, with no .env instruction."""
+    manager.save("bad", {"LLM_PROVIDER": "bogus"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError) as exc_info:
+        manager.apply("bad", env_path)
+    message = str(exc_info.value)
+    assert "Fix the preset file." in message
+    assert "Fix these in your .env or environment." not in message
+    assert "Fix it in your .env or environment." not in message
+    assert message.count(str(manager.directory / "bad.json")) == 1
+
+
+def test_config_set_accepts_context_dependent_value_with_unrelated_breakage(tmp_path, monkeypatch):
+    """A private backend with its profile in .env is accepted; LAYOUT_DPI=0 ignored."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OCR_PROFILE=paddle\nLAYOUT_DPI=0\n", encoding="utf-8")
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    for var in ("OCR_BACKEND", "OCR_PROFILE", "LAYOUT_DPI"):
+        monkeypatch.delenv(var, raising=False)
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    assert config_cli.validate_value(docs["OCR_BACKEND"], "private-foo") == "private-foo"
+
+
+def test_config_set_rejects_new_failure_despite_unrelated_breakage(monkeypatch):
+    """Guard: an invalid candidate still fails naming itself when others break."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    monkeypatch.setenv("LAYOUT_DPI", "0")
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        config_cli.validate_value(docs["LLM_PROVIDER"], "bogus")
