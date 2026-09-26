@@ -382,8 +382,8 @@ released.
   times: one shared `match_references` pass feeds `ref_matching_f1`,
   `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
   live in a single table that the per-pair loop gates on, instead of two
-  copies that had to stay in lockstep. Scores are unchanged; the gate192
-  re-score is identical metric-for-metric and about three times faster.
+  copies that had to stay in lockstep. Scores are unchanged: re-scoring stored
+  evaluation runs gives identical metrics, about three times faster.
 - The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
   instead of the pure-Python table — same value, roughly three orders of
   magnitude faster on long abstracts.
