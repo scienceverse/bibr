@@ -1308,6 +1308,12 @@ def test_a_labelled_doi_in_a_citation_is_a_cited_work(text, selected):
             "https://doi.org/10.1234/own.4",
             False,
         ),
+        ("Cite as: Doe, J. (2020). A study. Example J, 1, 2. https://doi.org/10.1234/own.4", False),
+        (
+            "Suggested citation: Doe, J. (2020). A study. Example J, 1, 2. "
+            "https://doi.org/10.1234/own.4",
+            False,
+        ),
     ],
 )
 def test_a_reference_entry_read_as_page_furniture_is_a_reference(header, rejected):

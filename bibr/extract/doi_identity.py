@@ -169,7 +169,8 @@ _SOURCE_NOTE_RE = re.compile(
 )
 # The article's own citation, which reads like any other.
 _SELF_CITATION_RE = re.compile(
-    r"\b(?:cite\s+this|how\s+to\s+cite|please\s+cite|recommended\s+citation|citation\s*:)",
+    r"\b(?:cite\s+(?:this|as)\b|cite\s*:|how\s+to\s+cite|please\s+cite"
+    r"|(?:recommended|suggested)\s+citation|citation\s*:)",
     re.IGNORECASE,
 )
 
