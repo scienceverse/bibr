@@ -676,15 +676,13 @@ def create_local_demo(
         status_display = gr.Markdown(status_md)
 
         if presets_enabled:
-            from pathlib import Path
-
-            from bibr.presets import PresetManager
+            from bibr.presets import PresetManager, effective_env_file
 
             manager = PresetManager()
             preset_names = manager.list_presets()
 
             if preset_names:
-                active = manager.get_active(Path.cwd() / ".env")
+                active = manager.get_active(effective_env_file())
                 preset_dropdown = gr.Dropdown(
                     choices=["(current .env)"] + preset_names,
                     value=active if active in preset_names else "(current .env)",

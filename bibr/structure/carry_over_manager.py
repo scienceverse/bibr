@@ -48,6 +48,9 @@ class CarryOverState:
         # grows when a paragraph is joined across a page break, so each
         # flushed sentence can be attributed to the page it was printed on.
         self.page_spans: list[tuple[int, int]] = []
+        # Whether any contributing region was OCR output (not the PDF text
+        # layer); a join keeps True once one region sets it.
+        self.from_ocr: bool = True
 
     def has_pending(self) -> bool:
         """True iff there is non-empty buffered text awaiting flush."""
@@ -62,3 +65,4 @@ class CarryOverState:
         self.provenance = []
         self.region_meta = None
         self.page_spans = []
+        self.from_ocr = True

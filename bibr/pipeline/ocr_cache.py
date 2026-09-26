@@ -1,6 +1,6 @@
 """Opt-in disk cache for OCR stage output (``bibr.pipeline.stages.ocr``).
 
-Keyed on ``file_hash`` + page range + OCR backend/model + every setting that
+Keyed on the content SHA-256 + page range + OCR backend/model + every setting that
 shapes the cached artifacts + the bibr version + a format-version constant.
 The key cannot see code changes between releases: when comparing source
 revisions that touch rendering, layout, native text or OCR, use a fresh
@@ -98,11 +98,15 @@ def _key(
         temperature=effective.ocr.generation_temperature,
     )
     request = profile.request
-    table_recovery_limit = (
-        PADDLE_TABLE_RECOVERY_MAX_TOKENS
-        if identity.backend == "serve-http" and identity.profile == "paddle"
-        else 0
+    # The incomplete-table retry re-runs truncated Paddle tables at this
+    # higher budget, but only on the transports that run it (the paddle-*
+    # local clients and serve-http share one recovery helper). A Paddle
+    # profile behind any other backend (glm-http, cloud vision) never
+    # retries, so its key must not claim the recovery shaped its artifacts.
+    runs_table_recovery = identity.profile == "paddle" and (
+        identity.backend == "serve-http" or identity.backend.startswith("paddle")
     )
+    table_recovery_limit = PADDLE_TABLE_RECOVERY_MAX_TOKENS if runs_table_recovery else 0
     from bibr import __version__
 
     parts = [
@@ -110,7 +114,9 @@ def _key(
         # A release can change how the cached artifacts are produced without
         # anyone bumping _CACHE_FORMAT_VERSION; never reuse another release's.
         f"bibr={__version__}",
-        fs.file_hash or "",
+        # The full content hash: a serve deployment can share this cache
+        # between callers, and the 64-bit file_hash can be collided on purpose.
+        fs.content_sha256 or fs.file_hash or "",
         "" if cfg.start_page is None else str(cfg.start_page),
         "" if cfg.end_page is None else str(cfg.end_page),
         identity.backend,

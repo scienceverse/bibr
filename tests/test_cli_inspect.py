@@ -20,25 +20,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 FIXTURES = Path(__file__).parent / "fixtures"
 FULL = FIXTURES / "inspect_full_export.json"
 DEGRADED = FIXTURES / "inspect_degraded_export.json"
-
-# Local-only real-world corpus export (736 KB of a copyrighted paper's full
-# extracted text) — not committed, and slated for removal by the SCI-120
-# history purge. Only present on machines that still have the local `data/`
-# corpus checked out; see test_synthetic_pre_v10_3_export_without_schema_
-# version_exits_zero below for the always-running, fixture-free regression
-# coverage of the same code path.
-_REAL_PRE_V10_3_EXPORT = (
-    Path(__file__).parent.parent
-    / "data"
-    / "test_results"
-    / "arxiv_platform"
-    / "attention_is_all_you_need.json"
-)
 
 
 def test_full_fixture_validates_against_export_schema():
@@ -300,34 +284,9 @@ def test_openapi_shaped_json_exits_one(tmp_path, capsys):
     assert "bibr export" in err.lower()
 
 
-@pytest.mark.skipif(
-    not _REAL_PRE_V10_3_EXPORT.exists(),
-    reason="local corpus export not present (purged)",
-)
-def test_real_pre_v10_3_export_still_exits_zero():
-    """``attention_is_all_you_need.json`` predates ``schema_version`` but its
-    ``info`` block still carries ``bibr_version``/``input_format``/
-    ``file_hash`` — the tightened export-detection heuristic must still
-    accept it (guards against I1's fix being overly strict).
-
-    This file is a local-only real-world corpus export, not committed to the
-    repo, and is expected to disappear once the SCI-120 history purge runs —
-    see test_synthetic_pre_v10_3_export_without_schema_version_exits_zero for
-    fixture-free coverage of the same code path that keeps running after
-    that."""
-    from bibr.local.inspect import run_inspect
-
-    real_export = _REAL_PRE_V10_3_EXPORT
-    assert real_export.exists(), "expected real pre-v10.3 fixture export to exist in data/"
-
-    code = run_inspect(str(real_export))
-
-    assert code == 0
-
-
 def test_legacy_export_without_a_root_schema_version_exits_zero(tmp_path):
-    """Fixture-free, always-running regression coverage for the same code path
-    ``test_real_pre_v10_3_export_still_exits_zero`` exercises. v11 dispatches on
+    """Fixture-free, always-running regression coverage for pre-v10.3 exports
+    that predate a root ``schema_version``. v11 dispatches on
     a root ``schema_version``, but a file that predates it must still be
     *recognized* as a bibr export by ``_looks_like_bibr_export`` (via its
     bibr-only top-level blocks) and degrade to exit 0 rather than being rejected
@@ -335,8 +294,7 @@ def test_legacy_export_without_a_root_schema_version_exits_zero(tmp_path):
 
     Built by deep-copying the redistributable, schema-validated
     ``inspect_full_export.json`` fixture and reverting it to the v10 root shape
-    — no copyrighted paper text involved, so this survives the SCI-120 history
-    purge that may remove the real corpus export above."""
+    — no copyrighted paper text involved."""
     import copy
     import json
 

@@ -559,6 +559,16 @@ def _get_ner_parser(settings: GlobalSettings | None = None):
     return _NER_PARSER
 
 
+def _page_range(ref_df: pd.DataFrame) -> tuple[int, int] | None:
+    """First and last page of the located reference rows, or None without pages."""
+    if "page_number" not in ref_df.columns:
+        return None
+    pages = pd.to_numeric(ref_df["page_number"], errors="coerce").dropna()
+    if pages.empty:
+        return None
+    return int(pages.min()), int(pages.max())
+
+
 def _chunk(items: list, n: int):
     """Yield successive ``n``-sized chunks of *items*."""
     for i in range(0, len(items), max(1, n)):
@@ -1315,6 +1325,7 @@ class ReferenceExtractor:
         self._selected_segmentation_spans: tuple[tuple[int, int], ...] = ()
         self._credible_source_starts: int | None = None
         self._source_record_count: int | None = None
+        self._reference_pages: tuple[int, int] | None = None
 
     # Class-attribute seams so tests can patch capture without touching the
     # module functions other callers share.
@@ -1336,6 +1347,7 @@ class ReferenceExtractor:
         self._selected_segmentation_spans = ()
         self._credible_source_starts = None
         self._source_record_count = None
+        self._reference_pages = _page_range(ref_df)
 
         seg_strategy, parse_strategy = _resolve_ref_strategies(
             self._ref_seg_strategy,
@@ -1354,8 +1366,9 @@ class ReferenceExtractor:
         raw_ref_strings = await self._segment_references(ref_text, seg_strategy)
         raw_spans = self._selected_segmentation_spans
         ref_strings = raw_ref_strings
-        ref_strings = drop_non_reference_segments(ref_strings)
-        ref_strings = self._maybe_split_merged(ref_strings)
+        if not self._authoritative_native_selected():
+            ref_strings = drop_non_reference_segments(ref_strings)
+            ref_strings = self._maybe_split_merged(ref_strings)
         if ref_strings == raw_ref_strings and len(raw_spans) == len(ref_strings):
             located_spans: tuple[tuple[int, int] | None, ...] = raw_spans
         else:
@@ -1446,7 +1459,7 @@ class ReferenceExtractor:
 
     def _aligned_region_onset_count(self, ref_text: str) -> int:
         """Count unique layout anchors aligned to physical source offsets."""
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             return 0
         try:
@@ -1765,13 +1778,35 @@ class ReferenceExtractor:
         independent lower bound for the geom segment-count sanity gate. Never
         raises: an absent or malformed summary stream just disables the gate.
         """
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             return 0
         try:
             return len(region_anchor_texts(summaries))
         except Exception:  # noqa: BLE001 — the gate must never break extraction
             return 0
+
+    def _reference_region_summaries(self) -> list:
+        """Layout regions on the pages of the located reference rows.
+
+        ``contents.region_summaries`` covers the whole document. Reference
+        onsets from another list (a multi-article PDF, supplementary references
+        the locator did not select, a tail trimmed off the section) would
+        otherwise inflate the geom segment-count gate's lower bound and pull
+        the region tier's alignment fraction under its threshold, declining
+        both free tiers for a correct segmentation. Every summary is kept when
+        the reference rows carry no page numbers, and so is any summary without
+        a page.
+        """
+        summaries = list(getattr(self.contents, "region_summaries", None) or [])
+        if self._reference_pages is None:
+            return summaries
+        first, last = self._reference_pages
+        return [
+            summary
+            for summary in summaries
+            if not isinstance(getattr(summary, "page", None), int) or first <= summary.page <= last
+        ]
 
     async def _segment_llm_then_crf(
         self, ref_text: str, try_region: bool = True, reserve: list[str] | None = None
@@ -1837,7 +1872,7 @@ class ReferenceExtractor:
                 "region", ref_text, selected=False, reason_flags=("tier_disabled",)
             )
             return None
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         if not summaries:
             self._record_segmentation_attempt(
                 "region", ref_text, selected=False, reason_flags=("no_summaries",)
@@ -1929,6 +1964,21 @@ class ReferenceExtractor:
                 f"references region present ({len(ref_text.strip())} chars) but 0 segments",
             )
         return ref_strings
+
+    def _authoritative_native_selected(self) -> bool:
+        """Whether the selected segmentation is a JATS ref-list taken verbatim.
+
+        Each ``<ref>`` is one reference by construction, so the junk filter
+        (which drops short entries without a year) and the merge splitter
+        (which cuts at in-title citations and bare years) can only lose or
+        split real entries, shifting every later bib_id.
+        """
+        if getattr(self.contents, "native_ref_strings_authoritative", False) is not True:
+            return False
+        return any(
+            attempt.strategy == "native" and attempt.selected
+            for attempt in self._segmentation_attempts
+        )
 
     def _maybe_split_merged(self, ref_strings: list[str]) -> list[str]:
         """Split merged reference strings when REF_SPLIT_MERGED_REFS is on.
@@ -2337,7 +2387,7 @@ class ReferenceExtractor:
         # Parse-chunk sourcing is a distinct axis from the seg-cascade tier:
         # region_chunks() here only shapes parse batches, so it runs regardless
         # of REF_SEG_REGION_ANCHORS (which gates the region *segmentation* tier).
-        summaries = getattr(self.contents, "region_summaries", None) or []
+        summaries = self._reference_region_summaries()
         chunks = region_chunks(ref_text, summaries)
         if chunks is None:
             chunks = _group_segments_into_chunks(ref_strings, _CHUNK_TARGET_CHARS)

@@ -99,6 +99,9 @@ class FileState:
     error_code: str | None = None  # ErrorCode value for structured reporting
     failed_stage: str | None = None
     original_error: BaseException | None = None
+    # The failure is a service's or model's, not this file's: see
+    # ``set_error(outage=True)``.
+    error_outage: bool = False
     stage_times: dict = field(default_factory=dict)
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
 
@@ -130,16 +133,22 @@ class FileState:
         code: str | None = None,
         stage: str | None = None,
         exc: BaseException | None = None,
+        outage: bool = False,
     ):
         """Set structured error info.
 
         ``exc`` captures the originating exception so it can be chained via
         ``raise ... from`` in the outer pipeline boundary, preserving the
-        traceback for structured loggers and debuggers.
+        traceback for structured loggers and debuggers. ``outage`` marks a
+        failure that says nothing about this file — a layout model, OCR engine
+        or LLM server that could not start, or an OCR service that went down —
+        so callers can tell it from the file's own (``bibr batch`` runs such
+        papers again when the run is resumed).
         """
         self.error = message
         self.error_code = code
         self.failed_stage = stage
+        self.error_outage = outage
         if exc is not None:
             self.original_error = exc
 

@@ -142,15 +142,16 @@ def _float_order(items: Sequence[_Float]) -> list[_Float]:
 def _document_order(
     sections: list[PaperSection], first_text_id: dict[int, int]
 ) -> list[PaperSection]:
-    """Sort sections by where their text starts; ties go by section id.
+    """Sort sections by where their text starts; ties keep the list order.
 
     A section's text starts at its own first sentence or its first
     descendant's, whichever comes first. A section with no text anywhere below
-    it (a heading whose paragraphs went to its subsections) stays right after
-    the section created before it: parsers number sections as they read, but
-    the list order is not document order. Stages append the sections they find
-    (an unheaded abstract is added after the body), and ``implicit_sections``
-    moves every section without text to the end of the list.
+    it (a heading whose paragraphs went to its subsections, or the title once
+    its sentences moved into a synthesized Abstract) stays right after the
+    section listed before it. The list is in reading order, with each section
+    ``implicit_sections`` synthesizes inserted where its text is, so an empty
+    heading keeps its place behind those; a section a stage appended (the
+    positional Abstract, added after the body) is put back by its text.
     """
     children: dict[int, list[PaperSection]] = {}
     for section in sections:
@@ -175,8 +176,8 @@ def _document_order(
 
     keys: dict[int, tuple[int, int]] = {}
     previous = 0
-    for section in sorted(sections, key=lambda s: s.section_id):
+    for index, section in enumerate(sections):
         section_start = start(section, set())
         previous = previous if section_start is None else section_start
-        keys[section.section_id] = (previous, section.section_id)
+        keys[section.section_id] = (previous, index)
     return sorted(sections, key=lambda s: keys[s.section_id])

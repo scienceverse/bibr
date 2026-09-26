@@ -111,6 +111,8 @@ class HeadingHandlersMixin:
         content: str,
         page_number: int,
         bbox: list | None = None,
+        *,
+        from_ocr: bool = True,
     ) -> None:
         """Create a new PaperSection from a heading region."""
         self._expire_pending_table_label_fragment()
@@ -125,8 +127,8 @@ class HeadingHandlersMixin:
         if not text:
             return
 
-        # Collapse stray spaces in numbered prefixes from GLM-OCR (e.g.
-        # "3. 1 Encoder" → "3.1 Encoder"). Without this the heading both
+        # Collapse stray spaces in numbered prefixes (e.g. "3. 1 Encoder" →
+        # "3.1 Encoder"; see text_repair). Without this the heading both
         # displays oddly AND fails infer_level_from_numbering, which expects
         # tightly-spelled "N.M" for level inference.
         text = collapse_numbered_prefix_spaces(text)
@@ -139,14 +141,14 @@ class HeadingHandlersMixin:
             logger.info("Dropping heading %r as publisher noise (page %d)", text, page_number)
             return
         if disposition == HeadingDisposition.TABLE_CAPTION:
-            self._handle_table_caption(text, bbox, page_number)
+            self._handle_table_caption(text, bbox, page_number, from_ocr=from_ocr)
             return
         if disposition == HeadingDisposition.FIGURE_CAPTION:
-            self._handle_figure_caption(text, bbox, page_number)
+            self._handle_figure_caption(text, bbox, page_number, from_ocr=from_ocr)
             return
         if disposition == HeadingDisposition.BODY_TEXT:
             logger.debug("Heading gate: demoting implausible heading to content: %r", text[:80])
-            self._emit_content_without_promotion(text, page_number, bbox)
+            self._emit_content_without_promotion(text, page_number, bbox, from_ocr=from_ocr)
             return
 
         # Only a real section boundary invalidates stale caption tracking.
@@ -304,6 +306,8 @@ class HeadingHandlersMixin:
         page_number: int,
         bbox: list | None = None,
         region_meta: dict | None = None,
+        *,
+        from_ocr: bool = True,
     ) -> None:
         """Handle regions like 'abstract' or 'reference' that imply a section."""
         self._expire_pending_table_label_fragment()
@@ -317,6 +321,7 @@ class HeadingHandlersMixin:
                     page_number,
                     bbox,
                     region_meta=region_meta,
+                    from_ocr=from_ocr,
                 )
                 return
             if self._terminal_reference_tail_section_id is not None:
@@ -327,6 +332,7 @@ class HeadingHandlersMixin:
                         page_number,
                         bbox,
                         region_meta=region_meta,
+                        from_ocr=from_ocr,
                     )
                 return
 
@@ -361,6 +367,7 @@ class HeadingHandlersMixin:
                             is_formula=False,
                             provenance=[Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))],
                             region_meta=region_meta,
+                            from_ocr=from_ocr,
                         )
                     return
 
@@ -423,9 +430,12 @@ class HeadingHandlersMixin:
                     is_formula=False,
                     provenance=[Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))],
                     region_meta=region_meta,
+                    from_ocr=from_ocr,
                 )
             else:
-                self._handle_content(text, page_number, bbox, region_meta=region_meta)
+                self._handle_content(
+                    text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+                )
 
     def _promotable_content_heading(self, text: str, region_meta: dict | None = None) -> str | None:
         """Return repaired heading text when a body row is a trusted section.

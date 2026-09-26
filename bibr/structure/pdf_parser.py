@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
+from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
     FRONT_MATTER_MASTHEAD_RE,
@@ -314,6 +315,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # capture time so an unowned candidate can be replayed as body text
         # under its own section rather than whatever section parsing ended in.
         self._caption_candidate_sections: dict[str, int] = {}
+        # caption_id → whether OCR produced the candidate's text (False for
+        # the PDF text layer); rides to the sentences it becomes.
+        self._caption_candidate_from_ocr: dict[str, bool] = {}
         self._figure_source_indices: dict[int, int] = {}
         self._table_source_indices: dict[int, int] = {}
         self._structure_validation_issues = []
@@ -342,10 +346,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # pages — those are running headers misclassified as ``doc_title`` /
         # ``paragraph_title`` and must not produce sections.
         self._running_header_regions: set[tuple[int, int]] = set()
-        # Page-level ``reference`` envelopes duplicate their contained
-        # ``reference_content`` entries. Mark only envelopes with at least two
-        # contained children; envelope-only/single-child pages remain intact.
-        self._reference_envelope_regions: set[tuple[int, int]] = set()
+        # Page-level ``reference`` envelopes and the ``reference_content``
+        # entries inside them can carry the same text. Whichever side the other
+        # already covers is shadowed (see ``_mark_reference_envelopes``).
+        self._shadowed_reference_regions: set[tuple[int, int]] = set()
 
         # PDF outline (bookmarks) — the document's own declared heading
         # hierarchy. When present AND the feature is enabled, matched headings
@@ -553,6 +557,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         Preserves the original body ``section_id`` on each figure/table
         so that study-ID propagation can inherit from the correct section.
         """
+        caption_from_ocr = self._caption_text_from_ocr()
+
         # --- Figure sections ---
         for fig in self.figures:
             # Remember the body section where the figure was declared so
@@ -582,6 +588,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     section_id=self._section_counter,
                     paragraph_id=self._paragraph_counter,
                     page_number=fig.page_number,
+                    from_ocr=caption_from_ocr.get(fig.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
                 self._sentence_counter += 1
@@ -614,15 +621,20 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     section_id=self._section_counter,
                     paragraph_id=self._paragraph_counter,
                     page_number=tbl.page_number,
+                    from_ocr=caption_from_ocr.get(tbl.caption.strip(), True),
                 )
                 contents.sentences.append(sent)
                 self._sentence_counter += 1
 
         # --- Footnote sections + xrefs ---
         formula_text_ids = {s.text_id for s in self.sentences if s.is_display_formula}
-        for footnote_num, (fn_text, fn_page, _fn_orig_section, fn_deferred_idx) in enumerate(
-            self._footnotes, start=1
-        ):
+        for footnote_num, (
+            fn_text,
+            fn_page,
+            _fn_orig_section,
+            fn_deferred_idx,
+            fn_from_ocr,
+        ) in enumerate(self._footnotes, start=1):
             self._section_counter += 1
             footnote_section_id = self._section_counter
             marker = printed_marker(fn_text)
@@ -646,6 +658,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 section_id=footnote_section_id,
                 paragraph_id=self._paragraph_counter,
                 page_number=fn_page,
+                from_ocr=fn_from_ocr,
             )
             contents.sentences.append(sent)
             self._sentence_counter += 1
@@ -830,29 +843,54 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             )
 
     def _mark_reference_envelopes(self) -> None:
-        """Mark aggregate reference boxes shadowed by individual entry boxes."""
+        """Shadow whichever of an aggregate reference box and its entries is redundant.
+
+        The layout model can return one ``reference`` box over several entries
+        plus ``reference_content`` boxes for some or all of them. The aggregate
+        box is shadowed only when the entry boxes inside it already carry its
+        text. Otherwise it stays and only the entry boxes whose text it holds
+        are shadowed, so an entry without a box of its own is not lost and no
+        entry is emitted twice. Shadowed regions keep their region summaries.
+
+        Only entry boxes inside the aggregate box take part. They replace it at
+        its place in reading order, where it keys the References section even
+        when the OCR stage blanked its text, and a separate short entry
+        elsewhere on the page ("PubMed") is never hidden because the aggregate
+        box's text happens to contain it.
+        """
         for page_idx, regions in enumerate(self.json_result):
             children = [
-                region
-                for region in regions
-                if (region.native_label or region.label) == "reference_content"
+                (child_idx, child)
+                for child_idx, child in enumerate(regions)
+                if (child.native_label or child.label) == "reference_content"
             ]
-            if len(children) < 2:
+            if not children:
                 continue
             for region_idx, region in enumerate(regions):
                 if (region.native_label or region.label) != "reference":
                     continue
-                contained = sum(
-                    _bbox_containment_fraction(child.bbox_2d, region.bbox_2d) >= 0.8
-                    for child in children
+                contained = [
+                    (child_idx, child)
+                    for child_idx, child in children
+                    if _bbox_containment_fraction(child.bbox_2d, region.bbox_2d) >= 0.8
+                ]
+                if not contained:
+                    continue
+                envelope_text = alnum_key(region.content or "")
+                children_text = alnum_key("".join(child.content or "" for _, child in contained))
+                if alnum_text_covered(envelope_text, children_text):
+                    self._shadowed_reference_regions.add((page_idx, region_idx))
+                    continue
+                self._shadowed_reference_regions.update(
+                    (page_idx, child_idx)
+                    for child_idx, child in contained
+                    if alnum_text_covered(alnum_key(child.content or ""), envelope_text)
                 )
-                if contained >= 2:
-                    self._reference_envelope_regions.add((page_idx, region_idx))
 
-        if self._reference_envelope_regions:
+        if self._shadowed_reference_regions:
             logger.info(
-                "Shadowing %d aggregate reference envelope region(s)",
-                len(self._reference_envelope_regions),
+                "Shadowing %d duplicate reference region(s)",
+                len(self._shadowed_reference_regions),
             )
 
     def _process_page(
@@ -921,7 +959,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             self.region_summaries.append(region_summary)
             self._source_region_index = len(self.region_summaries) - 1
 
-            if key in self._reference_envelope_regions:
+            if key in self._shadowed_reference_regions:
                 region_summary.section_id = self._current_section_id or None
                 continue
 
@@ -968,6 +1006,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             if treatment == "abandon":
                 continue
 
+            # Text read from the PDF text layer is not OCR output: the late
+            # cleanup leaves its prose alone (``PaperSentence.from_ocr``).
+            from_ocr = not region.native_text_used
+
             # Demote running headers detected by _mark_running_headers,
             # regardless of how the layout model labeled them (doc_title /
             # paragraph_title heading OR body ``text``). Routing to
@@ -985,16 +1027,23 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             if treatment == "heading":
                 # Flush any carry-over before a heading
                 self._flush_carry_over()
-                self._handle_heading(effective_label, content, page_number, bbox)
+                self._handle_heading(effective_label, content, page_number, bbox, from_ocr=from_ocr)
 
             elif treatment == "section_hint":
                 self._flush_carry_over()
                 self._handle_section_hint(
-                    effective_label, content, page_number, bbox, region_meta=region_meta
+                    effective_label,
+                    content,
+                    page_number,
+                    bbox,
+                    region_meta=region_meta,
+                    from_ocr=from_ocr,
                 )
 
             elif treatment == "content":
-                self._handle_content(content, page_number, bbox, region_meta=region_meta)
+                self._handle_content(
+                    content, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+                )
 
             elif treatment == "formula":
                 self._handle_formula(content, page_number, bbox, region_meta=region_meta)
@@ -1008,7 +1057,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 self._handle_table(content, page_number, bbox)
 
             elif treatment == "table_caption":
-                self._handle_table_caption(content, bbox, page_number)
+                self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
 
             elif treatment == "figure":
                 self._flush_carry_over()
@@ -1021,10 +1070,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
 
             elif treatment == "caption":
                 # Smart route: "Table …" → table caption, else → figure caption
-                self._handle_caption(content, bbox, page_number, source_label=effective_label)
+                self._handle_caption(
+                    content, bbox, page_number, source_label=effective_label, from_ocr=from_ocr
+                )
 
             elif treatment == "footnote":
-                self._handle_footnote(content, page_number)
+                self._handle_footnote(content, page_number, from_ocr=from_ocr)
 
             region_summary.section_id = self._current_section_id or None
 
