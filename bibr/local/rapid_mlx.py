@@ -455,6 +455,8 @@ class _ManagedRapidMlxOcrClient:
         # was requested.
         self._model = model_path or model or getattr(self._settings.ocr, self._model_option)
         self._profile = profile
+        self._server: RapidMlxServer | None
+        self._http_client: HttpOcrClient | None
         self._server, self._http_client = self._start_generation()
         # rapid-mlx's MLLM vision-embedding cache (vllm_mlx MLLMBatchGenerator ->
         # VisionEmbeddingCache) retains full float32 pixel tensors for up to 100
@@ -567,14 +569,23 @@ class _ManagedRapidMlxOcrClient:
         await self._drain_event.wait()
         if self._http_client is None:
             # Parked on the drain while a recycle failed beneath us: the
-            # recycler already surfaced the failure, and no generation is
-            # usable — fail loudly instead of the old bare AssertionError.
+            # recycler stashed the failure and left the generation empty, so
+            # one more _ensure_generation retries the restart before we fail
+            # loudly instead of the old bare AssertionError.
             from bibr.exceptions import UpstreamServiceError
 
-            raise UpstreamServiceError(
-                "rapid-mlx",
-                f"OCR restart failed while parked: {self._restart_error}",
-            )
+            try:
+                await self._ensure_generation()
+            except Exception as exc:  # noqa: BLE001 — any restart error is named below
+                raise UpstreamServiceError(
+                    "rapid-mlx",
+                    f"OCR restart failed while parked: {self._restart_error or exc}",
+                ) from exc
+            if self._http_client is None:  # _ensure_generation installs or raises
+                raise UpstreamServiceError(
+                    "rapid-mlx",
+                    f"OCR restart failed while parked: {self._restart_error}",
+                )
         self._inflight += 1
         try:
             result = await self._http_client.recognize(image, prompt)

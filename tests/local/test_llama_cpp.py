@@ -905,6 +905,40 @@ def test_startup_retry_falls_back_to_conservative_args(monkeypatch, caplog):
     server.shutdown()
 
 
+def test_startup_retry_on_value_rejection(monkeypatch, caplog):
+    """A rejected flag VALUE also retries: llama.cpp wraps handler errors as
+    'error while handling argument "<flag>": <reason>' (common/arg.cpp), e.g.
+    --spec-type ngram-mod on a build from before ngram-mod existed."""
+    from bibr.local import llama_cpp
+
+    full = frozenset({"--kv-unified", "--spec-type", "--no-mmproj", "--no-context-shift"})
+    attempts = {"n": 0}
+
+    def wait(self, timeout):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise RuntimeError(
+                "llama.cpp exited during startup (code 1): "
+                'error while handling argument "--spec-type": '
+                "unknown speculative type: ngram-mod\n\nusage:\n"
+                "--spec-type [none|ngram-cache|ngram-simple]\n"
+            )
+        return None
+
+    launched = _healthy_stub_server(monkeypatch, available=full, wait_side_effect=wait)
+
+    with caplog.at_level(logging.WARNING):
+        server = llama_cpp.LlamaCppServer(model="org/model:Q4", port=8770, role="llm")
+
+    assert attempts["n"] == 2  # first fails, retry succeeds
+    assert len(launched) == 2
+    assert "--spec-type" in launched[0]
+    assert "--spec-type" not in launched[1]
+    assert any("conservative" in r.message.lower() for r in caplog.records)
+    server._process = None
+    server.shutdown()
+
+
 def test_startup_no_retry_on_timeout(monkeypatch):
     from bibr.local import llama_cpp
 

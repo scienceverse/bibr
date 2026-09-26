@@ -312,6 +312,33 @@ class TestLlmBackendResolution:
         assert pipe.llm_backend == "vllm-mlx"
         assert pipe._config.llm_backend == "vllm-mlx"
 
+    def test_local_pipeline_uses_instance_settings_for_rapid_mlx(self, monkeypatch):
+        """LocalPipeline hands its settings snapshot to the resolver (16).
+
+        Dropping ``settings=`` from the ``resolve_llm_backend`` call falls
+        back to the process-global executable lookup, so an injected
+        ``rapid_mlx.executable`` would resolve ``local`` to vllm-mlx while
+        the server later launches rapid-mlx.
+        """
+        import platform
+
+        from bibr.config import GlobalSettings
+        from bibr.local import rapid_mlx
+
+        pipeline_settings = GlobalSettings()
+        pipeline_settings.rapid_mlx.executable = "python3"  # resolvable on PATH
+        global_settings = GlobalSettings()
+        global_settings.rapid_mlx.executable = "definitely-not-on-path-bibr"
+
+        monkeypatch.setattr(platform, "system", lambda: "Darwin")
+        monkeypatch.setattr(platform, "machine", lambda: "arm64")
+        monkeypatch.setattr(rapid_mlx, "snapshot_settings", lambda settings=None: global_settings)
+        pipe = LocalPipeline(
+            llm_backend="local", ocr_backend="glm-rapid-mlx", settings=pipeline_settings
+        )
+        assert pipe.llm_backend == "rapid-mlx"
+        assert pipe._config.llm_backend == "rapid-mlx"
+
     def test_local_alias_resolves_to_vllm_elsewhere(self, monkeypatch):
         import platform
 

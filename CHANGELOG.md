@@ -218,11 +218,12 @@ released.
   scale with `LLM_LLAMA_CPP_CONTEXT_SIZE`.
 - llama.cpp server: `*_LLAMA_CPP_EXTRA_ARGS` documents the separate-token
   form (`--flag value`, not `--flag=value`) and names the setting on bad
-  quoting; `--host` in extra args is honoured as before, and `-hfr` joins
-  the `--hf-repo` aliases for the identity-override check.
+  quoting, and `-hfr` joins the `--hf-repo` aliases for the
+  identity-override check.
 - llama.cpp server: startup failures report the END of the stderr tail, and
-  the conservative-args retry fires only on argument-parse errors — load
-  and OOM failures fail fast. A `/health` 200 is accepted only if the
+  the conservative-args retry fires only on argument-parse errors (unknown
+  flags and rejected flag values) — load and OOM failures fail fast. A
+  `/health` 200 is accepted only if the
   process is still alive after a short grace period, so a port-racing
   sibling's server is not mistaken for ours.
 - llama.cpp server: Ctrl-C during startup shuts down the child instead of
@@ -242,11 +243,10 @@ released.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
   triggered it — the caller gets its own transcription, and the restart
   error surfaces on the next request where the generation is retried.
-  Callers parked on the recycle drain get an `UpstreamServiceError` naming
-  the failure instead of a bare assert, and replacing a dead generation
+  Callers parked on the recycle drain retry the failed restart once, and
+  get an `UpstreamServiceError` naming the failure instead of a bare
+  assert when the retry fails too, and replacing a dead generation
   shuts down its HTTP pool and handles first.
-- Rapid-MLX and paddle-mlx-vlm OCR: an explicit `--ocr-model` is honoured
-  as the launch model, matching main and the paddle-vllm path.
 - `resolve_llm_backend` accepts the pipeline's settings when checking
   rapid-mlx availability instead of only the global snapshot.
 - Cloud vision OCR: `settings.llm.api_key` is only forwarded to a vision
@@ -260,7 +260,11 @@ released.
   milliseconds (Redis truncates a Lua number reply to an integer, so a
   fractional-second wait became 0), and the key TTL spans the queued
   horizon so concurrent sleepers do not lose their place; the sliding
-  window quantizes to the same.
+  window quantizes to the same. The strict-interval key is now
+  `rate_limit:<resource>:next_allowed_ms`: it stores epoch milliseconds
+  while older releases stored epoch seconds under `next_allowed`, so the
+  two never read each other's values when old and new processes share one
+  Redis.
 - Circuit breaker: a waiter that times out no longer forces the breaker
   back to OPEN under a still-running probe — only the probe's completion
   owns the transition (a provably dead probe still fails fast).

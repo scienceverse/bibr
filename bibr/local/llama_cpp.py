@@ -733,6 +733,11 @@ _ARG_ERROR_MARKERS = (
     "unknown option",
     "parse error",
     "failed to parse",
+    # llama.cpp wraps every flag-handler exception as
+    # 'error while handling argument "<flag>": <reason>' (common/arg.cpp),
+    # e.g. a build whose --help lists --spec-type but rejects its value
+    # ('unknown speculative type: ngram-mod').
+    "error while handling argument",
 )
 
 

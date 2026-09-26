@@ -458,9 +458,12 @@ async def test_strict_interval_stores_whole_milliseconds():
     """
     limiter, fake = _fakeredis_limiter(max_requests=1, window_seconds=0.2)
     await limiter.acquire()
-    stored = await fake.get("rate_limit:fakeredis-resource:next_allowed")
+    stored = await fake.get("rate_limit:fakeredis-resource:next_allowed_ms")
     assert stored is not None and "." not in stored
     int(stored)  # whole milliseconds since the epoch
+    # The pre-ms key must stay untouched: old releases stored epoch seconds
+    # there, and sharing it across versions hangs old workers for ~1.8e12 s.
+    assert await fake.get("rate_limit:fakeredis-resource:next_allowed") is None
 
 
 @pytest.mark.asyncio
@@ -477,34 +480,38 @@ async def test_strict_interval_enforces_spacing():
 
 
 @pytest.mark.asyncio
-async def test_strict_interval_holds_spacing_under_concurrency():
-    """Concurrent workers stay spaced: the key TTL covers the queued horizon (ml-2).
+async def test_strict_interval_ttl_covers_queued_horizon():
+    """The key TTL spans the queued horizon, not just 2x the interval (ml-2).
 
-    A TTL of 2x the interval expires the queued next-allowed stamp while
-    callers are still sleeping, so a late caller sees no key and fires
-    immediately (1.5x over-rate with 12 workers). The TTL now runs from the
-    queued horizon plus a margin, so every gap holds.
+    Concurrent callers each push the next-allowed stamp one interval out,
+    so a fixed 2x-interval TTL expired the key while sleepers were still
+    queued — a late caller then saw no key and fired immediately. The TTL
+    now runs from the queued horizon plus a margin. Sleeps are stubbed so
+    all N acquires queue from the same instant: the stamp ends N intervals
+    out, and the TTL must still cover it. No wall-clock gap assertions, so
+    a loaded CI runner cannot fail this test.
     """
     import asyncio
     import time
 
-    interval = 0.1
-    workers, per_worker = 6, 3
-    limiter, _ = _fakeredis_limiter(max_requests=1, window_seconds=interval)
-    starts: list[float] = []
+    interval = 0.2
+    queued = 5
+    limiter, fake = _fakeredis_limiter(max_requests=1, window_seconds=interval)
+    key = "rate_limit:fakeredis-resource:next_allowed_ms"
 
-    async def worker():
-        for _ in range(per_worker):
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    with patch.object(asyncio, "sleep", _no_sleep):
+        for _ in range(queued):
             await limiter.acquire()
-            starts.append(time.monotonic())
+        stored = int(await fake.get(key))
+        pttl = await fake.pttl(key)
+        now_ms = int(time.time() * 1000)
 
-    t0 = time.monotonic()
-    await asyncio.gather(*(worker() for _ in range(workers)))
-    assert len(starts) == workers * per_worker
-    ordered = sorted(starts)
-    gaps = [b - a for a, b in zip(ordered, ordered[1:], strict=False)]
-    assert min(gaps) >= interval / 2, f"min gap {min(gaps) * 1000:.1f} ms"
-    assert (time.monotonic() - t0) >= (len(starts) - 1) * interval * 0.9
+    horizon_ms = stored - now_ms
+    assert horizon_ms >= int(queued * interval * 1000) - 50  # N intervals queued
+    assert pttl >= horizon_ms, f"pttl {pttl} ms does not cover queued horizon {horizon_ms} ms"
 
 
 @pytest.mark.asyncio

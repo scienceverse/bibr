@@ -696,6 +696,75 @@ async def test_ensure_generation_shuts_down_dead_generation(monkeypatch):
     assert client._restart_error is None
 
 
+async def test_ensure_generation_failure_closes_dead_generation(monkeypatch):
+    """A failed restart still releases the dead generation's pool/handles (8).
+
+    Removing the failure-branch close leaves the dead HTTP pool and server
+    handles open while the client reports no generation at all.
+    """
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    closed = []
+
+    class DeadServer:
+        base_url = "http://127.0.0.1:1"
+
+        @property
+        def loaded(self):
+            return False
+
+        def shutdown(self):
+            closed.append("server")
+
+    class DeadHttp:
+        async def shutdown(self):
+            closed.append("http")
+
+    client._server = DeadServer()
+    client._http_client = DeadHttp()
+
+    def boom():
+        raise RuntimeError("Metal OOM")
+
+    client._start_generation = boom
+
+    with pytest.raises(UpstreamServiceError, match="OCR restart failed"):
+        await client._ensure_generation()
+
+    assert closed == ["http", "server"]
+    assert client._server is None
+    assert client._http_client is None
+    assert client._restart_error is not None
+
+
+async def test_parked_waiter_retries_failed_restart(monkeypatch):
+    """A caller parked on the drain retries the failed restart once (8).
+
+    The recycle failed while this caller was parked, but the next start
+    would succeed — it must get its transcription, not 'OCR restart failed
+    while parked' (which is reserved for a retry that fails again).
+    """
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    real_wait = client._drain_event.wait
+
+    async def sabotage():
+        await real_wait()
+        # A recycle failed while we were parked: generation gone, failure
+        # stashed, drain open again — the retry below must recover.
+        client._server = None
+        client._http_client = None
+        client._restart_error = UpstreamServiceError("rapid-mlx", "OCR restart failed: Metal OOM")
+
+    client._drain_event.wait = sabotage
+    assert await client.recognize(None, "Text Recognition:") == "text-gen2"
+    assert client._restart_error is None
+
+
 def test_spawned_http_client_inherits_pipeline_settings(monkeypatch):
     """The recycled HTTP client gets the pipeline settings, not globals (9)."""
     from bibr.config import GlobalSettings

@@ -144,7 +144,11 @@ class AsyncRedisRateLimiter:
             try:
                 now_ms = int(time.time() * 1000)
                 interval_ms = int(round(self.window_seconds * 1000))
-                key = f"rate_limit:{self.resource_id}:next_allowed"
+                # ``_ms`` suffix: the stamp is epoch milliseconds, while older
+                # releases stored epoch seconds under ``next_allowed``. A
+                # distinct key keeps the two from reading each other's values
+                # when old and new processes share one Redis (rolling deploy).
+                key = f"rate_limit:{self.resource_id}:next_allowed_ms"
                 # Using eval directly on the connection
                 wait_ms = await self.redis.eval(script, 1, key, interval_ms, now_ms)
 
