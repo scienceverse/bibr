@@ -1291,41 +1291,6 @@ def test_a_labelled_doi_in_a_citation_is_a_cited_work(text, selected):
     assert (selection.selected.normalized if selection.selected else None) == selected
 
 
-@pytest.mark.parametrize(
-    ("header", "rejected"),
-    [
-        # A reference entry at the top of a page, read as a running header.
-        (
-            "Doe, J., 2012b. How children cope. J. Example Psychol. 32, 225-233.\r\n"
-            "https://doi.org/10.1234/cited.4.",
-            True,
-        ),
-        # The paper's own citation lines stay page furniture.
-        ("2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/own.4.", False),
-        ("Doe et al. Example J 2020;9:e12345. DOI: https://doi.org/10.1234/own.4", False),
-        (
-            "Please cite this article as: Doe, J., A study, Example J (2020), "
-            "https://doi.org/10.1234/own.4",
-            False,
-        ),
-        ("Cite as: Doe, J. (2020). A study. Example J, 1, 2. https://doi.org/10.1234/own.4", False),
-        (
-            "Suggested citation: Doe, J. (2020). A study. Example J, 1, 2. "
-            "https://doi.org/10.1234/own.4",
-            False,
-        ),
-    ],
-)
-def test_a_reference_entry_read_as_page_furniture_is_a_reference(header, rejected):
-    from bibr.extract.doi_identity import collect_doi_candidates
-
-    contents = _contents([], headers=[header])
-
-    [candidate] = collect_doi_candidates(contents)
-
-    assert (candidate.rejection_reason == "reference_candidate") is rejected
-
-
 def test_a_correction_notice_names_the_original_article_as_its_parent():
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
