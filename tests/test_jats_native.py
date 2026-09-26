@@ -980,3 +980,1199 @@ def test_table_wrap_without_a_table_is_kept_with_its_caption():
         ("2", "Table 2 Scanned values.", [], ""),
     ]
     assert [(x.xref_type, x.xref_id) for x in c.xrefs] == [("table", 2)]
+
+
+# ---------------------------------------------------------------------------
+# Multiple / nested <ref-list>s (audit input-parsers-5)
+# ---------------------------------------------------------------------------
+
+MULTI_REFLIST_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Two lists</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Text.</p></sec></body>
+  <back>
+    <ref-list><title>References</title>
+      <ref><element-citation publication-type="journal">
+        <person-group><name><surname>A</surname><given-names>X</given-names></name></person-group>
+        <year>2000</year><article-title>Title 1</article-title><source>Jrnl</source>
+      </element-citation></ref>
+      <ref><element-citation publication-type="journal">
+        <person-group><name><surname>B</surname><given-names>Y</given-names></name></person-group>
+        <year>2001</year><article-title>Title 2</article-title><source>Jrnl</source>
+      </element-citation></ref>
+      <ref><element-citation publication-type="journal">
+        <person-group><name><surname>C</surname><given-names>Z</given-names></name></person-group>
+        <year>2002</year><article-title>Title 3</article-title><source>Jrnl</source>
+      </element-citation></ref>
+    </ref-list>
+    <ref-list><title>Data references</title>
+      <ref><element-citation publication-type="dataset">
+        <person-group><name><surname>D</surname><given-names>W</given-names></name></person-group>
+        <year>2003</year><article-title>Title 9</article-title><source>Repo</source>
+      </element-citation></ref>
+    </ref-list>
+  </back>
+</article>"""
+
+NESTED_REFLIST_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Nested lists</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Text.</p></sec></body>
+  <back><ref-list><title>References</title>
+    <ref-list><title>Primary</title>
+      <ref><mixed-citation>Alpha, A. (2010). First.</mixed-citation></ref>
+      <ref><mixed-citation>Beta, B. (2011). Second.</mixed-citation></ref>
+    </ref-list>
+  </ref-list></back>
+</article>"""
+
+
+class TestMultipleRefLists:
+    def test_later_list_extends_instead_of_replacing(self):
+        c = _parse(MULTI_REFLIST_JATS)._contents
+        assert c.native_references is not None
+        assert [(r.bib_id, r.title) for r in c.native_references] == [
+            (1, "Title 1"),
+            (2, "Title 2"),
+            (3, "Title 3"),
+            (4, "Title 9"),
+        ]
+
+    def test_each_list_keeps_its_references_section(self):
+        c = _parse(MULTI_REFLIST_JATS)._contents
+        ref_secs = [s for s in c.sections if s.section_type == CanonicalSection.REFERENCES]
+        assert [s.header for s in ref_secs] == ["References", "Data references"]
+
+    def test_mixed_union_falls_back_to_strings_for_all(self):
+        # Structured main list + mixed data list: the invariant is decided
+        # over the union, so every ref (not just the mixed one) is a string.
+        data_ref = (
+            b'<ref><element-citation publication-type="dataset">\n'
+            b"        <person-group><name><surname>D</surname><given-names>W</given-names>"
+            b"</name></person-group>\n"
+            b"        <year>2003</year><article-title>Title 9</article-title>"
+            b"<source>Repo</source>\n      </element-citation></ref>"
+        )
+        assert data_ref in MULTI_REFLIST_JATS
+        xml = MULTI_REFLIST_JATS.replace(
+            data_ref,
+            b"<ref><mixed-citation>Datum, D. (2003). Title 9.</mixed-citation></ref>",
+        )
+        c = _parse(xml)._contents
+        assert c.native_references is None
+        assert c.native_ref_strings is not None
+        assert len(c.native_ref_strings) == 4
+        assert c.native_ref_strings[-1] == "Datum, D. (2003). Title 9."
+
+    def test_nested_ref_lists_yield_refs_and_rows(self):
+        p = _parse(NESTED_REFLIST_JATS)
+        c = _segment(p)
+        assert c.native_references is None
+        assert c.native_ref_strings == [
+            "Alpha, A. (2010). First.",
+            "Beta, B. (2011). Second.",
+        ]
+        ref_ids = {
+            s.section_id for s in c.sections if s.section_type == CanonicalSection.REFERENCES
+        }
+        assert [s.text for s in c.sentences if s.section_id in ref_ids] == [
+            "Alpha, A. (2010). First.",
+            "Beta, B. (2011). Second.",
+        ]
+
+
+# ---------------------------------------------------------------------------
+# <alternatives> (audit input-parsers-7)
+# ---------------------------------------------------------------------------
+
+ALTERNATIVES_JATS = (
+    b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+    b"<front><article-meta><title-group><article-title>T</article-title></title-group>"
+    b"</article-meta></front><body><sec><title>R</title>"
+    b"<p>We set the significance level to <inline-formula><alternatives>"
+    b"<tex-math>\\documentclass[12pt]{minimal}\\usepackage{amsmath}"
+    b"\\begin{document}$$\\alpha = 0.05$$\\end{document}</tex-math>"
+    b'<mml:math xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+    b"<mml:mi>\xce\xb1</mml:mi><mml:mo>=</mml:mo><mml:mn>0.05</mml:mn></mml:math>"
+    b'<graphic xlink:href="g.png"/></alternatives></inline-formula> for all tests.</p>'
+    b"</sec></body></article>"
+)
+
+
+class TestAlternatives:
+    def test_inline_alternatives_emits_mathml_only(self):
+        c = _segment(_parse(ALTERNATIVES_JATS))
+        assert [s.text for s in c.sentences] == [
+            "We set the significance level to \u03b1=0.05 for all tests."
+        ]
+
+    def test_tex_only_alternatives_drops_the_preamble(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title><p>With <inline-formula><alternatives><tex-math>"
+            b"\\documentclass{minimal}\\usepackage{amsmath}"
+            b"\\begin{document}$$y = a + b$$\\end{document}</tex-math>"
+            b"</alternatives></inline-formula> inside.</p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [s.text for s in c.sentences] == ["With y = a + b inside."]
+
+    def test_disp_formula_alternatives_is_one_entry(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+            b"<front><article-meta><title-group>"
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title>"
+            b"<disp-formula><alternatives><tex-math>\\documentclass{minimal}"
+            b"\\begin{document}$$y = a + b$$\\end{document}</tex-math>"
+            b"<mml:math><mml:mi>y=a</mml:mi></mml:math></alternatives><label>(1)</label>"
+            b"</disp-formula></sec></body></article>"
+        )
+        p = _parse(xml)
+        formulas = [(t[0], t[4]) for t in p._deferred_texts]
+        assert formulas == [("y=a (1)", True)]
+
+    def test_graphic_only_alternatives_keeps_the_tail(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>R</title>"
+            b"<p>See <inline-formula><alternatives>"
+            b'<graphic xlink:href="g.png"/></alternatives></inline-formula> here.</p>'
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [s.text for s in c.sentences] == ["See here."]
+
+    def test_bare_tex_math_preamble_is_trimmed(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title>"
+            b"<p>With <inline-formula><tex-math>\\documentclass[12pt]{minimal}"
+            b"\\usepackage{amsmath}\\begin{document}$$y = a + b$$\\end{document}"
+            b"</tex-math></inline-formula> inside.</p>"
+            b"<disp-formula><tex-math>\\documentclass{minimal}"
+            b"\\begin{document}$$E = mc^2$$\\end{document}</tex-math></disp-formula>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        c = _segment(p)
+        assert [s.text for s in c.sentences] == ["With y = a + b inside.", "E = mc^2"]
+        assert [(t[0], t[4]) for t in p._deferred_texts if t[4]] == [("E = mc^2", True)]
+
+    def test_plain_tex_math_is_untouched(self):
+        # No preamble, no delimiters: the formula text passes through as-is.
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title>"
+            b"<disp-formula><tex-math>E = mc^2</tex-math></disp-formula>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        assert [(t[0], t[4]) for t in p._deferred_texts] == [("E = mc^2", True)]
+
+
+# ---------------------------------------------------------------------------
+# Blocks nested inside <p> (audit input-parsers-8)
+# ---------------------------------------------------------------------------
+
+BLOCKS_IN_P_JATS = b"""<?xml version="1.0"?>
+<article xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta>
+    <title-group><article-title>Nested blocks</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>R</title>
+    <p>Text before <fig><label>Figure 1</label><caption><p>A cap.</p></caption>
+      <graphic xlink:href="f.png"/></fig> after.</p>
+    <p>Eq: <disp-formula><label>(2)</label><tex-math>x</tex-math></disp-formula> done.</p>
+    <p>See table <table-wrap><label>Table 1</label><caption><p>Tcap</p></caption>
+      <table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>
+      </table-wrap></p>
+    <p>A plain paragraph stays one entry.</p>
+  </sec></body>
+</article>"""
+
+
+class TestBlocksInsideParagraph:
+    def test_fig_inside_p_is_registered_not_merged(self):
+        p = _parse(BLOCKS_IN_P_JATS)
+        c = _segment(p)
+        assert [f.caption for f in c.figures] == ["Figure 1 A cap."]
+        texts = [s.text for s in c.sentences]
+        assert "Text before Figure 1 A cap. after." not in texts
+        assert "Text before" in texts
+        assert "after." in texts
+
+    def test_table_wrap_inside_p_is_registered_not_merged(self):
+        p = _parse(BLOCKS_IN_P_JATS)
+        c = _segment(p)
+        assert [(t.label, t.caption) for t in c.tables] == [("1", "Table 1 Tcap")]
+        assert c.tables[0].df.values.tolist() == [["1", "2"]]
+        texts = [s.text for s in c.sentences]
+        assert "See table Table 1 Tcap A B 1 2" not in texts
+
+    def test_disp_formula_inside_p_is_a_formula_entry(self):
+        p = _parse(BLOCKS_IN_P_JATS)
+        formulas = [t for t in p._deferred_texts if t[4]]
+        assert len(formulas) == 1
+        assert formulas[0][0] == "(2) x"
+        texts = [t[0] for t in p._deferred_texts if t[3]]
+        assert "Eq: (2)x done." not in texts
+
+    def test_formula_label_does_not_fuse_with_the_following_word(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title>"
+            b"<p>The model is <disp-formula><label>(2)</label><tex-math>y=x</tex-math>"
+            b"</disp-formula>where y is the outcome.</p>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        texts = [t[0] for t in p._deferred_texts if t[3]]
+        assert "(2)where" not in " ".join(texts)
+        assert "where y is the outcome." in texts
+
+    def test_plain_paragraph_stays_one_entry(self):
+        p = _parse(BLOCKS_IN_P_JATS)
+        texts = [t[0] for t in p._deferred_texts if t[3]]
+        assert "A plain paragraph stays one entry." in texts
+
+    def test_table_footnotes_are_kept_with_their_links(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>R</title>"
+            b"<p>Values <table-wrap><label>Table 1</label><caption><p>Tcap</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+            b"<table-wrap-foot><p>Source data at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://example.org/src">'
+            b"https://example.org/src</ext-link>.</p></table-wrap-foot>"
+            b"</table-wrap></p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(t.label, t.caption) for t in c.tables] == [("1", "Table 1 Tcap")]
+        assert "Source data at https://example.org/src." in [s.text for s in c.sentences]
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("https://example.org/src", "https://example.org/src")
+        ]
+
+    def test_caption_sentence_of_in_paragraph_fig_keeps_its_url(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>R</title>"
+            b"<p>Shown <fig><label>Figure 1</label><caption><p>Rates at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://example.org/rates">'
+            b"https://example.org/rates</ext-link>.</p></caption>"
+            b'<graphic xlink:href="f.png"/></fig> here.</p>'
+            b"<fig><label>Figure 2</label><caption><p>Plain cap at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://example.org/plain">'
+            b"https://example.org/plain</ext-link>.</p></caption>"
+            b'<graphic xlink:href="g.png"/></fig>'
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [f.caption for f in c.figures] == [
+            "Figure 1 Rates at https://example.org/rates.",
+            "Figure 2 Plain cap at https://example.org/plain.",
+        ]
+        urls = [link.url for link in c.links]
+        # The in-paragraph caption keeps its regex link; a sibling float's
+        # caption never had one and still does not.
+        assert "https://example.org/rates" in urls
+        assert "https://example.org/plain" not in urls
+
+    def test_table_foot_fn_paragraphs_are_kept_with_their_links(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>R</title>"
+            b"<p>Values <table-wrap><label>Table 1</label><caption><p>Tcap</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+            b"<table-wrap-foot><fn><p>Model from "
+            b'<ext-link ext-link-type="uri" xlink:href="https://example.org/mm5">'
+            b"https://example.org/mm5</ext-link>.</p></fn></table-wrap-foot>"
+            b"</table-wrap></p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert "Model from https://example.org/mm5." in [s.text for s in c.sentences]
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("https://example.org/mm5", "https://example.org/mm5")
+        ]
+
+    def test_multi_table_wrap_inside_p_keeps_every_table(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>R</title><p>Intro "
+            b"<table-wrap><label>Table 1</label><caption><p>Curriculum</p></caption>"
+            b"<table><tr><th>Year</th></tr><tr><td>First year Neck ultrasound session</td></tr></table>"
+            b"<table><tr><th>Year</th></tr><tr><td>Second year Cardiac ultrasound session</td></tr></table>"
+            b"</table-wrap> tail.</p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert len(c.tables) == 1
+        grid = c.tables[0].df.values.tolist()
+        flat = " ".join(str(v) for row in grid for v in row)
+        assert "Neck ultrasound session" in flat
+        assert "Cardiac ultrasound session" in flat
+
+    def test_statement_labels_and_disp_quote_attrib_inside_p_are_kept(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<p>As one author put it <disp-quote><p>Men do not diet.</p>"
+            b"<attrib>(Moi 1991, p. 1030)</attrib></disp-quote> which we test.</p>"
+            b"<p>Intro <statement><label>Study 1</label><title>Case 1</title>"
+            b"<p>A patient presented.</p></statement> tail.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert "Study 1" in texts
+        assert "Case 1" in texts
+        assert "(Moi 1991, p. 1030)" in texts
+        assert texts.count("(Moi 1991, p. 1030)") == 1
+
+    def test_boxed_text_sec_inside_p_keeps_its_depth(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>Parent</title><p>Body.</p>"
+            b"<p>Para <boxed-text><sec><title>Box in p</title><p>Words.</p></sec>"
+            b"</boxed-text> tail.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Box in p"].level == 2
+        assert by_header["Box in p"].parent_section_id == by_header["Parent"].section_id
+
+    def test_floats_group_figs_and_tables_are_kept(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group>"
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<floats-group><fig><label>Figure 1</label><caption><p>Cap.</p></caption>"
+            b'<graphic xlink:href="f.png"/></fig>'
+            b"<table-wrap><label>Table 1</label><caption><p>Tcap</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>"
+            b"</floats-group></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [f.caption for f in c.figures] == ["Figure 1 Cap."]
+        assert [(t.label, t.caption) for t in c.tables] == [("1", "Table 1 Tcap")]
+
+    def test_list_inside_p_is_kept(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title><p>Steps <list><list-item><p>First step.</p>"
+            b"</list-item><list-item><p>Second step.</p></list-item></list> done.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert "First step." in texts
+        assert "Second step." in texts
+
+    def test_boxed_text_caption_title_beside_p_is_emitted_once(self):
+        # A wrapper's <caption><title> must not double: the heading pass used
+        # to emit it and the recursed <caption> emitted it again.
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<boxed-text><label>Box 1.</label>"
+            b"<caption><title>Key points</title></caption>"
+            b"<p>Point one.</p></boxed-text><p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Key points") == 1
+        assert texts == ["Box 1.", "Key points", "Point one.", "After."]
+
+    def test_boxed_text_caption_title_inside_p_is_emitted_once(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<p>See the box. <boxed-text><caption><title>Practice points</title>"
+            b"<p>Sleep more.</p></caption></boxed-text> after.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Practice points") == 1
+
+    def test_supplementary_material_caption_title_inside_p_is_emitted_once(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<p>See <supplementary-material><caption><title>Raw data</title>"
+            b"<p>File.</p></caption></supplementary-material> after.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Raw data") == 1
+        assert "File." in texts
+
+    def test_labelled_list_items_do_not_emit_label_only_sentences(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<list><list-item><label>1.</label><p>First item.</p></list-item>"
+            b"<list-item><label>2.</label><p>Second item.</p></list-item></list>"
+            b"<p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [s.text for s in c.sentences] == ["First item.", "Second item.", "After."]
+
+    def test_table_foot_fn_label_is_not_a_standalone_sentence(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<table-wrap><label>Table 1</label><caption><p>Cap.</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+            b"<table-wrap-foot><fn><label>a</label><p>Adjusted for age.</p></fn>"
+            b"</table-wrap-foot></table-wrap><p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert "a" not in texts
+        assert "Adjusted for age." in texts
+        assert "After." in texts
+
+    def test_caption_sentence_of_in_paragraph_table_keeps_its_url(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>R</title>"
+            b"<p>Shown <table-wrap><label>Table 1</label><caption><p>Rates at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://example.org/rates">'
+            b"https://example.org/rates</ext-link>.</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+            b"</table-wrap> here.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert "https://example.org/rates" in [link.url for link in c.links]
+
+
+# ---------------------------------------------------------------------------
+# Back-matter notes / app-group / glossary and body wrappers (input-parsers-4)
+# ---------------------------------------------------------------------------
+
+BACK_MATTER_JATS = b"""<?xml version="1.0"?>
+<article xmlns:xlink="http://www.w3.org/1999/xlink">
+  <front><article-meta>
+    <title-group><article-title>Back matter</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Body.</p>
+    <boxed-text><sec><title>Box</title><p>Boxed words here.</p></sec></boxed-text>
+    <fig-group><fig><label>Figure 9</label><caption><p>Grouped cap.</p></caption>
+      <graphic xlink:href="g.png"/></fig></fig-group>
+  </sec></body>
+  <back>
+    <ack><p>Thanks.</p></ack>
+    <notes notes-type="data-availability"><title>Data Availability</title>
+      <p>Data are at https://osf.io/abcd.</p></notes>
+    <notes notes-type="COI-statement"><title>Competing interests</title>
+      <p>None declared.</p></notes>
+    <app-group><app id="a1"><title>Appendix A</title><p>Appendix text here.</p></app></app-group>
+    <glossary><title>Glossary</title><def-list><def-item><term>Word</term>
+      <def><p>Meaning here.</p></def></def-item></def-list></glossary>
+    <ref-list><title>References</title>
+      <ref><mixed-citation>Doe J. 2020. X.</mixed-citation></ref></ref-list>
+  </back>
+</article>"""
+
+SEC_WRAPPED_REFLIST_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Wrapped bibliography</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>Intro</title><p>Body.</p></sec></body>
+  <back><sec><title>References</title>
+    <ref-list>
+      <ref><mixed-citation>Doe J. 2020. X.</mixed-citation></ref>
+    </ref-list>
+  </sec></back>
+</article>"""
+
+
+class TestBackMatterSections:
+    def test_notes_become_typed_sections_with_their_text(self):
+        c = _segment(_parse(BACK_MATTER_JATS))
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Data Availability"].section_type == CanonicalSection.OPEN_DATA
+        assert by_header["Competing interests"].section_type == CanonicalSection.COI
+        texts = [s.text for s in c.sentences]
+        assert "Data are at https://osf.io/abcd." in texts
+        assert "None declared." in texts
+
+    def test_untyped_notes_keep_their_text_as_unknown(self):
+        xml = BACK_MATTER_JATS.replace(b'notes-type="COI-statement"', b'notes-type="other"')
+        c = _segment(_parse(xml))
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Competing interests"].section_type == CanonicalSection.UNKNOWN
+        assert "None declared." in [s.text for s in c.sentences]
+
+    def test_app_group_and_glossary_are_kept(self):
+        c = _segment(_parse(BACK_MATTER_JATS))
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Appendix A"].section_type == CanonicalSection.APPENDIX
+        texts = [s.text for s in c.sentences]
+        assert "Appendix text here." in texts
+        assert "Meaning here." in texts
+
+    def test_boxed_text_and_fig_group_are_kept(self):
+        c = _segment(_parse(BACK_MATTER_JATS))
+        texts = [s.text for s in c.sentences]
+        assert "Boxed words here." in texts
+        assert [f.caption for f in c.figures] == ["Figure 9 Grouped cap."]
+
+    def test_sec_wrapped_ref_list_reuses_its_section(self):
+        c = _parse(SEC_WRAPPED_REFLIST_JATS)._contents
+        ref_secs = [s for s in c.sections if s.section_type == CanonicalSection.REFERENCES]
+        assert len(ref_secs) == 1
+        assert ref_secs[0].header == "References"
+        # No leftover UNKNOWN twin of the same heading.
+        assert [s.header for s in c.sections if s.section_id].count("References") == 1
+        assert c.native_ref_strings == ["Doe J. 2020. X."]
+
+    def test_ref_list_in_a_substantive_back_sec_opens_its_own_section(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b'<back><sec sec-type="COI-statement"><title>Competing interests</title>'
+            b"<p>None</p><ref-list><title>References</title>"
+            b"<ref><mixed-citation>Doe J. 2020. X.</mixed-citation></ref>"
+            b"</ref-list></sec></back></article>"
+        )
+        c = _parse(xml)._contents
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Competing interests"].section_type != CanonicalSection.REFERENCES
+        ref_secs = [s for s in c.sections if s.section_type == CanonicalSection.REFERENCES]
+        assert len(ref_secs) == 1
+        assert ref_secs[0].header == "References"
+
+    def test_notes_without_a_title_get_a_human_header(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b'<back><notes notes-type="data-availability"><p>Data here.</p></notes>'
+            b"</back></article>"
+        )
+        c = _parse(xml)._contents
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Data availability"].section_type == CanonicalSection.OPEN_DATA
+
+    def test_financial_disclosure_notes_are_typed_funding(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b'<back><notes notes-type="financial-disclosure">'
+            b"<title>Funding</title><p>Grant X.</p></notes></back></article>"
+        )
+        c = _parse(xml)._contents
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert by_header["Funding"].section_type == CanonicalSection.FUNDING
+
+    def test_bio_becomes_a_section_with_its_text(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><bio><title>Biography</title><p>Jane wrote this.</p></bio></back></article>"
+        )
+        c = _segment(_parse(xml))
+        by_header = {s.header: s for s in c.sections if s.section_id}
+        assert "Biography" in by_header
+        assert "Jane wrote this." in [s.text for s in c.sentences]
+
+
+# ---------------------------------------------------------------------------
+# Affiliations: IDREFS rids and group-level <aff> (audit input-parsers-6)
+# ---------------------------------------------------------------------------
+
+IDREFS_AFF_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Affs</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>A</surname><given-names>Ann</given-names></name>
+        <xref ref-type="aff" rid="aff1 aff2"/></contrib>
+    </contrib-group>
+    <aff id="aff1">Uni One</aff><aff id="aff2">Uni Two</aff>
+  </article-meta></front>
+  <body><sec><title>I</title><p>Body.</p></sec></body>
+</article>"""
+
+GROUP_AFF_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Group aff</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>A</surname><given-names>Ann</given-names></name></contrib>
+      <contrib contrib-type="author">
+        <name><surname>B</surname><given-names>Bob</given-names></name></contrib>
+      <aff>Department of Psychology, Utrecht University</aff>
+    </contrib-group>
+  </article-meta></front>
+  <body><sec><title>I</title><p>Body.</p></sec></body>
+</article>"""
+
+
+class TestAffiliationFallbacks:
+    def test_idrefs_rid_resolves_every_aff(self):
+        m = _parse(IDREFS_AFF_JATS)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation) for a in m.authors] == [("A", "Uni One; Uni Two")]
+
+    def test_group_level_aff_applies_to_member_contribs(self):
+        m = _parse(GROUP_AFF_JATS)._contents.preparsed_metadata
+        assert [a.affiliation for a in m.authors] == [
+            "Department of Psychology, Utrecht University",
+            "Department of Psychology, Utrecht University",
+        ]
+
+    def test_single_article_meta_aff_is_a_last_resort(self):
+        xml = GROUP_AFF_JATS.replace(
+            b"<aff>Department of Psychology, Utrecht University</aff>", b""
+        ).replace(
+            b"</contrib-group>",
+            b"</contrib-group><aff>Lone Institute</aff>",
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [a.affiliation for a in m.authors] == ["Lone Institute", "Lone Institute"]
+
+    def test_several_article_meta_affs_do_not_attach(self):
+        xml = GROUP_AFF_JATS.replace(
+            b"<aff>Department of Psychology, Utrecht University</aff>", b""
+        ).replace(
+            b"</contrib-group>",
+            b"</contrib-group><aff>First Institute</aff><aff>Second Institute</aff>",
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [a.affiliation for a in m.authors] == ["", ""]
+
+    def test_consortium_does_not_inherit_a_person_affiliation(self):
+        from bibr.models import ORGANIZATION_ROLE
+
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>A</surname>'
+            b"<given-names>Ann</given-names></name></contrib>"
+            b'<contrib contrib-type="author"><collab>The Consortium</collab></contrib>'
+            b"<aff>Uni One</aff></contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation, a.role) for a in m.authors] == [
+            ("A", "Uni One", []),
+            ("The Consortium", "", [ORGANIZATION_ROLE]),
+        ]
+
+    def test_xref_less_author_inherits_only_unclaimed_group_affs(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>A</surname>'
+            b'<given-names>Ann</given-names></name><xref ref-type="aff" rid="a1"/>'
+            b"</contrib>"
+            b'<contrib contrib-type="author"><name><surname>B</surname>'
+            b"<given-names>Bob</given-names></name></contrib>"
+            b'<aff id="a1">Institute of Place</aff>'
+            b'<aff id="a2">Institute of Elsewhere</aff>'
+            b"</contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation) for a in m.authors] == [
+            ("A", "Institute of Place"),
+            ("B", "Institute of Elsewhere"),
+        ]
+
+    def test_aff_claimed_by_another_group_is_not_inherited(self):
+        # An <aff> claimed by an author of a later <contrib-group> must not
+        # leak to an xref-less author of an earlier group.
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>Goldacre</surname>'
+            b"<given-names>Ben</given-names></name></contrib>"
+            b'<aff id="a1">Institute of Elsewhere</aff></contrib-group>'
+            b"<contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>Other</surname>'
+            b'<given-names>Olive</given-names></name><xref ref-type="aff" rid="a1"/>'
+            b"</contrib></contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation) for a in m.authors] == [
+            ("Goldacre", ""),
+            ("Other", "Institute of Elsewhere"),
+        ]
+
+    def test_address_email_and_orcid_reach_the_author(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author" corresp="yes">'
+            b"<name><surname>Keizer</surname><given-names>Ron</given-names></name>"
+            b"<address><email>ron.keizer@example.org</email></address>"
+            b'<contrib-id contrib-id-type="orcid">0000-0002-1234-5678</contrib-id>'
+            b"</contrib></contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        (author,) = _parse(xml)._contents.preparsed_metadata.authors
+        assert author.email == "ron.keizer@example.org"
+        assert author.orcid == "https://orcid.org/0000-0002-1234-5678"
+
+    def test_name_alternatives_author_is_kept_with_stable_ids(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>Keizer</surname>'
+            b"<given-names>Ron</given-names></name></contrib>"
+            b'<contrib contrib-type="author"><name-alternatives>'
+            b"<name><surname>Wang</surname><given-names>Wei</given-names></name>"
+            b"</name-alternatives></contrib>"
+            b'<contrib contrib-type="author"><name><surname>Goldacre</surname>'
+            b"<given-names>Ben</given-names></name></contrib>"
+            b"</contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        authors = _parse(xml)._contents.preparsed_metadata.authors
+        assert [(a.author_id, a.family) for a in authors] == [
+            (1, "Keizer"),
+            (2, "Wang"),
+            (3, "Goldacre"),
+        ]
+
+
+# ---------------------------------------------------------------------------
+# ext-link/uri targets (audit input-parsers-10)
+# ---------------------------------------------------------------------------
+
+
+class TestBodyLinks:
+    def test_ext_link_target_is_recorded_with_its_display_text(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>All data and code are available on the "
+            b'<ext-link ext-link-type="uri" xlink:href="https://osf.io/x7k2q/">'
+            b"Open Science Framework</ext-link>.</p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("https://osf.io/x7k2q/", "Open Science Framework")
+        ]
+
+    def test_uri_target_is_recorded(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b'<p>See <uri xlink:href="https://example.org/data">the dataset</uri>.</p>'
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("https://example.org/data", "the dataset")
+        ]
+
+    def test_bare_url_still_links_by_regex_without_display_text(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Data are at https://osf.io/abcd.</p></sec>"
+            b"</body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(link.url, link.link_text) for link in c.links] == [("https://osf.io/abcd", None)]
+
+    def test_link_shown_as_its_own_url_is_recorded_once(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>Data are at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://osf.io/abcd">'
+            b"https://osf.io/abcd</ext-link>.</p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(link.url, link.text_id) for link in c.links] == [("https://osf.io/abcd", 1)]
+
+    def test_url_in_first_sentence_is_recorded_once_at_the_right_sentence(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>Data are at "
+            b'<ext-link ext-link-type="uri" xlink:href="https://github.com/x/y">'
+            b"https://github.com/x/y</ext-link>. Second sentence follows here.</p>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        c = p._contents
+        p.apply_segmentation(
+            c,
+            [["Data are at https://github.com/x/y.", "Second sentence follows here."]],
+        )
+        assert [(link.url, link.text_id) for link in c.links] == [("https://github.com/x/y", 1)]
+
+    def test_named_link_resolves_to_the_sentence_holding_its_text(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>All data are on the "
+            b'<ext-link ext-link-type="uri" xlink:href="https://osf.io/x7k2q/">'
+            b"Open Science Framework</ext-link>. Second sentence follows here.</p>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        c = p._contents
+        p.apply_segmentation(
+            c,
+            [["All data are on the Open Science Framework.", "Second sentence follows here."]],
+        )
+        assert [(link.url, link.text_id) for link in c.links] == [("https://osf.io/x7k2q/", 1)]
+
+    def test_short_anchor_text_resolves_to_the_sentence_holding_it(self):
+        # 'here' is a substring of 'There': only the anchor's offset tells the
+        # first-sentence mention apart from the second-sentence anchor.
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>There are more results here and there. Download "
+            b'<ext-link ext-link-type="uri" xlink:href="https://x.example.org/d">'
+            b"here</ext-link>.</p>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        c = p._contents
+        p.apply_segmentation(
+            c,
+            [["There are more results here and there.", "Download here."]],
+        )
+        assert [(link.url, link.text_id) for link in c.links] == [("https://x.example.org/d", 2)]
+
+    def test_bare_doi_href_becomes_a_doi_org_url(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>See "
+            b'<ext-link ext-link-type="doi" xlink:href="10.1016/j.cell.2010.01.001">'
+            b"the paper</ext-link>.</p></sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("https://doi.org/10.1016/j.cell.2010.01.001", "the paper")
+        ]
+
+    def test_accession_href_is_not_exported_as_a_url(self):
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>Gene "
+            b'<ext-link ext-link-type="gen" xlink:href="EU598807">EU598807</ext-link>.</p>'
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [link.url for link in c.links] == []
+
+
+# ---------------------------------------------------------------------------
+# Reference row text (audit input-parsers-11)
+# ---------------------------------------------------------------------------
+
+CITATION_ALTERNATIVES_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Rows</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>I</title><p>Body.</p></sec></body>
+  <back><ref-list><title>References</title>
+    <ref id="r1"><label>1</label><citation-alternatives>
+      <element-citation publication-type="journal">
+        <person-group person-group-type="author">
+          <name><surname>Smith</surname><given-names>J</given-names></name></person-group>
+        <article-title>Sleep and memory</article-title><source>Psychol Sci</source>
+        <year>2020</year><volume>31</volume><fpage>1</fpage><lpage>9</lpage>
+      </element-citation>
+      <mixed-citation>Smith J. Sleep and memory. Psychol Sci. 2020;31:1-9.</mixed-citation>
+    </citation-alternatives></ref>
+  </ref-list></back>
+</article>"""
+
+ELEMENT_ONLY_REF_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Rows</article-title></title-group>
+  </article-meta></front>
+  <body><sec><title>I</title><p>Body.</p></sec></body>
+  <back><ref-list><title>References</title>
+    <ref id="r1"><element-citation publication-type="journal">
+      <person-group person-group-type="author">
+        <name><surname>Smith</surname><given-names>J</given-names></name></person-group>
+      <article-title>A title</article-title><source>J Psych</source>
+      <year>2020</year><volume>31</volume>
+    </element-citation></ref>
+  </ref-list></back>
+</article>"""
+
+
+class TestReferenceRows:
+    def test_row_prefers_mixed_citation_over_fused_fields(self):
+        p = _parse(CITATION_ALTERNATIVES_JATS)
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        assert rows == ["1 Smith J. Sleep and memory. Psychol Sci. 2020;31:1-9."]
+
+    def test_element_only_row_is_separated_not_fused(self):
+        p = _parse(ELEMENT_ONLY_REF_JATS)
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        assert rows == ["Smith J A title J Psych 2020 31"]
+
+    def test_mixed_only_rows_keep_their_exact_text(self):
+        c = _parse(MIXED_CITATION_JATS)._contents
+        assert c.native_ref_strings == [
+            "Alpha, A. (2010). First. Journal A, 1, 1-2.",
+            "Beta, B. (2011). Second. Journal B, 2, 3-4.",
+        ]
+
+    def test_element_row_keeps_comment_access_notes_and_urls(self):
+        # PLOS-style element-citation: the URL lives in a <comment> the
+        # structured parse does not model. The row must keep it (and the
+        # link it yields), only separated instead of fused.
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><ref-list><title>References</title>"
+            b'<ref id="r2"><label>2</label>'
+            b'<element-citation publication-type="book">'
+            b"<collab>World Health Organization</collab><year>2006</year>"
+            b"<article-title>Weighted average prices.</article-title>"
+            b"<comment>Available: "
+            b'<ext-link ext-link-type="uri" xlink:href="http://www.who.int/entity/x.pdf">'
+            b"http://www.who.int/entity/x.pdf</ext-link>. Accessed 2006</comment>"
+            b"</element-citation></ref></ref-list></back></article>"
+        )
+        p = _parse(xml)
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        assert rows == [
+            "2 World Health Organization 2006 Weighted average prices. "
+            "Available: http://www.who.int/entity/x.pdf. Accessed 2006"
+        ]
+        c = _segment(p)
+        assert [(link.url, link.link_text) for link in c.links] == [
+            ("http://www.who.int/entity/x.pdf", None)
+        ]
+
+    def test_ref_note_beside_mixed_citation_is_kept_with_its_urls(self):
+        # ACS-style <ref>: the access note (with its URLs) sits beside the
+        # mixed-citation, not inside it.
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><ref-list><title>References</title>"
+            b'<ref id="r39"><label>39</label>'
+            b"<mixed-citation>Roy, R. (1993). Program. Physica B, 192, 55.</mixed-citation>"
+            b"<note><p>Remarks: the program is at "
+            b'<uri xlink:href="http://www.ill.eu/sites/fullprof/">'
+            b"http://www.ill.eu/sites/fullprof/</uri></p></note>"
+            b"</ref></ref-list></back></article>"
+        )
+        p = _parse(xml)
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        assert rows == [
+            "39 Roy, R. (1993). Program. Physica B, 192, 55. "
+            "Remarks: the program is at http://www.ill.eu/sites/fullprof/"
+        ]
+        c = _segment(p)
+        assert [link.url for link in c.links] == ["http://www.ill.eu/sites/fullprof/"]
+
+    def test_ref_with_two_mixed_citations_keeps_both(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><ref-list><title>References</title>"
+            b'<ref id="r62"><label>62</label>'
+            b"<mixed-citation>Liu X. Tetrahedron 2006, 62, 11039.</mixed-citation>"
+            b"<mixed-citation>Ludley P. Tetrahedron 2006, 62, 11043.</mixed-citation>"
+            b"</ref></ref-list></back></article>"
+        )
+        c = _parse(xml)._contents
+        assert c.native_ref_strings == [
+            "62 Liu X. Tetrahedron 2006, 62, 11039. Ludley P. Tetrahedron 2006, 62, 11043."
+        ]
+
+    def test_ref_note_stays_between_its_citations_in_document_order(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><ref-list><title>References</title>"
+            b'<ref id="r62"><label>62</label>'
+            b"<mixed-citation>Liu X. Tetrahedron 2006, 62, 11039.</mixed-citation>"
+            b"<note>See also:</note>"
+            b"<mixed-citation>Ludley P. Tetrahedron 2006, 62, 11043.</mixed-citation>"
+            b"</ref></ref-list></back></article>"
+        )
+        c = _parse(xml)._contents
+        assert c.native_ref_strings == [
+            "62 Liu X. Tetrahedron 2006, 62, 11039. See also: "
+            "Ludley P. Tetrahedron 2006, 62, 11043."
+        ]
+
+    def test_nested_ref_list_inside_a_back_sec_is_not_duplicated(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><sec><title>References</title><ref-list>"
+            b"<ref><mixed-citation>Doe J. 2020. X.</mixed-citation></ref>"
+            b"<ref-list><ref><mixed-citation>Roe J. 2021. Y.</mixed-citation></ref></ref-list>"
+            b"</ref-list></sec></back></article>"
+        )
+        c = _parse(xml)._contents
+        assert c.native_ref_strings == ["Doe J. 2020. X.", "Roe J. 2021. Y."]
+
+
+# ---------------------------------------------------------------------------
+# Consortium with nested members (audit input-parsers-12)
+# ---------------------------------------------------------------------------
+
+
+def _ref_list_xml(ref: str) -> bytes:
+    return (
+        '<?xml version="1.0"?><article><front><article-meta><title-group>'
+        "<article-title>T</article-title></title-group></article-meta></front>"
+        "<body><sec><title>I</title><p>Body.</p></sec></body>"
+        f"<back><ref-list><title>References</title>{ref}</ref-list></back></article>"
+    ).encode()
+
+
+_SMITH_FIELDS = (
+    "<person-group><name><surname>Smith</surname><given-names>J</given-names></name>"
+    "</person-group><article-title>A study</article-title><source>Nature</source>"
+    "<year>2001</year>"
+)
+
+
+class TestReferenceRowNotes:
+    """A <note> sits beside the citation; it never replaces it."""
+
+    @pytest.mark.parametrize("tag", ["element-citation", "nlm-citation", "citation"])
+    @pytest.mark.parametrize("note_first", [False, True])
+    def test_a_note_keeps_the_citation_in_the_row(self, tag, note_first):
+        citation = f'<{tag} publication-type="journal">{_SMITH_FIELDS}</{tag}>'
+        note = "<note><p>Erratum in Nature 2002.</p></note>"
+        body = note + citation if note_first else citation + note
+        p = _parse(_ref_list_xml(f'<ref id="r1"><label>1</label>{body}</ref>'))
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        expected = (
+            "1 Erratum in Nature 2002. Smith J A study Nature 2001"
+            if note_first
+            else "1 Smith J A study Nature 2001 Erratum in Nature 2002."
+        )
+        assert rows == [expected]
+        if tag != "element-citation":  # unstructured: the row is the exported string
+            assert p._contents.native_ref_strings == [expected]
+
+    def test_a_nested_citation_is_read_ahead_of_the_note(self):
+        xml = _ref_list_xml(
+            '<ref id="r1"><label>1</label><note><p>Erratum.</p></note>'
+            f"<citation-group><element-citation>{_SMITH_FIELDS}</element-citation>"
+            "</citation-group></ref>"
+        )
+        rows = [e.text for e in _parse(xml).assembler.entries if not e.needs_segmentation]
+        assert rows == ["1 Smith J A study Nature 2001 Erratum."]
+
+
+CONSORTIUM_JATS = b"""<?xml version="1.0"?>
+<article>
+  <front><article-meta>
+    <title-group><article-title>Consortium</article-title></title-group>
+    <contrib-group>
+      <contrib contrib-type="author">
+        <name><surname>Alpha</surname><given-names>Ann</given-names></name>
+      </contrib>
+      <contrib contrib-type="author">
+        <collab>The Big Consortium<contrib-group><contrib>
+          <name><surname>Member</surname><given-names>M</given-names></name>
+        </contrib></contrib-group></collab>
+      </contrib>
+    </contrib-group>
+  </article-meta></front>
+  <body><sec><title>I</title><p>Body.</p></sec></body>
+</article>"""
+
+
+class TestConsortiumMembers:
+    def test_consortium_appears_once_and_members_are_kept_once(self):
+        from bibr.models import ORGANIZATION_ROLE
+
+        m = _parse(CONSORTIUM_JATS)._contents.preparsed_metadata
+        assert [(a.author_id, a.given, a.family, a.role) for a in m.authors] == [
+            (1, "Ann", "Alpha", []),
+            (2, "", "The Big Consortium", [ORGANIZATION_ROLE]),
+            (3, "M", "Member", []),
+        ]
+
+    def test_nested_member_keeps_its_own_affiliation(self):
+        from bibr.models import ORGANIZATION_ROLE
+
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>A</surname>'
+            b"<given-names>Ann</given-names></name></contrib>"
+            b'<contrib contrib-type="author"><collab>The Consortium<contrib-group>'
+            b'<contrib contrib-type="author"><name><surname>Member</surname>'
+            b'<given-names>M</given-names></name><xref ref-type="aff" rid="mem1"/>'
+            b"</contrib></contrib-group></collab></contrib>"
+            b"<aff>Outer Uni</aff></contrib-group>"
+            b'<aff id="mem1">Member Lab</aff></article-meta></front>'
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation, a.role) for a in m.authors] == [
+            ("A", "Outer Uni", []),
+            ("The Consortium", "", [ORGANIZATION_ROLE]),
+            ("Member", "Member Lab", []),
+        ]

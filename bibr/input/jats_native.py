@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 
 import pandas as pd
 
@@ -109,12 +110,125 @@ def _first_desc(el, name: str):
     return None
 
 
+# Subtrees that never belong to the enclosing <contrib>: a consortium
+# <collab> nests member <contrib>s whose names, emails and affiliations must
+# not stand in for the group's own.
+_CONTRIB_PRUNE = frozenset({"collab", "contrib-group"})
+
+
+def _iter_contrib_descs(contrib, names: set[str]):
+    """Yield descendants of *contrib* named in *names*, pruning collab groups."""
+    for child in contrib:
+        if not isinstance(getattr(child, "tag", None), str):
+            continue
+        ln = _ln(child)
+        if not ln:
+            continue
+        if ln in _CONTRIB_PRUNE:
+            continue
+        if ln in names:
+            yield child
+        yield from _iter_contrib_descs(child, names)
+
+
+def _first_contrib_desc(contrib, name: str):
+    """First pruned-descendant with local name *name*, or ``None``."""
+    return next(_iter_contrib_descs(contrib, {name}), None)
+
+
 def _attr(el, name: str) -> str | None:
     """Attribute value matched by local name (handles ``xlink:href`` etc.)."""
     for key, value in el.attrib.items():
         if key.rsplit("}", 1)[-1] == name:
             return value
     return None
+
+
+def _topmost_ref_lists(scope) -> list:
+    """``<ref-list>`` descendants of *scope* not nested in another ref-list."""
+    found = []
+    for el in scope.iter():
+        if el is scope or _ln(el) != "ref-list":
+            continue
+        parent = el.getparent()
+        nested = False
+        while parent is not None and parent is not scope:
+            if _ln(parent) == "ref-list":
+                nested = True
+                break
+            parent = parent.getparent()
+        if not nested:
+            found.append(el)
+    return found
+
+
+def _collect_refs(ref_list) -> list:
+    """Direct ``<ref>`` children plus those of nested ``<ref-list>``s, in order."""
+    refs = []
+    for child in ref_list:
+        ln = _ln(child)
+        if ln == "ref":
+            refs.append(child)
+        elif ln == "ref-list":
+            refs.extend(_collect_refs(child))
+    return refs
+
+
+_OTHER_CITATION_TAGS = ("element-citation", "nlm-citation", "citation")
+
+
+def _ref_ordered_text(ref) -> str:
+    """Join a ``<ref>``'s citation and note texts in document order.
+
+    A <ref> may carry several citations (ACS 'refs 62a/62b' style) with a
+    <note> such as 'See also:' between them. Reading all citations first and
+    the notes second would move the note after every citation, so collect
+    each child where it stands. Mixed-citations are the printed text and win
+    when present; otherwise an element-citation, nlm-citation or citation
+    takes that position, flattened with its fields kept apart. Citations inside
+    <citation-alternatives> count at the position of that element. A note
+    never stands in for the citation: when no child citation is found, the
+    first nested one is read and put ahead of the notes.
+    """
+    children = list(ref)
+    mixed_mode = any(
+        _ln(child) == "mixed-citation"
+        or (
+            _ln(child) == "citation-alternatives"
+            and _first_desc(child, "mixed-citation") is not None
+        )
+        for child in children
+    )
+    ordered: list[str] = []
+    found_citation = False
+    for child in children:
+        ln = _ln(child)
+        txt = ""
+        if ln == "note":
+            txt = _text(child)
+        elif ln == "citation-alternatives":
+            if mixed_mode:
+                alt = _first_desc(child, "mixed-citation")
+                txt = _text(alt) if alt is not None else ""
+            else:
+                alt = _first_desc(child, "element-citation")
+                txt = _citation_text(alt) if alt is not None else _text(child)
+            found_citation = found_citation or bool(txt)
+        elif ln == "mixed-citation" or (not mixed_mode and ln in _OTHER_CITATION_TAGS):
+            txt = _text(child) if ln == "mixed-citation" else _citation_text(child)
+            found_citation = found_citation or bool(txt)
+        if txt:
+            ordered.append(txt)
+    if not found_citation:
+        nested = _first_desc(ref, "mixed-citation")
+        if nested is not None:
+            txt = _text(nested)
+        else:
+            element_citation = _first_desc(ref, "element-citation")
+            txt = _citation_text(element_citation) if element_citation is not None else ""
+        if txt:
+            ordered.insert(0, txt)
+    return " ".join(ordered).strip()
 
 
 # Elements that end the run of text they sit in. XML carries no whitespace of
@@ -159,6 +273,383 @@ _TEXT_BOUNDARY = frozenset(
 )
 
 
+# Boundaries that also end the run they sit in. ``_TEXT_BOUNDARY`` inserts a
+# space before the element; these additionally need one after, because the
+# source spells no whitespace there either: a printed ``<label>`` fuses with
+# whatever follows it ("(2)where", "1Smith"). Restricted to elements that
+# never occur inside MathML, where a trailing space would corrupt a formula
+# ("[ 0 1 10 20]" must not become "[ 0 1 10 20 ]").
+_TEXT_BOUNDARY_AFTER = frozenset({"label", "title", "term"})
+
+# Children of <alternatives> that carry no text of their own — never the
+# fallback representative.
+_ALT_GRAPHIC = frozenset({"graphic", "inline-graphic", "media", "inline-media"})
+
+# Block-level JATS that may sit inside a <p> (PMC nests display equations in
+# paragraphs; author manuscripts nest floats). A paragraph walker flushes the
+# prose so far, dispatches the child to its handler, and continues with the
+# child's tail.
+_P_BLOCKS = frozenset(
+    {
+        "fig",
+        "table-wrap",
+        "disp-formula",
+        "list",
+        "list-item",
+        "boxed-text",
+        "disp-quote",
+        "fig-group",
+        "table-wrap-group",
+        "floats-group",
+        "def-list",
+        "def-item",
+        "fn-group",
+        "ref-list",
+        "statement",
+        "supplementary-material",
+        "preformat",
+        "caption",
+    }
+)
+
+_TEX_BEGIN_DOCUMENT = re.compile(r"\\begin\{document\}")
+_TEX_END_DOCUMENT = re.compile(r"\\end\{document\}")
+
+# Citation sub-elements that end the run of text they sit in. An
+# element-citation has no whitespace of its own between fields, so plain
+# flattening fuses "Smith" + "J" + "Sleep and memory". Inline markup (italic,
+# sub, sup, xref...) stays absent so "H<sub>2</sub>O" keeps reading "H2O".
+# Used only for reference rows — never for body prose.
+_CITATION_BOUNDARY_EXTRA = frozenset(
+    {
+        "person-group",
+        "name",
+        "string-name",
+        "surname",
+        "given-names",
+        "suffix",
+        "prefix",
+        "degrees",
+        "etal",
+        "collab",
+        "article-title",
+        "chapter-title",
+        "trans-title",
+        "trans-source",
+        "source",
+        "series",
+        "year",
+        "month",
+        "day",
+        "volume",
+        "issue",
+        "supplement",
+        "fpage",
+        "lpage",
+        "elocation-id",
+        "pub-id",
+        "comment",
+        "annotation",
+        "publisher-name",
+        "publisher-loc",
+        "edition",
+        "version",
+        "conf-name",
+        "conf-date",
+        "conf-loc",
+        "conf-sponsor",
+        "size",
+    }
+)
+_CITATION_BOUNDARY = _TEXT_BOUNDARY | _CITATION_BOUNDARY_EXTRA
+
+
+def _citation_text(ec) -> str:
+    """Flatten an ``<element-citation>`` with its fields kept apart.
+
+    Unlike a string synthesized from the parsed reference, this keeps every
+    sub-element the parser does not model — ``<comment>`` access notes and
+    their URLs, consortium authors, name suffixes, conference details — so a
+    row never loses printed text the old fused flattening kept.
+    """
+    return collapse_ws(_Walker(None, boundaries=_CITATION_BOUNDARY).run(ec)).strip()
+
+
+# ``notes-type`` values with an unambiguous canonical section. Anything else
+# (competing-interest wordings, funding statements, plain notes) keeps its
+# text under an UNKNOWN section the classifier can still re-type by header.
+_NOTES_TYPE_MAP = {
+    "data-availability": CanonicalSection.OPEN_DATA,
+    "coi-statement": CanonicalSection.COI,
+    "financial-disclosure": CanonicalSection.FUNDING,
+}
+
+# Human headers for back-matter <notes> without a <title> (the raw
+# ``notes-type`` attribute would otherwise leak, e.g. 'data-availability').
+_NOTES_HEADER_MAP = {
+    "data-availability": "Data availability",
+    "coi-statement": "Competing interests",
+    "conflict-of-interest": "Competing interests",
+    "competing-interest": "Competing interests",
+    "financial-disclosure": "Financial disclosure",
+}
+
+
+def _notes_header_fallback(notes_type: str | None) -> str:
+    if not notes_type:
+        return "Notes"
+    key = notes_type.lower()
+    if key in _NOTES_HEADER_MAP:
+        return _NOTES_HEADER_MAP[key]
+    return notes_type.replace("-", " ").replace("_", " ").title() or "Notes"
+
+
+_BARE_DOI_RE = re.compile(r"10\.\d{4,9}/\S+")
+
+
+def _normalize_ext_href(el, href: str) -> str | None:
+    """Map an ``<ext-link>``/``<uri>`` href to an exported URL, or ``None``.
+
+    Bare DOIs (``ext-link-type=\"doi\"`` or a ``10.xxxx/...`` href) become
+    ``https://doi.org/...``. Anything without a web scheme (GenBank/PDB/OMIM
+    accessions, ``ncbi-n:``/``pdb:`` prefixes, relative anchors) is skipped —
+    as an href it would be a broken relative link; a printed URL is still
+    caught by the regex pass over the sentence text.
+    """
+    href = (href or "").strip()
+    if not href:
+        return None
+    link_type = (_attr(el, "ext-link-type") or "").lower()
+    if link_type == "doi" or _BARE_DOI_RE.match(href):
+        if "://" in href:
+            return clean_extracted_url(href) or None
+        m = _BARE_DOI_RE.search(href)
+        if not m:
+            return None
+        doi = clean_extracted_url(m.group(0))
+        return f"https://doi.org/{doi}" if doi else None
+    lowered = href.lower()
+    if lowered.startswith(("ncbi-n:", "pdb:", "genbank:", "omim:")):
+        return None
+    if "://" in href or lowered.startswith("www."):
+        return clean_extracted_url(href) or None
+    return None
+
+
+def _trim_tex_math(text: str) -> str:
+    """Keep only a TeX preamble's document body, with ``$$`` delimiters stripped."""
+    body = text
+    m = _TEX_BEGIN_DOCUMENT.search(body)
+    if m:
+        body = body[m.end() :]
+    m = _TEX_END_DOCUMENT.search(body)
+    if m:
+        body = body[: m.start()]
+    return collapse_ws(body.replace("$$", "")).strip()
+
+
+def _choose_alternative(alt) -> tuple[object | None, str | None]:
+    """Pick the single representative child of an ``<alternatives>`` element.
+
+    Returns ``(element, None)`` to walk, or ``(None, text)`` to emit — never
+    both. MathML first (it is the rendered form), else the TeX body without
+    its document preamble, else the first non-graphic child.
+    """
+    math = tex = fallback = first = None
+    for child in alt:
+        ln = _ln(child)
+        if not ln:  # comments / processing instructions are not content
+            continue
+        if first is None:
+            first = child
+        if ln == "math" and math is None:
+            math = child
+        elif ln == "tex-math" and tex is None:
+            tex = child
+        elif ln not in _ALT_GRAPHIC and fallback is None:
+            fallback = child
+    if math is not None:
+        return math, None
+    if tex is not None:
+        body = _trim_tex_math(_flatten(tex))
+        if body:
+            return None, body
+    target = fallback if fallback is not None else first
+    return target, None
+
+
+def _anchor_offset(pre_raw: str, lead_raw: str | None, link_text: str) -> int:
+    """Character offset where an anchor's display text starts in entry text.
+
+    *pre_raw* is the walker's raw accumulation before the anchor child;
+    entry text is that accumulation collapsed, so the collapsed prefix length
+    is the anchor's start, plus one separator space when the source spells
+    whitespace on either side of the anchor.
+    """
+    pre = collapse_ws(pre_raw)
+    if not pre or not link_text:
+        return len(pre)
+    trail = pre_raw[-1:].isspace()
+    lead = bool(lead_raw and lead_raw[:1].isspace())
+    return len(pre) + (1 if trail or lead else 0)
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int):
+    """Return the candidate sentence covering *offset* in *entry_text*.
+
+    Sentence spans are recovered with the same progressive ``find`` the
+    assembler uses at emission, so externally-segmented sentences map back
+    onto the entry they were split from.
+    """
+    if not candidates:
+        return None
+    chosen = candidates[0]
+    cursor = 0
+    for sent in candidates:
+        found = entry_text.find(sent.text, cursor)
+        start = found if found >= 0 else cursor
+        if start <= offset:
+            chosen = sent
+        else:
+            break
+        cursor = start + len(sent.text)
+    return chosen
+
+
+def _resolve_link_sentence(
+    candidates,
+    url: str,
+    link_text: str,
+    fallback_id: int | None,
+    entry_text: str = "",
+    anchor_offset: int | None = None,
+):
+    """Pick the sentence of one deferred entry that holds an anchor.
+
+    Anchors are recorded per paragraph entry but emitted per sentence, so a
+    pending link must resolve to the sentence holding its display text (or,
+    failing that, its href) — not blindly to the entry's last sentence, which
+    duplicates URL-as-text links and misattributes named ones. The anchor's
+    character offset picks its sentence directly; the text search below is
+    the fallback for links recorded without one. A plain substring search
+    would land a short anchor on the wrong sentence ('here' inside 'There'),
+    so an offset pick stands only when it carries the anchor's evidence.
+    """
+    if anchor_offset is not None and entry_text:
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        if picked is not None:
+            needle = (link_text or "").strip()
+            if not needle or needle in picked.text or url in picked.text:
+                return picked
+    if link_text:
+        needle = link_text.strip()
+        if needle:
+            for sent in candidates:
+                if needle in sent.text:
+                    return sent
+    for sent in candidates:
+        if url in sent.text:
+            return sent
+    if fallback_id is not None:
+        for sent in candidates:
+            if sent.text_id == fallback_id:
+                return sent
+    return candidates[-1] if candidates else None
+
+
+class _Walker:
+    """One text-flattening pass over an element.
+
+    :meth:`run` matches the old ``_flatten`` exactly (plus the
+    ``<alternatives>`` single-emission, the bare ``<tex-math>`` preamble trim
+    and the after-boundary spaces).
+    :class:`JatsParser` reuses it to split a ``<p>`` at block children:
+    *on_block* flushes the prose so far and dispatches the child, and
+    *on_link* records each ``ext-link``/``uri`` target for the entry being
+    accumulated.
+    """
+
+    def __init__(self, exclude, on_block=None, on_link=None, boundaries=None) -> None:
+        self.flat = FlatText()
+        self.serials = itertools.count()
+        self.exclude = exclude
+        self.on_block = on_block
+        self.on_link = on_link
+        self.boundaries = _TEXT_BOUNDARY if boundaries is None else boundaries
+
+    def run(self, el) -> str:
+        self.walk(el, False, next(self.serials), True)
+        return self.flat.join()
+
+    def reset(self) -> None:
+        self.flat = FlatText()
+
+    def _add(self, text: str, in_math: bool, owner: str | None, group: int) -> None:
+        if in_math:
+            self.flat.add_math(text, owner, group)
+        else:
+            self.flat.add(text)
+
+    def _walk_alternative(self, alt, in_math: bool, serial: int) -> None:
+        chosen, text = _choose_alternative(alt)
+        if chosen is not None:
+            self.walk(chosen, in_math, serial, False)
+        elif text:
+            self._add(text, False, "alternatives", serial)
+
+    def walk(self, node, in_math: bool, parent: int, top: bool) -> None:
+        ln = _ln(node)
+        in_math = in_math or ln == "math"
+        serial = next(self.serials)
+        if node.text:
+            self._add(node.text, in_math, ln, parent)
+        for child in node:
+            child_ln = _ln(child)
+            if not child_ln:  # comments / processing instructions are not content
+                if child.tail:
+                    self._add(child.tail, in_math, None, serial)
+                continue
+            if top and self.on_block is not None and self.on_block(child):
+                # Dispatched (and flushed) by the caller; the tail still
+                # belongs to the running text that follows the block.
+                pass
+            elif self.exclude is None or child_ln not in self.exclude:
+                if child_ln in self.boundaries or (
+                    child_ln == "mspace" and mspace_separates(child.attrib)
+                ):
+                    self.flat.separate()
+                # An anchor's offset is the accumulation before it is walked;
+                # entry text is that accumulation collapsed.
+                pre_raw = None
+                if self.on_link is not None and child_ln in ("ext-link", "uri"):
+                    pre_raw = self.flat.join()
+                if child_ln == "alternatives":
+                    self._walk_alternative(child, in_math, serial)
+                elif child_ln == "tex-math":
+                    # A bare TeX formula (no <alternatives> around it) carries
+                    # the same Springer preamble — keep only its body.
+                    body = _trim_tex_math(_flatten(child))
+                    if body:
+                        self._add(body, False, "tex-math", serial)
+                else:
+                    self.walk(child, in_math, serial, False)
+                if child_ln in _TEXT_BOUNDARY_AFTER:
+                    self.flat.separate()
+                if pre_raw is not None:
+                    href = _attr(child, "href")
+                    if href:
+                        url = _normalize_ext_href(child, href)
+                        if url:
+                            link_text = _text(child)
+                            self.on_link(
+                                url,
+                                link_text,
+                                _anchor_offset(pre_raw, child.text, link_text),
+                            )
+            if child.tail:
+                self._add(child.tail, in_math, None, serial)
+
+
 def _flatten(el, exclude: set[str] | None = None) -> str:
     """Concatenate descendant text, skipping local names in *exclude*.
 
@@ -169,38 +660,7 @@ def _flatten(el, exclude: set[str] | None = None) -> str:
     between MathML elements is dropped as a renderer drops it, except where it
     keeps two words apart (:mod:`bibr.input.mathml_whitespace`).
     """
-    flat = FlatText()
-    serials = itertools.count()
-
-    def add(text: str, in_math: bool, owner: str | None, group: int) -> None:
-        if in_math:
-            flat.add_math(text, owner, group)
-        else:
-            flat.add(text)
-
-    def walk(node, in_math: bool, parent: int) -> None:
-        ln = _ln(node)
-        in_math = in_math or ln == "math"
-        serial = next(serials)
-        if node.text:
-            add(node.text, in_math, ln, parent)
-        for child in node:
-            child_ln = _ln(child)
-            if not child_ln:  # comments / processing instructions are not content
-                if child.tail:
-                    add(child.tail, in_math, None, serial)
-                continue
-            if exclude is None or child_ln not in exclude:
-                if child_ln in _TEXT_BOUNDARY or (
-                    child_ln == "mspace" and mspace_separates(child.attrib)
-                ):
-                    flat.separate()
-                walk(child, in_math, serial)
-            if child.tail:
-                add(child.tail, in_math, None, serial)
-
-    walk(el, False, next(serials))
-    return flat.join()
+    return _Walker(exclude).run(el)
 
 
 def _text(el) -> str:
@@ -273,6 +733,20 @@ class JatsParser:
         self._footnotes: list[tuple[str, str | None]] = []
         self._aff_map: dict[str, str] = {}
         self._body_ref_lists: list[tuple[object, int]] = []
+        # Anchor targets seen while walking paragraphs: (url, display text,
+        # section id, deferred entry index, anchor offset in the entry text),
+        # resolved to text_ids in apply_segmentation like the HTML parser's
+        # _pending_url_links.
+        self._pending_url_links: list[tuple[str, str, int, int, int]] = []
+        # Reference accumulation across every <ref-list> (fix: a later list
+        # must extend the bibliography, not replace it). Rows and structured
+        # refs collect here with one continuous bib_id counter; the
+        # structured-vs-strings invariant is decided once, over the union, in
+        # _finalize_references after the whole back matter is walked.
+        self._ref_rows: list[str] = []
+        self._ref_structured: list[PaperReference] = []
+        self._ref_all_structured = True
+        self._ref_next_id = 1
 
     # ------------------------------------------------------------------
     # Public API (mirrors DocxParser / PDFParser)
@@ -320,7 +794,12 @@ class JatsParser:
             self._process_container(body, section_id=0, depth=0)
         if back is not None:
             self._parse_back(back)
+        # Article-level <floats-group> holds figures/tables outside body/back;
+        # walk it so those floats register instead of vanishing.
+        for floats in _iter_children(root, "floats-group"):
+            self._process_container(floats, section_id=0, depth=0)
         self._recover_body_ref_list()
+        self._finalize_references()
 
         return PaperContents(
             sentences=[],
@@ -351,6 +830,7 @@ class JatsParser:
 
     def apply_segmentation(self, contents: PaperContents, all_segments: list[list[str]]) -> None:
         """Populate sentences from externally-segmented results (mirrors DOCX)."""
+        start_paragraph = self._paragraph_counter
         self.sentences, self._sentence_counter, self._paragraph_counter = self.assembler.emit(
             all_segments,
             sentence_factory=self._make_sentence,
@@ -358,8 +838,43 @@ class JatsParser:
             paragraph_counter=self._paragraph_counter,
         )
 
+        by_paragraph: dict[int, list] = {}
         for sent in self.sentences:
-            self._detect_urls(sent)
+            by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
+        covered: set[tuple[str, int]] = set()
+        for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
+            if deferred_index >= len(self.assembler.last_text_id):
+                continue
+            fallback_id = self.assembler.last_text_id[deferred_index]
+            if fallback_id is None:
+                continue
+            entry_para = start_paragraph + deferred_index + 1
+            candidates = by_paragraph.get(entry_para, [])
+            if not candidates:
+                continue
+            entry_text = ""
+            if 0 <= deferred_index < len(self.assembler.entries):
+                entry_text = self.assembler.entries[deferred_index].text
+            sentence = _resolve_link_sentence(
+                candidates, url, link_text, fallback_id, entry_text, anchor_offset
+            )
+            if sentence is None:
+                continue
+            text_id = sentence.text_id
+            paragraph_id = sentence.paragraph_id
+            self.links.append(
+                PaperURLLink(
+                    url=url,
+                    section_id=section_id,
+                    paragraph_id=paragraph_id,
+                    text_id=text_id,
+                    link_text=link_text or None,
+                )
+            )
+            covered.add((url, text_id))
+
+        for sent in self.sentences:
+            self._detect_urls(sent, covered)
 
         contents.sentences = self.sentences
         contents.links = self.links
@@ -384,16 +899,19 @@ class JatsParser:
             fig.section_id = self._section_counter
             if fig.caption:
                 self._paragraph_counter += 1
-                contents.sentences.append(
-                    PaperSentence(
-                        text_id=self._sentence_counter,
-                        text=fig.caption,
-                        section_id=self._section_counter,
-                        paragraph_id=self._paragraph_counter,
-                        page_number=None,
-                        from_ocr=False,
-                    )
+                caption_sent = PaperSentence(
+                    text_id=self._sentence_counter,
+                    text=fig.caption,
+                    section_id=self._section_counter,
+                    paragraph_id=self._paragraph_counter,
+                    page_number=None,
+                    from_ocr=False,
                 )
+                contents.sentences.append(caption_sent)
+                if fig._in_paragraph:
+                    # Met inside a <p>: the caption merged into the paragraph
+                    # sentence, so its URLs were linked — keep that regex pass.
+                    self._detect_urls(caption_sent)
                 self._sentence_counter += 1
 
         for tbl in self.tables:
@@ -412,16 +930,18 @@ class JatsParser:
             tbl.section_id = self._section_counter
             if tbl.caption:
                 self._paragraph_counter += 1
-                contents.sentences.append(
-                    PaperSentence(
-                        text_id=self._sentence_counter,
-                        text=tbl.caption,
-                        section_id=self._section_counter,
-                        paragraph_id=self._paragraph_counter,
-                        page_number=None,
-                        from_ocr=False,
-                    )
+                caption_sent = PaperSentence(
+                    text_id=self._sentence_counter,
+                    text=tbl.caption,
+                    section_id=self._section_counter,
+                    paragraph_id=self._paragraph_counter,
+                    page_number=None,
+                    from_ocr=False,
                 )
+                contents.sentences.append(caption_sent)
+                if tbl._in_paragraph:
+                    # As for figures met inside a <p>.
+                    self._detect_urls(caption_sent)
                 self._sentence_counter += 1
 
         for footnote_num, (fn_text, fn_label) in enumerate(self._footnotes, start=1):
@@ -592,22 +1112,52 @@ class JatsParser:
                 continue
             aid = _attr(aff, "id")
             if aid:
-                affs[aid] = collapse_ws(_flatten_excluding(aff, {"label"})).strip()
+                affs[aid] = self._aff_text(aff)
         return affs
+
+    def _aff_text(self, aff) -> str:
+        """Flattened ``<aff>`` text (label excluded), including id-less ones."""
+        return collapse_ws(_flatten_excluding(aff, {"label"})).strip()
 
     def _parse_authors(self, article_meta) -> list[PaperAuthor]:
         authors: list[PaperAuthor] = []
         idx = 0
-        for contrib in article_meta.iter():
-            if _ln(contrib) != "contrib":
-                continue
+        # Article-meta-level <aff> elements: last-resort fallback when there
+        # is exactly one (id-less ones count — _aff_map only holds ids).
+        meta_affs = [self._aff_text(aff) for aff in _iter_children(article_meta, "aff")]
+        meta_affs = [t for t in meta_affs if t]
+
+        def _group_fallback(
+            group_affs: list[tuple[str | None, str]], referenced: set[str]
+        ) -> list[str]:
+            """Shared <aff>s an xref-less author may inherit: only unclaimed ones."""
+            return [t for aid, t in group_affs if t and (aid is None or aid not in referenced)]
+
+        def _referenced_aff_ids(contribs: list) -> set[str]:
+            rids: set[str] = set()
+            for contrib in contribs:
+                for xref in _iter_contrib_descs(contrib, {"xref"}):
+                    if (_attr(xref, "ref-type") or "").lower() == "aff":
+                        rids.update((_attr(xref, "rid") or "").split())
+            return rids
+
+        def handle_contrib(
+            contrib,
+            group_affs: list[tuple[str | None, str]],
+            referenced: set[str] | frozenset = frozenset(),
+        ) -> None:
+            nonlocal idx
             if (_attr(contrib, "contrib-type") or "author") != "author":
-                continue
-            name = _first_desc(contrib, "name")
+                return
+            # Pruned-descendant lookups: an <email> often sits in <address>,
+            # a CJK name in <name-alternatives> — but a consortium <collab>
+            # may nest member <contrib>s whose fields must not leak out.
+            name = _first_contrib_desc(contrib, "name")
             if name is None:
-                name = _first_desc(contrib, "string-name")
+                name = _first_contrib_desc(contrib, "string-name")
             given = family = ""
             roles: list[str] = []
+            is_group = False
             if name is not None:
                 if _ln(name) == "string-name":
                     family = _text(name)
@@ -617,40 +1167,53 @@ class JatsParser:
             else:
                 # A consortium/working-group byline carries <collab> instead of
                 # a personal name: one unsplit name, marked as an organization
-                # so the export writes it to ``author[].literal``.
-                collab = _first_desc(contrib, "collab")
+                # so the export writes it to ``author[].literal``. Nested
+                # member lists are not part of the name.
+                collab = _first_child(contrib, "collab")
                 if collab is not None:
-                    family = _text(collab)
+                    family = collapse_ws(_flatten_excluding(collab, {"contrib-group"})).strip()
                     roles = [ORGANIZATION_ROLE]
+                    is_group = True
 
             if not given and not family:
                 # No name of any kind — emitting the row would only produce a
                 # blank author (VAL_AUTHOR_BLANK) and shift every later id.
-                continue
+                return
             idx += 1
 
-            email = _text(_first_desc(contrib, "email")) or None
+            email_el = _first_contrib_desc(contrib, "email")
+            email_text = _text(email_el) if email_el is not None else ""
+            email = email_text or None
 
             orcid = None
-            for cid in contrib.iter():
-                if _ln(cid) == "contrib-id" and _attr(cid, "contrib-id-type") == "orcid":
+            for cid in _iter_contrib_descs(contrib, {"contrib-id"}):
+                if _attr(cid, "contrib-id-type") == "orcid":
                     orcid = canonicalize_orcid(_text(cid))
                     break
 
             corresponding = (_attr(contrib, "corresp") or "").lower() == "yes"
             aff_texts: list[str] = []
-            for child in contrib.iter():
-                ln = _ln(child)
-                if ln == "aff":
-                    aff_texts.append(collapse_ws(_flatten_excluding(child, {"label"})).strip())
-                elif ln == "xref":
-                    ref_type = (_attr(child, "ref-type") or "").lower()
-                    if ref_type == "corresp":
-                        corresponding = True
-                    elif ref_type == "aff":
-                        rid = _attr(child, "rid")
-                        if rid and rid in self._aff_map:
+            for aff in _iter_contrib_descs(contrib, {"aff"}):
+                text = self._aff_text(aff)
+                if text:
+                    aff_texts.append(text)
+            for xref in _iter_contrib_descs(contrib, {"xref"}):
+                ref_type = (_attr(xref, "ref-type") or "").lower()
+                if ref_type == "corresp":
+                    corresponding = True
+                elif ref_type == "aff":
+                    # @rid is IDREFS: one author may cite several affs.
+                    for rid in (_attr(xref, "rid") or "").split():
+                        if rid in self._aff_map:
                             aff_texts.append(self._aff_map[rid])
+            if not aff_texts and not is_group:
+                # No xref or nested aff: the JATS convention for a shared
+                # affiliation is an <aff> beside the contribs, else a single
+                # article-meta-level one. An xref-less author must not inherit
+                # affiliations other authors claim by id — only unclaimed ones.
+                aff_texts = _group_fallback(group_affs, set(referenced)) or (
+                    meta_affs if len(meta_affs) == 1 else []
+                )
 
             affiliation = "; ".join(t for t in aff_texts if t)
             authors.append(
@@ -665,41 +1228,136 @@ class JatsParser:
                     role=roles,
                 )
             )
+            if is_group:
+                # Consortium members nested inside the <collab> are credited
+                # authors in their own right — emit them once, right after
+                # the group, instead of dropping them or folding their names
+                # into the group row.
+                for group in _iter_children(collab, "contrib-group"):
+                    nested_affs = [
+                        (_attr(a, "id"), self._aff_text(a)) for a in _iter_children(group, "aff")
+                    ]
+                    members = list(_iter_children(group, "contrib"))
+                    nested_ref = _referenced_aff_ids(members)
+                    for member in members:
+                        handle_contrib(member, nested_affs, nested_ref)
+
+        # Affiliation ids claimed by any author in <article-meta>: an xref-less
+        # author must not inherit an <aff> another author claims, even from a
+        # later <contrib-group> — the claimed set is computed once, globally.
+        all_contribs: list = []
+        for child in article_meta:
+            if _ln(child) == "contrib-group":
+                all_contribs.extend(_iter_children(child, "contrib"))
+            elif _ln(child) == "contrib":
+                all_contribs.append(child)
+        claimed_everywhere = _referenced_aff_ids(all_contribs)
+
+        for child in article_meta:
+            ln = _ln(child)
+            if ln == "contrib-group":
+                # Member contribs nested in a <collab> are not authors of
+                # their own; only the group's direct contribs are.
+                group_affs = [
+                    (_attr(aff, "id"), self._aff_text(aff)) for aff in _iter_children(child, "aff")
+                ]
+                contribs = list(_iter_children(child, "contrib"))
+                for contrib in contribs:
+                    handle_contrib(contrib, group_affs, claimed_everywhere)
+            elif ln == "contrib":
+                handle_contrib(child, [])
         return authors
 
     # ------------------------------------------------------------------
     # Body → sections / paragraphs / tables / figures
     # ------------------------------------------------------------------
 
-    def _process_container(self, el, section_id: int, depth: int) -> None:
+    def _process_container(
+        self, el, section_id: int, depth: int, in_paragraph: bool = False
+    ) -> None:
         """Walk a container's children in document order into the current section."""
         for child in el:
+            self._handle_block(child, section_id, depth, in_paragraph=in_paragraph)
+
+    def _emit_wrapper_heading(self, el, section_id: int) -> None:
+        """Keep a wrapper's printed heading text that recursion would drop.
+
+        Flattening used to merge a boxed-text/statement/disp-quote's
+        <label>/<title> into the paragraph, so dispatching them out of <p>
+        must emit those strings, else tokens such as 'Box 1' disappear.
+        A <caption>'s own <title> is left to the recursed <caption> below,
+        which emits it once — emitting it here too would duplicate it.
+        (<attrib> citation lines reach paragraphs through the regular
+        recursion below.)
+        """
+        for child in el:
             ln = _ln(child)
-            if ln == "sec":
-                self._handle_sec(child, depth + 1, section_id)
-            elif ln == "p":
-                self._handle_paragraph(child, section_id)
-            elif ln == "disp-formula":
-                self._handle_formula(child, section_id)
-            elif ln == "table-wrap":
-                self._handle_table_wrap(child, section_id)
-            elif ln == "fig":
-                self._handle_fig(child, section_id)
-            elif ln in ("list", "list-item"):
-                # Flatten list structure — list items carry <p> children.
-                self._process_container(child, section_id, depth)
-            elif ln == "fn-group":
-                # Notes printed under a heading of their own ("Footnotes")
-                # are footnotes, like a back-matter <fn-group>.
-                self._collect_footnotes(child)
-            elif ln == "ref-list":
-                # EuropePMC's fullTextXML puts the bibliography in <body> as a
-                # <sec sec-type="ref-list"> instead of in <back>. Record it and
-                # let parse() decide — <back> is walked after the body, and a
-                # ref-list there is the authoritative one.
-                self._body_ref_lists.append((child, section_id))
-            # title (handled by the parent sec), label, and unknown wrappers
-            # are intentionally ignored.
+            if ln in ("label", "title"):
+                txt = _text(child)
+                if txt:
+                    self.assembler.append(txt, None, section_id, True, False)
+
+    def _handle_block(self, child, section_id: int, depth: int, in_paragraph: bool = False) -> None:
+        """Dispatch one block-level child (shared by containers and <p> interiors).
+
+        *in_paragraph* marks floats met inside a ``<p>`` — their captions
+        used to merge into the paragraph sentence, so caption URLs were
+        linked; the flag lets caption sentences keep that regex pass.
+        """
+        ln = _ln(child)
+        if ln == "sec":
+            self._handle_sec(child, depth + 1, section_id)
+        elif ln == "p":
+            self._handle_paragraph(child, section_id, depth)
+        elif ln == "disp-formula":
+            self._handle_formula(child, section_id)
+        elif ln == "table-wrap":
+            self._handle_table_wrap(child, section_id, in_paragraph)
+        elif ln == "fig":
+            self._handle_fig(child, section_id, in_paragraph)
+        elif ln in (
+            "list",
+            "list-item",
+            "boxed-text",
+            "disp-quote",
+            "fig-group",
+            "table-wrap-group",
+            "floats-group",
+            "def-list",
+            "def-item",
+            "statement",
+            "supplementary-material",
+            "caption",
+            "fn",
+        ):
+            # Grouping wrappers and their items — recurse; list items carry
+            # <p> children, a caption carries the <p> of its own text, and a
+            # table-foot <fn> carries its <p> the same way. A wrapper's own
+            # label/title is not a <p>/<sec> child, so emit it first — except
+            # for a list-item or <fn>, whose <label> is a list marker ('1.',
+            # 'a') rather than a heading: emitting it alone would add a
+            # label-only sentence the flattening never produced.
+            if ln not in ("list-item", "fn"):
+                self._emit_wrapper_heading(child, section_id)
+            self._process_container(child, section_id, depth, in_paragraph=in_paragraph)
+        elif ln in ("attrib", "term", "def", "preformat"):
+            txt = _text(child)
+            if txt:
+                self.assembler.append(txt, None, section_id, True, False)
+        elif ln == "fn-group":
+            # Notes printed under a heading of their own ("Footnotes")
+            # are footnotes, like a back-matter <fn-group>.
+            self._collect_footnotes(child)
+        elif ln == "ref-list":
+            # EuropePMC's fullTextXML puts the bibliography in <body> as a
+            # <sec sec-type="ref-list"> instead of in <back>. Record it and
+            # let parse() decide — <back> is walked after the body, and a
+            # ref-list there is the authoritative one.
+            self._body_ref_lists.append((child, section_id))
+        elif ln in ("title", "label"):
+            pass  # handled by the parent sec/fig/table-wrap
+        else:
+            logger.debug("JATS: ignoring <%s> in <%s>", ln, _ln(child.getparent()))
 
     def _collect_footnotes(self, fn_group) -> None:
         """Keep each <fn>'s text, and its printed <label> apart, for the footnote rows."""
@@ -710,7 +1368,7 @@ class JatsParser:
                 label = _text(label_el) if label_el is not None else ""
                 self._footnotes.append((fn_text, label or None))
 
-    def _handle_sec(self, sec, depth: int, parent_id: int) -> None:
+    def _handle_sec(self, sec, depth: int, parent_id: int) -> int:
         title_el = _first_child(sec, "title")
         header = _text(title_el) if title_el is not None else ""
         self._section_counter += 1
@@ -725,6 +1383,7 @@ class JatsParser:
             )
         )
         self._process_container(sec, sid, depth)
+        return sid
 
     @staticmethod
     def _map_sec_type(sec) -> CanonicalSection:
@@ -746,12 +1405,43 @@ class JatsParser:
         }
         return mapping.get(st, CanonicalSection.UNKNOWN)
 
-    def _handle_paragraph(self, p, section_id: int) -> None:
-        # itertext() flattens inline markup (italic/bold/ext-link) AND inline
-        # citation text (xref → "[1]", "(Smith, 2020)") so detect_xrefs finds them.
-        txt = _text(p)
-        if txt:
-            self.assembler.append(txt, None, section_id, True, False)
+    def _handle_paragraph(self, p, section_id: int, depth: int = 0) -> None:
+        # A <p> may hold block children — PMC nests display equations in
+        # paragraphs, manuscripts nest floats. Flattening the whole <p> would
+        # merge captions and table cells into one body sentence and register
+        # no figure, table or formula, so walk its children instead:
+        # accumulate prose (with inline markup flattened, so detect_xrefs
+        # still finds citation text), and on a block child flush the prose
+        # so far as a paragraph entry, dispatch the child, and continue with
+        # its tail. Anchor targets met along the way are attributed to the
+        # entry being accumulated, with the anchor's offset in that entry so
+        # apply_segmentation can place it on the sentence covering it.
+        links: list[tuple[str, str, int]] = []  # (url, display text, offset)
+
+        def flush() -> None:
+            txt = collapse_ws(walker.flat.join()).strip()
+            walker.reset()
+            segment_links = list(links)
+            links.clear()
+            if not txt:
+                return
+            entry_idx = self.assembler.append(txt, None, section_id, True, False)
+            for url, link_text, offset in segment_links:
+                self._pending_url_links.append((url, link_text, section_id, entry_idx, offset))
+
+        def on_block(child) -> bool:
+            if _ln(child) not in _P_BLOCKS:
+                return False
+            flush()
+            self._handle_block(child, section_id, depth, in_paragraph=True)
+            return True
+
+        def on_link(url: str, link_text: str, offset: int) -> None:
+            links.append((url, link_text, offset))
+
+        walker = _Walker(None, on_block=on_block, on_link=on_link)
+        walker.run(p)
+        flush()
 
     def _handle_formula(self, formula, section_id: int) -> None:
         math = _text(formula)
@@ -759,10 +1449,10 @@ class JatsParser:
             return
         self.assembler.append(math, None, section_id, needs_segmentation=False, is_formula=True)
 
-    def _handle_table_wrap(self, table_wrap, section_id: int) -> None:
+    def _handle_table_wrap(self, table_wrap, section_id: int, in_paragraph: bool = False) -> None:
         caption = self._caption_text(table_wrap)
-        table_el = _first_desc(table_wrap, "table")
-        df = self._table_to_df(table_el)
+        table_els = [el for el in table_wrap.iter() if _ln(el) == "table"]
+        df = self._tables_to_df(table_els)
         if df is not None:
             try:
                 html = df.to_html(index=False)
@@ -778,51 +1468,77 @@ class JatsParser:
         else:
             logger.warning("JATS table-wrap produced no parseable table; skipping")
             return
-        self.tables.append(
-            PaperTable(
-                table_id=self._table_counter,
-                df=df,
-                tbl_html=html,
-                section_id=section_id,
-                caption=caption or None,
-                page_number=None,
-                parts=[
-                    PaperTablePart(
-                        page_number=None,
-                        bbox=None,
-                        tbl_html=html,
-                        df=df,
-                    )
-                ],
-                label=self._float_label(table_wrap, caption, "table"),
-            )
+        record = PaperTable(
+            table_id=self._table_counter,
+            df=df,
+            tbl_html=html,
+            section_id=section_id,
+            caption=caption or None,
+            page_number=None,
+            parts=[
+                PaperTablePart(
+                    page_number=None,
+                    bbox=None,
+                    tbl_html=html,
+                    df=df,
+                )
+            ],
+            label=self._float_label(table_wrap, caption, "table"),
+            _in_paragraph=in_paragraph,
         )
+        self.tables.append(record)
         self._table_counter += 1
+        # Table footnotes print under the table; keep their paragraphs rather
+        # than dropping them with the grid.
+        foot = _first_child(table_wrap, "table-wrap-foot")
+        if foot is not None:
+            self._process_container(foot, section_id, 0)
 
     @staticmethod
     def _table_to_df(table_el) -> pd.DataFrame | None:
         """Convert a JATS/XHTML ``<table>`` to a DataFrame; ``None`` on failure."""
         if table_el is None:
             return None
+        return JatsParser._tables_to_df([table_el])
+
+    @staticmethod
+    def _tables_to_df(table_els: list) -> pd.DataFrame | None:
+        """Combine every ``<table>`` of a wrap into one DataFrame.
+
+        A wrap split across several <table>s (multi-page print) keeps only the
+        first grid's rows when read singly; concatenating every row keeps the
+        printed tokens. The first table's header stays the header — later
+        headers join as data rows so no cell text is lost.
+        """
+        tables = [el for el in table_els if el is not None]
+        if not tables:
+            return None
         try:
-            trs = [tr for tr in table_el.iter() if _ln(tr) == "tr"]
-            if not trs:
+            all_trs: list = []
+            for table_el in tables:
+                all_trs.extend([tr for tr in table_el.iter() if _ln(tr) == "tr"])
+            if not all_trs:
                 return None
 
             def cells(tr) -> list[str]:
                 return [_text(c) for c in tr if _ln(c) in ("td", "th")]
 
-            thead = _first_desc(table_el, "thead")
+            thead = _first_desc(tables[0], "thead")
             header_tr = None
             if thead is not None:
                 header_tr = next((tr for tr in thead.iter() if _ln(tr) == "tr"), None)
             if header_tr is None:
-                header_tr = trs[0]
-                body_trs = trs[1:]
+                header_tr = all_trs[0]
+                body_trs = all_trs[1:]
             else:
-                body_trs = [tr for tr in trs if tr is not header_tr]
+                body_trs = [tr for tr in all_trs if tr is not header_tr]
 
             header = cells(header_tr) if header_tr is not None else []
+            # Later tables repeat the header print; a repeated header row adds
+            # no tokens beyond the header itself, so drop exact repeats while
+            # keeping any differing header as a data row.
+            if header:
+                body_trs = [tr for tr in body_trs if cells(tr) != header]
             data = [cells(tr) for tr in body_trs]
             width = max([len(header), *[len(r) for r in data]], default=0)
             if width == 0:
@@ -833,26 +1549,26 @@ class JatsParser:
         except Exception:  # noqa: BLE001 — any malformed table degrades to skip
             return None
 
-    def _handle_fig(self, fig, section_id: int) -> None:
+    def _handle_fig(self, fig, section_id: int, in_paragraph: bool = False) -> None:
         caption = self._caption_text(fig)
         # <graphic> hrefs are unresolvable in a bare XML file — image stays None.
-        self.figures.append(
-            PaperFigure(
-                figure_id=self._figure_counter,
-                section_id=section_id,
-                image_b64=None,
-                caption=caption or None,
-                page_number=None,
-                parts=[
-                    PaperFigurePart(
-                        page_number=None,
-                        bbox=None,
-                        image_b64=None,
-                    )
-                ],
-                label=self._float_label(fig, caption, "figure"),
-            )
+        record = PaperFigure(
+            figure_id=self._figure_counter,
+            section_id=section_id,
+            image_b64=None,
+            caption=caption or None,
+            page_number=None,
+            parts=[
+                PaperFigurePart(
+                    page_number=None,
+                    bbox=None,
+                    image_b64=None,
+                )
+            ],
+            label=self._float_label(fig, caption, "figure"),
+            _in_paragraph=in_paragraph,
         )
+        self.figures.append(record)
         self._figure_counter += 1
 
     @staticmethod
@@ -879,6 +1595,7 @@ class JatsParser:
 
     def _parse_back(self, back) -> None:
         ref_lists = list(_iter_children(back, "ref-list"))
+        ref_lists_handled = bool(ref_lists)
         for child in back:
             ln = _ln(child)
             if ln == "ack":
@@ -895,17 +1612,103 @@ class JatsParser:
                 )
                 self._process_container(child, sid, 1)
             elif ln == "sec":
-                self._handle_sec(child, 1, 0)
+                sid = self._handle_sec(child, 1, 0)
+                # Some producers nest the bibliography in a back <sec>;
+                # reuse its section only when the ref-list is its substance
+                # (or the sec is itself a references sec) — else a
+                # 'Competing interests' sec with a nested list would retype.
+                nested_lists = _topmost_ref_lists(child)
+                if nested_lists:
+                    if self._sec_is_reflist_wrapper(child):
+                        for nested_list in nested_lists:
+                            self._handle_ref_list(nested_list, section_id=sid)
+                    else:
+                        for nested_list in nested_lists:
+                            self._handle_ref_list(nested_list)
+                    ref_lists_handled = True
             elif ln == "ref-list":
                 self._handle_ref_list(child)
             elif ln == "fn-group":
                 self._collect_footnotes(child)
+            elif ln == "notes":
+                notes_type = (_attr(child, "notes-type") or "").lower()
+                self._handle_back_section(
+                    child,
+                    _NOTES_TYPE_MAP.get(notes_type, CanonicalSection.UNKNOWN),
+                    header_fallback=_notes_header_fallback(_attr(child, "notes-type")),
+                )
+            elif ln == "app-group":
+                apps = [app for app in child if _ln(app) == "app"]
+                if apps:
+                    for app in apps:
+                        self._handle_back_section(
+                            app,
+                            CanonicalSection.APPENDIX,
+                            header_fallback=_attr(app, "id") or "Appendix",
+                        )
+                else:
+                    self._handle_back_section(
+                        child, CanonicalSection.APPENDIX, header_fallback="Appendix"
+                    )
+            elif ln == "glossary":
+                self._handle_back_section(
+                    child, CanonicalSection.UNKNOWN, header_fallback="Glossary"
+                )
+            elif ln == "bio":
+                self._handle_back_section(
+                    child, CanonicalSection.UNKNOWN, header_fallback="Biography"
+                )
+            elif ln == "floats-group":
+                self._process_container(child, section_id=0, depth=0)
+            else:
+                logger.debug("JATS: ignoring back-matter <%s>", ln)
 
-        # Some producers nest the ref-list inside a back <sec>; recover it.
-        if not ref_lists:
+        # A ref-list nested anywhere else in <back> (not a direct child, not
+        # in a <sec>) is still the bibliography when nothing else was handled.
+        if not ref_lists_handled:
             nested = _first_desc(back, "ref-list")
             if nested is not None:
                 self._handle_ref_list(nested)
+
+    def _handle_back_section(
+        self, el, section_type: CanonicalSection, header_fallback: str
+    ) -> None:
+        """Emit one back-matter section (notes/app/glossary/bio) from its <title>."""
+        title_el = _first_child(el, "title")
+        header = _text(title_el) if title_el is not None else ""
+        self._section_counter += 1
+        sid = self._section_counter
+        self.sections.append(
+            PaperSection(
+                section_id=sid,
+                header=header or header_fallback,
+                level=1,
+                parent_section_id=0,
+                section_type=section_type,
+            )
+        )
+        self._process_container(el, sid, 1)
+
+    @staticmethod
+    def _sec_is_reflist_wrapper(sec) -> bool:
+        """Whether a back <sec> holding a ref-list may be retyped REFERENCES.
+
+        Only when the ref-list is the sec's substance (no other paragraph text)
+        or the sec presents itself as the bibliography by type or title.
+        """
+        sec_type = (_attr(sec, "sec-type") or "").lower()
+        if "ref" in sec_type or "bibliograph" in sec_type:
+            return True
+        header = _text(_first_child(sec, "title")).lower()
+        if "reference" in header or "bibliograph" in header:
+            return True
+        for child in sec:
+            ln = _ln(child)
+            if ln in ("title", "label", "ref-list"):
+                continue
+            if _text(child).strip():
+                return False
+        return True
 
     def _retype_as_references(self, section_id: int, ref_list) -> None:
         """Mark an existing body section as the references section."""
@@ -925,7 +1728,7 @@ class JatsParser:
         correctly today changes. Without it a body-located bibliography is
         dropped in silence — ``_process_container`` has nowhere to put it.
         """
-        if self._native_references or self._native_ref_strings:
+        if self._ref_rows or self._ref_structured:
             return
         if not self._body_ref_lists:
             return
@@ -933,6 +1736,17 @@ class JatsParser:
         # The enclosing <sec> is the references heading the producer already
         # emitted; reuse it rather than appending a second, competing one.
         self._handle_ref_list(ref_list, section_id=section_id or None)
+
+    def _collect_refs(self, ref_list) -> list:
+        """Direct ``<ref>`` children plus those of nested ``<ref-list>``s, in order."""
+        return _collect_refs(ref_list)
+
+    def _finalize_references(self) -> None:
+        """Decide the structured-vs-strings invariant once, over every ref-list."""
+        if self._ref_all_structured and self._ref_structured:
+            self._native_references = self._ref_structured
+        elif self._ref_rows:
+            self._native_ref_strings = self._ref_rows
 
     def _handle_ref_list(self, ref_list, section_id: int | None = None) -> None:
         if section_id is None:
@@ -952,33 +1766,36 @@ class JatsParser:
             ref_sid = section_id
             self._retype_as_references(ref_sid, ref_list)
 
-        refs = list(_iter_children(ref_list, "ref"))
-        if not refs:
-            return
-
-        structured: list[PaperReference] = []
-        strings: list[str] = []
-        all_structured = True
-
-        for pos, ref in enumerate(refs, start=1):
+        # Refs accumulate across every ref-list with one continuous bib_id
+        # counter (a later list extends the bibliography); nested groupings
+        # contribute their refs and rows to the enclosing list's section.
+        for ref in self._collect_refs(ref_list):
+            pos = self._ref_next_id
+            self._ref_next_id += 1
             element_citation = _first_desc(ref, "element-citation")
-            text = _text(ref)
-            if not text and element_citation is not None:
-                text = _text(element_citation)
+            ordered_text = _ref_ordered_text(ref)
+            label_el = _first_child(ref, "label")
+            label_text = _text(label_el) if label_el is not None else ""
+            if element_citation is not None:
+                structured = self._build_reference(element_citation, pos)
+                row = ordered_text or _citation_text(element_citation)
+                if label_text:
+                    row = f"{label_text} {row}".strip() if row else label_text
+                text = row or _text(ref)
+                self._ref_structured.append(structured)
+            else:
+                # No element-citation: unstructured, whatever else is there.
+                # The whole-ref fallback keeps the printed label, as before.
+                text = ordered_text
+                if label_text and text:
+                    text = f"{label_text} {text}"
+                if not text:
+                    text = _text(ref)
+                self._ref_all_structured = False
             # One atomic sentence per ref (needs_segmentation=False) so each ref
             # stays a single row in the REFERENCES section for RefLocator.
             self.assembler.append(text, None, ref_sid, needs_segmentation=False, is_formula=False)
-            strings.append(text)
-            if element_citation is not None:
-                structured.append(self._build_reference(element_citation, pos))
-            else:
-                all_structured = False
-
-        # Invariant: either full structured coverage, or ref strings for ALL.
-        if all_structured and structured:
-            self._native_references = structured
-        else:
-            self._native_ref_strings = strings
+            self._ref_rows.append(text)
 
     def _build_reference(self, ec, pos: int) -> PaperReference:
         authors = self._person_names(ec, "author")
@@ -1074,10 +1891,18 @@ class JatsParser:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _detect_urls(self, sent: PaperSentence) -> None:
-        """Match URL_RE on the sentence and append PaperURLLink entries."""
+    def _detect_urls(
+        self, sent: PaperSentence, covered: set[tuple[str, int]] | None = None
+    ) -> None:
+        """Match URL_RE on the sentence and append PaperURLLink entries.
+
+        *(url, text_id)* pairs in *covered* (anchor targets collected while
+        walking paragraphs) are skipped so one link is not recorded twice.
+        """
         for m in URL_RE.finditer(sent.text):
             url = clean_extracted_url(m.group(0))
+            if covered is not None and (url, sent.text_id) in covered:
+                continue
             self.links.append(
                 PaperURLLink(
                     url=url,
