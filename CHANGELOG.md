@@ -547,13 +547,14 @@ released.
   DOI now ranks below every front-matter candidate. It still names the paper
   when it is the only candidate left, as in a preprint's "The present work has
   been shared as a preprint on …, doi: …"; two different ones are reported as
-  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside a citation
-  (a reference entry outside the located reference list, or a figure's source
-  note citing another work) never names the paper, and neither does the tail
-  of a reference entry split into a line of its own ("131-138. doi: …"). A
-  line holding nothing but the labelled DOI ("DOI: …") is not such a tail, so
-  a paper's own DOI line after cover pages still names it. An
-  eLife JATS or HTML file's labelled figure DOIs no longer raise
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside an
+  author-led or numbered citation (a reference entry outside the located
+  reference list, or a figure's source note citing another work) no longer
+  names the paper, and neither does the tail of a reference entry split into
+  a line of its own that opens with a page range, a volume or the DOI label
+  ("131-138. doi: …"). A line holding nothing but the labelled DOI ("DOI: …")
+  is not such a tail, so a paper's own DOI line after cover pages still names
+  it. An eLife JATS or HTML file's labelled figure DOIs no longer raise
   `VAL_DOI_AMBIGUOUS` against its article-id.
 - A correction notice printed "DOI of original article: …" on its first page
   and exported the corrected article's DOI as its own. That DOI is now the

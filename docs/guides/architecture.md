@@ -86,7 +86,8 @@ stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
 (sentences, page furniture, the input's structured metadata and, for a PDF,
 the text layer of pages 1 and 2) and records every candidate in
 `extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
-carries can confirm a printed one but is never exported. Extraction
+carries is recorded in the receipt as an agreement-only row: it takes no part
+in the selection and is never exported. Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:
