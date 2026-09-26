@@ -566,7 +566,7 @@ def _field_states(paper: Paper, *, present: dict[str, bool], warnings: list) -> 
     """
     from bibr.field_states import FieldScope, build_field_states
 
-    decisions = paper.field_decisions
+    decisions = getattr(paper, "field_decisions", None)
     selection = paper.doi_selection
     records = build_field_states(
         present=present,
