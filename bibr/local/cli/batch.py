@@ -134,6 +134,7 @@ def _form_fields(args: Any, console: Any) -> dict[str, str] | None:
 
 def _remote_options(args: Any, console: Any) -> Any:
     from bibr.batch.remote import RemoteOptions, resolve_token
+    from bibr.utils.hosts import cleartext_network_host
 
     form = _form_fields(args, console)
     if form is None:
@@ -156,18 +157,31 @@ def _remote_options(args: Any, console: Any) -> Any:
             "no bearer token — set AUTH_API_KEY / BIBR_SERVE_TOKEN or pass --token "
             "(fine only if the serve runs without auth)",
         )
-    return RemoteOptions(
-        serve_url=args.serve_url,
-        token=token,
-        concurrency=args.concurrency,
-        min_concurrency=args.min_concurrency,
-        max_concurrency=args.max_concurrency,
-        poll_timeout=args.poll_timeout,
-        poll_interval=args.poll_interval,
-        retries=args.retries,
-        ready_timeout=args.ready_timeout,
-        form=form,
-    )
+    try:
+        options = RemoteOptions(
+            serve_url=args.serve_url,
+            token=token,
+            concurrency=args.concurrency,
+            min_concurrency=args.min_concurrency,
+            max_concurrency=args.max_concurrency,
+            poll_timeout=args.poll_timeout,
+            poll_interval=args.poll_interval,
+            retries=args.retries,
+            ready_timeout=args.ready_timeout,
+            form=form,
+            allow_insecure_http=bool(getattr(args, "allow_insecure_http", False)),
+        )
+    except ValueError as e:
+        ui.error(console, str(e))
+        return None
+    if token and (host := cleartext_network_host(options.serve_url)):
+        # Allowed (a LAN GPU box is the usual remote), but not private.
+        ui.warn(
+            console,
+            f"the bearer token goes to {host!r} over plain http, readable by anyone on "
+            "that network — prefer https://, an SSH tunnel to 127.0.0.1, or a tailnet address",
+        )
+    return options
 
 
 def _local_options(args: Any, console: Any) -> Any:

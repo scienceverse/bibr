@@ -91,7 +91,9 @@ services:
     environment:
       # Host-only URL: bibr URL-encodes REDIS_PASSWORD into it at startup, so
       # a password containing @ : / ? or # still authenticates. Interpolating
-      # the raw password into the URL here silently disabled the cache.
+      # the raw password into the URL here silently disabled the cache. A
+      # JOBS_REDIS_URL or CROSSREF_CACHE_REDIS_URL on this same redis:6379
+      # gets the password too.
       - REDIS_URL=redis://redis:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - OCR_BASE_URL=${OCR_BASE_URL:-http://bibr-ocr:8080}

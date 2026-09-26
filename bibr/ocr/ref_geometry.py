@@ -22,6 +22,10 @@ from bibr.ocr.utils import pdfium_lock
 
 _WS = re.compile(r"\s+")
 _PAGE_NUMBER = re.compile(r"\b\d+\b")
+# Header/footer furniture belongs at a page edge. Two lines covers a running
+# title paired with a page number without scanning bibliography body lines for
+# coincidental repeated text.
+_EDGE_LINES = 2
 
 
 @dataclass(frozen=True)
@@ -119,17 +123,17 @@ def reference_lines_from_pages(
     crossing pages can otherwise inherit them as reference continuations. Only
     repeated first/last page lines are removed: a genuine continuation at the
     top of one page is retained unless it repeats as page furniture elsewhere.
+    A line inside the page is never furniture, even when its digits-masked text
+    matches an edge line's ("2." against a page-top "4.", "2015" against a
+    page number).
     """
     if header_page is None:
         return []
 
     furniture_pages: dict[str, set[int]] = defaultdict(set)
     for pi, plines in page_lines.items():
-        # Header/footer furniture belongs at a page edge. Two lines covers a
-        # running title paired with a page number without scanning bibliography
-        # body lines for coincidental repeated text.
-        for line in [*plines[:2], *plines[-2:]]:
-            key = _PAGE_NUMBER.sub("#", _WS.sub(" ", line.text.casefold()).strip())
+        for line in [*plines[:_EDGE_LINES], *plines[-_EDGE_LINES:]]:
+            key = _furniture_key(line)
             if key:
                 furniture_pages[key].add(pi)
     furniture = {key for key, pages in furniture_pages.items() if len(pages) >= 2}
@@ -137,19 +141,26 @@ def reference_lines_from_pages(
     lines: list[LineRecord] = []
     for pi in sorted(page_lines):
         plines = page_lines[pi]
+        start = 0
         if pi == header_page:
             cut = next(
                 (k for k, ln in enumerate(plines) if _REF_HEADER_RE.match(ln.text.strip())),
                 None,
             )
             if cut is not None:
-                plines = plines[cut + 1 :]
+                start = cut + 1
+        last_body = len(plines) - _EDGE_LINES
         lines.extend(
             line
-            for line in plines
-            if _PAGE_NUMBER.sub("#", _WS.sub(" ", line.text.casefold()).strip()) not in furniture
+            for k, line in enumerate(plines[start:], start=start)
+            if not ((k < _EDGE_LINES or k >= last_body) and _furniture_key(line) in furniture)
         )
     return lines
+
+
+def _furniture_key(line: LineRecord) -> str:
+    """Case- and digit-insensitive form under which page furniture repeats."""
+    return _PAGE_NUMBER.sub("#", _WS.sub(" ", line.text.casefold()).strip())
 
 
 def record_to_dict(r: LineRecord) -> dict:
