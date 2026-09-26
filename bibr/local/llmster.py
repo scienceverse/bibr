@@ -16,7 +16,7 @@ from typing import Any
 
 from bibr.config import snapshot_settings
 from bibr.exceptions import UpstreamServiceError
-from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM, request_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -235,12 +235,12 @@ class LlmsterLlmServer:
         coming up after `server start`, and failing here would break the
         normal cold-start path.
         """
-        import urllib.request
-
         url = f"http://127.0.0.1:{self._port}/v1/models"
         try:
-            with urllib.request.urlopen(url, timeout=10) as response:  # noqa: S310
-                payload = json.loads(response.read().decode("utf-8", "replace"))
+            status, _reason, body = request_bytes(url, timeout=10)
+            if status != 200:
+                raise ValueError(f"HTTP {status}")
+            payload = json.loads(body.decode("utf-8", "replace"))
         except Exception:  # noqa: BLE001 — any transport failure means "unknown"
             logger.debug("llmster liveness probe of %s failed; trusting `lms ps`", url)
             return True

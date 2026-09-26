@@ -150,7 +150,7 @@ class _LocalZeroBRefModel:
     """
 
     def predict(self, ids, _attention):
-        window = ids[0] if isinstance(ids, list) else ids
+        window = ids[0]  # one row: a nested list under the stub, a (1, n) tensor under torch
         return [[1 if i == 0 else 0 for i in range(len(window))]]
 
 
@@ -158,7 +158,7 @@ class _AllBRefModel:
     """Every position starts a reference: maximal boundary coverage."""
 
     def predict(self, ids, _attention):
-        window = ids[0] if isinstance(ids, list) else ids
+        window = ids[0]  # one row: a nested list under the stub, a (1, n) tensor under torch
         return [[1] * len(window)]
 
 
