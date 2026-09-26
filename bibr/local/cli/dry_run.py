@@ -84,7 +84,19 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     backend = config.ocr_backend
     if backend == "paddle":
         candidate = resolve_backend_candidates(backend, Settings)[0]
-        return candidate.model, candidate.model
+        # Served identity vs weight repo: the first candidate's display model
+        # may be a server alias (paddle-vllm advertises
+        # ``Settings.ocr.paddle_served_model``), while the HF cache holds the
+        # repo its launcher loads (``Settings.ocr.paddle_model``). Map through
+        # the same per-backend weight field the explicit-backend path uses so
+        # the cache check cannot miss on the alias.
+        weight_field = _OCR_LOCAL_WEIGHT_FIELD.get(candidate.backend)
+        weight_repo = (
+            config.ocr_model or getattr(Settings.ocr, weight_field)
+            if weight_field is not None
+            else candidate.model
+        )
+        return candidate.model, weight_repo
     if backend == "paddle-http":
         return config.ocr_model or Settings.ocr.paddle_served_model, None
     if backend in _OCR_HTTP_DEFAULT_SERVED_NAME:
@@ -334,6 +346,7 @@ def _print_dry_run_plan(
     *,
     is_batch: bool,
     manifest_outputs: list[Path] | None = None,
+    blockers: list[str] | None = None,
 ) -> None:
     """Print the full resolved run plan and return — the ``--dry-run`` payload.
 
@@ -421,5 +434,11 @@ def _print_dry_run_plan(
         manifest_outputs=manifest_outputs,
     ):
         print(f"  {line}")
+
+    if blockers:
+        ui.section(out, f"Blockers ({len(blockers)})")
+        for blocker in blockers:
+            out.print(f"  [red]{ui.FAIL}[/red] {blocker}", soft_wrap=True)
+        out.print("[dim]The real run exits 1 on these; fix them before processing.[/dim]")
 
     out.print("\n[dim]Dry run — no files were processed.[/dim]")

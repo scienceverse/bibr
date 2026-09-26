@@ -341,6 +341,35 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- `bibr chew` writing JSON to stdout is now valid JSON under every console
+  encoding. The startup stream setup replaced unencodable characters with
+  Python escapes (`\U0001d465`), which no JSON parser accepts; the export is
+  now written as UTF-8 bytes instead. File output already wrote UTF-8 and is
+  unchanged.
+- `bibr chew papers/ -o results/` with one paper in the directory no longer
+  writes a file named `results`. A trailing slash or an existing directory in
+  `-o` now means a directory even for a single resolved file, so the export
+  lands as `results/<stem>.json` and a later batch run with the same `-o`
+  resumes instead of crashing. A blocked `-o` is a clean exit 2 before any
+  model loads, and `-o` is resolved before the pipeline is constructed.
+- `bibr chew --dry-run` now reports a Blockers section and exits 1 when the
+  real run would fail immediately: missing inputs, missing LLM credentials
+  (key lookup only, no client is built), an unstartable managed local LLM
+  backend, and the PDF OCR/image runtime. A clean preview still exits 0.
+- The automatic-OCR dry-run line no longer reports the Paddle served-model
+  alias as weights to download. For the default chain it cache-checks the
+  weight repo the launcher loads, so a cached
+  `PaddlePaddle/PaddleOCR-VL-1.6` renders `cached` instead of
+  `will download (size unknown)`.
+- A bad `--ocr-model`/`--ocr-profile` combination no longer blames `--pages`.
+  Option errors from the run configuration print as `Invalid option: …` with
+  exit 2 in both `chew` and `batch`.
+- Per-file failure hints follow the pipeline's structured `error_code`
+  instead of message substrings that never matched (or matched `rapid-mlx`
+  for `api` and blamed API keys for local runtime failures).
+- Building the CLI no longer needs installed package metadata. Running from
+  a source tree via `PYTHONPATH` used to crash before argparse ran; the
+  version now falls back to `?`, as the help screen already did.
 
 ### Added
 

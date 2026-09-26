@@ -124,6 +124,66 @@ def _print_actual_ocr_summary(console, resources) -> None:
         console.print(f"  [dim]Fallback reason:[/dim] {fallback_reason}")
 
 
+def _write_stdout_json(json_str: str) -> None:
+    """Write the export payload to stdout as UTF-8 bytes.
+
+    ``main()`` configures stdout with ``errors=\"backslashreplace\"`` so
+    status glyphs survive legacy consoles — but that turns unencodable
+    characters (e.g. math italic U+1D465) into ``\\U0001d465``/``\\x81``
+    escapes that are not legal JSON. Bypass the text wrapper and emit
+    UTF-8 (the JSON interchange encoding) directly; fall back to
+    ``print()`` when stdout has no buffer (captured StringIO in tests).
+    """
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is not None:
+        buffer.write(json_str.encode("utf-8") + b"\n")
+        buffer.flush()
+    else:
+        print(json_str)
+
+
+def _hint_for_file_error(fs) -> str:
+    """Hint for a failed file, keyed by its structured ``error_code``.
+
+    The pipeline sets ``fs.error_code`` (``unsupported_format``,
+    ``encrypted_file``, ``ocr_failed``, ``llm_server_failed``, …) while
+    the human message varies — substring matching on it misfires
+    (``'api'`` matches ``'rapid-mlx'`` and any path containing ``'api'``)
+    and misses (``'Unsupported file format'`` contains no
+    ``'unsupported format'``). A state without a code falls back to the
+    pipeline's real message wordings, never to a bare ``'api'`` substring.
+    """
+    code = getattr(fs, "error_code", None)
+    if code == "unsupported_format":
+        from bibr.input.supported_files import SupportedFileType
+
+        formats = ", ".join(file_type.value for file_type in SupportedFileType)
+        return f"\n         [dim]bibr accepts {formats} files[/dim]"
+    if code == "encrypted_file":
+        return "\n         [dim]Remove the password and try again[/dim]"
+    if code in ("ocr_failed", "ocr_mostly_failed"):
+        return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if code == "llm_server_failed":
+        return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
+    if code is not None:
+        return ""
+    err_lower = str(fs.error or "").lower()
+    if "unsupported file format" in err_lower:
+        from bibr.input.supported_files import SupportedFileType
+
+        formats = ", ".join(file_type.value for file_type in SupportedFileType)
+        return f"\n         [dim]bibr accepts {formats} files[/dim]"
+    if "password-protected" in err_lower or "password" in err_lower:
+        return "\n         [dim]Remove the password and try again[/dim]"
+    if "ocr backend init failed" in err_lower or "ocr failed" in err_lower:
+        return "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
+    if "llm server start failed" in err_lower:
+        return "\n         [dim]Check your LLM backend with: bibr doctor[/dim]"
+    if "api key" in err_lower:
+        return "\n         [dim]Check your API keys with: bibr doctor[/dim]"
+    return ""
+
+
 def _write_chunk_results(
     file_states: list,
     *,
@@ -146,19 +206,7 @@ def _write_chunk_results(
     for fs in file_states:
         if fs.error:
             err_msg = str(fs.error)
-            hint = ""
-            err_lower = err_msg.lower()
-            if "unsupported format" in err_lower:
-                from bibr.input.supported_files import SupportedFileType
-
-                formats = ", ".join(file_type.value for file_type in SupportedFileType)
-                hint = f"\n         [dim]bibr accepts {formats} files[/dim]"
-            elif "encrypted" in err_lower:
-                hint = "\n         [dim]Remove the password and try again[/dim]"
-            elif "ocr failed" in err_lower:
-                hint = "\n         [dim]Check your OCR backend with: bibr doctor[/dim]"
-            elif "connection" in err_lower or "api" in err_lower:
-                hint = "\n         [dim]Check your API keys with: bibr doctor[/dim]"
+            hint = _hint_for_file_error(fs)
             console.print(f"  [red]✗ {fs.path.name}:[/red] {err_msg}{hint}")
             errors += 1
             continue
@@ -187,7 +235,7 @@ def _write_chunk_results(
             console.print(f"  [green]✓ {fs.path.name}[/green] → {out_file}")
             _print_validation_line(console, fs.result_json)
         elif output_path is None:
-            print(json_str)
+            _write_stdout_json(json_str)
             if not is_batch:
                 total_elapsed = time.monotonic() - total_t0
                 console.print(f"  [green]✓[/green] Done ({total_elapsed:.1f}s)")
@@ -314,6 +362,77 @@ class ChunkProcessor:
         return file_states
 
 
+def _dry_run_cloud_credential_blocker() -> str | None:
+    """Missing-key verdict for a cloud LLM without building a client.
+
+    ``--dry-run`` previews without touching any client machinery (no
+    httpx, no model loads), so it cannot call ``preflight_credentials``
+    (that builds a real provider client). This mirrors each bundled
+    provider adapter's key lookup verbatim — same Settings fields, same
+    messages (see ``bibr/clients/providers/*.py``) — and returns ``None``
+    when the real run's check would pass. Third-party providers stay the
+    real run's job to vet.
+    """
+    from bibr.clients import providers
+    from bibr.config import Settings
+
+    name = (Settings.llm.provider or "").lower()
+    try:
+        providers.get(name, settings=Settings)
+    except ValueError as exc:
+        return str(exc)
+    llm = Settings.llm
+    if name == "google":
+        if not (llm.api_key or Settings.GOOGLE_API_KEY):
+            return (
+                "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
+            )
+    elif name == "anthropic":
+        if not (llm.api_key or Settings.ANTHROPIC_API_KEY):
+            return (
+                "Anthropic API key required. "
+                "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
+            )
+    elif name == "groq":
+        if not (llm.api_key or Settings.GROQ_API_KEY):
+            return "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
+    elif name == "openai" and not llm.api_key and not llm.base_url:
+        return "OpenAI API key required. Set LLM_API_KEY environment variable."
+    return None
+
+
+def _dry_run_blockers(config, files: list, missing_count: int) -> list[str]:
+    """Cheap preflight verdicts for ``--dry-run``: blockers the real run exits 1 on.
+
+    Covers missing inputs, LLM credentials (provider key lookup only —
+    no client is built), the managed local-LLM backend, and the PDF
+    OCR/image runtime. Nothing is constructed or downloaded; every probe
+    is local and cheap.
+    """
+    blockers: list[str] = []
+    if missing_count:
+        blockers.append(f"{missing_count} input(s) not found — the real run counts them as errors.")
+    if not config.no_llm and config.llm_backend == "cloud":
+        credential_blocker = _dry_run_cloud_credential_blocker()
+        if credential_blocker is not None:
+            blockers.append(credential_blocker)
+    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
+
+    if not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
+        err = _preflight_local_backend(config.llm_backend)
+        if err:
+            blockers.append(err)
+    if any(p.suffix.lower() == ".pdf" for p in files):
+        opencv_problem = _preflight_opencv()
+        if opencv_problem is not None:
+            message, repair = opencv_problem
+            blockers.append(f"{message} (repair with: {repair})")
+        ocr_reason = _preflight_ocr_runtime(config)
+        if ocr_reason is not None:
+            blockers.append(ocr_reason)
+    return blockers
+
+
 async def _run_process(args) -> None:
     """Run the process command."""
     from rich.console import Console
@@ -347,8 +466,8 @@ async def _run_process(args) -> None:
     try:
         config = resolve_run_config(args)
     except ValueError as e:
-        ui.error(console, f"Invalid --pages value: {e}")
-        sys.exit(1)
+        ui.error(console, f"Invalid option: {e}")
+        sys.exit(2)
 
     console.print(_format_run_summary(config))
 
@@ -392,6 +511,17 @@ async def _run_process(args) -> None:
         files, missing_count = _collect_files(args.input)
         work_items = list(files)
     is_batch = len(files) > 1
+    if not is_batch and source_mode != "manifest" and args.output is not None:
+        # Directory intent survives a single resolved file: the documented
+        # batch form ``chew papers/ -o results/`` expands to one file when
+        # the directory holds one paper, and ``Path('results/')`` loses its
+        # trailing slash — without this the export lands as a FILE named
+        # ``results`` and the next batch ``-o results/`` crashes on mkdir.
+        # Only the -o shape triggers this: a bare directory input without
+        # -o stays single-file (so --paper-id keeps working there).
+        raw_out = args.output
+        if raw_out.endswith(("/", "\\")) or Path(raw_out).is_dir():
+            is_batch = True
 
     # --paper-id only makes sense when writing a single result — silently
     # discarding it for batch input used to hide the mistake entirely.
@@ -445,7 +575,10 @@ async def _run_process(args) -> None:
     # guards above so a colliding batch still hard-errors under --dry-run
     # (the same collision output — that's the intended reuse) instead of
     # previewing a plan for files that would never write successfully.
+    # The cheap preflights run here too and print as a Blockers section:
+    # without them the preview exits 0 for runs that fail immediately.
     if args.dry_run:
+        blockers = _dry_run_blockers(config, files, missing_count)
         _print_dry_run_plan(
             args,
             config,
@@ -454,8 +587,22 @@ async def _run_process(args) -> None:
             manifest_outputs=[record.output_path for record in manifest_records]
             if source_mode == "manifest"
             else None,
+            blockers=blockers or None,
         )
+        if blockers:
+            sys.exit(1)
         return
+
+    # Resolve -o before the pipeline loads: a path blocked by an existing
+    # file used to crash after model loads, outside the aclose() cleanup.
+    if source_mode == "manifest":
+        output_path = None
+    else:
+        try:
+            output_path = _prepare_output_path(args.output, is_batch=is_batch)
+        except OSError as exc:
+            ui.error(console, f"Cannot write output {args.output!r}: {exc}")
+            sys.exit(2)
 
     # Create pipeline
     from bibr.local.pipeline import LocalPipeline
@@ -479,11 +626,6 @@ async def _run_process(args) -> None:
         consolidate=config.consolidate,
         ref_seg_strategy=config.ref_seg,
         ref_parse_strategy=config.refs,
-    )
-
-    # Determine output handling
-    output_path = (
-        None if source_mode == "manifest" else _prepare_output_path(args.output, is_batch=is_batch)
     )
 
     chunk_size = min(config.chunk_size, len(files))
