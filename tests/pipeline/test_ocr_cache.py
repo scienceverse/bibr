@@ -212,6 +212,17 @@ def test_key_changes_with_page_range():
     assert base != start != end and base != end
 
 
+def test_key_separates_files_that_share_the_short_hash():
+    """x-security-6: the 16-hex file_hash is 64 bits and can be collided on
+    purpose; the key must follow the full content hash."""
+    cfg = RunConfig(ocr_backend="glm-llama")
+    first = _fs(file_hash="0123456789abcdef")
+    first.content_sha256 = "0123456789abcdef" + "0" * 48
+    second = _fs(file_hash="0123456789abcdef")
+    second.content_sha256 = "0123456789abcdef" + "1" * 48
+    assert ocr_cache._key(first, cfg, _identity()) != ocr_cache._key(second, cfg, _identity())
+
+
 def test_key_changes_with_backend_and_model():
     fs = _fs()
     base = ocr_cache._key(fs, RunConfig(ocr_backend="glm-llama"), _identity())
@@ -274,7 +285,10 @@ def test_serve_paddle_key_changes_with_table_recovery_limit(monkeypatch):
     assert baseline != ocr_cache._key(fs, cfg, _identity())
 
 
-def test_non_serve_paddle_key_ignores_serve_table_recovery_limit(monkeypatch):
+def test_local_paddle_key_changes_with_table_recovery_limit(monkeypatch):
+    """The paddle-* transports and serve run the truncated-table retry, so
+    their cache keys carry its budget — entries written before recovery
+    existed must not be served as recovered output."""
     fs = _fs()
     cfg = RunConfig(ocr_backend="paddle-vllm", ocr_profile="paddle")
     identity = _identity(backend="paddle-vllm")
@@ -282,7 +296,21 @@ def test_non_serve_paddle_key_ignores_serve_table_recovery_limit(monkeypatch):
 
     monkeypatch.setattr(ocr_cache, "PADDLE_TABLE_RECOVERY_MAX_TOKENS", 16384)
 
-    assert baseline == ocr_cache._key(fs, cfg, identity)
+    assert baseline != ocr_cache._key(fs, cfg, identity)
+
+
+@pytest.mark.parametrize("backend", ["glm-http", "gemini"])
+def test_non_recovery_transport_key_ignores_table_recovery_limit(backend, monkeypatch):
+    """A Paddle profile behind a backend that never runs the retry (glm-http,
+    cloud vision) must not carry the recovery term in its cache key."""
+    fs = _fs()
+    cfg = RunConfig(ocr_backend=backend, ocr_profile="paddle")
+    identity = _identity(backend=backend, model="glm-ocr", profile="paddle")
+    baseline = ocr_cache._key(fs, cfg, identity)
+
+    monkeypatch.setattr(ocr_cache, "PADDLE_TABLE_RECOVERY_MAX_TOKENS", 16384)
+
+    assert ocr_cache._key(fs, cfg, identity) == baseline
 
 
 def test_key_changes_with_effective_generation_temperature():
@@ -784,6 +812,7 @@ async def test_interleaved_init_failure_spares_native_files_in_mixed_chunk(enabl
 
     assert pending == []
     assert pdf.error_code == "ocr_failed"
+    assert pdf.error_outage is True
     assert docx.error is None
 
 

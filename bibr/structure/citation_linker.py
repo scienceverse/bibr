@@ -13,6 +13,7 @@ import unicodedata
 from dataclasses import replace
 
 from bibr.exceptions import ProcessingError
+from bibr.models import PaperReference
 from bibr.paper_contents import (
     CanonicalSection,
     CitationCandidate,
@@ -49,6 +50,92 @@ def _citation_span_is_resolved(
     return bool(components) and all(
         (text_id, component) in resolved_pairs for component in components
     )
+
+
+_YEAR_TOKEN_RE = re.compile(r"\d{4}")
+
+
+def _inside_linked_work(spans: list[tuple[int, int]], text: str, start: int, end: int) -> bool:
+    """Return whether a span restates a linked author-year span that contains it.
+
+    A linked span that names no year outside the span cites one work, so the
+    span is that work: the matcher's narrative span absorbs a preceding word
+    or name list ("In Smith (2020)", "De Vos (2020)", "Sanchez, Mayo, and
+    Rodriguez (2012)"). A linked parenthetical that names other years holds
+    other works ("NumPy [Harris et al., 2020], SciPy [Virtanen et al.,
+    2020]"), so the spans inside it stay on offer.
+    """
+    return any(
+        span_start <= start
+        and end <= span_end
+        and not _YEAR_TOKEN_RE.search(text, span_start, start)
+        and not _YEAR_TOKEN_RE.search(text, end, span_end)
+        for span_start, span_end in spans
+    )
+
+
+def _every_work_overlaps(spans: list[tuple[int, int]], cite_text: str, start: int) -> bool:
+    """Return whether each ``;``-separated work of a citation span overlaps *spans*."""
+    works = [
+        (start + part.start(), start + part.end()) for part in re.finditer(r"[^;]+", cite_text)
+    ]
+    return bool(works) and all(
+        any(span_start < work_end and work_start < span_end for span_start, span_end in spans)
+        for work_start, work_end in works
+    )
+
+
+# A year suffix list cites several works of one year: "Oddo et al., 2011a, b",
+# "Anderson et al. 1991a b".
+_YEAR_SUFFIX_LIST_RE = re.compile(r"\d{4}[a-z](?:\s*,\s*|\s+)[a-z]\b")
+
+
+def _names_one_work(cite_text: str) -> bool:
+    """Return whether an author-year citation text cites exactly one work.
+
+    Its only number is one year ("(Smith, 2020)", "Oddo et al. (2011b)"),
+    unlike "(Smith, 2019, 2020)", "2011a, b", "(A, 2019; B, n.d.)" or a
+    numeric bracket such as "[e.g., 8, 11]".
+    """
+    numbers = re.findall(r"\d+", cite_text)
+    return (
+        len(numbers) == 1
+        and len(numbers[0]) == 4
+        and ";" not in cite_text
+        and _YEAR_SUFFIX_LIST_RE.search(cite_text) is None
+    )
+
+
+def _llm_pick_fits_candidate(candidate: CitationCandidate, reference: PaperReference) -> bool:
+    """Return whether a Tier-3 pick may break a same-surname/year tie.
+
+    The pick must be on the matcher's shortlist or, like every shortlisted
+    reference, carry a cited family name and the cited year: the shortlist
+    itself can miss the right entry when parsed references lack their year
+    suffix ("Oddo et al., 2011b") and author counts decide the tie. Other
+    Tier-3 candidates carry no local evidence to check: a citation the
+    matcher found no reference for usually means that reference was parsed
+    badly, so its family name and year cannot vouch for the pick.
+    """
+    if "ambiguous_same_surname_year" not in candidate.rejection_reasons:
+        return True
+    if reference.bib_id in candidate.bib_ids:
+        return True
+    from bibr.structure.citation_matcher import (
+        _extract_families_from_span,
+        _family_keys_for,
+        extract_families,
+    )
+
+    cited = {
+        key
+        for family in _extract_families_from_span(candidate.raw)
+        for key in _family_keys_for(family)
+    }
+    listed = {
+        key for family in extract_families(reference.authors) for key in _family_keys_for(family)
+    }
+    return bool(cited & listed) and str(reference.year) in _YEAR_TOKEN_RE.findall(candidate.raw)
 
 
 # Bracketed content that LOOKS like a citation but isn't.  Used as a Tier 3
@@ -91,10 +178,10 @@ NUMERIC_CITE_RE = re.compile(
 )
 
 # Tier 1b: Superscript citations ^{3}, ^{15,16}, ^{1-3}, ^{8,9}
-# Produced by OCR engines that render superscripts as LaTeX.  After
-# strip_inline_math() runs, $^{3}$ becomes ^{3}.  Note: strip_inline_math
-# and strip_latex_commands are deferred to finalize_text() (late-phase
-# cleaning) so these patterns are still intact at citation linking time.
+# Produced by OCR engines that render superscripts as LaTeX.  Note: unwrapping
+# inline math and flattening LaTeX are deferred to finalize_text()
+# (clean_text_content_late, late-phase cleaning) so these patterns are still
+# intact at citation linking time.
 # The (?<!\$) lookbehind excludes math-mode superscripts like $^{2}$
 # (e.g. ηp$^{2}$ for partial eta-squared) which are not citations, and
 # (?<!\}) excludes a braced LaTeX base ($\mathrm{cm}^{2}$) — whose closing
@@ -103,12 +190,21 @@ NUMERIC_CITE_RE = re.compile(
 SUPERSCRIPT_CITE_RE = re.compile(r"(?<!\w)(?<!\$)(?<!\})\^\{(\d+(?:\s*[-\u2013,;]\s*\d+)*)\}")
 
 # Tier 1c: Bare parenthetical-numeric citations (3), (7, 8), (6-8).
-# Vancouver/Science-style papers where OCR kept the parentheses.  Only ever
-# activated as a fallback when the bracket/superscript tier found nothing.
+# Vancouver/Science-style papers where OCR kept the parentheses.  Runs on
+# every paper with printed reference numbers, alongside the bracket and
+# superscript markers (mixed styles are real), so each candidate must clear
+# its own local guards and the recurring-style gate.
 PAREN_NUMERIC_CITE_RE = re.compile(r"\((\d{1,3}(?:\s*[,\u2013-]\s*\d{1,3})*)\)")
 
 _PROCEDURAL_LABEL_BEFORE_RE = re.compile(
     r"(?:^|\b)(?:step|phase|stage|criterion|criteria|option|item)\s*$",
+    re.IGNORECASE,
+)
+# "Eq. (3)", "Eqs (4)", "Equation (5)" name an equation, never a reference, and
+# so does every later label of "Eqs. (5) and (6)" or "Equations (8)-(9)".
+_EQUATION_LABEL_BEFORE_RE = re.compile(
+    r"\b(?:eqs?|eqns?|equations?)\.?\s*"
+    r"(?:\(\d{1,3}[a-z]?\)\s*(?:[,\u2013-]|,?\s*(?:and|or|to)\b)\s*)*$",
     re.IGNORECASE,
 )
 _AGGREGATE_COUNT_CUE_RE = re.compile(
@@ -173,6 +269,36 @@ def _flattened_carrier(word: str) -> str:
     """Return the lexical carrier immediately preceding a flattened marker."""
 
     return word.rstrip(".,;:)]").lstrip("([")
+
+
+# Float, equation, section and volume/issue/page abbreviations glued to their
+# number ("Fig.3", "Eq.5", "Tab.2", "Vol.12", "No.3", "pp.14-16", "Exp.1") are
+# locators, not flattened citation superscripts. Abbreviations only: whole
+# words such as "figures.1" or "art.5" do carry real flattened citations.
+_FLATTENED_LOCATOR_CARRIERS = frozenset(
+    {
+        "ch",
+        "chap",
+        "eq",
+        "eqn",
+        "eqns",
+        "eqs",
+        "exp",
+        "expt",
+        "fig",
+        "figs",
+        "no",
+        "pp",
+        "sec",
+        "sect",
+        "suppl",
+        "tab",
+        "tabs",
+        "tbl",
+        "vol",
+        "vols",
+    }
+)
 
 
 def _citation_lexical_tokens(value: str | None) -> set[str]:
@@ -354,8 +480,11 @@ def _is_likely_citation_bracket(group_text: str, nums: list[int], valid_bib_ids:
        whole bracket is suspect (real citation lists don't reference refs
        that don't exist).
     2. **Wide-gap 2-tuple:** comma-separated brackets with exactly two
-       numbers and a spread above ``_CI_SPREAD_THRESHOLD`` are almost always
-       confidence intervals or percentile ranges.
+       numbers and a spread above ``_CI_SPREAD_THRESHOLD`` read as confidence
+       intervals or percentile ranges in author-year papers. In a paper that
+       cites with brackets they are ordinary two-reference citations, so
+       ``_numeric_candidates`` lifts this rule there unless interval wording
+       precedes the bracket.
 
     Range brackets like ``[3-5]`` and longer lists like ``[1, 7, 12]`` are
     not affected.
@@ -437,6 +566,31 @@ def _has_numeric_context(text: str, start: int, end: int) -> bool:
     return after.isdigit() or after in ("=", "%")
 
 
+# APA results print degrees of freedom glued to a one-letter (or Greek)
+# statistic symbol and follow them with a comparison, usually after a space:
+# "F(3, 84) = 4.49", "t(45) = 2.10", "r(58) = .21", "F[1, 44] = 5.92",
+# "Fs(1, 44) < 3.78". In a numbered-bibliography paper those numbers fall
+# inside the reference range. A spaced letter ("vitamin D (3)") is not a
+# statistic symbol.
+_STATISTIC_SYMBOL_BEFORE_RE = re.compile(
+    r"(?:^|[^0-9A-Za-z\u0370-\u03ff])(?:[A-Za-z]|[A-Z]s|df|[\u0370-\u03ff][2\u00b2]?)$"
+)
+_COMPARISON_AFTER_RE = re.compile(r"\s*[=<>\u2264\u2265]")
+
+
+def _is_statistic_group(text: str, start: int, end: int, *, require_both: bool = False) -> bool:
+    """Return True when a numeric group reads as a test statistic, not a citation.
+
+    Either signal suffices for a bare parenthetical group. A bracket needs
+    both: bracket citations do sit right after a letter ("a[36]; b[37]" in a
+    footnoted row, "1100 K[1]") or before a threshold ("statistic [51, 52]
+    >= 0.70").
+    """
+    symbol = _STATISTIC_SYMBOL_BEFORE_RE.search(text[max(0, start - 8) : start]) is not None
+    comparison = _COMPARISON_AFTER_RE.match(text, end) is not None
+    return symbol and comparison if require_both else symbol or comparison
+
+
 # Equation tags on display-formula lines: a trailing "(2)" (optionally followed
 # by punctuation) or an explicit LaTeX "\tag{2}".
 _EQ_TRAILING_TAG_RE = re.compile(r"\((\d{1,3})\)\s*[.,;]?\s*$")
@@ -494,35 +648,77 @@ def _is_non_citation_digit_run(text: str, digits: str, end: int) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# Citations per Tier-3 request. The answer is one CitationMatch per citation;
+# on a 192-paper evaluation run a request spent about 110 output tokens per
+# citation (reasoning included), and the one paper that sent about a hundred
+# citations in one request hit the 8192-token citation_max_tokens cap and got
+# no link at all. Batches of 40 stay near half that cap and fail on their own.
+_TIER3_BATCH_SIZE = 40
+
+
 async def _resolve_with_llm(
-    ambiguous, references, llm_client, file_hash, failures: list[str] | None = None
+    ambiguous,
+    references,
+    llm_client,
+    file_hash,
+    failures: list[tuple[str, list[str]]] | None = None,
 ) -> list[PaperXref]:
-    """Tier 3: batch unresolved citation candidates into a single LLM call.
+    """Tier 3: resolve unresolved citation candidates in LLM batches.
 
     Args:
         ambiguous: list of (text_id, citation_text) tuples that couldn't be resolved
         references: list of PaperReference objects
         llm_client: LlmClient instance
         file_hash: file hash for rate-limit tracking
+        failures: receives, per failed batch, the call's error code and the
+            citation texts that batch asked about
         failures: receives the error code of a failed call
 
-    Returns gracefully with [] on any failure.
+    Batches run concurrently within the client's own concurrency and rate
+    limits; a failed batch yields no matches without affecting the others.
     """
     if not ambiguous or not llm_client:
         return []
 
+    reference_summary = [
+        {
+            "bib_id": r.bib_id,
+            "author": r.authors or "",
+            "year": r.year,
+            "title": r.title,
+        }
+        for r in references
+    ]
+    results = await asyncio.gather(
+        *(
+            _resolve_batch_with_llm(
+                ambiguous[index : index + _TIER3_BATCH_SIZE],
+                reference_summary,
+                references,
+                llm_client,
+                file_hash,
+                failures,
+            )
+            for index in range(0, len(ambiguous), _TIER3_BATCH_SIZE)
+        ),
+        return_exceptions=True,
+    )
+    xrefs: list[PaperXref] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        xrefs.extend(result)
+    return xrefs
+
+
+async def _resolve_batch_with_llm(
+    ambiguous, reference_summary, references, llm_client, file_hash, failures=None
+) -> list[PaperXref]:
+    """Resolve one Tier-3 batch; returns gracefully with [] on any failure."""
     try:
         result = await llm_client.resolve_citations(
             ambiguous_citations=ambiguous,
-            reference_summary=[
-                {
-                    "bib_id": r.bib_id,
-                    "author": r.authors or "",
-                    "year": r.year,
-                    "title": r.title,
-                }
-                for r in references
-            ],
+            reference_summary=reference_summary,
             file_hash=file_hash,
         )
         # Gate on real bib_ids, mirroring Tier 1's valid_bib_ids check — a
@@ -555,7 +751,7 @@ async def _resolve_with_llm(
 
         logger.warning("Tier 3 LLM citation resolution failed: %s", e)
         if failures is not None:
-            failures.append(llm_failure_code(e))
+            failures.append((llm_failure_code(e), [cite_text for _text_id, cite_text in ambiguous]))
         return []
 
 
@@ -574,14 +770,48 @@ _STRIP_CITE_SUP_RE = re.compile(
     r"|(?<![\d$])\^\{(\d+(?:\s*[-–,;]\s*\d+)*)\}"
 )
 
+# Length units take an exponent ("25 cm^{2}", "3 g cm $ ^{3} $", "km^{2}") and
+# so does "ms" (m s^{-2} read as ms^{2}). Rate, volume and concentration units
+# (min, ml) do not: a superscript after them is a citation
+# ("75 beats/min^{10}"). Single letters and Greek bases are already maths.
+_UNIT_EXPONENT_BASES = frozenset(
+    {
+        "cm",
+        "dm",
+        "ft",
+        "km",
+        "mi",
+        "mm",
+        "ms",
+        "nm",
+        "um",
+        "\u00b5m",
+        "\u03bcm",
+    }
+)
+
+
+def _superscript_base(text: str, pos: int) -> str:
+    """Return the run of letters ending at *pos*."""
+    start = pos
+    while start > 0 and text[start - 1].isalpha():
+        start -= 1
+    return text[start:pos]
+
 
 def _is_citation_superscript(m: re.Match) -> str:
     # A whitespace-padded math wrapper (``$ ^{3} $``) is how GLM-OCR
     # commonly emits citation superscripts. Consume the wrapper atomically;
     # otherwise late inline-math cleanup pairs the orphaned dollars across
-    # ordinary prose and leaves spurious ``$ ... $`` spans behind.
+    # ordinary prose and leaves spurious ``$ ... $`` spans behind. The word
+    # before the wrapper still decides: a unit symbol takes an exponent.
     if m.group(1) is not None:
-        return ""
+        before = m.string[: m.start()].rstrip()
+        return (
+            str(m.group(0))
+            if _superscript_base(before, len(before)) in _UNIT_EXPONENT_BASES
+            else ""
+        )
     pos = m.start()
     text = m.string
     if pos == 0:
@@ -596,17 +826,14 @@ def _is_citation_superscript(m: re.Match) -> str:
     if text[pos - 1] == "}":
         # A braced base is LaTeX, not a word carrying a marker.
         return str(m.group(0))
-    start = pos
-    while start > 0 and text[start - 1].isalpha():
-        start -= 1
-    base = text[start:pos]
+    base = _superscript_base(text, pos)
     if not base:
         return ""
     # A Greek letter in the base marks a statistic (``\u03b7p^{2}``);
     # ``effective^{9}`` is an ordinary word followed by a citation marker.
     if _MATH_BASE_LETTER_RE.search(base):
         return str(m.group(0))
-    return str(m.group(0)) if len(base) == 1 else ""
+    return str(m.group(0)) if len(base) == 1 or base in _UNIT_EXPONENT_BASES else ""
 
 
 def strip_citation_superscripts(
@@ -740,8 +967,18 @@ def _printed_reference_sources(
     return sources
 
 
+# Interval wording just before a wide two-number bracket keeps the interval
+# reading even in a bracket-citing paper: "95% CI [12, 45]", "range [18, 65]".
+_INTERVAL_CONTEXT_BEFORE_RE = re.compile(
+    r"(?:\b(?:CIs?|CrI|HDI|HPD|IQR)\b|\b(?i:ranges?|intervals?|percentiles?)\b|[\u2208\u00b1])"
+)
+
+
 def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCandidate]:
     candidates: list[CitationCandidate] = []
+    # Wide two-number brackets rejected only by the interval guard, with no
+    # interval wording before them; accepted below in bracket-citing papers.
+    wide_pairs: list[int] = []
     for sent in body_sents:
         handled_bracket_spans: set[tuple[int, int]] = set()
         for match in NUMERIC_CITE_RE.finditer(sent.text):
@@ -756,9 +993,15 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
                     if any(num not in valid_bib_ids for num in nums)
                     else "numeric_interval_guard"
                 )
+            if _is_statistic_group(sent.text, match.start(), match.end(), require_both=True):
+                reasons.append("statistic_context")
             bib_ids = tuple(num for num in nums if num in valid_bib_ids)
             if not bib_ids and "unknown_bib_id" not in reasons:
                 reasons.append("unknown_bib_id")
+            if reasons == ["numeric_interval_guard"] and not _INTERVAL_CONTEXT_BEFORE_RE.search(
+                sent.text[max(0, match.start() - 32) : match.start()]
+            ):
+                wide_pairs.append(len(candidates))
             candidates.append(
                 CitationCandidate(
                     text_id=sent.text_id,
@@ -780,9 +1023,12 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
             reasons = []
             if _is_citation_superscript(match):
                 reasons.append("math_superscript")
-            if not nums or any(num not in valid_bib_ids for num in nums):
-                reasons.append("unknown_bib_id")
             bib_ids = tuple(num for num in nums if num in valid_bib_ids)
+            # Same policy as a bracket marker: a number outside the printed
+            # range rejects the marker, while a gap inside it (a reference the
+            # parser dropped) keeps the numbers that resolve.
+            if not bib_ids or min(nums) < 1 or max(nums) > max(valid_bib_ids):
+                reasons.append("unknown_bib_id")
             candidates.append(
                 CitationCandidate(
                     text_id=sent.text_id,
@@ -819,6 +1065,20 @@ def _numeric_candidates(body_sents, valid_bib_ids: set[int]) -> list[CitationCan
                     accepted=False,
                     rejection_reasons=("non_citation_bracket",),
                 )
+            )
+    bracket_sentences = {
+        candidate.text_id
+        for candidate in candidates
+        if candidate.accepted and "bracket_marker" in candidate.evidence
+    }
+    if len(bracket_sentences) >= _MIN_FALLBACK_STYLE_HITS:
+        for index in wide_pairs:
+            candidates[index] = replace(
+                candidates[index],
+                evidence=(*candidates[index].evidence, "bracket_citation_style"),
+                confidence=1.0,
+                accepted=True,
+                rejection_reasons=(),
             )
     return candidates
 
@@ -889,7 +1149,7 @@ def _parenthetical_local_reasons(
     match: re.Match,
     sentence_matches: list[re.Match],
 ) -> tuple[str, ...]:
-    """Reject locally evidenced list, count, and label parentheses.
+    """Reject locally evidenced list, count, label, equation and statistic parentheses.
 
     Bare ``(N)`` syntax is shared by citations, procedure numbering, sample
     counts, and entity/version labels. These guards use only the candidate's
@@ -930,6 +1190,11 @@ def _parenthetical_local_reasons(
     # elsewhere in a mixed-style document.
     if re.search(r"(?:[A-Za-z]{2,}[)\]]?\d+|[A-Z][A-Z0-9-]{2,}\s+\d+)\s*$", before):
         reasons.append("adjacent_numeric_label")
+
+    if _EQUATION_LABEL_BEFORE_RE.search(window):
+        reasons.append("equation_tag")
+    if _is_statistic_group(text, match.start(), match.end()):
+        reasons.append("statistic_context")
 
     return tuple(reasons)
 
@@ -1021,6 +1286,8 @@ def _flattened_candidates(
                 reasons.append("unknown_bib_id")
             high_specificity = _flattened_marker_is_high_specificity(word, digits)
             carrier = _flattened_carrier(word)
+            if carrier.casefold() in _FLATTENED_LOCATOR_CARRIERS:
+                reasons.append("locator_abbreviation")
             grounding_required = (
                 not high_specificity
                 and len(nums) == 1
@@ -1284,6 +1551,23 @@ async def detect_bib_xrefs_with_receipt(
             for candidate in candidates
             if candidate.accepted
         }
+        # By position as well as by text: the matcher's narrative span absorbs
+        # a preceding word or name list ("In Smith (2020)"), so a regex span
+        # for the same work inside it is already linked.
+        references_by_id = {reference.bib_id: reference for reference in references}
+        linked_spans: dict[int, list[tuple[int, int]]] = {}
+        # The matcher splits a group "(A, 2020; B, 2019)" into one span per
+        # work. Those spans are offered on their own (the unresolved ones), so
+        # a regex span whose every work the matcher saw adds nothing.
+        tier2_spans: dict[int, list[tuple[int, int]]] = {}
+        for candidate in candidates:
+            if candidate.style != "author-year":
+                continue
+            tier2_spans.setdefault(candidate.text_id, []).append((candidate.start, candidate.end))
+            if candidate.accepted:
+                linked_spans.setdefault(candidate.text_id, []).append(
+                    (candidate.start, candidate.end)
+                )
         ambiguous: list[tuple[int, str, int, int]] = []
         for candidate in candidates:
             if (
@@ -1297,6 +1581,7 @@ async def detect_bib_xrefs_with_receipt(
             ):
                 ambiguous.append((candidate.text_id, candidate.raw, candidate.start, candidate.end))
         for sent in body_sents:
+            sent_linked = linked_spans.get(sent.text_id, [])
             for match in re.finditer(r"\[([^\]]+)\]", sent.text):
                 match_text = match.group(1)
                 if NUMERIC_CITE_RE.fullmatch(f"[{match_text.strip()}]"):
@@ -1304,12 +1589,22 @@ async def detect_bib_xrefs_with_receipt(
                 if _looks_like_non_citation_bracket(match_text):
                     continue
                 cite_text = match.group(0)
-                if not _citation_span_is_resolved(sent.text_id, cite_text, resolved_pairs):
+                if not _citation_span_is_resolved(
+                    sent.text_id, cite_text, resolved_pairs
+                ) and not _inside_linked_work(sent_linked, sent.text, match.start(), match.end()):
                     ambiguous.append((sent.text_id, cite_text, match.start(), match.end()))
             for pattern in (PAREN_AUTHOR_YEAR_RE, NARRATIVE_AUTHOR_YEAR_RE):
                 for match in pattern.finditer(sent.text):
                     cite_text = match.group(0)
-                    if not _citation_span_is_resolved(sent.text_id, cite_text, resolved_pairs):
+                    if (
+                        not _citation_span_is_resolved(sent.text_id, cite_text, resolved_pairs)
+                        and not _inside_linked_work(
+                            sent_linked, sent.text, match.start(), match.end()
+                        )
+                        and not _every_work_overlaps(
+                            tier2_spans.get(sent.text_id, []), cite_text, match.start()
+                        )
+                    ):
                         ambiguous.append((sent.text_id, cite_text, match.start(), match.end()))
 
         if ambiguous:
@@ -1353,7 +1648,7 @@ async def detect_bib_xrefs_with_receipt(
             unique_cites: dict[str, int] = {}
             for text_id, cite_text, _start, _end in ambiguous:
                 unique_cites.setdefault(_normalize_citation_text(cite_text), text_id)
-            tier3_failures: list[str] = []
+            tier3_failures: list[tuple[str, list[str]]] = []
             tier3 = await _resolve_with_llm(
                 [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
                 references,
@@ -1362,79 +1657,108 @@ async def detect_bib_xrefs_with_receipt(
                 tier3_failures,
             )
             if tier3_failures:
-                # Record on the receipt why the candidates the call was asked
-                # about stay unresolved, instead of looking like no match.
-                reason = f"llm_failed:{tier3_failures[0]}"
-                affected = {(text_id, start, end) for text_id, _, start, end in ambiguous}
-                candidates = [
-                    replace(candidate, rejection_reasons=(*candidate.rejection_reasons, reason))
-                    if not candidate.accepted
-                    and (candidate.text_id, candidate.start, candidate.end) in affected
-                    else candidate
-                    for candidate in candidates
-                ]
-            resolved_map = {_normalize_citation_text(xref.contents): xref.xref_id for xref in tier3}
-            resolved_occurrences = [
-                (
-                    PaperXref(
-                        xref_id=bib_id,
-                        xref_type="bib",
-                        contents=_normalize_citation_text(cite_text),
-                        text_id=text_id,
-                        tier="llm",
-                        start=start,
-                        end=end,
-                    ),
-                    start,
-                    end,
-                )
-                for text_id, cite_text, start, end in ambiguous
-                if (bib_id := resolved_map.get(_normalize_citation_text(cite_text))) is not None
-            ]
-            llm_xrefs = [xref for xref, _start, _end in resolved_occurrences]
-            _add_xrefs(llm_xrefs)
-
-            for xref, start, end in resolved_occurrences:
-                normalized_contents = _normalize_citation_text(xref.contents)
+                # Record on the receipt why the candidates a failed batch was
+                # asked about stay unresolved, instead of looking like no match.
+                failed_reason: dict[str, str] = {}
+                for code, batch_texts in tier3_failures:
+                    for batch_text in batch_texts:
+                        failed_reason.setdefault(batch_text, f"llm_failed:{code}")
+                affected = {
+                    (text_id, start, end): failed_reason[normalized]
+                    for text_id, cite_text, start, end in ambiguous
+                    if (normalized := _normalize_citation_text(cite_text)) in failed_reason
+                }
+                for index, candidate in enumerate(candidates):
+                    key = (candidate.text_id, candidate.start, candidate.end)
+                    if not candidate.accepted and key in affected:
+                        candidates[index] = replace(
+                            candidate,
+                            rejection_reasons=(*candidate.rejection_reasons, affected[key]),
+                        )
+            # One citation text can name several works, so keep every match;
+            # a text that names one work takes one (a hedge links nothing).
+            resolved_map: dict[str, list[int]] = {}
+            for xref in tier3:
+                matches = resolved_map.setdefault(_normalize_citation_text(xref.contents), [])
+                if xref.xref_id not in matches:
+                    matches.append(xref.xref_id)
+            llm_xrefs: list[PaperXref] = []
+            for text_id, cite_text, start, end in ambiguous:
+                normalized_contents = _normalize_citation_text(cite_text)
+                picks = resolved_map.get(normalized_contents, [])
+                if not picks:
+                    continue
+                one_work = _names_one_work(normalized_contents)
+                linked: set[int] = set()
                 matched_candidate = False
                 for index, candidate in enumerate(candidates):
-                    if (
-                        candidate.text_id == xref.text_id
+                    if not (
+                        candidate.text_id == text_id
                         and candidate.start == start
                         and candidate.end == end
                         and not candidate.accepted
                         and _normalize_citation_text(candidate.raw) == normalized_contents
                     ):
+                        continue
+                    matched_candidate = True
+                    fitting = tuple(
+                        bib_id
+                        for bib_id in picks
+                        if _llm_pick_fits_candidate(candidate, references_by_id[bib_id])
+                    )
+                    refusal = None
+                    if not fitting:
+                        refusal = "llm_outside_shortlist"
+                    elif len(fitting) > 1 and one_work:
+                        refusal = "llm_ambiguous"
+                    if refusal:
                         candidates[index] = replace(
                             candidate,
-                            bib_ids=(xref.xref_id,),
-                            evidence=candidate.evidence
-                            + tuple(
-                                f"llm_overrode:{reason}" for reason in candidate.rejection_reasons
-                            )
-                            + ("llm_resolution",),
-                            confidence=max(candidate.confidence, 0.85),
-                            accepted=True,
-                            rejection_reasons=(),
+                            rejection_reasons=(*candidate.rejection_reasons, refusal),
                         )
-                        matched_candidate = True
-                if matched_candidate:
-                    continue
-                source = source_by_id.get(xref.text_id, "")
-                candidates.append(
-                    CitationCandidate(
-                        text_id=xref.text_id,
-                        start=start,
-                        end=end,
-                        raw=source[start:end] if source else xref.contents,
-                        style="llm",
-                        bib_ids=(xref.xref_id,),
-                        evidence=("llm_resolution",),
-                        confidence=0.85,
+                        continue
+                    linked.update(fitting)
+                    candidates[index] = replace(
+                        candidate,
+                        bib_ids=fitting,
+                        evidence=candidate.evidence
+                        + tuple(f"llm_overrode:{reason}" for reason in candidate.rejection_reasons)
+                        + ("llm_resolution",),
+                        confidence=max(candidate.confidence, 0.85),
                         accepted=True,
                         rejection_reasons=(),
                     )
+                if not matched_candidate and (len(picks) == 1 or not one_work):
+                    linked.update(picks)
+                    source = source_by_id.get(text_id, "")
+                    candidates.append(
+                        CitationCandidate(
+                            text_id=text_id,
+                            start=start,
+                            end=end,
+                            raw=source[start:end] if source else normalized_contents,
+                            style="llm",
+                            bib_ids=tuple(picks),
+                            evidence=("llm_resolution",),
+                            confidence=0.85,
+                            accepted=True,
+                            rejection_reasons=(),
+                        )
+                    )
+                llm_xrefs.extend(
+                    PaperXref(
+                        xref_id=bib_id,
+                        xref_type="bib",
+                        contents=normalized_contents,
+                        text_id=text_id,
+                        tier="llm",
+                        start=start,
+                        end=end,
+                    )
+                    for bib_id in picks
+                    if bib_id in linked
                 )
+            _add_xrefs(llm_xrefs)
 
             candidates = _dedupe_candidates(candidates)
 

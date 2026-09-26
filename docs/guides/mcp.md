@@ -137,7 +137,9 @@ claude mcp add --transport http bibr https://bibr.example.org/mcp \
   --header "Authorization: Bearer $AUTH_API_KEY"
 ```
 
-It is gated by the same bearer auth as every REST route (`AUTH_API_KEY`),
+It is gated by the same bearer auth as every REST route (`AUTH_API_KEY`;
+a keyless loopback server answers only loopback `Host` and `Origin` headers,
+see [Authentication](deployment.md#authentication)),
 and extraction rides the regular serve dispatch — the LitServe workers'
 resident models, admission control, and upload size caps all apply; no
 second pipeline is loaded. Concretely: `chew_paper` and `chew_url` accept
