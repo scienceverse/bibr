@@ -485,6 +485,70 @@ released.
   thread's current event loop is left alone.
 - `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
   not the `paper_id` twice.
+- llama.cpp server: an explicit `LLM_MAX_TOKENS`/`LLM_MAX_INPUT_CHARS`/
+  `LLM_REF_SEG_WINDOW_CHARS` is kept with a warning, while unset values
+  scale with `LLM_LLAMA_CPP_CONTEXT_SIZE`.
+- llama.cpp server: `*_LLAMA_CPP_EXTRA_ARGS` documents the separate-token
+  form (`--flag value`, not `--flag=value`) and names the setting on bad
+  quoting, and `-hfr` joins the `--hf-repo` aliases for the
+  identity-override check.
+- llama.cpp server: startup failures report the END of the stderr tail, and
+  the conservative-args retry fires only on argument-parse errors (unknown
+  flags and rejected flag values) — load and OOM failures fail fast. A
+  `/health` 200 is accepted only if the
+  process is still alive after a short grace period, so a port-racing
+  sibling's server is not mistaken for ours.
+- llama.cpp server: Ctrl-C during startup shuts down the child instead of
+  orphaning it; `--parallel N` is parsed for any N.
+- llmster: an `lms` timeout names the subcommand that timed out, and the
+  `load` hint suggests `LLM_LLMSTER_CONTEXT_LENGTH`. Reusing a pre-loaded
+  identifier validates it still serves that model. Unset `LLM_TIMEOUT_SECONDS`,
+  `LLM_MAX_CONCURRENCY` and `LLM_RATE_LIMIT_RPM` are raised to 300 s, 1 and
+  600 for the loopback server, matching the other local backends.
+- vLLM LLM server: readiness needs a second agreeing `/health` 200 after a
+  grace period, and startup failures report the END of the stderr tail.
+- vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
+  the other managed servers; startup failures report the END of the stderr
+  tail, as does the paddle vLLM OCR server.
+- Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
+  server like the other local backends.
+- Rapid-MLX OCR: a failed engine restart no longer discards the region that
+  triggered it — the caller gets its own transcription, and the restart
+  error surfaces on the next request where the generation is retried.
+  Callers parked on the recycle drain retry the failed restart once, and
+  get an `UpstreamServiceError` naming the failure instead of a bare
+  assert when the retry fails too, and replacing a dead generation
+  shuts down its HTTP pool and handles first.
+- `resolve_llm_backend` accepts the pipeline's settings when checking
+  rapid-mlx availability instead of only the global snapshot.
+- Cloud vision OCR: `settings.llm.api_key` is only forwarded to a vision
+  provider when it is a real key for the same provider and the LLM is not
+  pointed at another endpoint — cross-provider keys, managed-local
+  placeholders and a set `llm.base_url` fall through to the provider's own
+  key or SDK env fallback. The plain-HTTP refusal for a public vision
+  endpoint now also covers that fallback: an `OPENAI_API_KEY` the OpenAI SDK
+  would send is refused like a forwarded LLM key. Cloud vision backends
+  (`gemini`, `openai`, `anthropic`) are no longer torn down between chunks:
+  there are no local weights to reclaim.
+- Rate limiter: the strict-interval Redis Lua script works in whole
+  milliseconds (Redis truncates a Lua number reply to an integer, so a
+  fractional-second wait became 0), and the key TTL spans the queued
+  horizon so concurrent sleepers do not lose their place; the sliding
+  window quantizes to the same. The strict-interval key is now
+  `rate_limit:<resource>:next_allowed_ms`: it stores epoch milliseconds
+  while older releases stored epoch seconds under `next_allowed`, so the
+  two never read each other's values when old and new processes share one
+  Redis.
+- Circuit breaker: a waiter that times out no longer forces the breaker
+  back to OPEN under a still-running probe — only the probe's completion
+  owns the transition (a provably dead probe still fails fast).
+- Batch manifests: `content_sha256` streams inputs in 1 MiB chunks instead
+  of loading whole files. Validation still recomputes the hash for bytes
+  entering the pipeline, so the up-front manifest pass remains for now.
+- Layout preprocessing threads the resize column pass in row blocks; output
+  is bit-identical to the serial loop. The OOM batch-halving retry restores
+  torch.compile padding afterwards instead of leaving it disabled.
+
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

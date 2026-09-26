@@ -163,7 +163,9 @@ class InterleavedRenderOcrStage:
 
         # Single per-chunk teardown, matching what OcrStage would have done once
         # had it processed the whole chunk in one pass.
-        if _should_unload_ocr_after_chunk(cfg.memory_mode, cfg.llm_backend, ctx.settings):
+        if _should_unload_ocr_after_chunk(
+            cfg.memory_mode, cfg.llm_backend, ctx.settings, cfg.ocr_backend
+        ):
             await ctx.resources.shutdown_ocr()
 
 
@@ -321,7 +323,9 @@ class StreamingRenderOcrStage(InterleavedRenderOcrStage):
 
         # No-op for the gated config (cloud LLM + balanced/keep_all never
         # unloads) but kept for parity with the non-streaming path.
-        if _should_unload_ocr_after_chunk(cfg.memory_mode, cfg.llm_backend, ctx.settings):
+        if _should_unload_ocr_after_chunk(
+            cfg.memory_mode, cfg.llm_backend, ctx.settings, cfg.ocr_backend
+        ):
             await ctx.resources.shutdown_ocr()
 
     async def _run_backhalf(
