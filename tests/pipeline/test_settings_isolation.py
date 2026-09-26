@@ -310,13 +310,23 @@ async def test_closing_one_manager_does_not_clear_another_classifier():
     assert result[0][0] is CanonicalSection.RESULTS
 
 
-async def test_classifier_threshold_uses_supplied_settings_snapshot():
+async def test_classifier_threshold_uses_supplied_settings_snapshot(monkeypatch):
+    import bibr.structure.section_classifier as sc
+
+    async def no_llm(header_texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0) for _ in header_texts]
+
     first_settings = GlobalSettings()
     second_settings = GlobalSettings()
     first_settings.ml.section_classifier_min_confidence = 0.8
     second_settings.ml.section_classifier_min_confidence = 0.5
     first = _FakeClassifierResources(CanonicalSection.METHODS, score=0.7)
     second = _FakeClassifierResources(CanonicalSection.METHODS, score=0.7)
+    # Hermetic: the 0.7 < 0.8 miss collapses to UNKNOWN and — with default
+    # escalation on — reaches the LLM tier. Without this stub the test POSTs
+    # header text to the real LLM API and its UNKNOWN assertion holds only
+    # because that call fails.
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm)
 
     first_result, second_result = await asyncio.gather(
         classify_headers_batch_async(

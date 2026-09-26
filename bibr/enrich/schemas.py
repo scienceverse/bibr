@@ -6,6 +6,7 @@ consumes, catching upstream API changes at the parsing boundary.
 
 from __future__ import annotations
 
+import html
 import re
 
 from pydantic import BaseModel
@@ -15,6 +16,71 @@ _FUNDER_DOI = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/)?(?P<doi>10\.13039/\S
 # The license of the article itself, best first. "tdm" licenses grant text
 # mining, not reuse of the work, so they never stand for the article's license.
 _LICENSE_VERSIONS = ("vor", "unspecified", "am")
+# An inline element of a deposited title: JATS/HTML face markup (<i>, <sub>,
+# <scp>) and MathML (<mml:msub>). Its text is part of the title; the tag is not.
+# Attributes must be name="value", as XML requires, so a title's own "<y and z>"
+# is text, not a tag.
+_INLINE_TAG = re.compile(
+    r"(</?[A-Za-z][\w.:-]*(?:\s+[\w.:-]+\s*=\s*(?:\"[^\"]*\"|'[^']*'))*\s*/?>)"
+)
+# A line break inside a title separates the words on either side of it.
+_LINE_BREAK_TAG = re.compile(r"<(?:br|break)\s*/?>", re.IGNORECASE)
+_SCRIPT_TAG = re.compile(r"</?su[bp]\b", re.IGNORECASE)
+# An element symbol that continues a formula after a subscript ("N<sub>2</sub>O").
+_FORMULA_SYMBOL = re.compile(r"[A-Z][a-z]?(?![^\W\d_])")
+# Punctuation that attaches to the word before it, so it follows a closing tag
+# without a space ("<i>R</i> + newline + ': An'"), and punctuation that attaches
+# to the word after it, so it precedes an opening tag without one ("(" + newline
+# + "<i>Festuca</i>"). Dashes and slashes attach on both sides. A comma or
+# period before an element and a "(" after one keep their space ("Stink Bug,
+# <i>Halyomorpha halys</i> (Stål)"), and so does a straight double quote, which
+# may open or close.
+_JOINING_MARKS = "-‐‑‒–—―/"
+_ATTACHES_BEFORE = frozenset(",.;:!?)]}’”»'" + _JOINING_MARKS)
+_ATTACHES_AFTER = frozenset("([{‘“«'" + _JOINING_MARKS)
+
+
+def plain_text(value: object) -> str | None:
+    """A Crossref title as plain text: inline tags dropped (their text kept),
+    character entities decoded, whitespace collapsed.
+
+    Crossref returns titles as deposited, e.g. ``Effects of CO<sub>2</sub>``
+    or ``Genes &amp; Development``. Scored as-is the tags cost enough fuzzy
+    similarity to lose the correct record, and an accepted match exported them
+    into ``bib_match`` and, through consolidation, into ``bib``.
+
+    The line break a pretty-printed deposit puts around an element becomes a
+    space only where the title had one: not inside the element, not before a
+    sub- or superscript ("CO" + newline + "<sub>2</sub>"), not between an
+    element and punctuation that attaches to it, and not before an element
+    symbol that continues a formula ("C<sub>2</sub>" + newline + "H<sub>6</sub>").
+    """
+    if not isinstance(value, str):
+        return None
+    pieces = _INLINE_TAG.split(_LINE_BREAK_TAG.sub(" ", value))
+    out: list[str] = []
+    for index in range(0, len(pieces), 2):
+        text = html.unescape(pieces[index])
+        opened_by = pieces[index - 1] if index else ""
+        closed_by = pieces[index + 1] if index + 1 < len(pieces) else ""
+        body = text.lstrip()
+        if opened_by and "\n" in text[: len(text) - len(body)]:
+            joined = (
+                not opened_by.startswith("</")
+                or body[:1] in _ATTACHES_BEFORE
+                or bool(_SCRIPT_TAG.match(opened_by) and _FORMULA_SYMBOL.match(body))
+            )
+            text = body if joined else " " + body
+        body = text.rstrip()
+        if closed_by and "\n" in text[len(body) :]:
+            joined = (
+                closed_by.startswith("</")
+                or bool(_SCRIPT_TAG.match(closed_by))
+                or body[-1:] in _ATTACHES_AFTER
+            )
+            text = body if joined else body + " "
+        out.append(text)
+    return " ".join("".join(out).split()) or None
 
 
 def canonical_ror(value: object) -> str | None:
@@ -137,10 +203,10 @@ class CrossrefWorkItem(BaseModel):
     def from_raw(cls, raw: dict) -> CrossrefWorkItem:
         """Parse a raw Crossref API work item dict into a typed model."""
         titles = raw.get("title", [])
-        title = titles[0] if titles else None
+        title = plain_text(titles[0]) if titles else None
 
         containers = raw.get("container-title", [])
-        container_title = containers[0] if containers else None
+        container_title = plain_text(containers[0]) if containers else None
 
         authors = [
             CrossrefAuthor(

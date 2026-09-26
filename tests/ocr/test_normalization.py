@@ -7,7 +7,7 @@ from typing import cast
 
 import pytest
 
-from bibr.ocr.normalization import normalize_ocr_output
+from bibr.ocr.normalization import normalize_ocr_output, strip_one_balanced_formula_wrapper
 from bibr.ocr.profiles import GLM_PROFILE, PADDLE_PROFILE, OcrProfileName
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "paddle_vl_outputs.json"
@@ -103,3 +103,37 @@ def test_paddle_formula_preserves_crlf_inside_fence():
 
     assert normalized.content == "x\r\n+y"
     assert normalized.raw_content == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (r"\[x^2\]", "x^2"),
+        (r"\(a\) + \(b\)", r"\(a\) + \(b\)"),
+        ("$$a$$ + $$b$$", "$$a$$ + $$b$$"),
+        ("$E=mc^2$", "$E=mc^2$"),
+    ],
+)
+def test_public_formula_wrapper_stripper_removes_only_a_matched_outer_pair(raw, expected):
+    assert strip_one_balanced_formula_wrapper(raw) == expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("$E=mc^2$", "E=mc^2"),
+        ("$$E=mc^2$$", "E=mc^2"),
+        ("$a$ + $b$", "$a$ + $b$"),
+        (r"\(a\) + \(b\)", r"\(a\) + \(b\)"),
+        ("$a + b", "$a + b"),
+        # An escaped dollar is a dollar sign, not a delimiter.
+        (r"$$\text{cost} = \$5 \times n$$", r"\text{cost} = \$5 \times n"),
+        (r"\[ C = \$5 n \]", r"C = \$5 n"),
+        (r"\(x = \$2\)", r"x = \$2"),
+        (r"$p = \$5$", r"p = \$5"),
+        # "\\" is a line break, so the dollar after it is a delimiter.
+        (r"$x \\$", r"x \\"),
+    ],
+)
+def test_single_dollar_option_also_removes_one_matched_inline_pair(raw, expected):
+    assert strip_one_balanced_formula_wrapper(raw, single_dollar=True) == expected

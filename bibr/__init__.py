@@ -101,53 +101,38 @@ __all__ = [
     "write_tables",
 ]
 
+# One table drives the lazy API: module path per public name. ``__getattr__``
+# imports on first access (so ``import bibr`` stays free of stage/ML deps)
+# and ``__dir__`` reads ``__all__`` (so completion sees every name up front).
+_LAZY = {
+    "chew": "bibr.api",
+    "achew": "bibr.api",
+    "chew_file": "bibr.api",
+    "achew_file": "bibr.api",
+    "chew_many": "bibr.api",
+    "achew_many": "bibr.api",
+    "Result": "bibr.api",
+    "Records": "bibr.api",
+    "ChewFailure": "bibr.api",
+    "Chewer": "bibr.api",
+    "write_tables": "bibr.export.tables",
+    "LocalPipeline": "bibr.local.pipeline",
+    "Pipeline": "bibr.pipeline.pipeline",
+    "PaperExport": "bibr.export",
+    "Settings": "bibr.config",
+    "GlobalSettings": "bibr.config",
+}
+
 
 def __getattr__(name: str) -> Any:
-    if name in (
-        "chew",
-        "achew",
-        "chew_file",
-        "achew_file",
-        "chew_many",
-        "achew_many",
-        "Result",
-        "Records",
-        "ChewFailure",
-        "Chewer",
-    ):
-        from bibr import api
+    if name in _LAZY:
+        from importlib import import_module
 
-        value = getattr(api, name)
+        value = getattr(import_module(_LAZY[name]), name)
         globals()[name] = value
         return value
-    if name == "write_tables":
-        from bibr.export.tables import write_tables
-
-        globals()["write_tables"] = write_tables
-        return write_tables
-    if name == "LocalPipeline":
-        from bibr.local.pipeline import LocalPipeline
-
-        globals()["LocalPipeline"] = LocalPipeline
-        return LocalPipeline
-    if name == "Pipeline":
-        from bibr.pipeline.pipeline import Pipeline
-
-        globals()["Pipeline"] = Pipeline
-        return Pipeline
-    if name == "PaperExport":
-        from bibr.export import PaperExport
-
-        globals()["PaperExport"] = PaperExport
-        return PaperExport
-    if name == "Settings":
-        from bibr.config import Settings
-
-        globals()["Settings"] = Settings
-        return Settings
-    if name == "GlobalSettings":
-        from bibr.config import GlobalSettings
-
-        globals()["GlobalSettings"] = GlobalSettings
-        return GlobalSettings
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

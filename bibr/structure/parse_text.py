@@ -42,8 +42,14 @@ class TextHandlersMixin:
         page_number: int,
         bbox: list | None = None,
         region_meta: dict | None = None,
+        *,
+        from_ocr: bool = True,
     ) -> None:
-        """Accumulate body text, handling cross-page continuity."""
+        """Accumulate body text, handling cross-page continuity.
+
+        ``from_ocr`` is False for a region read from the PDF text layer; it
+        rides along to the sentences (``PaperSentence.from_ocr``).
+        """
         text = clean_text_content(content.strip())
         if not text:
             return
@@ -60,24 +66,26 @@ class TextHandlersMixin:
         # Route them through the caption handlers so they get attached to
         # their adjacent table/figure rather than appearing as body text.
         if self._TABLE_CAPTION_RE.match(text):
-            self._handle_table_caption(text, bbox, page_number)
+            self._handle_table_caption(text, bbox, page_number, from_ocr=from_ocr)
             return
         if self._FIGURE_CAPTION_RE.match(text):
-            self._handle_figure_caption(text, bbox, page_number)
+            self._handle_figure_caption(text, bbox, page_number, from_ocr=from_ocr)
             return
 
         heading = self._promotable_content_heading(text, region_meta)
         if heading is not None:
             self._flush_carry_over()
-            self._handle_heading("paragraph_title", heading, page_number, bbox)
+            self._handle_heading("paragraph_title", heading, page_number, bbox, from_ocr=from_ocr)
             return
 
         if self._stage_pending_table_label_fragment(
-            text, bbox, page_number, region_meta=region_meta
+            text, bbox, page_number, region_meta=region_meta, from_ocr=from_ocr
         ):
             return
 
-        self._emit_content_without_promotion(text, page_number, bbox, region_meta=region_meta)
+        self._emit_content_without_promotion(
+            text, page_number, bbox, region_meta=region_meta, from_ocr=from_ocr
+        )
 
     def _start_publisher_note_back_matter(
         self,
@@ -129,6 +137,7 @@ class TextHandlersMixin:
         bbox: list | None = None,
         *,
         region_meta: dict | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Emit body text without allowing it to re-enter heading promotion."""
         text = clean_text_content(content.strip())
@@ -165,6 +174,7 @@ class TextHandlersMixin:
                     )
                 self._carry_over.text += joiner + text
                 self._carry_over.provenance.append(prov)
+                self._carry_over.from_ocr = self._carry_over.from_ocr or from_ocr
                 # Advance the cursor to the page just appended. Left stale, a
                 # third region on the *new* page compares against the page the
                 # paragraph started on, computes ``same_page=False``, and is
@@ -186,8 +196,11 @@ class TextHandlersMixin:
             self._carry_over.provenance = [prov]
             self._carry_over.section_id = self._current_section_id
             self._carry_over.region_meta = region_meta
+            self._carry_over.from_ocr = from_ocr
         else:
-            self._emit_sentences(text, page_number, [prov], region_meta=region_meta)
+            self._emit_sentences(
+                text, page_number, [prov], region_meta=region_meta, from_ocr=from_ocr
+            )
 
     def _handle_formula(
         self,
@@ -240,7 +253,7 @@ class TextHandlersMixin:
             region_meta=region_meta,
         )
 
-    def _handle_footnote(self, content: str, page_number: int) -> None:
+    def _handle_footnote(self, content: str, page_number: int, *, from_ocr: bool = True) -> None:
         """Store a pending footnote for later conversion to section + sentences."""
         self._expire_pending_table_label_fragment()
         text = content.strip()
@@ -258,6 +271,7 @@ class TextHandlersMixin:
             page_number=page_number,
             body_section_id=self._current_section_id,
             deferred_text_index=len(self.assembler),
+            from_ocr=from_ocr,
         )
 
     def _emit_sentences(
@@ -267,6 +281,7 @@ class TextHandlersMixin:
         provenance: list[Provenance] | None = None,
         region_meta: dict | None = None,
         page_spans: list[tuple[int, int]] | None = None,
+        from_ocr: bool = True,
     ) -> None:
         """Store text for later batch segmentation via :meth:`apply_segmentation`."""
         self.assembler.append(
@@ -278,6 +293,7 @@ class TextHandlersMixin:
             provenance=provenance,
             region_meta=region_meta,
             page_spans=page_spans,
+            from_ocr=from_ocr,
         )
 
     def _detect_urls(self, sent: PaperSentence) -> None:
@@ -319,6 +335,7 @@ class TextHandlersMixin:
                         self._carry_over.provenance,
                         region_meta=self._carry_over.region_meta,
                         page_spans=self._carry_over.page_spans,
+                        from_ocr=self._carry_over.from_ocr,
                     )
                 finally:
                     self._current_section_id = saved
@@ -329,6 +346,7 @@ class TextHandlersMixin:
                     self._carry_over.provenance,
                     region_meta=self._carry_over.region_meta,
                     page_spans=self._carry_over.page_spans,
+                    from_ocr=self._carry_over.from_ocr,
                 )
         self._carry_over.reset()
 
@@ -487,7 +505,8 @@ class TextHandlersMixin:
         text_id: int,
         paragraph_id: int,
     ) -> PaperSentence:
-        """Build a PDF sentence, attaching source provenance + region_meta.
+        """Build a PDF sentence, attaching source provenance, region_meta and
+        whether OCR produced any of the text.
 
         ``is_display_formula`` reflects the entry flag — always ``False`` for
         segmentable body text, so it is safe to apply uniformly.
@@ -501,6 +520,7 @@ class TextHandlersMixin:
             is_display_formula=entry.is_formula,
             provenance=list(entry.provenance),
             region_meta=entry.region_meta,
+            from_ocr=entry.from_ocr,
         )
 
     def _find_nearest_text_id(

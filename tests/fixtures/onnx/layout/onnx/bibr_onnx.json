@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "model_file": "model.onnx",
+  "model": "layout",
+  "preprocessing": {
+    "size": {
+      "height": 64,
+      "width": 64
+    },
+    "rescale_factor": 0.00392156862745098,
+    "image_mean": [
+      0,
+      0,
+      0
+    ],
+    "image_std": [
+      1,
+      1,
+      1
+    ]
+  },
+  "num_queries": 8,
+  "num_labels": 5
+}

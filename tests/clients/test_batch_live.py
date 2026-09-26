@@ -4,7 +4,7 @@ from bibr.clients.batch import AnthropicBatchAdapter, BatchRequest
 from bibr.config import Settings
 from bibr.schemas import PaperTypeLabel
 
-pytestmark = pytest.mark.slow
+pytestmark = [pytest.mark.slow, pytest.mark.network]  # live API by design.
 
 
 @pytest.mark.skipif(not Settings.ANTHROPIC_API_KEY, reason="no ANTHROPIC_API_KEY")

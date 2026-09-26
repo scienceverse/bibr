@@ -1721,19 +1721,19 @@ class CoreMetadataExtractor:
         not be used.
 
         Selection is delegated to ``doi_identity.select_doi_from_text``, which
-        collects every candidate with a source-provenance ``selection_tier``
-        (explicit self-identity marker > front matter / repeated furniture >
-        uncontested untyped; reference, component, data/code and funder-registry
-        candidates are rejected outright) and returns the single highest-tier
-        candidate.  When two distinct DOIs tie at the top tier it applies a
-        deterministic provenance ladder (drop numeric-extension prefixes, prefer
-        an explicit marker over a bare one, prefer body/front-matter over
-        header/footer furniture, prefer the lowest page) and **abstains** unless
-        that ladder leaves exactly one survivor.  ``VAL_DOI_AMBIGUOUS`` is
-        emitted either way.  Wrap-truncated DOIs are repaired both upstream in
-        ``fix_ocr_artifacts`` (``bibr/input/consolidate_text.py``) and, for
-        breaks falling between ``10.`` and the registrant digits, by a
-        marker-gated bridge in ``doi_identity``.
+        classifies candidates and breaks ties like ``select_doi_candidates``
+        (see its docstring and ``_TIE_BREAK_LADDER``): reference, component,
+        data/code and funder-registry candidates are rejected outright, the
+        highest ``selection_tier`` wins, and a tie that the provenance ladder
+        cannot reduce to one DOI **abstains** with ``VAL_DOI_AMBIGUOUS``.  The
+        text here has no page or section provenance, so unlike
+        ``select_doi_candidates`` it still selects an uncontested tier-1 DOI.
+        In the pipeline ``IdentityValidationStage`` then overwrites
+        ``metadata.doi`` with the provenance-aware selection.
+        Wrap-truncated DOIs are repaired both upstream in ``fix_ocr_artifacts``
+        (``bibr/input/consolidate_text.py``) and, for breaks falling between
+        ``10.`` and the registrant digits, by a marker-gated bridge in
+        ``doi_identity``.
         """
         from bibr.extract.doi_identity import normalize_candidate_doi, select_doi_from_text
 
@@ -2180,36 +2180,50 @@ class CoreMetadataExtractor:
             return pt, l1, l2, None, None
 
         from bibr.structure import paper_classifier
+        from bibr.structure.paper_classifier_common import _build_input_text
 
         degraded_reason: str | None = None
-        try:
-            if self._explicit_classifier_runtime:
-                result = await paper_classifier.classify_paper_async(
-                    title,
-                    abstract,
-                    classifier_resources=self._classifier_resources,
-                    settings=self._settings,
-                )
-            else:
-                result = await paper_classifier.classify_paper_async(title, abstract)
-        except ProcessingError:
-            raise
-        except Exception as exc:
-            logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
-            result = None
-            degraded_reason = type(exc).__name__
+        result = None
+        # Empty title+abstract carries no signal — the model would return a
+        # training-prior artifact — so skip it and let the LLM classify from
+        # the full text. This is missing input, not a classifier outage, so
+        # no PAPER_CLASSIFIER_DEGRADED warning is recorded below.
+        empty_input = not _build_input_text(title, abstract)
+        if empty_input:
+            logger.info(
+                "Skipping trained paper classifier on empty title+abstract; using LLM fallback"
+            )
+        else:
+            try:
+                if self._explicit_classifier_runtime:
+                    result = await paper_classifier.classify_paper_async(
+                        title,
+                        abstract,
+                        classifier_resources=self._classifier_resources,
+                        settings=self._settings,
+                    )
+                else:
+                    result = await paper_classifier.classify_paper_async(title, abstract)
+            except ProcessingError:
+                raise
+            except Exception as exc:
+                logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
+                result = None
+                degraded_reason = type(exc).__name__
         if result is None:
             # The exception type only — never its message, which can quote
-            # document text.
-            self._record_metadata_warning(
-                WarningCode.PAPER_CLASSIFIER_DEGRADED,
-                (
-                    f"trained classifier raised {degraded_reason}"
-                    if degraded_reason
-                    else "trained classifier unavailable"
+            # document text. Empty input skips the warning: the model was
+            # never run, so nothing degraded.
+            if not empty_input:
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFIER_DEGRADED,
+                    (
+                        f"trained classifier raised {degraded_reason}"
+                        if degraded_reason
+                        else "trained classifier unavailable"
+                    )
+                    + "; the LLM classified the paper",
                 )
-                + "; the LLM classified the paper",
-            )
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             else:

@@ -559,7 +559,9 @@ class TestDetectBibXrefs:
             llm_client=FakeLLM(),
         )
 
-        assert captured == [(1, "(Smith, 2020; Unknown, 2019)")]
+        # The matcher split the group per work and linked Smith, so only the
+        # unresolved work is offered, not the whole group.
+        assert captured == [(1, "Unknown, 2019")]
 
     async def test_excludes_reference_section(self):
         """Citations in the reference section should not be detected."""
@@ -1888,7 +1890,11 @@ async def test_internal_bib_ids_do_not_establish_printed_numeric_style(bib_ids):
         ("paren-numeric", "error (3)% here", []),
         ("paren-numeric", "computed 5(3) times", []),
         ("paren-numeric", "see (3, 99) refs", []),
-        ("paren-numeric", "see equation (1)", [("(1)", [1])]),
+        # Ends right after the marker: the empty trailing character must not
+        # trip the "%/=" context guard.
+        ("paren-numeric", "as reported earlier (1)", [("(1)", [1])]),
+        ("paren-numeric", "see equation (1)", []),
+        ("paren-numeric", "the effect was F(3, 8) = 4.49", []),
         ("flattened-superscript", "similar physical traits1, but", [("1", [1])]),
         ("flattened-superscript", "own characteristics2,3.", [("2,3", [2, 3])]),
         ("flattened-superscript", "effectiveness.6–8 remain", [("6–8", [6, 7, 8])]),

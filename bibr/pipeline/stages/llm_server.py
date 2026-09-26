@@ -33,6 +33,7 @@ class LlmServerStage:
                     code="llm_server_failed",
                     stage=self.name,
                     exc=e,
+                    outage=True,
                 )
             logger.warning("LLM server start failed", exc_info=True)
             return

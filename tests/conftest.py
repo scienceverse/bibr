@@ -1,4 +1,8 @@
+import copy
+import ipaddress
+import logging
 import os
+import socket
 import subprocess
 from pathlib import Path
 
@@ -187,3 +191,277 @@ def _skip_installed_onnxruntime_builds_check(monkeypatch):
     tests/test_onnx_providers_builds.py resets it with stubbed metadata.
     """
     monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)
+
+
+# ---------------------------------------------------------------------------
+# Isolation: the process-global Settings must not leak between tests.
+#
+# ``Settings`` (bibr/config.py) is a process-global singleton whose nested
+# sections are pydantic v2 models. Pydantic records every attribute assignment
+# in ``model_fields_set``, and ``monkeypatch.setattr`` undoes itself with
+# another assignment — so the field stays marked "user-set" after the test.
+# About 15 production sites read ``model_fields_set`` as "the user explicitly
+# set this" (llama_cpp.py, local/llm.py, ocr/registry.py, ...), which made the
+# suite pass only in one file order (x-tests-1). Snapshot every section's
+# values, ``model_fields_set`` and private attributes before each test and
+# restore them in place afterwards (in place, so modules holding a section
+# reference keep seeing the same object).
+# ---------------------------------------------------------------------------
+
+
+def _snapshot_settings():
+    from pydantic import BaseModel
+
+    from bibr.config import Settings
+
+    inst = object.__getattribute__(Settings, "_instance")
+    if inst is None:
+        # The test would construct the singleton on first touch and any
+        # pollution would then have no baseline to restore to. Construct it
+        # now (once per session — later tests reuse the instance) so every
+        # test starts from, and returns to, the same state. A failure here
+        # means the pinned test env itself is invalid; fall back to no
+        # snapshot rather than erroring the whole suite at setup.
+        try:
+            inst = Settings._get()
+        except Exception:
+            return None
+    saved_sections = {}
+    for name in type(inst).model_fields:
+        value = getattr(inst, name, None)
+        if isinstance(value, BaseModel):
+            saved_sections[name] = (
+                set(value.model_fields_set),
+                value.model_copy(deep=True),
+            )
+    return {
+        "fields_set": set(inst.model_fields_set),
+        "extras": copy.deepcopy(inst.__pydantic_extra__),
+        "private": copy.deepcopy(inst.__pydantic_private__),
+        "root_values": {
+            name: copy.deepcopy(getattr(inst, name, None))
+            for name in type(inst).model_fields
+            if name not in saved_sections
+        },
+        "sections": saved_sections,
+    }
+
+
+def _restore_settings(saved) -> None:
+    from pydantic import BaseModel
+
+    from bibr.config import Settings
+
+    inst = object.__getattribute__(Settings, "_instance")
+    if inst is None or saved is None:
+        return
+    for name, (fields_set, snapshot) in saved["sections"].items():
+        current = getattr(inst, name, None)
+        if isinstance(current, BaseModel) and type(current) is type(snapshot):
+            for field in type(snapshot).model_fields:
+                setattr(current, field, getattr(snapshot, field))
+            current.model_fields_set.clear()
+            current.model_fields_set.update(fields_set)
+            if current.__pydantic_private__ is not None and snapshot.__pydantic_private__:
+                current.__pydantic_private__.clear()
+                current.__pydantic_private__.update(copy.deepcopy(snapshot.__pydantic_private__))
+        else:
+            setattr(inst, name, snapshot)
+    for name, value in saved["root_values"].items():
+        setattr(inst, name, value)
+    inst.model_fields_set.clear()
+    inst.model_fields_set.update(saved["fields_set"])
+    if inst.__pydantic_extra__ is not None:
+        inst.__pydantic_extra__.clear()
+        if saved["extras"]:
+            inst.__pydantic_extra__.update(saved["extras"])
+    if inst.__pydantic_private__ is not None and saved["private"] is not None:
+        inst.__pydantic_private__.clear()
+        inst.__pydantic_private__.update(saved["private"])
+
+
+@pytest.fixture(autouse=True)
+def _isolate_global_settings(monkeypatch):
+    """Each test sees pristine global Settings; its mutations die with it.
+
+    Takes ``monkeypatch`` (the same function-scoped instance the test uses)
+    so teardown can undo the test's attribute swaps *before* restoring the
+    snapshot: ``monkeypatch`` undoes itself with another assignment, which
+    pydantic records in ``model_fields_set`` — restoring first and letting
+    the undo run afterwards would re-mark every touched field as user-set.
+    ``MonkeyPatch.undo()`` is idempotent, so the later automatic teardown is
+    a no-op.
+    """
+    saved = _snapshot_settings()
+    yield
+    monkeypatch.undo()
+    _restore_settings(saved)
+
+
+# ---------------------------------------------------------------------------
+# Isolation: CLI-invoked logging must not leak between tests.
+#
+# ``bibr chew``/``doctor`` run ``logging.basicConfig`` and pin
+# ``bibr.local``/``bibr.pipeline``/``bibr.structure``/``bibr.extract`` to
+# INFO. Tests calling ``main()`` left those levels (and root handlers) set,
+# which broke the serve log-level test whenever it ran afterwards (x-tests-9
+# — not a production bug: ``bibr serve`` dispatches before that setup runs).
+# Snapshot the root handlers/level and every existing logger's level, and
+# reset any logger created mid-test to NOTSET afterwards.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    import _pytest.logging
+
+    root = logging.getLogger()
+    before_handlers = list(root.handlers)
+    before_level = root.level
+    before_levels = {
+        name: logger.level
+        for name, logger in logging.Logger.manager.loggerDict.items()
+        if isinstance(logger, logging.Logger)
+    }
+    yield
+    for handler in root.handlers[:]:
+        if handler not in before_handlers and not isinstance(
+            handler, _pytest.logging.LogCaptureHandler
+        ):
+            root.removeHandler(handler)
+    root.setLevel(before_level)
+    for name, logger in logging.Logger.manager.loggerDict.items():
+        if not isinstance(logger, logging.Logger):
+            continue
+        if name in before_levels:
+            logger.setLevel(before_levels[name])
+        else:
+            logger.setLevel(logging.NOTSET)
+
+
+# ---------------------------------------------------------------------------
+# Guard: unit tests must not open non-loopback sockets.
+#
+# Three classifier tests used to POST header text to Google's API (conftest's
+# ``test-google-key``) and pass only because the call failed; offline they
+# each burned ~20 s of retry/backoff (x-tests-2). Those tests now stub the LLM
+# tier. This guard sits next to the killpg/subprocess guards so the next leak
+# fails loudly instead of slowing the suite or exfiltrating fixture text.
+# Loopback stays open (serve TestClients, the wedged-Redis probe, spawned
+# LitServe workers all talk to 127.0.0.1); Unix sockets are untouched.
+# ---------------------------------------------------------------------------
+
+_LOOPBACK_NAMES = frozenset({"localhost", "ip6-localhost", "ip6-loopback"})
+
+
+def _is_loopback_host(host) -> bool:
+    if host is None:
+        return True
+    if isinstance(host, bytes):
+        try:
+            host = host.decode("ascii")
+        except (UnicodeDecodeError, AttributeError):
+            return False
+    if not isinstance(host, str):
+        return False
+    if not host or host in _LOOPBACK_NAMES:
+        return True
+    try:
+        addr = ipaddress.ip_address(host.split("%", 1)[0])
+    except ValueError:
+        return False
+    return addr.is_loopback or addr.is_unspecified
+
+
+def _guarded_connect(real_connect):
+    def connect(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect(self, address, *args, **kwargs)
+        host = address[0] if isinstance(address, tuple) else address
+        if not _is_loopback_host(host):
+            pytest.fail(
+                f"socket.connect({address!r}) blocked: unit tests must not open "
+                "non-loopback sockets. Stub the client (or the module's LLM tier) "
+                "instead of letting the call reach the network."
+            )
+        return real_connect(self, address, *args, **kwargs)
+
+    return connect
+
+
+def _guarded_create_connection(real_create_connection):
+    def create_connection(address, *args, **kwargs):
+        host = address[0] if isinstance(address, tuple) else address
+        if not _is_loopback_host(host):
+            pytest.fail(
+                f"socket.create_connection({address!r}) blocked: unit tests must not "
+                "open non-loopback sockets. Stub the client instead."
+            )
+        return real_create_connection(address, *args, **kwargs)
+
+    return create_connection
+
+
+def _guarded_connect_ex(real_connect_ex):
+    def connect_ex(self, address, *args, **kwargs):
+        if self.family not in (socket.AF_INET, socket.AF_INET6):
+            return real_connect_ex(self, address, *args, **kwargs)
+        host = address[0] if isinstance(address, tuple) else address
+        if not _is_loopback_host(host):
+            pytest.fail(
+                f"socket.connect_ex({address!r}) blocked: unit tests must not open "
+                "non-loopback sockets. Stub the client instead."
+            )
+        return real_connect_ex(self, address, *args, **kwargs)
+
+    return connect_ex
+
+
+def _guarded_gethostbyname(real_gethostbyname):
+    def gethostbyname(host, *args, **kwargs):
+        if isinstance(host, str) and host not in _LOOPBACK_NAMES:
+            try:
+                ipaddress.ip_address(host.split("%", 1)[0])
+            except ValueError:
+                pytest.fail(
+                    f"socket.gethostbyname({host!r}) blocked: unit tests must not "
+                    "resolve external names. Stub the client instead."
+                )
+        return real_gethostbyname(host, *args, **kwargs)
+
+    return gethostbyname
+
+
+def _guarded_getaddrinfo(real_getaddrinfo):
+    def getaddrinfo(host, *args, **kwargs):
+        if isinstance(host, str) and host not in _LOOPBACK_NAMES:
+            try:
+                ipaddress.ip_address(host.split("%", 1)[0])
+            except ValueError:
+                pytest.fail(
+                    f"socket.getaddrinfo({host!r}) blocked: unit tests must not "
+                    "resolve external names. Stub the client instead."
+                )
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    return getaddrinfo
+
+
+@pytest.fixture(autouse=True)
+def _block_non_loopback_sockets(monkeypatch, request):
+    """Fail any test that tries a real non-loopback connect or DNS lookup.
+
+    Tests marked ``network`` opt out: the live/API tests exist precisely to
+    reach the network (gated on env vars/keys and marked slow), so the
+    guard would break the runs it is meant to protect.
+    """
+    if request.node.get_closest_marker("network") is None:
+        monkeypatch.setattr(socket.socket, "connect", _guarded_connect(socket.socket.connect))
+        monkeypatch.setattr(
+            socket.socket, "connect_ex", _guarded_connect_ex(socket.socket.connect_ex)
+        )
+        monkeypatch.setattr(
+            socket, "create_connection", _guarded_create_connection(socket.create_connection)
+        )
+        monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo(socket.getaddrinfo))
+        monkeypatch.setattr(socket, "gethostbyname", _guarded_gethostbyname(socket.gethostbyname))

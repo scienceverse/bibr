@@ -113,6 +113,8 @@ class TestResolveBackendName:
         class _Opts:
             model_fields_set = frozenset()
             backend = "glm-llama"
+            paddle_served_model = "paddle-served"
+            llama_cpp_model = "glm/llama"
 
         class _Settings:
             ocr = _Opts()
@@ -128,6 +130,8 @@ class TestResolveBackendName:
         class _Opts:
             model_fields_set = frozenset({"backend"})
             backend = "glm-llama"
+            paddle_served_model = "paddle-served"
+            llama_cpp_model = "glm/llama"
 
         class _Settings:
             ocr = _Opts()

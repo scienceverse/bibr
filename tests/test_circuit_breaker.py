@@ -674,6 +674,67 @@ class TestCircuitBreakerHalfOpenProbeCoordination:
         await waiter_task
         assert cb.state == CircuitState.OPEN
 
+    async def test_slow_probe_success_not_stolen_by_waiter_timeout(self):
+        """A timed-out waiter must not force OPEN under a succeeding probe (ml-3).
+
+        reset_timeout doubles as the waiters' real wait_for bound: the waiter
+        gives up waiting at 0.1s while the probe needs 0.4s. The probe's
+        completion — not the waiter's timeout — owns the transition, so the
+        waiter rides the success to CLOSED instead of raising CircuitOpenError.
+        """
+        clock = FakeClock()
+        cb = AsyncCircuitBreaker(
+            failure_threshold=2,
+            reset_timeout=0.1,
+            name="slow-probe",
+            failure_dedup_window=0.0,
+            clock=clock,
+        )
+        await self._trip_to_open(cb, clock)
+        clock.advance(0.2)
+
+        async def slow_probe():
+            async with cb:
+                await asyncio.sleep(0.4)
+
+        async def waiter():
+            async with cb:
+                pass
+
+        probe_task = asyncio.create_task(slow_probe())
+        await asyncio.sleep(0.005)  # let the probe enter HALF_OPEN
+        assert cb.state == CircuitState.HALF_OPEN
+        await asyncio.create_task(waiter())  # must not raise
+        await probe_task
+        assert cb.state == CircuitState.CLOSED
+
+    async def test_waiter_timeout_with_dead_probe_forces_open(self):
+        """A provably-dead probe still fails fast instead of parking (ml-3 guard)."""
+        clock = FakeClock()
+        cb = AsyncCircuitBreaker(
+            failure_threshold=1,
+            reset_timeout=0.05,
+            name="dead-probe",
+            failure_dedup_window=0.0,
+            clock=clock,
+        )
+
+        async def gone():
+            pass
+
+        dead = asyncio.ensure_future(gone())
+        await dead
+        async with cb:  # bind the loop lock so the injection below survives
+            pass
+        cb._state = CircuitState.HALF_OPEN
+        cb._probe_event = asyncio.Event()
+        cb._probe_task = dead
+
+        with pytest.raises(CircuitOpenError):
+            async with cb:
+                pass
+        assert cb.state == CircuitState.OPEN
+
 
 class TestCircuitBreakerCrossLoop:
     """Reusing one breaker instance across event loops (test fixtures, worker

@@ -518,6 +518,17 @@ class PaperSentence:
     # ``(page, index)``.
     # None for DOCX-native input or when font metadata was not extracted.
     region_meta: dict | None = None
+    # Whether any of the text may come from OCR. ``finalize_text`` repairs OCR
+    # artifacts only there. Native parsers (DOCX, JATS, HTML, ePub) and PDF
+    # paragraphs built only from the embedded text layer set False; unknown
+    # provenance keeps the default, so it still gets the OCR repairs.
+    from_ocr: bool = True
+    # The ``$…$`` spans the parser itself wrote into ``text`` (DOCX inline
+    # equations). ``finalize_text`` unwraps these wherever they sit, glued to a
+    # word included ("the $n$th"); other dollar signs in document text are
+    # mostly literal, so only a tightly delimited pair of them counts as math.
+    # Like ``from_ocr`` it lives only here: no export or checkpoint reads it.
+    inline_math: tuple[str, ...] = ()
 
 
 @dataclass
@@ -584,6 +595,9 @@ class PaperTable:
     # ``create_content_sections`` reassigns ``section_id`` to the table's own
     # synthetic section). Exported as the table's ``section_id``.
     _body_section_id: int | None = field(default=None)
+    # True when the float was met inside a <p>: its caption used to merge into
+    # the paragraph sentence, so the caption sentence keeps the URL regex pass.
+    _in_paragraph: bool = field(default=False)
     parts: list[PaperTablePart] = field(default_factory=list)
     # Printed label without the word ("3", "3.1", "S2", "IV"), from the
     # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.
@@ -621,6 +635,8 @@ class PaperFigure:
     # ``create_content_sections`` reassigns ``section_id`` to the figure's own
     # synthetic section). Exported as the figure's ``section_id``.
     _body_section_id: int | None = field(default=None)
+    # True when the float was met inside a <p> (see PaperTable._in_paragraph).
+    _in_paragraph: bool = field(default=False)
     parts: list[PaperFigurePart] = field(default_factory=list)
     # Printed label without the word ("3", "3.1", "S2", "A1"), from the
     # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.
@@ -764,6 +780,13 @@ class PaperContents:
     # each entry is one full reference. Consumed by the ``native`` segmentation
     # branch so LLM/geom segmentation is skipped, then parsed as configured.
     native_ref_strings: list[str] | None = None
+    # True when every ``native_ref_strings`` entry is exactly one reference by
+    # construction (one JATS <ref> each), so reference extraction keeps them
+    # verbatim: no junk filter, no merge split. HTML leaves it False because
+    # its walker also collects non-reference lists and text blocks under a
+    # references heading (navigation, "Download BibTeX"), which the filter
+    # still has to drop.
+    native_ref_strings_authoritative: bool = False
     # Internal diagnostics appended at the tail to preserve positional callers.
     reference_yield_receipt: ReferenceYieldReceipt | None = None
     reference_boundary_reason_flags: list[str] = field(default_factory=list)
@@ -789,6 +812,8 @@ class PaperContents:
         commands (``^{}``, ``\\alpha``, etc.) that were intentionally
         preserved during parsing so that citation linking, equation
         extraction, and xref detection could operate on the raw patterns.
+        Outside ``$...$`` spans only sentences with OCR text are cleaned
+        (``PaperSentence.from_ocr``; see ``clean_text_content_late``).
 
         Display-formula sentences are skipped — their LaTeX content is
         the actual data and should not be cleaned.
@@ -800,7 +825,9 @@ class PaperContents:
         """
         for sent in self.sentences:
             if not sent.is_display_formula:
-                sent.text = clean_text_content_late(sent.text)
+                sent.text = clean_text_content_late(
+                    sent.text, from_ocr=sent.from_ocr, inline_math=sent.inline_math
+                )
         self.invalidate_text_caches()
 
     @cached_property

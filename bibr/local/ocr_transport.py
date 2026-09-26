@@ -228,11 +228,17 @@ class BaseHttpOcrClient:
         """Post-process the recognized text. Default: identity."""
         return text
 
-    async def _send_request(self, image_b64: str, prompt: str) -> str:
+    async def _send_request(
+        self, image_b64: str, prompt: str, *, max_tokens: int | None = None
+    ) -> str:
         """Send OCR request with retry logic."""
         import httpx
 
         payload = self._build_payload(image_b64, prompt)
+        if max_tokens is not None:
+            # Table-recovery retry: re-run the same region under a higher
+            # output budget instead of the profile's table cap.
+            payload["max_tokens"] = max_tokens
         label = self._SERVICE_LABEL
         url = f"{self._base_url}/v1/chat/completions"
         last_exc: Exception | None = None

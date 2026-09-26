@@ -10,13 +10,8 @@ import pytest
 
 @pytest.fixture
 def docx_with_footnotes():
-    """Locate a fixture .docx with footnotes. If none exists in repo, skip."""
-    candidates = list(Path("tests/fixtures").rglob("*.docx"))
-    for p in candidates:
-        # Heuristic: file size > 50KB usually indicates richer content.
-        if p.stat().st_size > 50_000:
-            return p
-    pytest.skip("no .docx fixture with footnotes available")
+    """Committed synthetic fixture with two real footnotes (plus separators)."""
+    return Path(__file__).parent.parent / "fixtures" / "footnotes_sample.docx"
 
 
 def test_load_footnotes_returns_dict(docx_with_footnotes):
@@ -27,10 +22,10 @@ def test_load_footnotes_returns_dict(docx_with_footnotes):
 
     doc = Document(str(docx_with_footnotes))
     fns = load_footnotes(doc)
-    assert isinstance(fns, dict)
-    for k, v in fns.items():
-        assert isinstance(k, str)
-        assert isinstance(v, str)
+    assert fns == {
+        "2": "First synthetic footnote text.",
+        "3": "Second synthetic footnote with split runs.",
+    }
 
 
 def test_load_footnotes_empty_when_no_footnotes_part():

@@ -90,3 +90,87 @@ async def test_detect_batch_coalesces_concurrent_requests_through_real_batcher()
         assert sum(len(b) for b in batches) == 6
     finally:
         await det._batcher.close()
+
+
+async def test_build_batcher_uses_effective_batch_for_cpu_and_cuda(monkeypatch):
+    """The serve micro-batcher runs one page at a time on CPU (no arena
+    growth) and keeps the configured batch on CUDA; explicit wins."""
+    from types import SimpleNamespace
+
+    from bibr.layout_utils import effective_layout_batch_size
+
+    async def _max_batch(device_type, env_batch=None):
+        if env_batch is not None:
+            monkeypatch.setenv("LAYOUT_BATCH_SIZE", env_batch)
+        else:
+            monkeypatch.delenv("LAYOUT_BATCH_SIZE", raising=False)
+        det = object.__new__(LayoutDetector)
+        det._settings = GlobalSettings()
+        det._device = SimpleNamespace(type=device_type)
+        det._gpu_executor = None
+        det._detect_images = lambda batch: [[{}] for _ in batch]  # type: ignore[method-assign]
+        batcher = det._build_batcher()
+        try:
+            assert batcher._max_batch_size == effective_layout_batch_size(
+                det._settings, device_type
+            )
+            return batcher._max_batch_size
+        finally:
+            await batcher.close()
+
+    assert await _max_batch("cpu") == 1
+    assert await _max_batch("cuda") == 8
+    assert await _max_batch("cpu", "4") == 4
+
+
+def test_onnx_warmup_uses_effective_batch_on_cpu():
+    """The ONNX warmup forwards the effective CPU batch (1), not raw 8."""
+    from types import SimpleNamespace
+
+    det = object.__new__(LayoutDetector)
+    det._settings = GlobalSettings()
+    det._device = SimpleNamespace(type="cpu")
+    det._runtime = "onnx"
+    seen = {}
+
+    class _FakeModel:
+        def run(self, batch):
+            seen["n"] = len(batch)
+            return [[{}] for _ in batch]
+
+    det._model = _FakeModel()
+    det._run_warmup()
+
+    assert seen["n"] == 1
+
+
+def test_torch_warmup_uses_effective_batch_on_cpu(monkeypatch):
+    """The torch warmup also forwards the effective CPU batch."""
+    import sys
+    import types
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    det = object.__new__(LayoutDetector)
+    det._settings = GlobalSettings()
+    det._device = SimpleNamespace(type="cpu")
+    det._runtime = "torch"
+    det._model = MagicMock()
+    seen = {}
+
+    class _FakeProcessor:
+        def __call__(self, images, return_tensors=None):
+            seen["n"] = len(images)
+            mock = MagicMock()
+            mock.to.return_value = mock
+            return {"x": mock}
+
+    det._image_processor = _FakeProcessor()
+    fake_torch = types.ModuleType("torch")
+    fake_torch.inference_mode = lambda: __import__("contextlib").nullcontext()  # type: ignore[attr-defined]
+    fake_torch.cuda = SimpleNamespace(empty_cache=lambda: None)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    det._run_warmup()
+
+    assert seen["n"] == 1

@@ -3,8 +3,11 @@
 Local-pipeline variant of the shared wtpsplit-lite SaT core
 (:class:`bibr.segmenter_base.BaseSentenceSegmenter`): adds an explicit
 ``unload()`` for memory recovery across sequential pipeline phases and
-serializes concurrent callers through a per-loop asyncio lock. Tiny model
-(~0.1 GB) — typically stays resident.
+serializes concurrent callers through a per-loop asyncio lock. The fp16
+weights are small (470 MB) but resident RSS is GB-scale: 0.9 GB after load
+and 3.7 GB after one paper under ORT's default CPU memory arena
+(audit-measured), which CPU-only sessions now opt out of. Aggressive mode
+still unloads it between phases; balanced mode keeps it resident.
 """
 
 import logging

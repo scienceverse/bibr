@@ -1017,6 +1017,98 @@ def test_redis_url_passes_through_when_only_url_set(monkeypatch):
     assert s.redis.url == "rediss://my-host:6380/0"
 
 
+def _redis_env(monkeypatch, env: dict[str, str]):
+    for name in ("REDIS_URL", "REDIS_PASSWORD", "JOBS_REDIS_URL", "CROSSREF_CACHE_REDIS_URL"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    from bibr.config import GlobalSettings
+
+    return GlobalSettings()
+
+
+def test_redis_password_joins_a_username_only_url(monkeypatch):
+    """config-13: a Redis 6 ACL URL with a user and no password stayed unauthenticated."""
+    s = _redis_env(
+        monkeypatch, {"REDIS_URL": "redis://default@redis:6379/0", "REDIS_PASSWORD": "p@ss"}
+    )
+    assert s.redis.url == "redis://default:p%40ss@redis:6379/0"
+
+
+def test_redis_password_reaches_sibling_urls_on_the_same_server(monkeypatch):
+    """config-13: a host-only JOBS_REDIS_URL on the compose Redis got NOAUTH."""
+    s = _redis_env(
+        monkeypatch,
+        {
+            "REDIS_PASSWORD": "hunter2",
+            "JOBS_REDIS_URL": "redis://redis:6379/1",
+            "CROSSREF_CACHE_REDIS_URL": "redis://redis/2",
+        },
+    )
+    assert s.redis.url == "redis://:hunter2@redis:6379/0"
+    assert s.jobs.redis_url == "redis://:hunter2@redis:6379/1"
+    assert s.crossref.cache_redis_url == "redis://:hunter2@redis/2"
+
+
+def test_redis_password_reaches_a_unix_socket_url_and_its_siblings(monkeypatch):
+    """A socket URL has no host; redis-py still reads ``unix://:password@/path``."""
+    from redis.connection import parse_url
+
+    s = _redis_env(
+        monkeypatch,
+        {
+            "REDIS_URL": "unix:///var/run/redis/redis.sock?db=0",
+            "REDIS_PASSWORD": "hunter2",
+            "JOBS_REDIS_URL": "unix:///var/run/redis/redis.sock?db=1",
+            "CROSSREF_CACHE_REDIS_URL": "unix:///run/other/redis.sock?db=0",
+        },
+    )
+    assert s.redis.url == "unix://:hunter2@/var/run/redis/redis.sock?db=0"
+    assert parse_url(s.redis.url)["password"] == "hunter2"
+    assert s.jobs.redis_url == "unix://:hunter2@/var/run/redis/redis.sock?db=1"
+    assert s.crossref.cache_redis_url == "unix:///run/other/redis.sock?db=0"
+    assert s.model_dump()["redis"]["url"] == "unix://:***@/var/run/redis/redis.sock?db=0"
+
+
+def test_redis_password_stays_off_a_separate_server_and_explicit_credentials(monkeypatch):
+    s = _redis_env(
+        monkeypatch,
+        {
+            "REDIS_URL": "redis://redis:6379/0",
+            "REDIS_PASSWORD": "hunter2",
+            "JOBS_REDIS_URL": "redis://:own-pass@redis:6379/1",
+            "CROSSREF_CACHE_REDIS_URL": "redis://crossref-cache:6379/0",
+        },
+    )
+    assert s.jobs.redis_url == "redis://:own-pass@redis:6379/1"
+    assert s.crossref.cache_redis_url == "redis://crossref-cache:6379/0"
+
+
+def test_repr_and_dump_mask_the_password_inside_redis_urls(monkeypatch):
+    """config-12: the field-name redaction masked ``password`` but printed the
+    same secret inside ``url``."""
+    s = _redis_env(monkeypatch, {"REDIS_PASSWORD": "hunter2-secret"})
+    assert "hunter2-secret" not in repr(s.redis)
+    assert "url='redis://:***@redis:6379/0'" in repr(s.redis)
+    assert s.model_dump()["redis"]["url"] == "redis://:***@redis:6379/0"
+    # The stored value is untouched: connections still authenticate.
+    assert s.redis.url == "redis://:hunter2-secret@redis:6379/0"
+
+
+def test_config_show_masks_the_password_inside_url_settings():
+    from bibr.config_cli import format_value
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {d.env_name: d for d in iter_setting_docs()}
+    assert (
+        format_value(docs["REDIS_URL"], "redis://default:hunter2-secret@redis:6379/0")
+        == "redis://default:***@redis:6379/0"
+    )
+    assert format_value(docs["JOBS_REDIS_URL"], "redis://redis:6379/1") == "redis://redis:6379/1"
+    assert format_value(docs["LLM_MODEL"], "a:b@c") == "a:b@c"
+
+
 def test_compute_code_hash_memoized_across_settings(monkeypatch):
     """Repeated calls reuse the module-level cache instead of re-walking the
     package tree."""

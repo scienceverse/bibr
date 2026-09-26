@@ -383,6 +383,57 @@ async def test_no_configured_classifier_keeps_initial_broad_call(monkeypatch):
 
 
 class TestDegradedClassifierIsVisibleInTheExport:
+    async def test_empty_input_takes_llm_path_with_no_degraded_warning(self, monkeypatch):
+        """Empty title+abstract is missing input, not a classifier outage: the
+        trained classifier must not run and no PAPER_CLASSIFIER_DEGRADED
+        warning may reach the export — the LLM classifies from the full text.
+        """
+        classify_spy = mock.AsyncMock(
+            side_effect=AssertionError("trained classifier must not run on empty input")
+        )
+        monkeypatch.setattr(paper_classifier, "classify_paper_async", classify_spy)
+
+        llm = _base_llm_result()
+        ext = _build_extractor(llm)
+        ext.contents.processing_warnings = []
+        result = await ext.core._classify_paper("", "", llm, "full classification text here")
+
+        classify_spy.assert_not_awaited()
+        # The delayed broad LLM fallback decides, with null confidences.
+        assert result == (
+            "commentary",
+            "Humanities and the Arts",
+            "Languages and Literature",
+            None,
+            None,
+        )
+        ext.llm_client.extract_paper_classification.assert_awaited_once()
+        assert not [
+            w
+            for w in ext.contents.processing_warnings
+            if w.code == WarningCode.PAPER_CLASSIFIER_DEGRADED
+        ]
+
+    async def test_whitespace_only_input_takes_llm_path_with_no_degraded_warning(self, monkeypatch):
+        """Blank strings carry no signal either — same quiet LLM path."""
+        classify_spy = mock.AsyncMock(
+            side_effect=AssertionError("trained classifier must not run on blank input")
+        )
+        monkeypatch.setattr(paper_classifier, "classify_paper_async", classify_spy)
+
+        llm = _base_llm_result()
+        ext = _build_extractor(llm)
+        ext.contents.processing_warnings = []
+        result = await ext.core._classify_paper("   ", "  ", llm, "full classification text here")
+
+        classify_spy.assert_not_awaited()
+        assert result[0] == "commentary"
+        assert not [
+            w
+            for w in ext.contents.processing_warnings
+            if w.code == WarningCode.PAPER_CLASSIFIER_DEGRADED
+        ]
+
     async def test_unavailable_classifier_marks_the_export(self, monkeypatch):
         """Configured but not answering (core install, failed load): the LLM decides
         and processing_warnings must say so."""

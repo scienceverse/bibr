@@ -9,6 +9,7 @@ import pytest
 
 pytestmark = [
     pytest.mark.slow,
+    pytest.mark.network,  # real API call by design; opts out of the socket guard.
     pytest.mark.skipif(
         not os.environ.get("BIBR_RUN_VISION_OCR_INTEGRATION"),
         reason="Set BIBR_RUN_VISION_OCR_INTEGRATION=1 to run",

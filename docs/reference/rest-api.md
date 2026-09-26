@@ -49,7 +49,7 @@ second file return `400`.
 | `include_figures` | bool | No | Emit figure images as `data:` URIs (default: `false`) |
 | `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
 | `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
-| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
+| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
@@ -138,8 +138,10 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving;
-network-visible binds require a key at least 32 characters long.
+header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+and the server then refuses non-loopback `Host` headers (`421`) and
+state-changing requests from other sites (`403`); network-visible binds
+require a key at least 32 characters long.
 See [Authentication](../guides/deployment.md#authentication) in the
 deployment guide for the production-hardening checks (`ENVIRONMENT=production`)
 that force it on.
@@ -147,7 +149,8 @@ that force it on.
 ## Caching
 
 When `CACHE_ENABLED=true` (the default) and Redis is configured, the API caches
-successful extraction responses. Keys distinguish file content, page range,
+successful extraction responses. Keys distinguish file content (its full
+SHA-256), the file extension (which picks the parser), page range,
 figure/region output, consolidation, and reference-strategy overrides. The
 cache namespace also includes a settings fingerprint and code version.
 Identical concurrent cache misses are coalesced; failed Redis operations are
@@ -161,7 +164,7 @@ Configure caching:
 | `REDIS_URL` | Redis connection URL | auto-generated |
 | `REDIS_PASSWORD` | Redis password | (none) |
 | `CACHE_VERSION` | Cache key prefix version | auto-computed from source hash |
-| `CACHE_TTL_SECONDS` | Cache TTL | `86400` (24h) |
+| `CACHE_TTL_SECONDS` | Cache TTL (`0` = no expiry) | `86400` (24h) |
 | `CACHE_OPERATION_TIMEOUT_SECONDS` | Maximum wait for one cache operation | `5` |
 
 ## Request metering
@@ -169,9 +172,12 @@ Configure caching:
 With `METER_ENABLED=true` (the default), non-probe HTTP responses carry
 `x-request-id` and `x-bibr-duration-ms`. A valid client-supplied `x-request-id`
 is echoed; otherwise the server generates one. Request and extraction records
-go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds a
-rotating JSONL file. Cache hits do not count the original extraction's LLM
-tokens as new usage.
+go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds
+rotating JSONL files: the API process writes request records to `METER_LOG_PATH`
+itself, while the worker writes extraction records (the only ones carrying
+LLM token usage) to the sibling `<stem>.worker<suffix>` file. Each process
+rotates only its own file, so usage tallies must read both files. Cache hits
+do not count the original extraction's LLM tokens as new usage.
 
 ## Error responses
 

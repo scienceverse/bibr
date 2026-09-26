@@ -165,10 +165,19 @@ async def test_absent_request_value_keeps_deployment_level_switch(tmp_path):
 def _key(api: BibrPipelineAPI, inputs: dict, *, crossref: bool) -> str:
     import hashlib
 
-    digest = hashlib.sha256(inputs["content"]).hexdigest()[:16]
+    digest = hashlib.sha256(inputs["content"]).hexdigest()
     ref_seg, refs = _resolve_ref_strategies(None, None)
     return api._cache_key(
-        digest, None, None, False, False, None, refs=refs, ref_seg=ref_seg, crossref=crossref
+        digest,
+        None,
+        None,
+        False,
+        False,
+        None,
+        refs=refs,
+        ref_seg=ref_seg,
+        crossref=crossref,
+        input_format=".pdf",
     )
 
 
@@ -177,7 +186,7 @@ def test_cache_key_separates_enriched_from_unenriched(tmp_path):
     inputs = _inputs()
 
     assert _key(api, inputs, crossref=True) != _key(api, inputs, crossref=False)
-    assert _key(api, inputs, crossref=True).endswith(":enrich")
+    assert _key(api, inputs, crossref=True).endswith(":enrich:fmt:pdf")
 
 
 async def test_crossref_true_never_reads_a_cached_unenriched_result(tmp_path):
