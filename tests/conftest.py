@@ -45,14 +45,14 @@ os.environ["REF_SEG_STRATEGY"] = "llm"
 # tests don't pull the HF snapshot. Classifier-path tests opt in via monkeypatch;
 # test_config.test_paper_classifier_defaults_to_published_model asserts the real
 # default after delenv.
-os.environ["ML_PAPER_CLASSIFIER_MODEL_ID"] = "null"
+os.environ["ML_PAPER_CLASSIFIER_MODEL_ID"] = ""
 # Keep section-classifier tests offline for the same reason. Tests for the
 # trained path opt in explicitly; config-default tests clear this override.
-os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = "null"
+os.environ["ML_SECTION_CLASSIFIER_MODEL_ID"] = ""
 # Production default is the published front-role bundle; disabled here so
 # front-matter tests don't pull the HF snapshot. Tests for the model path build
 # their own FrontRolePredictions or point at a local bundle.
-os.environ["ML_FRONT_ROLE_MODEL_ID"] = "null"
+os.environ["ML_FRONT_ROLE_MODEL_ID"] = ""
 # Production default is "auto" (probe the Hub for a model's ONNX bundle, else
 # torch). Pinned to "torch" here so constructing a detector/classifier in a
 # test never makes a network round-trip; ONNX-runtime tests set ML_RUNTIME (or

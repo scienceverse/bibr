@@ -350,15 +350,14 @@ def test_diff_against_categorizes_keys(manager, tmp_path):
         "LLM_PROVIDER": "google",  # changed
         "LLM_MODEL": "gpt-5",  # same
         "LLM_MAX_TOKENS": "4096",  # only in env (non-secret)
-        "CROSSREF_API_EMAIL": "me@x.com",  # only in env, secret → hidden from diff
+        "CROSSREF_API_EMAIL": "me@x.com",  # only in env (non-secret)
         "GOOGLE_API_KEY": "AIzaSy",  # only in env, secret → hidden from diff
         "BIBR_ACTIVE_PRESET": "ref",  # ignored
     }
     changed, only_in_preset, only_in_env = manager.diff_against("ref", env_dict)
     assert changed == {"LLM_PROVIDER": ("google", "openai")}
     assert only_in_preset == {"EXTRA": "x"}
-    assert only_in_env == {"LLM_MAX_TOKENS": "4096"}
-    assert "CROSSREF_API_EMAIL" not in only_in_env
+    assert only_in_env == {"LLM_MAX_TOKENS": "4096", "CROSSREF_API_EMAIL": "me@x.com"}
     assert "GOOGLE_API_KEY" not in only_in_env
     assert "BIBR_ACTIVE_PRESET" not in only_in_env
 

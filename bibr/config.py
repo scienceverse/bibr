@@ -113,12 +113,12 @@ def _section(prefix: str) -> SettingsConfigDict:
         env_file_encoding="utf-8",
         env_prefix=prefix,
         extra="ignore",
-        # An empty value falls back to the field default (it is ignored, the
-        # way an unset variable is), and the literal ``null`` sets None on
-        # nullable fields — so uncommenting any ``bibr config example --full``
-        # line loads, and section fields can be set to their documented null
-        # from the environment just like top-level fields already could.
-        env_ignore_empty=True,
+        # The literal ``null`` sets None on nullable fields, so section fields
+        # can be set to their documented null from the environment just like
+        # top-level fields already could. Empty values are NOT ignored here:
+        # a blank still masks lower layers (see ``_BibrSettings``'s
+        # before-validator), so ``ML_*_MODEL_ID=`` still disables the model
+        # and ``BIBR_RESOLVER_SOURCES=`` still means the resolver tier.
         env_parse_none_str="null",
     )
 
@@ -232,6 +232,86 @@ def _split_csv_env(value, *, lower: bool = False):
     return value
 
 
+def _allows_none(annotation) -> bool:
+    """Whether *annotation* accepts None (``X | None``), peeling Annotated."""
+    import types
+    import typing
+
+    ann = annotation
+    while typing.get_origin(ann) is typing.Annotated or hasattr(ann, "__metadata__"):
+        args = typing.get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+    origin = typing.get_origin(ann)
+    if origin is typing.Union or isinstance(ann, types.UnionType):
+        return type(None) in typing.get_args(ann)
+    return ann is type(None)
+
+
+def _is_list_annotation(annotation) -> bool:
+    """Whether *annotation* is (or wraps) a ``list``."""
+    import typing
+
+    ann = annotation
+    while typing.get_origin(ann) is typing.Annotated or hasattr(ann, "__metadata__"):
+        args = typing.get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+    if ann is list:
+        return True
+    origin = typing.get_origin(ann)
+    if origin is list:
+        return True
+    if isinstance(ann, type) and issubclass(ann, list):
+        return True
+    if origin is typing.Union or str(type(origin)) == "<class 'types.UnionType'>":
+        return any(_is_list_annotation(a) for a in typing.get_args(ann) if a is not type(None))
+    return False
+
+
+def _is_dict_annotation(annotation) -> bool:
+    """Whether *annotation* is (or wraps) a ``dict``."""
+    import typing
+
+    ann = annotation
+    while typing.get_origin(ann) is typing.Annotated or hasattr(ann, "__metadata__"):
+        args = typing.get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+    if ann is dict:
+        return True
+    origin = typing.get_origin(ann)
+    if origin is dict:
+        return True
+    if isinstance(ann, type) and issubclass(ann, dict):
+        return True
+    if origin is typing.Union or str(type(origin)) == "<class 'types.UnionType'>":
+        return any(_is_dict_annotation(a) for a in typing.get_args(ann) if a is not type(None))
+    return False
+
+
+def _is_plain_str_annotation(annotation) -> bool:
+    """Whether *annotation* is exactly ``str`` (nullable or not)."""
+    import typing
+
+    ann = annotation
+    while typing.get_origin(ann) is typing.Annotated or hasattr(ann, "__metadata__"):
+        args = typing.get_args(ann)
+        if not args:
+            break
+        ann = args[0]
+    if ann is str:
+        return True
+    origin = typing.get_origin(ann)
+    if origin is typing.Union or str(type(origin)) == "<class 'types.UnionType'>":
+        non_none = [a for a in typing.get_args(ann) if a is not type(None)]
+        return len(non_none) == 1 and non_none[0] is str
+    return False
+
+
 class _BibrSettings(BaseSettings):
     """Base for all bibr settings models.
 
@@ -272,6 +352,72 @@ class _BibrSettings(BaseSettings):
             kwargs["_env_file"] = None if dotenv_disabled() else _default_env_files()
         super().__init__(**kwargs)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _empty_str_to_none_or_default(cls, data):
+        """Give every blank value the meaning it had before empty-ignoring.
+
+        A blank still masks lower layers (process env beats dotenv beats
+        default) because the merged mapping already picked the highest layer's
+        ``""`` before this runs — this only decides what ``""`` *means*:
+
+        - nullable fields (``str | None``, ``int | None``, ``Literal | None``,
+          ...) → None, so ``LLM_REASONING_EFFORT=`` still omits the parameter
+          and ``ML_*_MODEL_ID=`` still disables the model;
+        - list fields → left alone (the CSV splitter turns ``""`` into ``[]``,
+          so ``BIBR_RESOLVER_SOURCES=`` still means the resolver's own tier);
+        - plain ``str`` fields → left alone (``""`` stays ``""``, as before);
+        - every other non-nullable field (ints, floats, bools, Literals,
+          dicts) → dropped so the default applies, which is the only way the
+          ``bibr config example --full`` lines for those fields can load
+          (on the old tree they failed instead). The literal ``null`` keeps
+          working as an extra None spelling via ``env_parse_none_str``.
+        """
+        if not isinstance(data, dict):
+            return data
+        fields = cls.model_fields
+        if cls.__name__ == "GlobalSettings":
+            # Top-level keeps the pre-fix rule exactly: every blank becomes
+            # None (nullable fields disable; plain fields then fail, as
+            # before). See ``empty_str_to_none`` on the old tree.
+            for key, value in list(data.items()):
+                if value == "":
+                    data[key] = None
+            return data
+        for key, value in list(data.items()):
+            if value != "":
+                continue
+            finfo = fields.get(key)
+            if finfo is None:
+                # Init kwargs may use an alias spelling (``OCR_SGLANG_GPUS``);
+                # resolve it to the field so the same rule applies.
+                for _fname, candidate in fields.items():
+                    alias = candidate.validation_alias
+                    names: tuple[str, ...] = ()
+                    if isinstance(alias, AliasChoices):
+                        names = tuple(str(c) for c in alias.choices)
+                    elif isinstance(alias, str):
+                        names = (alias,)
+                    if key in names:
+                        finfo = candidate
+                        break
+                if finfo is None:
+                    continue
+            ann = finfo.annotation
+            if _allows_none(ann):
+                data[key] = None
+            elif _is_list_annotation(ann):
+                continue
+            elif _is_plain_str_annotation(ann):
+                # A blank for a computed (factory) default — ``CACHE_VERSION=``
+                # — means the computed value; a blank for an explicit string
+                # default stays ``""``, as before.
+                if finfo.default_factory is not None:
+                    del data[key]
+            else:
+                del data[key]
+        return data
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -298,7 +444,9 @@ class LlmOptions(_BibrSettings):
 
     provider: Literal["google", "openai", "anthropic", "groq", "ollama"] = Field(
         "google",
-        description='LLM provider: "google" (default), "openai", "anthropic", "groq", or "ollama".',
+        description='LLM provider: "google" (default), "openai", "anthropic", "groq", or "ollama". '
+        "Custom adapters added through bibr.clients.providers.register cannot be named here; "
+        "set them on the settings object in code instead.",
     )
     model: str = Field("gemini-3.5-flash-lite", description="Model name for the selected provider.")
     model_revision: str | None = Field(
@@ -328,7 +476,7 @@ class LlmOptions(_BibrSettings):
         "addresses, single-label names, .local/.internal/.lan/.ts.net) never need it; public "
         "hosts default to HTTPS-only.",
     )
-    chat_template_kwargs: dict[str, Any] = Field(
+    chat_template_kwargs: Annotated[dict[str, Any], NoDecode] = Field(
         default_factory=dict,
         description="Chat-template options for custom OpenAI-compatible endpoints, e.g. "
         "LLM_CHAT_TEMPLATE_KWARGS='{\"enable_thinking\": false}'. Ignored for real OpenAI.",
@@ -580,8 +728,9 @@ class LlmOptions(_BibrSettings):
         Field(
             "",
             description='Instructor structured-output mode for custom-base_url (local) servers: "" '
-            '(default, strict JSON_SCHEMA) or "json" (json_object, looser but more complete on small '
-            "models). Ignored for real OpenAI.",
+            '(default, strict JSON_SCHEMA), "json" (json_object, looser but more complete on small '
+            'models), or the explicit "md_json"/"markdown_json"/"json_schema"/"tools" spellings. '
+            '"json_object" is accepted as "json". Ignored for real OpenAI.',
         )
     )
     # Structured-output backend selector. Native NuExtract templates are
@@ -616,6 +765,26 @@ class LlmOptions(_BibrSettings):
             return v
         mode = v.strip().lower()
         return "json" if mode == "json_object" else mode
+
+    @field_validator("chat_template_kwargs", mode="before")
+    @classmethod
+    def _parse_chat_template_kwargs(cls, v):
+        """Parse the JSON mapping, with ``""`` meaning the default (``{}``).
+
+        ``NoDecode`` keeps pydantic-settings from JSON-decoding the env value
+        (a blank would raise ``SettingsError`` before any validator runs), so
+        this decodes here: blank gives the default, malformed JSON falls
+        through as a string so pydantic raises a ``ValidationError`` naming
+        the setting instead of a raw ``SettingsError`` traceback.
+        """
+        if v == "" or v is None:
+            return {}
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except ValueError:
+                return v
+        return v
 
 
 class OcrOptions(_BibrSettings):
@@ -825,7 +994,7 @@ class OcrOptions(_BibrSettings):
     @field_validator("backend", mode="before")
     @classmethod
     def _lower_ocr_backend(cls, v):
-        """Normalize the backend name so the Literal check is case-insensitive."""
+        """Normalize the backend name to lowercase (backends match case-insensitively)."""
         return v.strip().lower() if isinstance(v, str) else v
 
     @model_validator(mode="after")
@@ -2018,9 +2187,9 @@ class GlobalSettings(_BibrSettings):
         env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
-        # Same empty/null policy as the sections (see ``_section``): an empty
-        # value falls back to the default, the literal ``null`` sets None.
-        env_ignore_empty=True,
+        # Same null policy as the sections (see ``_section``): the literal
+        # ``null`` sets None. Empty values are NOT ignored: a blank still
+        # masks lower layers (see ``_BibrSettings``'s before-validator).
         env_parse_none_str="null",
     )
 
@@ -2574,9 +2743,15 @@ def _configuration_error(exc: ValidationError) -> ConfigurationError:
         else:
             prefix = _env_prefix_for_model(exc.title)
             field = str(loc[-1]) if loc else exc.title
-            # Top-level fields are already the bare env-var name; sub-model fields
-            # are prefix + FIELD_NAME.
-            env_var = field if not prefix else f"{prefix}{field.upper()}"
+            if field == field.upper() and "_" in field:
+                # The loc already holds the env spelling (alias values such
+                # as ``OCR_SGLANG_GPUS`` surface verbatim) — using it as-is
+                # avoids a doubled ``OCR_OCR_...`` prefix.
+                env_var = field
+            else:
+                # Top-level fields are already the bare env-var name;
+                # sub-model fields are prefix + FIELD_NAME.
+                env_var = field if not prefix else f"{prefix}{field.upper()}"
         expected = (err.get("ctx") or {}).get("expected")
         if not loc:
             # A model-level validator reports ``loc == ()`` and ``input`` == the
@@ -2598,6 +2773,42 @@ def _configuration_error(exc: ValidationError) -> ConfigurationError:
         body = "\n".join(f"  - {p}" for p in problems)
         message = f"Invalid configuration:\n{body}\nFix these in your .env or environment."
     return ConfigurationError(message, problems=problems)
+
+
+def _env_names_for_attr(field_attr: str) -> list[str]:
+    """Env-var spellings for a settings *attribute* name (e.g. ``chat_template_kwargs``).
+
+    Used by the ``SettingsError`` path, which only names the attribute.
+    Multiple sections can share an attribute (``model``); all spellings are
+    returned so the message can name each one.
+    """
+    from bibr.config_introspect import iter_setting_docs
+
+    names: list[str] = []
+    for doc in iter_setting_docs():
+        if doc.field_name == field_attr and doc.env_name not in names:
+            names.append(doc.env_name)
+    return names
+
+
+def _settings_error(exc: SettingsError) -> ConfigurationError:
+    """Translate a pydantic-settings ``SettingsError`` into a ``ConfigurationError``.
+
+    Raised when a dotenv/env value cannot even be decoded (malformed JSON for
+    a mapping field). Names the env var (via the settings registry), never
+    echoing a secret field's value back — the raw decode error can carry the
+    offending text.
+    """
+    import re
+
+    match = re.search(r'field "([^"]+)"', str(exc))
+    field = match.group(1) if match else "configuration"
+    names = _env_names_for_attr(field)
+    env_var = " / ".join(names) if names else field
+    secret = _is_secret_name(field) or any(_is_secret_name(name) for name in names)
+    detail = "could not be parsed" if secret else str(exc)
+    message = f"Invalid value for {env_var} — {detail}. Fix it in your .env or environment."
+    return ConfigurationError(message, problems=[f"Invalid value for {env_var}"])
 
 
 @contextlib.contextmanager
@@ -2643,9 +2854,11 @@ def validate_env_overrides(overrides: Mapping[str, str]) -> "GlobalSettings":
                 str_overrides[key] = str(value)
     with _overlaid_environ(str_overrides):
         try:
-            return GlobalSettings()
+            return GlobalSettings()  # type: ignore[call-arg]
         except ValidationError as exc:
             raise _configuration_error(exc) from exc
+        except SettingsError as exc:
+            raise _settings_error(exc) from exc
 
 
 class _SettingsProxy:
@@ -2679,26 +2892,11 @@ class _SettingsProxy:
         inst = cast(GlobalSettings | None, object.__getattribute__(self, "_instance"))
         if inst is None:
             try:
-                inst = GlobalSettings()
+                inst = GlobalSettings()  # type: ignore[call-arg]
             except ValidationError as exc:
                 raise _configuration_error(exc) from exc
             except SettingsError as exc:
-                # pydantic-settings raises a bare SettingsError (not a
-                # ValidationError) when a dotenv/env value cannot even be
-                # decoded (e.g. malformed JSON for a dict field). Surface it
-                # as a ConfigurationError naming the field instead of a raw
-                # traceback.
-                import re
-
-                match = re.search(r'field "([^"]+)"', str(exc))
-                field = match.group(1) if match else "configuration"
-                # Never echo a secret field's value back: the raw decode
-                # error can carry the offending text.
-                detail = "could not be parsed" if _is_secret_name(field) else str(exc)
-                raise ConfigurationError(
-                    f"Invalid value for {field} — {detail}. Fix it in your .env or environment.",
-                    problems=[f"Invalid value for {field}"],
-                ) from exc
+                raise _settings_error(exc) from exc
             object.__setattr__(self, "_instance", inst)
         return inst
 

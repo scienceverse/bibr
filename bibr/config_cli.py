@@ -163,10 +163,45 @@ def validate_value(doc: SettingDoc, raw: str):
     from bibr.config import validate_env_overrides
     from bibr.exceptions import ConfigurationError
 
+    names = {doc.env_name, *doc.aliases, doc.env_name.upper(), *(a.upper() for a in doc.aliases)}
     try:
         fresh = validate_env_overrides({doc.env_name: raw})
     except ConfigurationError as exc:
-        raise ValueError(str(exc)) from exc
+        problems = getattr(exc, "problems", None) or [str(exc)]
+        own = [
+            p
+            for p in problems
+            if any(
+                p.startswith(name) or p.startswith(f"Invalid value for {name}") for name in names
+            )
+        ]
+        if own:
+            raise ValueError("; ".join(own)) from exc
+        # The candidate itself is fine — only unrelated settings are
+        # invalid. Rebuild with a clean environment so the candidate's
+        # coerced value can still be returned (``config set`` then writes
+        # it, matching the old tree which wrote the value).
+        import os
+
+        from bibr.config import DOTENV_DISABLE_VAR
+        from bibr.config_introspect import iter_setting_docs
+
+        known = {d.env_name for d in iter_setting_docs()}
+        known |= {a for d in iter_setting_docs() for a in d.aliases}
+        saved = {key: os.environ.pop(key) for key in list(known) if key in os.environ}
+        had_disable = os.environ.get(DOTENV_DISABLE_VAR)
+        os.environ[DOTENV_DISABLE_VAR] = "1"
+        try:
+            fresh = validate_env_overrides({doc.env_name: raw})
+        except ConfigurationError as exc2:
+            problems2 = getattr(exc2, "problems", None) or [str(exc2)]
+            raise ValueError("; ".join(problems2)) from exc2
+        finally:
+            os.environ.update(saved)
+            if had_disable is None:
+                os.environ.pop(DOTENV_DISABLE_VAR, None)
+            else:
+                os.environ[DOTENV_DISABLE_VAR] = had_disable
     section_attr, field_name = _locate_doc_field(doc)
     if section_attr is not None:
         return getattr(getattr(fresh, section_attr), field_name)

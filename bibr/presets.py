@@ -33,14 +33,40 @@ _DEFAULT_DIR = Path.home() / ".bibr" / "presets"
 _NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 _SCHEMA_VERSION = 1
 
-# Secret filtering is delegated to ``bibr.config._is_secret_name`` — the same
-# end-anchored rule the repr redaction and the cache-fingerprint scrub share —
-# so the three cannot drift. A bare substring match here used to classify
-# every ``*_MAX_TOKENS`` tuning knob and ``JOBS_KEY_PREFIX`` as a secret,
-# silently dropping them from saved presets while ``preset diff`` reported a
-# match. Values themselves are never inspected — too easy to false-positive
-# on legitimate config strings (URLs, hashes, ...).
+# Secret filtering: known bibr settings use the settings metadata
+# (``SettingDoc.is_secret``, the end-anchored rule that already excludes the
+# ``*_MAX_TOKENS`` knobs, ``JOBS_KEY_PREFIX`` and ``CORS_ALLOW_CREDENTIALS``);
+# anything else in the user's ``.env`` (third-party keys presets also snapshot)
+# uses a conservative substring rule so a secret that merely fails the
+# end-anchor — ``AWS_SECRET_ACCESS_KEY``, ``OPENROUTER_KEY``, ``DB_PASSWD``,
+# ``*_CREDENTIALS``, ``LLM_API_KEY_2`` — is still excluded from the
+# shareable preset JSON. Values themselves are never inspected — too easy to
+# false-positive on legitimate config strings (URLs, hashes, ...).
 _ACTIVE_PRESET_KEY = "BIBR_ACTIVE_PRESET"
+
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL")
+
+# Unknown-key exemptions: names that contain a marker but are config, not
+# credentials. Compared case-insensitively.
+_NON_SECRET_SUFFIXES = ("_TOKENS", "_RPM")
+_NON_SECRET_KEYS = frozenset({"JOBS_KEY_PREFIX", "CORS_ALLOW_CREDENTIALS"})
+
+_known_secret_cache: dict[str, bool] | None = None
+
+
+def _known_secrets() -> dict[str, bool]:
+    """Map every known bibr env name (plus aliases) to its secret flag."""
+    global _known_secret_cache
+    if _known_secret_cache is None:
+        from bibr.config_introspect import iter_setting_docs
+
+        known: dict[str, bool] = {}
+        for doc in iter_setting_docs():
+            for spelling in (doc.env_name, *doc.aliases):
+                known[spelling] = doc.is_secret
+                known[spelling.upper()] = doc.is_secret
+        _known_secret_cache = known
+    return _known_secret_cache
 
 
 class InvalidPresetError(ConfigurationError):
@@ -72,15 +98,24 @@ def effective_env_file() -> Path:
 
 def is_secret_key(name: str) -> bool:
     """Return True if *name* should be excluded from a preset snapshot."""
-    from bibr.config import _is_secret_name
-
-    return _is_secret_name(name)
+    known = _known_secrets()
+    hit = known.get(name)
+    if hit is None:
+        hit = known.get(name.upper())
+    if hit is not None:
+        return hit
+    upper = name.upper()
+    if upper in _NON_SECRET_KEYS:
+        return False
+    if upper.endswith(_NON_SECRET_SUFFIXES):
+        return False
+    return any(marker in upper for marker in _SECRET_MARKERS)
 
 
 def redact_value(name: str, value: str) -> str:
     """Mask *value* if *name* looks like a secret.
 
-    Short non-secrets are returned verbatim. Secrets are shown as
+    Non-secrets are returned verbatim. Secrets are shown as
     ``XXXX…YY`` — the first 4 and last 2 characters around an ellipsis,
     enough to recognize the credential without exposing it. Values shorter
     than 8 characters are masked entirely.
@@ -219,8 +254,39 @@ class PresetManager:
     # ------------------------------------------------------------------
 
     def apply(self, name: str, env_path: Path) -> None:
-        """Write the preset's settings into *env_path* and tag it active."""
+        """Write the preset's settings into *env_path* and tag it active.
+
+        The preset's values are validated through the real settings parser
+        first (see :func:`bibr.config.validate_env_overrides`), so a preset
+        holding an invalid value fails naming the preset file instead of
+        corrupting ``.env`` for every later run.
+        """
         data = self.load(name)
+        if any(key != _ACTIVE_PRESET_KEY for key in data):
+            from bibr.config import validate_env_overrides
+
+            candidate = {key: data[key] for key in data if key != _ACTIVE_PRESET_KEY}
+            try:
+                validate_env_overrides(candidate)
+            except ConfigurationError as exc:
+                problems = getattr(exc, "problems", None) or [str(exc)]
+                own = [
+                    p
+                    for p in problems
+                    if any(
+                        p.startswith(key) or p.startswith(f"Invalid value for {key}")
+                        for key in candidate
+                    )
+                ]
+                if own:
+                    path = self._path(name)
+                    raise InvalidPresetError(
+                        f"Preset {name!r} at {path} is invalid: {exc} "
+                        f"Fix the preset file at {path}.",
+                        problems=[f"Preset {name!r}: {problem}" for problem in own],
+                    ) from exc
+                # Only unrelated settings are invalid — the preset itself is
+                # fine, so still write it (its keys will mask nothing extra).
         data[_ACTIVE_PRESET_KEY] = name
         merge_env(env_path, data)
 
@@ -236,12 +302,14 @@ class PresetManager:
         :func:`bibr.config.validate_env_overrides`), so list/dict parsing,
         ``Literal`` and constraint checks, validators, aliases and the
         auto-tune model_validators all run exactly as they do for ``.env``.
-        Only the touched sections (and top-level fields) are copied back
-        onto *settings* — the way ``setup_wizard._reload_settings_in_place``
-        copies sections — so unrelated in-memory values are preserved. This
+        The touched sections plus any section an auto-tune changed relative
+        to the no-override baseline (e.g. ``crossref`` when the preset sets
+        ``BIBR_RESOLVER_URL``) are copied back onto *settings* — the way
+        ``setup_wizard._reload_settings_in_place`` copies sections — so
+        unrelated in-memory values are preserved. This
         also works on the ``bibr.config.Settings`` proxy, which has no
         ``model_fields`` of its own. A preset value that fails validation
-        raises :class:`InvalidPresetError` naming the preset and the
+        raises :class:`InvalidPresetError` naming the preset file and the
         setting; nothing is applied in that case.
 
         Dispatch order: section by live env-prefix mapping → top-level
@@ -268,17 +336,50 @@ class PresetManager:
         try:
             fresh = validate_env_overrides({key: data[key] for key in targets})
         except ConfigurationError as exc:
+            path = self._path(name)
             problems = getattr(exc, "problems", None) or [str(exc)]
             raise InvalidPresetError(
-                f"Preset {name!r} is invalid: {exc}",
+                f"Preset {name!r} at {path} is invalid: {exc} Fix the preset file at {path}.",
                 problems=[f"Preset {name!r}: {problem}" for problem in problems],
             ) from exc
         touched_sections = {section for section, _ in targets.values() if section is not None}
+        # Auto-tune model_validators can write sections the preset did not
+        # touch (``BIBR_RESOLVER_URL`` raises ``crossref.enrich_concurrency``
+        # 12 → 16): also copy every section the preset changed relative to
+        # the no-override baseline, so a preset behaves like the same lines
+        # in ``.env``. Falls back to the known cross-section edge when the
+        # baseline itself cannot build (unrelated settings invalid).
+        try:
+            baseline = validate_env_overrides({})
+        except ConfigurationError:
+            baseline = None
+        if baseline is not None:
+            from bibr.config import GlobalSettings
+
+            for attr in GlobalSettings.model_fields:
+                if attr in touched_sections:
+                    continue
+                try:
+                    current = getattr(fresh, attr)
+                except AttributeError:
+                    continue
+                try:
+                    other = getattr(baseline, attr)
+                except AttributeError:
+                    continue
+                if current != other:
+                    touched_sections.add(attr)
+        elif "resolver" in touched_sections:
+            touched_sections.add("crossref")
         for section in touched_sections:
-            setattr(settings, section, getattr(fresh, section))
-        for section, field_name in targets.values():
-            if section is None:
-                setattr(settings, field_name, getattr(fresh, field_name))
+            try:
+                setattr(settings, section, getattr(fresh, section))
+            except AttributeError:
+                continue
+        for target_section, target_field in targets.values():
+            if target_section is not None:
+                continue
+            setattr(settings, target_field, getattr(fresh, target_field))
         return unknown
 
     # ------------------------------------------------------------------

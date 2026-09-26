@@ -64,12 +64,12 @@ def test_resolver_sources_env_comma_split(monkeypatch):
     assert ResolverOptions().sources == ["crossref", "openalex"]
 
 
-def test_resolver_sources_env_empty_falls_back_to_default(monkeypatch):
-    # An empty value is ignored and falls back to the default tier.
+def test_resolver_sources_env_empty_disables_selection(monkeypatch):
+    # An empty value falls back to the resolver's own default tier (no sources key).
     monkeypatch.setenv("BIBR_RESOLVER_SOURCES", "")
     from bibr.config import ResolverOptions
 
-    assert ResolverOptions().sources == ["crossref"]
+    assert ResolverOptions().sources == []
 
 
 def test_resolver_fallback_defaults_are_disabled_and_bounded():
