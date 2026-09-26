@@ -7,7 +7,6 @@ import re
 from collections import Counter, defaultdict
 from dataclasses import replace
 from difflib import SequenceMatcher
-from functools import partial
 from typing import TYPE_CHECKING
 
 from bibr.extract.ref_locator import _looks_like_terminal_reference_start
@@ -26,12 +25,11 @@ FRONT_MATTER_OR_REPEATED_FURNITURE = 2
 UNCONTESTED_UNTYPED = 1
 
 # Candidate sources read from the PDF itself (``pdf_doi_evidence``) rather than
-# from the parsed text. A text-layer DOI is printed on the page; a link target
-# or a metadata DOI is not, so it can only agree with a printed candidate.
+# from the parsed text. A text-layer DOI is printed on the page. A link target
+# or a document-information DOI is not: it is recorded in the receipt as
+# agreement evidence and never takes part in the selection.
 TEXT_LAYER = "text_layer"
 LINK_ANNOTATION = "link_annotation"
-PDF_INFO = "pdf_info"
-PDF_XMP = "pdf_xmp"
 AGREEMENT_ONLY = "agreement_only"
 LINE_JOIN_OVERRUN = "line_join_overrun"
 
@@ -739,11 +737,13 @@ def _text_layer_candidates(
 
 
 def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
-    """One row per DOI a link target or the document metadata names.
+    """One receipt row per DOI a link target or the document information names.
 
-    A link target counts once per page. ``semantic_context`` says whether the
-    page prints that DOI under or next to the link (``printed_link``); the
-    printed DOI itself is a candidate of the text it is printed in.
+    They never take part in the selection; they record what the PDF says
+    beside its print. A link target counts once per page. ``semantic_context``
+    says whether the page prints that DOI under or next to the link
+    (``printed_link``); the printed DOI itself is a candidate of the text it is
+    printed in.
     """
 
     rows: list[DoiCandidate] = []
@@ -788,15 +788,15 @@ def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
 
 
 def _overruns_line(
-    parsed: DoiCandidate, reading: DoiCandidate, tail: str, line: TextLayerLine, agreeing
+    parsed: DoiCandidate, reading: DoiCandidate, tail: str, line: TextLayerLine
 ) -> bool | None:
     """Whether *parsed* ran past the line end where the text layer ends *reading*.
 
     *tail* is what the line prints after *reading*. None when *parsed* does
     not continue *reading* onto the next line. Otherwise the parse joined the
     two lines: True when the join ran into the next field (the continuation is
-    glued to more text, or only *reading* agrees with the link and metadata
-    DOIs), False for a DOI wrapped onto the next line.
+    glued to more text, as an ISSN to its copyright line), False for a DOI
+    wrapped onto the next line.
     """
 
     rest = parsed.normalized[len(reading.normalized) :]
@@ -804,8 +804,7 @@ def _overruns_line(
     if not rest or not joined.startswith(rest):
         return None
     after = joined[len(rest) : len(rest) + 1]
-    glued = bool(after) and not after.isspace() and after not in _DOI_CLOSERS
-    return glued or (reading.normalized in agreeing and parsed.normalized not in agreeing)
+    return bool(after) and not after.isspace() and after not in _DOI_CLOSERS
 
 
 def _with_pdf_evidence(
@@ -828,7 +827,6 @@ def _with_pdf_evidence(
         if region.page is not None:
             regions_by_page[region.page].append(region)
     rows = _agreement_rows(evidence)
-    agreeing = _agreeing_dois(rows)
 
     readings = [
         (candidate, tail, line)
@@ -846,7 +844,7 @@ def _with_pdf_evidence(
                 and len(candidate.normalized) > len(reading.normalized)
                 and candidate.normalized.startswith(reading.normalized)
                 and all(ch.isspace() or ch in _DOI_CLOSERS for ch in tail)
-                and _overruns_line(candidate, reading, tail, line, agreeing)
+                and _overruns_line(candidate, reading, tail, line)
             ):
                 candidate = replace(
                     candidate,
@@ -934,19 +932,6 @@ def _drop_truncated_prefixes(candidates: list[DoiCandidate]) -> list[DoiCandidat
     return kept or candidates
 
 
-def _prefer_agreeing(
-    candidates: list[DoiCandidate], agreeing: frozenset[str]
-) -> list[DoiCandidate]:
-    """Prefer a DOI that a link target or the document metadata also names.
-
-    The PDF's own metadata and its link targets name the paper's DOI far more
-    often than any other, so of two printed rivals the one they name is kept.
-    """
-
-    agreed = [c for c in candidates if c.normalized.casefold() in agreeing]
-    return agreed or candidates
-
-
 def _prefer_structured(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
     """Prefer the publisher's structured article DOI (JATS, HTML meta) over body text.
 
@@ -995,45 +980,23 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
 _MIN_IDENTITY_TIER = FRONT_MATTER_OR_REPEATED_FURNITURE
 
 
-def _tie_break_ladder(agreeing: frozenset[str]):
-    return (
-        _prefer_structured,
-        partial(_prefer_agreeing, agreeing=agreeing),
-        _drop_truncated_prefixes,
-        _prefer_marked,
-        _prefer_body_sources,
-        _prefer_lowest_page,
-    )
+_TIE_BREAK_LADDER = (
+    _prefer_structured,
+    _drop_truncated_prefixes,
+    _prefer_marked,
+    _prefer_body_sources,
+    _prefer_lowest_page,
+)
 
 
-def _agreeing_dois(candidates) -> frozenset[str]:
-    """DOIs the PDF names outside its printed text.
+def _select_below_front_matter(candidates: tuple[DoiCandidate, ...]) -> DoiSelection:
+    """Name the paper from a labelled DOI outside the front matter.
 
-    The document metadata counts, and a link whose text is not the DOI itself
-    (a journal citation line, a "cite this" button). A link over a printed DOI
-    only repeats that print, and front pages link a cited work's DOI as
-    readily as the paper's own.
-    """
-    return frozenset(
-        c.normalized.casefold()
-        for c in candidates
-        if c.source_kind in (PDF_INFO, PDF_XMP)
-        or (c.source_kind == LINK_ANNOTATION and c.semantic_context == "link_target")
-    )
-
-
-def _select_below_front_matter(
-    candidates: tuple[DoiCandidate, ...], agreeing: frozenset[str]
-) -> DoiSelection:
-    """Name the paper from a tier-1 DOI when no candidate reaches tier 2.
-
-    A tier-1 DOI alone does not name the paper: printed unmarked in the body it
-    is usually a cited work. Two kinds still can. A DOI the PDF's metadata or
-    a link target also names is the paper's own, printed where the tiers do not
-    look. A DOI printed with a label outside the front matter and not in a
-    citation ("labelled_body") is the paper's own when it is the only such DOI:
-    two different ones are ambiguous and the selection abstains, unless the
-    metadata agrees with one.
+    Only when no candidate reaches tier 2. A tier-1 DOI alone does not name the
+    paper: printed unmarked in the body it is usually a cited work. A DOI
+    printed with a label outside the front matter and not in a citation
+    ("labelled_body") is the paper's own when it is the only such DOI; two
+    different ones are ambiguous and the selection abstains.
     """
 
     pool = [
@@ -1041,11 +1004,11 @@ def _select_below_front_matter(
         for c in candidates
         if c.rejection_reason is None
         and c.selection_tier == UNCONTESTED_UNTYPED
-        and (c.semantic_context == "labelled_body" or c.normalized.casefold() in agreeing)
+        and c.semantic_context == "labelled_body"
     ]
     if not pool:
         return DoiSelection(None, candidates, ())
-    resolved = _drop_truncated_prefixes(_prefer_agreeing(pool, agreeing))
+    resolved = _drop_truncated_prefixes(pool)
     if len(_distinct_dois(resolved)) == 1:
         return DoiSelection(resolved[0], candidates, ())
     issue = ValidationIssue(
@@ -1063,14 +1026,13 @@ def _select_below_front_matter(
 def _select_without_expected(
     candidates: tuple[DoiCandidate, ...], *, min_tier: int = UNCONTESTED_UNTYPED
 ) -> DoiSelection:
-    agreeing = _agreeing_dois(candidates)
     eligible = [
         candidate
         for candidate in candidates
         if candidate.rejection_reason is None and candidate.selection_tier >= min_tier
     ]
     if not eligible:
-        return _select_below_front_matter(candidates, agreeing)
+        return _select_below_front_matter(candidates)
     highest_tier = max(candidate.selection_tier for candidate in eligible)
     highest = [candidate for candidate in eligible if candidate.selection_tier == highest_tier]
     if len(_distinct_dois(highest)) > 1:
@@ -1083,7 +1045,7 @@ def _select_without_expected(
         # deterministic provenance ladder and take the winner only if the tie
         # collapses to a single DOI. Otherwise abstain, as before.
         resolved = highest
-        for rule in _tie_break_ladder(agreeing):
+        for rule in _TIE_BREAK_LADDER:
             if len(_distinct_dois(resolved)) == 1:
                 break
             resolved = rule(resolved)

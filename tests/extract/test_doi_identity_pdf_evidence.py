@@ -64,8 +64,8 @@ def _evidence(lines=(), links=(), metadata=()) -> PdfDoiEvidence:
     return PdfDoiEvidence((1, 2), tuple(lines), tuple(links), tuple(metadata))
 
 
-def _xmp(doi: str) -> MetadataDoi:
-    return MetadataDoi("pdf_xmp", "prism:doi", doi)
+def _info(doi: str) -> MetadataDoi:
+    return MetadataDoi("pdf_info", "doi", doi)
 
 
 def _select(contents, evidence=None):
@@ -207,10 +207,10 @@ def test_the_parse_reading_of_a_layout_region_wins_over_the_text_layer():
     [
         # The parse glued the ISSN line under the DOI onto it.
         ("https://doi.org/10.1234/jex.2026.04.0061234-5678© 2026 The Authors.", (), True),
-        # Only the line-end reading agrees with the document metadata.
-        ("https://doi.org/10.1234/jex.2026.04.0062468", (_xmp("10.1234/jex.2026.04.006"),), True),
-        # Otherwise a digit run continued on the next line is a wrapped DOI.
+        # A digit run continued on the next line is a wrapped DOI, whatever the
+        # document information says.
         ("https://doi.org/10.1234/jex.2026.04.0062468", (), False),
+        ("https://doi.org/10.1234/jex.2026.04.0062468", (_info("10.1234/jex.2026.04.006"),), False),
     ],
 )
 def test_a_parsed_doi_that_ran_into_the_next_line_is_rejected(footer, metadata, overrun):
@@ -218,7 +218,7 @@ def test_a_parsed_doi_that_ran_into_the_next_line_is_rejected(footer, metadata, 
     line = _line(
         1,
         "https://doi.org/10.1234/jex.2026.04.006",
-        next_text="1234-5678© 2026 The Authors." if overrun and not metadata else "2468",
+        next_text="1234-5678© 2026 The Authors." if overrun else "2468",
     )
 
     candidates, selection = _select(contents, _evidence([line], metadata=metadata))
@@ -236,50 +236,35 @@ def test_a_parsed_doi_that_ran_into_the_next_line_is_rejected(footer, metadata, 
         assert selection.selected.normalized == parsed.normalized
 
 
-def test_agreement_breaks_a_tie_between_printed_rivals():
-    contents = _contents(
-        [
-            (CanonicalSection.TITLE, "See https://doi.org/10.1234/first.1 for the data.", 1),
-            (CanonicalSection.TITLE, "https://doi.org/10.1234/second.2", 1),
-        ]
-    )
-    _candidates, alone = _select(contents)
-
-    _candidates, selection = _select(contents, _evidence(metadata=[_xmp("10.1234/second.2")]))
-
-    assert alone.selected is None
-    assert [issue.code for issue in alone.issues] == ["VAL_DOI_AMBIGUOUS"]
-    assert selection.selected is not None
-    assert selection.selected.normalized == "10.1234/second.2"
-    assert selection.selected.source_kind == "sentence"
-    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
-
-
 @pytest.mark.parametrize(
-    ("printed_text", "resolved"),
+    "evidence",
     [
-        # A link over the DOI's own print repeats it; it does not agree.
-        ("https://doi.org/10.1234/second.2", False),
-        # A link on the journal's citation line names the paper's DOI.
-        ("Example Journal 11 (2026) 1-12", True),
+        _evidence(metadata=[_info("10.1234/second.2")]),
+        _evidence(
+            links=[
+                LinkDoi(
+                    1,
+                    "10.1234/second.2",
+                    "https://doi.org/10.1234/second.2",
+                    (0, 0, 1, 1),
+                    "Example Journal 11 (2026) 1-12",
+                )
+            ]
+        ),
     ],
 )
-def test_only_a_link_whose_text_is_not_the_doi_agrees(printed_text, resolved):
+def test_links_and_document_information_never_break_a_tie(evidence):
     contents = _contents(
         [
             (CanonicalSection.TITLE, "See https://doi.org/10.1234/first.1 for the data.", 1),
             (CanonicalSection.TITLE, "https://doi.org/10.1234/second.2", 1),
         ]
     )
-    link = LinkDoi(
-        1, "10.1234/second.2", "https://doi.org/10.1234/second.2", (0, 0, 1, 1), printed_text
-    )
 
-    _candidates, selection = _select(contents, _evidence(links=[link]))
+    _candidates, selection = _select(contents, evidence)
 
-    assert (selection.selected is not None) is resolved
-    if resolved:
-        assert selection.selected.normalized == "10.1234/second.2"
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
 
 
 def test_link_and_metadata_dois_are_never_selected_alone():
@@ -296,8 +281,7 @@ def test_link_and_metadata_dois_are_never_selected_alone():
     ]
     metadata = [
         MetadataDoi("pdf_info", "Subject", "Example J 1 (2020) 1-2. doi:10.1234/abc.5"),
-        MetadataDoi("pdf_info", "doi", "10.1234/abc.5"),
-        _xmp("10.1234/abc.5"),
+        _info("10.1234/abc.5"),
     ]
 
     candidates, selection = _select(
@@ -310,7 +294,6 @@ def test_link_and_metadata_dois_are_never_selected_alone():
         ("link_annotation", 1, "link_target", "link_uri"),
         ("link_annotation", 2, "link_target", "link_uri"),
         ("pdf_info", None, "pdf_metadata", "Subject"),
-        ("pdf_xmp", None, "pdf_metadata", "prism:doi"),
     ]
 
 
@@ -328,24 +311,20 @@ def test_a_link_over_the_printed_doi_is_marked_printed():
     assert [c.semantic_context for c in candidates] == ["printed_link"]
 
 
-def test_agreement_confirms_a_printed_body_doi():
+def test_document_information_never_confirms_an_unlabelled_body_doi():
     contents = _contents(
         [
             (CanonicalSection.TITLE, "A study of examples", 1),
             (CanonicalSection.INTRODUCTION, "As published at 10.1234/own.9 in full.", 5),
         ]
     )
-    _candidates, alone = _select(contents)
 
-    candidates, selection = _select(contents, _evidence(metadata=[_xmp("10.1234/own.9")]))
+    _candidates, selection = _select(contents, _evidence(metadata=[_info("10.1234/own.9")]))
 
-    assert alone.selected is None
-    assert selection.selected is not None
-    assert selection.selected.normalized == "10.1234/own.9"
-    assert selection.selected.selection_tier == 1
+    assert selection.selected is None
 
 
-def test_agreement_picks_between_labelled_dois_outside_the_front_matter():
+def test_document_information_never_picks_between_labelled_body_dois():
     contents = _contents(
         [
             (CanonicalSection.TITLE, "A study of examples", 1),
@@ -354,11 +333,10 @@ def test_agreement_picks_between_labelled_dois_outside_the_front_matter():
         ]
     )
 
-    _candidates, selection = _select(contents, _evidence(metadata=[_xmp("10.1234/own.9")]))
+    _candidates, selection = _select(contents, _evidence(metadata=[_info("10.1234/own.9")]))
 
-    assert selection.selected is not None
-    assert selection.selected.normalized == "10.1234/own.9"
-    assert selection.issues == ()
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
 
 
 @pytest.mark.parametrize(
@@ -369,11 +347,11 @@ def test_agreement_picks_between_labelled_dois_outside_the_front_matter():
         "[3] Smith J. Prior work. https://doi.org/10.1234/cited.3",
     ],
 )
-def test_agreement_never_revives_a_rejected_candidate(text):
+def test_document_information_never_revives_a_rejected_candidate(text):
     contents = _contents([(CanonicalSection.TITLE, text, 1)])
     [doi] = [c.normalized for c in collect_doi_candidates(contents)]
 
-    candidates, selection = _select(contents, _evidence(metadata=[_xmp(doi)]))
+    candidates, selection = _select(contents, _evidence(metadata=[_info(doi)]))
 
     assert selection.selected is None
     assert candidates[0].rejection_reason is not None
