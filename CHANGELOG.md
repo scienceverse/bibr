@@ -49,8 +49,11 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
   another module assigns them. Not covered: the DOI, which the identity stage
   decides; the fields a record is built with (volume, issue, pages, ISSN,
   licence, language and the identifiers), which have one producer each; the
-  JATS and HTML readers, which build the record they hand over; and structured
-  funding and affiliations in a run without an LLM, where nothing parses them.
+  JATS and HTML readers, which build the record they hand over; structured
+  funding and affiliations in a run without an LLM, where nothing parses them;
+  and the contribution roles the structured-integrity call adds to the decided
+  authors in place, which the author receipt records as a `contribution_roles`
+  transform.
   The rules keep the precedence of the write sites they replace, so exported
   values are unchanged except one provenance case: when the author call fails
   and the empty-author recovery returns only a translator credit,

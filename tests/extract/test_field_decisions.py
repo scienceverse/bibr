@@ -9,12 +9,15 @@ import ast
 import copy
 import pickle
 import re
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import get_origin
 
 import pytest
 
 import bibr
+import bibr.extract.field_decisions as field_decisions_module
 from bibr.extract.field_decisions import (
     DECIDED_ATTRIBUTES,
     FIELD_ATTRIBUTES,
@@ -49,10 +52,61 @@ _OTHER_OBJECTS = {
     # PaperMetadata's own copy, which drops the receipts of the fields an
     # update rewrites.
     ("models.py", "super().model_copy"),
+    # References, their candidates and matches, the model's responses, the
+    # doc-info parse: lists handed to helpers that are not the paper's.
+    ("clients/llm.py", "authors.authors"),
+    ("clients/llm.py", "title_kw.keywords"),
+    ("enrich/references.py", "cand.authors"),
+    ("enrich/references.py", "ref.authors"),
+    ("export/json_export.py", "m.authors"),
+    ("export/json_export.py", "r.authors"),
+    ("extract/core_metadata.py", "llm_metadata.authors"),
+    ("extract/core_metadata.py", "recovered.authors"),
+    ("extract/research_integrity.py", "result.affiliations"),
+    ("structure/citation_matcher.py", "r.authors"),
 }
 _MUTATORS = {"append", "extend", "insert", "remove", "clear", "pop", "sort", "reverse"}
 _METADATA_NAME = re.compile(r"meta(?:data)?$|preparsed$|record$")
 _CONSTRUCTORS = {"model_validate", "model_construct"}
+# The decided attributes that hold a list, which a helper handed it can change.
+_LIST_ATTRIBUTES = frozenset(
+    attribute
+    for attribute in DECIDED_ATTRIBUTES
+    if get_origin(PaperMetadata.model_fields[attribute].annotation) is list
+)
+# Builtins that only read what they are handed, and the decision module's API.
+_READERS = {
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "enumerate",
+    "frozenset",
+    "isinstance",
+    "iter",
+    "len",
+    "list",
+    "max",
+    "min",
+    "reversed",
+    "set",
+    "sorted",
+    "str",
+    "tuple",
+    "zip",
+    *field_decisions_module.__all__,
+}
+_ITERATORS = {"enumerate", "iter", "list", "reversed", "sorted", "tuple", "zip"}
+# Other functions a decided list may be handed to, by module.
+_HANDED_TO = {
+    # Read the authors' affiliation strings.
+    ("enrich/organizations.py", "collect_affiliations"),
+    ("export/json_export.py", "collect_affiliations"),
+    ("extract/research_integrity.py", "collect_affiliations"),
+    # Adds contribution roles to the decided authors in place; the author
+    # receipt lists the "contribution_roles" transform (record_transforms).
+    ("extract/research_integrity.py", "_apply_contributions"),
+}
 
 
 def _decided_constant(node):
@@ -64,6 +118,13 @@ def _decided_path(node):
     return any(
         isinstance(sub, ast.Attribute) and sub.attr in DECIDED_ATTRIBUTES for sub in ast.walk(node)
     )
+
+
+def _root_name(node):
+    """The local name an attribute or item chain starts from: ``a`` in ``a.role[0]``."""
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
 
 
 def _target_writes(target, aliases):
@@ -78,7 +139,7 @@ def _target_writes(target, aliases):
         if (
             target.attr in DECIDED_ATTRIBUTES
             or _decided_path(target.value)
-            or (isinstance(target.value, ast.Name) and target.value.id in aliases)
+            or _root_name(target.value) in aliases
         ):
             yield ast.unparse(target)
     elif isinstance(target, ast.Subscript):
@@ -91,23 +152,72 @@ def _target_writes(target, aliases):
         if (
             _decided_path(container)
             or (dunder and _decided_constant(target.slice))
-            or (isinstance(container, ast.Name) and container.id in aliases)
+            or _root_name(container) in aliases
         ):
             yield ast.unparse(target)
 
 
+def _decided_value(node, relative):
+    """The decided attribute *node* reads, as in ``meta.authors``, or None."""
+    if (
+        isinstance(node, ast.Attribute)
+        and node.attr in DECIDED_ATTRIBUTES
+        and (relative, ast.unparse(node)) not in _OTHER_OBJECTS
+    ):
+        return node.attr
+    return None
+
+
 def _aliases(function, relative):
-    """Local names a function binds to a decided value, as in ``authors = meta.authors``."""
-    return {
-        target.id
+    """Local names a function binds to a decided value, and the attribute each holds.
+
+    ``authors = meta.authors``, and the targets of a loop over a decided value
+    or an alias of one: ``for author in meta.authors``, ``for i, a in
+    enumerate(authors)``.
+    """
+    aliases = {
+        target.id: attribute
         for node in ast.walk(function)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Attribute)
-        and node.value.attr in DECIDED_ATTRIBUTES
-        and (relative, ast.unparse(node.value)) not in _OTHER_OBJECTS
+        if isinstance(node, ast.Assign) and (attribute := _decided_value(node.value, relative))
         for target in node.targets
         if isinstance(target, ast.Name)
     }
+    loops = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension))
+    ]
+
+    def iterated(node):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            if node.func.id in _ITERATORS:
+                return next(filter(None, (iterated(argument) for argument in node.args)), None)
+            return None
+        if isinstance(node, ast.Name):
+            return aliases.get(node.id)
+        return _decided_value(node, relative)
+
+    changed = True
+    while changed:
+        changed = False
+        for loop in loops:
+            attribute = iterated(loop.iter)
+            if attribute is None:
+                continue
+            for name in ast.walk(loop.target):
+                if isinstance(name, ast.Name) and name.id not in aliases:
+                    aliases[name.id] = attribute
+                    changed = True
+    return aliases
+
+
+def _handed_list(node, aliases, relative):
+    """Whether a call argument is a decided list, or a local bound to one or its items."""
+    if isinstance(node, ast.Starred):
+        node = node.value
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id) in _LIST_ATTRIBUTES
+    return _decided_value(node, relative) in _LIST_ATTRIBUTES
 
 
 def _writes_in(relative, source):
@@ -115,9 +225,11 @@ def _writes_in(relative, source):
 
     Assignments and ``del`` (attributes, items and slices of a decided value,
     ``__dict__``/``vars()`` items), in-place list mutations, including through a
-    local alias of a decided value, ``setattr``/``object.__setattr__``, and
-    record rebuilds (``model_copy(update=...)``, ``PaperMetadata.model_validate``
-    of a dump, ``PaperMetadata.model_construct``).
+    local alias of a decided value or a loop over one, a decided list (or an
+    alias of it or its items) handed to a function that could change it,
+    ``setattr``/``object.__setattr__``, and record rebuilds
+    (``model_copy(update=...)``, ``PaperMetadata.model_validate`` of a dump,
+    ``PaperMetadata.model_construct``).
     """
     tree = ast.parse(source)
     enclosing = {}
@@ -128,7 +240,7 @@ def _writes_in(relative, source):
     aliases_of = {function: _aliases(function, relative) for function in set(enclosing.values())}
     for node in ast.walk(tree):
         function = enclosing.get(node)
-        aliases = aliases_of[function] if function is not None else set()
+        aliases = aliases_of[function] if function is not None else {}
         targets = []
         if isinstance(node, ast.Assign):
             targets = node.targets
@@ -146,9 +258,20 @@ def _writes_in(relative, source):
         if isinstance(func, ast.Attribute) and func.attr in _MUTATORS:
             receiver = func.value
             if (isinstance(receiver, ast.Attribute) and receiver.attr in DECIDED_ATTRIBUTES) or (
-                isinstance(receiver, ast.Name) and receiver.id in aliases
+                _root_name(receiver) in aliases
             ):
                 yield relative, node.lineno, ast.unparse(func)
+        callee = (
+            func.id
+            if isinstance(func, ast.Name)
+            else func.attr
+            if isinstance(func, ast.Attribute)
+            else ast.unparse(func)
+        )
+        if callee not in _READERS and (relative, callee) not in _HANDED_TO:
+            for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                if _handed_list(argument, aliases, relative):
+                    yield relative, node.lineno, f"{callee}({ast.unparse(argument)})"
         if (
             isinstance(func, ast.Attribute)
             and func.attr == "model_copy"
@@ -218,10 +341,50 @@ def test_only_the_decision_writes_the_decided_fields():
         "def f(meta, PaperMetadata):\n"
         "    return PaperMetadata.model_validate({**meta.model_dump(), 'title': 'X'})\n",
         "def f(PaperMetadata):\n    return PaperMetadata.model_construct(title='X', doi='')\n",
+        # A loop over a decided value binds its items.
+        "def f(meta):\n    for a in meta.authors:\n        a.family = 'X'\n",
+        "def f(meta):\n    for a in meta.authors:\n        a.role.append('x')\n",
+        "def f(meta):\n    for i, a in enumerate(meta.authors):\n        a.role[0] = 'x'\n",
+        "def f(meta):\n    authors = meta.authors\n    for a in authors:\n        a.email = ''\n",
+        # A decided list handed to a function that could change it.
+        "def g(authors):\n    authors[0].role.append('x')\ndef f(meta):\n    g(meta.authors)\n",
+        "def f(meta, g):\n    g(authors=meta.keywords)\n",
+        "def f(meta, g):\n    authors = meta.authors\n    g(authors)\n",
+        "def f(meta, g):\n    for a in meta.authors:\n        g(a)\n",
+        "def f(metadata, result):\n"
+        "    _apply_contributions(metadata.authors, result.contributions)\n",
     ],
 )
 def test_the_scan_sees_every_kind_of_write(source):
     assert list(_writes_in("pipeline/stages/post_parse.py", source))
+
+
+def test_the_scan_allows_reading_and_the_listed_handovers():
+    reading = (
+        "def f(meta, g):\n"
+        "    n = len(meta.authors)\n"
+        "    g(meta.title)\n"
+        "    for a in meta.authors:\n"
+        "        g(a.family)\n"
+        "    return FieldCandidate('author', 'native', meta.authors), n\n"
+    )
+    assert list(_writes_in("pipeline/stages/post_parse.py", reading)) == []
+    # The role mapping changes the decided authors in place; it is allowed by
+    # name in its own module, where the author receipt records it.
+    handover = (
+        "def f(metadata, result):\n"
+        "    _apply_contributions(metadata.authors, result.contributions)\n"
+    )
+    assert list(_writes_in("extract/research_integrity.py", handover)) == []
+
+
+def test_the_role_mapping_is_flagged_without_its_listed_handover(monkeypatch):
+    listed = ("extract/research_integrity.py", "_apply_contributions")
+    monkeypatch.setattr(sys.modules[__name__], "_HANDED_TO", _HANDED_TO - {listed})
+    relative = listed[0]
+    source = (_PACKAGE / relative).read_text(encoding="utf-8")
+    writes = [text for _, _, text in _writes_in(relative, source)]
+    assert writes == ["_apply_contributions(metadata.authors)"]
 
 
 def test_the_scan_ignores_the_listed_other_objects():

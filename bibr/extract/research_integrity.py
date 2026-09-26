@@ -138,12 +138,16 @@ def _match_author(token: str, authors: list[PaperAuthor]) -> PaperAuthor | None:
 
 def _apply_contributions(
     authors: list[PaperAuthor], contributions: list[AuthorContributionLLM]
-) -> None:
+) -> bool:
     """Map contribution roles onto ``authors[*].role`` (verbatim). Unmatched or
     ambiguous entries are dropped; authors with no match keep ``role=[]``.
     Roles merge (order-preserving, deduplicated) — role-keyed statements
     ("Conceptualization: J.W.; Writing: J.W.") yield one entry per role for
-    the same author, and a later entry must not overwrite an earlier one."""
+    the same author, and a later entry must not overwrite an earlier one.
+
+    Returns whether any role was added, so the caller can note it on the
+    author receipt."""
+    added = False
     for entry in contributions:
         roles = [r.strip() for r in entry.roles if r and r.strip()]
         if not roles:
@@ -152,7 +156,10 @@ def _apply_contributions(
         if author is None:
             logger.debug("Dropping unmatched contribution entry for %r", entry.author)
             continue
+        before = len(author.role)
         author.role.extend(r for r in roles if r not in author.role)
+        added = added or len(author.role) > before
+    return added
 
 
 def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
@@ -257,7 +264,12 @@ async def extract_structured_integrity(
         _keep_unparsed(metadata, "call_failed")
         return
 
-    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+    from bibr.extract.field_decisions import (
+        FieldCandidate,
+        apply_decision,
+        decide_value,
+        record_transforms,
+    )
 
     parsed_funding = [
         FundingEntry(
@@ -276,7 +288,10 @@ async def extract_structured_integrity(
         transforms=("discarded_without_statement",) if parsed_funding and not funding_text else (),
     )
     apply_decision(metadata, decide_value("funding", funding))
-    _apply_contributions(metadata.authors, result.contributions)
+    # The roles go onto the decided authors in place; the author receipt
+    # records it (the one-writer scan allows this call by name).
+    if _apply_contributions(metadata.authors, result.contributions):
+        record_transforms(metadata, "author", "contribution_roles")
     apply_decision(
         metadata,
         decide_value(

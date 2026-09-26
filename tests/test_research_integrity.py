@@ -254,6 +254,33 @@ async def test_role_mapping_unmatched_dropped_and_no_contrib_keeps_empty():
     assert metadata.authors[1].role == []
 
 
+@pytest.mark.parametrize(
+    ("contributor", "transforms"),
+    [("Jakub Werner", ("contribution_roles",)), ("Zoe Zimmer", ())],
+)
+async def test_role_mapping_is_on_the_author_receipt(contributor, transforms):
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_authors
+
+    contents = _contents(
+        [(1, "Author Contributions", CanonicalSection.AUTHOR_CONTRIBUTIONS, ["stmt"])]
+    )
+    metadata = PaperMetadata(doi="", title="T")
+    authors = [_author(1, "Jakub", "Werner")]
+    apply_decision(metadata, decide_authors([FieldCandidate("author", "llm", authors)]))
+    result = ResearchIntegrityLLM.model_validate(
+        {"contributions": [{"author": contributor, "roles": ["Conceptualization"]}]}
+    )
+    await _run_structured(contents, metadata, result)
+    ledger = metadata._field_decisions
+    receipt = ledger.get("author")
+    # The roles change the decided authors in place: the same list, no second decision.
+    assert receipt.value is authors
+    assert metadata.authors == receipt.value
+    assert receipt.selected.transforms == transforms
+    assert (receipt.source, receipt.rule) == ("llm", "extracted")
+    assert ledger.superseded == []
+
+
 async def test_structured_funding_stored():
     contents = _contents([(1, "Funding", CanonicalSection.FUNDING, ["Funded by NSF grant 123."])])
     metadata = PaperMetadata(doi="", title="T", funding_statement="Funded by NSF grant 123.")

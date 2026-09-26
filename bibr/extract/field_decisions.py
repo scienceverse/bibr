@@ -23,6 +23,13 @@ paper (a run without an LLM decides no structured funding or affiliations):
 * the integrity steps decide the statements, structured funding and parsed
   affiliations.
 
+One step changes a decided value after its decision: the structured-integrity
+call adds contribution roles to the decided authors' ``role`` lists in place
+(``research_integrity._apply_contributions``). It writes no field and the
+author list stays the same object, so the author receipt is not replaced by a
+second decision; :func:`record_transforms` adds ``contribution_roles`` to its
+transforms instead.
+
 The receipts ride the metadata record (:class:`FieldDecisions`) and end up on
 ``Paper.field_decisions``; the export reads each field's ``source`` and
 ``rule`` from them.
@@ -157,6 +164,17 @@ class FieldDecisions:
             self.superseded.append(previous)
         self._decisions[decision.field] = decision
 
+    def amend(self, decision: FieldDecision) -> None:
+        """Replace a field's receipt with one for the same written value.
+
+        For a step that repairs the decided value in place after the decision
+        (the object written is unchanged, so the field is not decided again).
+        """
+        previous = self._decisions[decision.field]
+        if decision.value is not previous.value:
+            raise ValueError(f"an amended {decision.field!r} receipt must keep the written value")
+        self._decisions[decision.field] = decision
+
     def copy(self) -> FieldDecisions:
         """An independent ledger with the same proposals and receipts."""
         return FieldDecisions(dict(self._proposals), dict(self._decisions), list(self.superseded))
@@ -220,6 +238,18 @@ def with_transforms(decision: FieldDecision, *transforms: str) -> FieldDecision:
         for verdict in decision.considered
     )
     return replace(decision, value=selected.value, selected=selected, considered=considered)
+
+
+def record_transforms(metadata: Any, name: str, *transforms: str) -> None:
+    """Note on *name*'s receipt repairs a later step made to its value in place.
+
+    The structured-integrity call adds contribution roles to the decided
+    authors; the author receipt then lists ``contribution_roles``.
+    """
+    ledger = field_decisions_of(metadata)
+    decision = ledger.get(name) if ledger is not None else None
+    if ledger is not None and decision is not None:
+        ledger.amend(with_transforms(decision, *transforms))
 
 
 def _empty(value: Any) -> bool:
@@ -676,5 +706,6 @@ __all__ = [
     "decide_value",
     "field_decisions_of",
     "incumbent_candidate",
+    "record_transforms",
     "with_transforms",
 ]
