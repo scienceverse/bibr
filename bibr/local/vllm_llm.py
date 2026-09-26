@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Grace period between SIGTERM and SIGKILL on shutdown.
 _TERM_GRACE_S = 10
 
+# Grace period after a /health 200 before declaring readiness: a 200 from a
+# previous occupant of a reused port must not pass while our server is still
+# starting (mirrors LlamaCppLlmServer).
+_HEALTH_GRACE_S = 1.0
+
 
 class VllmLlmServer:
     """Managed vLLM subprocess for local LLM inference.
@@ -201,12 +206,25 @@ class VllmLlmServer:
             try:
                 status, _reason, _body = request_bytes(health_url, timeout=5)
                 if status == 200:
-                    logger.info(
-                        "vLLM LLM server ready (model=%s, port=%d)",
-                        self._model,
-                        self._port,
-                    )
-                    return
+                    # A 200 here may belong to a previous occupant of a reused
+                    # port. Only declare readiness if our process is still
+                    # alive AND a second probe after a grace period agrees.
+                    if self._process.poll() is not None:
+                        continue
+                    time.sleep(_HEALTH_GRACE_S)
+                    if self._process.poll() is not None:
+                        continue
+                    try:
+                        status, _reason, _body = request_bytes(health_url, timeout=5)
+                    except (LocalHttpError, json.JSONDecodeError):
+                        continue
+                    if status == 200:
+                        logger.info(
+                            "vLLM LLM server ready (model=%s, port=%d)",
+                            self._model,
+                            self._port,
+                        )
+                        return
             except (LocalHttpError, json.JSONDecodeError):
                 pass
             time.sleep(2.0)

@@ -1008,3 +1008,37 @@ def test_explicit_mtp_does_not_fall_back(monkeypatch):
         )
 
     assert len(cmds) == 1
+
+
+def test_spawn_and_wait_shuts_down_on_keyboard_interrupt(monkeypatch):
+    """Ctrl-C during the health wait still shuts down the child (4/13)."""
+    from bibr.config import Settings
+    from bibr.local import rapid_mlx as mod
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 123456789  # no such group: killpg falls through to terminate
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: proc)
+
+    def _interrupt(_url, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod, "request_bytes", _interrupt)
+
+    server = mod.RapidMlxServer.__new__(mod.RapidMlxServer)
+    server._settings = Settings
+    server._model = "test-model"
+    server._served_model_name = "test-model"
+    server._port = 8871
+    server._multimodal = False
+    server._strict_ocr_smoke = False
+    server._process = None
+    server._stderr_log = None
+    server._stderr_fh = None
+    server._reused = False
+
+    with pytest.raises(KeyboardInterrupt):
+        server._spawn_and_wait(["sleep", "30"])
+    # shutdown() ran: the module fixture neuters os.killpg, so the child is
+    # reaped through the killpg path and _process is cleared.
+    assert server._process is None

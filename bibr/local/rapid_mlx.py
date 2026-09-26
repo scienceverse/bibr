@@ -227,7 +227,14 @@ class RapidMlxServer:
             start_new_session=True,
             env=self._subprocess_env(),
         )
-        self._wait_until_healthy()
+        try:
+            self._wait_until_healthy()
+        except BaseException:
+            # BaseException, not Exception: the child runs in its own session
+            # and never sees the terminal's Ctrl-C, so a KeyboardInterrupt or
+            # task cancellation out of the health wait must still shut it down.
+            self.shutdown()
+            raise
 
     @property
     def base_url(self) -> str:

@@ -302,3 +302,49 @@ def test_configure_llm_client_respects_explicit_rate_limit():
     server.configure_llm_client()
 
     assert server._settings.llm.rate_limit_rpm == 25
+
+
+def _mk_wait_server(monkeypatch):
+    """VllmLlmServer with a fake process and stubbed HTTP, driving the real wait."""
+    from bibr.config import GlobalSettings
+    from bibr.local import vllm_llm as mod
+
+    proc = MagicMock()
+    server = mod.VllmLlmServer.__new__(mod.VllmLlmServer)
+    server._settings = GlobalSettings()
+    server._model = "org/m"
+    server._port = 8872
+    server._process = proc
+    server._stderr_fh = None
+    server._read_stderr_tail = lambda n=2000: "boom"
+    server._close_stderr_fh = lambda: None
+    monkeypatch.setattr(mod, "_HEALTH_GRACE_S", 0.01)
+    return server, proc, mod
+
+
+def test_single_200_with_dying_process_is_not_readiness(monkeypatch):
+    """A lone 200 while our process dies must not declare readiness (15)."""
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.side_effect = [None, 1, 1]
+    proc.returncode = 1
+    calls = []
+    monkeypatch.setattr(
+        mod, "request_bytes", lambda url, **kw: calls.append(url) or (200, "OK", b"{}")
+    )
+
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        server._wait_until_healthy()
+    assert len(calls) == 1
+
+
+def test_two_agreeing_200s_with_live_process_is_readiness(monkeypatch):
+    """Two 200s with our process alive declare readiness (15 guard)."""
+    server, proc, mod = _mk_wait_server(monkeypatch)
+    proc.poll.return_value = None
+    calls = []
+    monkeypatch.setattr(
+        mod, "request_bytes", lambda url, **kw: calls.append(url) or (200, "OK", b"{}")
+    )
+
+    server._wait_until_healthy()
+    assert len(calls) == 2

@@ -248,3 +248,30 @@ def test_vllm_mlx_warmup_payload_matches_engine_mode(monkeypatch, multimodal):
         assert any(part.get("type") == "image_url" for part in content)
     else:
         assert isinstance(content, str), "text-only server must not receive an image payload"
+
+
+def test_startup_keyboard_interrupt_shuts_down_child(monkeypatch):
+    """Ctrl-C during the health wait still shuts down the child (11/13)."""
+    from bibr.local import ocr as mod
+    from bibr.local.http_runtime import LocalHttpError
+
+    proc = mock.MagicMock()
+    proc.poll.return_value = None
+    popens = []
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: popens.append((a, k)) or proc)
+
+    calls = []
+
+    def fake_request(url, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            # Pre-spawn port guard probe: nothing listening yet.
+            raise LocalHttpError("connection refused")
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod, "request_bytes", fake_request)
+
+    with pytest.raises(KeyboardInterrupt):
+        mod.VllmMlxServer(model="x", port=8765)
+    assert len(popens) == 1  # the interrupt hit the health wait, not the guard
+    proc.terminate.assert_called_once()

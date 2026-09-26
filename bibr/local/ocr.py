@@ -128,32 +128,39 @@ class VllmMlxServer:
         poll_interval = 2.0
         health_url = f"http://localhost:{port}/health"
 
-        while time.monotonic() < deadline:
-            # Check process didn't die during startup
-            if self._process.poll() is not None:
-                rc = self._process.returncode
-                stderr_tail = self._read_stderr_tail()
-                self._close_stderr_fh()
-                self._process = None
-                raise RuntimeError(
-                    f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[:500]}"
-                )
-            try:
-                status, _reason, raw_body = request_bytes(health_url, timeout=5)
-                if status == 200:
-                    body = json.loads(raw_body.decode("utf-8"))
-                    # /health returns 200 as soon as the FastAPI app is up,
-                    # but the MLX engine may still be mmapping weights. Wait
-                    # for ``model_loaded: true`` — otherwise the first OCR
-                    # request pays the full paging cost and can blow past
-                    # the per-request read-timeout.
-                    if body.get("model_loaded"):
-                        logger.info("vllm-mlx server ready (model=%s, port=%d)", model, port)
-                        self._warmup_model()
-                        return
-            except (LocalHttpError, json.JSONDecodeError):
-                pass
-            time.sleep(poll_interval)
+        try:
+            while time.monotonic() < deadline:
+                # Check process didn't die during startup
+                if self._process.poll() is not None:
+                    rc = self._process.returncode
+                    stderr_tail = self._read_stderr_tail()
+                    self._close_stderr_fh()
+                    self._process = None
+                    raise RuntimeError(
+                        f"vllm-mlx process exited during startup (code {rc}): {stderr_tail[:500]}"
+                    )
+                try:
+                    status, _reason, raw_body = request_bytes(health_url, timeout=5)
+                    if status == 200:
+                        body = json.loads(raw_body.decode("utf-8"))
+                        # /health returns 200 as soon as the FastAPI app is up,
+                        # but the MLX engine may still be mmapping weights. Wait
+                        # for ``model_loaded: true`` — otherwise the first OCR
+                        # request pays the full paging cost and can blow past
+                        # the per-request read-timeout.
+                        if body.get("model_loaded"):
+                            logger.info("vllm-mlx server ready (model=%s, port=%d)", model, port)
+                            self._warmup_model()
+                            return
+                except (LocalHttpError, json.JSONDecodeError):
+                    pass
+                time.sleep(poll_interval)
+        except BaseException:
+            # BaseException, not Exception: the child never sees the
+            # terminal's Ctrl-C, so a KeyboardInterrupt or task cancellation
+            # out of the health wait must still shut it down.
+            self.shutdown()
+            raise
 
         # Timeout — kill the process, but never let cleanup mask the TimeoutError.
         try:
