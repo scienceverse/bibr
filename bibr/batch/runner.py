@@ -11,6 +11,7 @@ the same :func:`Ledger.record` path, so ``outcomes.jsonl`` has one shape.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import random
@@ -19,15 +20,17 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from bibr.batch.ledger import (
+    CHUNK_ERROR,
     INTERRUPTED,
     LEDGER_FILENAME,
+    UPSTREAM_UNAVAILABLE,
     Ledger,
     LedgerContext,
     Outcome,
@@ -35,9 +38,16 @@ from bibr.batch.ledger import (
     summarize_export,
     utc_now_iso,
 )
-from bibr.batch.manifest import BatchItem, Discovery, assign_paper_ids, discover_inputs
+from bibr.batch.manifest import (
+    RESERVED_IDS,
+    BatchItem,
+    Discovery,
+    assign_paper_ids,
+    discover_inputs,
+)
 from bibr.batch.remote import RemoteAuthError, RemoteExecutor, RemoteOptions, configured_value
 from bibr.batch.report import compute_report, render_report
+from bibr.utils.transient import is_service_outage
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +129,11 @@ def parse_deadline(text: str) -> float:
 def build_plan(options: BatchOptions, ledger: Ledger) -> BatchPlan:
     """Discover inputs, assign ids, apply resume rules, shuffle and limit."""
     discovery = discover_inputs(options.inputs)
-    items = assign_paper_ids(discovery.files)
-    resume = ledger.plan(items, force=options.force, retry_failed=options.retry_failed)
+    entries = ledger.read()
+    items = assign_paper_ids(discovery.files, recorded=entries, reserved=RESERVED_IDS)
+    resume = ledger.plan(
+        items, force=options.force, retry_failed=options.retry_failed, entries=entries
+    )
     to_run = list(resume.to_run)
     seed = options.seed
     if options.shuffle:
@@ -203,9 +216,12 @@ def write_batch_tables(
     """Rebuild ``<out>/tables/`` from every paper whose latest attempt is ok.
 
     Best-effort: the JSON exports are the run's result, so a table failure is
-    a warning, never a failed run.
+    a warning, never a failed run. Exports of another schema major — left by
+    an older bibr in a resumed out dir — are left out and counted, since one
+    would otherwise fail the whole rebuild on every run.
     """
-    from bibr.export.tables import write_tables
+    from bibr.export.schema_artifact import SCHEMA_MAJOR
+    from bibr.export.tables import ExportFile, write_tables
     from bibr.local.cli import ui
     from bibr.local.cli.tables import report_tables
 
@@ -216,13 +232,41 @@ def write_batch_tables(
     ]
     if not files:
         return
-    try:
-        report = write_tables(files, out_dir / TABLES_DIRNAME)
-    except Exception as exc:  # noqa: BLE001 - tables are a derived convenience
-        logger.warning("writing Parquet tables failed", exc_info=True)
-        ui.warn(console, f"Parquet tables not written: {exc}")
-        return
-    report_tables(console, report)
+    other_major: list[tuple[str, str]] = []
+
+    def current_major() -> Iterator[Any]:
+        for path in files:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                payload = None
+            version = payload.get("schema_version") if isinstance(payload, dict) else None
+            if not isinstance(version, str):
+                yield path  # not an export: write_tables reports it as skipped
+            elif version.split(".")[0] != SCHEMA_MAJOR:
+                other_major.append((path.name, version))
+            else:
+                yield ExportFile(path, payload)  # named by its file in any error
+
+    exports = current_major()
+    first = next(exports, None)
+    report = None
+    if first is not None:  # else keep whatever tables an older bibr wrote
+        try:
+            report = write_tables(itertools.chain([first], exports), out_dir / TABLES_DIRNAME)
+        except Exception as exc:  # noqa: BLE001 - tables are a derived convenience
+            logger.warning("writing Parquet tables failed", exc_info=True)
+            ui.warn(console, f"Parquet tables not written: {exc}")
+            return
+    if other_major:
+        name, version = other_major[0]
+        ui.warn(
+            console,
+            f"{len(other_major)} export(s) of another schema major left out of the tables "
+            f"({name}: {version}); re-run them with --force to include them",
+        )
+    if report is not None:
+        report_tables(console, report)
 
 
 # --- local executor -----------------------------------------------------------
@@ -314,12 +358,13 @@ class LocalExecutor:
                 logger.exception("chunk %d/%d crashed", index, total_chunks)
                 elapsed = self._clock() - t0
                 finished_at = utc_now_iso()
+                code = UPSTREAM_UNAVAILABLE if is_service_outage(exc) else CHUNK_ERROR
                 for item in chunk:
                     on_outcome(
                         item,
                         Outcome(
                             "failed",
-                            error_code="chunk_error",
+                            error_code=code,
                             error=f"{type(exc).__name__}: {exc}",
                             started_at=started_at,
                             finished_at=finished_at,
@@ -351,9 +396,12 @@ def _local_outcome(result: Any, started_at: str, finished_at: str, elapsed: floa
             finished_at=finished_at,
             duration_s=pipeline_seconds if pipeline_seconds is not None else elapsed,
         )
+    # A service outage says nothing about the paper: record it under the code
+    # the remote executor uses for the same failure, which resume re-runs.
+    code = UPSTREAM_UNAVAILABLE if getattr(result, "outage", False) is True else None
     return Outcome(
         "failed",
-        error_code=getattr(result, "error_code", None) or "processing_error",
+        error_code=code or getattr(result, "error_code", None) or "processing_error",
         failed_stage=getattr(result, "failed_stage", None),
         error=getattr(result, "error", None) or "processing failed",
         started_at=started_at,

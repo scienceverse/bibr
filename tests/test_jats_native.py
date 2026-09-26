@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from bibr.input.jats_native import JatsParser
 from bibr.paper_contents import CanonicalSection
 
@@ -698,3 +700,283 @@ def test_floats_take_their_label_from_the_label_element():
     table_xrefs = [(x.xref_type, x.xref_id, x.tier) for x in c.xrefs if x.xref_type != "figure"]
     assert table_xrefs == [("table", 2, "label"), ("table", 1, "label")]
     assert [(x.xref_id, x.tier) for x in c.xrefs if x.xref_type == "figure"] == [(1, "label")]
+
+
+def test_jats_sentences_are_not_ocr_text_and_keep_their_prose():
+    """Late cleanup assumed OCR input and fused "a 2 x 2 design" into "a2x2"
+    and dropped the underscores from ``age_group`` and email addresses."""
+    prose = "Participants completed a 2 x 2 x 3 design; age_group was coded 1 2 3."
+    xml = (
+        b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+        b"<article-title>T</article-title></title-group></article-meta></front>"
+        b"<body><sec><title>Method</title><p>" + prose.encode() + b"</p></sec></body>"
+        b"<back><fn-group><fn><p>Contact john_smith@uni.edu.</p></fn></fn-group></back>"
+        b"</article>"
+    )
+    contents = _segment(_parse(xml))
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert prose in texts
+    assert any("john_smith@uni.edu" in text for text in texts)
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def test_jats_captions_are_not_ocr_text():
+    """Captions are document text too: the late cleanup's spaced-run collapse
+    turned "items 1 2 3" into "items 123"."""
+    xml = (
+        b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+        b"<article-title>T</article-title></title-group></article-meta></front>"
+        b"<body><sec><title>Results</title><p>Body text.</p>"
+        b"<table-wrap><label>Table 1</label><caption><p>Items 1 2 3 by age_group.</p></caption>"
+        b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table></table-wrap>"
+        b"<fig><label>Figure 1</label><caption><p>Scores on items 1 2 3 by age_group.</p>"
+        b"</caption><graphic/></fig></sec></body></article>"
+    )
+    contents = _segment(_parse(xml))
+
+    contents.finalize_text()
+    texts = [s.text for s in contents.sentences]
+    assert "Table 1 Items 1 2 3 by age_group." in texts
+    assert "Figure 1 Scores on items 1 2 3 by age_group." in texts
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+# Inline MathML as PLOS and eLife pretty-print it: whitespace between elements.
+# Operators and punctuation close up, as a renderer shows them and as the same
+# formula reads from a publisher that writes no whitespace.
+MATHML_OPERATORS = [
+    (
+        '<mml:msub><mml:mover accent="true"><mml:mi>y</mml:mi> <mml:mo>¯</mml:mo></mml:mover> '
+        "<mml:mrow><mml:mi>t</mml:mi> <mml:mo>-</mml:mo> <mml:mn>1</mml:mn></mml:mrow></mml:msub>",
+        "y¯t-1",
+    ),
+    (
+        "<mml:mi>t</mml:mi> <mml:mo>(</mml:mo> <mml:mn>28</mml:mn> <mml:mo>)</mml:mo> "
+        "<mml:mo>=</mml:mo> <mml:mn>2</mml:mn> <mml:mo>.</mml:mo> <mml:mn>1</mml:mn>",
+        "t(28)=2.1",
+    ),
+    ("<mml:mi>SD</mml:mi>\n  <mml:mo>=</mml:mo>\n  <mml:mn>1.2</mml:mn>", "SD=1.2"),
+    (
+        "<mml:msub><mml:mi>a</mml:mi><mml:mrow><mml:mi>i</mml:mi><mml:mi>j</mml:mi></mml:mrow>"
+        "</mml:msub> <mml:mo>=</mml:mo> <mml:mn>5</mml:mn>",
+        "aij=5",
+    ),
+    (
+        "<mml:mi>β</mml:mi> <mml:mo>∼</mml:mo> <mml:mtext>Cauchy</mml:mtext> <mml:mo>(</mml:mo> "
+        "<mml:mn>0</mml:mn> <mml:mo>,</mml:mo> <mml:mn>2</mml:mn> <mml:mo>.</mml:mo> "
+        "<mml:mn>5</mml:mn> <mml:mo>)</mml:mo>",
+        "β∼Cauchy(0,2.5)",
+    ),
+    ("<mml:mi>x</mml:mi> <mml:mi>y</mml:mi>", "xy"),
+    (
+        "<mml:mi>f</mml:mi> <mml:mo>(</mml:mo> <mml:mi>x</mml:mi> <mml:mo>,</mml:mo> "
+        "<mml:mi>y</mml:mi> <mml:mo>)</mml:mo>",
+        "f(x,y)",
+    ),
+    (
+        "<mml:mi>cos</mml:mi> <mml:mo>&#x2061;</mml:mo> <mml:mo>(</mml:mo> "
+        "<mml:mi>q</mml:mi> <mml:mo>)</mml:mo>",
+        "cos\u2061(q)",
+    ),
+]
+# Where a renderer spaces words by other means, or the source spells a word
+# one letter per element, the whitespace keeps them apart.
+MATHML_WORDS = [
+    (
+        "<mml:mi>b</mml:mi> <mml:mo>⋅</mml:mo> <mml:mi>ln</mml:mi> <mml:mi>dbh</mml:mi>",
+        "b⋅ln dbh",
+    ),
+    ("<mml:mn>0.93</mml:mn> <mml:mtext>GeV</mml:mtext>", "0.93 GeV"),
+    ("<mml:mn>2</mml:mn>\n  <mml:mtext>s</mml:mtext>", "2 s"),
+    (
+        "".join(f'<mml:mi mathvariant="normal">{c}</mml:mi>' for c in "direct")
+        + " "
+        + "".join(f'<mml:mi mathvariant="normal">{c}</mml:mi>' for c in "effect"),
+        "direct effect",
+    ),
+    (
+        "<mml:mi>A</mml:mi><mml:mo>,</mml:mo> <mml:mi>B</mml:mi><mml:mo>,</mml:mo> "
+        "<mml:mtext>and</mml:mtext> <mml:mi>C</mml:mi>",
+        "A,B, and C",
+    ),
+    # A renderer spaces a function name from a bare argument.
+    ("<mml:mi>sin</mml:mi> <mml:mo>&#x2061;</mml:mo> <mml:mi>x</mml:mi>", "sin\u2061 x"),
+]
+# Whitespace between two numbers stays: a renderer shows them apart (the parts
+# of a fraction, a coefficient and its root, a base and its scripts).
+MATHML_NUMBERS = [
+    (
+        "<mml:mi>M</mml:mi> <mml:mo>=</mml:mo> "
+        "<mml:mfrac><mml:mn>1</mml:mn> <mml:mn>2</mml:mn></mml:mfrac> "
+        "<mml:mo>(</mml:mo> <mml:mi>s</mml:mi> <mml:mo>)</mml:mo>",
+        "M=1 2(s)",
+    ),
+    ("<mml:mn>3</mml:mn> <mml:msqrt><mml:mn>2</mml:mn></mml:msqrt>", "3 2"),
+    ("<mml:mroot><mml:mn>27</mml:mn> <mml:mn>3</mml:mn></mml:mroot>", "27 3"),
+    (
+        "<mml:msubsup><mml:mi>g</mml:mi> <mml:mn>1</mml:mn> <mml:mn>1</mml:mn></mml:msubsup>",
+        "g1 1",
+    ),
+    ("<mml:msup><mml:mn>10</mml:mn> <mml:mn>3</mml:mn></mml:msup>", "10 3"),
+    (
+        "<mml:msup><mml:mi>Σ</mml:mi> <mml:mrow><mml:mo>-</mml:mo> <mml:mn>1</mml:mn></mml:mrow>"
+        "</mml:msup> <mml:mn>1</mml:mn>",
+        "Σ-1 1",
+    ),
+]
+# Matrix cells and <mspace> separate the text around them, whitespace or not.
+MATHML_SEPARATORS = [
+    (
+        "<mml:mi>J</mml:mi> <mml:mo>=</mml:mo> <mml:mrow><mml:mo>[</mml:mo> <mml:mtable>"
+        "<mml:mtr><mml:mtd><mml:mn>0</mml:mn></mml:mtd> <mml:mtd><mml:mn>1</mml:mn></mml:mtd>"
+        "</mml:mtr> <mml:mtr><mml:mtd><mml:mn>10</mml:mn></mml:mtd> "
+        "<mml:mtd><mml:mn>20</mml:mn></mml:mtd></mml:mtr></mml:mtable> <mml:mo>]</mml:mo></mml:mrow>",
+        "J=[ 0 1 10 20]",
+    ),
+    # E_{t-1} \quad 0 < λ ≤ 1, as in journal.pone.0278264.
+    (
+        "<mml:msub><mml:mi>E</mml:mi> <mml:mrow><mml:mi>t</mml:mi> <mml:mo>-</mml:mo> "
+        '<mml:mn>1</mml:mn></mml:mrow></mml:msub> <mml:mspace width="8pt"/> <mml:mn>0</mml:mn> '
+        "<mml:mo>&lt;</mml:mo> <mml:mi>λ</mml:mi> <mml:mo>≤</mml:mo> <mml:mn>1</mml:mn>",
+        "Et-1 0<λ≤1",
+    ),
+    (
+        " ".join(f"<mml:mi>{c}</mml:mi>" for c in "naive")
+        + ' <mml:mspace width="1em"/> '
+        + " ".join(f"<mml:mi>{c}</mml:mi>" for c in "seasonality"),
+        "naive seasonality",
+    ),
+    # A negative space pulls its neighbours together.
+    (
+        '<mml:mi>a</mml:mi> <mml:mspace width="negativethinmathspace"/> <mml:mi>b</mml:mi>',
+        "ab",
+    ),
+]
+
+
+def _mathml_jats(paragraph: str) -> bytes:
+    return (
+        '<?xml version="1.0"?><article xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+        "<front><article-meta><title-group><article-title>T</article-title></title-group>"
+        f"</article-meta></front><body><sec><title>Method</title><p>{paragraph}</p></sec>"
+        "</body></article>"
+    ).encode()
+
+
+def _inline_text(math: str) -> str:
+    inline = (
+        '<inline-formula><mml:math display="inline"><mml:mrow>'
+        f"{math}</mml:mrow></mml:math></inline-formula>"
+    )
+    (entry,) = _parse(_mathml_jats(f"We used {inline} here.")).assembler.entries
+    return entry.text
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_OPERATORS,
+    ids=[
+        "index",
+        "statistic",
+        "identifier",
+        "subscript",
+        "text",
+        "variables",
+        "arguments",
+        "function-bracket",
+    ],
+)
+def test_whitespace_between_mathml_elements_is_dropped(math, expected):
+    """Kept as text it split "2.1" into "2 . 1"; the late clean-up used to
+    fuse some of those runs back, until it stopped touching document text."""
+    assert _inline_text(math) == f"We used {expected} here."
+    assert _inline_text(re.sub(r">\s+<", "><", math)) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_WORDS,
+    ids=[
+        "function-names",
+        "unit-mtext",
+        "unit-newline",
+        "spelled-words",
+        "text-after-comma",
+        "function-argument",
+    ],
+)
+def test_whitespace_between_mathml_elements_keeps_words_apart(math, expected):
+    assert _inline_text(math) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_NUMBERS,
+    ids=["fraction", "coefficient-root", "root-index", "scripts", "power", "different-rows"],
+)
+def test_whitespace_between_mathml_numbers_is_kept(math, expected):
+    """Dropped, it wrote one number for two: one half read "12"."""
+    assert _inline_text(math) == f"We used {expected} here."
+
+
+@pytest.mark.parametrize(
+    ("math", "expected"),
+    MATHML_SEPARATORS,
+    ids=["matrix", "mspace-number", "mspace-words", "negative-mspace"],
+)
+def test_mathml_matrix_cells_and_spaces_separate_the_text(math, expected):
+    assert _inline_text(math) == f"We used {expected} here."
+    assert _inline_text(re.sub(r">\s+<", "><", math)) == f"We used {expected} here."
+
+
+def test_mathml_fraction_in_a_table_cell_keeps_its_numbers_apart():
+    fraction = (
+        "<inline-formula><mml:math><mml:mfrac><mml:mn>3</mml:mn> <mml:mn>4</mml:mn></mml:mfrac>"
+        "</mml:math></inline-formula>"
+    )
+    xml = _mathml_jats(
+        'Text.</p><table-wrap id="t1"><label>Table 1</label><caption><p>Shares.</p></caption>'
+        f"<table><tr><th>share</th><th>n</th></tr><tr><td>{fraction}</td><td>12</td></tr></table>"
+        "</table-wrap><p>More."
+    )
+    contents = _segment(_parse(xml))
+
+    assert contents.tables[0].df.values.tolist() == [["3 4", "12"]]
+
+
+def test_mathml_whitespace_next_to_prose_keeps_the_words_apart():
+    xml = _mathml_jats(
+        'the value<inline-formula><mml:math display="inline"> <mml:mi>x</mml:mi> '
+        "</mml:math></inline-formula>is small, <inline-formula><mml:math>"
+        "<mml:mi>y</mml:mi> </mml:math></inline-formula>, too."
+    )
+    (entry,) = _parse(xml).assembler.entries
+    assert entry.text == "the value x is small, y, too."
+
+
+def test_table_wrap_without_a_table_is_kept_with_its_caption():
+    """A table printed as an image has a <graphic> and no <table>. It was
+    dropped with its caption, so "Table 2" resolved nowhere; it is kept with
+    empty contents, as the HTML parser keeps a captioned image-only table. A
+    table-wrap with neither a table nor a label or caption is still dropped."""
+    xml = b"""
+    <article><front><article-meta>
+      <title-group><article-title>Image table</article-title></title-group>
+    </article-meta></front><body><sec><title>Results</title>
+      <p>Table 2 lists the values.</p>
+      <table-wrap><label>Table 1</label><caption><p>Counts.</p></caption>
+        <table><tr><th>N</th></tr><tr><td>12</td></tr></table></table-wrap>
+      <table-wrap><label>Table 2</label><caption><p>Scanned values.</p></caption>
+        <graphic xlink:href="t2.png" xmlns:xlink="http://www.w3.org/1999/xlink"/></table-wrap>
+      <table-wrap><graphic/></table-wrap>
+    </sec></body></article>
+    """
+    c = _segment(_parse(xml))
+
+    assert [(t.label, t.caption, t.contents, t.tbl_html) for t in c.tables] == [
+        ("1", "Table 1 Counts.", [["N"], ["12"]], c.tables[0].tbl_html),
+        ("2", "Table 2 Scanned values.", [], ""),
+    ]
+    assert [(x.xref_type, x.xref_id) for x in c.xrefs] == [("table", 2)]

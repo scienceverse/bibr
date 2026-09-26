@@ -26,6 +26,29 @@ def test_local_resolves_to_rapid_mlx_on_mac_arm_when_installed():
         assert resolve_llm_backend("local") == "rapid-mlx"
 
 
+def test_local_uses_pipeline_settings_for_rapid_mlx_availability():
+    """The injected pipeline settings pick the executable, not the globals (16).
+
+    `rapid_mlx.executable` set on the pipeline snapshot must drive the
+    Apple-Silicon `local` choice even when the process-global Settings point
+    elsewhere.
+    """
+    from bibr.config import GlobalSettings
+
+    pipeline_settings = GlobalSettings()
+    pipeline_settings.rapid_mlx.executable = "python3"  # resolvable on PATH
+    global_settings = GlobalSettings()
+    global_settings.rapid_mlx.executable = "definitely-not-on-path-bibr"
+
+    with (
+        patch("platform.system", return_value="Darwin"),
+        patch("platform.machine", return_value="arm64"),
+        patch("bibr.local.rapid_mlx.snapshot_settings", return_value=global_settings),
+    ):
+        assert resolve_llm_backend("local", settings=pipeline_settings) == "rapid-mlx"
+        assert resolve_llm_backend("local") == "vllm-mlx"
+
+
 def test_local_falls_back_to_vllm_mlx_on_mac_arm_without_rapid_mlx():
     with (
         patch("platform.system", return_value="Darwin"),

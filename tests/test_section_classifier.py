@@ -410,6 +410,8 @@ class TestTrainedClassifierBranch:
             "section_classifier_min_confidence",
             0.5,
         )
+        # The collapse itself is under test, not the LLM tier it escalates to.
+        monkeypatch.setattr(Settings.ml, "section_classifier_llm_escalation", False)
 
         results = await section_classifier.classify_headers_batch_async(
             ["Mysterious Header"], body_snippets=["body..."]
@@ -815,11 +817,18 @@ async def test_configured_but_unloadable_model_warns(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm(header_texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0) for _ in header_texts]
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = "scienceverse/bibr-section-classifier"
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    # Hermetic: the alias-free path calls the LLM tier unconditionally when
+    # no model loads (escalation only gates the trained-model branch), so
+    # without this stub the test POSTs header text to the real LLM API.
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm)
     results = await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,
@@ -835,11 +844,16 @@ async def test_unconfigured_model_is_not_reported_as_degraded(monkeypatch):
     async def no_model(*_args):
         return None
 
+    async def no_llm(header_texts, **_kwargs):
+        return [(CanonicalSection.UNKNOWN, 0.0) for _ in header_texts]
+
     settings = GlobalSettings()
     settings.ml.section_classifier_model_id = None
     settings.ml.section_classifier_llm_escalation = False
     warnings: list[ProcessingWarning] = []
     monkeypatch.setattr(sc, "_get_trained_model_async", no_model)
+    # Same hermetic stub as above: no model means the LLM tier is reached.
+    monkeypatch.setattr(sc, "_classify_llm_batch", no_llm)
     await sc.classify_headers_batch_async(
         ["unfamiliar section"],
         settings=settings,
@@ -969,6 +983,94 @@ class TestLlmEscalation:
 
         results = await sc.classify_headers_batch_async(["mystery header"])
         assert results[0] == (CanonicalSection.UNKNOWN, 0.4, None, None)
+
+    def test_collapsed_below_threshold_labels_only_the_collapse_case(self):
+        """The two UNKNOWN kinds are separable: a below-threshold collapse
+        (is_top_level None) vs the model's confidently predicted 'unknown'
+        class (real is_top_level bool)."""
+        import bibr.structure.section_classifier as sc
+        from bibr.paper_contents import CanonicalSection
+
+        assert sc._collapsed_below_threshold(CanonicalSection.UNKNOWN, None) is True
+        assert sc._collapsed_below_threshold(CanonicalSection.UNKNOWN, False) is False
+        assert sc._collapsed_below_threshold(CanonicalSection.UNKNOWN, True) is False
+        assert sc._collapsed_below_threshold(CanonicalSection.METHODS, None) is False
+
+    async def test_confident_unknown_still_escalates_to_llm(self, monkeypatch):
+        """Pins the deferred half of structure-sections-classifiers-7: a
+        confidently predicted 'unknown' still reaches the LLM (narrowing
+        escalation to collapses-only needs a val-set measurement)."""
+        import bibr.structure.section_classifier as sc
+        from bibr.paper_contents import CanonicalSection
+
+        llm_calls = []
+
+        async def fake_trained(pairs):
+            # Confident 'unknown' straight from the model head.
+            return [(CanonicalSection.UNKNOWN, 0.99, False) for _ in pairs]
+
+        async def fake_llm(texts, **kw):
+            llm_calls.append(list(texts))
+            return [(CanonicalSection.METHODS, 0.85) for _ in texts]
+
+        async def fake_get_model():
+            return object()
+
+        monkeypatch.setattr(sc, "_classify_trained_batch", fake_trained)
+        monkeypatch.setattr(sc, "_classify_llm_batch", fake_llm)
+        monkeypatch.setattr(sc, "_get_trained_model_async", fake_get_model)
+
+        results = await sc.classify_headers_batch_async(["Stimuli"])
+
+        assert llm_calls == [["stimuli"]]
+        assert results[0][0] == CanonicalSection.METHODS
+
+    async def test_llm_overwrite_resets_is_top_level_pending_measurement(self, monkeypatch):
+        """Deferred with the escalation narrowing: the LLM overwrite resets
+        is_top_level to None (as on main), pending a val-set hierarchy
+        measurement. The trained model's top/sub bit is not followed yet."""
+        import bibr.structure.section_classifier as sc
+        from bibr.paper_contents import CanonicalSection
+
+        async def fake_trained(pairs):
+            return [(CanonicalSection.UNKNOWN, 0.99, False) for _ in pairs]
+
+        async def fake_llm(texts, **kw):
+            return [(CanonicalSection.METHODS, 0.85) for _ in texts]
+
+        async def fake_get_model():
+            return object()
+
+        monkeypatch.setattr(sc, "_classify_trained_batch", fake_trained)
+        monkeypatch.setattr(sc, "_classify_llm_batch", fake_llm)
+        monkeypatch.setattr(sc, "_get_trained_model_async", fake_get_model)
+
+        results = await sc.classify_headers_batch_async(["Stimuli"])
+
+        assert results[0] == (CanonicalSection.METHODS, 0.85, None, "llm")
+
+    async def test_llm_overwrite_of_collapse_keeps_none_is_top_level(self, monkeypatch):
+        """A below-threshold collapse carries no hierarchy signal, so the LLM
+        overwrite keeps is_top_level None there."""
+        import bibr.structure.section_classifier as sc
+        from bibr.paper_contents import CanonicalSection
+
+        async def fake_trained(pairs):
+            return [(CanonicalSection.UNKNOWN, 0.3, None) for _ in pairs]
+
+        async def fake_llm(texts, **kw):
+            return [(CanonicalSection.ETHICS, 0.85) for _ in texts]
+
+        async def fake_get_model():
+            return object()
+
+        monkeypatch.setattr(sc, "_classify_trained_batch", fake_trained)
+        monkeypatch.setattr(sc, "_classify_llm_batch", fake_llm)
+        monkeypatch.setattr(sc, "_get_trained_model_async", fake_get_model)
+
+        results = await sc.classify_headers_batch_async(["patient consent and irb"])
+
+        assert results[0] == (CanonicalSection.ETHICS, 0.85, None, "llm")
 
 
 class TestContextPropagation:

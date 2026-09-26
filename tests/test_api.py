@@ -3,6 +3,7 @@
 import asyncio
 import inspect
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -185,6 +186,47 @@ def test_chew_preflights_a_managed_local_backend(stub_pipeline, monkeypatch):
     with pytest.raises(ConfigurationError, match="llama-cpp backend selected"):
         bibr.chew("paper.pdf", llm="llama-cpp")
     assert stub_pipeline.instances == []
+
+
+def test_preflight_llm_uses_pipeline_settings_for_backend_resolution(monkeypatch):
+    """api._preflight_llm resolves with the caller's settings, not globals (16).
+
+    Dropping ``settings=`` from the ``resolve_llm_backend`` call falls back
+    to the process-global executable lookup, so an injected
+    ``rapid_mlx.executable`` would preflight a different backend than the
+    pipeline later resolves.
+    """
+    import platform
+
+    import bibr.api as api_mod
+    import bibr.local.pipeline as pipeline_mod
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx
+    from bibr.local.cli import run_config
+
+    real_resolve = pipeline_mod.resolve_llm_backend
+    seen: dict = {}
+
+    def spy(raw, settings=None):
+        seen["raw"] = raw
+        seen["settings"] = settings
+        return real_resolve(raw, settings=settings)
+
+    pipeline_settings = GlobalSettings()
+    pipeline_settings.rapid_mlx.executable = "python3"  # resolvable on PATH
+    global_settings = GlobalSettings()
+    global_settings.rapid_mlx.executable = "definitely-not-on-path-bibr"
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(rapid_mlx, "snapshot_settings", lambda settings=None: global_settings)
+    monkeypatch.setattr(pipeline_mod, "resolve_llm_backend", spy)
+    monkeypatch.setattr(run_config, "_preflight_local_backend", lambda backend: None)
+
+    api_mod._preflight_llm(pipeline_settings, {"llm_backend": "local"})
+
+    assert seen["raw"] == "local"
+    assert seen["settings"] is pipeline_settings
 
 
 # --- Records / Result views -------------------------------------------------
@@ -678,6 +720,188 @@ def test_chewfailure_importable_from_bibr():
     from bibr import ChewFailure  # noqa: F401
 
 
+class _ScriptedPipeline:
+    """Mirrors the export stage's paper_id (the caller's, else the stem) and
+    runs ``script(stems)`` per chunk: it may raise, or fail files itself."""
+
+    memory_mode = "balanced"
+
+    def __init__(self, script=lambda stems, states: None):
+        self.script = script
+        self.chunks: list[list[str]] = []
+
+    async def process_chunk(self, file_states, progress=None, config=None):
+        stems = [fs.path.stem for fs in file_states]
+        self.chunks.append(stems)
+        self.script(stems, file_states)
+        for fs in file_states:
+            if fs.error is None:
+                data = _export_fixture()
+                data["paper_id"] = fs.paper_id or fs.path.stem
+                data["source"]["file_name"] = fs.path.name
+                fs.result_json = data
+
+
+def test_batch_stem_collisions_get_ids_the_tables_can_join(tmp_path):
+    from bibr.api import _process_batch
+    from bibr.batch.manifest import sha256_file
+
+    files = []
+    for rel, body in (("a/paper.pdf", b"one"), ("b/paper.pdf", b"two"), ("c/paper.xml", b"<x/>")):
+        path = tmp_path / rel
+        path.parent.mkdir()
+        path.write_bytes(body)
+        files.append(path)
+
+    results = asyncio.run(_process_batch(_ScriptedPipeline(), files, batch_size=8))
+
+    assert [r.paper_id for r in results] == [f"paper-{sha256_file(f)[:8]}" for f in files]
+    assert bibr.write_tables(results, tmp_path / "tables").papers == 3
+
+
+def test_write_tables_names_the_files_behind_a_duplicate_paper_id(tmp_path):
+    one, two = _export_fixture(), _export_fixture()
+    two["source"] = {**two["source"], "file_name": "paper.xml"}
+    with pytest.raises(
+        ValueError, match=r"10.1234/example \(paper.pdf\) and 10.1234/example \(paper.xml\)"
+    ):
+        bibr.write_tables([Result(one), Result(two)], tmp_path / "tables")
+
+
+def test_a_crashed_chunk_keeps_its_neighbours_results():
+    """A crash of one chunk must not discard the batch: its files run again on
+    their own, and only the one that crashes by itself fails."""
+    from bibr.api import ChewFailure, _process_batch
+
+    def script(stems, states):
+        if "p5" in stems:
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    pipeline = _ScriptedPipeline(script)
+    files = [Path(f"p{i}.pdf") for i in range(8)]
+
+    results = asyncio.run(_process_batch(pipeline, files, batch_size=4))
+
+    assert pipeline.chunks == [
+        ["p0", "p1", "p2", "p3"],
+        ["p4", "p5", "p6", "p7"],
+        ["p4"],
+        ["p5"],
+        ["p6"],
+        ["p7"],
+    ]
+    assert [r.ok for r in results] == [True] * 5 + [False] + [True] * 2
+    failure = results[5]
+    assert isinstance(failure, ChewFailure)
+    assert failure.error_code == "chunk_error"
+    assert failure.error == "RuntimeError: CUDA error: an illegal memory access was encountered"
+    assert failure.outage is False
+
+
+def test_a_crash_on_a_dead_service_is_an_outage_and_settled_files_keep_their_verdict():
+    """A chunk that dies on a refused connection is an outage, for the file
+    run alone as for a one-file chunk; a file that failed on its own before
+    the crash is not run again."""
+    import httpx
+
+    from bibr.api import _process_batch
+
+    def script(stems, states):
+        if len(stems) > 1:
+            states[0].set_error("OCR failed: bad image", code="ocr_failed", stage="ocr")
+            raise RuntimeError("CUDA error: an illegal memory access was encountered")
+        if stems in (["doomed"], ["solo"]):
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+
+    pipeline = _ScriptedPipeline(script)
+    files = [Path(f"{name}.pdf") for name in ("garbled", "doomed", "fine", "solo")]
+
+    results = asyncio.run(_process_batch(pipeline, files, batch_size=3))
+
+    assert pipeline.chunks == [["garbled", "doomed", "fine"], ["doomed"], ["fine"], ["solo"]]
+    assert [r.ok for r in results] == [False, False, True, False]
+    assert (results[0].error_code, results[0].outage) == ("ocr_failed", False)
+    for failure in (results[1], results[3]):
+        assert failure.error_code == "chunk_error"
+        assert failure.error == "ConnectError: [Errno 111] Connection refused"
+        assert failure.outage is True
+
+
+def test_a_crashed_chunk_releases_its_pages_before_its_files_run_again(monkeypatch):
+    """The one-by-one re-runs exist for chunks too big to fit: they must not
+    run while the crashed chunk's pages, on its states or in the frames of its
+    traceback, are still alive."""
+    import gc
+    import logging
+    import weakref
+
+    from bibr.api import _process_batch
+
+    class Page:
+        pass
+
+    # pytest's log capture would keep the logged traceback, and its frames.
+    monkeypatch.setattr(logging.getLogger("bibr.api"), "propagate", False)
+    pages: list[weakref.ref] = []
+    alive: list[int] = []
+
+    def script(stems, states):
+        if len(states) > 1:
+            held = [Page() for _ in states]  # a stage's locals, as in a real crash
+            for fs, page in zip(states, held, strict=True):
+                fs.page_images = [page]
+            pages.extend(weakref.ref(page) for page in held)
+            raise MemoryError("CUDA out of memory")
+        gc.collect()
+        alive.append(sum(ref() is not None for ref in pages))
+
+    results = asyncio.run(
+        _process_batch(_ScriptedPipeline(script), [Path("a.pdf"), Path("b.pdf")], batch_size=2)
+    )
+
+    assert [r.ok for r in results] == [True, True]
+    assert alive == [0, 0]
+
+
+def test_a_file_the_pipeline_left_without_a_result_is_a_failure_not_an_exception():
+    from bibr.api import _process_batch
+
+    class Forgetful(_ScriptedPipeline):
+        async def process_chunk(self, file_states, progress=None, config=None):
+            await super().process_chunk(file_states, progress, config)
+            file_states[0].result_json = None
+
+    results = asyncio.run(_process_batch(Forgetful(), [Path("a.pdf"), Path("b.pdf")], batch_size=2))
+
+    assert [r.ok for r in results] == [False, True]
+    assert results[0].error_code == "chunk_error"
+    assert results[0].error == "pipeline completed without an export result"
+
+
+def test_batch_failures_say_whether_a_service_was_down():
+    import httpx
+
+    from bibr.api import _process_batch
+
+    def script(stems, states):
+        by_stem = {fs.path.stem: fs for fs in states}
+        by_stem["refused"].set_error(
+            "OCR failed for all pages: refused",
+            code="ocr_failed",
+            stage="ocr",
+            exc=httpx.ConnectError("[Errno 111] Connection refused"),
+        )
+        by_stem["init"].set_error(
+            "OCR backend init failed: no GPU", code="ocr_failed", stage="ocr", outage=True
+        )
+        by_stem["garbled"].set_error("OCR failed: bad image", code="ocr_failed", stage="ocr")
+
+    files = [Path(f"{name}.pdf") for name in ("refused", "init", "garbled", "fine")]
+    results = asyncio.run(_process_batch(_ScriptedPipeline(script), files, batch_size=4))
+
+    assert [getattr(r, "outage", None) for r in results] == [True, True, False, None]
+
+
 # --- consolidate --------------------------------------------------------------
 
 
@@ -853,6 +1077,93 @@ def test_chewer_refs_is_per_run_not_global(stub_pipeline, monkeypatch, tmp_path)
     assert bibr.config.Settings.REF_PARSE_STRATEGY == "llm"
     (pipeline,) = stub_pipeline.instances
     assert pipeline.kwargs["ref_parse_strategy"] == "ner"
+
+
+def test_ctrl_c_cancels_the_chew_before_close_runs(stub_pipeline, tmp_path, monkeypatch):
+    """Ctrl-C must not leave the chew pending on the Chewer's loop, where
+    close() would resume it alongside the teardown (and let it start an OCR
+    server after shutdown_ocr ran)."""
+    import os
+    import signal
+    import threading
+
+    events: list[str] = []
+
+    async def slow_file(self, path, paper_id=None, progress=None):
+        events.append("chew started")
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            events.append("chew cancelled")
+            raise
+        events.append("chew resumed")
+        return _export_fixture()
+
+    async def aclose(self):
+        events.append("aclose")
+
+    monkeypatch.setattr(stub_pipeline, "process_file", slow_file)
+    monkeypatch.setattr(stub_pipeline, "aclose", aclose)
+    chewer = bibr.Chewer()
+    (paper,) = _touch_pdfs(tmp_path, "one.pdf")
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            chewer.chew(paper)
+    finally:
+        timer.cancel()
+    chewer.close()
+
+    assert events == ["chew started", "chew cancelled", "aclose"]
+
+
+def test_chewer_leaves_the_threads_current_event_loop_alone(stub_pipeline, tmp_path, monkeypatch):
+    """A caller's current loop (the legacy get_event_loop pattern) must stay
+    current through chew() and after close()."""
+    (paper,) = _touch_pdfs(tmp_path, "one.pdf")
+    seen: list[asyncio.AbstractEventLoop] = []
+
+    async def process_file(self, path, paper_id=None, progress=None):
+        seen.append(asyncio.get_running_loop())
+        return _export_fixture()
+
+    monkeypatch.setattr(stub_pipeline, "process_file", process_file)
+    policy = asyncio.get_event_loop_policy()
+    mine = asyncio.new_event_loop()
+    asyncio.set_event_loop(mine)
+    try:
+        chewer = bibr.Chewer()
+        chewer.chew(paper)
+        assert policy.get_event_loop() is mine
+        chewer.close()
+        assert policy.get_event_loop() is mine
+        assert mine.run_until_complete(asyncio.sleep(0, "still usable")) == "still usable"
+    finally:
+        asyncio.set_event_loop(None)
+        mine.close()
+    (private,) = seen
+    assert private is not mine
+    assert private.is_closed()  # close() closed the Chewer's own loop
+
+
+async def test_close_inside_a_running_loop_leaves_aclose_to_release_the_pipeline(
+    stub_pipeline, tmp_path
+):
+    """``with bibr.Chewer() as c: await c.achew(p)`` ends in a sync close()
+    inside the loop; it must fail without marking the Chewer closed, so the
+    documented fallback still releases the pipeline."""
+    (paper,) = _touch_pdfs(tmp_path, "one.pdf")
+    chewer = bibr.Chewer()
+    await chewer.achew(paper)
+
+    with pytest.raises(RuntimeError, match="aclose"):
+        chewer.close()
+    (pipeline,) = stub_pipeline.instances
+    assert not pipeline.closed
+
+    await chewer.aclose()
+    assert pipeline.closed
 
 
 def test_chewer_repr_states(stub_pipeline, tmp_path):

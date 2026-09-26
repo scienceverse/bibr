@@ -217,22 +217,11 @@ def _preflight_local_backend(backend: str) -> str | None:
 
     Fail fast before OCR: unsupported hardware (no NVIDIA GPU, not Apple
     Silicon) or a missing launcher would otherwise crash/hang deep in the run.
-    Returns ``None`` when the backend is ready to launch.
+    Returns ``None`` when the backend is ready to launch; a slow llama.cpp
+    build is logged as a warning, not refused.
     """
-    import importlib.util
-    import shutil
-
-    from bibr.local.llm_models import detect_hardware
-
-    if backend == "llmster":
-        if shutil.which("lms") is not None:
-            return None
-        return (
-            "llmster backend selected but LM Studio's `lms` CLI is not installed. "
-            "Install it manually with: curl -fsSL https://lmstudio.ai/install.sh | bash"
-        )
-
-    if backend == "llama-cpp":
+    problem = _local_llm_backend_blocker(backend)
+    if problem is None and backend == "llama-cpp":
         from bibr.local.llama_cpp import (
             cuda_steering_hint,
             find_llama_server,
@@ -243,9 +232,7 @@ def _preflight_local_backend(backend: str) -> str | None:
 
         prefix = find_llama_server()
         if prefix is None:
-            return (
-                "llama.cpp backend selected but no server executable was found. " + install_hint()
-            )
+            return None
         # Soft check only — CPU builds are usable but painfully slow; surface
         # that at doctor time rather than hard-failing preflight (users may be
         # smoke-testing install order before swapping in a CUDA binary).
@@ -265,6 +252,36 @@ def _preflight_local_backend(backend: str) -> str | None:
                 import logging
 
                 logging.getLogger(__name__).warning("%s", steer)
+    return problem
+
+
+def _local_llm_backend_blocker(backend: str) -> str | None:
+    """Why a managed local LLM backend cannot start here, or ``None``.
+
+    The hard half of :func:`_preflight_local_backend`, without its llama.cpp
+    speed warnings: ``bibr doctor`` reports those itself, and takes its
+    pass/fail verdict from here so it refuses exactly what ``bibr chew`` refuses.
+    """
+    import importlib.util
+    import shutil
+
+    from bibr.local.llm_models import detect_hardware
+
+    if backend == "llmster":
+        if shutil.which("lms") is not None:
+            return None
+        return (
+            "llmster backend selected but LM Studio's `lms` CLI is not installed. "
+            "Install it manually with: curl -fsSL https://lmstudio.ai/install.sh | bash"
+        )
+
+    if backend == "llama-cpp":
+        from bibr.local.llama_cpp import find_llama_server, install_hint
+
+        if find_llama_server() is None:
+            return (
+                "llama.cpp backend selected but no server executable was found. " + install_hint()
+            )
         return None
 
     platform_key, _ = detect_hardware()
@@ -354,10 +371,18 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
     """
     if config.ocr_url:
         return None
+    return _ocr_runtime_blocker(config.ocr_backend)
+
+
+def _ocr_runtime_blocker(ocr_backend: str) -> str | None:
+    """Why no candidate of ``ocr_backend``'s startup chain can start here, or ``None``.
+
+    Shared by the ``bibr chew``/``bibr batch`` preflight and ``bibr doctor``.
+    """
     from bibr.config import Settings
     from bibr.ocr.registry import resolve_backend_candidates
 
-    candidates = resolve_backend_candidates(config.ocr_backend, Settings)
+    candidates = resolve_backend_candidates(ocr_backend, Settings)
     blockers: list[str] = []
     for candidate in candidates:
         reason = _ocr_candidate_unavailable_reason(candidate.backend)
@@ -370,7 +395,7 @@ def _preflight_ocr_runtime(config: ResolvedRunConfig) -> str | None:
         "Alternatives: point --ocr-url at an external OCR server, or use a cloud vision "
         "backend (--ocr gemini|openai|anthropic)."
     )
-    if len(blockers) == 1 and config.ocr_backend != "paddle":
+    if len(blockers) == 1 and ocr_backend != "paddle":
         return f"OCR backend cannot start here — {blockers[0]}. {alternatives}"
     listed = "\n".join(f"  - {blocker}" for blocker in blockers)
     return (
