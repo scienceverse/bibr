@@ -82,8 +82,13 @@ _TABLE_KEYS = (
 _ALIASES = {
     "references": "bib",
     "authors": "author",
+    "affiliations": "affiliation",
     "sections": "section",
     "footnotes": "footnote",
+    "figures": "figure",
+    "tables": "table",
+    "urls": "url",
+    "equations": "eq",
 }
 
 # chew()/achew() option → LocalPipeline constructor argument. Identity

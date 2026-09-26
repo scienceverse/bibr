@@ -31,6 +31,4 @@ BIO_TAGS: list[str] = ["O"] + [
     f"{prefix}-{field}" for field in FIELD_TYPES for prefix in ("B", "I")
 ]
 
-TAG_TO_IDX: dict[str, int] = {tag: idx for idx, tag in enumerate(BIO_TAGS)}
-
 SEG_TAGS: list[str] = ["O", "B-REF", "I-REF"]

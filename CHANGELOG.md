@@ -1073,6 +1073,36 @@ released.
   the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the file, and the file
   is rewritten only when consolidation ran) and replays the enriched run's
   `extraction.timings`, so the `enrich` stage time is reported on both paths.
+- Anthropic thinking budgets no longer produce requests the API rejects
+  with a 400. With `LLM_THINKING_BUDGET` set, a task cap sends thinking only
+  when it leaves at least 1024 tokens above the budget for the answer;
+  smaller caps run without thinking at temperature 0. Budgets below the 1024
+  minimum are raised to it and logged.
+- `bibr mcp` chew tools report failure causes again: `chew_paper` and
+  `chew_url` wrap non-`BibrError` failures in a `ToolError` carrying the
+  exception type and a secret-scrubbed message with the file name only,
+  never the full path or URL, instead of the detail-less "Error executing
+  tool". `BibrError` messages are scrubbed the same way, and `chew_url`
+  reports the downloaded file name rather than the URL.
+- `bibr mcp` without cloud credentials prints the one-line missing-key
+  message and exits 1 instead of dumping a traceback. Only the startup
+  credential check is reported that way; a `ValueError` from the running
+  server session keeps its traceback, and `bibr.chew()`/`Chewer` still raise
+  the provider's `ValueError`.
+- The offline batch docs no longer claim batch runs prefill the LLM
+  response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
+- The Crossref bulk DOI prefetch sends no request and seeds nothing when
+  both cache tiers are disabled, and leaves comma-bearing DOIs to their
+  individual lookup instead of failing the whole chunk's filter.
+- `CACHE_TTL_SECONDS=0` (or negative) now means "no expiry" instead of
+  failing every Redis SET with "invalid expire time" and silently
+  disabling the result cache.
+- `dir(bibr)` lists the lazy public API (`chew`, `Chewer`, `Result`,
+  `write_tables`, ...) without importing it, and `Result` answers the
+  plural table aliases (`figures`, `tables`, `affiliations`, `urls`,
+  `equations`).
+- Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
+  "not implemented" warning instead of passing silently.
 
 ### Added
 
@@ -1242,6 +1272,20 @@ released.
   unix-socket URL gets it as before (`unix://:password@/path/redis.sock`), and so
   does a sibling URL on the same socket. A URL on a different server, or with its
   own password, is left alone.
+- `ML_CLASSIFIERS_REQUIRED=true` is now enforced on the local pipeline, not
+  just in serve. A required classifier that fails to load fails the file
+  with code `classifier_required_failed` and a message naming the setting.
+  The run used to continue silently without the classifiers; set
+  `ML_CLASSIFIERS_REQUIRED=false` to allow the run to continue without them.
+- `save_paper` writes only `.json` files and refuses to overwrite an
+  existing file unless `overwrite=True` is passed explicitly.
+
+### Removed
+
+- Dead helpers with no callers anywhere (including tests):
+  `snapshot_download_no_symlink`, `onnxruntime_available`,
+  `ONNX_TOKENIZER`, `vllm_mlx_available`, `TAG_TO_IDX`, and
+  `bibr.batch.runner._print`.
 
 ## [0.5.1] - 2026-09-12
 

@@ -425,10 +425,13 @@ class BibrPipelineAPI(ls.LitAPI):
                     # the same way a code change does.
                     prefix=cache_namespace(self._settings),
                 )
-                logger.info(
-                    "Response cache enabled (TTL=%ds)",
-                    self._settings.cache.ttl_seconds,
-                )
+                if self._settings.cache.ttl_seconds > 0:
+                    logger.info(
+                        "Response cache enabled (TTL=%ds)",
+                        self._settings.cache.ttl_seconds,
+                    )
+                else:
+                    logger.info("Response cache enabled (no expiry)")
         except Exception as e:
             logger.warning("Response cache not available: %s", e)
 

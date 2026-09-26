@@ -67,19 +67,3 @@ def hf_download_or_cached(repo_id: str, filename: str, revision: str | None = No
         except Exception as cache_exc:  # noqa: BLE001 — surface the original error below
             logger.debug("%s/%s not in the local HF cache: %s", repo_id, filename, cache_exc)
         raise
-
-
-def snapshot_download_no_symlink(*args: Any, **kwargs: Any) -> str:
-    """Run ``snapshot_download`` after disabling Windows cache symlinks."""
-    disable_hf_cache_symlinks_on_windows()
-    from huggingface_hub import snapshot_download
-
-    try:
-        return snapshot_download(*args, **kwargs)
-    except OSError as exc:
-        if not is_windows_symlink_privilege_error(exc):
-            raise
-        disable_hf_cache_symlinks_on_windows()
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.setdefault("max_workers", 1)
-        return snapshot_download(*args, **retry_kwargs)
