@@ -168,6 +168,27 @@ def _looks_like_auth_error(exc: BaseException) -> bool:
     return any(marker in text for marker in _AUTH_ERROR_MARKERS)
 
 
+def _caused_by_configuration_error(exc: BaseException) -> bool:
+    """Whether *exc* is or wraps a :class:`ConfigurationError`.
+
+    chew() reports a bad setting wrapped — the pipeline raises
+    ``ProcessingError('Layout initialization failed: ...')`` from the
+    ``ConfigurationError`` — so walk ``__cause__``/``__context__``, not just
+    the top exception.
+    """
+    from bibr.exceptions import ConfigurationError
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, ConfigurationError):
+            return True
+        cause = current.__cause__
+        current = cause if cause is not None else current.__context__
+    return False
+
+
 SetupPrompt = Literal["install_extras", "cloud_api_key", "private_server_url", "smoke_test"]
 SetupTier = Literal["fully_local", "mostly_local", "private_server", "cloud_fallback"]
 
@@ -1738,7 +1759,7 @@ class SetupWizard:
         """
         from rich.markup import escape
 
-        from bibr.exceptions import ConfigurationError, UpstreamServiceError
+        from bibr.exceptions import UpstreamServiceError
 
         doctor_line = "[dim]Run `bibr doctor` for a full check.[/dim]"
         key_env = self._llm_key_env_hint()
@@ -1749,9 +1770,11 @@ class SetupWizard:
             # exact `uv sync --extra ...` line into the message.
             return f"[dim]{escape(_redact(str(exc), api_key))}[/dim]\n{doctor_line}"
 
-        if isinstance(exc, ConfigurationError):
+        if _caused_by_configuration_error(exc):
             # _step_smoke_test already printed the message in full; say once
-            # what to do about it instead of labelling it unexpected.
+            # what to do about it instead of labelling it unexpected. chew()
+            # reports a bad setting wrapped (a ProcessingError whose cause is
+            # the ConfigurationError), so walk the chain, not just the top.
             return (
                 "[dim]Fix the configuration value above in your .env, then "
                 f"rerun the test.[/dim]\n{doctor_line}"

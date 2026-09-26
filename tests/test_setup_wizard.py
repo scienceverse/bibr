@@ -2216,22 +2216,116 @@ def test_advanced_step4_skips_install_when_step1_ml_is_present(monkeypatch):
 
 def test_smoke_hint_keeps_bracketed_extra_names(monkeypatch):
     """Install hints like 'bibr[torch]' must survive Rich markup, printed once."""
-    from bibr.exceptions import ConfigurationError
+    from bibr.exceptions import ConfigurationError, ProcessingError
 
     wizard = _recording_wizard()
     wizard.env_vars = {"OCR_BACKEND": "paddle"}
     message = (
         "ML_RUNTIME=torch but torch is not installed. Install it with pip install 'bibr[torch]'"
     )
+    # chew() reports a bad setting wrapped: the pipeline raises
+    # ProcessingError('Layout initialization failed: ...') from the
+    # ConfigurationError (see bibr/pipeline/pipeline.py).
+    chained = ProcessingError(
+        f"Layout initialization failed: {message}",
+        error_code="layout_failed",
+        failed_stage="layout",
+    )
+    chained.__cause__ = ConfigurationError(message)
     monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
-    with patch("bibr.api.chew", side_effect=ConfigurationError(message)):
+    with patch("bibr.api.chew", side_effect=chained):
         wizard._step_smoke_test()
 
     text = wizard.console.export_text()
     assert "pip install 'bibr[torch]'" in text
     assert "\\[torch]" not in text
-    assert text.count(message) == 1
+    assert text.count("ML_RUNTIME=torch") == 1
     assert "Unexpected error" not in text
+
+
+def test_caused_by_configuration_error_walks_the_chain():
+    """Bare, chained (cause/context) and unrelated failures classify correctly."""
+    from bibr.exceptions import ConfigurationError, ProcessingError
+    from bibr.setup_wizard import _caused_by_configuration_error
+
+    assert _caused_by_configuration_error(ConfigurationError("bad value"))
+    chained = ProcessingError("Layout initialization failed: bad value")
+    chained.__cause__ = ConfigurationError("bad value")
+    assert _caused_by_configuration_error(chained)
+    outer = ProcessingError("outer")
+    outer.__context__ = ConfigurationError("implicit context")
+    assert _caused_by_configuration_error(outer)
+    assert not _caused_by_configuration_error(RuntimeError("boom"))
+
+
+def test_install_failure_detail_keeps_bracketed_extra_names(monkeypatch, tmp_path):
+    """uv stderr naming 'bibr[vllm]' must print in full, not eaten as Rich markup."""
+    import subprocess
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("bibr.setup_wizard.shutil.which", lambda name: "/bin/uv")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Because bibr[vllm] depends on vllm>=0.24"
+        )
+
+    monkeypatch.setattr("bibr.setup_wizard.subprocess.run", fake_run)
+    wizard = _recording_wizard()
+    wizard.selected_extras = {"vllm"}
+
+    with pytest.raises(SystemExit):
+        wizard._install_selected_extras()
+
+    text = wizard.console.export_text()
+    # The detail line, not the (always escaped) command line above it: without
+    # escape() Rich eats '[vllm]' as a style tag and prints 'Because bibr depends'.
+    assert "Because bibr[vllm] depends" in text
+    assert "vllm>=0.24" in text
+
+
+def test_smoke_import_error_hint_keeps_brackets(monkeypatch):
+    """An ImportError carrying the torch hint must print 'bibr[torch]' literally."""
+    from bibr.utils.ml_extra import TORCH_EXTRA_HINT
+
+    wizard = _recording_wizard()
+    err = ImportError(
+        f"Layout detection (LayoutDetector) requires the 'ml' extra: {TORCH_EXTRA_HINT}"
+    )
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: True)
+    with patch("bibr.api.chew", side_effect=err):
+        wizard._step_smoke_test()
+
+    text = wizard.console.export_text()
+    # The message prints twice — the (always escaped) 'Test extraction failed'
+    # line and the hint. Without escape() in the hint branch, the second copy
+    # renders as "pip install 'bibr'".
+    assert text.count("bibr[torch]") == 2
+    assert "uv sync --extra torch" in text
+
+
+def test_connection_error_keeps_brackets(monkeypatch):
+    """A connect failure mentioning '[...]' must print it, not eat it as markup."""
+    wizard = _recording_wizard()
+    wizard.env_vars = {
+        "LLM_PROVIDER": "google",
+        "LLM_MODEL": "gemini-3.5-flash-lite",
+        "GOOGLE_API_KEY": "AIza-test-key-placeholder",
+    }
+    answers = iter([True, False])
+    monkeypatch.setattr("bibr.setup_wizard.Confirm.ask", lambda *a, **k: next(answers))
+
+    def fake_ping(_settings):
+        raise ConnectionError("model [llama3] not found on the server")
+
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", fake_ping)
+
+    wizard._offer_llm_connection_test()
+
+    text = wizard.console.export_text()
+    assert "Couldn't connect" in text
+    # Without escape() Rich eats '[llama3]' as a style tag ('model  not found').
+    assert "model [llama3] not found" in text
 
 
 def test_run_validation_tests_the_private_server_llm(monkeypatch):

@@ -359,7 +359,7 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
                                 | {name: conv(row.get(name)) for name, conv in table.columns}
                             )
             except Exception as exc:  # noqa: BLE001 — re-raised naming the paper
-                raise ValueError(f"{label}: {exc}") from exc
+                raise ValueError(f"{label} (paper_id {paper_id}): {exc}") from exc
             papers += 1
             pending.append(label)
             if papers % _PAPERS_PER_ROW_GROUP == 0:

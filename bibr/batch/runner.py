@@ -444,7 +444,8 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
             f"{len(discovery.manifests)} manifests {ui.SEP} "
             f"{len(discovery.directories)} directories {ui.SEP} "
             f"{len(discovery.missing)} missing {ui.SEP} "
-            f"{len(discovery.unsupported)} unsupported",
+            f"{len(discovery.unsupported)} unsupported {ui.SEP} "
+            f"{len(discovery.unreadable)} unreadable",
         )
     )
 

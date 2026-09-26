@@ -233,3 +233,29 @@ def test_txt_and_extensionless_files_are_still_manifests(tmp_path):
     found = discover_inputs([str(bare)])
     assert found.files == [a]
     assert found.manifests == [bare]
+
+
+def test_manifest_over_long_line_is_missing_not_a_crash(tmp_path):
+    """A >255-byte line in a .txt manifest cannot be stated: record, don't raise."""
+    manifest = tmp_path / "notes.txt"
+    long_line = "x" * 300
+    manifest.write_text(f"{long_line}\n", encoding="utf-8")
+
+    found = discover_inputs([str(manifest)])
+
+    assert found.files == []
+    assert len(found.missing) == 1
+    assert f"(from {manifest.name})" in found.missing[0]
+    assert found.problems == 1
+
+
+def test_uppercase_manifest_suffix_is_still_a_manifest(tmp_path):
+    """Suffix matching is case-insensitive: LIST.TXT is a manifest, not prose."""
+    a = _pdf(tmp_path / "a.pdf")
+    manifest = tmp_path / "LIST.TXT"
+    manifest.write_text(f"{a}\n")
+
+    found = discover_inputs([str(manifest)])
+
+    assert found.files == [a]
+    assert found.manifests == [manifest]

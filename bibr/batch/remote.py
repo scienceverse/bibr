@@ -20,6 +20,9 @@ Backpressure and failure policy (mirrors the bibr-training campaign script):
   serve is up, the paper was too slow. It is retried once (contention can
   starve a paper) without shrinking in-flight, then recorded as
   ``pipeline_timeout``.
+* A finished result that fails to download (a reset connection, a 5xx, or a
+  409 "not finished") is re-fetched from the same job with backoff, up to
+  ``MAX_FETCH_ERRORS`` times, before the paper is re-submitted from scratch.
 * **4xx** is a property of the request (rejected upload, bad option): failed
   at once, no retry. 401/403 stops the whole run — every paper would fail —
   and resume runs the papers it failed again by default.

@@ -98,7 +98,7 @@ def _read_manifest(manifest: Path, found: Discovery, seen: set[Path]) -> None:
     except (UnicodeDecodeError, OSError) as exc:
         # A binary or unreadable manifest-like file names itself instead of
         # aborting discovery with a path-less codec error.
-        found.unreadable.append(f"{manifest}: not readable as a manifest ({exc})")
+        found.unreadable.append(f"{manifest} ({exc})")
         return
     found.manifests.append(manifest)
     base = manifest.parent
@@ -106,10 +106,18 @@ def _read_manifest(manifest: Path, found: Discovery, seen: set[Path]) -> None:
         candidate = Path(entry).expanduser()
         if not candidate.is_absolute():
             candidate = base / candidate
-        if candidate.is_dir():
+        try:
+            is_dir = candidate.is_dir()
+            is_file = False if is_dir else candidate.is_file()
+        except OSError:
+            # An over-long line (a prose file picked up by a shell glob)
+            # cannot even be stated: record it, don't abort the batch.
+            found.missing.append(f"{entry} (from {manifest.name})")
+            continue
+        if is_dir:
             found.directories.append(candidate)
             _add_files(_walk_directory(candidate), found, seen, empty_source=candidate)
-        elif candidate.is_file():
+        elif is_file:
             _add_files([candidate], found, seen)
         else:
             found.missing.append(f"{entry} (from {manifest.name})")

@@ -655,8 +655,9 @@ def test_configured_value_reads_env_and_honours_dotenv_kill_switch(monkeypatch):
 # --- audit S8: a finished result that fails to download is not re-submitted ---
 
 
-async def test_transient_fetch_error_retries_the_same_job(tmp_path):
-    """A reset connection while downloading a succeeded result re-fetches job1."""
+@pytest.mark.parametrize("mode", ["reset", "http_503", "http_409"])
+async def test_transient_fetch_error_retries_the_same_job(tmp_path, mode):
+    """A failed download of a succeeded result re-fetches job1: reset, 5xx, 409."""
     serve = FakeServe()
     real_handler = serve.handler
     result_calls = {"n": 0}
@@ -665,7 +666,10 @@ async def test_transient_fetch_error_retries_the_same_job(tmp_path):
         if request.url.path.endswith("/result"):
             result_calls["n"] += 1
             if result_calls["n"] == 1:
-                raise httpx.ReadTimeout("connection reset", request=request)
+                if mode == "reset":
+                    raise httpx.ReadTimeout("connection reset", request=request)
+                code = 503 if mode == "http_503" else 409
+                return httpx.Response(code, json={"detail": f"scripted {code}"})
         return real_handler(request)
 
     clock = _Clock()
@@ -685,6 +689,7 @@ async def test_transient_fetch_error_retries_the_same_job(tmp_path):
     assert len(serve.submits) == 1  # job1's computed result is kept, not re-run
     assert outcome.extra["job_id"] == "job1"
     assert outcome.extra["retries"] == 0  # the same-job fetch retry is not a re-submit
+    assert result_calls["n"] >= 2  # the failed first download was re-fetched
     assert [s for s in sleeper.calls if s >= 5.0]  # backoff before the re-fetch
 
 
