@@ -803,36 +803,40 @@ def ref_field_scores(
             gt_ref = ground_truth_refs[gi]
             ext_ref = extracted_refs[ei]
 
-            # Title accuracy (only count pairs where GT has a title)
-            gt_title = _get_ref_title(gt_ref)
-            if gt_title:
+            # Presence comes from the shared gold-presence table above —
+            # never re-derived inline — so these denominators cannot drift
+            # from the pooled ``<field>_matched`` counts in
+            # ``evaluate.ref_field_counts``. Only the comparison values are
+            # fetched here.
+            if gold_has["title"][gi]:
                 title_gt_matched += 1
+                gt_title = _get_ref_title(gt_ref)
                 ext_title = _get_ref_title(ext_ref)
                 if ext_title and token_sort_ratio(ext_title.lower(), gt_title.lower()) >= 85.0:
                     title_correct += 1
 
             # Year accuracy (only count pairs where GT has a year)
-            gt_year = _get_ref_year(gt_ref)
-            if gt_year:
+            if gold_has["year"][gi]:
                 year_gt_matched += 1
+                gt_year = _get_ref_year(gt_ref)
                 ext_year = _get_ref_year(ext_ref)
                 if ext_year and gt_year == ext_year:
                     year_correct += 1
 
-            gt_doi = normalize_doi(gt_ref.get("doi") or gt_ref.get("DOI") or "")
-            if gt_doi:
+            if gold_has["doi"][gi]:
+                gt_doi = normalize_doi(gt_ref.get("doi") or gt_ref.get("DOI") or "")
                 ext_doi = normalize_doi(ext_ref.get("doi") or ext_ref.get("DOI") or "")
                 if ext_doi and ext_doi == gt_doi:
                     doi_correct += 1
 
-            if _ref_surname_tokens(gt_ref):
+            if gold_has["author"][gi]:
                 author_gt_matched += 1
                 if _author_list_correct(ext_ref, gt_ref):
                     author_correct += 1
 
-            gt_container = _get_ref_container(gt_ref)
-            if gt_container:
+            if gold_has["journal"][gi]:
                 journal_gt_matched += 1
+                gt_container = _get_ref_container(gt_ref)
                 ext_container = _get_ref_container(ext_ref)
                 if (
                     ext_container
@@ -840,13 +844,12 @@ def ref_field_scores(
                 ):
                     journal_correct += 1
 
-            gt_volume = _get_ref_volume(gt_ref)
-            if gt_volume:
+            if gold_has["volume"][gi]:
                 volume_gt_matched += 1
-                if _get_ref_volume(ext_ref) == gt_volume:
+                if _get_ref_volume(ext_ref) == _get_ref_volume(gt_ref):
                     volume_correct += 1
 
-            if _get_ref_pages(gt_ref)[0]:
+            if gold_has["pages"][gi]:
                 pages_gt_matched += 1
                 if _pages_correct(ext_ref, gt_ref):
                     pages_correct_n += 1

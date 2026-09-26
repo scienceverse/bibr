@@ -3,7 +3,7 @@
 Covers batch-eval-16 (dead metric code removed), batch-eval-18 (shared
 reference matching) and batch-eval-19 (rapidfuzz LCS). batch-eval-12 is
 tested in tests/batch/test_report.py; batch-eval-20 in
-tests/test_evaluate_provenance.py.
+TestDirtyTreeProvenance below.
 """
 
 from __future__ import annotations
@@ -127,7 +127,9 @@ class TestSharedReferenceMatching:
     def test_match_pairs_drive_all_three_metrics(self):
         # The failure scenario was denominators disagreeing with accuracies
         # after a one-sided predicate edit. There is only one predicate table
-        # now: counts and denominators come from the same match object.
+        # now, and the per-pair loop gates on its output
+        # (``match.gold_has_field``) instead of re-deriving presence inline:
+        # counts and denominators come from the same match object.
         from evaluation.evaluate import ref_field_counts
         from evaluation.validation_metrics import match_references, ref_field_scores
 
@@ -145,6 +147,61 @@ class TestSharedReferenceMatching:
         # the field — the same matched count pooled above.
         assert scores["ref_title_acc"] is not None
         assert counts["title_matched"] >= 1
+
+    def test_field_scores_pin_exact_values(self):
+        # Hard values on the synthetic pairs: any predicate edit — in the
+        # table or in the loop — moves a score or a count below.
+        from evaluation.evaluate import ref_field_counts
+        from evaluation.validation_metrics import match_references, ref_field_scores
+
+        ext, gold = _synthetic_refs()
+        match = match_references(ext, gold)
+        assert match.pairs == ((0, 0), (1, 1))
+        assert ref_field_scores(ext, gold, match=match) == {
+            "ref_title_acc": 1.0,
+            "ref_year_acc": 1.0,
+            "ref_doi_recall": 0.5,
+            "ref_author_acc": 1.0,
+            "ref_journal_acc": 1.0,
+            "ref_volume_acc": 1.0,
+            # The gold carries a last_page the extraction lacks.
+            "ref_pages_acc": 0.0,
+        }
+        counts = ref_field_counts(ext, gold, match=match)
+        assert counts["title_matched"] == 2
+        assert counts["year_matched"] == 2
+        assert counts["doi_matched"] == 1
+        assert counts["author_matched"] == 1
+        assert counts["journal_matched"] == 1
+        assert counts["volume_matched"] == 1
+        assert counts["pages_matched"] == 1
+
+    def test_field_scores_gate_on_the_shared_presence_table(self, monkeypatch):
+        # A predicate edit must move the accuracy denominators together with
+        # the pooled counts: the per-pair loop gates on
+        # ``match.gold_has_field`` instead of re-deriving presence inline.
+        # Invert the DOI predicate (present exactly where the gold has no
+        # DOI): the matched G1 then counts as carrying a DOI per the table,
+        # but its empty value can never compare equal, so ref_doi_recall is
+        # 0.0. Inline ``if gt_doi:`` gating would still score the matched
+        # G0 DOI and report 1.0.
+        import evaluation.validation_metrics as vm
+        from evaluation.evaluate import ref_field_counts
+
+        ext, gold = _synthetic_refs()
+        monkeypatch.setitem(
+            vm._REF_GOLD_FIELD_GETTERS,
+            "doi",
+            lambda ref: (
+                "" if vm.normalize_doi(ref.get("doi") or ref.get("DOI") or "") else "10.0/inverted"
+            ),
+        )
+        match = vm.match_references(ext, gold)
+        assert match.pairs == ((0, 0), (1, 1))
+        counts = ref_field_counts(ext, gold, match=match)
+        assert counts["doi_gold"] == 1
+        assert counts["doi_matched"] == 1
+        assert vm.ref_field_scores(ext, gold, match=match)["ref_doi_recall"] == 0.0
 
     def test_empty_sides_match_nothing(self):
         from evaluation.evaluate import ref_field_counts
