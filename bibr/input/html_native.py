@@ -262,8 +262,21 @@ def _map_heading(header: str) -> CanonicalSection:
     return CanonicalSection.UNKNOWN
 
 
-def _resolve_link_sentence(candidates, url: str, link_text: str, fallback_id: int | None):
+def _resolve_link_sentence(
+    candidates,
+    url: str,
+    link_text: str,
+    fallback_id: int | None,
+    entry_text: str = "",
+    anchor_offset: int | None = None,
+):
     """Pick the sentence of one deferred entry that holds an anchor (as JATS)."""
+    if anchor_offset is not None and entry_text:
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        if picked is not None:
+            needle = (link_text or "").strip()
+            if not needle or needle in picked.text or url in picked.text:
+                return picked
     if link_text:
         needle = link_text.strip()
         if needle:
@@ -278,6 +291,50 @@ def _resolve_link_sentence(candidates, url: str, link_text: str, fallback_id: in
             if sent.text_id == fallback_id:
                 return sent
     return candidates[-1] if candidates else None
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int):
+    """Return the candidate sentence covering *offset* in *entry_text* (as JATS)."""
+    if not candidates:
+        return None
+    chosen = candidates[0]
+    cursor = 0
+    for sent in candidates:
+        found = entry_text.find(sent.text, cursor)
+        start = found if found >= 0 else cursor
+        if start <= offset:
+            chosen = sent
+        else:
+            break
+        cursor = start + len(sent.text)
+    return chosen
+
+
+def _anchor_offset_in_block(block: Tag, anchor: Tag, display: str) -> int:
+    """Character offset where an anchor's display text starts in the block text.
+
+    The strings before the anchor in document order are the anchor's prefix;
+    block text is that accumulation collapsed, so the collapsed prefix
+    length is the anchor's start, plus one separator space when the source
+    spells whitespace on either side of it.
+    """
+    parts: list[str] = []
+    for node in block.descendants:
+        if node is anchor:
+            break
+        if isinstance(node, (NavigableString, CData)):
+            parts.append(str(node))
+    pre_raw = "".join(parts)
+    pre = collapse_ws(pre_raw)
+    if not pre or not display:
+        return len(pre)
+    first_inside = next(
+        (str(s) for s in anchor.descendants if isinstance(s, (NavigableString, CData))),
+        "",
+    )
+    trail = pre_raw[-1:].isspace()
+    lead = first_inside[:1].isspace()
+    return len(pre) + (1 if trail or lead else 0)
 
 
 class HtmlParser:
@@ -311,7 +368,7 @@ class HtmlParser:
         self._detected_title: str | None = None
         self._metadata: PaperMetadata = PaperMetadata(doi="", title="")
         self._native_ref_strings: list[str] | None = None
-        self._pending_url_links: list[tuple[str, str, int, int]] = []
+        self._pending_url_links: list[tuple[str, str, int, int, int]] = []
 
     @property
     def _deferred_texts(self) -> list[tuple[str, int | None, int, bool, bool]]:
@@ -403,7 +460,12 @@ class HtmlParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
-        for url, link_text, section_id, deferred_index in self._pending_url_links:
+        for pending in self._pending_url_links:
+            if len(pending) == 5:
+                url, link_text, section_id, deferred_index, anchor_offset = pending
+            else:  # links recorded without an offset fall back to text search
+                url, link_text, section_id, deferred_index = pending
+                anchor_offset = None
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
             fallback_id = self.assembler.last_text_id[deferred_index]
@@ -413,7 +475,12 @@ class HtmlParser:
             candidates = by_paragraph.get(entry_para, [])
             if not candidates:
                 continue
-            sentence = _resolve_link_sentence(candidates, url, link_text or "", fallback_id)
+            entry_text = ""
+            if 0 <= deferred_index < len(self.assembler.entries):
+                entry_text = self.assembler.entries[deferred_index].text
+            sentence = _resolve_link_sentence(
+                candidates, url, link_text or "", fallback_id, entry_text, anchor_offset
+            )
             if sentence is None:
                 continue
             text_id = sentence.text_id
@@ -651,8 +718,15 @@ class HtmlParser:
             url = clean_extracted_url(str(a.get("href") or ""))
             if not url:
                 continue
+            display = _text(a)
             self._pending_url_links.append(
-                (url, _text(a), self._current_section_id, deferred_index)
+                (
+                    url,
+                    display,
+                    self._current_section_id,
+                    deferred_index,
+                    _anchor_offset_in_block(tag, a, display),
+                )
             )
 
     def _process_list(self, tag: Tag) -> None:

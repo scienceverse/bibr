@@ -1386,6 +1386,80 @@ class TestBlocksInsideParagraph:
         assert "First step." in texts
         assert "Second step." in texts
 
+    def test_boxed_text_caption_title_beside_p_is_emitted_once(self):
+        # A wrapper's <caption><title> must not double: the heading pass used
+        # to emit it and the recursed <caption> emitted it again.
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<boxed-text><label>Box 1.</label>"
+            b"<caption><title>Key points</title></caption>"
+            b"<p>Point one.</p></boxed-text><p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Key points") == 1
+        assert texts == ["Box 1.", "Key points", "Point one.", "After."]
+
+    def test_boxed_text_caption_title_inside_p_is_emitted_once(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<p>See the box. <boxed-text><caption><title>Practice points</title>"
+            b"<p>Sleep more.</p></caption></boxed-text> after.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Practice points") == 1
+
+    def test_supplementary_material_caption_title_inside_p_is_emitted_once(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<p>See <supplementary-material><caption><title>Raw data</title>"
+            b"<p>File.</p></caption></supplementary-material> after.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert texts.count("Raw data") == 1
+        assert "File." in texts
+
+    def test_labelled_list_items_do_not_emit_label_only_sentences(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<list><list-item><label>1.</label><p>First item.</p></list-item>"
+            b"<list-item><label>2.</label><p>Second item.</p></list-item></list>"
+            b"<p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        assert [s.text for s in c.sentences] == ["First item.", "Second item.", "After."]
+
+    def test_table_foot_fn_label_is_not_a_standalone_sentence(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>S</title>"
+            b"<table-wrap><label>Table 1</label><caption><p>Cap.</p></caption>"
+            b"<table><tr><th>A</th></tr><tr><td>1</td></tr></table>"
+            b"<table-wrap-foot><fn><label>a</label><p>Adjusted for age.</p></fn>"
+            b"</table-wrap-foot></table-wrap><p>After.</p>"
+            b"</sec></body></article>"
+        )
+        c = _segment(_parse(xml))
+        texts = [s.text for s in c.sentences]
+        assert "a" not in texts
+        assert "Adjusted for age." in texts
+        assert "After." in texts
+
     def test_caption_sentence_of_in_paragraph_table_keeps_its_url(self):
         xml = (
             b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
@@ -1642,6 +1716,27 @@ class TestAffiliationFallbacks:
             ("B", "Institute of Elsewhere"),
         ]
 
+    def test_aff_claimed_by_another_group_is_not_inherited(self):
+        # An <aff> claimed by an author of a later <contrib-group> must not
+        # leak to an xref-less author of an earlier group.
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group><contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>Goldacre</surname>'
+            b"<given-names>Ben</given-names></name></contrib>"
+            b'<aff id="a1">Institute of Elsewhere</aff></contrib-group>'
+            b"<contrib-group>"
+            b'<contrib contrib-type="author"><name><surname>Other</surname>'
+            b'<given-names>Olive</given-names></name><xref ref-type="aff" rid="a1"/>'
+            b"</contrib></contrib-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body></article>"
+        )
+        m = _parse(xml)._contents.preparsed_metadata
+        assert [(a.family, a.affiliation) for a in m.authors] == [
+            ("Goldacre", ""),
+            ("Other", "Institute of Elsewhere"),
+        ]
+
     def test_address_email_and_orcid_reach_the_author(self):
         xml = (
             b'<?xml version="1.0"?><article><front><article-meta><title-group>'
@@ -1769,6 +1864,26 @@ class TestBodyLinks:
             [["All data are on the Open Science Framework.", "Second sentence follows here."]],
         )
         assert [(link.url, link.text_id) for link in c.links] == [("https://osf.io/x7k2q/", 1)]
+
+    def test_short_anchor_text_resolves_to_the_sentence_holding_it(self):
+        # 'here' is a substring of 'There': only the anchor's offset tells the
+        # first-sentence mention apart from the second-sentence anchor.
+        xml = (
+            b'<?xml version="1.0"?><article xmlns:xlink="http://www.w3.org/1999/xlink">'
+            b"<front><article-meta><title-group><article-title>T</article-title>"
+            b"</title-group></article-meta></front><body><sec><title>I</title>"
+            b"<p>There are more results here and there. Download "
+            b'<ext-link ext-link-type="uri" xlink:href="https://x.example.org/d">'
+            b"here</ext-link>.</p>"
+            b"</sec></body></article>"
+        )
+        p = _parse(xml)
+        c = p._contents
+        p.apply_segmentation(
+            c,
+            [["There are more results here and there.", "Download here."]],
+        )
+        assert [(link.url, link.text_id) for link in c.links] == [("https://x.example.org/d", 2)]
 
     def test_bare_doi_href_becomes_a_doi_org_url(self):
         xml = (
@@ -1924,6 +2039,24 @@ class TestReferenceRows:
         c = _parse(xml)._contents
         assert c.native_ref_strings == [
             "62 Liu X. Tetrahedron 2006, 62, 11039. Ludley P. Tetrahedron 2006, 62, 11043."
+        ]
+
+    def test_ref_note_stays_between_its_citations_in_document_order(self):
+        xml = (
+            b'<?xml version="1.0"?><article><front><article-meta><title-group>'
+            b"<article-title>T</article-title></title-group></article-meta></front>"
+            b"<body><sec><title>I</title><p>Body.</p></sec></body>"
+            b"<back><ref-list><title>References</title>"
+            b'<ref id="r62"><label>62</label>'
+            b"<mixed-citation>Liu X. Tetrahedron 2006, 62, 11039.</mixed-citation>"
+            b"<note>See also:</note>"
+            b"<mixed-citation>Ludley P. Tetrahedron 2006, 62, 11043.</mixed-citation>"
+            b"</ref></ref-list></back></article>"
+        )
+        c = _parse(xml)._contents
+        assert c.native_ref_strings == [
+            "62 Liu X. Tetrahedron 2006, 62, 11039. See also: "
+            "Ludley P. Tetrahedron 2006, 62, 11043."
         ]
 
     def test_nested_ref_list_inside_a_back_sec_is_not_duplicated(self):

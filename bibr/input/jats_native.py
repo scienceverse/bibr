@@ -174,39 +174,34 @@ def _collect_refs(ref_list) -> list:
     return refs
 
 
-def _ref_mixed_and_note_texts(ref) -> tuple[str, str]:
-    """Join a ``<ref>``'s mixed-citation texts and its sibling notes.
+def _ref_ordered_text(ref) -> str:
+    """Join a ``<ref>``'s mixed-citation and note texts in document order.
 
     A <ref> may carry several citations (ACS 'refs 62a/62b' style) with a
-    <note> such as 'See also:' between them. Reading only the first
-    mixed-citation drops every later citation, so join every mixed-citation
-    that is not a language alternative inside <citation-alternatives>.
-    Returns ``(mixed_text, note_text)`` in document order within each kind.
+    <note> such as 'See also:' between them. Reading all mixed-citations
+    first and the notes second would move the note after every citation, so
+    collect each child where it stands. Citations inside
+    <citation-alternatives> count at the position of that element.
     """
-    mixed_parts: list[str] = []
-    note_parts: list[str] = []
+    ordered: list[str] = []
     for child in ref:
         ln = _ln(child)
-        if ln == "mixed-citation":
+        if ln in ("mixed-citation", "note"):
             txt = _text(child)
             if txt:
-                mixed_parts.append(txt)
-        elif ln == "note":
-            txt = _text(child)
-            if txt:
-                note_parts.append(txt)
+                ordered.append(txt)
         elif ln == "citation-alternatives":
             alt_mixed = _first_desc(child, "mixed-citation")
             txt = _text(alt_mixed) if alt_mixed is not None else ""
             if txt:
-                mixed_parts.append(txt)
-    if not mixed_parts:
+                ordered.append(txt)
+    if not ordered:
         fallback = _first_desc(ref, "mixed-citation")
         if fallback is not None:
             txt = _text(fallback)
             if txt:
-                mixed_parts.append(txt)
-    return " ".join(mixed_parts).strip(), " ".join(note_parts).strip()
+                ordered.append(txt)
+    return " ".join(ordered).strip()
 
 
 # Elements that end the run of text they sit in. XML carries no whitespace of
@@ -456,14 +451,69 @@ def _choose_alternative(alt) -> tuple[object | None, str | None]:
     return target, None
 
 
-def _resolve_link_sentence(candidates, url: str, link_text: str, fallback_id: int | None):
+def _anchor_offset(pre_raw: str, lead_raw: str | None, link_text: str) -> int:
+    """Character offset where an anchor's display text starts in entry text.
+
+    *pre_raw* is the walker's raw accumulation before the anchor child;
+    entry text is that accumulation collapsed, so the collapsed prefix length
+    is the anchor's start, plus one separator space when the source spells
+    whitespace on either side of the anchor.
+    """
+    pre = collapse_ws(pre_raw)
+    if not pre or not link_text:
+        return len(pre)
+    trail = pre_raw[-1:].isspace()
+    lead = bool(lead_raw and lead_raw[:1].isspace())
+    return len(pre) + (1 if trail or lead else 0)
+
+
+def _sentence_at_offset(candidates, entry_text: str, offset: int):
+    """Return the candidate sentence covering *offset* in *entry_text*.
+
+    Sentence spans are recovered with the same progressive ``find`` the
+    assembler uses at emission, so externally-segmented sentences map back
+    onto the entry they were split from.
+    """
+    if not candidates:
+        return None
+    chosen = candidates[0]
+    cursor = 0
+    for sent in candidates:
+        found = entry_text.find(sent.text, cursor)
+        start = found if found >= 0 else cursor
+        if start <= offset:
+            chosen = sent
+        else:
+            break
+        cursor = start + len(sent.text)
+    return chosen
+
+
+def _resolve_link_sentence(
+    candidates,
+    url: str,
+    link_text: str,
+    fallback_id: int | None,
+    entry_text: str = "",
+    anchor_offset: int | None = None,
+):
     """Pick the sentence of one deferred entry that holds an anchor.
 
     Anchors are recorded per paragraph entry but emitted per sentence, so a
     pending link must resolve to the sentence holding its display text (or,
     failing that, its href) — not blindly to the entry's last sentence, which
-    duplicates URL-as-text links and misattributes named ones.
+    duplicates URL-as-text links and misattributes named ones. The anchor's
+    character offset picks its sentence directly; the text search below is
+    the fallback for links recorded without one. A plain substring search
+    would land a short anchor on the wrong sentence ('here' inside 'There'),
+    so an offset pick stands only when it carries the anchor's evidence.
     """
+    if anchor_offset is not None and entry_text:
+        picked = _sentence_at_offset(candidates, entry_text, anchor_offset)
+        if picked is not None:
+            needle = (link_text or "").strip()
+            if not needle or needle in picked.text or url in picked.text:
+                return picked
     if link_text:
         needle = link_text.strip()
         if needle:
@@ -541,6 +591,11 @@ class _Walker:
                     child_ln == "mspace" and mspace_separates(child.attrib)
                 ):
                     self.flat.separate()
+                # An anchor's offset is the accumulation before it is walked;
+                # entry text is that accumulation collapsed.
+                pre_raw = None
+                if self.on_link is not None and child_ln in ("ext-link", "uri"):
+                    pre_raw = self.flat.join()
                 if child_ln == "alternatives":
                     self._walk_alternative(child, in_math, serial)
                 elif child_ln == "tex-math":
@@ -553,12 +608,17 @@ class _Walker:
                     self.walk(child, in_math, serial, False)
                 if child_ln in _TEXT_BOUNDARY_AFTER:
                     self.flat.separate()
-                if self.on_link is not None and child_ln in ("ext-link", "uri"):
+                if pre_raw is not None:
                     href = _attr(child, "href")
                     if href:
                         url = _normalize_ext_href(child, href)
                         if url:
-                            self.on_link(url, _text(child))
+                            link_text = _text(child)
+                            self.on_link(
+                                url,
+                                link_text,
+                                _anchor_offset(pre_raw, child.text, link_text),
+                            )
             if child.tail:
                 self._add(child.tail, in_math, None, serial)
 
@@ -647,9 +707,10 @@ class JatsParser:
         self._aff_map: dict[str, str] = {}
         self._body_ref_lists: list[tuple[object, int]] = []
         # Anchor targets seen while walking paragraphs: (url, display text,
-        # section id, deferred entry index), resolved to text_ids in
-        # apply_segmentation like the HTML parser's _pending_url_links.
-        self._pending_url_links: list[tuple[str, str, int, int]] = []
+        # section id, deferred entry index, anchor offset in the entry text),
+        # resolved to text_ids in apply_segmentation like the HTML parser's
+        # _pending_url_links.
+        self._pending_url_links: list[tuple[str, str, int, int, int]] = []
         # Reference accumulation across every <ref-list> (fix: a later list
         # must extend the bibliography, not replace it). Rows and structured
         # refs collect here with one continuous bib_id counter; the
@@ -754,7 +815,12 @@ class JatsParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
-        for url, link_text, section_id, deferred_index in self._pending_url_links:
+        for pending in self._pending_url_links:
+            if len(pending) == 5:
+                url, link_text, section_id, deferred_index, anchor_offset = pending
+            else:  # links recorded without an offset fall back to text search
+                url, link_text, section_id, deferred_index = pending
+                anchor_offset = None
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
             fallback_id = self.assembler.last_text_id[deferred_index]
@@ -764,7 +830,12 @@ class JatsParser:
             candidates = by_paragraph.get(entry_para, [])
             if not candidates:
                 continue
-            sentence = _resolve_link_sentence(candidates, url, link_text, fallback_id)
+            entry_text = ""
+            if 0 <= deferred_index < len(self.assembler.entries):
+                entry_text = self.assembler.entries[deferred_index].text
+            sentence = _resolve_link_sentence(
+                candidates, url, link_text, fallback_id, entry_text, anchor_offset
+            )
             if sentence is None:
                 continue
             text_id = sentence.text_id
@@ -1149,6 +1220,17 @@ class JatsParser:
                     for member in members:
                         handle_contrib(member, nested_affs, nested_ref)
 
+        # Affiliation ids claimed by any author in <article-meta>: an xref-less
+        # author must not inherit an <aff> another author claims, even from a
+        # later <contrib-group> — the claimed set is computed once, globally.
+        all_contribs: list = []
+        for child in article_meta:
+            if _ln(child) == "contrib-group":
+                all_contribs.extend(_iter_children(child, "contrib"))
+            elif _ln(child) == "contrib":
+                all_contribs.append(child)
+        claimed_everywhere = _referenced_aff_ids(all_contribs)
+
         for child in article_meta:
             ln = _ln(child)
             if ln == "contrib-group":
@@ -1158,9 +1240,8 @@ class JatsParser:
                     (_attr(aff, "id"), self._aff_text(aff)) for aff in _iter_children(child, "aff")
                 ]
                 contribs = list(_iter_children(child, "contrib"))
-                referenced = _referenced_aff_ids(contribs)
                 for contrib in contribs:
-                    handle_contrib(contrib, group_affs, referenced)
+                    handle_contrib(contrib, group_affs, claimed_everywhere)
             elif ln == "contrib":
                 handle_contrib(child, [])
         return authors
@@ -1182,6 +1263,8 @@ class JatsParser:
         Flattening used to merge a boxed-text/statement/disp-quote's
         <label>/<title> into the paragraph, so dispatching them out of <p>
         must emit those strings, else tokens such as 'Box 1' disappear.
+        A <caption>'s own <title> is left to the recursed <caption> below,
+        which emits it once — emitting it here too would duplicate it.
         (<attrib> citation lines reach paragraphs through the regular
         recursion below.)
         """
@@ -1189,11 +1272,6 @@ class JatsParser:
             ln = _ln(child)
             if ln in ("label", "title"):
                 txt = _text(child)
-                if txt:
-                    self.assembler.append(txt, None, section_id, True, False)
-            elif ln == "caption":
-                title_el = _first_child(child, "title")
-                txt = _text(title_el) if title_el is not None else ""
                 if txt:
                     self.assembler.append(txt, None, section_id, True, False)
 
@@ -1233,8 +1311,12 @@ class JatsParser:
             # Grouping wrappers and their items — recurse; list items carry
             # <p> children, a caption carries the <p> of its own text, and a
             # table-foot <fn> carries its <p> the same way. A wrapper's own
-            # label/title/attrib is not a <p>/<sec> child, so emit it first.
-            self._emit_wrapper_heading(child, section_id)
+            # label/title is not a <p>/<sec> child, so emit it first — except
+            # for a list-item or <fn>, whose <label> is a list marker ('1.',
+            # 'a') rather than a heading: emitting it alone would add a
+            # label-only sentence the flattening never produced.
+            if ln not in ("list-item", "fn"):
+                self._emit_wrapper_heading(child, section_id)
             self._process_container(child, section_id, depth, in_paragraph=in_paragraph)
         elif ln in ("attrib", "term", "def", "preformat"):
             txt = _text(child)
@@ -1310,8 +1392,9 @@ class JatsParser:
         # still finds citation text), and on a block child flush the prose
         # so far as a paragraph entry, dispatch the child, and continue with
         # its tail. Anchor targets met along the way are attributed to the
-        # entry being accumulated.
-        links: list[tuple[str, str]] = []  # (url, display text) of this segment
+        # entry being accumulated, with the anchor's offset in that entry so
+        # apply_segmentation can place it on the sentence covering it.
+        links: list[tuple[str, str, int]] = []  # (url, display text, offset)
 
         def flush() -> None:
             txt = collapse_ws(walker.flat.join()).strip()
@@ -1321,8 +1404,8 @@ class JatsParser:
             if not txt:
                 return
             entry_idx = self.assembler.append(txt, None, section_id, True, False)
-            for url, link_text in segment_links:
-                self._pending_url_links.append((url, link_text, section_id, entry_idx))
+            for url, link_text, offset in segment_links:
+                self._pending_url_links.append((url, link_text, section_id, entry_idx, offset))
 
         def on_block(child) -> bool:
             if _ln(child) not in _P_BLOCKS:
@@ -1331,8 +1414,8 @@ class JatsParser:
             self._handle_block(child, section_id, depth, in_paragraph=True)
             return True
 
-        def on_link(url: str, link_text: str) -> None:
-            links.append((url, link_text))
+        def on_link(url: str, link_text: str, offset: int) -> None:
+            links.append((url, link_text, offset))
 
         walker = _Walker(None, on_block=on_block, on_link=on_link)
         walker.run(p)
@@ -1668,26 +1751,22 @@ class JatsParser:
             pos = self._ref_next_id
             self._ref_next_id += 1
             element_citation = _first_desc(ref, "element-citation")
-            mixed_text, note_text = _ref_mixed_and_note_texts(ref)
+            ordered_text = _ref_ordered_text(ref)
             label_el = _first_child(ref, "label")
             label_text = _text(label_el) if label_el is not None else ""
             if element_citation is not None:
                 structured = self._build_reference(element_citation, pos)
-                row = mixed_text or _citation_text(element_citation)
+                row = ordered_text or _citation_text(element_citation)
                 if label_text:
                     row = f"{label_text} {row}".strip() if row else label_text
-                if note_text:
-                    row = f"{row} {note_text}".strip() if row else note_text
                 text = row or _text(ref)
                 self._ref_structured.append(structured)
             else:
                 # No element-citation: unstructured, whatever else is there.
                 # The whole-ref fallback keeps the printed label, as before.
-                text = mixed_text
+                text = ordered_text
                 if label_text and text:
                     text = f"{label_text} {text}"
-                if note_text and text:
-                    text = f"{text} {note_text}"
                 if not text:
                     text = _text(ref)
                 self._ref_all_structured = False
