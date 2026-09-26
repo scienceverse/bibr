@@ -204,11 +204,14 @@ def test_health_poll_returns_when_server_is_ready(monkeypatch):
     monkeypatch.setattr(Settings.llm, "vllm_startup_timeout", 10)
     monkeypatch.setattr(vllm_llm.time, "monotonic", MagicMock(side_effect=[0, 1]))
     monkeypatch.setattr(vllm_llm, "request_bytes", request)
+    monkeypatch.setattr(vllm_llm, "_HEALTH_GRACE_S", 0)
 
     server._wait_until_healthy()
 
-    process.poll.assert_called_once()
-    request.assert_called_once_with("http://localhost:9999/health", timeout=5)
+    # One 200 is not readiness: the grace re-probe must agree.
+    assert process.poll.call_count == 3
+    assert request.call_count == 2
+    request.assert_called_with("http://localhost:9999/health", timeout=5)
 
 
 def test_health_poll_reports_early_process_exit(tmp_path, monkeypatch):

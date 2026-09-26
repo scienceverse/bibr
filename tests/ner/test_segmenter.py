@@ -71,18 +71,21 @@ def test_segmenter_scrubs_lone_surrogates_before_tokenizing():
 # ---------------------------------------------------------------------------
 
 
-def _stubbed_segmenter(window, stride, model):
+def _stubbed_segmenter(monkeypatch, window, stride, model):
     """RefSegmenter with stubbed torch/transformers so tests run anywhere.
 
-    Uses setdefault: a real torch install (developer machines, CI with
-    models) is never shadowed — the stubs only fill the gaps in minimal
-    environments.
+    Stubs only fill gaps (a real torch install is never shadowed) and are
+    removed afterwards via monkeypatch, so later tests in the same session
+    see the real imports.
     """
     import sys
     import types
 
-    torch_stub = sys.modules.get("torch")
-    if torch_stub is None:
+    def _install(name, module):
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, module)
+
+    if "torch" not in sys.modules:
         torch_stub = types.ModuleType("torch")
         torch_stub.tensor = lambda data, **kwargs: data
         torch_stub.ones_like = lambda data: data
@@ -95,18 +98,18 @@ def _stubbed_segmenter(window, stride, model):
 
         torch_nn.Module = _Module
         torch_stub.nn = torch_nn
-        sys.modules["torch"] = torch_stub
-        sys.modules["torch.nn"] = torch_nn
+        _install("torch", torch_stub)
+        _install("torch.nn", torch_nn)
     if "transformers" not in sys.modules:
         transformers_stub = types.ModuleType("transformers")
         transformers_stub.AutoTokenizer = object
-        sys.modules["transformers"] = transformers_stub
+        _install("transformers", transformers_stub)
     for name in ("bibr.ner.checkpoint", "bibr.ner.model"):
         if name not in sys.modules:
             sibling = types.ModuleType(name)
             sibling.resolve_checkpoint = lambda *args, **kwargs: ""
             sibling.EncoderCRFModel = object
-            sys.modules[name] = sibling
+            _install(name, sibling)
 
     from bibr.ner.segmenter import RefSegmenter
 
@@ -159,7 +162,7 @@ class _AllBRefModel:
         return [[1] * len(window)]
 
 
-def test_window_merge_trust_votes_and_ties():
+def test_window_merge_trust_votes_and_ties(monkeypatch):
     """Overlapping windows vote by interior trust; ties keep the first (ml-4).
 
     window=6, stride=3 over 10 words. Hand-computed: only absolute position 1
@@ -169,12 +172,12 @@ def test_window_merge_trust_votes_and_ties():
     """
     words = [f"w{i}" for i in range(10)]
     text = " ".join(words)
-    segmenter = _stubbed_segmenter(6, 3, _LocalZeroBRefModel())
+    segmenter = _stubbed_segmenter(monkeypatch, 6, 3, _LocalZeroBRefModel())
     refs = segmenter.segment(text)
     assert refs == ["w1"]
 
 
-def test_window_merge_drops_no_boundaries():
+def test_window_merge_drops_no_boundaries(monkeypatch):
     """A B-REF-everywhere model over many windows returns every word but the
     first (ml-4).
 
@@ -184,11 +187,11 @@ def test_window_merge_drops_no_boundaries():
     """
     words = [f"ref{i}" for i in range(25)]
     text = " ".join(words)
-    segmenter = _stubbed_segmenter(8, 6, _AllBRefModel())
+    segmenter = _stubbed_segmenter(monkeypatch, 8, 6, _AllBRefModel())
     assert segmenter.segment(text) == words[1:]
 
 
-def test_window_size_does_not_change_constant_model_output():
+def test_window_size_does_not_change_constant_model_output(monkeypatch):
     """A position-constant fake segments identically at any window size (ml-4).
 
     The shift applies uniformly to every window, so windowing only changes
@@ -196,6 +199,6 @@ def test_window_size_does_not_change_constant_model_output():
     """
     words = [f"ref{i}" for i in range(25)]
     text = " ".join(words)
-    small = _stubbed_segmenter(8, 6, _AllBRefModel()).segment(text)
-    big = _stubbed_segmenter(2048, 1536, _AllBRefModel()).segment(text)
+    small = _stubbed_segmenter(monkeypatch, 8, 6, _AllBRefModel()).segment(text)
+    big = _stubbed_segmenter(monkeypatch, 2048, 1536, _AllBRefModel()).segment(text)
     assert small == big == words[1:]
