@@ -25,9 +25,12 @@ agents get the same chew-then-query tool surface as ``bibr mcp`` (see
 - **State is per MCP session, bounded.** Each client session gets its own
   paper store (no cross-client leakage through a shared bearer key), capped
   at ``MCP_MAX_PAPERS_PER_SESSION`` and dropped with the session via weak
-  references. Sessions idle for ``MCP_SESSION_IDLE_TIMEOUT_SECONDS`` are
-  closed server-side, so a client that vanishes without ``DELETE`` cannot
-  pin its papers for the process lifetime.
+  references. A process-wide ``MCP_MAX_PAPERS_TOTAL`` cap evicts the oldest
+  paper of the oldest session past the total (reported in the chew result),
+  so session churn cannot pin gigabytes in the one API process. Sessions
+  idle for ``MCP_SESSION_IDLE_TIMEOUT_SECONDS`` are closed server-side, so
+  a client that vanishes without ``DELETE`` cannot pin its papers for the
+  process lifetime.
 
 Auth needs nothing new: the serve app's bearer middleware gates every path
 outside ``PUBLIC_PATHS``, ``/mcp`` included — clients send the same
@@ -102,22 +105,77 @@ class _SessionStores:
     session. Those Pydantic objects are unhashable, so use identity keys with
     weak references and release the store when the connection is collected.
     All callers run on the server event loop.
+
+    ``max_total_papers`` bounds papers across *all* sessions: every resolve
+    evicts the oldest paper of the oldest session while the total is over the
+    cap (a chew's own paper is added after its resolve, so it is never the
+    victim — the total overshoots by at most one paper between tool calls).
+    Evicted ids are stashed per session for the chew result to report.
     """
 
-    def __init__(self, max_papers: int) -> None:
+    def __init__(self, max_papers: int, max_total_papers: int | None = None) -> None:
         self._stores: dict[int, tuple[weakref.ReferenceType, _PaperStore]] = {}
         self._max_papers = max_papers
+        self._max_total_papers = max_total_papers
+        self._pending_evictions: dict[int, list[str]] = {}
 
-    def resolve(self, ctx: Context) -> _PaperStore:
+    @staticmethod
+    def _store_key(ctx: Context) -> int:
         client = ctx.session.client_params
         if client is None:
             raise ToolError("initialize a stateful MCP session before using paper tools")
-        key = id(client)
+        return id(client)
+
+    def _prune_dead(self) -> None:
+        for key, (ref, _store) in list(self._stores.items()):
+            if ref() is None:
+                self._stores.pop(key, None)
+                self._pending_evictions.pop(key, None)
+
+    def _enforce_total(self) -> list[str]:
+        """Evict oldest-first across sessions while over the total cap."""
+        evicted: list[str] = []
+        if self._max_total_papers is None:
+            return evicted
+        self._prune_dead()
+        while sum(len(store) for _, store in self._stores.values()) > self._max_total_papers:
+            for _key, (ref, store) in self._stores.items():
+                if ref() is None or len(store) == 0:
+                    continue
+                paper_id = store.evict_oldest()
+                if paper_id is None:
+                    continue
+                evicted.append(paper_id)
+                break
+            else:
+                break
+        return evicted
+
+    def drain_evictions(self, ctx: Context) -> list[str]:
+        """Eviction ids stashed for this session since its last chew (if any)."""
+        try:
+            key = self._store_key(ctx)
+        except ToolError:
+            return []
+        return self._pending_evictions.pop(key, [])
+
+    def resolve(self, ctx: Context) -> _PaperStore:
+        key = self._store_key(ctx)
         existing = self._stores.get(key)
-        if existing is not None and existing[0]() is client:
-            return existing[1]
-        store = _PaperStore(max_papers=self._max_papers)
-        self._stores[key] = (weakref.ref(client, lambda _ref: self._stores.pop(key, None)), store)
+        if existing is not None and existing[0]() is ctx.session.client_params:
+            store = existing[1]
+        else:
+            client = ctx.session.client_params
+            store = _PaperStore(max_papers=self._max_papers)
+            self._stores[key] = (
+                weakref.ref(client, lambda _ref: self._stores.pop(key, None)),
+                store,
+            )
+        evicted = self._enforce_total()
+        if evicted:
+            pending = self._pending_evictions.setdefault(key, [])
+            pending.extend(evicted)
+            del pending[:-32]
         return store
 
 
@@ -143,6 +201,7 @@ def build_serve_mcp(
     upload_store: UploadStore,
     tracker: InferenceDispatchTracker,
     max_papers_per_session: int,
+    max_total_papers: int | None = None,
     chew_url_enabled: bool = True,
     url_allowed_hosts: list[str] | None = None,
     admission_gate: UploadAdmissionGate | None = None,
@@ -163,7 +222,7 @@ def build_serve_mcp(
             "Start with chew_paper (upload) or chew_url (public https:// URL):",
         )
 
-    stores = _SessionStores(max_papers_per_session)
+    stores = _SessionStores(max_papers_per_session, max_total_papers=max_total_papers)
     server = MCPServer(
         "bibr",
         instructions=instructions,
@@ -248,6 +307,9 @@ def build_serve_mcp(
         pid = store.add(result, source=source)
         summary = _summarize(pid, result, source)
         summary["seconds"] = round(time.monotonic() - started, 1)
+        evicted = stores.drain_evictions(ctx)
+        if evicted:
+            summary["evicted_papers"] = evicted
         return summary
 
     @server.tool()
@@ -395,6 +457,7 @@ def mount_mcp(
         upload_store=upload_store,
         tracker=tracker,
         max_papers_per_session=settings.mcp.max_papers_per_session,
+        max_total_papers=settings.mcp.max_papers_total,
         chew_url_enabled=settings.mcp.chew_url_enabled,
         url_allowed_hosts=settings.mcp.url_allowed_hosts,
         admission_gate=admission_gate,

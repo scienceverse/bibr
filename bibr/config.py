@@ -1845,6 +1845,14 @@ class McpOptions(_BibrSettings):
         description="Chewed papers retained in memory per MCP client session; the oldest "
         "is evicted beyond this.",
     )
+    max_papers_total: int = Field(
+        128,
+        ge=1,
+        description="Chewed papers retained in memory across all MCP client sessions on "
+        "bibr serve; beyond this the oldest paper of the oldest session is evicted "
+        "(reported in the chew result as evicted_papers). Bounds the API process "
+        "against session churn. Keep above max_papers_per_session.",
+    )
     session_idle_timeout_seconds: float = Field(
         1800.0,
         ge=0,

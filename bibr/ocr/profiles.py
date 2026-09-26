@@ -205,12 +205,9 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
     server merely to discover its identity.
     """
     requested_backend = cfg.ocr_backend or settings.ocr.backend
-    backend = (
-        "glm-http"
-        if cfg.ocr_url
-        and requested_backend not in {"paddle-http", "serve-http", "gemini", "openai", "anthropic"}
-        else requested_backend
-    )
+    from bibr.ocr.registry import resolve_url_backend
+
+    backend = resolve_url_backend(requested_backend, cfg.ocr_url) or requested_backend
     model = (
         settings.ocr.paddle_served_model
         if requested_backend == "paddle-vllm"
@@ -245,19 +242,47 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
     )
 
 
-def _default_ocr_model(
+def resolve_served_family(
+    *, requested_backend: str, explicit_profile: str | None
+) -> OcrProfileName:
+    """Which model family an HTTP OCR endpoint belongs to: paddle or glm.
+
+    A single predicate shared by the served-model table below and the serve
+    defaults, so an explicit paddle profile (or a concrete paddle HTTP
+    backend) selects the Paddle served alias everywhere. The bare ``paddle``
+    automatic selector and the managed-local Paddle runtimes do not count:
+    they name no concrete server family.
+    """
+    if (explicit_profile or "") == "paddle" or requested_backend == "paddle-http":
+        return "paddle"
+    return "glm"
+
+
+def resolve_served_model(
     *,
     requested_backend: str,
     concrete_backend: str,
     settings: GlobalSettings,
     explicit_profile: str | None,
 ) -> str:
-    """Return the model string selected by the configured OCR backend."""
+    """Return the model string selected by the configured OCR backend.
+
+    The single table behind the registry startup candidates, the static
+    runtime identity, the serve defaults and ``--dry-run``: every path that
+    asks what an OCR server serves must agree. ``requested_backend`` is the
+    configured selector, ``concrete_backend`` the runtime after the
+    ``ocr_url`` rewrite.
+    """
     ocr = settings.ocr
     if concrete_backend in {"gemini", "openai", "anthropic"}:
         return ocr.model or settings.ocr_vision.model
     if concrete_backend == "serve-http":
-        if explicit_profile == "paddle" or requested_backend.startswith("paddle"):
+        if (
+            resolve_served_family(
+                requested_backend=requested_backend, explicit_profile=explicit_profile
+            )
+            == "paddle"
+        ):
             return ocr.paddle_served_model
         return ocr.model or GLM_SERVED_MODEL_ALIAS
     if concrete_backend == "glm-http":
@@ -278,3 +303,19 @@ def _default_ocr_model(
     if requested_backend == "glm-llama":
         return ocr.llama_cpp_model
     return ocr.model or ocr.local_model
+
+
+def _default_ocr_model(
+    *,
+    requested_backend: str,
+    concrete_backend: str,
+    settings: GlobalSettings,
+    explicit_profile: str | None,
+) -> str:
+    """Return the model string selected by the configured OCR backend."""
+    return resolve_served_model(
+        requested_backend=requested_backend,
+        concrete_backend=concrete_backend,
+        settings=settings,
+        explicit_profile=explicit_profile,
+    )

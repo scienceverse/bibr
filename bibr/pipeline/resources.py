@@ -375,9 +375,9 @@ class ResourceManager:
         if backend_name != "serve-http" and backend_name not in known:
             raise ValueError(f"Unknown OCR backend: {backend_name!r}. Known: {known}")
 
-        if self.ocr_url and backend_name not in ("glm-http", "paddle-http", "serve-http"):
-            return "glm-http"
-        return backend_name
+        from bibr.ocr.registry import resolve_url_backend
+
+        return resolve_url_backend(backend_name, self.ocr_url) or backend_name
 
     _VISION_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
 
@@ -531,7 +531,23 @@ class ResourceManager:
                     client = await self._construct_ocr_candidate(candidate)
                     if client is None:
                         raise RuntimeError("factory returned no client")
-                    await self._await_ocr_client_ready(client)
+                    try:
+                        await self._await_ocr_client_ready(client)
+                    except Exception:
+                        # A readiness-gated HTTP backend (serve-http) owns a
+                        # cross-request cooldown: publish the failed instance
+                        # so later requests fail fast on its cooldown instead
+                        # of rebuilding and re-polling for the full timeout.
+                        # Local engines have no such gate — a broken one must
+                        # be discarded, never reused.
+                        if client is not None and hasattr(client, "wait_for_server"):
+                            self._ocr = client
+                            try:
+                                self._set_ocr_runtime_identity(candidate)
+                            except Exception:
+                                # Provenance only; never mask the readiness error.
+                                logger.warning("OCR runtime identity unavailable", exc_info=True)
+                        raise
                 except BaseException as exc:  # dispose unpublished clients on cancellation too
                     try:
                         await await_owned(self._shutdown_client(client))

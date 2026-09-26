@@ -473,6 +473,34 @@ class TestWaitForServer:
         assert "unavailable" in str(cooled.value)
 
     @pytest.mark.asyncio
+    async def test_unauthorized_names_the_key_not_the_model(self, caplog):
+        """A 401 on /v1/models means the key is wrong; the failure must say
+        so instead of pointing at the model alias."""
+        from bibr.exceptions import UpstreamServiceError
+
+        async def handler(request):
+            return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://ocr.internal.example"
+        )
+        backend = BibrServeOcrBackend(
+            base_url="http://ocr.internal.example:8080",
+            http_client=client,
+            sem_global=asyncio.Semaphore(1),
+            sem_per_file=asyncio.Semaphore(1),
+            breaker=AsyncCircuitBreaker(failure_threshold=3, reset_timeout=60, name="t"),
+            ready_poll_interval=0.01,
+            ready_timeout=0.05,
+        )
+        with caplog.at_level("ERROR", logger="bibr.serve.ocr_backend"):
+            with pytest.raises(UpstreamServiceError) as exc_info:
+                await backend.wait_for_server()
+        assert "401" in str(exc_info.value)
+        logged = " ".join(r.getMessage() for r in caplog.records)
+        assert "401" in logged
+
+    @pytest.mark.asyncio
     async def test_unreachable_server_error_names_no_endpoint(self):
         from bibr.exceptions import UpstreamServiceError
 

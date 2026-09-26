@@ -23,6 +23,7 @@ from fastapi import HTTPException
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, SafeLlmDiagnostics
 from bibr.serve.ingress import UploadIntegrityError, consume_upload_descriptor
+from bibr.serve.jobs import _sanitize_request_id
 from bibr.serve.logsetup import configure_worker_logging
 
 if TYPE_CHECKING:
@@ -34,6 +35,15 @@ logger = logging.getLogger(__name__)
 # ``bibr.serve.metering`` logger (same logger the HTTP middleware in serve.app
 # uses for per-request records).
 _metering_logger = logging.getLogger("bibr.serve.metering")
+
+
+def _link_id(raw: object) -> str | None:
+    """Sanitize an optional linkage id from an upload descriptor.
+
+    The API wrote these ids itself (request id, job id); anything unexpected
+    becomes None rather than failing the request.
+    """
+    return _sanitize_request_id(raw) if isinstance(raw, str) else None
 
 
 def _emit_extract_metric(
@@ -48,6 +58,8 @@ def _emit_extract_metric(
     settings: GlobalSettings,
     error_code: str | None = None,
     safe_diagnostics: SafeLlmDiagnostics | None = None,
+    request_id: str | None = None,
+    job_id: str | None = None,
 ) -> None:
     """Emit one ``event="extract"`` JSON line for an extraction attempt.
 
@@ -84,6 +96,8 @@ def _emit_extract_metric(
         json.dumps(
             {
                 "event": "extract",
+                "request_id": request_id,
+                "job_id": job_id,
                 "file_hash": file_hash,
                 "filename": filename,
                 "duration_ms": duration_ms,
@@ -521,6 +535,8 @@ class BibrPipelineAPI(ls.LitAPI):
             "consolidate": consolidate,
             "refs": refs,
             "ref_seg": ref_seg,
+            "request_id": _link_id(request.get("request_id")),
+            "job_id": _link_id(request.get("job_id")),
         }
 
     @staticmethod
@@ -591,6 +607,8 @@ class BibrPipelineAPI(ls.LitAPI):
             file_hash=file_hash,
             filename=filename,
             started_at=cache_start,
+            request_id=inputs.get("request_id"),
+            job_id=inputs.get("job_id"),
         )
         if cached_response is not None:
             return cached_response
@@ -609,6 +627,8 @@ class BibrPipelineAPI(ls.LitAPI):
                 file_hash=file_hash,
                 filename=filename,
                 started_at=cache_start,
+                request_id=inputs.get("request_id"),
+                job_id=inputs.get("job_id"),
             )
             if cached_response is not None:
                 return cached_response
@@ -677,7 +697,19 @@ class BibrPipelineAPI(ls.LitAPI):
                 except Exception:
                     logger.warning("Failed to release distributed cache lease", exc_info=True)
 
-        deadline = time.monotonic() + self._settings.cache.singleflight_wait_seconds
+        # A real extraction runs up to PIPELINE_TIMEOUT (plus queueing on the
+        # in-flight semaphore, which the owner holds its lease through), so a
+        # waiter that gives up after the flat singleflight_wait_seconds almost
+        # always pays the wait AND a duplicate extraction. Unless the operator
+        # set an explicit wait, the budget follows the pipeline timeout; the
+        # owner's lease (renewed every 30 s against a 120 s TTL) is the
+        # liveness signal, and its disappearance means the owner died without
+        # publishing — take over at once instead of waiting out the budget.
+        if "singleflight_wait_seconds" in self._settings.cache.model_fields_set:
+            wait_budget = self._settings.cache.singleflight_wait_seconds
+        else:
+            wait_budget = float(self._settings.pipeline.timeout)
+        deadline = time.monotonic() + wait_budget
         poll_seconds = self._settings.cache.singleflight_poll_interval_ms / 1000
         while time.monotonic() < deadline:
             await asyncio.sleep(poll_seconds)
@@ -687,6 +719,8 @@ class BibrPipelineAPI(ls.LitAPI):
                     file_hash=file_hash,
                     filename=filename,
                     started_at=started_at,
+                    request_id=inputs.get("request_id"),
+                    job_id=inputs.get("job_id"),
                 )
             except Exception:
                 logger.warning("Distributed cache wait failed; extracting normally", exc_info=True)
@@ -703,6 +737,28 @@ class BibrPipelineAPI(ls.LitAPI):
                     settings=self._settings,
                 )
                 return cached_response
+            try:
+                lease_alive = await asyncio.wait_for(
+                    self._cache.lease_alive(cache_key),
+                    timeout=self._settings.cache.operation_timeout_seconds,
+                )
+            except Exception:
+                logger.warning(
+                    "Distributed cache lease check failed; extracting normally", exc_info=True
+                )
+                _emit_singleflight_metric(
+                    "redis_error_fallback",
+                    cache_key=cache_key,
+                    settings=self._settings,
+                )
+                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+            if not lease_alive:
+                _emit_singleflight_metric(
+                    "owner_gone_fallback",
+                    cache_key=cache_key,
+                    settings=self._settings,
+                )
+                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
 
         _emit_singleflight_metric(
             "timeout_fallback",
@@ -758,6 +814,8 @@ class BibrPipelineAPI(ls.LitAPI):
         file_hash: str,
         filename: str,
         started_at: float,
+        request_id: str | None = None,
+        job_id: str | None = None,
     ) -> dict | None:
         cached = await self._bounded_cache_call(self._cache.get(cache_key), what="get")
         if not cached:
@@ -783,6 +841,8 @@ class BibrPipelineAPI(ls.LitAPI):
             error_kind=None,
             result_json=paper_json,
             settings=self._settings,
+            request_id=request_id,
+            job_id=job_id,
         )
         return {
             "success": True,
@@ -853,6 +913,8 @@ class BibrPipelineAPI(ls.LitAPI):
                 error_kind="timeout",
                 result_json=None,
                 settings=self._settings,
+                request_id=inputs.get("request_id"),
+                job_id=inputs.get("job_id"),
             )
             raise HTTPException(status_code=504, detail="Pipeline processing timed out") from None
         except HTTPException:
@@ -871,6 +933,8 @@ class BibrPipelineAPI(ls.LitAPI):
                 settings=self._settings,
                 error_code=failure.get("error_code"),
                 safe_diagnostics=safe_diagnostics,
+                request_id=inputs.get("request_id"),
+                job_id=inputs.get("job_id"),
             )
             return failure
 
@@ -890,6 +954,8 @@ class BibrPipelineAPI(ls.LitAPI):
             error_kind=None,
             result_json=result_json,
             settings=self._settings,
+            request_id=inputs.get("request_id"),
+            job_id=inputs.get("job_id"),
         )
         return {
             "success": True,

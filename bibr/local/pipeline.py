@@ -251,11 +251,14 @@ class LocalPipeline(Pipeline):
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
         requested_backend = ocr_backend or configured_backend
-        if ocr_url and requested_backend not in {"paddle-http", "serve-http"}:
-            # A supplied URL is the established explicit remote-GLM contract;
-            # resolve it before the local automatic selector can attach Paddle
-            # identity or cache provenance to that request.
-            ocr_backend = "glm-http"
+        if ocr_url:
+            # A supplied URL names an external server, so a managed-local
+            # runtime can never start against it. One shared rule
+            # (``resolve_url_backend``) selects the GLM HTTP compatibility
+            # path unless the request already names a remote endpoint.
+            from bibr.ocr.registry import resolve_url_backend
+
+            ocr_backend = resolve_url_backend(requested_backend, ocr_url) or "glm-http"
         else:
             automatic_paddle = ocr_backend == "paddle" or (
                 ocr_backend is None

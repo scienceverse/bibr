@@ -152,7 +152,7 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ocr-url",
-        help="URL for external OCR server (default profile: Paddle; --ocr glm-http keeps GLM)",
+        help="URL for external OCR server (default profile: GLM; --ocr paddle-http selects Paddle)",
     )
     parser.add_argument(
         "--ocr-model",

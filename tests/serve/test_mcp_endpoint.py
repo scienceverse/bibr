@@ -458,6 +458,49 @@ def test_paper_store_evicts_oldest_beyond_cap():
     assert [pid for pid, _ in store.items()] == ["two", "three"]
 
 
+def _session_ctxs(n):
+    class _Session:
+        """Weakref-able stand-in for an MCP ServerSession."""
+
+    class _Ctx:
+        def __init__(self, session):
+            self.session = type("SessionProxy", (), {"client_params": session})()
+
+    sessions = [_Session() for _ in range(n)]
+    return [_Ctx(s) for s in sessions]
+
+
+def test_session_stores_enforce_a_process_wide_cap():
+    """Session churn cannot pin unbounded exports: past the total cap the
+    oldest paper of the oldest session goes, and the ids are reported."""
+    stores = _SessionStores(max_papers=4, max_total_papers=3)
+    ctxs = _session_ctxs(3)
+    held = {}
+    for i, ctx in enumerate(ctxs):
+        for j in range(2):
+            store = stores.resolve(ctx)
+            store.add(_fixture_data(), source=f"s{i}-p{j}.pdf", requested_id=f"s{i}-p{j}")
+            held[i] = store
+    total = sum(len(store) for _, store in stores._stores.values())
+    assert total <= 4  # cap, plus the in-flight chew's own paper
+    assert [pid for pid, _ in held[0].items()] == []
+    assert [pid for pid, _ in held[1].items()] == ["s1-p0", "s1-p1"]
+    assert [pid for pid, _ in held[2].items()] == ["s2-p0", "s2-p1"]
+    assert stores.drain_evictions(ctxs[2]) == ["s0-p0", "s0-p1"]
+
+
+def test_session_stores_without_total_cap_keep_everything():
+    """Guard: with no total cap, sessions stay isolated and unbounded."""
+    stores = _SessionStores(max_papers=4)
+    ctxs = _session_ctxs(3)
+    for i, ctx in enumerate(ctxs):
+        for j in range(2):
+            stores.resolve(ctx).add(
+                _fixture_data(), source=f"s{i}-p{j}.pdf", requested_id=f"s{i}-p{j}"
+            )
+    assert sum(len(store) for _, store in stores._stores.values()) == 6
+
+
 # ---------------------------------------------------------------------------
 # Streamable-HTTP integration: mount + auth gate + protocol round-trip
 # ---------------------------------------------------------------------------

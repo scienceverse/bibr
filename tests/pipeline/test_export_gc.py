@@ -1,8 +1,9 @@
-"""ExportStage's throttled gc.collect() must run off the event loop.
+"""ExportStage's throttled gc sweep must stay short and off the event loop.
 
-gc.collect() holds the GIL for the whole sweep; on the event loop that stalls
-every concurrent serve request. It must run in a thread executor instead, while
-keeping the existing once-per-window throttle.
+A full gc.collect() holds the GIL for the whole sweep, so a worker thread
+cannot spare the loop during one. The stage therefore sweeps only the young
+generations (the old one is left to automatic GC), throttled to once per
+window, and runs even that pass in a thread executor.
 """
 
 import gc
@@ -39,3 +40,16 @@ async def test_maybe_gc_collect_respects_throttle(monkeypatch):
 
     await stage._maybe_gc_collect()
     assert calls["n"] == 0, "must not collect again within the throttle window"
+
+
+async def test_maybe_gc_collect_sweeps_only_young_generations(monkeypatch):
+    """x-concurrency-6: a full sweep holds the GIL throughout, so the stage
+    must ask for generation 1, leaving old-gen cycles to automatic GC."""
+    stage = ExportStage()
+    stage._last_gc_time = -1e9  # far in the past → not throttled
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(gc, "collect", lambda *a: calls.append(a) or 0)
+
+    await stage._maybe_gc_collect()
+    assert calls == [(1,)], f"expected one young-generation sweep, got {calls}"

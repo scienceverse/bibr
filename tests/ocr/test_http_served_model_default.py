@@ -80,3 +80,59 @@ def test_dry_run_preview_matches_the_resolved_identity(settings):
 
     identity = resolve_ocr_runtime_identity(RunConfig(ocr_backend="glm-http"), settings)
     assert _OCR_HTTP_DEFAULT_SERVED_NAME["glm-http"] == identity.model
+
+
+def test_serve_http_with_paddle_profile_agrees_on_the_paddle_alias(settings):
+    """The ocr-5 mismatch: candidates, static identity and serve defaults must
+    ask a Paddle serve-http endpoint for the Paddle served alias, not glm-ocr."""
+    from bibr.serve.pipeline import serve_ocr_defaults
+
+    settings.ocr.profile = "paddle"
+    expected = settings.ocr.paddle_served_model
+
+    candidates = resolve_backend_candidates("serve-http", settings)
+    assert candidates[0].model == expected
+
+    identity = resolve_ocr_runtime_identity(RunConfig(ocr_backend="serve-http"), settings)
+    assert identity.backend == "serve-http"
+    assert identity.model == expected
+    assert identity.profile == "paddle"
+
+    assert serve_ocr_defaults(settings) == (expected, "paddle")
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (None, "glm-http"),
+        ("paddle", "glm-http"),
+        ("glm", "glm-http"),
+        ("glm-llama", "glm-http"),
+        ("paddle-vllm", "glm-http"),
+        ("glm-http", "glm-http"),
+        ("paddle-http", "paddle-http"),
+        ("serve-http", "serve-http"),
+        ("gemini", "gemini"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+    ],
+)
+def test_url_rewrite_sends_local_runtimes_to_glm_http(requested, expected):
+    """The ocr-8 single rule: a URL names an external server, so managed-local
+    runtimes rewrite to the GLM compatibility path; remote endpoints stay."""
+    from bibr.ocr.registry import resolve_url_backend
+
+    url = "http://ocr.internal:8002"
+    assert resolve_url_backend(requested, url) == expected
+    assert resolve_url_backend(requested, None) == requested
+
+
+def test_cli_and_library_agree_on_a_bare_url():
+    """A bare ``--ocr-url`` / ``ocr_url`` selects glm-http on both surfaces."""
+    from bibr.local.cli import _build_parser
+    from bibr.local.cli.run_config import resolve_run_config
+    from bibr.ocr.registry import resolve_url_backend
+
+    args = _build_parser().parse_args(["chew", "paper.pdf", "--ocr-url", "http://host:8080"])
+    assert resolve_run_config(args).ocr_backend == "glm-http"
+    assert resolve_url_backend(None, "http://host:8080") == "glm-http"

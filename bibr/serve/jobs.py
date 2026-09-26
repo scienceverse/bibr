@@ -593,6 +593,14 @@ def register_job_routes(
             # Upload is on disk; free the admission slot before queueing.
             release_spool_slot(request)
             descriptor = stored.to_descriptor(form_values)
+            request_id = getattr(request.state, "request_id", None)
+            if request_id is not None:
+                # Link the worker-side extract record back to this request's
+                # per-request metering record (serve-8).
+                descriptor["request_id"] = request_id
+            # The job id links the worker-side extract record to the job the
+            # client polls; the handoff ignores unknown keys.
+            descriptor["job_id"] = job.job_id
             await _job_dispatcher().submit(
                 job.job_id,
                 JobPayload(descriptor=descriptor),

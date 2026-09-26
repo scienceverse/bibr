@@ -16,11 +16,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# gc.collect() holds the GIL for the whole pass, stalling the event loop —
-# in serve mode every request is one chunk, so an unconditional collect per
-# chunk stacks loop stalls under load. Throttle to one full collect per
-# window; refcounting already frees the big DataFrames immediately, the
-# collect only mops up cycles.
+# A full gc.collect() holds the GIL for the whole sweep, so offloading it to
+# a thread does NOT spare the event loop — in serve mode every request is one
+# chunk, and an unconditional full collect per chunk would stall co-resident
+# requests under load. Throttle to one bounded collect per window and only
+# sweep the young generations: refcounting already frees the big DataFrames
+# immediately, automatic GC still amortizes the old generation, and the
+# young-gen pass stays short even on a large heap.
 _GC_MIN_INTERVAL_SECONDS = 30.0
 
 # Per-file timings that overlap another stage's wall clock and therefore must
@@ -253,12 +255,15 @@ class ExportStage:
         if now - self._last_gc_time < _GC_MIN_INTERVAL_SECONDS:
             return
         self._last_gc_time = now
-        # gc.collect() holds the GIL for the whole sweep; run it in a thread so
-        # the event loop keeps servicing other in-flight requests meanwhile.
+        # Sweep only the young generations. A full sweep holds the GIL for its
+        # whole pass, so a thread cannot keep the loop responsive during one;
+        # the young-gen pass stays short, and the old generation is left to
+        # automatic GC. Run it off the loop thread so refcount churn and
+        # allocator work here don't interleave with request callbacks.
         import asyncio
 
         loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, gc.collect)
+        await loop.run_in_executor(None, gc.collect, 1)
 
     async def run(self, ctx: PipelineContext) -> None:
         ctx.progress.stage_start(self.name)

@@ -211,6 +211,71 @@ async def test_await_ocr_no_preload_loads_sync():
 
 
 @pytest.mark.asyncio
+async def test_readiness_failure_without_self_gate_discards_client():
+    """Guard: only a readiness-gated HTTP backend is kept after a readiness
+    failure — a plain client must still be discarded, never reused."""
+    rm = ResourceManager(ocr_backend="glm-llama")
+    broken = MagicMock(spec=["loaded", "shutdown"], loaded=True)
+    broken.shutdown = AsyncMock()
+    with patch.object(rm, "_create_ocr_client", return_value=broken):
+        ready = AsyncMock(side_effect=RuntimeError("not ready"))
+        with patch.object(rm, "_await_ocr_client_ready", new=ready):
+            with pytest.raises(RuntimeError, match="not ready"):
+                await rm.await_ocr()
+    assert rm._ocr is None
+
+
+@pytest.mark.asyncio
+async def test_serve_http_readiness_failure_cools_down_across_requests():
+    """x-concurrency-2: after one full readiness poll fails, the failed
+    serve-http backend is kept so its own cooldown fail-fasts the next
+    request instead of re-polling for another full timeout."""
+    import httpx
+
+    from bibr.config import GlobalSettings
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.serve import ocr_backend as _serve_ocr_backend  # noqa: F401 — registers serve-http
+    from bibr.utils.circuit_breaker import AsyncCircuitBreaker
+
+    polls = {"n": 0}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        polls["n"] += 1
+        return httpx.Response(503, json={"error": {"message": "model loading"}})
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://ocr.local"
+    )
+    settings = GlobalSettings(pipeline={"deployment_ready_timeout": 1})
+    rm = ResourceManager(
+        ocr_backend="serve-http",
+        ocr_url="http://ocr.local",
+        http_client=http_client,
+        ocr_sem_global=asyncio.Semaphore(4),
+        ocr_breaker=AsyncCircuitBreaker(failure_threshold=3, reset_timeout=60, name="t"),
+        settings=settings,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(UpstreamServiceError):
+        await rm.await_ocr()
+    assert time.monotonic() - started >= 1.0
+    polls_after_first = polls["n"]
+    assert polls_after_first >= 1
+
+    # The next request reuses the failed backend and fails fast on its
+    # cooldown — no new /v1/models polls (OcrStage then surfaces the
+    # cooldown via rm.ocr.wait_for_server()).
+    started = time.monotonic()
+    await rm.await_ocr()
+    assert time.monotonic() - started < 1.0
+    assert polls["n"] == polls_after_first
+    assert rm.ocr is not None
+    with pytest.raises(UpstreamServiceError, match="retried"):
+        await rm.ocr.wait_for_server()
+
+
+@pytest.mark.asyncio
 async def test_automatic_paddle_falls_back_only_during_startup_and_records_identity(monkeypatch):
     """Constructor/readiness failures release owned clients before trying the next runtime."""
     rm = ResourceManager(ocr_backend="paddle")

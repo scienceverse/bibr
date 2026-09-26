@@ -162,11 +162,22 @@ class ResponseCache:
     ) -> RedisLease | None:
         """Atomically acquire a token-owned flight lease, or return ``None``."""
         token = ownership_id or uuid.uuid4().hex
-        lease_key = f"{self._prefix}:flight:{key}"
+        lease_key = self._flight_key(key)
         acquired = await self._redis.set(lease_key, token, nx=True, ex=ttl_seconds)
         if not acquired:
             return None
         return RedisLease(self._redis, lease_key, token, ttl_seconds)
+
+    def _flight_key(self, key: str) -> str:
+        return f"{self._prefix}:flight:{key}"
+
+    async def lease_alive(self, key: str) -> bool:
+        """Whether another replica still holds the flight lease for ``key``.
+
+        Raises on Redis errors — waiters treat that as fail-open (extract
+        normally) rather than as an owner death.
+        """
+        return bool(await self._redis.exists(self._flight_key(key)))
 
     async def close(self) -> None:
         """Shut down the Redis connection."""

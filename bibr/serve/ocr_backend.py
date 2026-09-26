@@ -130,10 +130,12 @@ class BibrServeOcrBackend:
                 "Waiting up to %ds for OCR server at %s…", self._ready_timeout, self._base_url
             )
             host_was_unreachable = False
+            last_status: int | None = None
             observed_model_ids: list[str] = []
             while time.monotonic() < deadline:
                 try:
                     resp = await self._http.get(f"{self._base_url}/v1/models", timeout=5.0)
+                    # Any response proves the host is up, whatever its status.
                     host_was_unreachable = False
                     if resp.status_code == 200:
                         data = resp.json()
@@ -142,6 +144,11 @@ class BibrServeOcrBackend:
                             self._ready = True
                             logger.info("OCR server ready at %s", self._base_url)
                             return
+                    else:
+                        # A non-200 answer still proves the host is up; remember
+                        # which status so the failure names the key (401), not
+                        # the model alias.
+                        last_status = resp.status_code
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     host_was_unreachable = True
                 except Exception:  # noqa: S110
@@ -157,6 +164,17 @@ class BibrServeOcrBackend:
                     self._ready_timeout,
                 )
                 raise UpstreamServiceError("ocr", "OCR server is unreachable.")
+            if last_status == 401:
+                logger.error(
+                    "OCR server at %s returned 401 (unauthorized — check OCR_API_KEY); "
+                    "observed model ids: %r",
+                    self._base_url,
+                    observed_model_ids,
+                )
+                raise UpstreamServiceError(
+                    "ocr",
+                    "OCR server unauthorized (401): check OCR_API_KEY.",
+                )
             logger.error(
                 "OCR server at %s did not serve model %r within %.0fs; observed model ids: %r",
                 self._base_url,
