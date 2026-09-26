@@ -4,12 +4,15 @@ A field's value used to be written by whichever step ran last: the model's
 answer, a grounding repair, a fallback that fills an empty field, a guard that
 blanks one. Producers now propose :class:`FieldCandidate` values instead, one
 rule per field picks among them, and :func:`apply_decision` — the only code
-that assigns these ``PaperMetadata`` fields once the record exists — writes the
-chosen value and keeps the :class:`FieldDecision` as the field's receipt: every
-candidate considered, the one used, and the rule that decided.
+that assigns these ``PaperMetadata`` fields (:data:`FIELD_ATTRIBUTES`) once
+the record exists — writes the chosen value and keeps the
+:class:`FieldDecision` as the field's receipt: every candidate considered, the
+one used, and the rule that decided. The DOI is the identity stage's, and the
+fields a record is built with (volume, pages, identifiers, ...) have one
+producer each.
 
-A field is decided where its last candidate becomes known, exactly once per
-paper:
+A field is decided where its last candidate becomes known, at most once per
+paper (a run without an LLM decides no structured funding or affiliations):
 
 * the core extractor decides the fields only it produces — authors, the
   publication date, journal, publisher and paper type — and proposes the

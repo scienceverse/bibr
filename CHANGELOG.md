@@ -36,18 +36,29 @@ export is still valid input for the 12.x reader, `bibr.validation`'s
 
 ### Changed — one decision point per metadata field
 
-- Every metadata field other than the DOI is decided once, by one rule in
-  `bibr.extract.field_decisions`, from the candidates its producers propose:
-  the model's answer and its grounding repairs, the selected-record and layout
-  title fallbacks, the unclassified-heading scan, the Abstract and Keywords
-  sections, the PDF doc-info, the empty-author recovery and the CRediT
-  statement, the paper classifier and its LLM relabel, the correction-notice
-  guard, and the integrity-statement resolution. Only that module writes these
-  fields once the record exists, and a test fails when another does. The rules
-  keep the precedence the scattered write sites had, so no exported value
-  changes. Each field's receipt (the candidates considered, the one used, the
-  repairs applied to it and the rule) is kept on `Paper.field_decisions`, and
-  `extraction.fields` takes its `source` and `rule` from it.
+- The title, authors, abstract, keywords, publication date, journal,
+  publisher, paper type (with the OECD fields), the four research-integrity
+  statements, structured funding and parsed affiliations are each decided
+  once, by one rule in `bibr.extract.field_decisions`, from the candidates their
+  producers propose: the model's answer and its grounding repairs, the
+  selected-record and layout title fallbacks, the unclassified-heading scan,
+  the Abstract and Keywords sections, the PDF doc-info, the empty-author
+  recovery and the CRediT statement, the paper classifier and its LLM relabel,
+  the correction-notice guard, and the integrity-statement resolution. Once the
+  record exists that module is their only writer, and a test fails when
+  another module assigns them. Not covered: the DOI, which the identity stage
+  decides; the fields a record is built with (volume, issue, pages, ISSN,
+  licence, language and the identifiers), which have one producer each; the
+  JATS and HTML readers, which build the record they hand over; and structured
+  funding and affiliations in a run without an LLM, where nothing parses them.
+  The rules keep the precedence of the write sites they replace, so exported
+  values are unchanged except one provenance case: when the author call fails
+  and the empty-author recovery returns only a translator credit,
+  `extraction.fields.author.source` now names the step that failed (`llm`)
+  instead of `llm_recovery`. Each field's receipt (the candidates considered,
+  the one used, the repairs applied to it and the rule) is kept on
+  `Paper.field_decisions`, and `extraction.fields` takes its `source` and
+  `rule` from it.
 
 ### Changed — export schema 12.0 (breaking)
 
