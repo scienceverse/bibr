@@ -22,6 +22,39 @@ _NUMBERED_PAREN_RE = re.compile(r"^(\(|\uff08)(\d+|[A-Za-z])(\)|\uff09)(.+)$")
 # "1.text" or "1)text" or "A)text" → "1. text" etc.
 _NUMBERED_DOT_RE = re.compile(r"^(\d+|[A-Za-z])(\.|\)|\uff09)(.+)$")
 
+# A leading literal "\t" is a GLM-OCR tab artifact in prose, but in a formula
+# it is the start of \theta, \tau, \text, \tilde or \times.  Formula regions
+# strip a leading one only when no command name follows.  A trailing one
+# cannot start a command, so every region strips it the same way.
+_LEADING_TAB_RE = re.compile(r"^(\\t)+")
+_TRAILING_TAB_RE = re.compile(r"(\\t)+$")
+_FORMULA_LEADING_TAB_RE = re.compile(r"^(?:\\t(?![A-Za-z]))+")
+
+# Punctuation that attaches to the token before it: a space in front of it
+# would split "(1)–(3)" or "(a), (b)".
+_ATTACHED_PUNCTUATION = frozenset(",.;:!?)]}…-–—_^/\\%")
+
+
+def _is_list_marker_rest(rest: str, sep: str) -> bool:
+    """Whether *rest* can follow a list marker the OCR glued to its text.
+
+    "1.text", "(1)12 participants" and "(a)“Always”" are list items.  After a
+    period, though, a digit continues a number ("3.14", "10.1038/…",
+    "0.5\\sum") and a letter carrying its own period is an abbreviation
+    ("U.S. Adults", "e.g. the", "i.e., the"); a space would split those.  A
+    closing parenthesis starts neither, so a word, digit or quote may follow
+    it.  Punctuation that attaches to the marker ("(1)–(3)") is never split
+    off, and whitespace after the marker is only normalised to one space.
+    """
+    first = rest[0]
+    if first.isspace():
+        return True
+    if first in _ATTACHED_PUNCTUATION:
+        return False
+    if sep == ".":
+        return not first.isdigit() and not (first.isalpha() and rest[1:2] == ".")
+    return True
+
 
 def _has_repeated_ngram(s: str, unit_len: int, min_repeats: int) -> bool:
     """Exact O(n) precondition for the consecutive-repeat search below.
@@ -44,10 +77,11 @@ def _find_consecutive_repeat(
     min_unit_len: int = 10,
     min_repeats: int = 10,
 ) -> str | None:
-    """Find and truncate consecutive repeated patterns.
+    """Find and collapse the first run of consecutive repeated patterns.
 
-    Returns the string with the repetition replaced by a single occurrence,
-    or ``None`` if no repeats were found.
+    Returns the string with the repetition replaced by a single occurrence —
+    the text before and after the run is kept — or ``None`` if no repeats
+    were found.
     """
     n = len(s)
     if n < min_unit_len * min_repeats:
@@ -77,9 +111,19 @@ def _find_consecutive_repeat(
         re.DOTALL,
     )
     match = pattern.search(search_s)
-    if match:
-        return s[: match.start()] + match.group(1)
-    return None
+    if match is None:
+        return None
+    # Keep the text after the run: dropping it cut a dot-leader table of
+    # contents to its first entry. A decode loop can run on past the searched
+    # window, so its copies beyond the window go too, and so does a final
+    # partial copy where the model hit its token cap.
+    unit = match.group(1)
+    end = match.end()
+    while s.startswith(unit, end):
+        end += len(unit)
+    if unit.startswith(s[end:]):
+        end = n
+    return s[: match.start()] + unit + s[end:]
 
 
 def _clean_repeated_content(
@@ -133,7 +177,7 @@ def _clean_repeated_content(
     return content
 
 
-def clean_ocr_content(content: str) -> str:
+def clean_ocr_content(content: str, *, formula: bool = False) -> str:
     r"""Clean raw OCR output text.
 
     Ported from vendored ``ResultFormatter._clean_content``:
@@ -142,35 +186,50 @@ def clean_ocr_content(content: str) -> str:
     * Collapse runs of repeated punctuation (``....`` → ``...``).
     * Remove hallucinated repeated content for long strings (>2048 chars).
     * Normalise numbered-list items (``(1)text`` → ``(1) text``).
+
+    Only OCR output needs this: text taken from the PDF text layer carries
+    none of these artifacts. ``formula=True`` marks LaTeX from a formula
+    region. There a leading ``\t`` is only stripped when no command name
+    follows it (``\theta``, ``\text``), and the punctuation and list-marker
+    steps are skipped: they repair prose rendering, and in LaTeX they only
+    change bytes (``(a)_{n}`` → ``(a) _{n}``). The repeat trimmer still runs,
+    since formula decoding loops too.
     """
     if not content:
         return content
 
     # 1. Strip leading/trailing literal \t
-    result = re.sub(r"^(\\t)+", "", content).lstrip()
-    result = re.sub(r"(\\t)+$", "", result).rstrip()
+    leading = _FORMULA_LEADING_TAB_RE if formula else _LEADING_TAB_RE
+    result = leading.sub("", content).lstrip()
+    result = _TRAILING_TAB_RE.sub("", result).rstrip()
 
     # 2. Collapse repeated punctuation
-    result = re.sub(r"(\.)\1{2,}", r"\1\1\1", result)
-    result = re.sub(r"(\u00b7)\1{2,}", r"\1\1\1", result)  # middle dot
-    result = re.sub(r"(_)\1{2,}", r"\1\1\1", result)
-    result = re.sub(r"(\\_)\1{2,}", r"\1\1\1", result)
+    if not formula:
+        result = re.sub(r"(\.)\1{2,}", r"\1\1\1", result)
+        result = re.sub(r"(\u00b7)\1{2,}", r"\1\1\1", result)  # middle dot
+        result = re.sub(r"(_)\1{2,}", r"\1\1\1", result)
+        result = re.sub(r"(\\_)\1{2,}", r"\1\1\1", result)
 
     # 3. Remove hallucinated repeated content (long strings only)
     if len(result) >= 2048:
         result = _clean_repeated_content(result)
 
     # 4. Normalise numbered-list formatting
+    if formula:
+        return result.strip()
+    #    Full-width parentheses become ASCII whether or not a space goes in.
     m = _NUMBERED_PAREN_RE.match(result)
     if m:
         _, symbol, _, rest = m.groups()
-        result = f"({symbol}) {rest.lstrip()}"
-    else:
-        m = _NUMBERED_DOT_RE.match(result)
-        if m:
-            symbol, sep, rest = m.groups()
-            sep = ")" if sep == "\uff09" else sep
-            result = f"{symbol}{sep} {rest.lstrip()}"
+        marker, sep = f"({symbol})", ")"
+    elif m := _NUMBERED_DOT_RE.match(result):
+        symbol, sep, rest = m.groups()
+        sep = ")" if sep == "\uff09" else sep
+        marker = f"{symbol}{sep}"
+    if m:
+        result = (
+            f"{marker} {rest.lstrip()}" if _is_list_marker_rest(rest, sep) else f"{marker}{rest}"
+        )
 
     return result.strip()
 
@@ -326,6 +385,10 @@ def merge_text_blocks(json_page_results: list[dict[str, Any]]) -> list[dict[str,
                                 merged_content = content_stripped[:-1] + next_content.lstrip()
                                 merged_block = block.copy()
                                 merged_block["content"] = merged_content
+                                # The merged text is from the text layer only
+                                # when both halves are.
+                                if not json_page_results[j].get("_native_text_used"):
+                                    merged_block.pop("_native_text_used", None)
 
                                 merged_results.append(merged_block)
                                 skip_indices.add(j)

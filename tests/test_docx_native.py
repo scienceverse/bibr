@@ -547,3 +547,161 @@ class TestNoteSeparators:
         assert load_endnotes(_FakeDoc()) == {
             "1": "Smith, J. 2020 Title of the work Journal of Testing."
         }
+
+
+def test_docx_sentences_are_not_ocr_text_and_keep_their_prose():
+    """Late cleanup assumed OCR input and fused "a 2 x 2 design" into "a2x2"
+    and dropped the underscores from ``age_group``."""
+    prose = "Participants completed a 2 x 2 x 3 design; age_group was coded 1 2 3."
+
+    def build(doc):
+        doc.add_heading("Method", level=1)
+        doc.add_paragraph(prose)
+
+    parser = DocxParser(_make_docx_bytes(build))
+    contents = parser.parse()
+    parser.apply_segmentation(
+        contents, [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+
+    contents.finalize_text()
+    assert prose in [s.text for s in contents.sentences]
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def test_docx_captions_and_footnotes_are_not_ocr_text():
+    """Captions and footnotes are document text too: the late cleanup's
+    spaced-run collapse turned "items 1 2 3" into "items 123"."""
+    from docx.opc.constants import CONTENT_TYPE as CT
+    from docx.opc.constants import RELATIONSHIP_TYPE as RT
+    from docx.opc.packuri import PackURI
+    from docx.oxml.ns import qn
+    from docx.parts.story import StoryPart
+    from lxml import etree
+
+    figure_caption = "Figure 1. Scores on items 1 2 3 by age_group."
+    table_caption = "Table 1. Items 1 2 3 by age_group."
+    note = "Contact john_smith@uni.edu about items 1 2 3."
+
+    doc = Document()
+    doc.add_heading("Results", level=1)
+    paragraph = doc.add_paragraph("Body text with a note.")
+    reference = etree.SubElement(paragraph.add_run()._r, qn("w:footnoteReference"))
+    reference.set(qn("w:id"), "1")
+    doc.add_picture(io.BytesIO(_png_bytes()))
+    doc.add_paragraph(figure_caption, style="Caption")
+    doc.add_paragraph("")
+    doc.add_paragraph(table_caption, style="Caption")
+    _add_table(doc)
+    footnotes = (
+        f'<w:footnotes xmlns:w="{_NS_W}"><w:footnote w:id="1">'
+        f"<w:p><w:r><w:t>{note}</w:t></w:r></w:p></w:footnote></w:footnotes>"
+    )
+    doc.part.relate_to(
+        StoryPart(
+            PackURI("/word/footnotes.xml"),
+            CT.WML_FOOTNOTES,
+            etree.fromstring(footnotes.encode()),
+            doc.part.package,
+        ),
+        RT.FOOTNOTES,
+    )
+    buf = io.BytesIO()
+    doc.save(buf)
+
+    parser = DocxParser(buf.getvalue())
+    contents = parser.parse()
+    parser.apply_segmentation(
+        contents, [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+    contents.finalize_text()
+
+    texts = [s.text for s in contents.sentences]
+    for expected in (figure_caption, table_caption, note):
+        assert any(expected in text for text in texts), (expected, texts)
+    assert all(sentence.from_ocr is False for sentence in contents.sentences)
+
+
+def _inline_math_paragraph(doc, *pieces: str) -> None:
+    """A paragraph of alternating text and inline equations (``m:oMath``
+    children of ``w:p``, as Word writes them): text, math, text, ..."""
+    from lxml import etree
+
+    math_ns = _NS["m"]
+    paragraph = doc.add_paragraph()
+    for index, piece in enumerate(pieces):
+        if index % 2 == 0:
+            if piece:
+                paragraph.add_run(piece)
+            continue
+        omath = etree.SubElement(paragraph._p, f"{{{math_ns}}}oMath")
+        run = etree.SubElement(omath, f"{{{math_ns}}}r")
+        etree.SubElement(run, f"{{{math_ns}}}t").text = piece
+
+
+def test_inline_equations_glued_to_a_word_are_unwrapped():
+    """Only a tightly delimited ``$…$`` counts as math in document text, and
+    "the $n$th" is not one, so the late clean-up exported DOCX's own
+    delimiters. The sentence now lists the equations the parser wrote."""
+
+    def build(doc):
+        doc.add_heading("Method", level=1)
+        _inline_math_paragraph(doc, "For the ", "n", "th participant, df$age_group was kept.")
+        _inline_math_paragraph(doc, "Each item", "i", " was scored, as was ", "β_i=0", ".")
+
+    parser = DocxParser(_make_docx_bytes(build))
+    contents = parser.parse()
+    parser.apply_segmentation(
+        contents, [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+    )
+    parser.create_content_sections(contents)
+    contents.finalize_text()
+
+    assert [s.text for s in contents.sentences] == [
+        "For the nth participant, df$age_group was kept.",
+        "Each itemi was scored, as was βi=0.",
+    ]
+
+
+def test_each_sentence_keeps_the_inline_equations_it_holds():
+    """Segmentation splits a paragraph after the parser recorded its
+    equations; each sentence keeps the ones it holds, so literal dollars in
+    another sentence still get the tight-delimiter rule."""
+
+    def build(doc):
+        doc.add_heading("Method", level=1)
+        _inline_math_paragraph(
+            doc,
+            "For the ",
+            "n",
+            "th case we stop. Each item",
+            "i",
+            " was scored. Pay US$ 5 per $k$th.",
+        )
+
+    parser = DocxParser(_make_docx_bytes(build))
+    contents = parser.parse()
+    (entry,) = [e for e in parser.assembler.entries if e.needs_segmentation and "$" in e.text]
+    assert entry.inline_math == ("$n$", "$i$")
+    parser.apply_segmentation(
+        contents,
+        [
+            entry.text.split(". ") if e is entry else [e.text]
+            for e in parser.assembler.entries
+            if e.needs_segmentation
+        ],
+    )
+    held = {s.text: s.inline_math for s in contents.sentences if "$" in s.text}
+    assert held == {
+        "For the $n$th case we stop": ("$n$",),
+        "Each item$i$ was scored": ("$i$",),
+        "Pay US$ 5 per $k$th.": (),
+    }
+    contents.finalize_text()
+    assert [s.text for s in contents.sentences][-3:] == [
+        "For the nth case we stop",
+        "Each itemi was scored",
+        "Pay US$ 5 per $k$th.",
+    ]

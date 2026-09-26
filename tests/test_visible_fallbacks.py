@@ -161,6 +161,23 @@ async def test_citation_llm_failure_is_on_the_receipt_and_warned():
     assert warning.message.startswith("llm_timeout: ")
 
 
+async def test_citation_llm_failure_names_only_the_failed_batch():
+    from bibr.structure.citation_linker import _TIER3_BATCH_SIZE, _resolve_with_llm
+
+    _, _, references = _citation_inputs()
+    cites = [(1, f"jones {i}") for i in range(_TIER3_BATCH_SIZE + 3)]
+
+    class SecondBatchFails:
+        async def resolve_citations(self, ambiguous_citations, reference_summary, file_hash="x"):
+            if ambiguous_citations[0][1] != "jones 0":
+                raise _timeout("resolve citations")
+            return []
+
+    failures: list = []
+    assert await _resolve_with_llm(cites, references, SecondBatchFails(), "h", failures) == []
+    assert failures == [("llm_timeout", [text for _, text in cites[_TIER3_BATCH_SIZE:]])]
+
+
 async def test_answered_citation_call_adds_no_warning():
     from bibr.pipeline.stages.post_parse import _link_citations
 

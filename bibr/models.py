@@ -90,42 +90,56 @@ class BibType(StrEnum):
     OTHER = "other"
 
 
+# Legacy BibTeX types and the Crossref ``type`` vocabulary, to ``BibType``.
+_BIB_TYPE_ALIASES: dict[str, str] = {
+    "article": BibType.JOURNAL_ARTICLE.value,
+    "journal_article": BibType.JOURNAL_ARTICLE.value,
+    "journal-article": BibType.JOURNAL_ARTICLE.value,
+    "book": BibType.BOOK.value,
+    # Crossref files monographs, edited volumes and reference works as their
+    # own types; left out, a matched book came back as "other".
+    "monograph": BibType.BOOK.value,
+    "edited-book": BibType.BOOK.value,
+    "reference-book": BibType.BOOK.value,
+    "book-set": BibType.BOOK.value,
+    "inbook": BibType.BOOK_CHAPTER.value,
+    "incollection": BibType.BOOK_CHAPTER.value,
+    "book_chapter": BibType.BOOK_CHAPTER.value,
+    "book-chapter": BibType.BOOK_CHAPTER.value,
+    "book-section": BibType.BOOK_CHAPTER.value,
+    "book-part": BibType.BOOK_CHAPTER.value,
+    "book-track": BibType.BOOK_CHAPTER.value,
+    "conference": BibType.CONFERENCE_PAPER.value,
+    "inproceedings": BibType.CONFERENCE_PAPER.value,
+    "proceedings": BibType.CONFERENCE_PAPER.value,
+    "proceedings-article": BibType.CONFERENCE_PAPER.value,
+    "conference_paper": BibType.CONFERENCE_PAPER.value,
+    "techreport": BibType.REPORT.value,
+    "report": BibType.REPORT.value,
+    "report-component": BibType.REPORT.value,
+    "report-series": BibType.REPORT.value,
+    "unpublished": BibType.PREPRINT.value,
+    "preprint": BibType.PREPRINT.value,
+    "posted-content": BibType.PREPRINT.value,
+    "dataset": BibType.DATASET.value,
+    "database": BibType.DATASET.value,
+    "software": BibType.SOFTWARE.value,
+    "thesis": BibType.THESIS.value,
+    "phdthesis": BibType.THESIS.value,
+    "mastersthesis": BibType.THESIS.value,
+    "masterthesis": BibType.THESIS.value,
+    "dissertation": BibType.THESIS.value,
+}
+
+
 def migrate_bib_type(old: str | None) -> str:
-    """Map legacy BibTeX type strings to ``BibType`` values.
+    """Map legacy BibTeX and Crossref type strings to ``BibType`` values.
 
     Returns a ``BibType`` value string.  Unknown inputs map to ``"other"``.
     """
-    if not old:
+    if not old or not isinstance(old, str):
         return BibType.OTHER.value
-    _MAP: dict[str, str] = {
-        "article": BibType.JOURNAL_ARTICLE.value,
-        "journal_article": BibType.JOURNAL_ARTICLE.value,
-        "journal-article": BibType.JOURNAL_ARTICLE.value,
-        "book": BibType.BOOK.value,
-        "inbook": BibType.BOOK_CHAPTER.value,
-        "incollection": BibType.BOOK_CHAPTER.value,
-        "book_chapter": BibType.BOOK_CHAPTER.value,
-        "book-chapter": BibType.BOOK_CHAPTER.value,
-        "book-section": BibType.BOOK_CHAPTER.value,
-        "conference": BibType.CONFERENCE_PAPER.value,
-        "inproceedings": BibType.CONFERENCE_PAPER.value,
-        "proceedings": BibType.CONFERENCE_PAPER.value,
-        "proceedings-article": BibType.CONFERENCE_PAPER.value,
-        "conference_paper": BibType.CONFERENCE_PAPER.value,
-        "techreport": BibType.REPORT.value,
-        "report": BibType.REPORT.value,
-        "unpublished": BibType.PREPRINT.value,
-        "preprint": BibType.PREPRINT.value,
-        "posted-content": BibType.PREPRINT.value,
-        "dataset": BibType.DATASET.value,
-        "software": BibType.SOFTWARE.value,
-        "thesis": BibType.THESIS.value,
-        "phdthesis": BibType.THESIS.value,
-        "mastersthesis": BibType.THESIS.value,
-        "masterthesis": BibType.THESIS.value,
-        "dissertation": BibType.THESIS.value,
-    }
-    return _MAP.get(old.lower().strip(), BibType.OTHER.value)
+    return _BIB_TYPE_ALIASES.get(old.lower().strip(), BibType.OTHER.value)
 
 
 # ``PaperAuthor.role`` entry that marks a group or organization author (a

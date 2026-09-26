@@ -172,12 +172,24 @@ def enforce_section_sanity(sections: list[PaperSection]) -> None:
     - ABSTRACT appearing after the paper's first METHODS/RESULTS section
       (abstracts are front matter; a late "Summary" is discussion-flavored
       and would pollute the exported abstract fallback).
-    - REFERENCES in the first half of the section list with core IMRaD body
-      sections still to come (reference lists end the body; appendices and
-      floats after a terminal reference list are fine and stay untouched).
+    - REFERENCES in the first half of the body (more body sections after it
+      than before it) with core IMRaD body sections still to come (reference
+      lists end the body; appendices and floats after a terminal reference
+      list are fine and stay untouched).
+
+    Positions are read from the list order, which must be document order:
+    ``implicit_sections`` inserts each section it synthesizes from the LLM's
+    boundaries where its text is. The positional Abstract fallback still
+    appends its section after the body, so in a paper with a Methods or
+    Results section this pass demotes that one. The
+    root and the synthetic figure/table/footnote sections that
+    ``create_content_sections`` appends at the tail are not body sections:
+    they take no position, so a paper's float count cannot move the "first
+    half".
 
     Runs after ``enforce_imrad_order``. Mutates sections in-place.
     """
+    sections = [s for s in sections if s.level > 0 and not s.synthetic_kind]
     if not sections:
         return
 
@@ -207,7 +219,7 @@ def enforce_section_sanity(sections: list[PaperSection]) -> None:
             _demote(section, "abstract after body start")
         elif (
             section.section_type == CanonicalSection.REFERENCES
-            and i < n / 2
+            and i < n - 1 - i
             and any(s.section_type in _CORE_BODY_TYPES for s in sections[i + 1 :])
         ):
             _demote(section, "early references with body after")
