@@ -307,6 +307,63 @@ released.
   letters or more, between terms of a product ("m3hgNa"), the parts of a
   fraction ("e-diλi") or a sum and its limits. Dropping every such space
   would have joined 187 ("lndbh", "directeffect").
+- The Ollama provider sent every request to `/chat/completions` under
+  `LLM_OLLAMA_BASE_URL`, and Ollama answers that with 404. With the default URL,
+  `http://localhost:11434`, which is also what `bibr setup` writes, every paper
+  failed at its first LLM call, and so did the setup wizard's connection test.
+  Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
+  unless the URL already ends in it, so both forms work. The wizard no longer
+  lists models from `/v1/v1/models` when the URL is typed with `/v1`.
+- `bibr doctor` and the `bibr setup` connection test now send their test
+  request through the provider adapter that extraction uses. Both built their
+  own client, with a 64-token cap. For the default `gemini-3.5-flash-lite`
+  they left out the thinking budget the Gemini adapter always sends. For
+  OpenAI they sent `max_tokens`, which reasoning models such as the wizard's
+  `gpt-5-nano` reject, where the adapter sends `max_completion_tokens`. The
+  test could therefore fail a setup that `bibr chew` runs. Doctor also skipped
+  Ollama; it now tests it like any other provider. When the wizard's test
+  fails for Ollama, it offers to change the base URL. It used to ask for an
+  API key and write the answer to `.env` as a line with no name, `=<key>`.
+  Both tests now give up after twice `LLM_TIMEOUT_SECONDS`, the limit `bibr
+  chew` puts on one LLM call. A server that accepted the request and never
+  answered kept them waiting on the SDK's own timeout instead, which for the
+  OpenAI SDK that Ollama and OpenAI-compatible servers go through is 600 s per
+  attempt.
+- `bibr setup` could leave an older `LLM_API_KEY`, `LLM_BASE_URL` or
+  `LLM_BACKEND` in effect behind the provider just chosen. Merging into an
+  existing `.env`, the default, keeps every key the wizard does not write, and
+  `~/.bibr/.env` still applies under a new `./.env`. The Google, Anthropic and
+  Groq adapters send `LLM_API_KEY` in place of their own key, so switching
+  from OpenAI to Google sent the old OpenAI key to Gemini, while the
+  connection test, which used the typed key, passed. Choosing a provider now
+  also writes `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL`
+  where none was entered, and the connection test uses those same values.
+- `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
+  resolved to the backend chew would start on this machine; doctor used to
+  check it as a cloud provider and ask for a key. The provider's credentials are
+  checked by its adapter. `LLM_API_KEY` now counts for Google, Anthropic and
+  Groq, and an OpenAI-compatible server set with `LLM_BASE_URL` needs no key.
+  A managed local backend fails when chew's preflight would refuse it, for
+  example vLLM on a machine with no NVIDIA GPU, which doctor passed. An unknown
+  `LLM_BACKEND` value is reported instead of being checked as cloud.
+- `bibr doctor`'s OCR check now fails where `bibr chew` refuses a PDF. With
+  the default `OCR_BACKEND=paddle` on Windows, or on Linux without a GPU that
+  fits paddle-vllm, the automatic chain is glm-llama alone. Doctor now looks
+  for llama.cpp there, where it used to warn that availability was unverified.
+  It fails when no runtime of the chain can start, when
+  `OCR_BACKEND=paddle-vllm` has no GPU that fits it, and when a cloud vision
+  backend (`gemini`, `openai`, `anthropic`) has no API key.
+- `bibr doctor` no longer fails when the working directory has no `.env`.
+  Settings come from `~/.bibr/.env` and `./.env`, or from `BIBR_ENV_FILE`.
+  Doctor now names the files it read, and warns when there are none, because
+  configuration from the environment alone is valid. `bibr preset` uses the
+  file whose values are in effect, which is the last existing file of that
+  chain. `preset save` and `preset use` therefore work when the configuration
+  lives in `~/.bibr/.env`, and `save`, `use` and `deactivate` name the file.
+  The demo's preset picker reads the active preset from the same file.
+- `bibr doctor` reports a missing `uv` as a warning instead of a failure.
+  `python -m pip install bibr` is a documented setup, and only the uv-managed
+  vLLM and MLX-VLM runners need uv. Their own checks still fail without it.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
