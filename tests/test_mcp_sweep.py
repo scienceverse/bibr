@@ -112,7 +112,9 @@ async def test_chew_url_bibr_error_reports_filename_without_url(monkeypatch):
         )
 
     async def failing_achew_file(self, path, *, paper_id=None, progress=None):
-        raise BibrError("parse failed with key=secret-token-value")
+        # Credentials leak into error text through request URLs, which is the
+        # form scrub_secrets masks.
+        raise BibrError("lookup failed for https://api.example.org/v1?key=secret-token-value")
 
     monkeypatch.setattr(safe_fetch, "fetch_url_safely", fake_fetch)
     monkeypatch.setattr(bibr.api.Chewer, "achew_file", failing_achew_file)
