@@ -213,6 +213,23 @@ released.
 
 ### Fixed
 
+- JATS input keeps the paper's structure instead of flattening it. References
+  accumulate across every `<ref-list>` with one continuous counter: a later
+  'Methods references' list extends the main bibliography instead of replacing
+  it, nested Springer-style wrappers contribute their refs and rows, and a
+  `<ref-list>` inside a back `<sec>` reuses that section instead of adding a
+  second one. An `<alternatives>` emits one representation — MathML when
+  present, else the TeX body without its document preamble — and the same trim
+  applies to a bare `<tex-math>`, so LaTeX preambles no longer pollute
+  sentences. Figures, tables and display formulas nested inside `<p>` are
+  registered as figures, tables and formulas instead of being merged into the
+  paragraph text, with captions and table footnotes kept. Back-matter
+  `<notes>`, appendices, glossaries and biographies become sections built from
+  their titles (data-availability notes typed as open-data, COI statements as
+  conflicts, financial disclosures as funding), and an image-only
+  `<table-wrap>` keeps its caption. Author affiliations resolve multi-id `rid`
+  references and shared group-level `<aff>` elements, and a consortium byline
+  appears once as an organization followed by its credited members.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that

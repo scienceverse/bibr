@@ -84,8 +84,12 @@ async def test_real_jats_fixture_loads_as_pipeline_input():
         "for innovation"
     )
     assert fs.contents.preparsed_metadata.doi == "10.1093/nar/gku1061"
-    assert len(fs.contents.sections) == 32
+    assert len(fs.contents.sections) == 33
     assert len(fs.contents.figures) == 3
+    # Box 1's inner <sec> inside <boxed-text> is recovered, not dropped.
+    assert "The four routes of article deposition into Europe PMC" in [
+        s.header for s in fs.contents.sections
+    ]
 
 
 @pytest.mark.asyncio
