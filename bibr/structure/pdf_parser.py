@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
+from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
     FRONT_MATTER_MASTHEAD_RE,
@@ -345,10 +346,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # pages — those are running headers misclassified as ``doc_title`` /
         # ``paragraph_title`` and must not produce sections.
         self._running_header_regions: set[tuple[int, int]] = set()
-        # Page-level ``reference`` envelopes duplicate their contained
-        # ``reference_content`` entries. Mark only envelopes with at least two
-        # contained children; envelope-only/single-child pages remain intact.
-        self._reference_envelope_regions: set[tuple[int, int]] = set()
+        # Page-level ``reference`` envelopes and the ``reference_content``
+        # entries inside them can carry the same text. Whichever side the other
+        # already covers is shadowed (see ``_mark_reference_envelopes``).
+        self._shadowed_reference_regions: set[tuple[int, int]] = set()
 
         # PDF outline (bookmarks) — the document's own declared heading
         # hierarchy. When present AND the feature is enabled, matched headings
@@ -842,29 +843,54 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             )
 
     def _mark_reference_envelopes(self) -> None:
-        """Mark aggregate reference boxes shadowed by individual entry boxes."""
+        """Shadow whichever of an aggregate reference box and its entries is redundant.
+
+        The layout model can return one ``reference`` box over several entries
+        plus ``reference_content`` boxes for some or all of them. The aggregate
+        box is shadowed only when the entry boxes inside it already carry its
+        text. Otherwise it stays and only the entry boxes whose text it holds
+        are shadowed, so an entry without a box of its own is not lost and no
+        entry is emitted twice. Shadowed regions keep their region summaries.
+
+        Only entry boxes inside the aggregate box take part. They replace it at
+        its place in reading order, where it keys the References section even
+        when the OCR stage blanked its text, and a separate short entry
+        elsewhere on the page ("PubMed") is never hidden because the aggregate
+        box's text happens to contain it.
+        """
         for page_idx, regions in enumerate(self.json_result):
             children = [
-                region
-                for region in regions
-                if (region.native_label or region.label) == "reference_content"
+                (child_idx, child)
+                for child_idx, child in enumerate(regions)
+                if (child.native_label or child.label) == "reference_content"
             ]
-            if len(children) < 2:
+            if not children:
                 continue
             for region_idx, region in enumerate(regions):
                 if (region.native_label or region.label) != "reference":
                     continue
-                contained = sum(
-                    _bbox_containment_fraction(child.bbox_2d, region.bbox_2d) >= 0.8
-                    for child in children
+                contained = [
+                    (child_idx, child)
+                    for child_idx, child in children
+                    if _bbox_containment_fraction(child.bbox_2d, region.bbox_2d) >= 0.8
+                ]
+                if not contained:
+                    continue
+                envelope_text = alnum_key(region.content or "")
+                children_text = alnum_key("".join(child.content or "" for _, child in contained))
+                if alnum_text_covered(envelope_text, children_text):
+                    self._shadowed_reference_regions.add((page_idx, region_idx))
+                    continue
+                self._shadowed_reference_regions.update(
+                    (page_idx, child_idx)
+                    for child_idx, child in contained
+                    if alnum_text_covered(alnum_key(child.content or ""), envelope_text)
                 )
-                if contained >= 2:
-                    self._reference_envelope_regions.add((page_idx, region_idx))
 
-        if self._reference_envelope_regions:
+        if self._shadowed_reference_regions:
             logger.info(
-                "Shadowing %d aggregate reference envelope region(s)",
-                len(self._reference_envelope_regions),
+                "Shadowing %d duplicate reference region(s)",
+                len(self._shadowed_reference_regions),
             )
 
     def _process_page(
@@ -933,7 +959,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             self.region_summaries.append(region_summary)
             self._source_region_index = len(self.region_summaries) - 1
 
-            if key in self._reference_envelope_regions:
+            if key in self._shadowed_reference_regions:
                 region_summary.section_id = self._current_section_id or None
                 continue
 

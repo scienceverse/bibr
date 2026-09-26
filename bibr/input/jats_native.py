@@ -307,6 +307,7 @@ class JatsParser:
             preparsed_metadata=self._metadata,
             native_references=self._native_references,
             native_ref_strings=self._native_ref_strings,
+            native_ref_strings_authoritative=True,
         )
 
     def _make_sentence(self, entry, text: str, text_id: int, paragraph_id: int) -> PaperSentence:

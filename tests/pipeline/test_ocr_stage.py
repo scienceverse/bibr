@@ -841,6 +841,197 @@ def test_dedup_still_removes_reference_overlapping_reference_content():
     assert labels == ["reference_content"]
 
 
+def test_dedup_keeps_reference_region_holding_entries_its_children_miss():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+
+    entries = [
+        "Adams, A. (2001). One. J, 1.",
+        "Baker, B. (2002). Two. J, 2.",
+        "Clark, C. (2003). Three. J, 3.",
+        "Dunn, D. (2004). Four. J, 4.",
+    ]
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": "\n".join(entries),
+        "bbox_2d": [100, 150, 900, 500],
+    }
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": entries[i],
+            "bbox_2d": [100, 150 + 45 * i, 900, 190 + 45 * i],
+        }
+        for i in range(2)
+    ]
+
+    result = _deduplicate_reference_regions([[envelope, *children]])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference", "\n".join(entries)),
+        ("reference_content", entries[0]),
+        ("reference_content", entries[1]),
+    ]
+
+
+_ENVELOPE_ENTRIES = [
+    "Kahneman, D., & Tversky, A. (1979). Prospect theory. Econometrica, 47, 263-291.",
+    "Barnard, C. (1938). The functions of the executive. Harvard University Press.",
+    "Modern, R. (2001). Governance in modern corporations. Journal of Finance, 12, 1-20.",
+]
+
+
+def _envelope_page(envelope_text: str, child_texts: list[str], elsewhere: int = 0) -> list[dict]:
+    """A ``reference`` box in the left column over entry boxes for *child_texts*;
+    the last *elsewhere* entry boxes sit in the right column instead."""
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": envelope_text,
+        "bbox_2d": [100, 150, 480, 500],
+    }
+    first_elsewhere = len(child_texts) - elsewhere
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": text,
+            "bbox_2d": [x, 150 + 45 * i, x + 380, 190 + 45 * i],
+        }
+        for i, text in enumerate(child_texts)
+        for x in [520 if i >= first_elsewhere else 100]
+    ]
+    return [envelope, *children]
+
+
+@pytest.mark.parametrize(
+    ("envelope_text", "child_texts"),
+    [
+        # "rn" read for "m" makes the aggregate read a few chars longer
+        ("\n".join(e.replace("m", "rn") for e in _ENVELOPE_ENTRIES), _ENVELOPE_ENTRIES),
+        ("\n".join(_ENVELOPE_ENTRIES), [e.replace("m", "rn") for e in _ENVELOPE_ENTRIES]),
+    ],
+    ids=["envelope-read-longer", "entry-reads-longer"],
+)
+def test_dedup_removes_reference_region_whose_entries_read_slightly_differently(
+    envelope_text, child_texts
+):
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+
+    result = _deduplicate_reference_regions([_envelope_page(envelope_text, child_texts)])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference_content", text) for text in child_texts
+    ]
+
+
+def test_dedup_blanks_but_keeps_reference_region_covered_only_with_boxes_elsewhere():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+
+    # One entry box lies over the region; the boxes for the other two entries
+    # sit in the other column. Pass 1 only removes a region its overlapping
+    # entry boxes cover; pass 2 blanks the duplicate text and keeps the region,
+    # which still keys the References section.
+    page = _envelope_page("\n".join(_ENVELOPE_ENTRIES), _ENVELOPE_ENTRIES, elsewhere=2)
+
+    result = _deduplicate_reference_regions([page])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference", ""),
+        *(("reference_content", text) for text in _ENVELOPE_ENTRIES),
+    ]
+
+
+def test_dedup_decides_a_long_near_equal_reference_region_quickly():
+    import time
+
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+
+    # An OCR repetition loop can fill one region with tens of thousands of
+    # characters. Its entry boxes' read, of equal length and one character
+    # off, once took minutes to compare (partial_ratio on equal lengths).
+    loop = " ".join(
+        f"Smith, J. ({1900 + i % 120}). Title {i}. Journal, {i}, 1-2." for i in range(1500)
+    )
+    page = _envelope_page(loop, [loop[:-2] + "x."])
+
+    started = time.perf_counter()
+    result = _deduplicate_reference_regions([page])
+    elapsed = time.perf_counter() - started
+
+    assert [r["native_label"] for r in result[0]] == ["reference_content"]
+    assert elapsed < 5
+
+
+def test_dedup_keeps_a_long_reference_region_whose_entry_boxes_miss_one_entry():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+    from tests.reference_fixtures import REFERENCE_LIST
+
+    # One entry of twelve has no box of its own. It is under 5% of the region's
+    # text, so a fuzzy score over the whole text takes the region as covered.
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": "\n".join(REFERENCE_LIST),
+        "bbox_2d": [100, 100, 900, 100 + 45 * len(REFERENCE_LIST)],
+    }
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": entry,
+            "bbox_2d": [100, 100 + 45 * i, 900, 140 + 45 * i],
+        }
+        for i, entry in enumerate(REFERENCE_LIST)
+        if i != 2
+    ]
+
+    result = _deduplicate_reference_regions([[envelope, *children]])
+
+    assert [(r["native_label"], r["content"]) for r in result[0]] == [
+        ("reference", "\n".join(REFERENCE_LIST)),
+        *(("reference_content", child["content"]) for child in children),
+    ]
+
+
+def test_dedup_keeps_reference_region_text_that_no_text_region_has():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+    from tests.reference_fixtures import BODY_TEXT, REFERENCE_LIST
+
+    # The region opens with the end of a reference continued from the previous
+    # page, which the page's text regions lack. The page also holds body text,
+    # so the region is shorter than the text regions together.
+    region_text = "\n".join(["Psychological Review, 94(2), 115-147.", *REFERENCE_LIST])
+    page = [
+        {
+            "native_label": "text",
+            "label": "text",
+            "content": BODY_TEXT,
+            "bbox_2d": [100, 100, 900, 200],
+        },
+        {
+            "native_label": "reference",
+            "label": "text",
+            "content": region_text,
+            "bbox_2d": [100, 220, 900, 900],
+        },
+        *(
+            {
+                "native_label": "text",
+                "label": "text",
+                "content": entry,
+                "bbox_2d": [100, 260 + 50 * i, 900, 300 + 50 * i],
+            }
+            for i, entry in enumerate(REFERENCE_LIST)
+        ),
+    ]
+
+    result = _deduplicate_reference_regions([page])
+
+    assert [r["content"] for r in result[0] if r["native_label"] == "reference"] == [region_text]
+
+
 # --- per-chunk OCR teardown heuristic (balanced keeps OCR across chunks) -----
 # balanced mode reloaded OCR weights every chunk; with a cloud/remote LLM there
 # is no GPU consumer for the freed VRAM, so OCR now stays resident across chunks

@@ -21,6 +21,7 @@ from bibr.ocr.profiles import (
     resolve_ocr_profile,
     resolve_ocr_runtime_identity,
 )
+from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
 from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
@@ -186,19 +187,6 @@ def _deduplicate_formula_text_regions(
     return pages
 
 
-def _norm_alnum(s: str) -> str:
-    """Lowercased alphanumeric-only projection of *s* for duplicate detection."""
-    return "".join(c for c in s.lower() if c.isalnum())
-
-
-# Content-based reference dedup: minimum fuzzy score for a reference region's
-# normalized content to count as already present in the page's text regions,
-# and the minimum needle length below which only exact containment is trusted
-# (short needles fuzzy-match too easily).
-_CONTENT_DUP_MIN_SCORE = 95
-_CONTENT_DUP_MIN_CHARS = 30
-
-
 def _deduplicate_reference_regions(
     pages: list[list[dict]], settings: GlobalSettings | None = None
 ) -> list[list[dict]]:
@@ -212,7 +200,10 @@ def _deduplicate_reference_regions(
     that confuse downstream LLM extraction.
 
     Pass 1 drops a ``reference`` region when >=50% of its area overlaps
-    with a ``reference_content`` region (or vice versa).
+    with ``reference_content`` regions (or vice versa) whose text already
+    holds its own. Geometry alone is not enough: an aggregate box over four
+    entries with entry boxes for only two would take the other two with it.
+    A kept box's duplicated entry boxes are shadowed by the parser.
 
     Pass 2 handles the same double-detection against per-entry ``text``
     regions (data/prereg.pdf pages 22-23): a full-column ``reference`` region
@@ -223,6 +214,11 @@ def _deduplicate_reference_regions(
     content is blanked.  The region itself is KEPT, because it still keys the
     References section (``_handle_section_hint``) and emits the layout hint
     used by section-classification fallbacks.
+
+    Both passes tolerate OCR noise between the two reads, but not a run of
+    text the other regions lack (``alnum_text_covered``): a region holding a
+    line or a DOI that no text region has, such as the end of a reference
+    continued from the previous page, keeps its content.
     """
     containment_threshold = _effective_settings(settings).layout.containment_threshold
 
@@ -246,24 +242,25 @@ def _deduplicate_reference_regions(
             bbox = region.get("bbox_2d")
             if not bbox:
                 continue
-            for rc_r in ref_content_regions:
-                rc_bbox = rc_r["bbox_2d"]
-                if (
-                    _bbox_containment(bbox, rc_bbox) > containment_threshold
-                    or _bbox_containment(rc_bbox, bbox) > containment_threshold
-                ):
-                    to_remove.add(i)
-                    break
+            overlapping = [
+                rc_r
+                for rc_r in ref_content_regions
+                if _bbox_containment(bbox, rc_r["bbox_2d"]) > containment_threshold
+                or _bbox_containment(rc_r["bbox_2d"], bbox) > containment_threshold
+            ]
+            if overlapping and alnum_text_covered(
+                alnum_key(region.get("content") or ""),
+                alnum_key("".join(rc_r.get("content") or "" for rc_r in overlapping)),
+            ):
+                to_remove.add(i)
 
         if to_remove:
             page_regions[:] = [r for i, r in enumerate(page_regions) if i not in to_remove]
 
     # Pass 2: content-based suppression against plain text regions.
-    from rapidfuzz import fuzz
-
     _TEXT_BLOB_LABELS = {"text", "content", "reference_content"}
     for page_regions in pages:
-        blob = _norm_alnum(
+        blob = alnum_key(
             "".join(
                 r.get("content") or ""
                 for r in page_regions
@@ -277,16 +274,8 @@ def _deduplicate_reference_regions(
                 continue
             if region.get("_native_text_candidate") is not None:
                 continue
-            ref_norm = _norm_alnum(region.get("content") or "")
-            # A needle longer than the blob cannot be contained in it —
-            # blanking would lose the uncovered tail.
-            if not ref_norm or len(ref_norm) > len(blob):
-                continue
-            duplicated = ref_norm in blob or (
-                len(ref_norm) >= _CONTENT_DUP_MIN_CHARS
-                and fuzz.partial_ratio(ref_norm, blob) >= _CONTENT_DUP_MIN_SCORE
-            )
-            if duplicated:
+            ref_norm = alnum_key(region.get("content") or "")
+            if ref_norm and alnum_text_covered(ref_norm, blob):
                 logger.info(
                     "Blanked duplicate reference region (%d chars already "
                     "covered by text regions on the page)",

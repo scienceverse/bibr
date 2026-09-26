@@ -712,6 +712,73 @@ released.
   or "under a Creative Commons Attribution 4.0 licence") and the date an
   approval was received ended the statement as if they were publisher
   boilerplate.
+- A section whose heading merely contains the word "reference", such as
+  "Revealed Preferences", "Reference standard" or "Reference values", is no
+  longer taken for the bibliography when no other reference section is found.
+  Its prose was parsed into references and the section was exported as
+  `references`. The heading fallback now needs "references", "bibliography",
+  "works cited", "literature cited" or "reference list" as whole words
+  ("Selected References" and "Appendix B. References" still count), or a whole
+  references heading in any language the reference-line capture recognises, so
+  it also finds headings it used to miss, such as "Literaturverzeichnis" or
+  "Daftar Pustaka".
+- When a printed "References" heading overrides the sections the classifier
+  had typed `references`, each of them now gets the type its heading looks up
+  to ("General Discussion" becomes `discussion`, a heading with no known alias
+  `unknown`). They kept `references`, so a bibliography entry could point its
+  `text_id` at a body sentence, the citation linker read the section's numbers
+  as reference numbers, and the export typed a body section as references. The
+  reference receipt records `classifier_references_demoted`. A second list
+  keeps its type when its heading names references or looks up to them, or
+  when at least half of its rows open like a dated reference entry, as under
+  "Studies Included in the Meta-Analysis".
+- Reference strings from a JATS `<ref-list>` are parsed as given, one per
+  `<ref>`. The filter for non-reference fragments dropped short entries without
+  a year (a classic such as "Aristotle. Nicomachean Ethics.", or an entry whose
+  year abuts its journal name), and the merged-reference splitter cut single
+  entries in two, so every later entry shifted. HTML reference lists still go
+  through both, because the HTML reader also collects other lists under a
+  references heading, such as page navigation.
+- The merged-reference splitter no longer cuts one reference in two at a
+  citation inside its title when the title opens right after that reference's
+  own date ("Brown, T. (2018). Beyond Kahneman and Tversky (1979): …"), or at
+  an edition number that equals the next entry number in a numbered list
+  ("1. Müller A. Lehrbuch. 2. Aufl. …", and likewise "udg.", "uppl.", "ed.",
+  "wyd." and similar edition words).
+- The geometry segmenter's segment-count check and the layout-region
+  segmentation tier count only the reference onsets on the pages of the
+  located reference section. Onsets from a second list elsewhere in the PDF,
+  such as a transliterated copy of the bibliography or supplementary
+  references, made the check decline a correct geometry result and the region
+  tier decline as well, so the list went to the LLM segmenter.
+- An aggregate `reference` layout box is dropped only when the entry boxes
+  inside it hold all of its text. When the layout model returned entry boxes
+  for only some of the entries in it, the entries without a box of their own
+  were lost from the reference list. The aggregate box now stays and the entry
+  boxes it repeats are hidden instead; they still count as layout onsets. The
+  texts are compared with a tolerance for OCR noise in either direction, since
+  a scanned page reads the aggregate box and each entry box separately and the
+  reads differ by a character here and there. Text the entry boxes lack keeps
+  the aggregate box however small a share of it that text is, such as one
+  entry among twelve or more, a line or a DOI. A piece under 16 letters and
+  digits long, such as a page range alone on the last line of an entry, still
+  passes for OCR noise and is lost when the box is dropped or emptied. This
+  applies both to the OCR stage's overlap cleanup and to the PDF parser. The
+  OCR stage's second cleanup, which empties a `reference` region whose text
+  the page's text regions already hold, uses the same comparison. It kept a
+  region whose read ran a few characters longer than the text regions' reads,
+  so its entries were emitted twice, and it emptied a region holding a line
+  that no text region had, such as the end of a reference continued from the
+  previous page, when that line was a small share of the region's text. The
+  first is now emptied and the second kept.
+- The page-furniture filter on the reference lines the geometry segmenter
+  reads removes only lines at the top or bottom edge of a page, as it was
+  documented to. It removed every line whose text, with digits masked, matched
+  a line repeated at the edges of two pages, so reference text inside a page
+  was dropped when the same short text also opened or closed two pages: a
+  wrapped year or page range matching a page number, a wrapped "Polish)." line,
+  or a reference label printed on its own line ("2." matching a "4." at the top
+  of the next page).
 
 ### Added
 
