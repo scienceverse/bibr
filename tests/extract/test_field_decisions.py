@@ -450,6 +450,8 @@ def _decide_journal_b(metadata):
         lambda metadata: metadata.model_copy(deep=True),
         copy.copy,
         copy.deepcopy,
+        # A round trip of our own object, not untrusted input.
+        # nosemgrep: python.lang.security.deserialization.pickle.avoid-pickle
         lambda metadata: pickle.loads(pickle.dumps(metadata)),
     ],
 )
