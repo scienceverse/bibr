@@ -779,6 +779,69 @@ released.
   wrapped year or page range matching a page number, a wrapped "Polish)." line,
   or a reference label printed on its own line ("2." matching a "4." at the top
   of the next page).
+- When implicit-section detection created an Abstract or Introduction, it
+  moved every section without text of its own behind References: the root,
+  the title once its text went to the new Abstract, a printed "Abstract"
+  heading emptied the same way, and a numbered parent such as "2 Method"
+  whose paragraphs sit in "2.1". The section sanity check reads list position
+  as document position, so it then reset that printed Abstract heading to
+  `unknown`, and reset References to `unknown` with score 0 whenever body
+  sections now followed it in the first half of the list (reference location
+  put the type back, not the score). Each new section is now inserted right
+  after the section its text came from, usually the title, and no other
+  section moves. Where a printed heading ("LITERATURE CITED") and the
+  reference section bibr created for the rows both classify as references,
+  the printed heading now comes first and keeps the type, as the tie-break by
+  document order intends.
+- The export placed a heading without text of its own right after the
+  section with the next lower id. A "Method" heading whose subsections were
+  not nested under it therefore came before the Abstract and Introduction
+  that implicit-section detection cut from the title's text, since those are
+  created last. It now follows the section listed before it.
+- The section sanity check also counted the root and the figure, table and
+  footnote sections added at the end of the list, so enough floats could
+  place a terminal References section in the "first half" and reset it. Only
+  body sections count now, and References is reset only when more body
+  sections follow it than precede it, the threshold a paper without floats
+  already had.
+- The printed abstract span opened only on absolute page 1 and continued only
+  onto page 2. A PDF processed with `--pages` or serve `start_page` keeps its
+  absolute page numbers, and DOCX, HTML and ePub input has no pages, so none
+  of them got a span: a DOCX with no model abstract exported an empty one, and
+  a DOCX model abstract was flagged `VAL_ABSTRACT_SUSPECT` (`ungrounded`) even
+  when it matched the printed abstract. The span now opens on the first page
+  the parse saw, as the first-page abstract fallback already did, and skips
+  the page test for input without pages. On the eLife HTML sample it now
+  selects exactly the printed Abstract section in 841 of 984 articles, where it
+  selected nothing.
+- The lettered-appendix repair re-typed ordinary headings as top-level
+  `appendix` sections. A run of "A. …", "B. …" headings in the last 40% of the
+  section list qualified with no anchor at all, which caught the lettered
+  subsections of IEEE-style papers ("IV. EXPERIMENTS", "A. Datasets", "C.
+  Results") and of many regional journals ("Results and Discussion", "A. …",
+  "B. …"), and a Roman "V. CONCLUSION", which reads as letter V. Any lettered
+  heading after the first section typed references also qualified, so a
+  Frontiers "Citation" panel above the title, or the navigation "References"
+  at the top of an eLife HTML page, turned the title "A protocol for …" or
+  subsections such as "A specific requirement for …" and "C. elegans strains"
+  into appendices. A lettered run now needs a real anchor: an "Appendix"
+  heading, which anchors only the headings after it, or the reference list
+  that ends the body. That is the first section typed references after a
+  body section, or the first one when no body section comes before any.
+- A heading that is exactly the name of a part ("Materials and methods",
+  "Experimental Section") folded under an earlier heading of the same type
+  that only contains a keyword, such as the Results subsection "A neural
+  implementation of oscillation" read as Methods. It became a subsection of
+  that heading, and the subsections printed under it were attached to the
+  part before it (Discussion, in eLife articles) and took that part's type.
+  It now starts its own part and keeps its subsections. Exact names of
+  subsections, such as "Study design" or "Limitations", still fold under a
+  keyword part heading such as "Patients and methods" or "Discussion and
+  conclusion". A part name printed as a subsection of such a heading, such as
+  "Conclusions" inside "Discussion and conclusion", does start a part of its
+  own. The earlier heading counts as a keyword hit only when the alias table
+  typed it, which in runs with an LLM or the trained classifier happens only
+  when the keyword covers most of the heading.
 
 ### Added
 
