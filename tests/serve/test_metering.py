@@ -148,7 +148,9 @@ class TestMeteringMiddleware:
             raise RuntimeError("worker exploded")
 
         try:
-            client = TestClient(server.app, raise_server_exceptions=False)
+            client = TestClient(
+                server.app, base_url="http://127.0.0.1:8000", raise_server_exceptions=False
+            )
             with caplog.at_level(logging.INFO, logger="bibr.serve.metering"):
                 response = client.get("/boom", headers={"x-request-id": "boom-1"})
             assert response.status_code == 500
