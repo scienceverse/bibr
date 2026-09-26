@@ -279,3 +279,84 @@ def test_arena_shrinkage_run_option_is_accepted_by_onnxruntime():
     run_options = opened.run.call_args.args[2]
     assert isinstance(run_options, ort.RunOptions)
     assert run_options.get_run_config_entry("memory.enable_memory_arena_shrinkage") == "gpu:0"
+
+
+def _cpu_only_ort_with_recording_options():
+    """A mock onnxruntime exposing only the CPU provider with a SessionOptions
+    stand-in that records attribute writes (a MagicMock would auto-create any
+    attribute on read, so absence could not be asserted)."""
+    mock_ort = MagicMock()
+    mock_ort.get_available_providers.return_value = ["CPUExecutionProvider"]
+    mock_ort.InferenceSession.return_value.get_providers.return_value = ["CPUExecutionProvider"]
+    recorded: dict = {}
+
+    class _RecordingOptions:
+        def __setattr__(self, name, value):
+            recorded[name] = value
+
+    mock_ort.SessionOptions = _RecordingOptions
+    return mock_ort, recorded
+
+
+def test_create_session_disables_cpu_arena_for_cpu_only_when_asked():
+    """CPU-only sessions pass enable_cpu_mem_arena=False: the CPU arena keeps
+    its peak allocation for the session's life (layout ~5 GB, SaT ~2.8 GB)."""
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        _, device = onnx_providers.create_session(
+            "model.onnx", device="cpu", model_name="layout", disable_cpu_arena=True
+        )
+
+    assert device == "cpu"
+    assert recorded.get("enable_cpu_mem_arena") is False
+
+
+def test_create_session_keeps_cpu_arena_by_default():
+    """Without the opt-in, CPU sessions keep ORT's default arena behavior."""
+    mock_ort, recorded = _cpu_only_ort_with_recording_options()
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        _, device = onnx_providers.create_session("model.onnx", device="cpu", model_name="layout")
+
+    assert device == "cpu"
+    assert "enable_cpu_mem_arena" not in recorded
+
+
+def test_create_session_cpu_arena_opt_in_is_noop_for_cuda():
+    """The flag must not change CUDA sessions: the CUDA EP manages its own
+    arena and disabling the CPU arena there is unverified."""
+    mock_ort = _cuda_build_ort()
+    recorded: dict = {}
+
+    class _RecordingOptions:
+        def __setattr__(self, name, value):
+            recorded[name] = value
+
+    mock_ort.SessionOptions = _RecordingOptions
+    mock_ort.InferenceSession.return_value.get_providers.return_value = [
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider",
+    ]
+    with patch.dict("sys.modules", {"onnxruntime": mock_ort}):
+        _, device = onnx_providers.create_session(
+            "model.onnx", device="cuda", model_name="layout", disable_cpu_arena=True
+        )
+
+    assert device == "cuda"
+    assert "enable_cpu_mem_arena" not in recorded
+
+
+def test_cpu_ort_session_options_disables_the_arena():
+    """The wtpsplit ort_kwargs helper carries enable_cpu_mem_arena=False."""
+    ort = pytest.importorskip("onnxruntime")
+
+    options = onnx_providers.cpu_ort_session_options()
+
+    assert isinstance(options, ort.SessionOptions)
+    assert options.enable_cpu_mem_arena is False
+
+
+def test_cpu_ort_session_options_is_none_without_onnxruntime():
+    """Without onnxruntime there is nothing to build options for (SaT skips
+    ort_kwargs then)."""
+    with patch.dict("sys.modules", {"onnxruntime": None}):
+        assert onnx_providers.cpu_ort_session_options() is None

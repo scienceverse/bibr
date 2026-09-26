@@ -100,7 +100,7 @@ LOCAL_LLM_BACKENDS = frozenset({"vllm", "vllm-mlx", "rapid-mlx", "llama-cpp", "l
 _VALID_LLM_BACKENDS = frozenset({"cloud"}) | LOCAL_LLM_BACKENDS
 
 
-def resolve_llm_backend(raw: str) -> str:
+def resolve_llm_backend(raw: str, settings: GlobalSettings | None = None) -> str:
     """Resolve the ``local`` LLM-backend alias to a concrete backend.
 
     ``local`` auto-picks rapid-mlx (falling back to vllm-mlx when the
@@ -110,6 +110,11 @@ def resolve_llm_backend(raw: str) -> str:
     backend set raises ``InputValidationError`` rather than silently falling
     through to cloud. Shared by the CLI and ``LocalPipeline`` so the library
     API accepts everything ``bibr chew --llm`` does.
+
+    ``settings`` is the pipeline's settings snapshot: the rapid-mlx
+    availability check must consult it, not the process-global Settings,
+    so an injected ``rapid_mlx.executable`` resolves the same way the
+    server later launches.
     """
     if raw == "local":
         import platform
@@ -120,7 +125,7 @@ def resolve_llm_backend(raw: str) -> str:
             # Prefer the supported Apple Silicon runtime, falling back when it is unavailable.
             from bibr.local.rapid_mlx import rapid_mlx_unavailable_reason
 
-            if rapid_mlx_unavailable_reason() is None:
+            if rapid_mlx_unavailable_reason(settings=settings) is None:
                 return "rapid-mlx"
             return "vllm-mlx"
         if sys.platform == "win32":
@@ -198,7 +203,10 @@ class LocalPipeline(Pipeline):
 
     - ``"aggressive"``: Load/unload each model per phase (8 GB machines)
     - ``"balanced"``: Keep layout + segmenter loaded; OCR engine stays
-      resident across chunks unless a local LLM server needs the VRAM
+      resident across chunks unless a local LLM server needs the VRAM.
+      Resident RSS includes the models' ORT CPU arenas, which keep their
+      peak allocation — CPU-only layout/SaT sessions opt out of the arena,
+      but the weights stay resident across files by design.
     - ``"keep_all"``: Keep everything loaded (24+ GB GPU or cloud LLM only)
     - ``None`` (default): ``PIPELINE_MEMORY_MODE`` if set, else auto-detect
       from system RAM (≤8 GB → aggressive, else balanced)
@@ -266,7 +274,9 @@ class LocalPipeline(Pipeline):
             else:
                 ocr_backend = resolve_backend_name(ocr_backend, settings=settings_snapshot)
         # None → LLM_BACKEND setting (default "cloud"); explicit values pass through.
-        llm_backend = resolve_llm_backend(llm_backend or settings_snapshot.llm.backend)
+        llm_backend = resolve_llm_backend(
+            llm_backend or settings_snapshot.llm.backend, settings=settings_snapshot
+        )
         # None → PIPELINE_MEMORY_MODE, else RAM auto-detect — same resolution
         # ladder as the CLI, so the library API behaves identically.
         if memory_mode is None:

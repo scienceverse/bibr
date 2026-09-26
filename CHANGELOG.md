@@ -485,6 +485,70 @@ released.
   thread's current event loop is left alone.
 - `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
   not the `paper_id` twice.
+- llama.cpp server: an explicit `LLM_MAX_TOKENS`/`LLM_MAX_INPUT_CHARS`/
+  `LLM_REF_SEG_WINDOW_CHARS` is kept with a warning, while unset values
+  scale with `LLM_LLAMA_CPP_CONTEXT_SIZE`.
+- llama.cpp server: `*_LLAMA_CPP_EXTRA_ARGS` documents the separate-token
+  form (`--flag value`, not `--flag=value`) and names the setting on bad
+  quoting, and `-hfr` joins the `--hf-repo` aliases for the
+  identity-override check.
+- llama.cpp server: startup failures report the END of the stderr tail, and
+  the conservative-args retry fires only on argument-parse errors (unknown
+  flags and rejected flag values) — load and OOM failures fail fast. A
+  `/health` 200 is accepted only if the
+  process is still alive after a short grace period, so a port-racing
+  sibling's server is not mistaken for ours.
+- llama.cpp server: Ctrl-C during startup shuts down the child instead of
+  orphaning it; `--parallel N` is parsed for any N.
+- llmster: an `lms` timeout names the subcommand that timed out, and the
+  `load` hint suggests `LLM_LLMSTER_CONTEXT_LENGTH`. Reusing a pre-loaded
+  identifier validates it still serves that model. Unset `LLM_TIMEOUT_SECONDS`,
+  `LLM_MAX_CONCURRENCY` and `LLM_RATE_LIMIT_RPM` are raised to 300 s, 1 and
+  600 for the loopback server, matching the other local backends.
+- vLLM LLM server: readiness needs a second agreeing `/health` 200 after a
+  grace period, and startup failures report the END of the stderr tail.
+- vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
+  the other managed servers; startup failures report the END of the stderr
+  tail, as does the paddle vLLM OCR server.
+- Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
+  server like the other local backends.
+- Rapid-MLX OCR: a failed engine restart no longer discards the region that
+  triggered it — the caller gets its own transcription, and the restart
+  error surfaces on the next request where the generation is retried.
+  Callers parked on the recycle drain retry the failed restart once, and
+  get an `UpstreamServiceError` naming the failure instead of a bare
+  assert when the retry fails too, and replacing a dead generation
+  shuts down its HTTP pool and handles first.
+- `resolve_llm_backend` accepts the pipeline's settings when checking
+  rapid-mlx availability instead of only the global snapshot.
+- Cloud vision OCR: `settings.llm.api_key` is only forwarded to a vision
+  provider when it is a real key for the same provider and the LLM is not
+  pointed at another endpoint — cross-provider keys, managed-local
+  placeholders and a set `llm.base_url` fall through to the provider's own
+  key or SDK env fallback. The plain-HTTP refusal for a public vision
+  endpoint now also covers that fallback: an `OPENAI_API_KEY` the OpenAI SDK
+  would send is refused like a forwarded LLM key. Cloud vision backends
+  (`gemini`, `openai`, `anthropic`) are no longer torn down between chunks:
+  there are no local weights to reclaim.
+- Rate limiter: the strict-interval Redis Lua script works in whole
+  milliseconds (Redis truncates a Lua number reply to an integer, so a
+  fractional-second wait became 0), and the key TTL spans the queued
+  horizon so concurrent sleepers do not lose their place; the sliding
+  window quantizes to the same. The strict-interval key is now
+  `rate_limit:<resource>:next_allowed_ms`: it stores epoch milliseconds
+  while older releases stored epoch seconds under `next_allowed`, so the
+  two never read each other's values when old and new processes share one
+  Redis.
+- Circuit breaker: a waiter that times out no longer forces the breaker
+  back to OPEN under a still-running probe — only the probe's completion
+  owns the transition (a provably dead probe still fails fast).
+- Batch manifests: `content_sha256` streams inputs in 1 MiB chunks instead
+  of loading whole files. Validation still recomputes the hash for bytes
+  entering the pipeline, so the up-front manifest pass remains for now.
+- Layout preprocessing threads the resize column pass in row blocks; output
+  is bit-identical to the serial loop. The OOM batch-halving retry restores
+  torch.compile padding afterwards instead of leaving it disabled.
+
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
@@ -929,6 +993,52 @@ released.
   again, backed by committed synthetic fixtures
   (`scripts/generate_hermetic_test_fixtures.py`) instead of uncommitted
   corpus files.
+- `bibr chew` writing JSON to stdout is now valid JSON under every console
+  encoding. The startup stream setup replaced unencodable characters with
+  Python escapes (`\U0001d465`), which no JSON parser accepts; the export is
+  now written as UTF-8 bytes instead. File output already wrote UTF-8 and is
+  unchanged.
+- `bibr chew papers/ -o results/` with one paper in the directory no longer
+  writes a file named `results`. A trailing slash or an existing directory in
+  `-o` now means a directory even for a single resolved file, so the export
+  lands as `results/<stem>.json` and a later run with the same `-o`
+  writes into it again instead of crashing. A blocked `-o` is a clean exit 2
+  before any model loads, and `-o` is resolved before the pipeline is
+  constructed.
+- The automatic-OCR dry-run line no longer reports the Paddle served-model
+  alias as weights to download. For the default chain it cache-checks the
+  weight repo the launcher loads, so a cached
+  `PaddlePaddle/PaddleOCR-VL-1.6` renders `cached` instead of
+  `will download (size unknown)`.
+- A bad `--ocr-model`/`--ocr-profile` combination no longer blames `--pages`.
+  Option errors from the run configuration print as `Invalid option: …` with
+  exit 2 in both `chew` and `batch`.
+- Per-file failure hints follow the pipeline's structured `error_code`
+  instead of message substrings that never matched (or matched `rapid-mlx`
+  for `api` and blamed API keys for local runtime failures).
+- Building the CLI no longer needs installed package metadata. Running from
+  a source tree via `PYTHONPATH` used to crash before argparse ran; the
+  version now falls back to `?`, as the help screen already did.
+- The batch report no longer shows a phantom `enrich_prefetch` stage share.
+  That timer overlaps another stage's wall clock (the export stage already
+  excludes it from `total_seconds`), but the report divided by a sum that
+  included it, deflating the real stages. It now shares the export stage's
+  exclusion list.
+- Removed dead evaluation code with no in-repo callers: the unreferenced
+  `keywords_fuzzy_f1`, `authors_count_ratio` and `authors_order_score`
+  helpers, and the opposite-contract `validation_metrics.keywords_f1`
+  duplicate (the harness's `evaluate.keywords_f1` is the one scored). The
+  `title_soft_containment` docstring no longer promises a per-paper aggregate
+  that was never emitted.
+- Reference matching in the evaluator now runs once per paper instead of three
+  times: one shared `match_references` pass feeds `ref_matching_f1`,
+  `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
+  live in a single table that the per-pair loop gates on, instead of two
+  copies that had to stay in lockstep. Scores are unchanged: re-scoring stored
+  evaluation runs gives identical metrics, about three times faster.
+- The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
+  instead of the pure-Python table — same value, roughly three orders of
+  magnitude faster on long abstracts.
 - Input validation no longer rejects readable files. A password-protected DOCX
   is reported as password-protected instead of corrupted: the CFB check
   searched for an ASCII `EncryptedPackage` stream name that real files store as
@@ -966,6 +1076,10 @@ released.
 
 ### Added
 
+- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
+  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
+  under the same printable-ratio gate as body text. Default output is
+  unchanged; enable it to compare.
 - PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
   `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
   still loads PP-DocLayoutV3; switching is a settings change behind an
@@ -1003,6 +1117,10 @@ released.
   missing DOI.
 - Captured reference training records carry a `provenance` object with the
   label source, LLM provider and model, prompt name and hash, and bibr version.
+- Evaluation artifacts now record a `bibr_dirty` flag (uncommitted tracked
+  changes in the scoring checkout) and an `eval_code_sha256` digest over
+  `evaluation/*.py`, so a score from a patched worktree no longer stamps
+  the same provenance as unpatched code. No metric definition changed.
 - `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
   generated from the strict `PaperExport` models. `Result.model` is an instance
   of it when built from a dict, and it remains a `PaperExport` subclass.
@@ -1011,10 +1129,40 @@ released.
 
 ### Changed
 
+- `bibr chew --dry-run` now reports a Blockers section and exits 1 when the
+  real run would fail immediately: missing inputs, missing LLM credentials
+  (key lookup only, no client is built), an unstartable managed local LLM
+  backend, and the PDF OCR/image runtime. `bibr batch --dry-run` runs the
+  same local preflight (the PDF OCR/image runtime) the real run does and
+  exits 1 with it. A clean preview still exits 0.
+- Removed the shipped `bibr.metrics` package: the `PerformanceRecorder`
+  (whose only consumer was never published, and whose per-request peaks were
+  process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
+  no longer imports.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
   still finish before the enrichment is reported partial.
+- On CPU-only machines the layout detector runs one page at a time unless
+  `LAYOUT_BATCH_SIZE` is set explicitly. Batching pages on CPU only grows
+  memory use without running faster.
+- CPU sessions for the layout detector and the sentence segmenter no longer
+  use the ONNX Runtime CPU arena, which otherwise holds its peak allocation
+  for the life of the session. The smaller footprint costs about 10% more
+  wall time on CPU.
+- In aggressive memory mode the NER reference parser loads on CPU rather than
+  the GPU and is released after post-parse. Balanced and keep-all modes keep
+  the previous device choice (CUDA when available) and keep it loaded across
+  files in one process; set `NER_DEVICE` to override.
+- The equation fallback sends fewer methods/results sentences to the LLM:
+  sentences whose digit-bearing parentheticals are only author-year citations,
+  bare years, or figure, table, supplement, equation or section references are
+  skipped — unless the surrounding prose carries digits of its own, in which
+  case they are still sent, as is any sentence with statistic-like content.
+  Measured over three public JATS corpora (3927 papers), about 18% of
+  sentences with digit-bearing parentheticals are skipped, all
+  citation/reference-only; no equation in the stored exports came from a
+  skipped sentence.
 
 ### Security
 

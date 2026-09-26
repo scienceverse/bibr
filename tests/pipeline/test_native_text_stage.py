@@ -57,6 +57,7 @@ def _adapt_legacy_helper_mocks(monkeypatch):
         include_ref_geometry,
         min_chars,
         min_printable_ratio,
+        eligible_labels=None,
     ):
         import bibr.input.pdf_metadata as metadata_mod
         import bibr.input.pdf_outline as outline_mod
@@ -64,12 +65,10 @@ def _adapt_legacy_helper_mocks(monkeypatch):
 
         layout = deepcopy(layout_results)
         if fill_native_text:
-            layout = native_mod.fill_native_text_and_fonts(
-                pdf_bytes,
-                layout,
-                min_chars=min_chars,
-                min_printable_ratio=min_printable_ratio,
-            )
+            fill_kwargs = {"min_chars": min_chars, "min_printable_ratio": min_printable_ratio}
+            if eligible_labels is not None:
+                fill_kwargs["eligible_labels"] = eligible_labels
+            layout = native_mod.fill_native_text_and_fonts(pdf_bytes, layout, **fill_kwargs)
         verification = "\n".join(str(r.get("content") or "") for r in (layout[0] if layout else []))
         metadata = metadata_mod.harvest_pdf_metadata(pdf_bytes, verification or first_page_text)
         outline = outline_mod.extract_pdf_outline(pdf_bytes) if include_outline else []
@@ -145,6 +144,33 @@ async def test_stage_passes_physical_page_indices_to_inspection(monkeypatch):
     await NativeTextStage().run(_ctx([fs]))
 
     assert captured["page_indices"] == fs.page_indices
+
+
+@pytest.mark.asyncio
+async def test_stage_header_footer_setting_reaches_inspection(monkeypatch):
+    """Both header/footer settings: off keeps header/footer out of the
+    eligible labels (default output unchanged); on adds them."""
+    import bibr.pipeline.stages.native_text as stage_mod
+    from bibr.ocr.pdf_inspection import PdfInspection
+
+    async def eligible_for(flag):
+        monkeypatch.setattr(Settings.ocr, "native_text_header_footer", flag)
+        captured = {}
+
+        def fake_inspect(pdf_bytes, layout_results, **kwargs):
+            captured.update(kwargs)
+            return PdfInspection((), deepcopy(layout_results), {}, [], [])
+
+        monkeypatch.setattr(stage_mod, "inspect_pdf", fake_inspect)
+        fs = FileState(path=Path("paper.pdf"), pdf_bytes=b"%PDF")
+        fs.layout_results = [[{"label": "text", "content": ""}]]
+        await NativeTextStage().run(_ctx([fs]))
+        return captured["eligible_labels"]
+
+    off = await eligible_for(False)
+    assert "header" not in off and "footer" not in off
+    on = await eligible_for(True)
+    assert {"header", "footer"} <= set(on)
 
 
 @pytest.mark.asyncio
@@ -236,7 +262,7 @@ async def test_skips_file_without_layout_results(monkeypatch):
 
     calls: list[tuple] = []
 
-    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         calls.append((pdf_bytes, layout, min_chars))
         return layout
 
@@ -261,7 +287,7 @@ async def test_skips_file_without_pdf_bytes(monkeypatch):
 
     calls: list[tuple] = []
 
-    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         calls.append((pdf_bytes, layout, min_chars))
         return layout
 
@@ -290,7 +316,7 @@ async def test_helper_marks_regions_filled(monkeypatch):
 
     import bibr.ocr.native_text as native_mod
 
-    def _fake_fill(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _fake_fill(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         # Simulate helper: mark the text region as filled from native text.
         layout[0][0]["content"] = "hello world"
         layout[0][0]["_native_text_used"] = True
@@ -333,7 +359,7 @@ async def test_helper_failure_clears_partial_fills(monkeypatch):
 
     import bibr.ocr.native_text as native_mod
 
-    def _boom(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _boom(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         raise RuntimeError("native text blew up mid-fill")
 
     monkeypatch.setattr(native_mod, "fill_native_text_and_fonts", _boom)
@@ -368,7 +394,7 @@ async def test_errored_files_are_skipped(monkeypatch):
 
     seen_paths: list[str] = []
 
-    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _spy(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         # We don't have the filename in the helper, but we can assert count.
         seen_paths.append("called")
         layout[0][0]["_native_text_used"] = True
@@ -395,7 +421,7 @@ async def test_sync_helpers_run_off_the_event_loop(monkeypatch):
 
     import bibr.ocr.native_text as native_mod
 
-    def _slow_fill(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85):
+    def _slow_fill(pdf_bytes, layout, *, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         time.sleep(0.25)
         return layout
 
@@ -434,7 +460,7 @@ async def test_docinfo_metadata_harvested(monkeypatch):
     import bibr.input.pdf_metadata as pdf_meta_mod
     import bibr.ocr.native_text as native_mod
 
-    def _fill(pdf_bytes, layout_results, min_chars, min_printable_ratio=0.85):
+    def _fill(pdf_bytes, layout_results, min_chars, min_printable_ratio=0.85, eligible_labels=None):
         for r in layout_results[0]:
             r["content"] = "Attention Is All You Need"
             r["_native_text_used"] = True
@@ -521,7 +547,7 @@ def _geom_capture_stub(monkeypatch):
     monkeypatch.setattr(
         native_mod,
         "fill_native_text_and_fonts",
-        lambda b, lr, min_chars, min_printable_ratio=0.85: lr,
+        lambda b, lr, min_chars, min_printable_ratio=0.85, eligible_labels=None: lr,
     )
     monkeypatch.setattr(pdf_meta_mod, "harvest_pdf_metadata", lambda *a, **k: {})
 
@@ -626,7 +652,7 @@ async def test_docinfo_harvest_empty_result_stays_none(monkeypatch):
     monkeypatch.setattr(
         native_mod,
         "fill_native_text_and_fonts",
-        lambda b, lr, min_chars, min_printable_ratio=0.85: lr,
+        lambda b, lr, min_chars, min_printable_ratio=0.85, eligible_labels=None: lr,
     )
     monkeypatch.setattr(pdf_meta_mod, "harvest_pdf_metadata", lambda *a: {})
 
