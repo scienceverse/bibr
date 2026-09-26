@@ -1565,3 +1565,50 @@ class TestNavigationLists:
             "https://osf.io/abc",
             "See Figure 1 for details.",
         ]
+
+
+class TestStructuredPageDescription:
+    def test_description_is_the_abstract_of_a_structured_editorial(self):
+        # An eLife editorial carries dc.title and a DOI and no abstract meta;
+        # its description is its JATS abstract, which main exported.
+        meta = (
+            HtmlParser(
+                b"""<html><head><meta name="dc.title" content="Editorial">"""
+                b"""<meta name="dc.identifier" content="doi:10.7554/eLife.00855">"""
+                b"""<meta name="description" content="It is time to rethink assessment.">"""
+                b"""</head><body><main><h2>Body</h2><p>Text.</p></main></body></html>"""
+            )
+            .parse()
+            .preparsed_metadata
+        )
+        assert meta.abstract == "It is time to rethink assessment."
+
+    def test_abstract_meta_still_wins_over_the_description(self):
+        meta = (
+            HtmlParser(
+                b"""<html><head><meta name="dc.title" content="Paper">"""
+                b"""<meta name="dc.identifier" content="doi:10.7554/eLife.1">"""
+                b"""<meta name="dc.description" content="The digest.">"""
+                b"""<meta name="description" content="Impact statement.">"""
+                b"""</head><body><main><h2>Body</h2><p>Text.</p></main></body></html>"""
+            )
+            .parse()
+            .preparsed_metadata
+        )
+        assert meta.abstract == "The digest."
+
+    def test_description_is_not_the_abstract_when_the_page_prints_one(self):
+        # A research article's description is its impact statement; the
+        # printed Abstract section must stay the abstract.
+        meta = (
+            HtmlParser(
+                b"""<html><head><meta name="dc.title" content="Paper">"""
+                b"""<meta name="dc.identifier" content="doi:10.7554/eLife.03600">"""
+                b"""<meta name="description" content="Building on previous work, we used it.">"""
+                b"""</head><body><main><h2>Abstract</h2><p>MicroED is a method.</p>"""
+                b"""</main></body></html>"""
+            )
+            .parse()
+            .preparsed_metadata
+        )
+        assert meta.abstract == ""

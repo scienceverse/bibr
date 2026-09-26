@@ -965,55 +965,56 @@ released.
   `extraction.timings`, so the `enrich` stage time is reported on both paths.
 - The HTML and DOCX native parsers now walk inline markup recursively instead
   of reading a fixed tag list. In HTML, the direct text of `div`/`section`
-  containers is kept instead of dropped (display equations in `div`
-  wrappers, for example), with the spaces between inline siblings preserved.
-  Page chrome is still left out, and more of it than before: buttons and
-  other form controls, `visuallyhidden`/`sr-only` spans, `aria-hidden`
-  subtrees, links inside section headers, containers holding only link text
-  (download links), lists made only of button, download or
-  table-of-contents links, float labels printed on their own outside a caption
-  ("Figure 3", "Table 1", "Figure 2 with 2 supplements see all", "Author
-  response image 1"), lone bracketed years, and the article's own formatted
-  "cite this article" block (a `div.reference` or `div.citation` of author,
-  year, title and source parts outside the references), which no longer
-  opens a References section of author-name reference strings. Removing
-  nested hidden or landmark elements (a `role="search"` inside
-  `role="navigation"`) no longer fails the parse. A `<div>` reference that
-  nests its parts in inner `div` elements parses as one reference string
-  rather than one per part, loose text in a references section without any
-  digit (a list lead-in) is not taken as a reference, and an inline element
-  that wraps block content (as an unclosed `<b>` nests whole footer sections
-  inside itself) is recursed into rather than flattened, so its headings
-  still section the page. A `<figure>` that only wraps a `<table>` now parses
-  as a table with the figure's caption, while a figure with an image still
-  parses as a figure; when the figure wraps several tables only the first
-  takes the `figcaption`, so captions and labels are not duplicated. Spine
-  documents' `<head>` contents (`title`, `meta`, `link`, `base`) never become
-  body paragraphs, and an inline image in loose container text is a word
-  boundary, as it is in paragraph text. HTML bytes are decoded from the BOM,
-  then as strict UTF-8, then from the declared label through the WHATWG label
-  table (so `iso-8859-1` reads as windows-1252 and a `utf-16` label on 8-bit
-  bytes reads as UTF-8), then from the XML declaration, falling back to
-  windows-1252 as before when nothing declares an encoding.
+  containers is kept instead of dropped (display equations in `div` wrappers,
+  for example), with the spaces between inline siblings preserved. Page chrome
+  is still left out, and more of it than before: buttons and other form
+  controls, `visuallyhidden`/`sr-only` spans, `aria-hidden` subtrees, links
+  inside section headers, containers holding only link text (download links),
+  lists made only of button, download or table-of-contents links, float labels
+  printed on their own outside a caption ("Figure 3", "Table 1", "Figure 2
+  with 2 supplements see all", "Author response image 1"), lone bracketed
+  years, and the article's own formatted "cite this article" block (a
+  `div.reference` or `div.citation` of author, year, title and source parts
+  outside the references), which no longer opens a References section of
+  author-name reference strings. Removing nested hidden or landmark elements
+  (a `role="search"` inside `role="navigation"`) no longer fails the parse. A
+  `<div>` reference that nests its parts in inner `div` elements parses as one
+  reference string rather than one per part, loose text in a references
+  section without any digit (a list lead-in) is not taken as a reference, and
+  an inline element that wraps block content (as an unclosed `<b>` nests whole
+  footer sections inside itself) is recursed into rather than flattened, so
+  its headings still section the page. A `<figure>` that only wraps a
+  `<table>` now parses as a table with the figure's caption, while a figure
+  with an image still parses as a figure; when the figure wraps several tables
+  only the first takes the `figcaption`, so captions and labels are not
+  duplicated. Spine documents' `<head>` contents (`title`, `meta`, `link`,
+  `base`) never become body paragraphs, and an inline image in loose container
+  text is a word boundary, as it is in paragraph text. HTML bytes are decoded
+  from the BOM, then as strict UTF-8, then from the declared label through the
+  WHATWG label table (so `iso-8859-1` reads as windows-1252 and a `utf-16`
+  label on 8-bit bytes reads as UTF-8), then from the XML declaration, falling
+  back to windows-1252 as before when nothing declares an encoding.
 - HTML front-matter metadata is stricter about what it claims. Authors come
   from the first populated source instead of merging every scheme; a generic
-  `<meta name="author">` list is split on every comma when each part reads
-  as a full name, while a single "Family, Given" name stays one author. Each
+  `<meta name="author">` list is split on every comma when each part reads as
+  a full name, while a single "Family, Given" name stays one author. Each
   `citation_author_institution`, `citation_author_email` and
   `citation_author_orcid` attaches in document order to the `citation_author`
   it follows, with several institutions joined, instead of pairing by list
   position. DOIs are validated and normalised, so a non-DOI identifier is no
   longer exported as a DOI. The `<title>` site suffix (" | Journal") is
   stripped only when the rest matches the printed heading, and the generic
-  SEO `description` is no longer exported as the abstract. A page whose meta
-  tags carry no structured front matter (a Highwire, Dublin Core or ePub OPF
-  title together with authors or a DOI) is marked untrusted: an LLM run then
-  extracts the title, authors and abstract from the printed article and
-  fills only the fields extraction left empty (identifiers, language,
-  keywords, journal details, publisher, date and licence) from the page
-  meta, while a no-LLM run keeps the page meta as before. Dublin Core pages,
-  ePubs without a listed creator and author-less pages with a DOI count as
-  structured front matter.
+  `description` meta is no longer exported as the abstract of a page that
+  prints an Abstract section or has no structured front matter (it remains the
+  fallback for a structured page without one, such as an editorial whose
+  standfirst it carries). A page whose meta tags carry no structured front
+  matter (a Highwire, Dublin Core or ePub OPF title together with authors or a
+  DOI) is marked untrusted: an LLM run then extracts the title, authors and
+  abstract from the printed article and fills only the fields extraction left
+  empty (identifiers, language, keywords, journal details, publisher, date and
+  licence) from the page meta, while a no-LLM run keeps the page meta as
+  before. Dublin Core pages, ePubs without a listed creator and author-less
+  pages with a DOI count as structured front matter.
 - The DOCX walker reads runs nested in `w:sdt`, `w:smartTag`, `w:fldSimple`
   and tracked-move destinations, symbol characters and non-breaking hyphens,
   while tracked deletions, field instructions and ruby readings are still

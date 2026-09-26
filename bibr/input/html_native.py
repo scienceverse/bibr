@@ -851,8 +851,13 @@ class HtmlParser:
         doi = first("citation_doi", "dc.identifier", "dc.identifier.doi")
         meta.doi = normalize_doi(doi) or ""
 
-        # The generic SEO "description" is the site's blurb, not the paper's
-        # abstract — it used to win over the printed ABSTRACT section.
+        # The generic SEO "description" is not the paper's abstract when the
+        # page prints one: it is the site's blurb or an impact statement, and
+        # it used to win over the printed ABSTRACT section. It stays the last
+        # resort (below) only for structured front matter on a page with no
+        # Abstract heading, where publisher pages put the article's own
+        # standfirst there (an eLife editorial's JATS abstract is exactly its
+        # description).
         meta.abstract = first("citation_abstract", "dc.description")
         meta.keywords = _split_keywords(values("citation_keywords", "keywords", "dc.subject"))
         meta.journal = first("citation_journal_title", "citation_journal_abbrev") or None
@@ -938,6 +943,16 @@ class HtmlParser:
                             affiliation="",
                         )
                     )
+
+        if (
+            not meta.abstract
+            and _has_trustworthy_front_matter(soup, meta)
+            and not any(
+                _map_heading(_text(heading)) == CanonicalSection.ABSTRACT
+                for heading in soup.find_all(list(_HEADING_TAGS))
+            )
+        ):
+            meta.abstract = first("description")
 
         overrides = self.metadata_overrides
         for field, value in overrides.items():
