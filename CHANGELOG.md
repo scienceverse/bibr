@@ -213,6 +213,27 @@ released.
 
 ### Fixed
 
+- `table[].contents` keeps the cell text the paper printed. The OCR engines
+  return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
+  too. That HTML was read with pandas type inference, so every column that
+  looked numeric was rewritten: "2.50" became "2.5", "007" became "7",
+  "1,234" became "1234", a decimal comma was read as a thousands separator
+  ("1,5" became "15", "0,25" became "25"), an integer column with one empty
+  cell came out as "12.0", and "TRUE" became "True". A cell printing "NA",
+  "n/a" or "None" came out empty from a PDF and as "nan" from HTML or ePub,
+  where every empty cell was "nan" too. A PDF table without a header row,
+  whose first row becomes the header, could get headers such as "2019.0".
+  Cells now keep their printed text and an empty cell is "", and tables keep
+  the shape they had before. A table printed as an image is now kept
+  with its caption and empty `contents`, so a mention of it resolves: in HTML
+  and ePub input a `<table>` with no cell text whose caption prints a table
+  label ("Table 3. ..."), in JATS a `<table-wrap>` with a label or caption but
+  no `<table>` with rows. An HTML table with a span such as `colspan="2px"` is no longer
+  dropped.
+- A table continued across pages no longer gets its repeated header as a data
+  row in the middle of `contents` when the later page prints the header with
+  different spacing, case, dashes or punctuation ("Mean(SD)" under
+  "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout

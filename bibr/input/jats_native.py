@@ -714,13 +714,21 @@ class JatsParser:
         caption = self._caption_text(table_wrap)
         table_el = _first_desc(table_wrap, "table")
         df = self._table_to_df(table_el)
-        if df is None:
+        if df is not None:
+            try:
+                html = df.to_html(index=False)
+            except Exception:  # noqa: BLE001 — degrade gracefully, never crash
+                html = ""
+        elif caption:
+            # No cell grid: a table printed as an image (<graphic> only). A
+            # table-wrap is a table whatever it holds, so one with a label or
+            # caption is kept with no contents and mentions resolve to it, as
+            # the HTML parser keeps a captioned image-only <table>.
+            df = pd.DataFrame()
+            html = ""
+        else:
             logger.warning("JATS table-wrap produced no parseable table; skipping")
             return
-        try:
-            html = df.to_html(index=False)
-        except Exception:  # noqa: BLE001 — degrade gracefully, never crash
-            html = ""
         self.tables.append(
             PaperTable(
                 table_id=self._table_counter,
