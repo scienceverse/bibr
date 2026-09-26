@@ -479,98 +479,6 @@ class TestReclaimBoundaryOrphans:
         assert self._reclaimed(self.ACK_PROSE, first) == [134, 135]
 
 
-class TestFindDoi:
-    """Tests for _find_doi regex extraction."""
-
-    def test_standard_doi(self):
-        ext = _make_extractor([], [])
-        assert ext.core._find_doi("DOI: 10.1038/nature12373") == "10.1038/nature12373"
-
-    def test_doi_in_url(self):
-        ext = _make_extractor([], [])
-        result = ext.core._find_doi("https://doi.org/10.1016/j.cell.2020.01.001")
-        assert result == "10.1016/j.cell.2020.01.001"
-
-    def test_doi_with_special_chars(self):
-        ext = _make_extractor([], [])
-        assert ext.core._find_doi("10.1000/xyz123-abc") == "10.1000/xyz123-abc"
-
-    def test_no_doi(self):
-        ext = _make_extractor([], [])
-        assert ext.core._find_doi("No DOI here") is None
-
-    def test_empty_string(self):
-        ext = _make_extractor([], [])
-        assert ext.core._find_doi("") is None
-
-    def test_doi_with_parentheses(self):
-        ext = _make_extractor([], [])
-        result = ext.core._find_doi("10.1002/(SICI)1097-0258")
-        assert result == "10.1002/(SICI)1097-0258"
-
-    def test_hyphen_space_split_doi_is_bridged(self):
-        # exp #2 (ja.2018-26): EOL-hyphenated DOI joined as "hyphen space" —
-        # the regex must bridge the gap instead of truncating at the space.
-        ext = _make_extractor([], [])
-        text = (
-            "Economics E-Journal, 12 (2018-26): 1-9. "
-            "http://dx.doi.org/10.5018/economics- ejournal.ja.2018-26"
-        )
-        assert ext.core._find_doi(text) == "10.5018/economics-ejournal.ja.2018-26"
-
-    def test_trailing_hyphen_not_bridged_into_prose(self):
-        # The guard is that the hyphen-space bridge above must not swallow the
-        # following prose. It previously fell back to the stub "10.1234/abc-";
-        # normalize_doi now rejects a hyphen-terminated suffix, so the decline is
-        # a clean abstention instead of a DOI that resolves to nothing.
-        ext = _make_extractor([], [])
-        assert ext.core._find_doi("DOI: 10.1234/abc- The Journal of Things") is None
-
-    def test_truncated_prefix_loses_to_full_doi(self):
-        # wrap-truncated copy earlier in the text must not shadow the full DOI.
-        # Resolved by priority ranking (marker > doi.org/ URL), not by
-        # prefix-dropping — the latter was removed because it also discarded
-        # correct DOIs that other candidates merely extend (e.g. figure DOIs).
-        ext = _make_extractor([], [])
-        text = (
-            "Citation: https://doi.org/10.1371/journal.\n"
-            "some prose here\n"
-            "DOI: 10.1371/journal.pone.0279511\n"
-        )
-        assert ext.core._find_doi(text) == "10.1371/journal.pone.0279511"
-
-    def test_article_doi_beats_journal_doi(self):
-        ext = _make_extractor([], [])
-        text = (
-            "Journal DOI: https://doi.org/10.46654/RJMP\n"
-            "Article DOI: https://doi.org/10.46654/RJMP.14033\n"
-        )
-        assert ext.core._find_doi(text) == "10.46654/RJMP.14033"
-
-    def test_journal_doi_alone_is_still_found(self):
-        ext = _make_extractor([], [])
-        text = "Journal DOI: https://doi.org/10.46654/RJMP\n"
-        assert ext.core._find_doi(text) == "10.46654/RJMP"
-
-    def test_unrelated_longer_doi_does_not_shadow(self):
-        ext = _make_extractor([], [])
-        text = "DOI: 10.1234/abc\nsee also 10.1234/abcdef.99\n"
-        # 10.1234/abc is a DOI: marker match (priority 3), 10.1234/abcdef.99 is bare (priority 1)
-        assert ext.core._find_doi(text) == "10.1234/abc"
-
-    def test_figure_doi_does_not_shadow_paper_doi(self):
-        # PLOS prints figure DOIs in body captions, inside the pre-references
-        # window. They extend the paper's own DOI, so a prefix-dropping rule
-        # would discard the correct DOI in favour of a figure's.
-        ext = _make_extractor([], [])
-        text = (
-            "PLoS ONE 10(6): e0130688. doi:10.1371/journal.pone.0130688\n"
-            "Fig 1. Screening strategy.\ndoi:10.1371/journal.pone.0130688.g001\n"
-            "Fig 5. Median fin fold.\ndoi:10.1371/journal.pone.0130688.g005\n"
-        )
-        assert ext.core._find_doi(text) == "10.1371/journal.pone.0130688"
-
-
 class TestGetCutoffIndex:
     """Tests for _get_cutoff_index, which finds where metadata ends."""
 
@@ -886,134 +794,14 @@ class TestHeaderAliasPrecedence:
         assert all(t.startswith("Ref ") for t in result["text"])
 
 
-class TestFindDoiHeadersFooters:
-    """Tests for DOI extraction from headers and footers."""
-
-    def test_doi_found_in_footer(self):
-        ext = _make_extractor(
-            [],
-            [],
-            detected_footers=["Journal of Testing | https://doi.org/10.1234/test.2024"],
-        )
-        assert ext.core._find_doi("No DOI in body") == "10.1234/test.2024"
-
-    def test_doi_found_in_header(self):
-        ext = _make_extractor(
-            [],
-            [],
-            detected_headers=["DOI: 10.5678/header-doi.001"],
-        )
-        assert ext.core._find_doi("No DOI in body") == "10.5678/header-doi.001"
-
-    def test_body_doi_takes_precedence(self):
-        """DOI in the main text should be preferred over header/footer."""
-        ext = _make_extractor(
-            [],
-            [],
-            detected_footers=["https://doi.org/10.9999/footer-doi"],
-        )
-        assert ext.core._find_doi("Paper DOI: 10.1111/body-doi") == "10.1111/body-doi"
-
-    def test_no_doi_anywhere(self):
-        ext = _make_extractor(
-            [],
-            [],
-            detected_headers=["Volume 42, Issue 3"],
-            detected_footers=["Page 1 of 10"],
-        )
-        assert ext.core._find_doi("No DOI here either") is None
-
-    def test_footer_checked_before_header(self):
-        """Footers are more common for DOIs, so they are checked first."""
-        ext = _make_extractor(
-            [],
-            [],
-            detected_footers=["10.1000/footer-first"],
-            detected_headers=["10.2000/header-second"],
-        )
-        assert ext.core._find_doi("No body DOI") == "10.1000/footer-first"
-
-
-class TestFindDoiWithFallback:
-    """Tests for _find_doi_with_fallback's early-page (pages 1-2) rescue."""
-
-    def test_page2_doi_found_via_early_page_fallback(self):
-        rows = [
-            ("Title", "A Study of Reproductive Health Outcomes", 1),
-            ("Introduction", "This paper examines maternal outcomes.", 1),
-            (
-                "Body",
-                "Full text available at http://dx.doi.org/10.5935/1981-2965.20170016",
-                2,
-            ),
-        ]
-        ext = _make_extractor_pages(rows)
-        front_text = (
-            "A Study of Reproductive Health Outcomes This paper examines maternal outcomes."
-        )
-        assert ext.core._find_doi_with_fallback(front_text) == "10.5935/1981-2965.20170016"
-
-    def test_page1_doi_still_found_via_early_page_fallback(self):
-        """Widening to pages 1-2 must not regress the original page-1 case."""
-        rows = [
-            ("Title", "A Title With No DOI In The Front Matter", 1),
-            ("Footer", "DOI: 10.1234/page1-doi", 1),
-        ]
-        ext = _make_extractor_pages(rows)
-        front_text = "A Title With No DOI In The Front Matter"
-        assert ext.core._find_doi_with_fallback(front_text) == "10.1234/page1-doi"
-
-    def test_no_doi_anywhere_returns_none(self):
-        rows = [
-            ("Title", "A Title With No DOI Anywhere", 1),
-            ("Body", "More text, still no DOI.", 2),
-        ]
-        ext = _make_extractor_pages(rows)
-        front_text = "A Title With No DOI Anywhere"
-        assert ext.core._find_doi_with_fallback(front_text) is None
-
-    def test_page2_reference_doi_is_not_taken_as_paper_doi(self):
-        """A short paper with no front-matter DOI whose reference list begins on
-        page 2 must not surface a reference DOI as its own — the fallback drops
-        rows printed under a references heading."""
-        rows = [
-            ("Title", "A Brief Report With No Front-Matter DOI", 1),
-            ("Introduction", "This short report prints no DOI on page 1.", 1),
-            (
-                "References",
-                "Smith J. Prior work. J Things 2020;1:2. https://doi.org/10.9999/reference.only",
-                2,
-            ),
-        ]
-        ext = _make_extractor_pages(rows)
-        front_text = (
-            "A Brief Report With No Front-Matter DOI This short report prints no DOI on page 1."
-        )
-        assert ext.core._find_doi_with_fallback(front_text) is None
-
-    def test_page2_footnote_doi_survives_reference_exclusion(self):
-        """An early-page footnote DOI remains eligible when reference rows are excluded."""
-        rows = [
-            ("Title", "A Study of Reproductive Health Outcomes", 1),
-            ("Introduction", "This paper examines maternal outcomes.", 1),
-            ("References", "Smith J. Prior work. https://doi.org/10.9999/reference.only", 2),
-            # Footnote appended at document end, page 2, no references heading.
-            (None, "http://dx.doi.org/10.5935/1981-2965.20170016", 2),
-        ]
-        ext = _make_extractor_pages(rows)
-        front_text = (
-            "A Study of Reproductive Health Outcomes This paper examines maternal outcomes."
-        )
-        assert ext.core._find_doi_with_fallback(front_text) == "10.5935/1981-2965.20170016"
-
-
 class TestDoiPoisoning:
     """M2: ORCID rows pulled from the reference list must not poison DOI extraction.
 
     `_collect_core_metadata_rows` includes every row containing "orcid.org"
     from the whole document. A reference-list row carrying both an ORCID URL
-    and a doi.org URL would inject a priority-2 DOI candidate that outranks
-    the paper's own DOI when the real DOI prints only bare (priority 1).
+    and a doi.org URL once injected a DOI candidate that outranked the paper's
+    own DOI. Core extraction no longer reads a DOI at all: the identity stage
+    chooses it from provenance-carrying candidates.
     """
 
     @staticmethod
@@ -1037,11 +825,11 @@ class TestDoiPoisoning:
         ]
         return _make_extractor(sections, texts, paper_sections=paper_sections)
 
-    async def test_ref_row_doi_does_not_outrank_paper_doi(self):
+    async def test_core_extraction_leaves_the_doi_to_identity(self):
         ext = self._poisoned_extractor()
         with mock.patch.object(ext.core, "_call_core_llm", return_value=None):
             await ext.extract_core_metadata()
-        assert ext.metadata.doi == "10.1234/real.paper"
+        assert ext.metadata.doi == ""
 
     async def test_orcid_rows_still_reach_llm_text(self):
         """The ORCID rows must stay in the LLM input (author<->ORCID mapping)."""

@@ -126,6 +126,7 @@ class Pipeline:
         fs = FileState(path=Path(path), paper_id=paper_id)
         if content is not None:
             fs.pdf_bytes = content
+            fs.caller_bytes = content
         fs.content_sha256 = content_hash
         await self.process_chunk([fs], progress=progress, config=config)
         if fs.error:

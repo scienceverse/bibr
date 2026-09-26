@@ -65,6 +65,19 @@ class TestDoiAndKeywords:
         out = harvest_docinfo({"Keywords": "https://doi.org/10.5555/j.tacl.2026.7"}, PAGE_TEXT)
         assert out.get("doi") == "10.5555/j.tacl.2026.7"
 
+    def test_doi_keeps_its_parentheses(self):
+        out = harvest_docinfo(
+            {"Subject": "Rev Bras Ortop, 46 (2011) 730. doi:10.1016/S2255-4971(15)30333-5"},
+            PAGE_TEXT,
+        )
+        assert out.get("doi") == "10.1016/S2255-4971(15)30333-5"
+
+    def test_doi_ends_at_a_comma(self):
+        out = harvest_docinfo(
+            {"Keywords": "health,https://doi.org/10.5555/abc.7,public space"}, PAGE_TEXT
+        )
+        assert out.get("doi") == "10.5555/abc.7"
+
     def test_no_doi_no_key(self):
         out = harvest_docinfo({"Subject": "Machine Learning"}, PAGE_TEXT)
         assert "doi" not in out

@@ -4,20 +4,34 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import replace
 from difflib import SequenceMatcher
+from typing import TYPE_CHECKING
 
+from bibr.extract.ref_locator import _REF_HEADER_RE, _looks_like_terminal_reference_start
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
 from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
+if TYPE_CHECKING:
+    from bibr.extract.pdf_doi_evidence import PdfDoiEvidence, TextLayerLine
+
 EXPECTED_VISIBLE = 4
 EXPLICIT_SELF_ID = 3
 FRONT_MATTER_OR_REPEATED_FURNITURE = 2
 UNCONTESTED_UNTYPED = 1
+
+# Candidate sources read from the PDF itself (``pdf_doi_evidence``) rather than
+# from the parsed text. A text-layer DOI is printed on the page. A link target
+# or a document-information DOI is not: it is recorded in the receipt as
+# agreement evidence and never takes part in the selection.
+TEXT_LAYER = "text_layer"
+LINK_ANNOTATION = "link_annotation"
+AGREEMENT_ONLY = "agreement_only"
+LINE_JOIN_OVERRUN = "line_join_overrun"
 
 _DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
@@ -43,6 +57,11 @@ _SUPPLEMENT_ISSUE_RE = re.compile(r"(?:\(\s*|\bvol(?:ume)?\.?\s*\d+\s*,?\s*)supp
 _NON_SELF_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"reference\s+doi\s*[:.]?\s*$", re.IGNORECASE), "reference_doi"),
     (re.compile(r"parent(?:\s+article)?\s+doi\s*[:.]?\s*$", re.IGNORECASE), "parent_doi"),
+    # A correction notice names the article it corrects.
+    (
+        re.compile(r"doi\s+of\s+(?:the\s+)?original\s+article\s*[:.]?\s*$", re.IGNORECASE),
+        "parent_doi",
+    ),
     (
         re.compile(
             r"(?:component|supplement(?:ary)?|figure|table)\s+doi\s*[:.]?\s*$",
@@ -140,6 +159,67 @@ def _marker_kind(text: str, start: int) -> str:
     return "bare"
 
 
+# A citation line that opens with the publication year ("2017. Proc Soc 2,
+# 20:1-15. https://doi.org/…", printed as a running header above the title) is
+# the article citing itself, not item 2017 of a numbered list.
+_YEAR_LED_CITATION_RE = re.compile(r"^\s*(?:19|20)\d{2}[.)]\s")
+
+
+# A source note that introduces a citation ("From: Moher D, … (2009) …").
+_SOURCE_NOTE_RE = re.compile(
+    r"^\s*(?:(?:adapted|reproduced|reprinted|modified)\s+)?(?:from|source)\s*:?\s*",
+    re.IGNORECASE,
+)
+# The article's own citation, which reads like any other.
+_SELF_CITATION_RE = re.compile(
+    r"\b(?:cite\s+(?:this|as)\b|cite\s*:|how\s+to\s+cite|please\s+cite"
+    r"|(?:recommended|suggested)\s+citation|citation\s*:)",
+    re.IGNORECASE,
+)
+
+
+# A reference entry's tail, split from it into a sentence of its own, opens
+# with the DOI label, a URL or the DOI, a page range or volume, or in lower case.
+_TAIL_OPENING_RE = re.compile(r"(?:doi\b|https?://|www\.|10\.\d)", re.IGNORECASE)
+# A line that is only the DOI label or resolver host and the DOI ("DOI: …",
+# "https://doi.org/…"): how a paper prints its own DOI as much as how a
+# reference entry ends, so it is not read as a tail.
+_LONE_DOI_LINE_RE = re.compile(
+    rf"(?:doi\s*[:.]?\s*(?:{_DOI_HOST})?|{_DOI_HOST})\s*10\.\d{{4,9}}/\S+\s*",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_reference_tail(text: str) -> bool:
+    """Whether *text* is the end of a reference entry split from its start.
+
+    "131-138. Doi: …" or "prevalence rates. Clin J. (2018) 18:38–44. doi: …":
+    no prose sentence opens that way. A line holding nothing but the labelled
+    DOI is not a tail: a paper prints its own DOI that way too, after cover
+    pages as much as on its first page.
+    """
+    opening = text.lstrip()
+    if not opening or _LONE_DOI_LINE_RE.fullmatch(opening):
+        return False
+    return bool(
+        _TAIL_OPENING_RE.match(opening)
+        or opening[0].isdigit()
+        or opening[0] in "(["
+        or opening[0].islower()
+    )
+
+
+def _reads_as_citation(text: str) -> bool:
+    """Whether *text* is a bibliographic citation (an author-date or numbered entry).
+
+    A figure's source note is one too once its "From:" label is set aside. The
+    article citing itself ("Cite this article: …", "Citation: …") is not.
+    """
+    if _SELF_CITATION_RE.search(text):
+        return False
+    return _looks_like_terminal_reference_start(_SOURCE_NOTE_RE.sub("", text, count=1))
+
+
 def _candidate_from_match(
     text: str,
     match: re.Match[str],
@@ -165,11 +245,20 @@ def _candidate_from_match(
     # sentence still is (a Zenodo DOI beside it marks a software citation).
     context = text.replace(match.group(0), " ")
     section_value = str(section_type or "").casefold()
+    # Where a paper names itself: the page furniture, the title, abstract and
+    # keywords sections, pages 1-2, and an unpaged input's front block. A DOI
+    # label anywhere else is how a cited work's DOI is printed.
+    in_front = (
+        source_kind in {"header", "footer"}
+        or section_value in _FRONT_MATTER_SECTIONS
+        or (page is not None and page <= 2)
+        or front_block
+    )
 
     rejection_reason = None
     if (
         section_value == CanonicalSection.REFERENCES.value
-        or _REFERENCE_PREFIX_RE.match(text)
+        or (_REFERENCE_PREFIX_RE.match(text) and not _YEAR_LED_CITATION_RE.match(text))
         or marker_kind == "reference_doi"
     ):
         semantic_context = "reference"
@@ -210,16 +299,24 @@ def _candidate_from_match(
         semantic_context = "parent_or_component"
         rejection_reason = "component_candidate"
         tier = 0
-    elif marker_kind == "explicit_doi":
+    elif marker_kind == "explicit_doi" and in_front:
         semantic_context = "article_self"
         tier = EXPLICIT_SELF_ID
+    elif marker_kind == "explicit_doi":
+        # A DOI label outside the front matter never outranks the front matter,
+        # but it can still name the paper as the only DOI left standing (a
+        # preprint's "shared as a preprint …, doi: …" note), unless it is a
+        # cited work's DOI: in a citation or in the tail of a reference entry.
+        cited = _reads_as_citation(text) or _reads_as_reference_tail(text)
+        semantic_context = "cited_work" if cited else "labelled_body"
+        tier = UNCONTESTED_UNTYPED
     elif marker_kind == "citation":
         semantic_context = "article_self"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
     elif source_kind in {"header", "footer"}:
         semantic_context = "repeated_furniture" if repeated_count > 1 else "structural_furniture"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
-    elif section_value in _FRONT_MATTER_SECTIONS or (page is not None and page <= 2) or front_block:
+    elif in_front:
         semantic_context = "front_matter"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
     else:
@@ -229,6 +326,13 @@ def _candidate_from_match(
     if marker_kind == "journal_doi" and rejection_reason is None:
         semantic_context = "journal_identity"
         tier = UNCONTESTED_UNTYPED
+    # No DOI ends in a slash. One that does ran on into the next field, as when
+    # a line join glues the ISSN line under a DOI onto it ("…04.006" +
+    # "1234-5678/© 2026 The Authors").
+    if rejection_reason is None and normalized.endswith("/"):
+        semantic_context = "line_join_overrun"
+        rejection_reason = LINE_JOIN_OVERRUN
+        tier = 0
 
     return DoiCandidate(
         raw=raw,
@@ -271,14 +375,6 @@ def _repair_doi_text(text: str) -> str:
         r"\1\2",
         cleaned,
     )
-
-
-def normalize_candidate_doi(raw: str) -> str | None:
-    """Normalize repaired DOI spelling while retaining source case for legacy callers."""
-
-    repaired = _repair_doi_text(raw)
-    match = _DOI_RE.search(repaired)
-    return normalize_doi(match.group(0)) if match is not None else None
 
 
 def _cleaned_char_source_ranges(source: str, cleaned: str) -> list[tuple[int, int]]:
@@ -473,8 +569,35 @@ def _pageless_front_block_end(contents, section_map) -> int | None:
     return min(classified, default=None)
 
 
-def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
-    """Collect every source-visible DOI with sentence or furniture provenance."""
+def _section_type(section, page: int | None) -> str | None:
+    """The section's type, taking a section headed "References" as one after page 2.
+
+    The classifier can leave a reference list's section untyped; its heading
+    still says what it is. On pages 1 and 2 the heading may not be printed:
+    the parser names the section of a box the layout labels as reference text,
+    such as the paper's own "Cite as" box, "References", and the paper's DOI in
+    it must stay the paper's. There the section keeps its own type.
+    """
+    if section is None:
+        return None
+    if (
+        (page is None or page > 2)
+        and section.section_type != CanonicalSection.REFERENCES
+        and _REF_HEADER_RE.match(section.header or "")
+    ):
+        return CanonicalSection.REFERENCES.value
+    return section.section_type.value if section.section_type else None
+
+
+def collect_doi_candidates(
+    contents, pdf_evidence: PdfDoiEvidence | None = None
+) -> tuple[DoiCandidate, ...]:
+    """Collect every source-visible DOI with sentence or furniture provenance.
+
+    With *pdf_evidence* (a PDF input) the pool also takes the DOIs the front
+    pages' text layer prints outside the parsed text, and the link targets and
+    document metadata as agreement-only rows; see ``_with_pdf_evidence``.
+    """
 
     section_map = {section.section_id: section for section in contents.sections}
     front_block_end = _pageless_front_block_end(contents, section_map)
@@ -488,9 +611,7 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
                 source_kind="sentence",
                 page=sentence.page_number,
                 section_id=sentence.section_id,
-                section_type=section.section_type.value
-                if section and section.section_type
-                else None,
+                section_type=_section_type(section, sentence.page_number),
                 region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
@@ -538,11 +659,295 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
             )
         )
     candidates.extend(_publication_table_doi_candidates(contents))
+    if pdf_evidence is not None:
+        candidates = _with_pdf_evidence(contents, candidates, pdf_evidence, section_map)
     return tuple(candidates)
+
+
+# Layout labels whose text a DOI inside them belongs to: a reference entry, a
+# table, or a figure and its caption. The parse keeps these out of the body
+# text, so their sentences carry these section types.
+_REFERENCE_LABELS = frozenset({"reference", "reference_content"})
+_FIGURE_LABELS = frozenset({"image", "chart", "figure_title", "header_image", "footer_image"})
+# Characters that may follow a DOI without being part of the token after it.
+_DOI_CLOSERS = frozenset(".,;:)]}>\"'\u2019\u201d")
+_BANNER_RE = re.compile(r"\bfirst\s+published\s+as\b", re.IGNORECASE)
+
+
+def _cut_unclosed(text: str) -> str:
+    """*text* up to its first ``(`` that no ``)`` closes.
+
+    A DOI's own parentheses are balanced (``…(20)30183-5``, a SICI
+    ``(SICI)``). The text layer can run a DOI into an invisible neighbouring
+    text run, such as ``(0123456789().,-volV)`` after the DOI line of some
+    publishers, and the never-closed ``(`` is where the DOI ended.
+    """
+    open_at: list[int] = []
+    for index, ch in enumerate(text):
+        if ch == "(":
+            open_at.append(index)
+        elif ch == ")" and open_at:
+            open_at.pop()
+    return text[: open_at[0]] if open_at else text
+
+
+def _region_at(regions: list, point: tuple[float, float]):
+    """The smallest layout region on the page that contains *point*."""
+    x, y = point
+    best = None
+    for region in regions:
+        if region.bbox is None:
+            continue
+        x1, y1, x2, y2 = region.bbox
+        if x1 - 2 <= x <= x2 + 2 and y1 - 2 <= y <= y2 + 2:
+            area = (x2 - x1) * (y2 - y1)
+            if best is None or area < best[0]:
+                best = (area, region)
+    return best[1] if best is not None else None
+
+
+def _region_context(region, section_map) -> tuple[int | None, str | None]:
+    """Section id and type a DOI printed inside *region* gets, as its sentences would."""
+    if region is None:
+        return None, None
+    if region.label in _REFERENCE_LABELS:
+        return region.section_id, CanonicalSection.REFERENCES.value
+    if region.label == "table":
+        return region.section_id, CanonicalSection.TABLE.value
+    if region.label in _FIGURE_LABELS:
+        return region.section_id, CanonicalSection.FIGURE.value
+    section = section_map.get(region.section_id)
+    if section is None or section.section_type is None:
+        return region.section_id, None
+    return region.section_id, section.section_type.value
+
+
+def _text_layer_candidates(
+    line: TextLayerLine, regions: list, section_map
+) -> list[tuple[DoiCandidate, str]]:
+    """Candidates of one text-layer line, each with the text after it on the line.
+
+    Each takes the context of the layout region it is printed in, so a DOI in a
+    reference entry, a table or a figure is rejected as its sentence would be.
+    Text outside every region (a margin banner, a masthead the layout missed)
+    has only its page and its own line for context. A repository banner states
+    the article's DOI ("… first published as 10.1234/… on 1 May 1999.
+    Downloaded from …"); the text layer may give its phrases in either order.
+    """
+
+    source = line.text
+    cleaned = _repair_doi_text(source)
+    matches = tuple(_DOI_RE.finditer(cleaned))
+    if not matches:
+        return []
+    ranges = _cleaned_char_source_ranges(source, cleaned)
+    banner = bool(_BANNER_RE.search(cleaned))
+    found = []
+    for match in matches:
+        start = ranges[match.start()][0]
+        end = max(ranges[match.end() - 1][1], start + 1)
+        points = [point for point in line.centers[start:end] if point is not None]
+        region = None
+        if points:
+            center = (
+                sum(point[0] for point in points) / len(points),
+                sum(point[1] for point in points) / len(points),
+            )
+            region = _region_at(regions, center)
+        section_id, section_type = _region_context(region, section_map)
+        candidate = _candidate_from_match(
+            cleaned,
+            match,
+            raw=source[start:end],
+            source_kind=TEXT_LAYER,
+            page=line.page,
+            section_id=section_id,
+            section_type=section_type,
+            region_index=region.index if region is not None else None,
+            region_type=region.label if region is not None else None,
+            text_id=None,
+        )
+        if candidate is None:
+            continue
+        cut = _cut_unclosed(candidate.raw)
+        if cut != candidate.raw:
+            normalized = _canonical_doi(cut)
+            if normalized is None:
+                continue
+            candidate = replace(candidate, raw=cut, normalized=normalized)
+        if banner and candidate.rejection_reason is None:
+            candidate = replace(
+                candidate,
+                marker_kind="first_published_as",
+                semantic_context="article_self",
+                selection_tier=EXPLICIT_SELF_ID,
+            )
+        # The line after the DOI, including punctuation normalization dropped.
+        doi_end = cleaned.casefold().find(candidate.normalized, match.start())
+        doi_end = doi_end + len(candidate.normalized) if doi_end >= 0 else match.end()
+        found.append((candidate, cleaned[doi_end:]))
+    return found
+
+
+def _agreement_rows(evidence: PdfDoiEvidence) -> list[DoiCandidate]:
+    """One receipt row per DOI a link target or the document information names.
+
+    They never take part in the selection; they record what the PDF says
+    beside its print. A link target counts once per page. ``semantic_context``
+    says whether the page prints that DOI under or next to the link
+    (``printed_link``); the printed DOI itself is a candidate of the text it is
+    printed in.
+    """
+
+    rows: list[DoiCandidate] = []
+    seen: set[tuple[str, int | None, str]] = set()
+
+    def row(raw, normalized, source_kind, page, marker_kind, semantic_context) -> None:
+        if (source_kind, page, normalized) in seen:
+            return
+        seen.add((source_kind, page, normalized))
+        rows.append(
+            DoiCandidate(
+                raw=raw[:300],
+                normalized=normalized,
+                source_kind=source_kind,
+                page=page,
+                section_id=None,
+                section_type=None,
+                region_index=None,
+                region_type=None,
+                text_id=None,
+                marker_kind=marker_kind,
+                repeated_header_footer_count=0,
+                semantic_context=semantic_context,
+                selection_tier=0,
+                rejection_reason=AGREEMENT_ONLY,
+            )
+        )
+
+    for link in evidence.links:
+        normalized = _canonical_doi(link.doi)
+        if normalized is None:
+            continue
+        printed = normalized in "".join(link.printed_text.split()).casefold()
+        context = "printed_link" if printed else "link_target"
+        row(link.uri, normalized, LINK_ANNOTATION, link.page, "link_uri", context)
+    for item in evidence.metadata:
+        for match in _DOI_RE.finditer(item.value):
+            normalized = _canonical_doi(match.group(0))
+            if normalized is not None:
+                row(match.group(0), normalized, item.source, None, item.key, "pdf_metadata")
+    return rows
+
+
+def _overruns_line(
+    parsed: DoiCandidate, reading: DoiCandidate, tail: str, line: TextLayerLine
+) -> bool | None:
+    """Whether *parsed* ran past the line end where the text layer ends *reading*.
+
+    *tail* is what the line prints after *reading*. None when *parsed* does
+    not continue *reading* onto the next line. Otherwise the parse joined the
+    two lines: True when the join ran into the next field (the continuation is
+    glued to more text, as an ISSN to its copyright line), False for a DOI
+    wrapped onto the next line.
+    """
+
+    rest = parsed.normalized[len(reading.normalized) :]
+    joined = ("".join(tail.split()) + line.next_text.lstrip()).casefold()
+    if not rest or not joined.startswith(rest):
+        return None
+    after = joined[len(rest) : len(rest) + 1]
+    return bool(after) and not after.isspace() and after not in _DOI_CLOSERS
+
+
+def _with_pdf_evidence(
+    contents, parsed: list[DoiCandidate], evidence: PdfDoiEvidence, section_map
+) -> list[DoiCandidate]:
+    """Add the PDF's own DOI evidence to the parsed-text candidates.
+
+    A text-layer DOI joins the pool unless the parsed text already holds it on
+    that page (or in the pageless page furniture) or reads more of it (the
+    text layer broke a wrapped DOI at the line end), or the parse read the same
+    layout region's DOI differently: the parse chose that region's text. The
+    line geometry also sets a DOI's end: a parsed DOI that runs from a line's
+    end into the next field, such as an ISSN printed on the next line
+    ("…04.006" + "1234-5678/© 2026"), is rejected. Link targets and metadata
+    DOIs are added as agreement-only rows.
+    """
+
+    regions_by_page: dict[int, list] = defaultdict(list)
+    for region in getattr(contents, "region_summaries", ()) or ():
+        if region.page is not None:
+            regions_by_page[region.page].append(region)
+    rows = _agreement_rows(evidence)
+
+    readings = [
+        (candidate, tail, line)
+        for line in evidence.lines
+        for candidate, tail in _text_layer_candidates(
+            line, regions_by_page.get(line.page, []), section_map
+        )
+    ]
+    checked: list[DoiCandidate] = []
+    for candidate in parsed:
+        for reading, tail, line in readings:
+            if (
+                candidate.rejection_reason is None
+                and candidate.page in (None, reading.page)
+                and len(candidate.normalized) > len(reading.normalized)
+                and candidate.normalized.startswith(reading.normalized)
+                and all(ch.isspace() or ch in _DOI_CLOSERS for ch in tail)
+                and _overruns_line(candidate, reading, tail, line)
+            ):
+                candidate = replace(
+                    candidate,
+                    semantic_context="line_join_overrun",
+                    selection_tier=0,
+                    rejection_reason=LINE_JOIN_OVERRUN,
+                )
+                break
+        checked.append(candidate)
+
+    def read_by_parse(reading: DoiCandidate) -> bool:
+        for candidate in checked:
+            if candidate.page not in (None, reading.page):
+                continue
+            if candidate.normalized == reading.normalized:
+                return True
+            if candidate.rejection_reason != LINE_JOIN_OVERRUN and candidate.normalized.startswith(
+                reading.normalized
+            ):
+                return True
+            # Longer than the parse's reading by more than an end a parse can
+            # lose: the text layer ran the DOI into the text after it.
+            if reading.normalized.startswith(candidate.normalized) and not _LOST_END_RE.match(
+                reading.normalized[len(candidate.normalized) :]
+            ):
+                return True
+            if (
+                reading.region_index is not None
+                and candidate.page == reading.page
+                and candidate.region_index == reading.region_index
+                and not reading.normalized.startswith(candidate.normalized)
+            ):
+                return True
+        return False
+
+    added: list[DoiCandidate] = []
+    for reading, _tail, _line in readings:
+        if read_by_parse(reading) or any(
+            (c.page, c.normalized) == (reading.page, reading.normalized) for c in added
+        ):
+            continue
+        added.append(reading)
+    return [*checked, *added, *rows]
 
 
 _FURNITURE_SOURCES = frozenset({"header", "footer"})
 _NUMERIC_EXTENSION_RE = re.compile(r"^[/.]\d")
+# The end a parse can lose off a printed DOI: a few characters, at most two of
+# them if a letter is among them (a Springer check letter, ``-x``).
+_LOST_END_RE = re.compile(r"^(?:[-._;()/:0-9]{1,4}|[-._;()/:A-Za-z0-9]{1,2})$")
 
 
 def _distinct_dois(candidates: list[DoiCandidate]) -> set[str]:
@@ -557,16 +962,24 @@ def _drop_truncated_prefixes(candidates: list[DoiCandidate]) -> list[DoiCandidat
     (``10.30574/wjarr`` → ``10.30574/wjarr.2022.14.3.0574``), while supplement
     and component spellings extend with a letter (``/s1``, ``.s001``, ``.g001``)
     and must never displace the article they belong to.
+
+    A text-layer DOI is read from one printed line, so a parsed DOI it extends
+    by a few characters without letters lost its end in the parse
+    (``…/25.202.3`` for the printed ``…/25.202.33``) and is dropped too.
     """
 
     values = _distinct_dois(candidates)
+    complete = {c.normalized.casefold() for c in candidates if c.source_kind == TEXT_LAYER}
     truncated = {
         value
         for value in values
         for other in values
         if other != value
         and other.startswith(value)
-        and _NUMERIC_EXTENSION_RE.match(other[len(value) :])
+        and (
+            _NUMERIC_EXTENSION_RE.match(other[len(value) :])
+            or (other in complete and _LOST_END_RE.match(other[len(value) :]))
+        )
     }
     kept = [c for c in candidates if c.normalized.casefold() not in truncated]
     return kept or candidates
@@ -619,6 +1032,7 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
 # Lowest tier that can name the paper without an expected DOI.
 _MIN_IDENTITY_TIER = FRONT_MATTER_OR_REPEATED_FURNITURE
 
+
 _TIE_BREAK_LADDER = (
     _prefer_structured,
     _drop_truncated_prefixes,
@@ -626,6 +1040,40 @@ _TIE_BREAK_LADDER = (
     _prefer_body_sources,
     _prefer_lowest_page,
 )
+
+
+def _select_below_front_matter(candidates: tuple[DoiCandidate, ...]) -> DoiSelection:
+    """Name the paper from a labelled DOI outside the front matter.
+
+    Only when no candidate reaches tier 2. A tier-1 DOI alone does not name the
+    paper: printed unmarked in the body it is usually a cited work. A DOI
+    printed with a label outside the front matter and not in a citation
+    ("labelled_body") is the paper's own when it is the only such DOI; two
+    different ones are ambiguous and the selection abstains.
+    """
+
+    pool = [
+        c
+        for c in candidates
+        if c.rejection_reason is None
+        and c.selection_tier == UNCONTESTED_UNTYPED
+        and c.semantic_context == "labelled_body"
+    ]
+    if not pool:
+        return DoiSelection(None, candidates, ())
+    resolved = _drop_truncated_prefixes(pool)
+    if len(_distinct_dois(resolved)) == 1:
+        return DoiSelection(resolved[0], candidates, ())
+    issue = ValidationIssue(
+        code="VAL_DOI_AMBIGUOUS",
+        severity=IssueSeverity.WARNING,
+        message="Conflicting labelled DOI candidates outside the front matter",
+        origin_stage="identity",
+        evidence_ids=tuple(
+            f"text:{c.text_id}" if c.text_id is not None else c.source_kind for c in resolved
+        ),
+    )
+    return DoiSelection(None, candidates, (issue,))
 
 
 def _select_without_expected(
@@ -637,7 +1085,7 @@ def _select_without_expected(
         if candidate.rejection_reason is None and candidate.selection_tier >= min_tier
     ]
     if not eligible:
-        return DoiSelection(None, candidates, ())
+        return _select_below_front_matter(candidates)
     highest_tier = max(candidate.selection_tier for candidate in eligible)
     highest = [candidate for candidate in eligible if candidate.selection_tier == highest_tier]
     if len(_distinct_dois(highest)) > 1:
@@ -756,37 +1204,3 @@ def select_doi_candidates(
             blocking=True,
         )
     return replace(fallback, issues=(*fallback.issues, issue))
-
-
-def select_doi_from_text(text: str) -> DoiSelection:
-    """Select a DOI from front-matter text that has no page or section provenance.
-
-    Every unmarked DOI in such text is tier 1, so unlike ``select_doi_candidates``
-    this still selects an uncontested tier-1 DOI. Its caller passes only the
-    metadata region and the page furniture.
-    """
-
-    candidates: list[DoiCandidate] = []
-    # OCR cleanup can legitimately join a line-ending DOI with the next
-    # doi.org URL. Restore only that unmistakable identifier boundary so the
-    # following article-self candidate keeps its own context.
-    prepared = re.sub(
-        r"(?<=[-._;()/:A-Za-z0-9])(?=https?://(?:www\.)?(?:dx\.)?doi\.org/)",
-        "\n",
-        text or "",
-        flags=re.IGNORECASE,
-    )
-    for line_number, line in enumerate(prepared.splitlines(), start=1):
-        candidates.extend(
-            _candidates_from_text(
-                line,
-                source_kind="text",
-                page=None,
-                section_id=None,
-                section_type=None,
-                region_index=None,
-                region_type=None,
-                text_id=line_number,
-            )
-        )
-    return _select_without_expected(tuple(candidates))

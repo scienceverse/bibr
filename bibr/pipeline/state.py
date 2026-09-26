@@ -58,6 +58,10 @@ class FileState:
 
     # Populated during processing — nulled progressively
     pdf_bytes: bytes | None = None
+    # Input bytes the caller supplied (a serve upload has no file at ``path``).
+    # Unlike ``pdf_bytes`` they are kept past OCR: the identity stage rereads
+    # the PDF's text layer, links and metadata. The caller holds them anyway.
+    caller_bytes: bytes | None = None
     page_images: "list[PILImage] | None" = None
     page_indices: list[int] | None = None
     layout_results: list[list[dict[str, Any]]] | None = None
@@ -154,6 +158,7 @@ class FileState:
 
             cancel_prefetch(self.paper)
         self.pdf_bytes = None
+        self.caller_bytes = None
         self.page_images = None
         self.page_indices = None
         self.layout_results = None

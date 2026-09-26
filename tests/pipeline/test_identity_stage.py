@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from bibr.config import Settings
 from bibr.input.file import InputFile
@@ -199,3 +199,189 @@ async def test_streaming_backhalf_runs_identity_immediately_after_post_parse():
     await stage._run_backhalf(ctx, [state], asyncio.Semaphore(1))
 
     assert events == ["parse", "extract", "identity", "enrich", "export"]
+
+
+def _banner_pdf() -> bytes:
+    from tests.extract.pdf_builder import Page, TextRun, build_pdf
+
+    return build_pdf(
+        [
+            Page(
+                runs=[
+                    TextRun(72, 700, "A paper with no printed DOI in its text"),
+                    TextRun(
+                        580,
+                        200,
+                        "Example J: first published as 10.1234/banner.7 on 1 May 1999.",
+                        size=7,
+                        angle=90,
+                    ),
+                ]
+            )
+        ],
+        info={"doi": "10.1234/banner.7"},
+    )
+
+
+def _banner_paper() -> Paper:
+    from bibr.paper_contents import RegionSummary
+
+    paper = _paper("A paper with no printed DOI in its text")
+    assert paper.contents is not None
+    paper.contents.region_summaries = [
+        RegionSummary(page=1, index=0, label="text", bbox=(100.0, 100.0, 700.0, 150.0))
+    ]
+    return paper
+
+
+async def test_identity_stage_reads_the_input_pdf_that_was_processed(tmp_path):
+    from bibr.field_states import FieldScope
+    from bibr.pipeline.stages.export import _build_extraction
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    pdf = _banner_pdf()
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(pdf)
+    paper = _banner_paper()
+    paper.field_scope = FieldScope(no_llm=True)
+    state = FileState(path=source, content_sha256=hashlib.sha256(pdf).hexdigest(), paper=paper)
+    ctx = _ctx(state)
+
+    await IdentityValidationStage().run(ctx)
+    state.paper.extraction = _build_extraction(ctx, state.paper, state)
+    payload = state.paper.export_to_json()
+
+    assert state.error is None
+    assert payload["metadata"]["doi"] == "10.1234/banner.7"
+    assert payload["extraction"]["fields"]["doi"]["source"] == "text_layer"
+    receipt = payload["extraction"]["identity"]["receipt"]
+    assert receipt["selected"]["source_kind"] == "text_layer"
+    assert receipt["selected"]["marker_kind"] == "first_published_as"
+    assert [(c["source_kind"], c["rejection_reason"]) for c in receipt["candidates"]] == [
+        ("text_layer", None),
+        ("pdf_info", "agreement_only"),
+    ]
+
+
+async def test_identity_stage_never_reads_a_file_that_differs_from_the_processed_bytes(tmp_path):
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(_banner_pdf())
+    state = FileState(path=source, content_sha256="0" * 64, paper=_banner_paper())
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert state.paper is not None and state.paper.metadata is not None
+    assert state.paper.metadata.doi == ""
+    assert state.doi_selection is not None and state.doi_selection.candidates == ()
+
+
+async def test_identity_stage_reads_an_upload_that_has_no_file():
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    state = FileState(path=Path("upload.pdf"), caller_bytes=_banner_pdf(), paper=_banner_paper())
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert state.paper is not None and state.paper.metadata is not None
+    assert state.paper.metadata.doi == "10.1234/banner.7"
+
+
+async def test_process_file_keeps_upload_bytes_past_ocr_for_identity():
+    from bibr.pipeline.pipeline import Pipeline
+
+    pipeline = Pipeline(stages=[], resources=MagicMock(), config=RunConfig(), settings=Settings)
+    seen = {}
+
+    async def _chunk(file_states, progress=None, config=None):
+        state = file_states[0]
+        state.free_pre_ocr()
+        seen["pdf_bytes"], seen["caller_bytes"] = state.pdf_bytes, state.caller_bytes
+        state.result_json = {}
+
+    with patch.object(pipeline, "process_chunk", side_effect=_chunk):
+        await pipeline.process_file(Path("upload.pdf"), content=b"%PDF-1.4 upload")
+
+    assert seen == {"pdf_bytes": None, "caller_bytes": b"%PDF-1.4 upload"}
+
+
+async def test_an_unreadable_pdf_leaves_the_parsed_text_pool(monkeypatch):
+    from bibr.pipeline.stages.identity import IdentityValidationStage
+
+    def unreadable(*_args, **_kwargs):
+        raise ValueError("Data format error")
+
+    monkeypatch.setattr("bibr.pipeline.stages.identity.read_pdf_doi_evidence", unreadable)
+    paper = _banner_paper()
+    assert paper.contents is not None
+    paper.contents.sentences[0].text = "DOI: 10.1234/printed.1"
+    state = FileState(path=Path("upload.pdf"), caller_bytes=_banner_pdf(), paper=paper)
+
+    await IdentityValidationStage().run(_ctx(state))
+
+    assert state.error is None
+    assert state.paper is not None and state.paper.metadata is not None
+    assert state.paper.metadata.doi == "10.1234/printed.1"
+
+
+def test_the_doi_field_source_names_the_selected_source_kind():
+    from bibr.pipeline.stages.identity import doi_field_source
+
+    assert doi_field_source("structured_metadata") == "native"
+    assert doi_field_source("sentence") == "sentence"
+    assert doi_field_source("text_layer") == "text_layer"
+
+
+def test_only_the_identity_stage_writes_the_paper_doi():
+    """No other module assigns a ``.doi`` or builds or copies metadata with one.
+
+    The native JATS and HTML parsers record the DOI the input declares on their
+    preparsed record, which the identity stage reads as structured evidence.
+    """
+    import ast
+
+    import bibr
+
+    def names_doi(node) -> bool:
+        return isinstance(node, ast.Constant) and node.value == "doi"
+
+    evidence_writers = {"input/jats_native.py", "input/html_native.py"}
+    writers: set[tuple[str, int]] = set()
+    root = Path(bibr.__file__).parent
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        relative = path.relative_to(root).as_posix()
+        for node in ast.walk(tree):
+            targets = []
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+            elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                targets = [node.target]
+            if any(isinstance(t, ast.Attribute) and t.attr == "doi" for t in targets):
+                writers.add((relative, node.lineno))
+            if not isinstance(node, ast.Call):
+                continue
+            name = ast.unparse(node.func)
+            doi_keyword = next((k for k in node.keywords if k.arg == "doi"), None)
+            empty = (
+                doi_keyword is not None
+                and isinstance(doi_keyword.value, ast.Constant)
+                and doi_keyword.value.value == ""
+            )
+            if name.endswith("PaperMetadata") and doi_keyword is not None and not empty:
+                writers.add((relative, node.lineno))
+            if name.split(".")[-1] == "replace" and doi_keyword is not None:
+                writers.add((relative, node.lineno))
+            if name == "setattr" and len(node.args) > 1 and names_doi(node.args[1]):
+                writers.add((relative, node.lineno))
+            if name.endswith("model_copy"):
+                for keyword in node.keywords:
+                    if keyword.arg == "update" and any(
+                        names_doi(key) for key in getattr(keyword.value, "keys", ())
+                    ):
+                        writers.add((relative, node.lineno))
+
+    assert {module for module, _line in writers} - evidence_writers == {
+        "pipeline/stages/identity.py"
+    }

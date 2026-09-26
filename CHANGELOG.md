@@ -792,6 +792,11 @@ released.
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- A paper whose DOI is printed only in a citation line that opens with the
+  year ("2017. Proc Soc 2, 20:1-15. https://doi.org/…"), as some journals print
+  it above the title, was exported with no DOI: the year was read as the number
+  of a reference-list entry. Numbered entries ("12. …", "[3] …") are still
+  references.
 - `bibr.Result(data)` loads exports written by newer releases of the same
   major version, as the additive-only policy promises. It previously rejected
   any unknown key and any `schema_version` other than the exact one it writes.
@@ -943,6 +948,48 @@ released.
 - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
   were cut at the `<` when read as the paper's DOI or matched against a
   manifest's expected DOI. They are kept whole.
+- A PDF whose DOI is printed only in a repository banner up the page margin
+  ("… first published as 10.…/… on 1 May 1999. Downloaded from …"), or in a
+  masthead line the layout did not turn into a region, was exported with no
+  DOI. The identity stage now also reads the text layer of pages 1 and 2, in
+  any orientation, where the parsed text does not reach, including the banner
+  a publisher stamped on a scan. Invisible text (a scan's hidden OCR layer)
+  is not read. A banner's "first published as" names the paper. A text-layer
+  DOI printed in a reference entry, table or figure is rejected like the
+  region's text.
+- A footer DOI with the journal's ISSN on the next line ("…04.006" over
+  "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
+  (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
+  line's end into the next printed field, or that ends in a slash, is now
+  rejected as `line_join_overrun`, and the text layer's reading stands. A
+  parsed DOI that lost its last characters gives way to the complete reading
+  of its printed line.
+- A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
+  figure note outranked the paper's own DOI printed as a doi.org link on page
+  1. Outside the front matter and the running headers and footers, a labelled
+  DOI now ranks below every front-matter candidate. It still names the paper
+  when it is the only candidate left, as in a preprint's "The present work has
+  been shared as a preprint on …, doi: …"; two different ones are reported as
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside an
+  author-led or numbered citation (a reference entry outside the located
+  reference list, or a figure's source note citing another work) no longer
+  names the paper, and neither does the tail of a reference entry split into
+  a line of its own that opens with a page range, a volume or the DOI label
+  ("131-138. doi: …"). A line holding nothing but the labelled DOI ("DOI: …")
+  is not such a tail, so a paper's own DOI line after cover pages still names
+  it. An eLife JATS or HTML file's labelled figure DOIs no longer raise
+  `VAL_DOI_AMBIGUOUS` against its article-id.
+- A correction notice printed "DOI of original article: …" on its first page
+  and exported the corrected article's DOI as its own. That DOI is now the
+  notice's parent, like a "parent article DOI".
+- A reference entry under a "References" (or "Bibliography") heading that the
+  section classifier left untyped counted as body text, so its labelled DOI
+  could name a paper that prints none of its own. From page 3 on, the section
+  header now marks the section as the reference list for the DOI choice,
+  whether the page prints it or the parser made it up from the layout's
+  reference label. On pages 1 and 2 the section keeps its own type: there the
+  parser can head a "Cite as" box that the layout labels as reference text
+  "References", and the paper's own DOI in it still names the paper.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
@@ -1404,6 +1451,17 @@ released.
   process rotating only its own file, so records are neither lost nor
   duplicated across rotation. Operators tallying token usage must read both
   files: `METER_LOG_PATH` alone holds no extraction records.
+- The identity stage is the only step that sets `metadata.doi`. The
+  core-metadata extractor no longer looks for a DOI, and the no-LLM
+  document-information fallback no longer fills one from a PDF's Subject or
+  Keywords: a DOI the paper does not print is never exported. A PDF's
+  document-information DOIs and its DOI link targets are recorded as
+  `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
+  `pdf_info`, `link_annotation`); they take no part in the selection.
+  `extraction.fields.doi.source` names the selected candidate's `source_kind`
+  (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
+  `native` for a JATS or HTML article-id) instead of `identity`. The export
+  schema changes only by describing the new receipt values.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
