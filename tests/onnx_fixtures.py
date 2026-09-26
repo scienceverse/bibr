@@ -7,7 +7,10 @@ encoders are tiny ``BertModel``s built from an explicit config and the
 tokenizer is a hand-rolled WordPiece vocabulary.
 
 Callers must ``pytest.importorskip`` ``torch``, ``transformers`` and ``onnx``
-before using these helpers.
+before using the model/export helpers. ``tiny_tokenizer`` needs only the
+``tokenizers`` package (a core dependency) and is also used by
+``scripts/generate_onnx_test_bundles.py`` to write the committed torch-free
+bundles under ``tests/fixtures/onnx/``.
 """
 
 from __future__ import annotations

@@ -8,6 +8,10 @@ Two complementary tools:
 * :func:`scrub_secrets` / :class:`SecretScrubbingFilter` — pattern-based masking
   for cases where the key is *not* in scope, e.g. an SDK traceback logged with
   ``exc_info=True`` that embeds ``?key=AIza…`` in a request URL (audit L12).
+
+:func:`describe_error` goes further for exception text that leaves the process
+(export warnings, HTTP error bodies): it drops URLs altogether, since the
+internal endpoint is itself what those readers must not learn.
 """
 
 from __future__ import annotations
@@ -23,8 +27,16 @@ _QUERY_SECRET_RE = re.compile(
 # ``Authorization: Bearer <token>`` / ``Basic <b64>``.
 _BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/\-]{8,}=*", re.IGNORECASE)
 # URL user-info credentials: ``https://user:pass@host`` — used by OCR/LLM SDKs
-# that embed credentials in the base URL.
-_URL_USERINFO_RE = re.compile(r"(://)[^/\s:@]+:[^/\s:@]+@")
+# that embed credentials in the base URL. The user may be empty: the
+# compose-style ``redis://:password@redis:6379/0`` carries only a password.
+_URL_USERINFO_RE = re.compile(r"(://)[^/\s:@]*:[^/\s:@]+@")
+# Just the password of URL user-info, keeping the user name visible.
+_URL_PASSWORD_RE = re.compile(r"(://[^/\s:@]*:)[^/\s:@]+@")
+# Any ``scheme://…`` URL, for text that must not name endpoints at all. A match
+# takes the whole run of scheme characters before ``://`` (so ``-https://`` loses
+# the dash too) and starts only where such a run starts: a long run without
+# ``://`` is scanned once, not once per word boundary inside it.
+_URL_RE = re.compile(r"(?<![a-z0-9+.\-])[a-z0-9+.\-]+://[^\s'\"<>]+", re.IGNORECASE)
 # Vendor key shapes: Google (AIza…), OpenAI/Anthropic (sk-…), Groq (gsk_…).
 _VENDOR_KEY_RE = re.compile(
     r"\b(?:AIza[0-9A-Za-z_\-]{20,}|sk-(?:ant-)?[0-9A-Za-z_\-]{16,}|gsk_[0-9A-Za-z_\-]{16,})"
@@ -64,6 +76,64 @@ def scrub_secrets(text: str) -> str:
     return out
 
 
+def redact_url_secrets(text: str) -> str:
+    """Mask a URL's user-info password and query-string secrets, keeping the rest.
+
+    For showing configured URLs (``REDIS_URL``, ``LLM_BASE_URL``, …) to their
+    operator: host, port, path and user name stay readable.
+    """
+    if not text:
+        return text
+    out = _URL_PASSWORD_RE.sub(rf"\1{_REDACTED}@", text)
+    return _QUERY_SECRET_RE.sub(rf"\1{_REDACTED}", out)
+
+
+def redact_urls(text: str) -> str:
+    """Replace every ``scheme://…`` URL in *text* with ``<url>``; mask secrets."""
+    if not text:
+        return text
+    return _URL_RE.sub("<url>", scrub_secrets(text))
+
+
+def describe_error(exc: BaseException) -> str:
+    """``TypeName: detail`` for exception text shown outside the process.
+
+    Export warnings and HTTP error bodies reach callers who must not learn the
+    internal endpoints behind them, and httpx/SDK status errors quote the full
+    request URL, user-info and query included. A status error is reduced to
+    ``HTTP <code> <reason>``; any other message keeps its text with URLs
+    replaced by ``<url>`` and credential shapes masked. Log the raw exception
+    separately for the operator.
+    """
+    name = type(exc).__name__
+    try:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        reason = getattr(response, "reason_phrase", None)
+    except Exception:  # noqa: BLE001 - some SDK properties raise when unset
+        status = reason = None
+    if isinstance(status, int) and not isinstance(status, bool):
+        detail = (
+            f"HTTP {status} {reason}" if isinstance(reason, str) and reason else f"HTTP {status}"
+        )
+    else:
+        detail = redact_urls(str(exc))
+    return f"{name}: {detail}" if detail else name
+
+
+def _scrubbed_arg(arg: object) -> object:
+    """*arg* with secrets masked: a str is scrubbed, any other object is
+    replaced by its scrubbed text only when its text carries a secret."""
+    if isinstance(arg, str):
+        return scrub_secrets(arg)
+    try:
+        text = str(arg)
+    except Exception:  # noqa: BLE001 - the whole-message check below decides
+        return arg
+    scrubbed = scrub_secrets(text)
+    return scrubbed if scrubbed != text else arg
+
+
 class SecretScrubbingFilter(logging.Filter):
     """Logging filter that scrubs credential-shaped substrings from records.
 
@@ -74,15 +144,48 @@ class SecretScrubbingFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003
-        if isinstance(record.msg, str):
-            record.msg = scrub_secrets(record.msg)
-        if record.args:
-            record.args = tuple(scrub_secrets(a) if isinstance(a, str) else a for a in record.args)
+        try:
+            rendered: str | None = record.getMessage()
+        except Exception:  # noqa: BLE001 - a malformed record is the handler's to report
+            rendered = None
+        if rendered is not None:
+            scrubbed = scrub_secrets(rendered)
+            if scrubbed != rendered:
+                self._mask(record, scrubbed)
+        else:
+            if isinstance(record.msg, str):
+                record.msg = scrub_secrets(record.msg)
+            if isinstance(record.args, tuple):
+                record.args = tuple(
+                    scrub_secrets(a) if isinstance(a, str) else a for a in record.args
+                )
         if record.exc_text:
             record.exc_text = scrub_secrets(record.exc_text)
         elif record.exc_info:
             record.exc_text = scrub_secrets(logging.Formatter().formatException(record.exc_info))
         return True
+
+    @staticmethod
+    def _mask(record: logging.LogRecord, scrubbed: str) -> None:
+        """Make *record* render as *scrubbed*, the masked form of its message.
+
+        The formatter renders ``msg % args`` only after this filter has run, so
+        an argument that is not a str (an exception, the most common case) must
+        be replaced, not skipped. Masking argument by argument keeps the tuple's
+        shape, which formatters such as uvicorn's ``AccessFormatter`` unpack;
+        when that does not render the same masked text, the message is frozen.
+        """
+        if isinstance(record.msg, str) and isinstance(record.args, tuple):
+            record.msg = scrub_secrets(record.msg)
+            record.args = tuple(_scrubbed_arg(a) for a in record.args)
+            try:
+                masked = record.getMessage() == scrubbed
+            except Exception:  # noqa: BLE001 - masking split a format directive
+                masked = False
+            if masked:
+                return
+        record.msg = scrubbed
+        record.args = ()
 
 
 def install_secret_scrubbing(*targets: logging.Logger | logging.Handler) -> None:

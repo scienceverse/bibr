@@ -17,13 +17,13 @@ import httpx
 
 from bibr.local.ocr_transport import BaseHttpOcrClient
 from bibr.ocr.backend import OcrText
-from bibr.ocr.otsl import check_otsl_completeness
 from bibr.ocr.profiles import (
     PADDLE_TABLE_RECOVERY_MAX_TOKENS,
     OcrProfile,
     resolve_ocr_profile,
 )
 from bibr.ocr.registry import register
+from bibr.ocr.table_recovery import recover_paddle_table
 from bibr.utils.circuit_breaker import AsyncCircuitBreaker
 
 logger = logging.getLogger(__name__)
@@ -193,39 +193,16 @@ class BibrServeOcrBackend:
                     encode_region_for_ocr, image, self._profile.image
                 )
                 result = await self._post_with_retry(image_b64, prompt)
-                task = self._profile.task_for_prompt(prompt)
-                if self._profile.name != "paddle" or task != "table":
-                    return result
-
-                completeness = check_otsl_completeness(result)
-                if result.finish_reason != "length" and completeness.complete:
-                    return result
-
-                logger.warning(
-                    "Paddle table output incomplete; retrying once at %d tokens "
-                    "(finish_reason=%s, reasons=%s)",
-                    PADDLE_TABLE_RECOVERY_MAX_TOKENS,
-                    result.finish_reason,
-                    completeness.reasons,
-                )
-                try:
-                    recovered = await self._post_with_retry(
+                return await recover_paddle_table(
+                    profile=self._profile,
+                    prompt=prompt,
+                    result=result,
+                    retry=lambda: self._post_with_retry(
                         image_b64,
                         prompt,
                         max_tokens=PADDLE_TABLE_RECOVERY_MAX_TOKENS,
-                    )
-                except Exception:
-                    logger.warning(
-                        "Paddle table recovery failed; retaining initial output",
-                        exc_info=True,
-                    )
-                    return result
-                if not recovered:
-                    logger.warning(
-                        "Paddle table recovery returned empty output; retaining initial output"
-                    )
-                    return result
-                return recovered
+                    ),
+                )
         except CircuitOpenError as exc:
             # The breaker only counts server-side failures (5xx/connection/
             # timeout), so an OPEN breaker means the OCR server is down. Surface

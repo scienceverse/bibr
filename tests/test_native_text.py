@@ -218,24 +218,24 @@ def test_nonzero_crop_origin_does_not_slice_columns():
     assert "OMEGA" not in left_half
 
 
-_HRV_PDF = Path("data/hrv.pdf")
+_BLEED_FIXTURE = Path(__file__).parent / "fixtures" / "native_text_bbox_bleed_sample.pdf"
 
 
-@pytest.mark.skipif(not _HRV_PDF.exists(), reason="data/hrv.pdf sample not present")
 def test_bbox_intersection_does_not_leak_clipped_neighboring_line():
     """A region bbox whose top edge slices through the line above it must not
     pull in the partial glyphs of that neighboring line as garbage.
 
     Regression test: ``get_text_bounded`` treats a char as "inside" whenever
     its bounding box merely INTERSECTS the query rect, so a bbox edge that
-    slices through an affiliation line above the region bleeds in stray
-    partial-glyph garbage (e.g. ``pf ygyppypp``) before the real text.
+    slices through the line above the region bleeds in stray partial-glyph
+    garbage (the fixture's upper-line descender fragments, ``pyy``) before
+    the real text. The committed synthetic fixture replaces the uncommitted
+    ``data/hrv.pdf`` sample with the same geometry: a query whose top edge
+    cuts through the upper line's glyph boxes while their centers stay out.
     """
-    pdf_bytes = _HRV_PDF.read_bytes()
-    text = get_native_text_in_bbox(pdf_bytes, page_idx=0, bbox_normalized=[68, 317, 550, 328])
-    assert "pf ygyppypp" not in text
-    assert not text.startswith("pf ")
-    assert "Department of Psychological Medicine" in text
+    pdf_bytes = _BLEED_FIXTURE.read_bytes()
+    text = get_native_text_in_bbox(pdf_bytes, page_idx=0, bbox_normalized=[0, 117, 1000, 154])
+    assert text == "Second line of body text content here"
 
 
 def test_fill_populates_text_regions_from_native_pdf():
