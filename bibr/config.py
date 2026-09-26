@@ -549,7 +549,8 @@ class LlmOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp LLM server command. "
-            "Overrides bibr defaults for the same flags. Role-based LLM defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based LLM defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, plus probe-gated "
             "--parallel 2 --kv-unified, --spec-type ngram-mod, and --no-mmproj when supported "
             "(else --parallel 1)."
@@ -643,12 +644,18 @@ class OcrOptions(_BibrSettings):
         "olragon/PaddleOCR-VL-1.6-8bit",
         description="Model id for the managed Paddle MLX OCR server.",
     )
-    paddle_mlx_port: int = Field(8775, description="Port for the managed Paddle MLX OCR server.")
+    paddle_mlx_port: int = Field(
+        8775,
+        description="Port for the managed Paddle MLX OCR server (shared with the "
+        "paddle-rapid-mlx fallback candidate, which runs in sequence, never alongside).",
+    )
     paddle_mlx_startup_timeout: int = Field(
         600, description="Startup timeout in seconds for the managed Paddle MLX OCR server."
     )
     paddle_mlx_extra_args: str = Field(
-        "", description="Extra CLI args appended to the managed Paddle MLX OCR server command."
+        "",
+        description="Extra CLI args appended to the managed Paddle MLX OCR server command "
+        "(shared with the paddle-rapid-mlx fallback candidate; use only flags both CLIs accept).",
     )
     paddle_rapid_mlx_model: str = Field(
         "olragon/PaddleOCR-VL-1.6-8bit",
@@ -668,7 +675,8 @@ class OcrOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp OCR server command. "
-            "Overrides bibr defaults for the same flags. Role-based OCR defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based OCR defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, --parallel 1 "
             "(OCR image encode serializes across slots, so it stays single-slot)."
         ),
@@ -688,6 +696,13 @@ class OcrOptions(_BibrSettings):
         0.85,
         description="Minimum fraction of printable characters a native-text extraction must have "
         "to be trusted; below this the page falls back to OCR.",
+    )
+    native_text_header_footer: bool = Field(
+        False,
+        description="Read header/footer regions from the PDF text layer instead of OCR "
+        "on born-digital PDFs, under the same printable-ratio gate as body text. "
+        "Off by default pending an eval of DOI furniture and front-matter effects; "
+        "enable to A/B. Short running heads use the short-text allowance.",
     )
     local_gpus: int = Field(
         1,
@@ -924,7 +939,14 @@ class LayoutOptions(_BibrSettings):
         0.5,
         description="Minimum overlap fraction for one detected region to be treated as contained in another.",
     )
-    batch_size: int = Field(8, ge=1, description="Page batch size for layout model inference.")
+    batch_size: int = Field(
+        8,
+        ge=1,
+        description="Page batch size for layout model inference. The configured value is "
+        "the non-CPU batch; on CPU the local and serve detectors run one page at a time "
+        "unless this was set explicitly (a CPU batch of 8 grows the ORT CPU arena to "
+        "several GB with no throughput gain).",
+    )
     # Coalescing window (ms) for the serve GpuBatcher: how long the layout
     # micro-batcher keeps gathering pages from concurrent requests after the
     # first queued page before flushing a partial batch. A single paper's
@@ -1224,13 +1246,20 @@ class CacheOptions(_BibrSettings):
         description="Cache version namespace; invalidates stored entries on change. Defaults to a "
         "hash of the code — override only to pin or force-invalidate manually.",
     )
-    ttl_seconds: int = Field(86400, description="Result cache entry TTL in seconds.")
+    ttl_seconds: int = Field(
+        86400,
+        description="Result cache entry TTL in seconds. 0 or a negative value means no expiry.",
+    )
     distributed_singleflight: bool = Field(
         True,
         description="Coalesce identical Redis-backed cache misses across workers. Fail-open.",
     )
     singleflight_wait_seconds: float = Field(
-        10.0, ge=0, description="Maximum time a distributed waiter polls for the owner's result."
+        10.0,
+        ge=0,
+        description="Maximum time a distributed waiter polls for the owner's result. "
+        "Unset (left at its default without explicitly setting it) follows PIPELINE_TIMEOUT; "
+        "an explicitly set value is the wait budget.",
     )
     singleflight_lease_ttl_seconds: int = Field(
         120, ge=1, description="TTL for a distributed extraction ownership lease."
@@ -1271,14 +1300,14 @@ class CacheOptions(_BibrSettings):
     )
     # Opt-in disk cache for structured LLM responses, keyed on model + schema +
     # system + user text. A hit costs no tokens and no rate-limit slot. This is
-    # also the prefill target for the offline Message Batches path: a batch
-    # answers requests at half price and writes them here for a later run to
-    # find. Off by default — like the OCR cache, it never silently changes
+    # not written by the offline Message Batches path (bibr/clients/batch.py
+    # has no CLI or pipeline caller), so nothing prefills it today.
+    # Off by default — like the OCR cache, it never silently changes
     # results unless opted in. Env: CACHE_LLM.
     llm: bool = Field(
         False,
         description="Opt-in disk cache for structured LLM responses, keyed on model, schema, "
-        "system prompt and user text. Also the prefill target for offline batch runs. Off by "
+        "system prompt and user text. Not written by the offline batch layer. Off by "
         "default.",
     )
     # Directory for the LLM response cache. None → $XDG_CACHE_HOME/bibr/llm
@@ -1424,13 +1453,16 @@ class MlOptions(_BibrSettings):
         description="Type-head softmax probability below which a section-classifier prediction "
         "collapses to UNKNOWN. Set to 0.0 to disable.",
     )
-    # When the trained classifier's prediction collapses to UNKNOWN (softmax
-    # below ``section_classifier_min_confidence``), escalate those headers to
-    # the batched LLM classifier instead of discarding the header. Only fires
-    # on misses, so the added cost is a fraction of a call per paper.
+    # When the trained classifier's prediction is UNKNOWN — either collapsed
+    # below ``section_classifier_min_confidence`` or confidently predicted as
+    # the model's own 'unknown' class — escalate those headers to the batched
+    # LLM classifier instead of discarding the header. Fires for every UNKNOWN,
+    # so on papers with many topic subheadings most non-alias headings reach
+    # the LLM; narrowing that to collapses-only needs a val-set measurement.
     section_classifier_llm_escalation: bool = Field(
         True,
-        description="Escalate section headers that collapse to UNKNOWN to the batched LLM "
+        description="Escalate section headers the trained classifier leaves UNKNOWN "
+        "(below-confidence collapses and confident unknown predictions) to the batched LLM "
         "classifier instead of discarding them.",
     )
     # Override the device the classifier runs on. ``None`` picks automatically
@@ -1850,9 +1882,11 @@ class JobsOptions(_BibrSettings):
 class MeteringOptions(_BibrSettings):
     """Per-request usage metering (serve). Env: ``METER_ENABLED``, ``METER_LOG_PATH``.
 
-    When ``log_path`` is set, metering records (one JSON line per request and per
-    extraction) are also written as JSONL to that file. Purely observational —
-    does not affect extraction output.
+    When ``log_path`` is set, request records are written as JSONL to that
+    file while the inference worker writes extraction records (the only ones
+    carrying LLM token usage) to the sibling ``<stem>.worker<suffix>`` file;
+    each process rotates only its own file, so usage tallies must read both.
+    Purely observational — does not affect extraction output.
     """
 
     model_config = _section("METER_")
@@ -1860,7 +1894,9 @@ class MeteringOptions(_BibrSettings):
     enabled: bool = Field(True, description="Enable per-request usage metering (serve).")
     log_path: str | None = Field(
         None,
-        description="Path to write metering records as JSONL (one line per request/extraction).",
+        description="Path to write metering records as JSONL (request records; the worker "
+        "writes extraction records to the sibling '<stem>.worker<suffix>' file, "
+        "so read both files for token usage).",
     )
     log_max_bytes: int = Field(
         100 * 1024 * 1024,

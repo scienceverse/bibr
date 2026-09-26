@@ -188,6 +188,47 @@ def test_chew_preflights_a_managed_local_backend(stub_pipeline, monkeypatch):
     assert stub_pipeline.instances == []
 
 
+def test_preflight_llm_uses_pipeline_settings_for_backend_resolution(monkeypatch):
+    """api._preflight_llm resolves with the caller's settings, not globals (16).
+
+    Dropping ``settings=`` from the ``resolve_llm_backend`` call falls back
+    to the process-global executable lookup, so an injected
+    ``rapid_mlx.executable`` would preflight a different backend than the
+    pipeline later resolves.
+    """
+    import platform
+
+    import bibr.api as api_mod
+    import bibr.local.pipeline as pipeline_mod
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx
+    from bibr.local.cli import run_config
+
+    real_resolve = pipeline_mod.resolve_llm_backend
+    seen: dict = {}
+
+    def spy(raw, settings=None):
+        seen["raw"] = raw
+        seen["settings"] = settings
+        return real_resolve(raw, settings=settings)
+
+    pipeline_settings = GlobalSettings()
+    pipeline_settings.rapid_mlx.executable = "python3"  # resolvable on PATH
+    global_settings = GlobalSettings()
+    global_settings.rapid_mlx.executable = "definitely-not-on-path-bibr"
+
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(rapid_mlx, "snapshot_settings", lambda settings=None: global_settings)
+    monkeypatch.setattr(pipeline_mod, "resolve_llm_backend", spy)
+    monkeypatch.setattr(run_config, "_preflight_local_backend", lambda backend: None)
+
+    api_mod._preflight_llm(pipeline_settings, {"llm_backend": "local"})
+
+    assert seen["raw"] == "local"
+    assert seen["settings"] is pipeline_settings
+
+
 # --- Records / Result views -------------------------------------------------
 
 

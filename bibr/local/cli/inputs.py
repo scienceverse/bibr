@@ -175,6 +175,16 @@ def _prepare_output_path(raw: str | None, *, is_batch: bool) -> Path | None:
     output_path = Path(raw)
     if is_batch:
         output_path.mkdir(parents=True, exist_ok=True)
+    elif raw.endswith(("/", "\\")):
+        # A trailing separator names a directory even for a single file
+        # (``chew paper.xml -o results/``): create it here so the existing
+        # single-output resolution below writes ``<dir>/<stem>.json``
+        # instead of a FILE named ``results``. An existing directory needs
+        # no creation and already resolves correctly. ``is_batch`` keeps
+        # its file-count meaning, so ``--paper-id`` still applies to the
+        # one file. A FILE blocking the path raises FileExistsError (an
+        # OSError), which the caller turns into a clean exit 2.
+        output_path.mkdir(parents=True, exist_ok=True)
     else:
         output_path.parent.mkdir(parents=True, exist_ok=True)
     return output_path

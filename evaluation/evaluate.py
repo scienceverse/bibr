@@ -29,24 +29,14 @@ from evaluation.section_metrics import (
 )
 from evaluation.validation_metrics import (
     FLOORS,
-    # Reference matching/field internals, reused verbatim so the per-paper
-    # denominators emitted here can never disagree with the accuracies
-    # ref_field_scores() computes from the same pairs. Ideally ref_field_scores()
-    # would return its own counts and this second matching pass would go away.
-    _get_ref_container,
-    _get_ref_pages,
-    _get_ref_title,
-    _get_ref_volume,
-    _get_ref_year,
-    _greedy_match_pairs,
-    _ref_similarity,
-    _ref_surname_tokens,
+    ReferenceMatchResult,
     abstract_ned,
     abstract_rouge_l,
     authors_family_f1,
     authors_fullname_f1,
     doi_match,
     first_author_match,
+    match_references,
     normalize_doi,
     paper_passes_floors,
     pass_rate,
@@ -101,6 +91,62 @@ def bibr_commit(repo_root: Path = _BIBR_REPO_ROOT) -> str | None:
         return None
     commit = proc.stdout.strip()
     return commit if proc.returncode == 0 and commit else None
+
+
+def bibr_dirty(repo_root: Path = _BIBR_REPO_ROOT) -> bool | None:
+    """Whether the scoring checkout has uncommitted changes, None if unknowable.
+
+    ``bibr_commit`` alone cannot tell a re-score from a patched worktree apart:
+    uncommitted metric fixes in worktrees are routine here, and they stamp the
+    same commit as unpatched code. Tracked-file status only — untracked files
+    cannot change scoring.
+    """
+    try:
+        proc = subprocess.run(  # noqa: S603
+            [  # noqa: S607
+                "git",
+                "-C",
+                str(repo_root),
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return bool(proc.stdout.strip())
+
+
+def eval_code_sha256(repo_root: Path = _BIBR_REPO_ROOT) -> str | None:
+    """Stable digest over the metric definitions doing the scoring.
+
+    Hashes ``filename -> sha256(content)`` for ``evaluation/*.py`` in sorted
+    order, so two artifacts scored from different worktree states compare
+    unequal even when they stamp the same commit.
+    """
+    digest = hashlib.sha256()
+    try:
+        paths = sorted((repo_root / "evaluation").glob("*.py"))
+    except OSError:
+        return None
+    if not paths:
+        return None
+    for path in paths:
+        try:
+            content = path.read_bytes()
+        except OSError:
+            return None
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(content).hexdigest().encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _scored_prediction_paths(json_dir: Path, ids: set[str] | None = None) -> list[Path]:
@@ -911,19 +957,6 @@ def affiliation_sim(e_authors, g_authors) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-# Gold-side "does this reference carry the field?" predicates, one per
-# ref_field_scores() metric. Reused from validation_metrics so the counts below
-# select exactly the references that metric's denominator selects.
-_REF_GOLD_FIELD_PREDICATES = {
-    "title": lambda r: bool(_get_ref_title(r)),
-    "year": lambda r: bool(_get_ref_year(r)),
-    "doi": lambda r: bool(normalize_doi(r.get("doi") or r.get("DOI") or "")),
-    "author": lambda r: bool(_ref_surname_tokens(r)),
-    "journal": lambda r: bool(_get_ref_container(r)),
-    "volume": lambda r: bool(_get_ref_volume(r)),
-    "pages": lambda r: bool(_get_ref_pages(r)[0]),
-}
-
 # Reference metric -> (count prefix, denominator the macro value divides by).
 # ref_*_acc is correct/matched_pairs; ref_doi_recall is correct/gold-refs-with-a-DOI.
 REF_FIELD_METRIC_COUNTS = {
@@ -937,7 +970,11 @@ REF_FIELD_METRIC_COUNTS = {
 }
 
 
-def ref_field_counts(extracted_refs: list[dict], ground_truth_refs: list[dict]) -> dict[str, int]:
+def ref_field_counts(
+    extracted_refs: list[dict],
+    ground_truth_refs: list[dict],
+    match: ReferenceMatchResult | None = None,
+) -> dict[str, int]:
     """Per-paper reference denominators behind the ``ref_*`` accuracies.
 
     Returns ``gold_refs`` plus, per field, ``<field>_gold`` (gold references
@@ -947,26 +984,19 @@ def ref_field_counts(extracted_refs: list[dict], ground_truth_refs: list[dict]) 
     across the corpus gives the micro-averaged companions, and
     ``<field>_gold / gold_refs`` gives the coverage fraction the metric was
     actually computed over.
+
+    Pass a ``match_references()`` result to reuse a shared matching pass.
     """
-    counts: dict[str, int] = {"gold_refs": len(ground_truth_refs)}
-    for field, has_field in _REF_GOLD_FIELD_PREDICATES.items():
-        counts[f"{field}_gold"] = sum(1 for r in ground_truth_refs if has_field(r))
+    if match is None:
+        match = match_references(extracted_refs, ground_truth_refs)
+    counts: dict[str, int] = {"gold_refs": match.n_gold}
+    for field, presence in match.gold_has_field.items():
+        counts[f"{field}_gold"] = sum(presence)
         counts[f"{field}_matched"] = 0
 
-    if not (extracted_refs and ground_truth_refs):
-        return counts
-
-    pairs = []
-    for gi, gt_ref in enumerate(ground_truth_refs):
-        for ei, ext_ref in enumerate(extracted_refs):
-            sim = _ref_similarity(ext_ref, gt_ref)
-            if sim > 0:
-                pairs.append((sim, gi, ei))
-
-    for gi, _ei in _greedy_match_pairs(pairs):
-        gt_ref = ground_truth_refs[gi]
-        for field, has_field in _REF_GOLD_FIELD_PREDICATES.items():
-            if has_field(gt_ref):
+    for gi, _ei in match.pairs:
+        for field, presence in match.gold_has_field.items():
+            if presence[gi]:
                 counts[f"{field}_matched"] += 1
     return counts
 
@@ -1010,8 +1040,11 @@ def score_paper(extracted: dict, ground_truth: dict) -> dict[str, object]:
         "authors_fullname_f1": authors_fullname_f1(e_authors, g_authors),
         "first_author": first_author_match(e_authors, g_authors),
         "ref_count_ratio": references_count_ratio(e_ref_count, g_ref_count),
-        "ref_matching_f1": ref_matching_f1(e_refs, g_refs),
     }
+    # One shared reference-matching pass feeds all three ref metrics, so the
+    # matrix is built once per paper instead of three times.
+    ref_match = match_references(e_refs, g_refs)
+    scores["ref_matching_f1"] = ref_matching_f1(e_refs, g_refs, match=ref_match)
     # Diagnostic field metrics: None when gold lacks the signal (excluded from aggregates).
     scores["keywords_f1"] = keywords_f1(extracted.get("keywords"), ground_truth.get("keywords"))
     scores["affiliation_sim"] = affiliation_sim(e_authors, g_authors)
@@ -1019,10 +1052,10 @@ def score_paper(extracted: dict, ground_truth: dict) -> dict[str, object]:
     scores["orcid_f1"] = orcid_f1(e_authors, g_authors)
     scores["corresponding_acc"] = corresponding_acc(e_authors, g_authors)
     # Field-level reference scores on raw extraction (primary).
-    scores.update(ref_field_scores(e_refs, g_refs))
+    scores.update(ref_field_scores(e_refs, g_refs, match=ref_match))
     # Denominators behind those accuracies — never a metric itself, but what the
     # micro-averaged companions and the gold-coverage annotations pool over.
-    scores["ref_field_counts"] = ref_field_counts(e_refs, g_refs)
+    scores["ref_field_counts"] = ref_field_counts(e_refs, g_refs, match=ref_match)
     return scores
 
 
@@ -1488,6 +1521,8 @@ def save_results(
             datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         ),
         "bibr_commit": bibr_commit(),
+        "bibr_dirty": bibr_dirty(),
+        "eval_code_sha256": eval_code_sha256(),
         "predictions_dir": str(predictions_dir) if predictions_dir is not None else None,
         "predictions_tree_sha256": (
             predictions_tree_sha256(predictions_dir, ids) if predictions_dir is not None else None

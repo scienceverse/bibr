@@ -376,13 +376,20 @@ class CrossrefClient:
 
         if not dois:
             return 0
+        if self._settings.crossref.cache_size <= 0 and await self._ensure_response_cache() is None:
+            # Warming caches that cannot hold anything still costs one
+            # rate-limited slot per chunk while seeding nothing.
+            return 0
         seen: set[str] = set()
         wanted: list[str] = []
         for doi in dois:
             if not doi:
                 continue
             folded = doi.casefold()
-            if folded in seen or not is_url_safe_doi(doi):
+            # A comma would splice into the comma-joined bulk filter as an
+            # extra term and fail the whole chunk — leave such DOIs to their
+            # individual lookup.
+            if folded in seen or "," in doi or not is_url_safe_doi(doi):
                 continue
             seen.add(folded)
             if self._cache_peek(f"works:{folded}") is None:
