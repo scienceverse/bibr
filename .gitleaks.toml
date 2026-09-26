@@ -35,6 +35,9 @@ regexes = [
   '''UNIQUE-PYDANTIC-RAW-SECRET-[0-9]+''',
   # tests/test_segmenter_base.py — fake Hub revisions
   '''(?i)0123456789abcdef0123456789abcdef0123456''',
+  # bibr/extract/ref_extractor.py in 1853255 (feat/reference-line-stream): keyword
+  # arguments, not a key; later commits renamed them
+  '''segmentation\.section_key, typical_length=typical''',
 ]
 paths = [
   '''__pycache__/''',
