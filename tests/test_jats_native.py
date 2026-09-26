@@ -2077,6 +2077,53 @@ class TestReferenceRows:
 # Consortium with nested members (audit input-parsers-12)
 # ---------------------------------------------------------------------------
 
+
+def _ref_list_xml(ref: str) -> bytes:
+    return (
+        '<?xml version="1.0"?><article><front><article-meta><title-group>'
+        "<article-title>T</article-title></title-group></article-meta></front>"
+        "<body><sec><title>I</title><p>Body.</p></sec></body>"
+        f"<back><ref-list><title>References</title>{ref}</ref-list></back></article>"
+    ).encode()
+
+
+_SMITH_FIELDS = (
+    "<person-group><name><surname>Smith</surname><given-names>J</given-names></name>"
+    "</person-group><article-title>A study</article-title><source>Nature</source>"
+    "<year>2001</year>"
+)
+
+
+class TestReferenceRowNotes:
+    """A <note> sits beside the citation; it never replaces it."""
+
+    @pytest.mark.parametrize("tag", ["element-citation", "nlm-citation", "citation"])
+    @pytest.mark.parametrize("note_first", [False, True])
+    def test_a_note_keeps_the_citation_in_the_row(self, tag, note_first):
+        citation = f'<{tag} publication-type="journal">{_SMITH_FIELDS}</{tag}>'
+        note = "<note><p>Erratum in Nature 2002.</p></note>"
+        body = note + citation if note_first else citation + note
+        p = _parse(_ref_list_xml(f'<ref id="r1"><label>1</label>{body}</ref>'))
+        rows = [e.text for e in p.assembler.entries if not e.needs_segmentation]
+        expected = (
+            "1 Erratum in Nature 2002. Smith J A study Nature 2001"
+            if note_first
+            else "1 Smith J A study Nature 2001 Erratum in Nature 2002."
+        )
+        assert rows == [expected]
+        if tag != "element-citation":  # unstructured: the row is the exported string
+            assert p._contents.native_ref_strings == [expected]
+
+    def test_a_nested_citation_is_read_ahead_of_the_note(self):
+        xml = _ref_list_xml(
+            '<ref id="r1"><label>1</label><note><p>Erratum.</p></note>'
+            f"<citation-group><element-citation>{_SMITH_FIELDS}</element-citation>"
+            "</citation-group></ref>"
+        )
+        rows = [e.text for e in _parse(xml).assembler.entries if not e.needs_segmentation]
+        assert rows == ["1 Smith J A study Nature 2001 Erratum."]
+
+
 CONSORTIUM_JATS = b"""<?xml version="1.0"?>
 <article>
   <front><article-meta>

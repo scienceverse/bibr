@@ -220,8 +220,8 @@ released.
   `<ref-list>` that is a back `<sec>`'s substance reuses that section while
   one nested in other prose opens its own references section. An
   `<alternatives>` emits one representation — MathML when present, else the
-  TeX body without its document preamble — and the same trim applies to a
-  bare `<tex-math>`, so LaTeX preambles no longer pollute sentences. Figures,
+  TeX body without its document preamble — and the same trim applies to a bare
+  `<tex-math>`, so LaTeX preambles no longer pollute sentences. Figures,
   tables and display formulas nested inside `<p>` are registered as figures,
   tables and formulas instead of being merged into the paragraph text, with
   captions, table footnotes and every grid of a multi-table wrap kept, and an
@@ -229,23 +229,23 @@ released.
   `<boxed-text>`, `<fig-group>` (including grouped eLife figures),
   `<supplementary-material>` and `<list>` wrappers beside `<p>` are kept too,
   with each wrapper heading and caption title emitted once and list and
-  footnote markers left out of the sentences. Back-matter
-  `<notes>`, appendices, glossaries and biographies become sections built from
-  their titles (data-availability notes typed as open-data, COI statements as
+  footnote markers left out of the sentences. Back-matter `<notes>`,
+  appendices, glossaries and biographies become sections built from their
+  titles (data-availability notes typed as open-data, COI statements as
   conflicts, financial disclosures as funding). Author affiliations resolve
   multi-id `rid` references and shared group-level `<aff>` elements, never
-  inheriting an affiliation another group claims, and a
-  consortium byline appears once as an organization followed by its credited
-  members. Body `<ext-link>`/`<uri>` targets are recorded as links with their
-  display text (bare-DOI hrefs as `https://doi.org/` URLs; scheme-less
-  accessions skipped), each attributed by anchor offset to the sentence holding
-  it, so a short display text no longer lands on an earlier sentence that
-  happens to contain it. HTML and ePub `<a href>` anchors are attributed the
-  same way, to the sentence holding them rather than the paragraph's last
-  sentence. Reference
+  inheriting an affiliation another group claims, and a consortium byline
+  appears once as an organization followed by its credited members. Body
+  `<ext-link>`/`<uri>` targets are recorded as links with their display text
+  (bare-DOI hrefs as `https://doi.org/` URLs; scheme-less accessions skipped),
+  each attributed by anchor offset to the sentence holding it, so a short
+  display text no longer lands on an earlier sentence that happens to contain
+  it. HTML and ePub `<a href>` anchors are attributed the same way, to the
+  sentence holding them rather than the paragraph's last sentence. Reference
   rows prefer the printed `<mixed-citation>` text — every citation in the
-  `<ref>` — else separated `<element-citation>` fields, with the label kept
-  apart and sibling notes in document order.
+  `<ref>` — else the separated fields of an `<element-citation>`,
+  `<nlm-citation>` or `<citation>`, with the label kept apart and sibling
+  notes in document order; a note never replaces the citation.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that

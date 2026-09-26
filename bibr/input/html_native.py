@@ -460,12 +460,7 @@ class HtmlParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
-        for pending in self._pending_url_links:
-            if len(pending) == 5:
-                url, link_text, section_id, deferred_index, anchor_offset = pending
-            else:  # links recorded without an offset fall back to text search
-                url, link_text, section_id, deferred_index = pending
-                anchor_offset = None
+        for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
             fallback_id = self.assembler.last_text_id[deferred_index]

@@ -174,33 +174,60 @@ def _collect_refs(ref_list) -> list:
     return refs
 
 
+_OTHER_CITATION_TAGS = ("element-citation", "nlm-citation", "citation")
+
+
 def _ref_ordered_text(ref) -> str:
-    """Join a ``<ref>``'s mixed-citation and note texts in document order.
+    """Join a ``<ref>``'s citation and note texts in document order.
 
     A <ref> may carry several citations (ACS 'refs 62a/62b' style) with a
-    <note> such as 'See also:' between them. Reading all mixed-citations
-    first and the notes second would move the note after every citation, so
-    collect each child where it stands. Citations inside
-    <citation-alternatives> count at the position of that element.
+    <note> such as 'See also:' between them. Reading all citations first and
+    the notes second would move the note after every citation, so collect
+    each child where it stands. Mixed-citations are the printed text and win
+    when present; otherwise an element-citation, nlm-citation or citation
+    takes that position, flattened with its fields kept apart. Citations inside
+    <citation-alternatives> count at the position of that element. A note
+    never stands in for the citation: when no child citation is found, the
+    first nested one is read and put ahead of the notes.
     """
+    children = list(ref)
+    mixed_mode = any(
+        _ln(child) == "mixed-citation"
+        or (
+            _ln(child) == "citation-alternatives"
+            and _first_desc(child, "mixed-citation") is not None
+        )
+        for child in children
+    )
     ordered: list[str] = []
-    for child in ref:
+    found_citation = False
+    for child in children:
         ln = _ln(child)
-        if ln in ("mixed-citation", "note"):
+        txt = ""
+        if ln == "note":
             txt = _text(child)
-            if txt:
-                ordered.append(txt)
         elif ln == "citation-alternatives":
-            alt_mixed = _first_desc(child, "mixed-citation")
-            txt = _text(alt_mixed) if alt_mixed is not None else ""
-            if txt:
-                ordered.append(txt)
-    if not ordered:
-        fallback = _first_desc(ref, "mixed-citation")
-        if fallback is not None:
-            txt = _text(fallback)
-            if txt:
-                ordered.append(txt)
+            if mixed_mode:
+                alt = _first_desc(child, "mixed-citation")
+                txt = _text(alt) if alt is not None else ""
+            else:
+                alt = _first_desc(child, "element-citation")
+                txt = _citation_text(alt) if alt is not None else _text(child)
+            found_citation = found_citation or bool(txt)
+        elif ln == "mixed-citation" or (not mixed_mode and ln in _OTHER_CITATION_TAGS):
+            txt = _text(child) if ln == "mixed-citation" else _citation_text(child)
+            found_citation = found_citation or bool(txt)
+        if txt:
+            ordered.append(txt)
+    if not found_citation:
+        nested = _first_desc(ref, "mixed-citation")
+        if nested is not None:
+            txt = _text(nested)
+        else:
+            element_citation = _first_desc(ref, "element-citation")
+            txt = _citation_text(element_citation) if element_citation is not None else ""
+        if txt:
+            ordered.insert(0, txt)
     return " ".join(ordered).strip()
 
 
@@ -815,12 +842,7 @@ class JatsParser:
         for sent in self.sentences:
             by_paragraph.setdefault(sent.paragraph_id, []).append(sent)
         covered: set[tuple[str, int]] = set()
-        for pending in self._pending_url_links:
-            if len(pending) == 5:
-                url, link_text, section_id, deferred_index, anchor_offset = pending
-            else:  # links recorded without an offset fall back to text search
-                url, link_text, section_id, deferred_index = pending
-                anchor_offset = None
+        for url, link_text, section_id, deferred_index, anchor_offset in self._pending_url_links:
             if deferred_index >= len(self.assembler.last_text_id):
                 continue
             fallback_id = self.assembler.last_text_id[deferred_index]
