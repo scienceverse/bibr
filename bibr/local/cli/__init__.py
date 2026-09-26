@@ -31,7 +31,11 @@ from bibr.local.cli.doctor import (
     _probe_ocr_url,
     _run_doctor,
 )
-from bibr.local.cli.dry_run import _print_dry_run_plan
+from bibr.local.cli.dry_run import (
+    _dry_run_blockers,
+    _dry_run_cloud_credential_blocker,
+    _print_dry_run_plan,
+)
 from bibr.local.cli.inputs import (
     _collect_files,
     _find_stem_collisions,
@@ -51,8 +55,6 @@ from bibr.local.cli.presets import _run_preset
 from bibr.local.cli.process import (
     ChunkProcessor,
     _as_count,
-    _dry_run_blockers,
-    _dry_run_cloud_credential_blocker,
     _format_validation_line,
     _hint_for_file_error,
     _print_validation_line,

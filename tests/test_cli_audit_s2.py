@@ -347,7 +347,7 @@ async def test_dry_run_automatic_paddle_checks_weight_repo_not_served_alias(
     monkeypatch.setattr(hf_hub, "scan_cache_dir", lambda *a, **k: _FakeCacheInfo())
     # Neutralize the dry-run OCR-runtime blocker (see above): this test
     # asserts cache rendering, not readiness.
-    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
 
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
@@ -445,7 +445,7 @@ async def test_dry_run_ocr_blocker_for_unstartable_backend(tmp_path, monkeypatch
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
     monkeypatch.setattr(
-        "bibr.local.cli.process._preflight_ocr_runtime",
+        "bibr.local.cli.dry_run._preflight_ocr_runtime",
         lambda config: "No local OCR runtime can start on this machine for PDF input",
     )
     args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--no-llm"])
@@ -459,7 +459,7 @@ async def test_clean_dry_run_still_exits_0_without_blockers(tmp_path, monkeypatc
     """Guard: a dry-run with nothing failing keeps exit 0 and no section."""
     from bibr.local.cli import _build_parser, _run_process
 
-    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
     good = tmp_path / "a.xml"
     good.write_text("<article/>")
     args = _build_parser().parse_args(["chew", str(good), "--dry-run", "--no-llm"])
@@ -471,7 +471,7 @@ def test_dry_run_credential_message_matches_provider_preflight(monkeypatch):
     """Guard: the non-constructing dry-run message cannot drift from the
     provider adapter's own error (both read the same Settings fields)."""
     from bibr.clients.llm import preflight_credentials
-    from bibr.local.cli.process import _dry_run_cloud_credential_blocker
+    from bibr.local.cli.dry_run import _dry_run_cloud_credential_blocker
 
     _clear_llm_keys(monkeypatch)
     expected = _dry_run_cloud_credential_blocker()

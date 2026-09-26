@@ -484,7 +484,7 @@ async def test_dry_run_hf_cache_cached_vs_will_download(tmp_path, capsys, monkey
     # platform defaults or settings mutated by earlier tests.
     # Neutralize the dry-run OCR-runtime blocker: --dry-run now surfaces it
     # (and exits 1), but this test asserts cache rendering, not readiness.
-    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
     args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
     await _run_process(args)
 
@@ -515,7 +515,7 @@ async def test_dry_run_uncached_repo_without_known_size_still_signals_download(
 
     # Neutralize the dry-run OCR-runtime blocker (see above): this test
     # asserts cache rendering, not readiness.
-    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
     args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
     await _run_process(args)
 
@@ -545,7 +545,7 @@ async def test_dry_run_ocr_weight_repo_has_approximate_size(tmp_path, capsys, mo
     # Apple Silicon), which would make this test host-dependent.
     # Neutralize the dry-run OCR-runtime blocker (see above): this test
     # asserts cache rendering, not readiness.
-    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
     args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--ocr", "glm-llama"])
     await _run_process(args)
 

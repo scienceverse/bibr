@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from bibr.local.cli import ui
-from bibr.local.cli.dry_run import _print_dry_run_plan
+from bibr.local.cli.dry_run import _dry_run_blockers, _print_dry_run_plan
 from bibr.local.cli.inputs import (
     _find_stem_collisions,
     _prepare_output_path,
@@ -360,77 +360,6 @@ class ChunkProcessor:
             console.print(f"  [dim]Chunk done in {chunk_elapsed:.1f}s[/dim]")
 
         return file_states
-
-
-def _dry_run_cloud_credential_blocker() -> str | None:
-    """Missing-key verdict for a cloud LLM without building a client.
-
-    ``--dry-run`` previews without touching any client machinery (no
-    httpx, no model loads), so it cannot call ``preflight_credentials``
-    (that builds a real provider client). This mirrors each bundled
-    provider adapter's key lookup verbatim — same Settings fields, same
-    messages (see ``bibr/clients/providers/*.py``) — and returns ``None``
-    when the real run's check would pass. Third-party providers stay the
-    real run's job to vet.
-    """
-    from bibr.clients import providers
-    from bibr.config import Settings
-
-    name = (Settings.llm.provider or "").lower()
-    try:
-        providers.get(name, settings=Settings)
-    except ValueError as exc:
-        return str(exc)
-    llm = Settings.llm
-    if name == "google":
-        if not (llm.api_key or Settings.GOOGLE_API_KEY):
-            return (
-                "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
-            )
-    elif name == "anthropic":
-        if not (llm.api_key or Settings.ANTHROPIC_API_KEY):
-            return (
-                "Anthropic API key required. "
-                "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
-            )
-    elif name == "groq":
-        if not (llm.api_key or Settings.GROQ_API_KEY):
-            return "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
-    elif name == "openai" and not llm.api_key and not llm.base_url:
-        return "OpenAI API key required. Set LLM_API_KEY environment variable."
-    return None
-
-
-def _dry_run_blockers(config, files: list, missing_count: int) -> list[str]:
-    """Cheap preflight verdicts for ``--dry-run``: blockers the real run exits 1 on.
-
-    Covers missing inputs, LLM credentials (provider key lookup only —
-    no client is built), the managed local-LLM backend, and the PDF
-    OCR/image runtime. Nothing is constructed or downloaded; every probe
-    is local and cheap.
-    """
-    blockers: list[str] = []
-    if missing_count:
-        blockers.append(f"{missing_count} input(s) not found — the real run counts them as errors.")
-    if not config.no_llm and config.llm_backend == "cloud":
-        credential_blocker = _dry_run_cloud_credential_blocker()
-        if credential_blocker is not None:
-            blockers.append(credential_blocker)
-    from bibr.local.pipeline import LOCAL_LLM_BACKENDS
-
-    if not config.no_llm and config.llm_backend in LOCAL_LLM_BACKENDS:
-        err = _preflight_local_backend(config.llm_backend)
-        if err:
-            blockers.append(err)
-    if any(p.suffix.lower() == ".pdf" for p in files):
-        opencv_problem = _preflight_opencv()
-        if opencv_problem is not None:
-            message, repair = opencv_problem
-            blockers.append(f"{message} (repair with: {repair})")
-        ocr_reason = _preflight_ocr_runtime(config)
-        if ocr_reason is not None:
-            blockers.append(ocr_reason)
-    return blockers
 
 
 async def _run_process(args) -> None:
