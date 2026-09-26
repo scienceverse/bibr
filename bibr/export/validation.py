@@ -307,7 +307,8 @@ def _check_dangling_ref(payload: dict) -> list[ValidationIssue]:
     for row in _as_list(extraction, "float_parts"):
         if not isinstance(row, dict):
             continue
-        pool = {"figure": figure_ids, "table": table_ids}.get(row.get("object_type"))
+        otype = row.get("object_type")
+        pool = figure_ids if otype == "figure" else table_ids if otype == "table" else None
         oid = row.get("object_id")
         if pool is not None and oid is not None and oid not in pool:
             dangling += 1

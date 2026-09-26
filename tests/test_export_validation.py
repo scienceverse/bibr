@@ -449,7 +449,7 @@ def test_abstract_suspect_emits_once_with_bounded_source_ids():
 def test_abstract_suspect_is_replay_fallback_when_payload_already_has_issue():
     p = _base()
     p["metadata"]["abstract"] = "A" * 2501
-    # Stored v12 exports carry the gate block at root `validation`
+    # Stored exports up to 11.x kept the gate block at the root `validation`
     # (extraction.validation is null there), so the dedup guard reads it.
     p["validation"] = {
         "errors": 0,
@@ -818,6 +818,61 @@ def test_dangling_ref_flags_orphan_extraction_rows():
         },
     }
     assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "xref_text_id",
+        "url_text_id",
+        "eq_text_id",
+        "affiliation_author_ids",
+        "affiliation_match",
+        "funding_match",
+        "bib_match",
+        "text_regions",
+        "float_parts",
+        "section_classification",
+        "xref_tier",
+    ],
+)
+def test_dangling_ref_single_orphan_pins_each_foreign_key(case):
+    """One orphan per new foreign key, each tripping exactly one dangling
+    reference. The grouped tests above plant several orphans at once, so any
+    single check satisfies them — a regression in one key would go unnoticed.
+    Each case here asserts VAL_DANGLING_REF with count == 1."""
+    p = _base()
+    if case == "xref_text_id":
+        p["xref"] = [{"xref_id": 1, "target_id": None, "xref_type": "bib", "text_id": 99}]
+    elif case == "url_text_id":
+        p["url"] = [{"url_id": 1, "href": "https://example.com/x", "text_id": 77}]
+    elif case == "eq_text_id":
+        p["eq"] = [{"eq_id": 1, "text_id": 78, "lhs": "x", "comp": "=", "rhs": "1"}]
+    elif case == "affiliation_author_ids":
+        p["author"] = [{"author_id": 1, "given": "A", "family": "B"}]
+        p["affiliation"] = [{"affiliation_id": 1, "text": "X", "author_ids": [7]}]
+    elif case == "affiliation_match":
+        p["affiliation_match"] = [{"affiliation_id": 9, "service": "ror"}]
+    elif case == "funding_match":
+        p["funding_match"] = [{"funding_id": 9, "service": "ror"}]
+    elif case == "bib_match":
+        p["bib_match"] = [{"bib_id": 9, "service": "crossref"}]
+    elif case == "text_regions":
+        p["extraction"] = {"text_regions": [{"text_id": 55, "page_number": 1}]}
+    elif case == "float_parts":
+        p["extraction"] = {
+            "float_parts": [{"object_type": "figure", "object_id": 3, "part_index": 1}]
+        }
+    elif case == "section_classification":
+        p["extraction"] = {"diagnostics": {"section_classification": [{"section_id": 44}]}}
+    elif case == "xref_tier":
+        p["extraction"] = {"diagnostics": {"xref_tier": [{"xref_id": 45, "tier": "direct"}]}}
+    else:  # pragma: no cover - parametrize list is exhaustive
+        raise AssertionError(f"unknown dangling-ref case: {case}")
+
+    issues = [issue for issue in validate_export(p) if issue.code == "VAL_DANGLING_REF"]
+    assert len(issues) == 1
+    assert issues[0].count == 1
 
 
 def test_duplicate_pk_flags_repeated_ids():
