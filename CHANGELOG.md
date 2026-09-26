@@ -943,8 +943,8 @@ released.
 - `bibr setup --advanced` honours a step-1 ml decline in step 4. Declining
   the `ml` extra used to install it anyway in step 4, without asking, and a
   failed install exited before `.env` was written; now that decline stands
-  and step 4 prints a one-line hint instead. Accepting `ml` in step 1 still
-  installs it there.
+  and step 4 prints a one-line hint with the command that adds it later.
+  Accepting `ml` in step 1 still installs it there.
 - The setup wizard no longer lets Rich markup in errors eat its own output.
   Dynamic text (exceptions, `uv`/smoke-test detail) is escaped before
   printing, so a hint such as `pip install 'bibr[torch]'` prints in full; a
@@ -971,7 +971,8 @@ released.
   of the raw payload, so a value lax validation coerces (a `"2"` page
   number) no longer crashes the Parquet write with `ArrowInvalid` after
   validation passed. A residual failure names the table and the buffered
-  papers (a per-paper conversion failure names its `paper_id` too) instead
+  papers (an in-memory export, and any per-paper conversion failure, by its
+  `paper_id`) instead
   of only the Arrow type error. A non-bibr export that omits a defaulted key
   takes the model default instead of null (an omitted `author.role` writes
   `[]`). Clean-corpus output is unchanged: all 25 tables are byte-identical

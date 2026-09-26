@@ -2187,12 +2187,19 @@ def test_advanced_step4_honours_the_step1_ml_decline(monkeypatch):
     monkeypatch.setattr(
         wizard, "_install_selected_extras", lambda reason="": installs.append(reason)
     )
+    monkeypatch.setattr(
+        "bibr.setup_wizard._install_command_for_extras",
+        lambda extras, **_k: (["uv", "pip", "install", f"bibr[{','.join(sorted(extras))}]"], ""),
+    )
 
     wizard._step_external_services()
 
     assert "ml" not in wizard.selected_extras
     assert installs == []
-    assert "declined in step 1" in wizard.console.export_text()
+    text = wizard.console.export_text()
+    assert "declined in step 1" in text
+    # The hint names the command that adds the extra later.
+    assert "Add it later with: uv pip install 'bibr[ml]'" in text
 
 
 def test_advanced_step4_skips_install_when_step1_ml_is_present(monkeypatch):

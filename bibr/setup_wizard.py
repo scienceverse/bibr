@@ -1604,10 +1604,19 @@ class SetupWizard:
         if "ml" not in self.selected_extras and not _ml_extra_available():
             if "ml" in self._declined_extras:
                 # The step-1 answer stands: a hint only, no install, no re-ask.
+                from rich.markup import escape
+
+                try:
+                    later_cmd, _label = _install_command_for_extras(
+                        {"ml"}, cwd=Path.cwd(), uv_bin=shutil.which("uv")
+                    )
+                    later = f" Add it later with: {escape(shlex.join(later_cmd))}"
+                except RuntimeError:
+                    later = ""
                 self.console.print(
                     "[dim]Skipped the ml extra (declined in step 1): layout "
-                    "detection and reference parsing use the CPU path. Install "
-                    "the ml extra later to speed them up.[/dim]"
+                    "detection and reference parsing run on the ONNX runtime "
+                    f"instead of torch.{later}[/dim]"
                 )
             else:
                 self.selected_extras.add("ml")

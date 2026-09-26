@@ -361,7 +361,8 @@ def write_tables(sources: Iterable[Any], out_dir: str | Path) -> TablesReport:
             except Exception as exc:  # noqa: BLE001 — re-raised naming the paper
                 raise ValueError(f"{label} (paper_id {paper_id}): {exc}") from exc
             papers += 1
-            pending.append(label)
+            # An in-memory dict has no file name; its paper_id says which paper it was.
+            pending.append(f"{label} (paper_id {paper_id})" if label == "<dict>" else label)
             if papers % _PAPERS_PER_ROW_GROUP == 0:
                 _flush_tables(tables, pending)
                 pending = []

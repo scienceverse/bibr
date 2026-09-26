@@ -200,7 +200,7 @@ def test_int64_overflow_names_the_table_and_the_source(payload, tmp_path):
     """
     payload = copy.deepcopy(payload)
     payload["text"][0]["page_number"] = 2**70
-    with pytest.raises(ValueError, match=r"table text.*papers <dict>"):
+    with pytest.raises(ValueError, match=r"table text.*papers <dict> \(paper_id "):
         write_tables([payload], tmp_path)
 
 
