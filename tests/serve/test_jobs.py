@@ -571,6 +571,36 @@ class TestJobRoutes:
         finally:
             asyncio.run(client.app.state.upload_store.close())
 
+    def test_submission_links_request_and_job_ids_into_descriptor(self):
+        """The worker-side extract record must join back to the request and job."""
+        store = MemoryJobStore()
+        tracker = _FakeTracker(result={"paper_id": "abc"})
+        client = _client(store, tracker=tracker)
+
+        @client.app.middleware("http")
+        async def _fake_metering(request, call_next):
+            # Stand-in for serve.app's metering middleware, which owns
+            # request.state.request_id in production.
+            request.state.request_id = request.headers.get("x-request-id", "generated")
+            return await call_next(request)
+
+        try:
+            with client:
+                response = client.post(
+                    "/papers/jobs",
+                    files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+                    headers={"x-request-id": "jreq-1"},
+                )
+                assert response.status_code == 202
+                job_id = response.json()["job_id"]
+                _poll_until(client, job_id, "succeeded")
+
+            descriptor = tracker.descriptors[0]
+            assert descriptor["request_id"] == "jreq-1"
+            assert descriptor["job_id"] == job_id
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
     def test_submission_caps_filename_in_descriptor_and_job_status(self):
         """Catches the job store retaining attacker-sized raw filename metadata."""
         store = MemoryJobStore()

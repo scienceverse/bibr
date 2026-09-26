@@ -131,6 +131,38 @@ class TestMeteringMiddleware:
         assert resp.headers.get("x-request-id") is None
         assert not caplog.records
 
+    def test_unhandled_error_still_emits_500_metering_record(self, monkeypatch, caplog):
+        """An exploding route must not vanish from usage/error dashboards."""
+        import asyncio
+
+        pytest.importorskip("litserve")
+        from bibr.config import Settings
+        from bibr.serve.app import build_server
+
+        monkeypatch.setattr(Settings.auth, "api_key", None)
+        monkeypatch.setattr(Settings.metering, "enabled", True)
+        server = build_server()
+
+        @server.app.get("/boom")
+        async def boom():  # pyright: ignore[reportUnusedFunction]
+            raise RuntimeError("worker exploded")
+
+        try:
+            client = TestClient(
+                server.app, base_url="http://127.0.0.1:8000", raise_server_exceptions=False
+            )
+            with caplog.at_level(logging.INFO, logger="bibr.serve.metering"):
+                response = client.get("/boom", headers={"x-request-id": "boom-1"})
+            assert response.status_code == 500
+            records = [json.loads(record.getMessage()) for record in caplog.records]
+            matched = [r for r in records if r.get("request_id") == "boom-1"]
+            assert matched, "no metering record for the unhandled 500"
+            assert matched[0]["status"] == 500
+            assert matched[0]["path"] == "/boom"
+        finally:
+            asyncio.run(server.app.state.inference_tracker.close())
+            asyncio.run(server.app.state.upload_store.close())
+
     def test_disabled_via_settings(self, monkeypatch, caplog):
         client = TestClient(_metering_app(monkeypatch, enabled=False))
         with caplog.at_level(logging.INFO, logger="bibr.serve.metering"):
@@ -471,3 +503,104 @@ def test_metering_file_handler_rotates(monkeypatch, tmp_path):
     for h in list(metering_logger.handlers):
         metering_logger.removeHandler(h)
         h.close()
+
+
+# --------------------------------------------------------------------------- #
+# Extract-record linkage (serve-8): request_id / job_id ride the descriptor
+# --------------------------------------------------------------------------- #
+
+
+def _staged_descriptor(tmp_path, *, request_id=None, job_id=None):
+    import hashlib
+
+    content = b"%PDF-1.4 fake"
+    upload_id = "0" * 32
+    (tmp_path / upload_id).write_bytes(content)
+    descriptor = {
+        "upload_id": upload_id,
+        "filename": "a.pdf",
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+    if request_id is not None:
+        descriptor["request_id"] = request_id
+    if job_id is not None:
+        descriptor["job_id"] = job_id
+    return descriptor
+
+
+@pytest.mark.parametrize(
+    ("raw_request", "raw_job", "want_request", "want_job"),
+    [
+        ("req-1", "job-2", "req-1", "job-2"),
+        ("bad/id!", "", "badid", None),
+        (123, None, None, None),
+    ],
+)
+async def test_decode_request_threads_linkage_ids(
+    tmp_path, raw_request, raw_job, want_request, want_job
+):
+    """The handoff descriptor's linkage ids reach the pipeline inputs."""
+    from bibr.serve.deployments.pipeline import BibrPipelineAPI
+
+    api = BibrPipelineAPI(upload_root=tmp_path)
+    api._cache = None
+    api._cache_inited = True
+    inputs = await api.decode_request(
+        _staged_descriptor(tmp_path, request_id=raw_request, job_id=raw_job)
+    )
+    assert inputs["request_id"] == want_request
+    assert inputs["job_id"] == want_job
+
+
+async def test_decode_request_without_linkage_ids_gives_nulls(tmp_path):
+    """Guard: descriptors written before the linkage change still decode."""
+    from bibr.serve.deployments.pipeline import BibrPipelineAPI
+
+    api = BibrPipelineAPI(upload_root=tmp_path)
+    api._cache = None
+    api._cache_inited = True
+    inputs = await api.decode_request(_staged_descriptor(tmp_path))
+    assert inputs["request_id"] is None
+    assert inputs["job_id"] is None
+
+
+async def test_extract_record_links_request_and_job_ids(tmp_path, caplog):
+    """The extract metering record carries the ids the route stored."""
+    from bibr.pipeline.context import RunConfig
+    from bibr.serve.deployments.pipeline import BibrPipelineAPI
+
+    api = BibrPipelineAPI(upload_root=tmp_path)
+    api._cache = None
+    api._cache_inited = True
+
+    class _FakePipeline:
+        _config = RunConfig()
+
+        async def process_file(self, filename, paper_id=None, content=None, config=None):
+            return {"info": {}, "extraction": {}}
+
+    api._pipeline = _FakePipeline()
+
+    with caplog.at_level(logging.INFO, logger="bibr.serve.metering"):
+        out = await api.predict(
+            {
+                "filename": "a.pdf",
+                "content": b"%PDF-1.4",
+                "start_page": None,
+                "end_page": None,
+                "include_figures": False,
+                "include_regions": False,
+                "consolidate": None,
+                "refs": None,
+                "ref_seg": None,
+                "request_id": "req-9",
+                "job_id": "job-7",
+            }
+        )
+    assert out["success"] is True
+    recs = [json.loads(r.getMessage()) for r in caplog.records if r.name == "bibr.serve.metering"]
+    extract = [r for r in recs if r.get("event") == "extract"]
+    assert len(extract) == 1
+    assert extract[0]["request_id"] == "req-9"
+    assert extract[0]["job_id"] == "job-7"

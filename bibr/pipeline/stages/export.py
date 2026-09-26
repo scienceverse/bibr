@@ -254,8 +254,9 @@ class ExportStage:
         if now - self._last_gc_time < _GC_MIN_INTERVAL_SECONDS:
             return
         self._last_gc_time = now
-        # gc.collect() holds the GIL for the whole sweep; run it in a thread so
-        # the event loop keeps servicing other in-flight requests meanwhile.
+        # gc.collect() holds the GIL for the whole sweep, so the executor
+        # offload does not spare the event loop during the pass — it only
+        # keeps this collection's own execution off the loop thread.
         import asyncio
 
         loop = asyncio.get_running_loop()

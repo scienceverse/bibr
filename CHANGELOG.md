@@ -1103,6 +1103,41 @@ released.
   `equations`).
 - Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
   "not implemented" warning instead of passing silently.
+- `bibr serve` cache-miss waiters no longer give up after a flat 10 seconds and
+  pay for a duplicate extraction. Unless the operator set an explicit wait, the
+  wait budget now follows the pipeline timeout, and a waiter whose owner's
+  lease disappears re-reads the cache once before falling back (the owner's
+  publish may have landed between the waiter's read and its lease check) and
+  otherwise takes over only after atomically acquiring the lease, so exactly
+  one waiter extracts instead of every waiter at once.
+- `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
+  to report them degraded without ever checking the directory): a local
+  directory counts as present when the configured runtime could load from
+  it (the ONNX bundle is required only for `ML_RUNTIME=onnx`), re-checks
+  a failed classifier verdict after a bounded
+  interval instead of caching it forever, and still loads no model on the
+  request path. It also probes the OCR server's `/v1/models` for the
+  served-model alias the backend will ask for, so a healthy `/health` with
+  the wrong models listed no longer reads ready; a 401 there is reported as
+  unauthorized (check the key), not as a missing model. The backend's startup
+  wait remembers the last non-200 status for the same reason, cleared by any
+  later 200.
+- `bibr serve` keeps a failed `serve-http` OCR backend — one that owns a
+  cross-request readiness cooldown — instead of discarding it, so the
+  backend's own cooldown fail-fasts later requests instead of every request
+  paying a full poll. The published instance is never shut down. Clients
+  without such a cooldown are still discarded on failure.
+- On the `/papers/extract` and `/jobs` routes, `bibr serve` extraction
+  metering records now carry the `request_id` of the request that submitted
+  them (and the `job_id` for async jobs), so the worker-side `extract`
+  record joins back to the API-side request record.
+  Unhandled route failures also emit their request record with status 500
+  before the 500 response is built; the 500 body itself is unchanged.
+- The served-model choice for HTTP OCR endpoints now lives in one place. With
+  `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
+  own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
+  defaults and `--dry-run` now agree on the paddle alias, and the dry-run
+  preview prints the resolved alias.
 
 ### Added
 
@@ -1169,6 +1204,13 @@ released.
   (whose only consumer was never published, and whose per-request peaks were
   process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
   no longer imports.
+- `bibr serve` no longer runs two rotating writers against one
+  `METER_LOG_PATH`. The API process writes request records to `METER_LOG_PATH`
+  itself while the worker writes extraction records — the only ones carrying
+  `llm_usage_totals` — to the sibling `<stem>.worker<suffix>` file, each
+  process rotating only its own file, so records are neither lost nor
+  duplicated across rotation. Operators tallying token usage must read both
+  files: `METER_LOG_PATH` alone holds no extraction records.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
