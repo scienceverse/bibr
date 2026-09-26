@@ -109,7 +109,7 @@ class TestMeteringMiddleware:
         server = build_server()
         try:
             with caplog.at_level(logging.INFO, logger="bibr.serve.metering"):
-                response = TestClient(server.app).get(
+                response = TestClient(server.app, base_url="http://127.0.0.1:8000").get(
                     "/openapi.json",
                     headers={"x-request-id": "inference-count"},
                 )

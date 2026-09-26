@@ -936,6 +936,85 @@ released.
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
   still finish before the enrichment is reported partial.
 
+### Security
+
+- **A `bibr serve` without `AUTH_API_KEY` no longer takes orders from web pages.**
+  Loopback was its only boundary, and a page open in the operator's browser could
+  cross it: a cross-site form POST needs no CORS preflight, and a DNS-rebinding page
+  reaches 127.0.0.1 under its own host name and reads the answers, `/mcp` included,
+  whose rebinding protection was switched off. Without a key the server now answers
+  only a `Host` of `127.0.0.1`, `localhost` or `[::1]` (`421` otherwise), refuses
+  state-changing requests from another site's `Origin` or with
+  `Sec-Fetch-Site: cross-site` (`403`; origins listed by name in `CORS_ORIGINS` are
+  accepted, `*` admits none), and turns the MCP transport's rebinding check on with
+  the same names. A keyless bind is accordingly limited to `127.0.0.1`, `::1` and
+  `localhost`; another loopback address such as `127.0.0.2` needs a key. `bibr batch
+  --serve-url`, MCP clients, curl and the operator's own browser on `/docs` are
+  unaffected. With a key nothing changes; a proxy or tunnel in front of the server
+  needs one.
+- **Upstream errors no longer put the OCR or Crossref URL into exports and error
+  bodies.** An httpx status error quotes the full request URL, user-info and query
+  included, and region, page and file OCR failures and Crossref enrichment failures
+  copied it into `extraction.warnings`, the `422` body and the job error. They now
+  name the error and its status (`HTTPStatusError: HTTP 400 Bad Request`), other
+  messages have URLs replaced by `<url>`, and the serve error body drops URLs too;
+  the full text stays in the (scrubbed) log.
+- **The log scrubber covers exceptions passed as arguments.** It rewrote only the
+  `str` arguments of a record, so `logger.warning("...: %s", exc)` — the common
+  form — logged `?key=…`, bearer tokens and URL passwords from the exception
+  unmasked. It now masks every argument, keeping the argument tuple that formatters
+  such as uvicorn's access-log formatter unpack, or freezes the masked message when
+  that cannot be done argument by argument; and it masks a password-only URL
+  (`redis://:password@redis:6379/0`) as well.
+- **`bibr setup` writes a new `.env` readable by its owner only (0600)**, as
+  `bibr config set` already did; it was created with the umask's mode (usually
+  0644), readable by every account on a shared machine. An existing file is
+  rewritten in place as before, keeping its mode, owner and links.
+- **Bearer keys are not sent over plain HTTP to public hosts.** `bibr batch
+  --serve-url` and an `LLM_BASE_URL` or `OCR_VISION_BASE_URL` receiving an API key
+  had no scheme check. `http://` stays allowed for loopback and private-network
+  hosts (LAN or tailnet addresses, single-label names,
+  `.local`/`.internal`/`.lan`/`.ts.net`); a public host needs `https://`, or
+  `--allow-insecure-http` for `bibr batch` and `LLM_ALLOW_INSECURE_HTTP=true` for the
+  LLM key, which the vision endpoint also receives. The pipeline, `bibr setup` (model
+  listing and connection test) and `bibr doctor` apply the same rule; the wizard asks
+  again, or records the opt-in, instead of sending the key. `bibr batch` also warns
+  when its token goes over plain `http://` to a LAN host, and its examples now use
+  `https://`.
+- **Script-capable links are dropped from exports.** `javascript:`, `vbscript:` and
+  `data:` targets from HTML, JATS or DOCX links reached `url[].href`, `bib[].url`
+  and the match rows' `url` and `license_url` (taken from the Crossref record as
+  deposited), which readers render as anchors. Other schemes pass; none of the
+  evaluation corpora carries a script-capable link.
+- **`chew_url` in `bibr mcp` keeps a downloaded file inside its temporary
+  directory on Windows.** A server-chosen name such as `D:evil.pdf` discarded the
+  directory and wrote to drive D. The name is now reduced to one plain component:
+  characters Windows forbids are replaced and device names such as `NUL` prefixed.
+- **The serve response cache and the OCR cache are keyed on the full SHA-256.**
+  The shared response cache used a 64-bit prefix, so two crafted files could share
+  one cached result. It also ignored the file extension, which picks the parser:
+  the same bytes uploaded as `.html` and then `.xml` got the HTML result back for
+  the cache's lifetime. Both keys changed, so existing response and OCR cache
+  entries are no longer read: the first request for each file extracts again, and
+  old OCR cache files can be deleted.
+- **Model bundles load through an allowlist.** The restricted joblib loader refused
+  a list of dangerous modules, which any allowed module could hand back as an
+  attribute, and it did not cover object-array payloads or joblib's pre-0.10
+  format. It now resolves only the numpy, scikit-learn and joblib classes the
+  front-role and geometry-segmenter bundles are built from, reads object arrays
+  under the same allowlist, and refuses the old format. The shipped bundles load
+  to identical models.
+- **`REDIS_PASSWORD` no longer shows inside `REDIS_URL`.** `repr()`/`model_dump()`
+  of the settings and `bibr config show` (and the batch ledger's settings snapshot)
+  printed it in the URL they mask elsewhere; URL passwords are masked now.
+- **`REDIS_PASSWORD` reaches the other Redis URLs on the same server.** It was
+  added only to `REDIS_URL`, so a host-only `JOBS_REDIS_URL` or
+  `CROSSREF_CACHE_REDIS_URL` on the compose Redis connected unauthenticated, and a
+  user-only URL (`redis://default@redis:6379/0`) stayed without a password. A
+  unix-socket URL gets it as before (`unix://:password@/path/redis.sock`), and so
+  does a sibling URL on the same socket. A URL on a different server, or with its
+  own password, is left alone.
+
 ## [0.5.1] - 2026-09-12
 
 ### Fixed

@@ -1,6 +1,6 @@
 """Opt-in disk cache for OCR stage output (``bibr.pipeline.stages.ocr``).
 
-Keyed on ``file_hash`` + page range + OCR backend/model + every setting that
+Keyed on the content SHA-256 + page range + OCR backend/model + every setting that
 shapes the cached artifacts + the bibr version + a format-version constant.
 The key cannot see code changes between releases: when comparing source
 revisions that touch rendering, layout, native text or OCR, use a fresh
@@ -108,7 +108,9 @@ def _key(
         # A release can change how the cached artifacts are produced without
         # anyone bumping _CACHE_FORMAT_VERSION; never reuse another release's.
         f"bibr={__version__}",
-        fs.file_hash or "",
+        # The full content hash: a serve deployment can share this cache
+        # between callers, and the 64-bit file_hash can be collided on purpose.
+        fs.content_sha256 or fs.file_hash or "",
         "" if cfg.start_page is None else str(cfg.start_page),
         "" if cfg.end_page is None else str(cfg.end_page),
         identity.backend,

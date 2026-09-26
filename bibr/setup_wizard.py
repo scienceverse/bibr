@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Literal
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from bibr.env_utils import _format_env_value
+from bibr.env_utils import _format_env_value, write_env_text
 from bibr.env_utils import merge_env as _merge_env  # re-exported for tests
 from bibr.local.cli import ui
 from bibr.local.llm_models import (
@@ -34,6 +34,7 @@ from bibr.local.llm_models import (
     variants_for,
 )
 from bibr.presets import PresetManager
+from bibr.utils.hosts import refuse_plaintext_llm_key
 from bibr.utils.onnx_providers import onnxruntime_gpu_reinstall_command
 
 if TYPE_CHECKING:
@@ -472,6 +473,13 @@ def _connection_test_settings(env_vars: dict[str, str]) -> "GlobalSettings":
     for key_env in ("GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"):
         if answers.get(key_env):
             setattr(settings, key_env, answers[key_env])
+    if "LLM_ALLOW_INSECURE_HTTP" in answers:
+        llm.allow_insecure_http = answers["LLM_ALLOW_INSECURE_HTTP"].strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        )
     return settings
 
 
@@ -486,10 +494,13 @@ _OPENAI_FILTER_PATTERNS = (
 )
 
 
-def _fetch_models(provider: str, api_key: str, base_url: str = "") -> list[str]:
+def _fetch_models(
+    provider: str, api_key: str, base_url: str = "", *, allow_insecure_http: bool = False
+) -> list[str]:
     """Fetch available model IDs from a provider's API.
 
-    Returns a sorted list of model ID strings, or an empty list on any error.
+    Returns a sorted list of model ID strings, or an empty list on any error,
+    including a public plain-HTTP ``base_url`` the key must not be sent to.
     """
     try:
         if provider == "google":
@@ -512,6 +523,7 @@ def _fetch_models(provider: str, api_key: str, base_url: str = "") -> list[str]:
             )
         elif provider == "openai":
             if base_url:
+                refuse_plaintext_llm_key(base_url, api_key, allow_insecure_http=allow_insecure_http)
                 return _fetch_openai_compat_models(
                     api_key, base_url=base_url, filter_non_chat=False
                 )
@@ -656,7 +668,7 @@ def _write_env_fresh(path: Path, env_vars: dict[str, str]) -> None:
             lines.append(f"{k}={_format_env_value(v)}")
         lines.append("")
 
-    path.write_text("\n".join(lines), encoding="utf-8")
+    write_env_text(path, "\n".join(lines))
 
 
 def _project_name(cwd: Path) -> str | None:
@@ -1174,10 +1186,7 @@ class SetupWizard:
             self.env_vars[defaults["key_env"]] = api_key
 
         if provider == "openai":
-            base_url = Prompt.ask(
-                "Custom base URL (leave blank for OpenAI default)",
-                default="",
-            )
+            base_url = self._ask_llm_base_url(api_key)
             if base_url:
                 self.env_vars["LLM_BASE_URL"] = base_url
 
@@ -1189,7 +1198,12 @@ class SetupWizard:
         # --- Fetch and select model ---
         model = None
         with self.console.status("Fetching available models …"):
-            models = _fetch_models(provider, api_key, base_url)
+            models = _fetch_models(
+                provider,
+                api_key,
+                base_url,
+                allow_insecure_http=self._allows_insecure_llm_http(),
+            )
 
         if models:
             model = _select_model(models, defaults["model"], self.console)
@@ -1202,6 +1216,33 @@ class SetupWizard:
             model = Prompt.ask("Model name", default=defaults["model"])
 
         self.env_vars["LLM_MODEL"] = model
+
+    def _allows_insecure_llm_http(self) -> bool:
+        value = self.env_vars.get("LLM_ALLOW_INSECURE_HTTP") or os.environ.get(
+            "LLM_ALLOW_INSECURE_HTTP", ""
+        )
+        return value.strip().lower() in ("1", "true", "yes", "on")
+
+    def _ask_llm_base_url(self, api_key: str) -> str:
+        """Ask for ``LLM_BASE_URL`` before the key is first sent to it.
+
+        Listing models and the connection test both send the key, so a public
+        ``http://`` URL is refused here, as the pipeline would refuse it, unless
+        the user opts in; the opt-in is saved as ``LLM_ALLOW_INSECURE_HTTP``.
+        """
+        while True:
+            base_url = Prompt.ask("Custom base URL (leave blank for OpenAI default)", default="")
+            try:
+                refuse_plaintext_llm_key(
+                    base_url, api_key, allow_insecure_http=self._allows_insecure_llm_http()
+                )
+            except ValueError as exc:
+                ui.error(self.console, str(exc))
+                if Confirm.ask("Send the key over plain HTTP anyway?", default=False):
+                    self.env_vars["LLM_ALLOW_INSECURE_HTTP"] = "true"
+                    return base_url
+                continue
+            return base_url
 
     def _step_llm_local(self) -> None:
         """Managed local LLM: pick a curated model/quant for this machine."""

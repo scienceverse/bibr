@@ -65,7 +65,7 @@ examples:
   bibr batch manifest.txt --out results/ --dry-run    # show the plan, run nothing
   bibr batch manifest.txt --out results/ --retry-failed --limit 50
   bibr batch manifest.txt --out results/ \\
-      --serve-url http://gpu-box:8000 --concurrency 2 --max-concurrency 4
+      --serve-url https://bibr.example.org --concurrency 2 --max-concurrency 4
   bibr batch report results/                          # ledger summary (--json for JSON)
 
 ledger: <out>/outcomes.jsonl — one JSON line per attempt (status, error_code,
@@ -473,6 +473,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Bearer token (default: AUTH_API_KEY or BIBR_SERVE_TOKEN from the "
             "environment, else AUTH_API_KEY from .env)"
+        ),
+    )
+    remote.add_argument(
+        "--allow-insecure-http",
+        action="store_true",
+        help=(
+            "Send the bearer token over plain http:// to a public host. Loopback and "
+            "private-network hosts (LAN, tailnet, single-label names) never need it; "
+            "plain http to a LAN host is allowed with a warning."
         ),
     )
     remote.add_argument(

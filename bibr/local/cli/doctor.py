@@ -573,7 +573,9 @@ def _check_llm_connection(settings, console, ok, fail) -> None:
 
     On failure the raw SDK exception is redacted before display: google-genai and
     other SDKs frequently embed ``?key=<API_KEY>`` in exception URLs, and doctor
-    output is routinely pasted into bug reports (audit M2).
+    output is routinely pasted into bug reports (audit M2). A public plain-HTTP
+    ``base_url`` fails the check without sending the key, as the pipeline would
+    refuse it.
     """
     from bibr.clients.llm import ping_llm
     from bibr.config import snapshot_settings
