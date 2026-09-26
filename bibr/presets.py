@@ -55,6 +55,24 @@ class InvalidPresetError(Exception):
     pass
 
 
+def effective_env_file() -> Path:
+    """The ``.env`` file whose values are in effect: what presets read and write.
+
+    Settings merge ``~/.bibr/.env`` and then ``./.env`` (or the files in
+    ``BIBR_ENV_FILE``), later files overriding earlier ones, so the last one
+    that exists is the file whose values win. With none present it is where
+    the chain would look last; ``./.env`` when the chain is empty. ``bibr
+    preset`` and the demo's preset picker both use it.
+    """
+    from bibr.config import _default_env_files
+
+    chain = _default_env_files()
+    existing = [path for path in chain if path.is_file()]
+    if existing:
+        return existing[-1].absolute()
+    return (chain[-1] if chain else Path(".env")).absolute()
+
+
 def is_secret_key(name: str) -> bool:
     """Return True if *name* should be excluded from a preset snapshot."""
     upper = name.upper()

@@ -24,7 +24,7 @@ from bibr.paper_contents import (
     CanonicalSection,
     is_exact_front_matter_furniture,
 )
-from bibr.utils.text import normalize_doi
+from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", re.IGNORECASE)
+_DOI_RE = DOI_CANDIDATE_RE
 _WORD_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", re.UNICODE)
 
 

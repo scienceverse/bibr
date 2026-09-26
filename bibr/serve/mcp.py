@@ -31,9 +31,11 @@ agents get the same chew-then-query tool surface as ``bibr mcp`` (see
 
 Auth needs nothing new: the serve app's bearer middleware gates every path
 outside ``PUBLIC_PATHS``, ``/mcp`` included — clients send the same
-``Authorization: Bearer <AUTH_API_KEY>`` header as REST callers. Transport
-DNS-rebinding protection stays at the SDK default (off), matching the REST
-surface where bearer auth is the boundary.
+``Authorization: Bearer <AUTH_API_KEY>`` header as REST callers. With a key,
+the bearer token is the boundary and the transport's DNS-rebinding check is
+off, so proxies may use any Host. Without one (a loopback-only server), the
+check is on and admits only loopback Host and Origin headers, like the serve
+app's own gate (:func:`bibr.serve.auth.check_keyless_request`).
 
 The streamable-HTTP session manager must be *running* for the endpoint to
 serve, and Starlette does not run mounted apps' lifespans — so the mount
@@ -56,6 +58,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from bibr.mcp_server import _PaperStore, _register_query_tools, _summarize
 from bibr.serve.admission import UploadAdmission, UploadAdmissionError, base64_envelope
+from bibr.serve.auth import KEYLESS_HOSTS
 from bibr.serve.ingress import (
     EmptyUploadError,
     InvalidUploadOptionError,
@@ -403,12 +406,31 @@ def mount_mcp(
     # The SDK's default 4 MiB JSON cap is smaller than bibr's upload limit.
     # Account for base64 expansion plus bounded JSON/options overhead.
     body_limit = 4 * ((upload_store.max_size + 2) // 3) + 64 * 1024
+    if settings.auth.api_key:
+        # Bearer auth is the deployment boundary; any Host may front it.
+        transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
+    else:
+        # No key: loopback is the only boundary, and a DNS-rebinding page would
+        # otherwise reach it under its own host name. Same names and origins as
+        # the serve app's own gate (check_keyless_request).
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=[host for name in KEYLESS_HOSTS for host in (name, f"{name}:*")],
+            allowed_origins=[
+                *(
+                    origin
+                    for name in KEYLESS_HOSTS
+                    for scheme in ("http", "https")
+                    for origin in (f"{scheme}://{name}", f"{scheme}://{name}:*")
+                ),
+                *(origin for origin in settings.cors.origins if origin != "*"),
+            ],
+        )
     mounted = server.streamable_http_app(
         streamable_http_path="/",
         session_idle_timeout=idle_timeout if idle_timeout > 0 else None,
         max_request_body_size=body_limit,
-        # Bearer auth and validate_bind_auth provide the deployment boundary.
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        transport_security=transport_security,
     )
     session_manager = server.session_manager
     app.mount(MCP_MOUNT_PATH, mounted)

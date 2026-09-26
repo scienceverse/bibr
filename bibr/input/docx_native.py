@@ -376,7 +376,12 @@ class DocxParser:
         text_id: int,
         paragraph_id: int,
     ) -> PaperSentence:
-        """Build a DOCX sentence — no provenance/region_meta side-channels.
+        """Build a DOCX sentence — no provenance/region_meta side-channels, and
+        never OCR text. It keeps the paragraph's inline equations whose ``$…$``
+        text it holds, so the late clean-up unwraps them even where a word
+        touches them ("the $n$th"). Held means the text occurs in the sentence:
+        a literal "$n$" elsewhere in a paragraph with an equation ``n`` would
+        be unwrapped too, and an equation the segmenter splits is not held.
 
         Formula entries are intentionally left with ``is_display_formula`` at
         its default of ``False`` (the historical DOCX behaviour).
@@ -387,6 +392,8 @@ class DocxParser:
             section_id=entry.section_id,
             paragraph_id=paragraph_id,
             page_number=entry.page_number,
+            from_ocr=False,
+            inline_math=tuple(span for span in entry.inline_math if span in text),
         )
 
     def apply_segmentation(
@@ -476,6 +483,7 @@ class DocxParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -504,6 +512,7 @@ class DocxParser:
                         section_id=self._section_counter,
                         paragraph_id=self._paragraph_counter,
                         page_number=None,
+                        from_ocr=False,
                     )
                 )
                 self._sentence_counter += 1
@@ -540,6 +549,7 @@ class DocxParser:
                     section_id=footnote_section_id,
                     paragraph_id=self._paragraph_counter,
                     page_number=None,
+                    from_ocr=False,
                 )
             )
             self._sentence_counter += 1
@@ -595,6 +605,8 @@ class DocxParser:
         #   - m:oMathPara (display math → emit as separate deferred entry)
         #   - w:drawing (inline image → register as PaperFigure)
         text_buf: list[str] = []
+        # The ``$…$`` each inline equation became, for the late clean-up.
+        math_buf: list[str] = []
         # (kind, id) pairs — "footnote" and "endnote" ids collide otherwise.
         pending_note_refs: list[tuple[str, str]] = []
         had_image = False
@@ -604,10 +616,14 @@ class DocxParser:
         def flush_body() -> None:
             txt = "".join(text_buf).strip()
             text_buf.clear()
+            inline_math = tuple(math_buf)
+            math_buf.clear()
             if not txt:
                 return
             # Footnote refs collected so far attach to this just-flushed entry.
-            deferred_idx = self.assembler.append(txt, None, self._current_section_id, True, False)
+            deferred_idx = self.assembler.append(
+                txt, None, self._current_section_id, True, False, inline_math=inline_math
+            )
             for kind, note_id in pending_note_refs:
                 source = self._footnotes_map if kind == "footnote" else self._endnotes_map
                 note_text = source.get(note_id, "").strip()
@@ -662,9 +678,10 @@ class DocxParser:
                 elif rt == f"{{{m}}}oMath":
                     inline = _omml_to_text(run_child)
                     if inline:
-                        text_buf.append(f"${inline}$")
+                        math_buf.append(f"${inline}$")
+                        text_buf.append(math_buf[-1])
                         if extra_buf is not None:
-                            extra_buf.append(f"${inline}$")
+                            extra_buf.append(math_buf[-1])
                 elif rt == f"{{{w}}}drawing":
                     had_image = True
                     # A drawing can be a text box rather than a picture, and
@@ -713,7 +730,8 @@ class DocxParser:
             elif tag == f"{{{m}}}oMath":
                 inline = _omml_to_text(child)
                 if inline:
-                    text_buf.append(f"${inline}$")
+                    math_buf.append(f"${inline}$")
+                    text_buf.append(math_buf[-1])
             elif tag == f"{{{w}}}r":
                 # Run: walk for w:t, note references, m:oMath, w:drawing
                 walk_run(child)

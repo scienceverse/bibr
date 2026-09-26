@@ -9,6 +9,18 @@ from bibr.segmenter import registry as segmenter_registry
 SETTINGS = GlobalSettings()
 
 
+@pytest.fixture(autouse=True)
+def _restore_registries():
+    """The registries are process-global: tests registering fakes restore them."""
+    layout_before = dict(layout_registry._BACKENDS)
+    segmenter_before = dict(segmenter_registry._BACKENDS)
+    yield
+    layout_registry._BACKENDS.clear()
+    layout_registry._BACKENDS.update(layout_before)
+    segmenter_registry._BACKENDS.clear()
+    segmenter_registry._BACKENDS.update(segmenter_before)
+
+
 def test_layout_registry_creates_a_fresh_instance():
     @layout_registry.register
     class FakeLayout:
@@ -56,6 +68,12 @@ def test_registry_rejects_duplicate_names(registry):
 
 @pytest.mark.parametrize("registry", [layout_registry, segmenter_registry])
 def test_registry_unknown_name_lists_known_backends(registry):
+    # Self-contained: register a throwaway backend so the test holds however
+    # it is ordered or selected (an empty registry used to fail it standalone).
+    @registry.register
+    class ListedBackend:
+        name = f"listed-{registry.__name__.rsplit('.', 1)[-1]}"
+
     with pytest.raises(ValueError, match="known") as exc_info:
         registry.create("does-not-exist")
 
