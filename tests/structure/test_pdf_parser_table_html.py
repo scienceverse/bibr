@@ -170,6 +170,14 @@ class TestHeaderOnlyTables:
         assert len(contents.tables) == 1
         assert list(contents.tables[0].df.columns) == ["Model", "AIC"]
 
+    def test_header_only_table_exports_its_header_row(self):
+        """The header text reaches ``contents``, not just the HTML."""
+        contents = _parse(
+            [[_region(0, "table", "<table><tr><th>Model</th><th>AIC</th></tr></table>")]]
+        )
+        assert contents.tables[0].contents == [["Model", "AIC"]]
+        assert contents.tables[0].parts[0].contents == [["Model", "AIC"]]
+
     def test_markdown_header_and_separator_only_is_a_table(self):
         contents = _parse([[_region(0, "table", "| Model | AIC | BIC |\n|---|---|---|")]])
         assert len(contents.tables) == 1

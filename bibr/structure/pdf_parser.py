@@ -684,7 +684,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # so an anchor there points consumers at text they never see
             # (mirrors the detect_xrefs guard).
             nearest_text_id = self._find_nearest_text_id(
-                fn_deferred_idx, skip_text_ids=formula_text_ids
+                fn_deferred_idx, skip_text_ids=formula_text_ids, page_limit=fn_page
             )
 
             # Link the note to the sentence before it. bibr does not find the
@@ -815,13 +815,33 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     len(demoted),
                     len(occurrences),
                 )
+        repeated_body = {
+            occurrence
+            for occurrences in seen_body.values()
+            if len({pi for pi, _ in occurrences}) >= 2
+            for occurrence in occurrences
+        }
+
+        def in_repeated_block(page_idx: int, region_idx: int) -> bool:
+            # Two or more repeated rows printed together (a chart legend or
+            # a table key reprinted with each float) are float furniture.
+            return (page_idx, region_idx - 1) in repeated_body or (
+                page_idx,
+                region_idx + 1,
+            ) in repeated_body
+
         for occurrences in seen_body.values():
             if len({pi for pi, _ in occurrences}) >= 2:
                 # Repetition alone is not evidence (see the heading path
-                # above): multi-study papers legitimately repeat short body
-                # rows mid-column. Require the geometry of actual page
-                # furniture; a missing bbox still falls back to demotion.
-                demoted = [occ for occ in occurrences if self._is_in_margin_band(*occ)]
+                # above): papers legitimately repeat a short body row
+                # mid-column ("where", "(TIF)"). Require the geometry of
+                # actual page furniture, or a block of repeated rows; a
+                # missing bbox still falls back to demotion.
+                demoted = [
+                    occ
+                    for occ in occurrences
+                    if self._is_in_margin_band(*occ) or in_repeated_block(*occ)
+                ]
                 if not demoted:
                     continue
                 self._running_header_regions.update(demoted)
@@ -1042,6 +1062,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 continue
 
             if treatment == "heading":
+                # Only a real section boundary flushes (inside
+                # _handle_heading); a heading demoted or dropped there leaves
+                # a barrier the carry-over can cross only in lowercase.
+                self._mark_carry_over_barrier()
                 self._handle_heading(effective_label, content, page_number, bbox, from_ocr=from_ocr)
 
             elif treatment == "section_hint":
@@ -1075,10 +1099,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
 
             elif treatment == "figure":
-                # Figures emit no text rows, so — like tables — they keep an
-                # unfinished prose carry-over alive across the region; the
-                # normal heading/section and continuation guards still
-                # prevent unrelated text from being joined.
+                # Figures emit no text rows, so they keep an unfinished prose
+                # carry-over alive across the region for a cross-page or
+                # lowercase continuation (see CarryOverState.barrier).
+                self._mark_carry_over_barrier()
                 self._handle_figure(
                     page_number,
                     bbox,

@@ -122,6 +122,61 @@ class TestMergeFigurePanels:
             (520, 560, 900, 800),
         ]
 
+    def test_tall_panel_stack_far_from_its_caption_still_merges(self):
+        """No near group (the captioned panel sits low on the page): the order
+        rule still absorbs the bare markers, as without geometry."""
+        figures = [
+            _fig_at(1, 3, "A", (100, 60, 900, 300)),
+            _fig_at(2, 3, "B", (100, 320, 900, 560)),
+            _fig_at(3, 3, "Figure 1. Three conditions.", (100, 580, 900, 820)),
+        ]
+        out = merge_figure_panels(figures)
+        assert [f.caption for f in out] == ["Figure 1. Three conditions."]
+        assert sorted(p.bbox for p in out[0].provenance) == [
+            (100, 60, 900, 300),
+            (100, 320, 900, 560),
+            (100, 580, 900, 820),
+        ]
+
+    def test_bare_panel_far_from_every_group_keeps_the_order_rule(self):
+        """Geometry only decides among near groups: a panel near none of them
+        goes to the following figure, not merely the closest one."""
+        figures = [
+            _fig_at(1, 3, "Figure 1. Early.", (100, 60, 900, 200)),
+            _fig_at(2, 3, "B", (100, 450, 900, 550)),
+            _fig_at(3, 3, "Figure 2. Late.", (100, 850, 900, 950)),
+        ]
+        out = merge_figure_panels(figures)
+        assert [len(f.provenance) for f in out] == [1, 2]
+        assert (100, 450, 900, 550) in [p.bbox for p in out[1].provenance]
+
+    def test_caption_less_image_keeps_the_id_order_rule(self):
+        """A caption-less image printed just above the next figure is not
+        absorbed by it: pass 2 reads list order by id, as before, and the
+        survivors keep document order."""
+        figures = [
+            _fig_at(12, 13, None, (283, 168, 635, 312)),
+            _fig_at(10, 13, "Figure 10. Cracked specimen.", (280, 409, 483, 505)),
+            _fig_at(11, 13, "Figure 11. Relative sides.", (282, 617, 464, 824)),
+        ]
+        out = merge_figure_panels(figures)
+        assert [f.caption for f in out] == [
+            None,
+            "Figure 10. Cracked specimen.",
+            "Figure 11. Relative sides.",
+        ]
+        assert [len(f.provenance) for f in out] == [1, 1, 1]
+
+    def test_merged_survivors_keep_document_order(self):
+        """After a merge, survivors come back in the caller's order, not by id."""
+        figures = [
+            _fig_at(9, 3, None, (100, 850, 900, 950)),
+            _fig_at(1, 3, "Figure 1. Early.", (100, 60, 480, 300)),
+            _fig_at(2, 3, "B", (520, 60, 900, 300)),
+        ]
+        out = merge_figure_panels(figures)
+        assert [f.caption for f in out] == [None, "Figure 1. Early."]
+
     def test_bare_panel_without_geometry_keeps_order_rule(self):
         """Guard: with no bboxes the following-then-preceding order rule
         still applies."""

@@ -1001,8 +1001,6 @@ def test_confirmed_table_caption_deduplicated_away_does_not_raise():
 
 def _body_sentence_texts(parser, contents):
     """Segment with identity splits and return non-float body sentence texts."""
-    from bibr.structure.pdf_parser import PDFParser  # noqa: F401 (style anchor)
-
     parser.apply_segmentation(
         contents,
         [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation],
@@ -1299,6 +1297,7 @@ def test_continuation_page_does_not_raise_id_conflict():
     contents = parser.parse()
 
     assert len(contents.tables) == 1
+    assert contents.tables[0].table_id == 2
     assert contents.tables[0].caption == "Table 2. Item statistics"
     assert len(contents.tables[0].df) == 3
     assert [
@@ -1306,3 +1305,82 @@ def test_continuation_page_does_not_raise_id_conflict():
         for issue in parser._structure_validation_issues
         if issue.code == "VAL_MEDIA_ID_CONFLICT"
     ] == []
+
+
+def test_two_unowned_captions_each_replay_where_printed():
+    """Several replays keep their own positions (each insert shifts the next)."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "text", "First paragraph here.", bbox=[100, 100, 900, 150]),
+                _region(1, "figure_title", "Figure 1. Unowned one.", bbox=[100, 200, 900, 240]),
+                _region(2, "text", "Second paragraph here.", bbox=[100, 300, 900, 350]),
+            ],
+            [
+                _region(0, "figure_title", "Figure 2. Unowned two.", bbox=[100, 100, 900, 140]),
+                _region(1, "text", "Third paragraph here.", bbox=[100, 200, 900, 250]),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert body == [
+        "First paragraph here.",
+        "Figure 1. Unowned one.",
+        "Second paragraph here.",
+        "Figure 2. Unowned two.",
+        "Third paragraph here.",
+    ]
+
+
+def test_caption_printed_inside_a_pending_paragraph_replays_after_it():
+    """A caption captured while a paragraph is still buffered follows it."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "text", "The effect was", bbox=[100, 100, 900, 150]),
+                _region(1, "figure_title", "Figure 1. Unowned.", bbox=[100, 200, 900, 240]),
+                _region(2, "text", "large and robust.", bbox=[100, 300, 900, 350]),
+                _region(3, "text", "Next paragraph.", bbox=[100, 400, 900, 450]),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert body == ["The effect was large and robust.", "Figure 1. Unowned.", "Next paragraph."]
+
+
+def test_owned_caption_copy_with_a_trailing_doi_is_not_replayed():
+    """A second copy of an owned caption that only adds a DOI stays out of the body."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "chart", bbox=[100, 100, 900, 400], image_b64="fig"),
+                _region(
+                    1,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=[100, 410, 900, 440],
+                ),
+                _region(2, "text", "The effect was large.", bbox=[100, 500, 900, 550]),
+                _region(
+                    3,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition. https://doi.org/10.1234/abc",
+                    bbox=[100, 850, 900, 880],
+                ),
+            ]
+        ]
+    )
+    contents = parser.parse()
+
+    assert contents.figures[0].caption == "Figure 1. Mean reaction times by condition."
+    assert [e.text for e in parser.assembler.entries] == ["The effect was large."]

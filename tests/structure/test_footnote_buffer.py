@@ -30,7 +30,6 @@ def test_iteration_preserves_order():
         ("B", 2, 1, 20, True),
     ]
     # Iteration does not consume — buffer still holds the records.
-    assert list(fb) != []
     assert list(fb) == out
 
 

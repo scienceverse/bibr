@@ -10,8 +10,10 @@ Two pathologies are handled that the inline handlers in
 * Multi-panel figures where each panel became its own ``PaperFigure`` with a
   bare marker caption ("A", "b", "(c)", "1") or no caption at all, next to
   one figure carrying the real "FIGURE N …" caption. The inline grouping
-  only catches lowercase "(a)"-style title regions that follow their image
-  region; uppercase markers and title-before-image orderings slip through.
+  (``MediaHandlersMixin._group_panel_figures``) folds panel regions that
+  precede their explicit caption and carries described panel titles ("(a)
+  Congruent", "A Congruent") into it; panels it cannot pair are left to
+  this module.
 * Multi-page tables emitted once per page with the caption repeated plus a
   trailing "(Continued)" marker.
 
@@ -154,12 +156,11 @@ def merge_figure_panels_with_remap(
 
     Figures whose caption is a bare panel marker are absorbed by the nearest
     labeled figure on the same page — the vertically nearest group bbox when
-    bboxes are available (required to be near, as in pass 2), else following
-    first (panels usually precede their caption in reading order), else
-    preceding. Caption-less figures are absorbed only when spatially near
-    the group being assembled (missing bbox
-    info falls back to trusting sequential order, matching
-    ``_is_bbox_nearby``). Absorbed figures donate their provenance, and their
+    one is near (``_vertically_near``), else following first (panels usually
+    precede their caption in reading order), else preceding. Caption-less
+    figures take the following-then-preceding target, and only when
+    spatially near the group being assembled (missing bbox info falls back
+    to trusting sequential order, matching ``_is_bbox_nearby``). Absorbed figures donate their provenance, and their
     crop when the survivor has none. Figures with no target are always kept —
     survival is the ownership layer's call. Survivors are renumbered from 1.
 
@@ -170,6 +171,12 @@ def merge_figure_panels_with_remap(
     """
     if not figures:
         return figures, {}
+    # The order rule ("following, else preceding") reads the list in id
+    # order, as it always has; survivors come back in the caller's
+    # (document) order. In document order a caption-less image printed just
+    # above the next figure would become that figure's "following" panel.
+    document_position = {id(fig): index for index, fig in enumerate(figures)}
+    figures = sorted(figures, key=lambda fig: fig.figure_id)
     is_target = [_FIGURE_LABEL_RE.match((f.caption or "").strip()) is not None for f in figures]
     absorbed: dict[int, int] = {}  # index -> target index
     group_bbox: dict[int, list[float] | None] = {}  # target index -> union bbox
@@ -181,34 +188,36 @@ def merge_figure_panels_with_remap(
             return a[1] - b[3]
         return 0.0
 
-    def nearest_target(i: int, fig: PaperFigure) -> int | None:
+    def nearest_near_target(i: int, panel_bbox: list[float], same_page: list[int]) -> int | None:
+        """The same-page target whose group bbox is vertically nearest, if near."""
+        best: int | None = None
+        best_key: tuple[float, int] = (0.0, 0)
+        for j in same_page:
+            group = group_bbox.get(j, _figure_bbox(figures[j]))
+            if group is None or not _vertically_near(panel_bbox, group):
+                continue
+            # Ties prefer the following target, as the order rule does.
+            key = (_vertical_gap(panel_bbox, group), 0 if j > i else 1)
+            if best is None or key < best_key:
+                best, best_key = j, key
+        return best
+
+    def nearest_target(i: int, fig: PaperFigure, *, geometric: bool) -> int | None:
         same_page = [
             j
             for j in range(len(figures))
             if j != i and is_target[j] and figures[j].page_number == fig.page_number
         ]
         panel_bbox = _figure_bbox(fig)
-        geometric = [
-            j
-            for j in same_page
-            if panel_bbox is not None and group_bbox.get(j, _figure_bbox(figures[j])) is not None
-        ]
-        if geometric:
-            # Bboxes available: join the vertically nearest group, as pass 2
-            # does — list order alone would steal a panel sitting next to the
-            # previous figure. Ties prefer the following target.
-            best: int | None = None
-            best_key: tuple[float, int] = (0.0, 0)
-            for j in geometric:
-                group = group_bbox.get(j, _figure_bbox(figures[j]))
-                assert group is not None  # noqa: S101 — filtered above
-                if not _vertically_near(panel_bbox, group):
-                    continue
-                # Ties prefer the following target, as the order rule does.
-                key = (_vertical_gap(panel_bbox, group), 0 if j > i else 1)
-                if best is None or key < best_key:
-                    best, best_key = j, key
-            return best
+        if geometric and panel_bbox is not None:
+            # Geometry only overrides list order when it finds a near group:
+            # list order alone would steal a panel sitting next to the
+            # previous figure. With no near group (a tall stack whose caption
+            # sits far below its top panels) the order rule below still
+            # applies, since a bare marker is strong evidence on its own.
+            near = nearest_near_target(i, panel_bbox, same_page)
+            if near is not None:
+                return near
         following = next(
             (j for j in range(i + 1, len(figures)) if j in same_page),
             None,
@@ -232,24 +241,26 @@ def merge_figure_panels_with_remap(
         caption = (fig.caption or "").strip()
         if not caption or not _BARE_PANEL_RE.match(caption):
             continue
-        target = nearest_target(i, fig)
+        target = nearest_target(i, fig, geometric=True)
         if target is not None:
             absorb(i, target)
 
     # Pass 2 — caption-less figures: weak evidence, require spatial proximity
     # to the group (which now includes pass-1 panels). Runs after pass 1 so a
-    # grid of panels extends the reach to its caption-less members.
+    # grid of panels extends the reach to its caption-less members. The
+    # target stays the order-rule one: picking the nearest group instead
+    # also pulls in a separate figure whose own caption went unassigned.
     for i, fig in enumerate(figures):
         if is_target[i] or i in absorbed or (fig.caption or "").strip():
             continue
-        target = nearest_target(i, fig)
+        target = nearest_target(i, fig, geometric=False)
         bbox = _figure_bbox(fig)
         if target is not None and _vertically_near(
             bbox, group_bbox.get(target, _figure_bbox(figures[target]))
         ):
             absorb(i, target)
     if not absorbed:
-        return figures, {}
+        return sorted(figures, key=lambda fig: document_position[id(fig)]), {}
     for i, target_idx in absorbed.items():
         target = figures[target_idx]
         panel = figures[i]
@@ -264,7 +275,10 @@ def merge_figure_panels_with_remap(
     # Snapshot the pre-merge ids before renumbering overwrites them; they are
     # what the caption receipt was frozen against.
     old_object_ids = [f"figure:{fig.figure_id}" for fig in figures]
-    merged = [fig for i, fig in enumerate(figures) if i not in absorbed]
+    merged = sorted(
+        (fig for i, fig in enumerate(figures) if i not in absorbed),
+        key=lambda fig: document_position[id(fig)],
+    )
     logger.debug(
         "merge_figure_panels: %d -> %d figures (%d panels merged)",
         len(figures),

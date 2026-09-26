@@ -163,8 +163,8 @@ class DocumentAssembler:
 
         Same normalization as :meth:`append`; used to replay an unowned
         caption where it was printed instead of at the end of the buffer,
-        so ``text_id`` order keeps matching reading order. ``last_text_id``
-        is kept aligned when it already tracks the buffer.
+        so ``text_id`` order keeps matching reading order. Runs during
+        parsing, before :meth:`emit` builds ``last_text_id``.
         """
         normalized = normalize_unicode(text)
         if page_spans and normalized != text:
@@ -187,10 +187,6 @@ class DocumentAssembler:
                 inline_math=tuple(normalize_unicode(span) for span in inline_math),
             ),
         )
-        if len(self.last_text_id) == len(self.entries) - 1:
-            # ``last_text_id`` tracked the buffer one-to-one before this
-            # insert; the new entry has emitted nothing yet.
-            self.last_text_id.insert(position, None)
         return position
 
     def __len__(self) -> int:

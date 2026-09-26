@@ -45,16 +45,73 @@ _SECTION_HINT_NAMES: dict[str, str] = {
     "reference_content": "References",
 }
 
-# Canonical class of each hint-created section, for reuse matching.
-_SECTION_HINT_CANONICAL: dict[str, CanonicalSection] = {
+# Printed spellings of each hint-created section that reuse it beyond the
+# literal name ("5 References", "Literature Cited", "Abstract:"), keyed by
+# the hint section's lowercase name and compared on ``_hint_alias_key``.
+# Deliberately a closed list, not the classifier's whole ABSTRACT/REFERENCES
+# class: "Summary", "Author summary", "Resumo" or "Supplementary references"
+# are separate printed sections and must not fold into the hint's.
+_HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
+    "abstract": frozenset({"abstract"}),
+    "references": frozenset(
+        {
+            "references",
+            "list of references",
+            "references and notes",
+            "references cited",
+            "literature cited",
+            "cited literature",
+            "works cited",
+            "bibliography",
+        }
+    ),
+}
+# A printed heading directly before a front-page abstract region may also
+# read "Summary" (Lancet style); a "Summary" after the abstract region (a
+# discussion subsection, a lay summary box) is its own section.
+_FRONT_ABSTRACT_HEADING_ALIASES = frozenset({"abstract", "summary"})
+_HINT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+_HINT_CANONICAL: dict[str, CanonicalSection] = {
     "abstract": CanonicalSection.ABSTRACT,
     "references": CanonicalSection.REFERENCES,
 }
+
+
+def _hint_alias_key(header: str) -> str:
+    """Normalize *header* for ``_HINT_REUSE_ALIASES`` matching.
+
+    Drops numbering and punctuation ("5. References:" → "references").
+    """
+    return " ".join(_HINT_ALIAS_PUNCT_RE.sub(" ", normalize_text(header)).split())
+
+
+def _is_hint_alias(header: str, hint_key: str, aliases: frozenset[str]) -> bool:
+    """True when *header* is a printed alias of the ``hint_key`` section.
+
+    Besides the alias list, the section classifier must put the header in
+    the hint's class, so the reused section keeps the type the synthetic
+    one would have had ("Reference" alone classifies as nothing and would
+    turn the reference list into untyped body text).
+    """
+    if _hint_alias_key(header) not in aliases:
+        return False
+    from bibr.structure.section_classifier import _classify_lookup
+
+    section_type, _score = _classify_lookup(normalize_text(header))
+    return section_type == _HINT_CANONICAL.get(hint_key)
+
 
 # A reference-list lead-in that OCR occasionally promotes to a heading, e.g.
 # "Breiman [2001]:" or "Smith (1999)." — a capitalised surname immediately
 # followed by a bracketed/parenthesised 4-digit year and a colon/period.
 _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]")
+
+# A captured first doc_title that reads as a journal masthead ("INTERNATIONAL
+# JOURNAL OF ...", a URL, an ISSN) is not the start of a split title, so the
+# next doc_title region is not appended to it.
+_SPLIT_TITLE_MASTHEAD_RE = re.compile(r"\bjournal\b|https?://|www\.|\bISSN\b", re.IGNORECASE)
 
 # OCR badge-glyph artifacts that the layout model occasionally merges into the
 # trailing edge of a page-1 doc_title region (e.g. the Open-Practices "TC"
@@ -101,6 +158,13 @@ class HeadingDisposition(StrEnum):
 
 class HeadingHandlersMixin:
     """Heading, section-hint, and outline-hierarchy handlers for ``PDFParser``."""
+
+    # Parser state, initialised in ``PDFParser.__init__``.
+    _current_section_id: int
+    _title_section_id: int | None
+    _title_bbox: list | tuple | None
+    _title_page: int | None
+    _title_assembler_len: int
 
     def _handle_structural(self, label: str, content: str) -> None:
         """Record headers/footers as metadata."""
@@ -190,11 +254,13 @@ class HeadingHandlersMixin:
 
         # A front-page title split across doc_title regions continues the
         # title instead of opening a stray level-1 section: still on the
-        # title section, nothing emitted since, vertically adjacent.
+        # title section, nothing emitted since, vertically adjacent, and the
+        # captured part is not a journal masthead.
         if (
             label == "doc_title"
             and self._is_front_page(page_number)
             and self._detected_title is not None
+            and not _SPLIT_TITLE_MASTHEAD_RE.search(self._detected_title)
             and self._title_section_id is not None
             and self._current_section_id == self._title_section_id
             and len(self.assembler) == self._title_assembler_len
@@ -217,22 +283,16 @@ class HeadingHandlersMixin:
         # If a section hint already created a section with the same name,
         # reuse it instead of creating a duplicate (e.g., "reference" hint
         # creates "References" section, then a "References" heading appears).
-        # The match is on the canonical class, not the literal string, so a
-        # printed "Literature Cited" or "5 References" reuses the hint's
-        # "References" section instead of leaving it empty beside a synthetic
-        # one. ("Reference List" is not a classifier alias and still misses.)
+        # A printed alias ("5 References", "Literature Cited") reuses it too,
+        # but only while the hint section is still current: the heading then
+        # belongs to the hint region just before it. Anywhere else it is a
+        # separate printed section.
         text_lower = text.lower().strip()
         hint_section_id = self._hint_section_lookup.get(text_lower)
-        if hint_section_id is None:
-            from bibr.structure.section_classifier import _classify_lookup
-
-            heading_type, _score = _classify_lookup(normalize_text(text))
+        if hint_section_id is None and self._current_section_id in self._hint_section_ids:
             for hint_key, section_id in self._hint_section_lookup.items():
-                if (
-                    hint_key == "references"
-                    and heading_type == CanonicalSection.REFERENCES
-                    or hint_key == "abstract"
-                    and heading_type == CanonicalSection.ABSTRACT
+                if section_id == self._current_section_id and _is_hint_alias(
+                    text, hint_key, _HINT_REUSE_ALIASES.get(hint_key, frozenset())
                 ):
                     hint_section_id = section_id
                     break
@@ -443,23 +503,31 @@ class HeadingHandlersMixin:
         elif hint_name:
             # Check if a heading-created section with the same name already
             # exists (heading came before the hint region).  If so, reuse it
-            # instead of creating a duplicate. The match is on the canonical
-            # class, not the literal string, so a printed "Literature Cited"
-            # or "Bibliography" heading owns the hint's entries instead of
-            # standing empty beside a synthetic "References" section.
+            # instead of creating a duplicate. A printed alias of the hint
+            # name ("Literature Cited", "5 References", "Abstract:") owns the
+            # hint's entries too, instead of standing empty beside a
+            # synthetic section, but only when it is the current section:
+            # the heading immediately precedes the hint region.
             hint_lower = hint_name.lower()
             existing = None
-            target_type = _SECTION_HINT_CANONICAL.get(hint_lower)
-            if target_type is not None:
-                from bibr.structure.section_classifier import _classify_lookup
-
-                for sec in reversed(self.sections):
-                    if sec.level <= 0 or sec.section_id in self._hint_section_ids:
-                        continue
-                    current_type, _score = _classify_lookup(normalize_text(sec.header))
-                    if current_type == target_type:
-                        existing = sec
-                        break
+            aliases = _HINT_REUSE_ALIASES.get(hint_lower, frozenset())
+            if hint_lower == "abstract" and self._is_front_page(page_number):
+                aliases = _FRONT_ABSTRACT_HEADING_ALIASES
+            current_section = next(
+                (
+                    sec
+                    for sec in reversed(self.sections)
+                    if sec.section_id == self._current_section_id
+                ),
+                None,
+            )
+            if (
+                current_section is not None
+                and current_section.level > 0
+                and current_section.section_id not in self._hint_section_ids
+                and _is_hint_alias(current_section.header, hint_lower, aliases)
+            ):
+                existing = current_section
             if existing is None:
                 for sec in self.sections:
                     if sec.header.lower() == hint_lower and sec.level > 0:

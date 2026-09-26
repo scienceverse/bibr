@@ -134,8 +134,12 @@ def test_sliced_body_prose_keeps_citation_superscripts():
     assert [e.text for e in parser.assembler.entries] == ["Sleep supports consolidation$^{4,5}$."]
 
 
-def test_title_section_byline_is_stripped():
-    """Unsliced title-then-byline: markers go even though a heading precedes."""
+def test_title_section_byline_keeps_its_markers():
+    """Title-then-byline keeps the markers: they link authors to affiliations.
+
+    Author extraction reads these page-1 sentences, and citation linking
+    already skips the title section, so stripping them there gains nothing.
+    """
     pages = [
         _page(
             _heading(TITLE),
@@ -146,15 +150,60 @@ def test_title_section_byline_is_stripped():
     parser.parse()
 
     assert parser._detected_title == TITLE
-    assert [e.text for e in parser.assembler.entries] == ["Jane Doe and John Roe"]
+    assert [e.text for e in parser.assembler.entries] == ["Jane Doe$^{1,2}$ and John Roe$^{3}$"]
 
 
-def test_sliced_long_prose_row_is_not_byline_shaped():
-    """A long row on the sliced front page keeps its markers even unstripped."""
+def test_title_section_intro_prose_keeps_citation_superscripts():
+    """A heading-less intro after the title (Nature style) keeps its citations."""
+    pages = [
+        _page(
+            _heading(TITLE),
+            _text("Sleep supports memory consolidation$^{4,5}$. Older adults sleep less$^{6}$."),
+        )
+    ]
+    parser = PDFParser(pages, first_page_index=0)
+    parser.parse()
+
+    assert [e.text for e in parser.assembler.entries] == [
+        "Sleep supports memory consolidation$^{4,5}$. Older adults sleep less$^{6}$."
+    ]
+
+
+def test_absolute_first_page_before_any_heading_is_stripped():
+    """Unsliced page 1 with no heading yet is the byline zone, whatever the shape."""
+    parser = PDFParser([], first_page_index=0)
+    parser._current_section_id = 0
+    text = "Jane Doe$^{1,2}$ and John Roe$^{3}$ report consolidation effects$^{4}$."
+    parser._handle_content(text, 1, bbox=[0, 0, 1, 1])
+    parser._flush_carry_over()
+
+    assert [e.text for e in parser.assembler.entries] == [
+        "Jane Doe and John Roe report consolidation effects."
+    ]
+
+
+def test_sliced_terminated_prose_row_is_not_byline_shaped():
+    """A row ending in terminal punctuation on the sliced front page is prose."""
     parser = PDFParser([], first_page_index=4)
     parser._current_section_id = 0
-    text = "Sleep supports consolidation across repeated testing sessions in older adults$^{4,5}$."
-    assert len(text) > 60
+    text = "Sleep supports consolidation$^{4,5}$."
+    parser._handle_content(text, 5, bbox=[0, 0, 1, 1])
+    parser._flush_carry_over()
+
+    assert [e.text for e in parser.assembler.entries] == [text]
+
+
+def test_sliced_long_unterminated_row_is_not_byline_shaped():
+    """An unterminated row over the byline length cap is prose, not a byline."""
+    parser = PDFParser([], first_page_index=4)
+    parser._current_section_id = 0
+    text = (
+        "Sleep supports consolidation across repeated testing sessions in older "
+        "adults$^{4,5}$ and the effect persists when sessions are spaced over "
+        "several weeks, which earlier work attributed to rehearsal during slow "
+        "wave sleep$^{6}$ and to reduced interference while"
+    )
+    assert len(text) > 200
     parser._handle_content(text, 5, bbox=[0, 0, 1, 1])
     parser._flush_carry_over()
 

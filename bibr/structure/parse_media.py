@@ -10,6 +10,7 @@ printed ids, and replaying unowned captions as body text. Shared state
 
 import logging
 import re
+from typing import Literal
 
 import pandas as pd
 
@@ -39,6 +40,11 @@ _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 
 class MediaHandlersMixin:
     """Table, figure, and caption handlers for ``PDFParser``."""
+
+    # Caption-fragment ownership, initialised in ``PDFParser.__init__`` and
+    # re-keyed to canonical caption ids in ``_finalize_media``.
+    _table_caption_fragments: dict[str, str]
+    _confirmed_table_caption_owners: dict[str, int]
 
     # Panel/sub-figure markers: "(a)", "(A)", "A", "A.", "b)", "(c) With BN".
     # A single letter (either case) with an optional paren/dot marker and an
@@ -121,7 +127,11 @@ class MediaHandlersMixin:
         self._caption_candidate_sections[caption_id] = self._current_section_id
         # Likewise the buffer position at capture time, so a replay lands
         # where the caption was printed instead of at the end of the buffer.
-        self._caption_candidate_positions[caption_id] = len(self.assembler)
+        # A pending carry-over was printed before the caption and becomes the
+        # next entry when it flushes, so the replay goes after it.
+        self._caption_candidate_positions[caption_id] = len(self.assembler) + (
+            1 if self._carry_over.has_pending() else 0
+        )
         # Likewise whether OCR produced the text (``PaperSentence.from_ocr``).
         self._caption_candidate_from_ocr[caption_id] = from_ocr
         self._caption_candidates.append(
@@ -154,7 +164,7 @@ class MediaHandlersMixin:
         if text.lstrip().startswith("<table") or text.lstrip().startswith("<TABLE"):
             df = self._parse_html_table(text)
             source_html = text
-            if self._table_frame_missing(df):
+            if df is None or len(df.columns) == 0:
                 salvaged = self._TABLE_TAG_RE.sub(r"<\1\2>", text)
                 if salvaged != text:
                     df = self._parse_html_table(salvaged)
@@ -165,7 +175,7 @@ class MediaHandlersMixin:
         # whose first page holds just the header row, or a small key-value
         # table): keep it so its text is not lost. Only a column-less frame
         # is unparseable.
-        if self._table_frame_missing(df):
+        if df is None or len(df.columns) == 0:
             self._rollback_pending_table_caption_fragment()
             self._expire_pending_table_label_fragment()
             self._dropped_table_count += 1
@@ -792,7 +802,7 @@ class MediaHandlersMixin:
         parenthesized continuation marker — the shape the continuation
         merger collapses back into a single float.
         """
-        kind = "table" if object_type == "table" else "figure"
+        kind: Literal["figure", "table"] = "table" if object_type == "table" else "figure"
         labels: set[str | None] = set()
         continued = False
         for caption_id, _object_id, claim_id in claim_records:
@@ -1584,8 +1594,8 @@ class MediaHandlersMixin:
                     )
             elif assignment.object_id in table_by_id:
                 text = self._caption_display_text_by_id.get(candidate.caption_id, candidate.text)
-                if fragment_id := self._table_caption_fragments.get(candidate.caption_id):
-                    text = f"{text} {candidate_by_id[fragment_id].text}".strip()
+                if table_fragment_id := self._table_caption_fragments.get(candidate.caption_id):
+                    text = f"{text} {candidate_by_id[table_fragment_id].text}".strip()
                 table_by_id[assignment.object_id].caption = text
             finalized.append(assignment)
 
@@ -1637,16 +1647,6 @@ class MediaHandlersMixin:
                 assignment_by_id[item.caption_id] for item in self._caption_candidates
             ),
         )
-
-    @staticmethod
-    def _table_frame_missing(df: pd.DataFrame | None) -> bool:
-        """True when a parsed table frame holds nothing exportable.
-
-        A header-only frame (columns, zero rows) is parseable — it keeps a
-        split header page or a one-row key-value table — so only a missing
-        frame or a column-less one counts as dropped.
-        """
-        return df is None or len(df.columns) == 0
 
     @staticmethod
     def _parse_html_table(html: str) -> pd.DataFrame | None:

@@ -329,3 +329,27 @@ def test_repeated_mid_column_body_sentence_survives_full_parse():
 
     assert deferred.count(repeated) == 2
     assert repeated not in parser.detected_headers
+
+
+def test_repeated_legend_rows_printed_together_stay_demoted():
+    """A block of repeated rows (a chart legend reprinted with each float) is
+    float furniture, not body text, wherever it sits on the page."""
+    pages = [
+        [
+            _text("Quadro 4 lists the green-area laws.", y=300),
+            _text("com interface", y=541),
+            _text("□ sem interface", y=562),
+            _text("Na composição das áreas verdes, os impactos são frequentes.", y=600),
+        ],
+        [
+            _text("Quadro 5 lists the morphology laws.", y=300),
+            _text("com interface", y=428),
+            _text("□ sem interface", y=449),
+            _text("Aos aspectos morfológicos, Lamas (2014) associa a forma.", y=500),
+        ],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser.parse()
+
+    assert {(0, 1), (0, 2), (1, 1), (1, 2)} <= parser._running_header_regions
+    assert not any("com interface" in t[0] for t in parser._deferred_texts)

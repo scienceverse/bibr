@@ -6,6 +6,8 @@ the flushed sentences must keep the section_id of the section they were
 emitted under, not the new section that happens to be current at flush time.
 """
 
+import re
+
 from bibr.structure.pdf_parser import PDFParser
 
 
@@ -239,28 +241,199 @@ def test_real_heading_between_halves_still_splits_paragraph():
 
 
 def test_footnote_xref_anchors_to_joined_paragraph():
-    """The footnote xref must land on the joined paragraph's sentence."""
-    pages = _cross_page_pages(
-        extra_page1=[
+    """The footnote xref lands on the joined sentence printed on the note's page.
+
+    The paragraph continues on page 2 with further sentences; the anchor is
+    the sentence that starts on page 1 (where the note is printed), not the
+    last page-2 sentence of the joined entry.
+    """
+    pages = [
+        [
+            {"label": "paragraph_title", "content": "Method", "bbox_2d": [100, 100, 900, 130]},
+            {
+                "label": "text",
+                "content": "We sampled students. Participants were recruited from the "
+                "local university and they",
+                "bbox_2d": [100, 400, 900, 450],
+            },
             {
                 "label": "footnote",
                 "content": "1 We thank the reviewers.",
                 "bbox_2d": [100, 850, 900, 900],
-            }
-        ]
-    )
+            },
+        ],
+        [
+            {
+                "label": "text",
+                "content": "completed the survey online. The survey took ten minutes. "
+                "Data were then cleaned.",
+                "bbox_2d": [100, 200, 900, 250],
+            },
+        ],
+    ]
     parser = PDFParser(pages)
     contents = parser.parse()
+    split = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
     parser.apply_segmentation(
-        contents, [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation]
+        contents,
+        [split.split(entry.text) for entry in parser.assembler.entries if entry.needs_segmentation],
     )
     parser.create_content_sections(contents)
 
     assert [record[3] for record in parser._footnotes] == [1]
     foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
     assert len(foot_xrefs) == 1
-    body_sentence = next(s for s in contents.sentences if "completed the survey" in s.text)
-    assert foot_xrefs[0].text_id == body_sentence.text_id
+    anchor = next(s for s in contents.sentences if s.text_id == foot_xrefs[0].text_id)
+    assert anchor.page_number == 1
+    assert anchor.text.startswith("Participants were recruited")
+
+
+def _same_page_pages(first, between, second, *, first_bbox=(100, 200, 900, 250)):
+    return [
+        [
+            {"label": "paragraph_title", "content": "Method", "bbox_2d": [100, 100, 900, 130]},
+            {"label": "text", "content": first, "bbox_2d": list(first_bbox)},
+            *between,
+            {"label": "text", "content": second, "bbox_2d": [100, 600, 900, 650]},
+        ]
+    ]
+
+
+_IMAGE = {"label": "image", "content": "", "bbox_2d": [100, 300, 900, 500]}
+_FOOTNOTE = {"label": "footnote", "content": "1 University of X", "bbox_2d": [100, 880, 900, 900]}
+
+
+def test_same_page_capitalised_row_does_not_join_across_a_figure():
+    """Across a figure, an unterminated row does not swallow a new block."""
+    parser = PDFParser(
+        _same_page_pages(
+            "Received: 12 January 2025 Published: 28 February 2025",
+            [_IMAGE],
+            "Copyright: 2025 by the authors.",
+        )
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Received: 12 January 2025 Published: 28 February 2025",
+        "Copyright: 2025 by the authors.",
+    ]
+
+
+def test_same_page_capitalised_row_does_not_join_across_a_footnote():
+    parser = PDFParser(
+        _same_page_pages(
+            "Jane Doe,1 John Roe2",
+            [_FOOTNOTE],
+            "Additional supplemental material is published online only.",
+        )
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Jane Doe,1 John Roe2",
+        "Additional supplemental material is published online only.",
+    ]
+
+
+def test_heading_demoted_to_body_does_not_join_an_unfinished_row():
+    """A demoted question heading is a barrier for the carry-over it follows."""
+    parser = PDFParser(
+        _same_page_pages(
+            "- Lecturer",
+            [
+                {
+                    "label": "paragraph_title",
+                    "content": "Which flexible strategies under the category of initial "
+                    "framework building will be most effective for mitigating challenges?",
+                    "bbox_2d": [509, 173, 876, 222],
+                }
+            ],
+            "- Curriculum design framework for online learning",
+        )
+    )
+    parser.parse()
+    texts = [e.text for e in parser.assembler.entries]
+    assert texts[0] == "- Lecturer"
+    assert texts[1].startswith("Which flexible strategies")
+
+
+def test_same_page_lowercase_continuation_joins_across_a_figure():
+    """Guard: a lowercase continuation past a figure is the same sentence."""
+    parser = PDFParser(
+        _same_page_pages(
+            "Outpatients and 55% of the inpatients reported an",
+            [_IMAGE],
+            "anxiety score of at least 11.",
+        )
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Outpatients and 55% of the inpatients reported an anxiety score of at least 11."
+    ]
+
+
+def test_narrow_region_does_not_join_across_a_barrier():
+    """Text in a sidebar box or inside a figure is not a body column."""
+    parser = PDFParser(
+        _same_page_pages(
+            "Published Online 12 May 2023",
+            [_IMAGE],
+            "understanding of different system structures.",
+            first_bbox=(815, 200, 919, 250),
+        )
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Published Online 12 May 2023",
+        "understanding of different system structures.",
+    ]
+
+
+def test_trailing_url_does_not_join_across_a_barrier():
+    """A reference ending in a DOI is not continued past a figure."""
+    first = "Journal of Pain, 24(7), 1301-1313. https://doi.org/10.1002/ejp.1576"
+    parser = PDFParser(
+        _same_page_pages(first, [_IMAGE], "and indirect effect of one mediation model.")
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        first,
+        "and indirect effect of one mediation model.",
+    ]
+
+
+def test_barrier_join_does_not_skip_a_page():
+    """Past a page of figures, the first text is often a continued legend."""
+    pages = _cross_page_pages(
+        extra_page1=[{"label": "image", "content": "", "bbox_2d": [100, 500, 900, 800]}]
+    )
+    pages.insert(1, [{"label": "image", "content": "", "bbox_2d": [100, 100, 900, 800]}])
+    parser = PDFParser(pages)
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Participants were recruited from the local university and they",
+        "completed the survey online.",
+    ]
+
+
+def test_cross_page_join_without_barrier_may_skip_a_table_page():
+    """Guard: main's rule is unchanged when no barrier region intervenes."""
+    pages = _cross_page_pages()
+    pages.insert(
+        1,
+        [
+            {
+                "label": "table",
+                "content": "<table><tr><th>a</th><th>b</th></tr><tr><td>1</td><td>2</td></tr></table>",
+                "bbox_2d": [100, 100, 900, 800],
+            }
+        ],
+    )
+    parser = PDFParser(pages)
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "Participants were recruited from the local university and they "
+        "completed the survey online."
+    ]
 
 
 def _two_region_pages(first):
@@ -303,6 +476,36 @@ def test_footnote_marker_ending_starts_new_paragraph():
             first,
             "A second, separate paragraph begins here.",
         ]
+
+
+def test_trailing_url_followed_by_lowercase_still_joins():
+    """A sentence broken after its URL continues in lowercase."""
+    parser = PDFParser(
+        [
+            [
+                {
+                    "label": "paragraph_title",
+                    "content": "Method",
+                    "bbox_2d": [100, 100, 900, 130],
+                },
+                {
+                    "label": "text",
+                    "content": "All materials are available at https://osf.io/abc12",
+                    "bbox_2d": [100, 200, 900, 250],
+                },
+                {
+                    "label": "text",
+                    "content": "and were preregistered before data collection.",
+                    "bbox_2d": [100, 300, 900, 350],
+                },
+            ]
+        ]
+    )
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "All materials are available at https://osf.io/abc12 and were preregistered "
+        "before data collection."
+    ]
 
 
 def test_trailing_url_starts_new_paragraph():
@@ -351,4 +554,44 @@ def test_unfinished_sentence_still_joins():
     parser.parse()
     assert [e.text for e in parser.assembler.entries] == [
         "The effect persisted across cohorts and A second, separate paragraph begins here."
+    ]
+
+
+class TestTerminalPunctuation:
+    """``_has_terminal_punct`` / ``_should_join`` edge cases."""
+
+    def test_quote_after_superscript_after_period_is_terminal(self):
+        """Closers and markers stack: ``."$^{1}$`` needs more than one pass."""
+        assert PDFParser._has_terminal_punct('as one said, "never again."$^{1}$')
+        assert PDFParser._has_terminal_punct('as one said, never again.$^{1}$"')
+        assert PDFParser._has_terminal_punct("as one said, “never again.”¹")
+
+    def test_superscript_without_period_is_not_terminal(self):
+        assert not PDFParser._has_terminal_punct("consolidation$^{4,5}$")
+
+    def test_bare_doi_ending_does_not_glue_a_new_paragraph(self):
+        assert not PDFParser._should_join("See doi:10.1234/abc.567", "The next study began.")
+        assert PDFParser._should_join("See doi:10.1234/abc.567", "and its supplement.")
+
+    def test_long_superscript_run_is_linear(self):
+        """An end-anchored search over a long superscript run must not go quadratic."""
+        import time
+
+        for text in ("¹" * 50_000 + "x", "a" + "$^{" * 16_000 + "x", "¹" * 50_000):
+            start = time.perf_counter()
+            PDFParser._has_terminal_punct(text)
+            PDFParser._should_join(text, "next text")
+            assert time.perf_counter() - start < 1.0
+
+
+def test_barrier_clears_after_a_lowercase_join():
+    """Once joined past the figure, the paragraph continues by the normal rule."""
+    pages = _same_page_pages("The effect was", [_IMAGE], "large and")
+    pages[0].append(
+        {"label": "text", "content": "Robust across samples.", "bbox_2d": [100, 700, 900, 750]}
+    )
+    parser = PDFParser(pages)
+    parser.parse()
+    assert [e.text for e in parser.assembler.entries] == [
+        "The effect was large and Robust across samples."
     ]

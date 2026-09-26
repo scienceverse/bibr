@@ -177,11 +177,11 @@ class TestBoldContentHeadingRescue:
         assert "Table 2 Caption" not in headers
 
 
-def _doc_title_page(*regions):
+def _page_of(*regions):
     return list(regions)
 
 
-def _title_region(index, content, bbox):
+def _title_region(content, bbox):
     return {"label": "doc_title", "content": content, "bbox_2d": bbox}
 
 
@@ -190,9 +190,9 @@ def test_split_front_page_title_joins_into_one_section():
     from bibr.structure.pdf_parser import PDFParser
 
     pages = [
-        _doc_title_page(
-            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
-            _title_region(1, "# the Stroop Interference Effect", [100, 105, 900, 140]),
+        _page_of(
+            _title_region("# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            _title_region("# the Stroop Interference Effect", [100, 105, 900, 140]),
             {"label": "paragraph_title", "content": "## Abstract", "bbox_2d": [100, 160, 900, 190]},
             {
                 "label": "paragraph_title",
@@ -219,9 +219,9 @@ def test_nonadjacent_second_doc_title_still_opens_a_section():
     from bibr.structure.pdf_parser import PDFParser
 
     pages = [
-        _doc_title_page(
-            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
-            _title_region(1, "# the Stroop Interference Effect", [100, 600, 900, 640]),
+        _page_of(
+            _title_region("# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            _title_region("# the Stroop Interference Effect", [100, 600, 900, 640]),
         )
     ]
     parser = PDFParser(pages)
@@ -236,14 +236,14 @@ def test_text_between_titles_blocks_continuation():
     from bibr.structure.pdf_parser import PDFParser
 
     pages = [
-        _doc_title_page(
-            _title_region(0, "# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+        _page_of(
+            _title_region("# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
             {
                 "label": "text",
                 "content": "An author line sits between.",
                 "bbox_2d": [100, 105, 900, 130],
             },
-            _title_region(2, "# the Stroop Interference Effect", [100, 135, 900, 170]),
+            _title_region("# the Stroop Interference Effect", [100, 135, 900, 170]),
         )
     ]
     parser = PDFParser(pages)
@@ -251,3 +251,65 @@ def test_text_between_titles_blocks_continuation():
 
     assert parser._detected_title == "A Large-Scale Registered Replication of"
     assert len([s for s in parser.sections if s.section_id != 0]) == 2
+
+
+def test_three_region_title_joins_on_the_growing_title_box():
+    """Each continuation is compared with the merged title box, not the first line."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _page_of(
+            _title_region("# A Large-Scale Registered", [100, 60, 900, 100]),
+            _title_region("# Replication of the Stroop", [100, 250, 900, 290]),
+            _title_region("# Interference Effect", [100, 440, 900, 480]),
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == (
+        "A Large-Scale Registered Replication of the Stroop Interference Effect"
+    )
+    title_sections = [s for s in parser.sections if s.section_id != 0]
+    assert len(title_sections) == 1
+    assert len(title_sections[0].provenance) == 3
+
+
+def test_masthead_doc_title_is_not_extended_with_the_real_title():
+    """A journal masthead captured first stays apart from the real title."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _page_of(
+            _title_region(
+                "# INTERNATIONAL JOURNAL OF LAW, GOVERNMENT AND COMMUNICATION",
+                [319, 137, 658, 223],
+            ),
+            _title_region("# NAVIGATING DIGITAL DIALOGUE", [115, 276, 883, 340]),
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == "INTERNATIONAL JOURNAL OF LAW, GOVERNMENT AND COMMUNICATION"
+    assert [s.header for s in parser.sections if s.section_id != 0] == [
+        "INTERNATIONAL JOURNAL OF LAW, GOVERNMENT AND COMMUNICATION",
+        "NAVIGATING DIGITAL DIALOGUE",
+    ]
+
+
+def test_heading_between_title_regions_blocks_continuation():
+    """Guard: once another section opened, a second doc_title is not the title."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    pages = [
+        _page_of(
+            _title_region("# A Large-Scale Registered Replication of", [100, 60, 900, 100]),
+            {"label": "paragraph_title", "content": "## Abstract", "bbox_2d": [100, 105, 900, 120]},
+            _title_region("# the Stroop Interference Effect", [100, 125, 900, 160]),
+        )
+    ]
+    parser = PDFParser(pages)
+    parser.parse()
+
+    assert parser._detected_title == "A Large-Scale Registered Replication of"
