@@ -440,17 +440,6 @@ async def _run_process(args) -> None:
         files, missing_count = _collect_files(args.input)
         work_items = list(files)
     is_batch = len(files) > 1
-    if not is_batch and source_mode != "manifest" and args.output is not None:
-        # Directory intent survives a single resolved file: the documented
-        # batch form ``chew papers/ -o results/`` expands to one file when
-        # the directory holds one paper, and ``Path('results/')`` loses its
-        # trailing slash — without this the export lands as a FILE named
-        # ``results`` and the next batch ``-o results/`` crashes on mkdir.
-        # Only the -o shape triggers this: a bare directory input without
-        # -o stays single-file (so --paper-id keeps working there).
-        raw_out = args.output
-        if raw_out.endswith(("/", "\\")) or Path(raw_out).is_dir():
-            is_batch = True
 
     # --paper-id only makes sense when writing a single result — silently
     # discarding it for batch input used to hide the mistake entirely.

@@ -1,8 +1,9 @@
 """Regression tests for audit action S2 (CLI findings, 2026-09-24 audit).
 
 Each test goes through the real argument parser and entry functions with
-fakes for the pipeline (no real chew, no models, no network). Every test
-fails on base (33e6c47) and passes with the S2 fixes.
+fakes for the pipeline (no real chew, no models, no network). Every
+regression test fails on base (33e6c47) and passes with the S2 fixes;
+guards (marked as such) pass on base too.
 """
 
 from __future__ import annotations
@@ -130,7 +131,7 @@ async def test_single_file_dir_with_trailing_slash_writes_inside(tmp_path, monke
     assert (out_dir / "only.json").is_file()
     assert json.loads((out_dir / "only.json").read_text())["info"]["title"] == "only.xml"
 
-    # A second run with the same -o must resume cleanly, not FileExistsError.
+    # A second run with the same -o must write into it again, not FileExistsError.
     args = _build_parser().parse_args(["chew", str(papers), "-o", out_raw, "--no-llm"])
     await _run_process(args)
     assert (out_dir / "only.json").is_file()
@@ -153,6 +154,64 @@ async def test_single_file_dir_with_existing_directory_writes_inside(tmp_path, m
     await _run_process(args)
 
     assert (existing / "only.json").is_file()
+
+
+async def test_paper_id_with_new_directory_output(tmp_path, monkeypatch):
+    """``chew paper.xml --paper-id X -o newdir/`` keeps the id and writes
+    ``newdir/paper.json`` — directory intent must not turn the run into a
+    batch that rejects ``--paper-id``."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    seen = {}
+
+    class _CapturePipeline(_FakePipeline):
+        async def process_chunk(self, file_states, progress=None):  # noqa: ARG002
+            for fs in file_states:
+                seen[fs.path.name] = fs.paper_id
+            await super().process_chunk(file_states, progress=progress)
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _CapturePipeline)
+
+    src = tmp_path / "paper.xml"
+    src.write_text("<article/>")
+    out_raw = str(tmp_path / "results") + "/"
+
+    args = _build_parser().parse_args(
+        ["chew", str(src), "--paper-id", "my-id", "-o", out_raw, "--no-llm"]
+    )
+    await _run_process(args)  # must not raise SystemExit(2)
+
+    assert (tmp_path / "results" / "paper.json").is_file()
+    assert seen == {"paper.xml": "my-id"}
+
+
+async def test_paper_id_with_existing_directory_output(tmp_path, monkeypatch):
+    """``chew paper.xml --paper-id X -o <existing dir>`` keeps the id and
+    writes ``<dir>/paper.json``."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    seen = {}
+
+    class _CapturePipeline(_FakePipeline):
+        async def process_chunk(self, file_states, progress=None):  # noqa: ARG002
+            for fs in file_states:
+                seen[fs.path.name] = fs.paper_id
+            await super().process_chunk(file_states, progress=progress)
+
+    monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _CapturePipeline)
+
+    src = tmp_path / "paper.xml"
+    src.write_text("<article/>")
+    existing = tmp_path / "existing"
+    existing.mkdir()
+
+    args = _build_parser().parse_args(
+        ["chew", str(src), "--paper-id", "my-id", "-o", str(existing), "--no-llm"]
+    )
+    await _run_process(args)  # must not raise SystemExit(2)
+
+    assert (existing / "paper.json").is_file()
+    assert seen == {"paper.xml": "my-id"}
 
 
 async def test_single_file_output_unchanged(tmp_path, monkeypatch):
@@ -260,6 +319,12 @@ def _state(path, error, code):
             "llm_server_failed",
             "Check your LLM backend",
         ),
+        # Code-keyed, not message-keyed: the message matches no fallback
+        # substring, so only the error_code can produce the hint.
+        ("x", "encrypted_file", "Remove the password"),
+        # A misleading message must not win over the code: the 'api key'
+        # fallback would blame API keys for a local OCR failure.
+        ("api key expired for rapid-mlx", "ocr_failed", "Check your OCR backend"),
     ],
 )
 def test_hints_follow_error_code(error, code, hint_fragment):
@@ -408,13 +473,19 @@ def test_safe_version_matches_installed_metadata():
 # --- local-cli-10: dry-run blockers ----------------------------------------------
 
 
-def _clear_llm_keys(monkeypatch):
+def _clear_llm_keys(monkeypatch, provider="google", key_attr="GOOGLE_API_KEY"):
     from bibr.config import Settings
 
-    monkeypatch.setattr(Settings.llm, "provider", "google")
+    monkeypatch.setattr(Settings.llm, "provider", provider)
     monkeypatch.setattr(Settings.llm, "api_key", None)
-    monkeypatch.setattr(Settings, "GOOGLE_API_KEY", None)
+    monkeypatch.setattr(Settings.llm, "base_url", None)
+    # The openai adapter reads only llm.api_key / llm.base_url, so it has
+    # no dedicated Settings key to clear (key_attr=None).
+    if key_attr is not None:
+        monkeypatch.setattr(Settings, key_attr, None)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     monkeypatch.delenv("LLM_API_KEY", raising=False)
 
 
@@ -455,6 +526,50 @@ async def test_dry_run_ocr_blocker_for_unstartable_backend(tmp_path, monkeypatch
     assert "Blockers" in capsys.readouterr().out
 
 
+async def test_dry_run_local_backend_blocker(tmp_path, monkeypatch, capsys):
+    """A managed local LLM backend that cannot start is a Blocker with
+    exit 1 — disabling the check must not pass silently."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.dry_run._preflight_local_backend",
+        lambda backend: f"{backend} cannot start here: no NVIDIA GPU",
+    )
+    good = tmp_path / "a.xml"
+    good.write_text("<article/>")
+    args = _build_parser().parse_args(["chew", str(good), "--dry-run", "--llm", "vllm"])
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(args)
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Blockers" in out
+    assert "no NVIDIA GPU" in out
+
+
+async def test_dry_run_opencv_blocker(tmp_path, monkeypatch, capsys):
+    """A PDF dry-run on a torch install without cv2 reports the opencv
+    blocker and exits 1 — disabling the check must not pass silently."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    monkeypatch.setattr(
+        "bibr.local.cli.dry_run._preflight_opencv",
+        lambda: (
+            "Layout/OCR image runtime unavailable: opencv (cv2) not installed",
+            "uv sync --extra torch",
+        ),
+    )
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    args = _build_parser().parse_args(["chew", str(pdf), "--dry-run", "--no-llm"])
+    with pytest.raises(SystemExit) as exc_info:
+        await _run_process(args)
+    assert exc_info.value.code == 1
+    out = capsys.readouterr().out
+    assert "Blockers" in out
+    assert "opencv" in out
+
+
 async def test_clean_dry_run_still_exits_0_without_blockers(tmp_path, monkeypatch, capsys):
     """Guard: a dry-run with nothing failing keeps exit 0 and no section."""
     from bibr.local.cli import _build_parser, _run_process
@@ -467,15 +582,40 @@ async def test_clean_dry_run_still_exits_0_without_blockers(tmp_path, monkeypatc
     assert "Blockers" not in capsys.readouterr().out
 
 
-def test_dry_run_credential_message_matches_provider_preflight(monkeypatch):
+@pytest.mark.parametrize(
+    ("provider", "key_attr", "message_fragment"),
+    [
+        ("google", "GOOGLE_API_KEY", "GOOGLE_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"),
+        ("groq", "GROQ_API_KEY", "GROQ_API_KEY"),
+        ("openai", None, "LLM_API_KEY"),
+    ],
+)
+def test_dry_run_credential_message_matches_provider_preflight(
+    monkeypatch, provider, key_attr, message_fragment
+):
     """Guard: the non-constructing dry-run message cannot drift from the
-    provider adapter's own error (both read the same Settings fields)."""
+    provider adapter's own error (both read the same Settings fields) —
+    for every bundled provider whose lookup the dry run mirrors."""
     from bibr.clients.llm import preflight_credentials
     from bibr.local.cli.dry_run import _dry_run_cloud_credential_blocker
 
-    _clear_llm_keys(monkeypatch)
+    _clear_llm_keys(monkeypatch, provider=provider, key_attr=key_attr)
     expected = _dry_run_cloud_credential_blocker()
-    assert expected is not None and "GOOGLE_API_KEY" in expected
+    assert expected is not None and message_fragment in expected
     with pytest.raises(ValueError) as exc_info:
         preflight_credentials()
     assert str(exc_info.value) == expected
+
+
+def test_dry_run_credential_openai_base_url_exemption(monkeypatch):
+    """Guard: the openai base_url exemption (self-hosted server needs no
+    key) matches the adapter — both stay silent together."""
+    from bibr.clients.llm import preflight_credentials
+    from bibr.config import Settings
+    from bibr.local.cli.dry_run import _dry_run_cloud_credential_blocker
+
+    _clear_llm_keys(monkeypatch, provider="openai", key_attr=None)
+    monkeypatch.setattr(Settings.llm, "base_url", "http://localhost:8080/v1")
+    assert _dry_run_cloud_credential_blocker() is None
+    preflight_credentials()  # must not raise

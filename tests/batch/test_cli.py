@@ -93,6 +93,30 @@ def test_dry_run_prints_the_plan_without_running(tmp_path, capsys, monkeypatch):
     assert not out.exists()
 
 
+def test_dry_run_reports_a_failing_preflight_like_the_real_run(tmp_path, monkeypatch, capsys):
+    """``batch --dry-run`` is the plan check: when the run's own preflight
+    fails, the preview must fail the same way (exit 1) instead of a clean
+    exit 0."""
+    monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._preflight_ocr_runtime",
+        lambda config: "No local OCR runtime can start on this machine for PDF input",
+    )
+    pdf = _pdf(tmp_path)
+    out = tmp_path / "out"
+
+    dry_args = _build_parser().parse_args(
+        ["batch", str(pdf), "--out", str(out), "--dry-run", "--no-llm"]
+    )
+    assert _run_batch(dry_args) == 1
+    assert "No local OCR runtime can start" in capsys.readouterr().err
+
+    real_args = _build_parser().parse_args(["batch", str(pdf), "--out", str(out), "--no-llm"])
+    assert _run_batch(real_args) == 1
+    assert "No local OCR runtime can start" in capsys.readouterr().err
+    assert not out.exists()
+
+
 def test_remote_dry_run_shows_form_and_warns_about_local_only_flags(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("AUTH_API_KEY", raising=False)
     pdf = _pdf(tmp_path)

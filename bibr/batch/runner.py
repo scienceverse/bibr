@@ -541,6 +541,14 @@ def run_batch(
 
     if options.dry_run:
         _print_plan(options, plan, ledger)
+        # Same preflight the real run does below: without it the preview
+        # exits 0 for runs that fail immediately, contradicting the plan
+        # check ``docs/guides/batch.md`` promises.
+        if options.local is not None and options.local.preflight is not None and plan.to_run:
+            problem = options.local.preflight([item.path for item in plan.to_run])
+            if problem:
+                ui.error(console, problem)
+                return EXIT_FAILURES
         return EXIT_OK
 
     if options.local is not None and options.local.preflight is not None and plan.to_run:

@@ -338,6 +338,10 @@ def _dry_run_output_destinations(
     output_path = Path(args.output)
     if is_batch:
         return [f"{f.name} -> {output_path / f'{f.stem}.json'}" for f in files]
+    if args.output.endswith(("/", "\\")):
+        # Same directory intent ``_prepare_output_path`` acts on at write
+        # time (it creates the directory there; the preview must not).
+        return [f"{files[0].name} -> {output_path / f'{files[0].stem}.json'}"]
     target = _resolve_single_output_path(output_path, files[0])
     return [f"{files[0].name} -> {target}"]
 
@@ -459,27 +463,31 @@ def _dry_run_cloud_credential_blocker() -> str | None:
     real run's job to vet.
     """
     from bibr.clients import providers
-    from bibr.config import Settings
+    from bibr.config import snapshot_settings
 
-    name = (Settings.llm.provider or "").lower()
+    # A concrete snapshot, not the lazy proxy: ``providers.get`` takes a
+    # ``GlobalSettings | None`` (see ``llm._get_provider``), and the copy
+    # freezes the same values the real run's credential check reads.
+    effective = snapshot_settings()
+    name = (effective.llm.provider or "").lower()
     try:
-        providers.get(name, settings=Settings)
+        providers.get(name, settings=effective)
     except ValueError as exc:
         return str(exc)
-    llm = Settings.llm
+    llm = effective.llm
     if name == "google":
-        if not (llm.api_key or Settings.GOOGLE_API_KEY):
+        if not (llm.api_key or effective.GOOGLE_API_KEY):
             return (
                 "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
             )
     elif name == "anthropic":
-        if not (llm.api_key or Settings.ANTHROPIC_API_KEY):
+        if not (llm.api_key or effective.ANTHROPIC_API_KEY):
             return (
                 "Anthropic API key required. "
                 "Set LLM_API_KEY or ANTHROPIC_API_KEY environment variable."
             )
     elif name == "groq":
-        if not (llm.api_key or Settings.GROQ_API_KEY):
+        if not (llm.api_key or effective.GROQ_API_KEY):
             return "Groq API key required. Set LLM_API_KEY or GROQ_API_KEY environment variable."
     elif name == "openai" and not llm.api_key and not llm.base_url:
         return "OpenAI API key required. Set LLM_API_KEY environment variable."
