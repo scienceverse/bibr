@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "model_file": "model.onnx",
+  "model": "section_classifier",
+  "tokenizer_file": "tokenizer.json",
+  "pad_token_id": 0,
+  "pad_token": "[PAD]",
+  "max_length": 32,
+  "label_classes": [
+    "intro",
+    "method",
+    "results",
+    "discussion",
+    "unknown"
+  ],
+  "template_version": 3
+}

@@ -22,14 +22,15 @@ from pydantic import BaseModel, ValidationError
 from bibr.clients.nuextract_schema import (
     NativeSchemaContract,
     NuExtractSchemaPolicy,
+    contract_wire_value_is_valid,
     native_contract_for_model,
-    native_wire_value_is_valid,
 )
 from bibr.config import GlobalSettings, snapshot_settings
 
 __all__ = [
     "NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256",
     "NUEXTRACT3_FP8_EXPECTED_REVISION",
+    "NUEXTRACT3_FP8_MODEL_ID",
     "NativeCompletionEnvelope",
     "NativeSchemaContract",
     "NativeInvalidCategory",
@@ -45,6 +46,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+# The qualified checkpoint. The expected revision and chat-template sha below
+# are this repo's; the bf16, GGUF and MLX repos have their own histories.
+NUEXTRACT3_FP8_MODEL_ID = "numind/NuExtract3-FP8"
 NUEXTRACT3_FP8_EXPECTED_REVISION = "d88964bad5ba47333cb721b351e19045ee6a6fc0"
 NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 = (
     "31e44d28615d268efdc3dcf59cb59bd2d51714d517455fbad97518d351b84119"
@@ -413,11 +417,7 @@ def parse_native_completion(
         raise diagnostic("non_json")
     if type(parsed) is not dict:
         raise diagnostic("non_object")
-    if not native_wire_value_is_valid(
-        parsed,
-        wire_schema=contract.wire_schema,
-        template=contract.template,
-    ):
+    if not contract_wire_value_is_valid(parsed, contract=contract):
         raise diagnostic("schema_invalid")
 
     result: BaseModel | None = None
@@ -458,13 +458,15 @@ def build_native_request_kwargs(
     system: str,
     messages: list[dict],
     max_tokens: int | None,
+    contract: NativeSchemaContract | None = None,
 ) -> dict[str, Any]:
     """Build one NuExtract-native OpenAI request from the semantic prompt contract."""
     if any(message.get("role") == "assistant" for message in messages):
         raise ValueError("NuExtract native requests do not accept assistant input messages")
 
     projected_messages, instructions = _project_native_prompt(messages)
-    contract = native_contract_for_model(response_model)
+    if contract is None:
+        contract = native_contract_for_model(response_model)
     chat_template_kwargs = {
         "template": json.dumps(contract.template, ensure_ascii=False, indent=2),
         "instructions": instructions or _GENERIC_INSTRUCTIONS,
@@ -585,6 +587,13 @@ class NuExtractNativeBackend:
                 "timeout": self._settings.llm.timeout_seconds * 2,
             }
             if self._settings.llm.base_url:
+                from bibr.utils.hosts import refuse_plaintext_llm_key
+
+                refuse_plaintext_llm_key(
+                    self._settings.llm.base_url,
+                    self._settings.llm.api_key,
+                    allow_insecure_http=self._settings.llm.allow_insecure_http,
+                )
                 kwargs["base_url"] = self._settings.llm.base_url
             self._client = AsyncOpenAI(**kwargs)
             self._client_sig = sig
@@ -611,12 +620,14 @@ class NuExtractNativeBackend:
             )
 
         client = self._get_client()
+        contract = native_contract_for_model(response_model)
         request_kwargs = build_native_request_kwargs(
             settings=self._settings,
             response_model=response_model,
             system=system,
             messages=messages,
             max_tokens=max_tokens,
+            contract=contract,
         )
         if on_protocol_hashes is not None:
             # Provenance capture is a best-effort side-channel: never let a hash
@@ -645,7 +656,6 @@ class NuExtractNativeBackend:
             on_dispatch()
         completion = await client.chat.completions.create(**request_kwargs)
         envelope = normalize_native_completion(completion)
-        contract = native_contract_for_model(response_model)
         result = parse_native_completion(
             envelope.raw,
             finish_reason=envelope.finish_reason,

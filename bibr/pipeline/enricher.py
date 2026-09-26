@@ -15,6 +15,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.redact import describe_error
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -190,16 +191,19 @@ class CrossrefEnricher:
         except Exception as e:  # noqa: BLE001
             if meta.references:
                 meta.enrichment_complete = False
+            # Both strings are exported: they name the error, not the request
+            # URL an HTTP error quotes. The log line keeps the raw text.
+            reason = describe_error(e)
             warning = ProcessingWarning(
                 WarningCode.CROSSREF_ENRICHMENT_FAILED,
-                f"Crossref enrichment failed: {type(e).__name__}: {e}",
+                f"Crossref enrichment failed: {reason}",
             )
             fs.warnings.append(warning)
             logger.warning("[%s] Crossref enrichment failed: %s", fs.path.name, e)
             return EnrichmentOutcome(
                 EnrichmentStatus.PARTIAL,
                 warnings=(warning,),
-                detail=f"Crossref enrichment failed: {e}",
+                detail=f"Crossref enrichment failed: {reason}",
             )
 
 

@@ -140,3 +140,114 @@ async def test_remote_path_one_page_error_does_not_fail_other_pages(monkeypatch)
     # Page 1 and 2 succeeded.
     assert any("page-1" in str(r) for r in fs.ocr_regions[1])
     assert any("page-2" in str(r) for r in fs.ocr_regions[2])
+
+
+def _real_pages(fs: FileState) -> FileState:
+    from PIL import Image
+
+    fs.page_images = [Image.new("RGB", (64, 64), "white") for _ in fs.page_indices]
+    return fs
+
+
+@pytest.mark.asyncio
+async def test_an_ocr_server_that_dies_mid_file_fails_the_file_as_an_outage():
+    """The OCR server goes away after page 1: the transport's retries end in a
+    refused connection for every later region. Shipped blank, those regions
+    failed the file as ocr_mostly_failed (a verdict on the paper, which a
+    resumed batch skips) or let it pass with text missing."""
+    import httpx
+
+    fs = _real_pages(_make_fs(pages=4))
+    ctx = _make_ctx([fs], ocr_backend="glm-llama")
+    calls = {"n": 0}
+
+    async def recognize(image, prompt):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        return "text"
+
+    ctx.resources.ocr.recognize = recognize
+    await OcrStage().run(ctx)
+
+    assert fs.error_code == "ocr_failed"
+    assert fs.error == "OCR upstream service failed: [Errno 111] Connection refused"
+    assert fs.error_outage is True
+
+
+@pytest.mark.asyncio
+async def test_a_region_that_times_out_still_ships_blank_with_a_warning():
+    """A timeout can be the region's own (a dense table): not an outage, so the
+    file keeps the partial-result behaviour."""
+    import httpx
+
+    fs = _real_pages(_make_fs(pages=3))
+    ctx = _make_ctx([fs], ocr_backend="glm-llama")
+    calls = {"n": 0}
+
+    async def recognize(image, prompt):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise httpx.ReadTimeout("timed out")
+        return "text"
+
+    ctx.resources.ocr.recognize = recognize
+    await OcrStage().run(ctx)
+
+    assert fs.error is None
+    assert [w.code for w in fs.warnings] == [WarningCode.OCR_REGION_FAILED]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 502, 503])
+async def test_a_busy_answer_for_one_region_still_ships_it_blank(status):
+    """A server that answers 429/502/503 after the transport's retries is up,
+    if busy. Failing the whole file for one region would turn a usable export
+    into a failed paper (a hard failure for `bibr chew` and the serve)."""
+    import httpx
+
+    fs = _real_pages(_make_fs(pages=3))
+    ctx = _make_ctx([fs], ocr_backend="paddle-http")
+    calls = {"n": 0}
+    request = httpx.Request("POST", "http://ocr:8080/v1/chat/completions")
+
+    async def recognize(image, prompt):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            response = httpx.Response(status, request=request)
+            raise httpx.HTTPStatusError(f"HTTP {status}", request=request, response=response)
+        return "text"
+
+    ctx.resources.ocr.recognize = recognize
+    await OcrStage().run(ctx)
+
+    assert fs.error is None
+    assert [w.code for w in fs.warnings] == [WarningCode.OCR_REGION_FAILED]
+
+
+@pytest.mark.asyncio
+async def test_an_open_breaker_keeps_the_upstream_error_after_a_refused_page(monkeypatch):
+    """The serve's breaker opens after page 1's refused connection. The file
+    must carry the UpstreamServiceError, which the serve answers with 502;
+    the raw transport error would come out as a 422 processing error."""
+    import httpx
+
+    from bibr.exceptions import UpstreamServiceError
+
+    fs = _make_fs(pages=3)
+    ctx = _make_ctx([fs], ocr_backend="serve-http")
+    breaker_open = UpstreamServiceError("ocr", "Circuit breaker 'ocr' is OPEN")
+
+    async def fake_ocr_page(
+        page_img, regions, idx, name, fn, sem, include_figures, settings=None, **kwargs
+    ):
+        if idx == 0:
+            raise httpx.ConnectError("[Errno 111] Connection refused")
+        raise breaker_open
+
+    monkeypatch.setattr("bibr.pipeline.stages.ocr.ocr_page_regions", fake_ocr_page)
+    await OcrStage().run(ctx)
+
+    assert fs.error_code == "ocr_failed"
+    assert fs.original_error is breaker_open
+    assert fs.error_outage is True

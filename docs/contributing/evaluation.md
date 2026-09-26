@@ -103,9 +103,10 @@ means from different versions.
 | `abstract_rouge_l` | primary | ROUGE-L F1 score using whitespace tokenization and longest common subsequence |
 | `abstract_ned` | diagnostic | Normalized Edit Distance similarity (1 - NED), following OmniDocBench methodology |
 
-Predictions are scored from `info.abstract` only. The evaluator does not recover
-an absent exported abstract from section text. Gold may use its abstract-typed
-sections because some gold records store their abstract there.
+Predictions are scored from `metadata.abstract` only. Exports older than schema
+11 name that block `info`, and the evaluator still reads it. The evaluator does
+not recover an absent exported abstract from section text. Gold may use its
+abstract-typed sections because some gold records store their abstract there.
 
 ### Authors
 

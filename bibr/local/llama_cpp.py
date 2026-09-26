@@ -14,7 +14,12 @@ import sys
 import time
 
 from bibr.exceptions import UpstreamServiceError
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+    LocalHttpError,
+    guard_managed_server_port,
+    request_bytes,
+)
 
 try:
     import winreg
@@ -24,6 +29,10 @@ except ImportError:  # pragma: no cover - only present on Windows
 logger = logging.getLogger(__name__)
 
 _TERM_GRACE_S = 10
+# Grace period after a /health 200 before declaring readiness: a sibling bibr
+# process may have won a port race and answered our probe while our own bind
+# is about to fail. Short enough to be noise against a 30-600 s startup.
+_HEALTH_GRACE_S = 1.0
 _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS = 300
 _LLAMA_CPP_RELEASES_URL = "https://github.com/ggml-org/llama.cpp/releases"
 
@@ -59,7 +68,7 @@ _OPTION_ALIASES: dict[str, frozenset[str]] = {
     "--host": frozenset({"--host"}),
     "--port": frozenset({"--port"}),
     "--alias": frozenset({"--alias"}),
-    "-hf": frozenset({"-hf", "--hf-repo"}),
+    "-hf": frozenset({"-hf", "-hfr", "--hf-repo"}),
 }
 
 # Cache of ``--help`` text keyed by ``tuple(prefix)`` so repeated launches in
@@ -224,9 +233,42 @@ def missing_binary_message(*, platform_name: str | None = None) -> str:
     return f"llama.cpp is not installed. {install_hint(platform_name=platform_name)}."
 
 
-def split_extra_args(value: str) -> list[str]:
-    """Split user CLI arguments with the quoting rules of the host OS."""
-    return shlex.split(value, posix=os.name != "nt")
+def _strip_one_quote_pair(token: str) -> str:
+    """Drop one matching pair of surrounding quotes from *token*.
+
+    Non-POSIX ``shlex`` keeps the quote characters inside the token (it does
+    not follow Windows CommandLineToArgvW rules), and
+    ``subprocess.list2cmdline`` then escapes them — so without this,
+    llama-server would receive a path wrapped in literal quote characters.
+    Only strips when the token both starts and ends with the same quote;
+    ``prefix\"quoted part\"`` style tokens are left alone.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
+def split_extra_args(value: str, *, setting: str = "llama_cpp_extra_args") -> list[str]:
+    """Split user CLI arguments with shlex using the host platform's rules.
+
+    Pass each flag and its value as separate tokens, quoting values that
+    contain spaces: ``--chat-template-file "C:\\path with space\\t.jinja"``.
+    That is the only supported form: ``--flag="value with space"`` still
+    splits at the space on Windows (non-POSIX shlex), as do JSON values
+    with escaped quotes, so use the separate-token form instead.
+    """
+    posix = os.name != "nt"
+    try:
+        parts = shlex.split(value, posix=posix)
+    except ValueError as exc:
+        raise UpstreamServiceError(
+            "local inference",
+            f"Could not parse {setting}={value!r}: {exc}. Quote paths with spaces, e.g. "
+            '--chat-template-file "C:\\models\\my model\\template.jinja".',
+        ) from exc
+    if not posix:
+        parts = [_strip_one_quote_pair(part) for part in parts]
+    return parts
 
 
 def _canonical_option(flag: str) -> str | None:
@@ -293,9 +335,11 @@ def _merge_cli_args(base: list[str], extra: list[str]) -> list[str]:
 def _role_runtime_args(role: str, available: frozenset[str]) -> list[str]:
     """Runtime flags for *role*, gating optional features on *available*.
 
-    Every optional flag added here is also stripped by the startup-retry
-    fallback (via ``available=frozenset()``), so an older build that lists a
-    flag in ``--help`` but crashes on it still recovers to a safe launch.
+    The startup retry strips every optional flag added here when the stderr
+    tail matches an argument-parse error (see ``_ARG_ERROR_MARKERS``), so a
+    build whose ``--help`` lists a flag it does not actually accept still
+    recovers to a safe launch. Anything else — a crash, an OOM, any message
+    outside those markers — fails fast with no retry.
     """
     if role not in ("ocr", "llm"):
         raise ValueError(f"unknown llama.cpp server role {role!r} (expected 'ocr' or 'llm')")
@@ -352,10 +396,48 @@ def _option_value(args: list[str], canonical: str) -> str | None:
 
 
 def _n_slots_from_argv(argv: list[str]) -> int:
-    """2 when the multi-slot LLM args (``--kv-unified`` + ``--parallel 2``) are active."""
+    """Server slot count from the launched argv.
+
+    Single-slot unless the multi-slot LLM args are active
+    (``--kv-unified`` plus ``--parallel N``); ``N`` is read as an int so
+    ``--parallel 4`` actually yields 4 slots, not 1.
+    """
     if "--kv-unified" not in _options_present(argv):
         return 1
-    return 2 if _option_value(argv, "--parallel") == "2" else 1
+    raw = _option_value(argv, "--parallel")
+    if raw is None:
+        return 1
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 1
+
+
+# Server-identity flags a user must never override via extra args: bibr polls
+# the configured port/alias and would lose (then kill) a server that moved.
+# `--host` is deliberately allowed: the base argv binds loopback and a user
+# `--host` (e.g. 0.0.0.0, as on main) still answers the loopback health poll.
+_IDENTITY_OPTIONS = frozenset({"--port", "--alias", "-hf"})
+
+
+def _check_no_identity_override(extra: list[str], *, role: str) -> None:
+    """Reject extra args that would move the server bibr thinks it started."""
+    if role == "llm":
+        extra_setting = "LLM_LLAMA_CPP_EXTRA_ARGS"
+        port_setting = "LLM_LLAMA_CPP_PORT"
+    else:
+        extra_setting = "OCR_LLAMA_CPP_EXTRA_ARGS"
+        port_setting = "OCR_LLAMA_CPP_PORT"
+    for token in extra:
+        bare = token.split("=", 1)[0]
+        if _canonical_option(bare) in _IDENTITY_OPTIONS:
+            raise UpstreamServiceError(
+                "local inference",
+                f"{extra_setting} must not set {bare}: the managed server's port, "
+                f"alias and model are fixed, and bibr polls the configured port — it would "
+                f"time out and kill a healthy server that moved. Set {port_setting} to move "
+                "the server instead.",
+            )
 
 
 def build_server_argv(
@@ -379,6 +461,9 @@ def build_server_argv(
     """
     if available is None:
         available = supported_flags(prefix)
+    setting = "LLM_LLAMA_CPP_EXTRA_ARGS" if role == "llm" else "OCR_LLAMA_CPP_EXTRA_ARGS"
+    extra = split_extra_args(extra_args, setting=setting)
+    _check_no_identity_override(extra, role=role)
     fixed = [
         *prefix,
         "-hf",
@@ -393,7 +478,7 @@ def build_server_argv(
         str(context_size),
         *_role_runtime_args(role, available),
     ]
-    return _merge_cli_args(fixed, split_extra_args(extra_args))
+    return _merge_cli_args(fixed, extra)
 
 
 def parse_gpu_offload(stderr: str) -> tuple[int, int] | None:
@@ -635,6 +720,32 @@ def log_offload_status(stderr: str) -> None:
         logger.info("llama.cpp full GPU offload: %d/%d layers", offloaded, total)
 
 
+# Substrings (lowercased) of a startup failure that blame argument parsing
+# rather than model loading — only these justify the conservative-args retry.
+# A load failure (e.g. CUDA OOM) would fail identically on retry, so it must
+# surface immediately instead of doubling the time to failure.
+_ARG_ERROR_MARKERS = (
+    "unknown argument",
+    "invalid argument",
+    "unrecognized argument",
+    "unrecognised argument",
+    "invalid option",
+    "unknown option",
+    "parse error",
+    "failed to parse",
+    # llama.cpp wraps every flag-handler exception as
+    # 'error while handling argument "<flag>": <reason>' (common/arg.cpp),
+    # e.g. a build whose --help lists --spec-type but rejects its value
+    # ('unknown speculative type: ngram-mod').
+    "error while handling argument",
+)
+
+
+def _looks_like_arg_error(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _ARG_ERROR_MARKERS)
+
+
 class LlamaCppServer:
     """Own a llama.cpp OpenAI-compatible server subprocess.
 
@@ -683,11 +794,9 @@ class LlamaCppServer:
                 missing_binary_message(),
             )
 
-        from bibr.utils.secure_temp import open_subprocess_log
-
-        self._stderr_log, self._stderr_fh = open_subprocess_log("llama", port)
-
         available = supported_flags(prefix)
+        # Build both argvs BEFORE opening the log handle: extra-args parsing
+        # (shlex errors, identity-flag overrides) must fail without leaking it.
         cmd = build_server_argv(
             prefix,
             model=model,
@@ -710,6 +819,10 @@ class LlamaCppServer:
         )
         has_optional_features = cmd != conservative_cmd
 
+        from bibr.utils.secure_temp import open_subprocess_log
+
+        self._stderr_log, self._stderr_fh = open_subprocess_log("llama", port)
+
         popen_kwargs: dict = {
             "stdout": subprocess.DEVNULL,
             "stderr": self._stderr_fh,
@@ -722,10 +835,11 @@ class LlamaCppServer:
         try:
             launched = self._launch(cmd, popen_kwargs, startup_timeout)
         except RuntimeError as exc:
-            # Process EXITED during startup (not a timeout). If we added any
-            # optional feature flags, an older build may reject one of them —
-            # retry once with the conservative args.
-            if not has_optional_features:
+            # Process EXITED during startup (not a timeout). Retry with the
+            # conservative args only when the failure blames argument parsing
+            # (an older build rejecting a probed flag) — a load failure such
+            # as CUDA OOM would fail identically, so surface it at once.
+            if not has_optional_features or not _looks_like_arg_error(str(exc)):
                 self.shutdown()
                 raise
             logger.warning(
@@ -735,10 +849,13 @@ class LlamaCppServer:
             )
             try:
                 launched = self._launch(conservative_cmd, popen_kwargs, startup_timeout)
-            except Exception:
+            except BaseException:
                 self.shutdown()
                 raise
-        except Exception:
+        except BaseException:
+            # BaseException, not Exception: the child runs in its own session
+            # and never sees the terminal's Ctrl-C, so a KeyboardInterrupt out
+            # of the health wait must still shut it down (mirrors VllmLlmServer).
             self.shutdown()
             raise
         self._n_slots = _n_slots_from_argv(launched)
@@ -778,10 +895,21 @@ class LlamaCppServer:
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
-                raise RuntimeError(f"llama.cpp exited during startup (code {rc}): {tail[:1000]}")
+                raise RuntimeError(f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}")
             try:
                 status, _reason, _body = request_bytes(f"{self.base_url}/health", timeout=5)
                 if status == 200:
+                    # A sibling bibr process may have won a port race: our own
+                    # bind failed and its server answered this probe. Require
+                    # our process to still be alive after a short grace period;
+                    # an exit here is a startup failure, not readiness.
+                    time.sleep(_HEALTH_GRACE_S)
+                    if self._process.poll() is not None:
+                        rc = self._process.returncode
+                        tail = self._read_stderr_tail()
+                        raise RuntimeError(
+                            f"llama.cpp exited during startup (code {rc}): {tail[-1000:]}"
+                        )
                     # Flush log so offload lines written before the health OK
                     # are visible to parse_gpu_offload.
                     if self._stderr_fh is not None:
@@ -863,12 +991,48 @@ class LlamaCppLlmServer:
         # multi-slot args are active), unless the user pinned it explicitly.
         if "max_concurrency" not in self._settings.llm.model_fields_set:
             self._settings.llm.max_concurrency = self._server.n_slots
-        # Keep prompt + completion inside the intentionally small KV cache.
-        self._settings.llm.max_tokens = min(self._settings.llm.max_tokens, 4096)
-        self._settings.llm.max_input_chars = min(self._settings.llm.max_input_chars, 24_000)
-        self._settings.llm.ref_seg_window_chars = min(
-            self._settings.llm.ref_seg_window_chars, 12_000
+        # Keep prompt + completion inside the launched context size. The caps
+        # below equal the historical constants at the default 16384-token
+        # context (completion ≤ ctx/4); a larger LLM_LLAMA_CPP_CONTEXT_SIZE
+        # scales them instead of silently keeping the small-context budget.
+        # Explicit user values are never replaced — only warned about when
+        # they cannot fit the context.
+        ctx = self._settings.llm.llama_cpp_context_size
+        caps = (
+            ("max_tokens", ctx // 4),
+            ("max_input_chars", 24_000 * ctx // 16_384),
+            ("ref_seg_window_chars", 12_000 * ctx // 16_384),
         )
+        for field, cap in caps:
+            current = getattr(self._settings.llm, field)
+            if field in self._settings.llm.model_fields_set:
+                if current > cap:
+                    logger.warning(
+                        "Local llama.cpp backend — explicit llm.%s=%s exceeds the %d-token "
+                        "context budget (~%s); requests past the context will fail or be cut. "
+                        "Raise LLM_LLAMA_CPP_CONTEXT_SIZE or lower the value.",
+                        field,
+                        current,
+                        ctx,
+                        cap,
+                    )
+                continue
+            if current > cap:
+                setattr(self._settings.llm, field, cap)
+                logger.info(
+                    "Local llama.cpp backend — capping llm.%s to %d for the %d-token context",
+                    field,
+                    cap,
+                    ctx,
+                )
+        if "rate_limit_rpm" not in self._settings.llm.model_fields_set:
+            # Our own server has no external quota to protect; the cloud 60
+            # rpm default would only add dead time between serialized calls.
+            self._settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+            logger.info(
+                "Local llama.cpp backend — raising llm.rate_limit_rpm to %d",
+                MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
         if "timeout_seconds" not in self._settings.llm.model_fields_set:
             self._settings.llm.timeout_seconds = _LLAMA_CPP_DEFAULT_TIMEOUT_SECONDS
             logger.info(

@@ -117,7 +117,7 @@ def test_detect_images_halves_batch_after_oom_preserving_order():
 
     assert [rows[0]["width"] for rows in out] == [10, 11, 12, 13, 14]
     assert calls == [5, 2, 3, 1, 2]
-    assert det._compiled is False
+    assert det._compiled is True  # padding disable is scoped to the retry only
 
 
 def test_maybe_empty_cache_throttles_to_one_call_per_interval(monkeypatch):

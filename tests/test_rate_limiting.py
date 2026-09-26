@@ -325,8 +325,8 @@ async def test_redis_rate_limiter_acquire():
             "redis://test", "resource", max_requests=1, window_seconds=1.0
         )
 
-        # Mock eval to return 0.1 seconds wait
-        mock_redis.eval.return_value = 0.1
+        # Mock eval to return 100 ms wait (the Lua script reports milliseconds)
+        mock_redis.eval.return_value = 100
 
         # Mock sleep
         with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
@@ -431,6 +431,100 @@ async def test_redis_limiter_close_calls_aclose():
         limiter = AsyncRedisRateLimiter("redis://test", "resource")
         await limiter.close()
         mock_redis.aclose.assert_awaited_once()
+
+
+# --- AsyncRedisRateLimiter against fakeredis (ml-runtime-utils-2) ---------
+
+
+def _fakeredis_limiter(**kwargs):
+    """AsyncRedisRateLimiter backed by fakeredis instead of a real server."""
+    import fakeredis.aioredis
+
+    from bibr.utils.rate_limiter import AsyncRedisRateLimiter
+
+    fake = fakeredis.aioredis.FakeRedis(decode_responses=True)
+    with patch("redis.asyncio.Redis") as mock_redis_cls:
+        mock_redis_cls.from_url.return_value = fake
+        limiter = AsyncRedisRateLimiter("redis://test", "fakeredis-resource", **kwargs)
+    return limiter, fake
+
+
+@pytest.mark.asyncio
+async def test_strict_interval_stores_whole_milliseconds():
+    """The next-allowed stamp is an int-ms string, not a float (ml-2).
+
+    Redis converts a Lua number reply to an integer, so float-second waits
+    came back truncated (a 0.3 s wait became 0) and callers never slept.
+    """
+    limiter, fake = _fakeredis_limiter(max_requests=1, window_seconds=0.2)
+    await limiter.acquire()
+    stored = await fake.get("rate_limit:fakeredis-resource:next_allowed_ms")
+    assert stored is not None and "." not in stored
+    int(stored)  # whole milliseconds since the epoch
+    # The pre-ms key must stay untouched: old releases stored epoch seconds
+    # there, and sharing it across versions hangs old workers for ~1.8e12 s.
+    assert await fake.get("rate_limit:fakeredis-resource:next_allowed") is None
+
+
+@pytest.mark.asyncio
+async def test_strict_interval_enforces_spacing():
+    """Back-to-back acquires are spaced by the window (ml-2)."""
+    import time
+
+    limiter, _ = _fakeredis_limiter(max_requests=1, window_seconds=0.2)
+    t0 = time.monotonic()
+    await limiter.acquire()
+    await limiter.acquire()
+    elapsed = time.monotonic() - t0
+    assert elapsed >= 0.19
+
+
+@pytest.mark.asyncio
+async def test_strict_interval_ttl_covers_queued_horizon():
+    """The key TTL spans the queued horizon, not just 2x the interval (ml-2).
+
+    Concurrent callers each push the next-allowed stamp one interval out,
+    so a fixed 2x-interval TTL expired the key while sleepers were still
+    queued — a late caller then saw no key and fired immediately. The TTL
+    now runs from the queued horizon plus a margin. Sleeps are stubbed so
+    all N acquires queue from the same instant: the stamp ends N intervals
+    out, and the TTL must still cover it. No wall-clock gap assertions, so
+    a loaded CI runner cannot fail this test.
+    """
+    import asyncio
+    import time
+
+    interval = 0.2
+    queued = 5
+    limiter, fake = _fakeredis_limiter(max_requests=1, window_seconds=interval)
+    key = "rate_limit:fakeredis-resource:next_allowed_ms"
+
+    async def _no_sleep(_delay: float) -> None:
+        return None
+
+    with patch.object(asyncio, "sleep", _no_sleep):
+        for _ in range(queued):
+            await limiter.acquire()
+        stored = int(await fake.get(key))
+        pttl = await fake.pttl(key)
+        now_ms = int(time.time() * 1000)
+
+    horizon_ms = stored - now_ms
+    assert horizon_ms >= int(queued * interval * 1000) - 50  # N intervals queued
+    assert pttl >= horizon_ms, f"pttl {pttl} ms does not cover queued horizon {horizon_ms} ms"
+
+
+@pytest.mark.asyncio
+async def test_sliding_window_burst_then_blocks():
+    """Two slots admit two immediate acquires; the third polls (ml-2 guard)."""
+    import asyncio
+
+    limiter, fake = _fakeredis_limiter(max_requests=2, window_seconds=60.0)
+    await limiter.acquire()
+    await limiter.acquire()
+    assert await fake.zcard("rate_limit:fakeredis-resource:window") == 2
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(limiter.acquire(), timeout=0.3)
 
 
 # --- 429 throttle recovery (CrossrefClient._recover_rate_limit) ---

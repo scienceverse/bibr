@@ -437,6 +437,7 @@ async def _resolve_preparsed_references(
     *,
     settings: GlobalSettings,
     on_references_ready: Callable[[list], None] | None = None,
+    memory_mode: str | None = None,
 ):
     """Fill references onto a natively-preparsed (JATS) ``PaperMetadata``.
 
@@ -475,6 +476,7 @@ async def _resolve_preparsed_references(
         ref_seg_strategy=ref_seg_strategy,
         ref_parse_strategy=ref_parse_strategy,
         settings=settings,
+        memory_mode=memory_mode,
     )
     try:
         ref_df = extractor._collect_reference_rows()
@@ -525,6 +527,7 @@ async def _extract_metadata_and_equations(
     front_matter_resolution: FrontMatterResolution | None = None,
     validation_issue_sink: list[ValidationIssue] | None = None,
     on_references_ready: Callable[[list], None] | None = None,
+    memory_mode: str | None = None,
 ):
     """Phase 1: metadata + equation extraction in parallel.
 
@@ -574,6 +577,7 @@ async def _extract_metadata_and_equations(
             ref_parse_strategy,
             settings=effective_settings,
             on_references_ready=on_references_ready,
+            memory_mode=memory_mode,
         )
     else:
         extractor = MetadataExtractor(
@@ -585,6 +589,7 @@ async def _extract_metadata_and_equations(
             settings=effective_settings,
             classifier_resources=classifier_resources,
             front_matter_resolution=front_matter_resolution,
+            memory_mode=memory_mode,
         )
         # Pass the listener only when one is set so extractor doubles that take no
         # kwargs (and every non-prefetching path) see the unchanged call.
@@ -1460,6 +1465,7 @@ def _build_qualification_provenance(
     from bibr.clients.nuextract import (
         NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256,
         NUEXTRACT3_FP8_EXPECTED_REVISION,
+        NUEXTRACT3_FP8_MODEL_ID,
     )
     from bibr.export.qualification_provenance import (
         DeploymentIdentity,
@@ -1468,17 +1474,19 @@ def _build_qualification_provenance(
 
     structured_backend = getattr(llm_client, "resolved_structured_backend", None)
     model_id = settings.llm.model
-    is_nuextract = (
-        structured_backend == "nuextract-native" or "nuextract3" in (model_id or "").lower()
-    )
+    # The expected pins belong to the FP8 repo. Stamping them on any other
+    # NuExtract 3 deployment (bf16, GGUF, MLX, whichever backend) would record a
+    # commit and template that deployment never loaded, so it reports only
+    # what LLM_MODEL_REVISION / LLM_JINJA_SHA256 declare.
+    is_nuextract_fp8 = (model_id or "").strip().lower() == NUEXTRACT3_FP8_MODEL_ID.lower()
     identity = DeploymentIdentity(
         bibr_sha=settings.pipeline.bibr_sha or settings.BIBR_BUILD_SHA,
         platform_sha=settings.pipeline.platform_sha,
         model_id=model_id,
         model_revision=settings.llm.model_revision
-        or (NUEXTRACT3_FP8_EXPECTED_REVISION if is_nuextract else None),
+        or (NUEXTRACT3_FP8_EXPECTED_REVISION if is_nuextract_fp8 else None),
         jinja_sha256=settings.llm.jinja_sha256
-        or (NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 if is_nuextract else None),
+        or (NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 if is_nuextract_fp8 else None),
         structured_backend=structured_backend,
         # Temperature is a declared qualification axis only for the native
         # protocol arms. For non-native backends it is not part of the
@@ -1514,6 +1522,7 @@ async def post_parse(
     classifier_resources: ClassifierResources | None = None,
     expected_identity: ExpectedIdentity | None = None,
     enrichment_prefetch: bool = False,
+    memory_mode: str | None = None,
 ):
     """Post-parse pipeline: classification, extraction, linking.
 
@@ -1623,6 +1632,7 @@ async def post_parse(
                 front_matter_resolution=contents.front_matter_resolution,
                 validation_issue_sink=metadata_issues,
                 on_references_ready=on_references_ready,
+                memory_mode=memory_mode,
             )
             metadata_ownership_scoped = bool(
                 contents.preparsed_metadata is None
@@ -1902,6 +1912,7 @@ class PostParseStage:
                     classifier_resources=ctx.resources.classifiers,
                     expected_identity=fs.expected_identity,
                     enrichment_prefetch=enrichment_prefetch,
+                    memory_mode=ctx.config.memory_mode,
                 )
                 fs.stage_times[self.name] = time.monotonic() - fs_t0
                 return result
@@ -1957,6 +1968,13 @@ class PostParseStage:
                 # the caches keyed on it.
                 result.input_file.sha256 = fs.content_sha256
                 fs.paper = result
+
+        if ctx.config.memory_mode == "aggressive":
+            # The NER reference parser (~1 GB) is a process-wide singleton
+            # outside the layout/segmenter lifecycle: release it now so the
+            # next chunk's OCR/LLM phases get the whole machine, mirroring
+            # the layout/segmenter unloads in aggressive mode.
+            ctx.resources.unload_ner_parser()
 
         logger.debug("Post-parse stage: %.1fs", time.monotonic() - t0)
         ctx.progress.stage_end(self.name)

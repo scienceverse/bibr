@@ -13,6 +13,20 @@ if TYPE_CHECKING:
     from bibr.config import GlobalSettings
 
 
+def ollama_openai_base_url(url: str) -> str:
+    """The OpenAI-compatible API root of the Ollama server at ``url``.
+
+    ``LLM_OLLAMA_BASE_URL`` names the server (``http://localhost:11434`` by
+    default, and what ``bibr setup`` writes), but Ollama serves its
+    OpenAI-compatible routes under ``/v1``. Instructor uses the base URL as
+    given, so the bare server URL sent every request to ``/chat/completions``,
+    which Ollama answers with 404. Both forms are accepted: ``/v1`` is appended
+    unless the URL already ends in it.
+    """
+    base = url.strip().rstrip("/")
+    return base if base.endswith("/v1") else f"{base}/v1"
+
+
 @register
 class OllamaProvider:
     name: ClassVar[str] = "ollama"
@@ -24,7 +38,7 @@ class OllamaProvider:
         return instructor.from_provider(
             f"ollama/{self._settings.llm.model}",
             async_client=True,
-            base_url=self._settings.llm.ollama_base_url,
+            base_url=ollama_openai_base_url(self._settings.llm.ollama_base_url),
         )
 
     def call_kwargs(self, reasoning_effort: str | None, max_tokens: int | None = None) -> dict:

@@ -1,17 +1,25 @@
-"""Export PP-DocLayoutV3 (the layout detector) to ONNX and check parity.
+"""Export the PP-DocLayout layout detector (V3 or V4) to ONNX and check parity.
 
 Usage::
 
     CUDA_VISIBLE_DEVICES="" python scripts/export_onnx_layout.py \
-        --out /mnt/bulk/datasets/onnx_exports/layout [--revision <sha>] \
-        [--images page1.png page2.png ...] [--pdf paper.pdf]
+        --out /mnt/bulk/datasets/onnx_exports/layout [--model-id <repo or dir>] \
+        [--revision <sha>] [--images page1.png page2.png ...] [--pdf paper.pdf]
 
-Loads the pinned torch checkpoint on CPU, exports the graph with the
-``logits``, ``pred_boxes`` and ``order_logits`` outputs (no mask head — bibr
-never reads the polygons), writes ``<out>/onnx/{model.onnx,bibr_onnx.json}``
-and then compares bibr's ONNX layout backend with the transformers path on
-the sample pages: preprocessing (pixel values), raw graph outputs, and the
-final region lists after ``BaseLayoutDetector._postprocess``.
+Loads the checkpoint (default ``LAYOUT_MODEL_ID`` at ``LAYOUT_MODEL_REVISION``)
+on CPU and exports the graph bibr's ONNX backend reads:
+
+- PP-DocLayoutV3: ``logits``, ``pred_boxes`` and ``order_logits`` (no mask
+  head — bibr never reads the polygons);
+- PP-DocLayoutV4: ``logits``, ``pred_boxes`` (quads), ``relative_order_logits``
+  and ``successor_order_logits``. Needs a transformers with PP-DocLayoutV4 and,
+  for the parity check's reference post-processing, scipy.
+
+It writes ``<out>/onnx/{model.onnx,bibr_onnx.json}`` (the manifest names the
+architecture, which is what selects bibr's pre/post-processing) and then
+compares bibr's ONNX layout backend with the transformers path on the sample
+pages: preprocessing (pixel values), raw graph outputs, the reading order and
+the final region lists after ``BaseLayoutDetector._postprocess``.
 """
 
 from __future__ import annotations
@@ -35,7 +43,27 @@ from _onnx_export import (  # noqa: E402
     write_manifest,
 )
 
-MODEL_ID = "PaddlePaddle/PP-DocLayoutV3_safetensors"
+# model_type -> what differs between the two generations.
+ARCHITECTURES = {
+    "pp_doclayout_v3": {
+        "architecture": "PPDocLayoutV3ForObjectDetection",
+        "sine": "PPDocLayoutV3SinePositionEmbedding",
+        "outputs": ("logits", "pred_boxes", "order_logits"),
+        "box_dims": 4,
+        "box_format": "cxcywh_normalized",
+        "resample": "bicubic_no_antialias",
+        "rescale_before_resize": False,
+    },
+    "pp_doclayout_v4": {
+        "architecture": "PPDocLayoutV4ForObjectDetection",
+        "sine": "PPDocLayoutV4SinePositionEmbedding",
+        "outputs": ("logits", "pred_boxes", "relative_order_logits", "successor_order_logits"),
+        "box_dims": 10,
+        "box_format": "quad_center_offsets_normalized",
+        "resample": "bicubic_no_antialias_float",
+        "rescale_before_resize": True,
+    },
+}
 
 
 def _sample_images(args) -> list:
@@ -62,7 +90,7 @@ def _sample_images(args) -> list:
     return images
 
 
-def _freeze_position_embedding() -> None:
+def _freeze_position_embedding(model_type: str) -> None:
     """Bake the 2-D sin/cos position embedding into the graph as a constant.
 
     The layout preprocessor resizes every page to a fixed ``size``, so the
@@ -73,9 +101,12 @@ def _freeze_position_embedding() -> None:
     Cos(7)". Evaluating the same float64 arithmetic eagerly in numpy keeps the
     values bit-for-bit and leaves an initializer where the subgraph was.
     """
+    import importlib
+
     import numpy as np
     import torch
-    from transformers.models.pp_doclayout_v3 import modeling_pp_doclayout_v3 as modeling
+
+    modeling = importlib.import_module(f"transformers.models.{model_type}.modeling_{model_type}")
 
     def build(
         height,
@@ -103,9 +134,8 @@ def _freeze_position_embedding() -> None:
         return out.to(device=device, dtype=dtype or torch.float32)
 
     modeling.build_2d_sinusoidal_position_embedding = build
-    cached = (
-        modeling.PPDocLayoutV3SinePositionEmbedding._cached_build_2d_sinusoidal_position_embedding
-    )
+    sine = getattr(modeling, ARCHITECTURES[model_type]["sine"])
+    cached = sine._cached_build_2d_sinusoidal_position_embedding
     for name in ("cache_clear", "clear_cache"):
         clear = getattr(cached, name, None)
         if callable(clear):
@@ -114,9 +144,9 @@ def _freeze_position_embedding() -> None:
 
 
 class _Wrapper:
-    """Graph = HF model minus the mask head outputs."""
+    """Graph = HF model restricted to the outputs bibr reads (V3: no mask head)."""
 
-    def __init__(self, model):
+    def __init__(self, model, output_names: tuple[str, ...]):
         import torch
 
         class Wrapped(torch.nn.Module):
@@ -126,14 +156,148 @@ class _Wrapper:
 
             def forward(self, pixel_values):
                 out = self.inner(pixel_values=pixel_values)
-                return out.logits, out.pred_boxes, out.order_logits
+                return tuple(getattr(out, name) for name in output_names)
 
         self.module = Wrapped(model).eval()
+
+
+def _resolve_source(args, settings) -> tuple[str, str | None]:
+    """``(model_id, revision)`` to export; the revision is a commit SHA or ``None`` (local dir).
+
+    The configured pin applies only to the configured checkpoint: exporting
+    another repo (say V4 while bibr still pins V3) without ``--revision``
+    resolves that repo's current head to a SHA, so the manifest never records
+    a revision the weights did not come from.
+    """
+    model_id = args.model_id or settings.layout.model_id
+    if Path(model_id).is_dir():
+        return model_id, None
+    if args.revision:
+        return model_id, args.revision
+    if model_id == settings.layout.model_id:
+        return model_id, settings.layout.model_revision
+    from huggingface_hub import HfApi
+
+    return model_id, HfApi().model_info(model_id).sha
+
+
+def _detector(settings, threshold):
+    """A postprocess-only ``BaseLayoutDetector`` (no model load)."""
+    from bibr.layout_base import BaseLayoutDetector
+    from bibr.layout_utils import _CORRECT_ID2LABEL
+
+    det = object.__new__(BaseLayoutDetector)
+    det.threshold = threshold
+    det._settings = settings
+    det._id2label = _CORRECT_ID2LABEL
+    return det
+
+
+def _region_diff(det, reference, ours, orig_sizes) -> tuple[int, int, int]:
+    """``(regions, pages that differ, max bbox Δ on the 0-1000 scale)``."""
+    regions = mismatch = max_box_delta = 0
+    for ref_r, our_r, (h, w) in zip(reference, ours, orig_sizes, strict=True):
+        a = det._postprocess(ref_r, w, h)
+        b = det._postprocess(our_r, w, h)
+        regions += len(a)
+        if len(a) != len(b) or any(ra["label"] != rb["label"] for ra, rb in zip(a, b, strict=True)):
+            mismatch += 1
+            continue
+        for ra, rb in zip(a, b, strict=True):
+            max_box_delta = max(
+                max_box_delta,
+                max(abs(x - y) for x, y in zip(ra["bbox_2d"], rb["bbox_2d"], strict=True)),
+            )
+    return regions, mismatch, max_box_delta
+
+
+def _parity_v4(args, settings, processor, model, bundle, model_path, size, timer) -> int:
+    """PP-DocLayoutV4: bibr's numpy pipeline vs the transformers processor + model."""
+    import torch
+
+    from bibr.layout_onnx import OnnxLayoutBackend, decode_detections_v4, preprocess_images
+
+    images = _sample_images(args)
+    threshold = settings.layout.detection_threshold
+    backend = OnnxLayoutBackend(bundle, device="cpu", threshold=threshold)
+
+    hf_inputs = processor(images=images, return_tensors="pt")
+    ours = preprocess_images(
+        images,
+        size=size,
+        rescale_factor=float(processor.rescale_factor),
+        image_mean=[float(v) for v in processor.image_mean],
+        image_std=[float(v) for v in processor.image_std],
+        rescale_before_resize=True,
+    )
+    pre_diff = float(np.abs(hf_inputs["pixel_values"].numpy() - ours).max())
+
+    with torch.inference_mode():
+        out = model(**hf_inputs)
+    names = ARCHITECTURES["pp_doclayout_v4"]["outputs"]
+    torch_raw = [getattr(out, name).float().numpy() for name in names]
+    # Same inputs through the graph: isolates the export from preprocessing.
+    onnx_raw = backend.forward(hf_inputs["pixel_values"].numpy())
+    kept = (1.0 / (1.0 + np.exp(-torch_raw[0]))).max(axis=-1) >= threshold
+    graph = {"n_kept": int(kept.sum())}
+    for name, t, o in zip(names, torch_raw, onnx_raw, strict=True):
+        if name.endswith("order_logits"):  # pairwise (queries x queries)
+            deltas = []
+            for b in range(len(images)):
+                idx = np.flatnonzero(kept[b])
+                sub_t, sub_o = t[b][np.ix_(idx, idx)], o[b][np.ix_(idx, idx)]
+                off_diagonal = ~np.eye(len(idx), dtype=bool)
+                if off_diagonal.any():
+                    deltas.append(float(np.abs(sub_t - sub_o)[off_diagonal].max()))
+            graph[name] = max(deltas, default=0.0)
+        else:
+            graph[name] = float(np.abs(t[kept] - o[kept]).max()) if kept.any() else 0.0
+
+    orig_sizes = [(img.height, img.width) for img in images]
+    hf_results = processor.post_process_object_detection(
+        out, threshold=threshold, target_sizes=orig_sizes
+    )
+    ours_torch = decode_detections_v4(*torch_raw, orig_sizes, threshold)
+    order_equal = all(
+        np.array_equal(h["order_seq"].numpy(), o["order_seq"])
+        and np.array_equal(h["labels"].numpy(), o["labels"])
+        for h, o in zip(hf_results, ours_torch, strict=True)
+    )
+    det = _detector(settings, threshold)
+    onnx_results = backend.run(images)
+    regions, mismatch, max_box_delta = _region_diff(det, hf_results, onnx_results, orig_sizes)
+    onnx_time = timer.lap()
+    report(
+        "layout parity (PP-DocLayoutV4)",
+        [
+            ("sample pages", str(len(images))),
+            ("preprocess max|Δ| (pixel_values)", f"{pre_diff:.3e}"),
+            ("queries >= threshold", str(graph["n_kept"])),
+            ("graph max|Δ| logits (kept)", f"{graph['logits']:.3e}"),
+            ("graph max|Δ| pred_boxes quads (kept)", f"{graph['pred_boxes']:.3e}"),
+            (
+                "graph max|Δ| relative / successor order (kept, off-diagonal)",
+                f"{graph['relative_order_logits']:.3e} / {graph['successor_order_logits']:.3e}",
+            ),
+            ("bibr decode == HF post-process (order, labels)", str(order_equal)),
+            (
+                "regions (HF pre/post vs bibr numpy pre/post)",
+                f"{regions} regions, {mismatch} pages differ, max bbox Δ {max_box_delta} "
+                "(0-1000 scale)",
+            ),
+            ("model.onnx", f"{file_size_mb(model_path):.1f} MB"),
+            ("onnx forward+post time", f"{onnx_time:.1f}s"),
+        ],
+    )
+    return 0 if order_equal and mismatch == 0 else 1
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", required=True, type=Path)
+    parser.add_argument(
+        "--model-id", default=None, help="Hub repo or local checkpoint; defaults to LAYOUT_MODEL_ID"
+    )
     parser.add_argument("--revision", default=None, help="defaults to LAYOUT_MODEL_REVISION")
     parser.add_argument("--opset", type=int, default=DEFAULT_OPSET)
     parser.add_argument("--dynamo", action="store_true", help="use the torch.export exporter")
@@ -152,70 +316,75 @@ def main() -> int:
     from bibr.layout_onnx import OnnxLayoutBackend, order_sequences, preprocess_images
 
     settings = GlobalSettings()
-    revision = args.revision or settings.layout.model_revision
+    model_id, revision = _resolve_source(args, settings)
     timer = Timer()
-    processor = AutoImageProcessor.from_pretrained(MODEL_ID, revision=revision)
-    model = AutoModelForObjectDetection.from_pretrained(MODEL_ID, revision=revision).eval()
-    print(f"loaded {MODEL_ID}@{revision} in {timer.lap():.1f}s")
-    _freeze_position_embedding()
+    processor = AutoImageProcessor.from_pretrained(model_id, revision=revision)
+    model = AutoModelForObjectDetection.from_pretrained(model_id, revision=revision).eval()
+    model_type = model.config.model_type
+    if model_type not in ARCHITECTURES:
+        raise SystemExit(f"{model_id} is a {model_type!r} checkpoint, not PP-DocLayoutV3/V4")
+    arch = ARCHITECTURES[model_type]
+    where = f"{model_id}@{revision}" if revision else f"{model_id} (local)"
+    print(f"loaded {where} ({arch['architecture']}) in {timer.lap():.1f}s")
+    _freeze_position_embedding(model_type)
+    output_names = arch["outputs"]
 
     size = (int(processor.size["height"]), int(processor.size["width"]))
     bundle = bundle_dir(args.out)
     model_path = bundle / "model.onnx"
     example = torch.zeros((1, 3, *size), dtype=torch.float32)
     export_torch_module(
-        _Wrapper(model).module,
+        _Wrapper(model, output_names).module,
         (example,),
         model_path,
         input_names=["pixel_values"],
-        output_names=["logits", "pred_boxes", "order_logits"],
-        dynamic_axes={
-            "pixel_values": {0: "batch"},
-            "logits": {0: "batch"},
-            "pred_boxes": {0: "batch"},
-            "order_logits": {0: "batch"},
-        },
+        output_names=list(output_names),
+        dynamic_axes={name: {0: "batch"} for name in ("pixel_values", *output_names)},
         opset=args.opset,
         dynamo=args.dynamo,
     )
     print(f"exported in {timer.lap():.1f}s -> {model_path} ({file_size_mb(model_path):.1f} MB)")
     check_onnx(model_path)
 
+    queries, labels = int(model.config.num_queries), int(model.config.num_labels)
+    outputs = [
+        {"name": "logits", "shape": ["batch", queries, labels]},
+        {
+            "name": "pred_boxes",
+            "shape": ["batch", queries, arch["box_dims"]],
+            "format": arch["box_format"],
+        },
+    ] + [{"name": name, "shape": ["batch", queries, queries]} for name in output_names[2:]]
+    preprocessing = {
+        "size": {"height": size[0], "width": size[1]},
+        "resample": arch["resample"],
+        "rescale_factor": float(processor.rescale_factor),
+        "image_mean": [float(v) for v in processor.image_mean],
+        "image_std": [float(v) for v in processor.image_std],
+    }
     manifest = {
         "model": "layout",
-        "architecture": "PPDocLayoutV3ForObjectDetection",
+        "architecture": arch["architecture"],
         "opset": args.opset,
         "exporter": "dynamo" if args.dynamo else "torchscript",
         "inputs": [
             {"name": "pixel_values", "shape": ["batch", 3, size[0], size[1]], "dtype": "float32"}
         ],
-        "outputs": [
-            {
-                "name": "logits",
-                "shape": ["batch", model.config.num_queries, model.config.num_labels],
-            },
-            {
-                "name": "pred_boxes",
-                "shape": ["batch", model.config.num_queries, 4],
-                "format": "cxcywh_normalized",
-            },
-            {
-                "name": "order_logits",
-                "shape": ["batch", model.config.num_queries, model.config.num_queries],
-            },
-        ],
-        "preprocessing": {
-            "size": {"height": size[0], "width": size[1]},
-            "resample": "bicubic_no_antialias",
-            "rescale_factor": float(processor.rescale_factor),
-            "image_mean": [float(v) for v in processor.image_mean],
-            "image_std": [float(v) for v in processor.image_std],
-        },
-        "num_queries": int(model.config.num_queries),
-        "num_labels": int(model.config.num_labels),
-        "source": {"repo_id": MODEL_ID, "revision": revision},
+        "outputs": outputs,
+        "preprocessing": preprocessing,
+        "num_queries": queries,
+        "num_labels": labels,
+        "source": {"repo_id": model_id, "revision": revision},
     }
+    if arch["rescale_before_resize"]:
+        preprocessing["rescale_before_resize"] = True
+        # V3's hub config collapses five labels, so only V4 records its list
+        # (bibr refuses a bundle whose list differs from the one it maps).
+        manifest["id2label"] = {str(k): v for k, v in model.config.id2label.items()}
     write_manifest(bundle, manifest)
+
+    if model_type == "pp_doclayout_v4":
+        return _parity_v4(args, settings, processor, model, bundle, model_path, size, timer)
 
     # ---- parity ---------------------------------------------------------
     images = _sample_images(args)
@@ -260,35 +429,15 @@ def main() -> int:
     }
 
     # End to end: bibr's numpy pre/post vs HF pre/post, then bibr's postprocess.
-    from bibr.layout_base import BaseLayoutDetector
-
-    det = object.__new__(BaseLayoutDetector)
-    det.threshold = threshold
-    det._settings = settings
-    from bibr.layout_utils import _CORRECT_ID2LABEL
-
-    det._id2label = _CORRECT_ID2LABEL
+    det = _detector(settings, threshold)
     orig_sizes = [(img.height, img.width) for img in images]
     hf_results = processor.post_process_object_detection(
         out, threshold=threshold, target_sizes=torch.tensor(orig_sizes, dtype=torch.float32)
     )
     onnx_results = backend.run(images)
-    region_mismatch = 0
-    max_box_delta = 0
-    for hf_r, ox_r, (h, w) in zip(hf_results, onnx_results, orig_sizes, strict=True):
-        a = det._postprocess(hf_r, w, h)
-        b = det._postprocess(ox_r, w, h)
-        if len(a) != len(b):
-            region_mismatch += 1
-            continue
-        for ra, rb in zip(a, b, strict=True):
-            if ra["label"] != rb["label"]:
-                region_mismatch += 1
-                break
-            max_box_delta = max(
-                max_box_delta,
-                max(abs(x - y) for x, y in zip(ra["bbox_2d"], rb["bbox_2d"], strict=True)),
-            )
+    regions, region_mismatch, max_box_delta = _region_diff(
+        det, hf_results, onnx_results, orig_sizes
+    )
     onnx_time = timer.lap()
     report(
         "layout parity",
@@ -308,7 +457,8 @@ def main() -> int:
             ("order sequence identical on kept queries", str(graph_diff["order_seq_kept_equal"])),
             (
                 "regions (HF pre/post vs bibr numpy pre/post)",
-                f"{sum(len(det._postprocess(r, w, h)) for r, (h, w) in zip(hf_results, orig_sizes, strict=True))} regions, {region_mismatch} pages differ, max bbox Δ {max_box_delta} (0-1000 scale)",
+                f"{regions} regions, {region_mismatch} pages differ, max bbox Δ {max_box_delta} "
+                "(0-1000 scale)",
             ),
             ("model.onnx", f"{file_size_mb(model_path):.1f} MB"),
             ("onnx forward+post time", f"{onnx_time:.1f}s"),

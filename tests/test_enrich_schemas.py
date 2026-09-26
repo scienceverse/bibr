@@ -1,5 +1,7 @@
 """Tests for Crossref response schema parsing."""
 
+import pytest
+
 
 class TestCrossrefWorkItem:
     def test_minimal_doi_lookup(self):
@@ -56,6 +58,20 @@ class TestCrossrefWorkItem:
         assert item.year == 2020
         assert item.date == "2020-05-15"
         assert item.api_score == 18.5
+
+    def test_title_and_container_markup_is_dropped(self):
+        """Deposited tags and entities reached bib_match."""
+        from bibr.enrich.schemas import CrossrefWorkItem
+
+        raw = {
+            "title": ["Effects of elevated CO<sub>2</sub> on <i>Drosophila</i>"],
+            "container-title": ["Genes &amp; Development"],
+        }
+        item = CrossrefWorkItem.from_raw(raw)
+        assert (item.title, item.container_title) == (
+            "Effects of elevated CO2 on Drosophila",
+            "Genes & Development",
+        )
 
     def test_empty_title_list(self):
         from bibr.enrich.schemas import CrossrefWorkItem
@@ -211,3 +227,59 @@ class TestCrossrefIdentifiers:
         client._cached = cached
         asyncio.run(client.search("A title"))
         assert {"author", "funder", "license"} <= set(seen["select"].split(","))
+
+
+class TestPlainText:
+    """Deposited title markup, including the pretty-printed layout Crossref
+    returns for JATS deposits (recorded shapes)."""
+
+    @pytest.mark.parametrize(
+        ("deposited", "plain"),
+        [
+            ("Global C\n  <sub>2</sub>\n  H\n  <sub>6</sub>\n  maps", "Global C2H6 maps"),
+            (
+                "CO\n <sub>2</sub>\n and O\n <sub>3</sub>\n on N\n <sub>2</sub>\n O",
+                "CO2 and O3 on N2O",
+            ),
+            ("CO\n <sub>2</sub>\n Emissions", "CO2 Emissions"),
+            ("(PM\n  <sub>2.5</sub>\n  ) collected", "(PM2.5) collected"),
+            ("Prostaglandin E\n  <sub>2</sub>\n  -Dependent", "Prostaglandin E2-Dependent"),
+            ("<scp>COVID</scp>\n  \u201019 and teaching", "COVID\u201019 and teaching"),
+            ("Novel\n  <i>Thermoplasmatota</i>\n  Clades", "Novel Thermoplasmatota Clades"),
+            ("<i>Cis</i>\n  \u2013\n  <i>trans</i>\n  controls", "Cis\u2013trans controls"),
+            ("(\n <i>Gadus morhua</i>\n )", "(Gadus morhua)"),
+            (
+                "<mml:math><mml:msub><mml:mi>H</mml:mi><mml:mn>2</mml:mn></mml:msub></mml:math>O",
+                "H2O",
+            ),
+            ("p < 0.05 &amp; beyond", "p < 0.05 & beyond"),
+            # A comma or period before an element and a "(" after one keep the
+            # deposit's space; the multiplication sign is a word of its own.
+            (
+                "Stink Bug,\n  <i>Halyomorpha halys</i>\n  (St\u00e5l), in orchards",
+                "Stink Bug, Halyomorpha halys (St\u00e5l), in orchards",
+            ),
+            (
+                "<i>Puccinia graminis</i>\n  f. sp.\n  <i>tritici</i>\n  isolates",
+                "Puccinia graminis f. sp. tritici isolates",
+            ),
+            (
+                "grasses (\n  <i>Festuca</i>\n  \u00d7\n  <i>Lolium</i>\n  ) display",
+                "grasses (Festuca \u00d7 Lolium) display",
+            ),
+            (
+                '<mml:math xmlns:mml="http://www.w3.org/1998/Math/MathML">'
+                "<mml:mi>x</mml:mi></mml:math> values",
+                "x values",
+            ),
+            ("x <y and z>", "x <y and z>"),
+            ("Title<br/>Subtitle", "Title Subtitle"),
+            ("Plain title", "Plain title"),
+            ("<i></i>", None),
+            (None, None),
+        ],
+    )
+    def test_plain_text(self, deposited, plain):
+        from bibr.enrich.schemas import plain_text
+
+        assert plain_text(deposited) == plain

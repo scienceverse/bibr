@@ -139,22 +139,33 @@ def test_section_ids_are_positions_in_document_order(demo_paper):
 
 
 def test_a_heading_without_text_keeps_its_place(demo_paper):
-    """A heading whose paragraphs all went to its subsections is numbered
-    where it is printed, even after ``implicit_sections`` moved it to the end
-    of the list with every other section that holds no text."""
+    """A heading with no text of its own is numbered where it is printed: a
+    "Methods" heading whose paragraphs sit in flat subsections stays behind the
+    Abstract and Introduction that ``implicit_sections`` cut from the title's
+    text and inserted after it, though those carry the highest section ids."""
     contents = demo_paper.contents
     root, introduction, results = contents.sections
+    introduction.section_id = 9
+    introduction.header_is_synthetic = True
+    results.section_id = 5
     contents.sections = [
         root,
-        introduction,
         PaperSection(
-            section_id=4,
-            header="Participants",
-            level=2,
+            section_id=1,
+            header="Paper Title",
+            level=1,
             parent_section_id=0,
-            section_type=CanonicalSection.METHODS,
+            section_type=CanonicalSection.TITLE,
         ),
-        results,
+        PaperSection(
+            section_id=8,
+            header="Abstract",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.ABSTRACT,
+            header_is_synthetic=True,
+        ),
+        introduction,
         PaperSection(
             section_id=3,
             header="Methods",
@@ -162,12 +173,20 @@ def test_a_heading_without_text_keeps_its_place(demo_paper):
             parent_section_id=0,
             section_type=CanonicalSection.METHODS,
         ),
+        PaperSection(
+            section_id=4,
+            header="Participants",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.METHODS,
+        ),
+        results,
     ]
-    results.section_id = 5
     contents.sentences = [
-        PaperSentence(text_id=1, text="We ask.", section_id=1, paragraph_id=1),
-        PaperSentence(text_id=2, text="Forty took part.", section_id=4, paragraph_id=2),
-        PaperSentence(text_id=3, text="It replicated.", section_id=5, paragraph_id=3),
+        PaperSentence(text_id=1, text="We summarize.", section_id=8, paragraph_id=1),
+        PaperSentence(text_id=2, text="We ask.", section_id=9, paragraph_id=2),
+        PaperSentence(text_id=3, text="Forty took part.", section_id=4, paragraph_id=3),
+        PaperSentence(text_id=4, text="It replicated.", section_id=5, paragraph_id=4),
     ]
     contents.xrefs = []
     contents.links = []
@@ -176,6 +195,8 @@ def test_a_heading_without_text_keeps_its_place(demo_paper):
     payload = _export_paper_payload(demo_paper)
 
     assert [s["header"] for s in payload["section"]] == [
+        "Paper Title",
+        "Abstract",
         "Introduction",
         "Methods",
         "Participants",

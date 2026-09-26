@@ -10,6 +10,7 @@ standard form unambiguously.
 
 from __future__ import annotations
 
+import calendar
 import re
 
 # ── dates ─────────────────────────────────────────────────────────────
@@ -66,7 +67,11 @@ def _date_from_match(m: re.Match[str]) -> str | None:
     if day is None:
         return f"{year:04d}-{month:02d}"
     day = int(day)
-    return f"{year:04d}-{month:02d}-{day:02d}" if 1 <= day <= 31 else None
+    if not 1 <= day <= calendar.monthrange(year, month)[1]:
+        # An impossible calendar date (an OCR slip or typo like 30 February):
+        # the day is undetermined, but the printed month and year still are.
+        return f"{year:04d}-{month:02d}"
+    return f"{year:04d}-{month:02d}-{day:02d}"
 
 
 def iso_date(printed: str | None) -> str | None:

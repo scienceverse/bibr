@@ -180,6 +180,7 @@ class MetadataExtractor:
         settings: GlobalSettings | None = None,
         classifier_resources: ClassifierResources | None = None,
         front_matter_resolution: FrontMatterResolution | None = None,
+        memory_mode: str | None = None,
     ):
         """
         Initialize the metadata extractor.
@@ -193,6 +194,9 @@ class MetadataExtractor:
                 (``None`` = resolve from Settings).
             ref_parse_strategy: Per-run parse strategy override
                 (``None`` = resolve from Settings).
+            memory_mode: Per-run memory mode (``None`` = resolve from
+                Settings). Reaches the NER reference parser so aggressive
+                mode loads it on CPU.
         """
         from bibr.config import snapshot_settings
 
@@ -213,6 +217,7 @@ class MetadataExtractor:
             seg_strategy=ref_seg_strategy,
             parse_strategy=ref_parse_strategy,
             settings=self._settings,
+            memory_mode=memory_mode,
         )
         core_kwargs = {}
         if settings is not None:

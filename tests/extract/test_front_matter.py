@@ -1428,6 +1428,55 @@ def test_ordinary_within_record_headings_do_not_split_the_block():
     assert issues == ()
 
 
+def test_expected_sici_doi_selects_the_block_that_prints_it_whole():
+    """Wiley SICI DOIs carry ``<...::AID-...>``; a truncated match cannot equal them."""
+
+    module = _front_matter_module()
+    sici = "10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K"
+    contents = _contents(
+        [
+            _paragraph(
+                1,
+                "FIRST GROUNDED ARTICLE TITLE",
+                paragraph_id=1,
+                bbox=(60.0, 100.0, 450.0, 145.0),
+                font_bold=True,
+            ),
+            _paragraph(
+                2,
+                "Article DOI: 10.1234/first.record",
+                paragraph_id=2,
+                bbox=(60.0, 150.0, 450.0, 180.0),
+            ),
+            _paragraph(
+                3,
+                "SECOND GROUNDED ARTICLE TITLE",
+                paragraph_id=3,
+                bbox=(540.0, 100.0, 930.0, 145.0),
+                font_bold=True,
+            ),
+            _paragraph(
+                4,
+                f"Article DOI: {sici}",
+                paragraph_id=4,
+                bbox=(540.0, 150.0, 930.0, 180.0),
+            ),
+        ]
+    )
+
+    resolution, issues = module.resolve_front_matter(
+        contents,
+        expected_identity=ExpectedIdentity(
+            queue_record_id="sici-target", expected_doi=sici, doi_required=True
+        ),
+        target_required=True,
+    )
+
+    assert resolution.selected_block_id == "front-matter-block-2"
+    assert resolution.selection_method == "expected_doi"
+    assert issues == ()
+
+
 def test_unique_expected_doi_and_coordinate_hint_select_a_single_block():
     module = _front_matter_module()
     contents = _contents(

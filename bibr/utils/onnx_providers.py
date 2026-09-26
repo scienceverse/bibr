@@ -65,6 +65,97 @@ def cuda_provider_available() -> bool:
         return False
 
 
+def onnxruntime_gpu_reinstall_command(
+    version: str, *, uv: str | None = "uv", python: str | None = None
+) -> list[str]:
+    """The command that makes ``onnxruntime-gpu`` ``version`` the build that loads.
+
+    The core ``onnxruntime`` dependency and the ``gpu`` extra's
+    ``onnxruntime-gpu`` are separate distributions that write the same
+    ``onnxruntime/`` directory, so the build that loads is whichever wheel's
+    files were written last. Reinstalling ``onnxruntime-gpu`` rewrites all of
+    them from the GPU wheel. ``onnxruntime`` stays installed: ``uv run``
+    reinstalls a missing one, and its files would replace the GPU build's.
+    ``uv=None`` gives the pip form, for environments pip manages.
+    """
+    python = python or sys.executable
+    if uv:
+        return [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            python,
+            "--reinstall-package",
+            "onnxruntime-gpu",
+            f"onnxruntime-gpu[cuda,cudnn]=={version}",
+        ]
+    return [
+        python,
+        "-m",
+        "pip",
+        "install",
+        "--force-reinstall",
+        "--no-deps",
+        f"onnxruntime-gpu=={version}",
+    ]
+
+
+_gpu_build_check_lock = threading.Lock()
+_gpu_build_shadowed: bool | None = None
+
+
+def _cpu_build_shadows_gpu(available: set[str]) -> bool:
+    """True when ``onnxruntime-gpu`` is installed but the CPU build is the one loaded.
+
+    ``available`` is ``ort.get_available_providers()``, and only the GPU
+    build's binary registers ``CUDAExecutionProvider``. Without it, both
+    distributions installed means the CPU wheel's files won: installing both
+    in one step races, and reinstalling ``onnxruntime`` later writes its files
+    over the GPU build's. Every ONNX model then runs on CPU. The loaded build
+    cannot change within a process, so this is checked once; finding it logs
+    a warning with the command that repairs it.
+    """
+    global _gpu_build_shadowed
+    with _gpu_build_check_lock:
+        if _gpu_build_shadowed is None:
+            builds = None if "CUDAExecutionProvider" in available else _installed_builds()
+            _gpu_build_shadowed = builds is not None
+            if builds is not None:
+                import shlex
+
+                cpu_version, gpu_version, installer = builds
+                command = onnxruntime_gpu_reinstall_command(
+                    gpu_version, uv="uv" if installer == "uv" else None
+                )
+                logger.warning(
+                    "onnxruntime %s and onnxruntime-gpu %s are both installed, and the CPU "
+                    "build is the one loaded: the two share the onnxruntime/ directory and "
+                    "the CPU wheel's files are the ones on disk, so ONNX models run on CPU. "
+                    "To load the GPU build, reinstall it so its files are written last: %s",
+                    cpu_version,
+                    gpu_version,
+                    shlex.join(command),
+                )
+        return _gpu_build_shadowed
+
+
+def _installed_builds() -> tuple[str, str, str] | None:
+    """``(onnxruntime version, onnxruntime-gpu version, onnxruntime-gpu installer)``
+    when both distributions are installed, else ``None``."""
+    from importlib import metadata
+
+    try:
+        cpu_version = metadata.version("onnxruntime")
+        gpu = metadata.distribution("onnxruntime-gpu")
+        return cpu_version, gpu.version, (gpu.read_text("INSTALLER") or "").strip()
+    except metadata.PackageNotFoundError:
+        return None
+    except Exception as exc:  # noqa: BLE001 — unreadable metadata must not break ORT setup
+        logger.debug("Could not read the installed onnxruntime distributions: %s", exc)
+        return None
+
+
 def get_ort_providers(
     *,
     enable_cuda: bool = True,
@@ -109,7 +200,11 @@ def get_ort_providers(
 
     providers.append("CPUExecutionProvider")
 
-    if enable_cuda and "CUDAExecutionProvider" not in available:
+    # Checked whether or not this chain asks for CUDA: the segmenter asks for
+    # CPU when cuda_provider_available() finds no CUDA EP, and a shadowed GPU
+    # build is one reason it finds none.
+    shadowed = _cpu_build_shadows_gpu(available)
+    if enable_cuda and "CUDAExecutionProvider" not in available and not shadowed:
         # Only consult a torch that is *already* loaded: the ONNX path must not
         # import torch just to phrase this warning (and a core install has none).
         torch = sys.modules.get("torch")
@@ -117,8 +212,8 @@ def get_ort_providers(
             if torch is not None and torch.cuda.is_available():
                 logger.warning(
                     "CUDA GPU detected but onnxruntime-gpu is not installed — "
-                    "%s will run on CPU. Install with: "
-                    "uv pip install 'onnxruntime-gpu[cuda,cudnn]'",
+                    "%s will run on CPU. Install the gpu extra as described at "
+                    "https://bibr.org/getting-started/install/#gpu-onnx-runtime",
                     model_name or "model",
                 )
         except Exception as exc:  # noqa: BLE001 — a broken torch must not break ORT setup
@@ -158,6 +253,50 @@ def session_device(
     return device
 
 
+_ARENA_SHRINKAGE = "memory.enable_memory_arena_shrinkage"
+
+
+class _ArenaShrinkingSession:
+    """A CUDA session whose every run frees the arena memory it no longer uses.
+
+    Everything but ``run`` passes through to the wrapped ``InferenceSession``.
+    """
+
+    def __init__(self, session, run_options) -> None:
+        self._session = session
+        self._run_options = run_options
+
+    def run(self, output_names, input_feed, run_options=None):
+        return self._session.run(output_names, input_feed, run_options or self._run_options)
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+
+def shrink_arena_after_runs(session):
+    """Make each run of a CUDA ``session`` give the memory it no longer uses back to CUDA.
+
+    ORT's CUDA arena keeps every block it allocates, and bibr grows it by
+    exactly the size a run asks for (``kSameAsRequested``). Input shapes change
+    from call to call (page batches, reference and header lengths), so new
+    shapes keep asking for blocks that no free one fits, and over a batch of
+    papers the arenas grow until the GPU is full. A ``gpu_mem_limit`` only turns
+    that into an earlier allocation failure. With
+    ``memory.enable_memory_arena_shrinkage`` each run ends by freeing the
+    arena regions nothing uses any more, so the arena holds the weights and
+    what the runs in flight need. A session that is not on CUDA comes back
+    unchanged.
+    """
+    if selected_device(session.get_providers()) != "cuda":
+        return session
+    import onnxruntime as ort
+
+    cuda_options = session.get_provider_options().get("CUDAExecutionProvider", {})
+    run_options = ort.RunOptions()
+    run_options.add_run_config_entry(_ARENA_SHRINKAGE, f"gpu:{cuda_options.get('device_id', '0')}")
+    return _ArenaShrinkingSession(session, run_options)
+
+
 def enable_cuda_for(device: str | None) -> bool:
     """Map a torch-style device request onto the CUDA provider switch.
 
@@ -170,19 +309,46 @@ def enable_cuda_for(device: str | None) -> bool:
     return str(device).split(":", 1)[0].strip().lower() != "cpu"
 
 
+def cpu_ort_session_options():
+    """``SessionOptions`` with ORT's CPU memory arena disabled, if available.
+
+    The CPU arena keeps its peak allocation for the life of the session
+    (audit-measured: layout ~5 GB at batch 8, SaT ~2.8 GB after one paper),
+    so CPU-only sessions for those models opt out and return freed blocks to
+    the OS. Returns ``None`` when onnxruntime cannot be imported, so callers
+    that build ``ort_kwargs`` for wtpsplit's ``SaT`` can skip the option.
+    """
+    try:
+        import onnxruntime as ort
+    except ImportError:
+        return None
+    options = ort.SessionOptions()
+    options.enable_cpu_mem_arena = False
+    return options
+
+
 def create_session(
     model_path: str | Path,
     *,
     device: str | None = None,
     model_name: str = "",
     gpu_mem_limit: int | None = None,
+    disable_cpu_arena: bool = False,
 ):
     """Open an ``InferenceSession`` on ``model_path`` and report its device.
 
     Returns ``(session, device)`` where ``device`` is ``"cuda"`` or ``"cpu"``,
-    the one the session got (see :func:`session_device`). Graph
-    optimisations are left at ORT's default (all), which is what the
-    wtpsplit segmenter already runs with.
+    the one the session got (see :func:`session_device`). A CUDA session comes
+    back wrapped by :func:`shrink_arena_after_runs`. Graph optimisations are
+    left at ORT's default (all), which is what the wtpsplit segmenter already
+    runs with.
+
+    ``disable_cpu_arena`` opts a CPU-only session out of ORT's CPU memory
+    arena (see :func:`cpu_ort_session_options`). It is a no-op for sessions
+    whose provider chain includes CUDA: the CUDA EP has its own arena
+    (``kSameAsRequested`` plus per-run shrinkage) and disabling the CPU arena
+    there is unverified. Only pass it for models where the arena cost was
+    measured (layout, SaT), not blindly for every model.
     """
     try:
         import onnxruntime as ort
@@ -198,5 +364,8 @@ def create_session(
     )
     options = ort.SessionOptions()
     options.log_severity_level = 3  # errors only; ORT's warnings are noisy at load
+    if disable_cpu_arena and selected_device(providers) != "cuda":
+        options.enable_cpu_mem_arena = False
     session = ort.InferenceSession(str(model_path), sess_options=options, providers=providers)
-    return session, session_device(session, providers, model_name=model_name)
+    device = session_device(session, providers, model_name=model_name)
+    return shrink_arena_after_runs(session), device

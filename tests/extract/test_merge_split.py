@@ -270,6 +270,39 @@ def test_numbered_singles_do_not_split():
         assert find_interior_onsets(s) == [], f"false split on numbered single: {s[:60]}..."
 
 
+# Edition numbers printed before the edition word ("2. Aufl.") that happen to
+# equal the next entry number.
+NUMBERED_EDITION_BIBLIOGRAPHY = [
+    "1. Müller A. Lehrbuch der Inneren Medizin. 2. Aufl. Stuttgart: Thieme; 2019.",
+    "2. Schmidt B. Kardiologie. Berlin: Springer; 2018.",
+    "3. Weber C. Pharmakologie. 4. Auflage. München: Elsevier; 2017.",
+    "4. Meyer D. Chirurgie. Köln: Deutscher Ärzteverlag; 2016.",
+    "5. Hansen E. Klinisk farmakologi. 6. udg. København: Munksgaard; 2015.",
+    "6. Silva F. Farmacologia clínica. 7. ed. São Paulo: Atlas; 2014.",
+]
+
+
+def test_numbered_edition_markers_do_not_split():
+    out, n_new = split_merged_refs(NUMBERED_EDITION_BIBLIOGRAPHY)
+
+    assert out == NUMBERED_EDITION_BIBLIOGRAPHY
+    assert n_new == 0
+
+
+def test_numbered_merge_with_next_author_named_like_an_edition_word_still_splits():
+    merged = (
+        "1. Müller A. Lehrbuch. Stuttgart: Thieme; 2019. 2. Edwards J. Cardiology. Lancet; 2018."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "1. Müller A. Lehrbuch. Stuttgart: Thieme; 2019.",
+        "2. Edwards J. Cardiology. Lancet; 2018.",
+    ]
+
+
 def test_numbered_bibliography_does_not_split_journal_year_tails():
     candidates = detect_merges(NUMBERED_VANCOUVER_SINGLES)
     out, n_new = split_merged_refs(NUMBERED_VANCOUVER_SINGLES)
@@ -312,6 +345,84 @@ def test_in_title_citation_single_does_not_split():
     # a single ref whose title cites "(Author Year)" must NOT be split
     for s in INTITLE_SINGLES:
         assert find_interior_onsets(s) == [], f"false split on in-title cite: {s[:70]}..."
+
+
+# A Title Case title that opens right after the reference's own date and cites
+# another work. Nothing separates the two dates, so there is no reference 1
+# title between them and the second date cannot start a new reference.
+N_INTITLE_TITLE_CASE = [
+    (
+        "Brown, T. (2018). Beyond Kahneman and Tversky (1979): Prospect Theory Today. "
+        "Econ Review, 5, 1-20."
+    ),
+    "Jones, K. (2021). Why Smith (2019) was wrong. Journal of Things, 3, 4-5.",
+    # eLife HTML reference list item (the authors carry no punctuation)
+    (
+        "Thomas DR Zumbo BD Kwan E Schweitzer L (2014) On Johnson's (2000) relative "
+        "weights method for assessing variable importance: A reanalysis Multivariate "
+        "Behavioral Research 49:329–338."
+    ),
+]
+
+
+def test_title_case_in_title_citation_does_not_split():
+    for s in N_INTITLE_TITLE_CASE:
+        assert find_interior_onsets(s) == [], f"false split on in-title cite: {s[:70]}..."
+    out, n_new = split_merged_refs(N_INTITLE_TITLE_CASE)
+    assert out == N_INTITLE_TITLE_CASE
+    assert n_new == 0
+
+
+def test_merge_whose_second_title_cites_a_work_splits_once():
+    merged = (
+        "Adams, A. (2017). Loss aversion revisited. Econ Letters, 4, 1-9. "
+        "Brown, T. (2018). Beyond Kahneman and Tversky (1979): Prospect Theory Today. "
+        "Econ Review, 5, 1-20."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "Adams, A. (2017). Loss aversion revisited. Econ Letters, 4, 1-9.",
+        "Brown, T. (2018). Beyond Kahneman and Tversky (1979): Prospect Theory Today. "
+        "Econ Review, 5, 1-20.",
+    ]
+
+
+def test_merge_after_a_title_ending_in_a_date_still_splits():
+    # Reference 1's title ends in its own parenthesized date, so the next
+    # reference's lead follows a date with no letters in between. The title
+    # guard measures from the date that opened reference 1, not that one.
+    merged = (
+        "Smith, J. (2001). Estimates of the population census (2000). "
+        "Jones, K. (2002). Other title. Journal, 3, 1-5."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "Smith, J. (2001). Estimates of the population census (2000).",
+        "Jones, K. (2002). Other title. Journal, 3, 1-5.",
+    ]
+
+
+def test_title_case_title_ending_in_a_date_splits_only_at_the_next_reference():
+    # "Proceedings of the CHI Conference" reads as an author lead before its
+    # "(2015)", but it opens right after reference 1's own date.
+    merged = (
+        "Lee, K. (2015). Proceedings of the CHI Conference (2015). "
+        "Park, S. (2016). Interfaces. HCI, 2, 3-4."
+    )
+
+    out, n_new = split_merged_refs([merged])
+
+    assert n_new == 1
+    assert out == [
+        "Lee, K. (2015). Proceedings of the CHI Conference (2015).",
+        "Park, S. (2016). Interfaces. HCI, 2, 3-4.",
+    ]
 
 
 def test_real_merge_with_citation_verb_in_title_still_splits():

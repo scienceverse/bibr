@@ -7,7 +7,10 @@ callback, and the end-to-end export surface an external gate reads
 """
 
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from bibr.export.qualification_provenance import (
     DeploymentIdentity,
@@ -197,6 +200,57 @@ class TestAggregator:
             identity=_identity(),
         )
         assert prov["protocol_hashes"] == hashes
+
+
+class TestNuExtractIdentityFallback:
+    """The expected pins are the FP8 repo's; no other deployment inherits them."""
+
+    @staticmethod
+    def _provenance(model, *, backend="nuextract-native", revision=None, jinja=None):
+        from bibr.config import snapshot_settings
+        from bibr.pipeline.stages.post_parse import _build_qualification_provenance
+
+        settings = snapshot_settings()
+        settings.llm.model = model
+        settings.llm.model_revision = revision
+        settings.llm.jinja_sha256 = jinja
+        return _build_qualification_provenance(
+            SimpleNamespace(resolved_structured_backend=backend),
+            settings,
+            usage_by_label={("extract_title_keywords", "openai", model): _native_bucket()},
+            protocol_hashes={},
+        )
+
+    @pytest.mark.parametrize("backend", ["nuextract-native", "instructor"])
+    @pytest.mark.parametrize("model", ["numind/NuExtract3-FP8", "numind/nuextract3-fp8"])
+    def test_the_fp8_repo_reports_the_expected_pins(self, model, backend):
+        from bibr.clients.nuextract import (
+            NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256,
+            NUEXTRACT3_FP8_EXPECTED_REVISION,
+        )
+
+        prov = self._provenance(model, backend=backend)
+        assert prov["model_revision"] == NUEXTRACT3_FP8_EXPECTED_REVISION
+        assert prov["jinja_sha256"] == NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256
+
+    @pytest.mark.parametrize("backend", ["nuextract-native", "instructor"])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "numind/NuExtract3",
+            "numind/NuExtract3-GGUF:Q4_K_M",
+            "numind/NuExtract3-mlx-8bits",
+            "nuextract3",
+        ],
+    )
+    def test_other_nuextract3_deployments_report_only_what_they_declare(self, model, backend):
+        prov = self._provenance(model, backend=backend)
+        assert prov["model_revision"] is None
+        assert prov["jinja_sha256"] is None
+
+        declared = self._provenance(model, backend=backend, revision="2e9fca82", jinja="c" * 64)
+        assert declared["model_revision"] == "2e9fca82"
+        assert declared["jinja_sha256"] == "c" * 64
 
 
 class TestProtocolHashAccumulator:

@@ -174,15 +174,18 @@ USER bibr
 
 # Pre-download models as bibr — files land owned by bibr so no chown is
 # needed (which would otherwise duplicate the multi-GB cache layer).
-# Pinned to the commit bibr loads at runtime (LayoutOptions.model_revision),
-# so a hub push cannot change what the image serves.
+# Pinned to the checkpoint and commit bibr loads at runtime
+# (LayoutOptions.model_id / model_revision), so a hub push cannot change what
+# the image serves.
+ARG LAYOUT_MODEL_ID=PaddlePaddle/PP-DocLayoutV3_safetensors
 ARG LAYOUT_MODEL_REVISION=97d101e6db2642e162a1d05392d1b0231c91033e
+ENV LAYOUT_MODEL_ID=${LAYOUT_MODEL_ID}
 ENV LAYOUT_MODEL_REVISION=${LAYOUT_MODEL_REVISION}
 RUN python -c "\
 from transformers import AutoModelForObjectDetection, AutoImageProcessor; \
-AutoModelForObjectDetection.from_pretrained('PaddlePaddle/PP-DocLayoutV3_safetensors', revision='${LAYOUT_MODEL_REVISION}'); \
-AutoImageProcessor.from_pretrained('PaddlePaddle/PP-DocLayoutV3_safetensors', revision='${LAYOUT_MODEL_REVISION}'); \
-print('PP-DocLayoutV3 safetensors cached')"
+AutoModelForObjectDetection.from_pretrained('${LAYOUT_MODEL_ID}', revision='${LAYOUT_MODEL_REVISION}'); \
+AutoImageProcessor.from_pretrained('${LAYOUT_MODEL_ID}', revision='${LAYOUT_MODEL_REVISION}'); \
+print('${LAYOUT_MODEL_ID} cached')"
 
 # This is the torch image: it carries the full PyTorch stack precisely so serve
 # can use torch.compile on layout, so it pins ML_RUNTIME rather than letting

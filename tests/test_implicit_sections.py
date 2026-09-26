@@ -1545,6 +1545,27 @@ class TestBoundedPositionalAbstract:
         assert sentences[0].section_id == abstract.section_id
         assert sentences[2].section_id == title.section_id
 
+    def test_sliced_parse_takes_only_the_first_processed_page(self):
+        """Under ``--pages 5-9`` the first page the parse saw is page 5; title
+        text on the next page is not abstract."""
+        title = PaperSection(1, "Paper Title", 1, 0, CanonicalSection.UNKNOWN)
+        methods = PaperSection(2, "Methods", 1, 0, CanonicalSection.METHODS)
+        sentences = [
+            PaperSentence(1, "Bounded abstract prose.", 1, 1, page_number=5),
+            PaperSentence(2, "Running text on the next page.", 1, 2, page_number=6),
+            PaperSentence(3, "The study sampled 50 people.", 2, 3, page_number=6),
+        ]
+        contents = _make_contents([title, methods], sentences)
+
+        _apply_positional_abstract_fallback(contents)
+
+        abstract = next(s for s in contents.sections if s.section_type == CanonicalSection.ABSTRACT)
+        assert [s.section_id for s in sentences] == [
+            abstract.section_id,
+            title.section_id,
+            methods.section_id,
+        ]
+
     def test_bloated_abstract_is_retained_with_source_warning(self, caplog):
         abstract = PaperSection(1, "Abstract", 1, 0, CanonicalSection.ABSTRACT)
         intro = PaperSection(2, "Introduction", 1, 0, CanonicalSection.INTRODUCTION)
@@ -1561,3 +1582,149 @@ class TestBoundedPositionalAbstract:
         assert contents.sections_text[1] == f"{'A' * 1800} {'B' * 1800}"
         assert "section_id=1" in caplog.text
         assert "text_ids=(1, 2)" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Implicit sections leave the list in document order for the sanity pass
+# ---------------------------------------------------------------------------
+
+
+def _normalize(contents: PaperContents) -> None:
+    """Run post-parse normalization: implicit detection, then both enforce_* passes."""
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.stages.post_parse import _normalize_section_structure
+
+    class _Client:
+        def _cap_input(self, text):
+            return text
+
+        async def close(self):
+            pass
+
+    asyncio.run(
+        _normalize_section_structure(
+            contents,
+            False,
+            _Client(),
+            "hash",
+            settings=GlobalSettings(),
+        )
+    )
+
+
+class TestSectionsStayInDocumentOrder:
+    def test_implicit_sections_leave_empty_parent_headings_in_place(self):
+        """Headings without prose of their own (the root, the emptied title,
+        numbered parents) used to sort behind References; the sanity pass then
+        saw Methods/Results after References and reset it to UNKNOWN."""
+        sections = [
+            PaperSection(0, "", 0, None),
+            PaperSection(1, "Paper Title", 1, 0, CanonicalSection.TITLE, 1.0, "title"),
+            PaperSection(2, "2 Method", 1, 0, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(3, "2.1 Participants", 2, 2, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(4, "3 Results", 1, 0, CanonicalSection.RESULTS, 1.0, "exact_alias"),
+            PaperSection(5, "3.1 Main effect", 2, 4, CanonicalSection.UNKNOWN),
+            PaperSection(6, "4 Discussion", 1, 0, CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+            PaperSection(7, "References", 1, 0, CanonicalSection.REFERENCES, 1.0, "exact_alias"),
+            PaperSection(10, "Appendix", 1, 0, CanonicalSection.APPENDIX, 1.0, "exact_alias"),
+        ]
+        sentences = [
+            PaperSentence(1, "Summary sentence one.", 1, 1, page_number=1),
+            PaperSentence(2, "Summary sentence two.", 1, 1, page_number=1),
+            PaperSentence(3, "Background prose one.", 1, 2, page_number=1),
+            PaperSentence(4, "Background prose two.", 1, 2, page_number=1),
+            PaperSentence(5, "We recruited 40 adults.", 3, 3, page_number=2),
+            PaperSentence(6, "The effect was large.", 5, 4, page_number=3),
+            PaperSentence(7, "We discuss it.", 6, 5, page_number=4),
+            PaperSentence(8, "Smith, J. (2020).", 7, 6, page_number=5),
+            PaperSentence(9, "Extra tables.", 10, 7, page_number=6),
+        ]
+        contents = _make_contents(sections, sentences)
+        result = FrontMatterResult(
+            segments=[
+                FrontMatterSegment(first_text_id=1, section_type="abstract"),
+                FrontMatterSegment(first_text_id=3, section_type="intro"),
+            ]
+        )
+
+        with patch(
+            "bibr.structure.implicit_sections._detect_via_llm",
+            new=AsyncMock(return_value=result),
+        ):
+            _normalize(contents)
+
+        assert [(s.section_id, s.header, s.section_type) for s in contents.sections] == [
+            (0, "", CanonicalSection.UNKNOWN),
+            (1, "Paper Title", CanonicalSection.TITLE),
+            (11, "Abstract", CanonicalSection.ABSTRACT),
+            (12, "Introduction", CanonicalSection.INTRODUCTION),
+            (2, "2 Method", CanonicalSection.METHODS),
+            (3, "2.1 Participants", CanonicalSection.METHODS),
+            (4, "3 Results", CanonicalSection.RESULTS),
+            (5, "3.1 Main effect", CanonicalSection.UNKNOWN),
+            (6, "4 Discussion", CanonicalSection.DISCUSSION),
+            (7, "References", CanonicalSection.REFERENCES),
+            (10, "Appendix", CanonicalSection.APPENDIX),
+        ]
+        references = next(s for s in contents.sections if s.section_id == 7)
+        assert references.classification_score == 1.0
+
+    def test_synthesized_sections_go_before_an_empty_heading_after_the_title(self):
+        """A "Method" heading with no prose of its own and flat subsections
+        stays behind the Abstract and Introduction cut from the title's text;
+        ahead of them, the sanity pass would read the Abstract as coming after
+        the Methods and reset it."""
+        sections = [
+            PaperSection(0, "", 0, None),
+            PaperSection(1, "Paper Title", 1, 0, CanonicalSection.TITLE, 1.0, "title"),
+            PaperSection(2, "Method", 1, 0, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(3, "Participants", 1, 0, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(4, "Procedure", 1, 0, CanonicalSection.METHODS, 1.0, "exact_alias"),
+            PaperSection(5, "Results", 1, 0, CanonicalSection.RESULTS, 1.0, "exact_alias"),
+            PaperSection(6, "Discussion", 1, 0, CanonicalSection.DISCUSSION, 1.0, "exact_alias"),
+            PaperSection(7, "References", 1, 0, CanonicalSection.REFERENCES, 1.0, "exact_alias"),
+        ]
+        sentences = [
+            PaperSentence(1, "Summary sentence one.", 1, 1, page_number=1),
+            PaperSentence(2, "Summary sentence two.", 1, 1, page_number=1),
+            PaperSentence(3, "Background prose one.", 1, 2, page_number=1),
+            PaperSentence(4, "Background prose two.", 1, 2, page_number=1),
+            PaperSentence(5, "We recruited 40 adults.", 3, 3, page_number=2),
+            PaperSentence(6, "They read a vignette.", 4, 4, page_number=2),
+            PaperSentence(7, "The effect was null.", 5, 5, page_number=3),
+            PaperSentence(8, "We discuss it.", 6, 6, page_number=3),
+            PaperSentence(9, "Smith, J. (2020).", 7, 7, page_number=4),
+        ]
+        contents = _make_contents(sections, sentences)
+        result = FrontMatterResult(
+            segments=[
+                FrontMatterSegment(first_text_id=1, section_type="abstract"),
+                FrontMatterSegment(first_text_id=3, section_type="intro"),
+            ]
+        )
+
+        with patch(
+            "bibr.structure.implicit_sections._detect_via_llm",
+            new=AsyncMock(return_value=result),
+        ):
+            _normalize(contents)
+
+        assert [(s.section_id, s.header) for s in contents.sections] == [
+            (0, ""),
+            (1, "Paper Title"),
+            (8, "Abstract"),
+            (9, "Introduction"),
+            (2, "Method"),
+            (3, "Participants"),
+            (4, "Procedure"),
+            (5, "Results"),
+            (6, "Discussion"),
+            (7, "References"),
+        ]
+        abstract = contents.sections[2]
+        assert (
+            abstract.section_type,
+            abstract.classification_source,
+            abstract.classification_score > 0,
+        ) == (CanonicalSection.ABSTRACT, "implicit", True)
+        assert {s.section_id for s in sentences[:2]} == {8}

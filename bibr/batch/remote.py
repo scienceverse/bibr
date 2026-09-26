@@ -15,9 +15,17 @@ Backpressure and failure policy (mirrors the bibr-training campaign script):
 * **5xx / connection errors / an upstream OCR-LLM outage** reported by a
   failed job are *transient*: in-flight shrinks by one, the paper is retried
   with backoff up to ``--retries`` times, and the last transient code is
-  recorded if it never recovers.
+  recorded if it never recovers (resume runs it again by default).
+* A job the serve failed with **504** ran out of its ``PIPELINE_TIMEOUT``: the
+  serve is up, the paper was too slow. It is retried once (contention can
+  starve a paper) without shrinking in-flight, then recorded as
+  ``pipeline_timeout``.
+* A finished result that fails to download (a reset connection, a 5xx, or a
+  409 "not finished") is re-fetched from the same job with backoff, up to
+  ``MAX_FETCH_ERRORS`` times, before the paper is re-submitted from scratch.
 * **4xx** is a property of the request (rejected upload, bad option): failed
-  at once, no retry. 401/403 stops the whole run — every paper would fail.
+  at once, no retry. 401/403 stops the whole run — every paper would fail —
+  and resume runs the papers it failed again by default.
 * Every success grows in-flight by one, back toward ``--max-concurrency``.
 * Ctrl-C stops submitting, waits ``grace`` seconds for in-flight jobs, then
   records the rest as ``failed`` / ``interrupted`` (re-run by default).
@@ -26,6 +34,7 @@ Backpressure and failure policy (mirrors the bibr-training campaign script):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -37,8 +46,14 @@ from typing import Any
 
 import httpx
 
-from bibr.batch.ledger import INTERRUPTED, Outcome, bounded_text, utc_now_iso
-from bibr.batch.manifest import BatchItem, sha256_file
+from bibr.batch.ledger import (
+    INTERRUPTED,
+    UPSTREAM_UNAVAILABLE,
+    Outcome,
+    bounded_text,
+    utc_now_iso,
+)
+from bibr.batch.manifest import BatchItem
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +69,15 @@ TRANSIENT_MARKERS = (
     "llm server",
     "unreachable",
     "upstream",
-    "timed out",
     "connection",
     "temporarily unavailable",
 )
+# The serve's ``PIPELINE_TIMEOUT`` fails a job with 504: the paper was too slow.
+PIPELINE_TIMEOUT = "pipeline_timeout"
 MAX_POLL_ERRORS = 5
+# A finished result that fails to download is fetched again from the same
+# job before the paper is re-submitted from scratch.
+MAX_FETCH_ERRORS = 3
 MAX_POLL_INTERVAL = 15.0
 MIME_TYPES = {
     ".pdf": "application/pdf",
@@ -162,9 +181,19 @@ class RemoteOptions:
     submit_wait_budget: float = 3600.0
     grace: float = 30.0
     form: dict[str, str] = field(default_factory=dict)
+    allow_insecure_http: bool = False
 
     def __post_init__(self) -> None:
         self.serve_url = self.serve_url.rstrip("/")
+        if self.token and not self.allow_insecure_http:
+            from bibr.utils.hosts import refuse_public_plaintext
+
+            # Every submit and poll carries the bearer token.
+            refuse_public_plaintext(
+                self.serve_url,
+                credential="serve bearer token",
+                opt_out="pass --allow-insecure-http",
+            )
         self.min_concurrency = max(1, self.min_concurrency)
         self.max_concurrency = max(self.min_concurrency, self.max_concurrency)
         self.concurrency = min(max(self.concurrency, self.min_concurrency), self.max_concurrency)
@@ -286,8 +315,9 @@ class RemoteExecutor:
         t0 = self._clock()
         retries_used = 0
         last_transient: TransientError | None = None
+        timeout_retried = False
         try:
-            sha256 = sha256_file(item.path)
+            # One read: the hash comes from the bytes already in hand.
             data = item.path.read_bytes()
         except OSError as exc:
             return self._finish(
@@ -298,6 +328,7 @@ class RemoteExecutor:
                 size=None,
                 retries=0,
             )
+        sha256 = hashlib.sha256(data).hexdigest()
         size = len(data)
 
         for attempt in range(self.options.retries + 1):
@@ -322,6 +353,19 @@ class RemoteExecutor:
                 await self._sleep(self._backoff(attempt))
                 continue
             except PermanentError as exc:
+                if (
+                    exc.code == PIPELINE_TIMEOUT
+                    and not timeout_retried
+                    and attempt < self.options.retries
+                ):
+                    # Once more: a paper can time out only because the serve's
+                    # OCR/LLM were shared with other jobs. Not backpressure,
+                    # so in-flight stays; a second timeout is the paper's.
+                    timeout_retried = True
+                    retries_used += 1
+                    logger.warning("%s: %s; retrying once", item.paper_id, exc.detail[:120])
+                    await self._sleep(self._backoff(attempt))
+                    continue
                 outcome = Outcome(
                     "failed",
                     error_code=exc.code,
@@ -399,8 +443,16 @@ class RemoteExecutor:
             text = result.text
         except httpx.HTTPError:
             pass
+        if http_status == 504:
+            raise PermanentError(
+                PIPELINE_TIMEOUT,
+                message,
+                http_status=http_status,
+                failed_stage=error.get("failed_stage"),
+                job_id=job_id,
+            )
         if http_status in TRANSIENT_HTTP or looks_transient(f"{message} {text}"):
-            raise TransientError("upstream_unavailable", message, job_id=job_id)
+            raise TransientError(UPSTREAM_UNAVAILABLE, message, job_id=job_id)
         raise PermanentError(
             str(code) if code else f"job_failed_{http_status or 'unknown'}",
             message,
@@ -502,31 +554,48 @@ class RemoteExecutor:
         )
 
     async def _fetch_result(self, client: httpx.AsyncClient, job_id: str) -> dict[str, Any]:
-        try:
-            response = await client.get(f"/papers/jobs/{job_id}/result", timeout=600.0)
-        except httpx.TransportError as exc:
-            raise TransientError(
-                "connection_error", f"{type(exc).__name__}: {exc}", job_id=job_id
-            ) from exc
-        status = response.status_code
-        if status >= 500 or status == 409:
-            raise TransientError(
-                f"http_{status}", bounded_text(response.text, 300) or "", job_id=job_id
-            )
-        if status != 200:
-            raise PermanentError(
-                f"http_{status}",
-                bounded_text(response.text, 500) or "",
-                http_status=status,
-                job_id=job_id,
-            )
-        try:
-            export = response.json()
-        except ValueError:
-            raise PermanentError("bad_result_json", "result is not JSON", job_id=job_id) from None
-        if not isinstance(export, dict):
-            raise PermanentError("bad_result_json", "result is not a JSON object", job_id=job_id)
-        return export
+        # Transient download failures retry against the same job: the result
+        # is already computed, so only a persistently failing fetch falls
+        # back to a full re-submit via TransientError.
+        errors = 0
+        while True:
+            try:
+                response = await client.get(f"/papers/jobs/{job_id}/result", timeout=600.0)
+            except httpx.TransportError as exc:
+                errors += 1
+                if errors > MAX_FETCH_ERRORS:
+                    raise TransientError(
+                        "connection_error", f"{type(exc).__name__}: {exc}", job_id=job_id
+                    ) from exc
+                await self._sleep(self._backoff(errors - 1))
+                continue
+            status = response.status_code
+            if status >= 500 or status == 409:
+                errors += 1
+                if errors > MAX_FETCH_ERRORS:
+                    raise TransientError(
+                        f"http_{status}", bounded_text(response.text, 300) or "", job_id=job_id
+                    )
+                await self._sleep(self._backoff(errors - 1))
+                continue
+            if status != 200:
+                raise PermanentError(
+                    f"http_{status}",
+                    bounded_text(response.text, 500) or "",
+                    http_status=status,
+                    job_id=job_id,
+                )
+            try:
+                export = response.json()
+            except ValueError:
+                raise PermanentError(
+                    "bad_result_json", "result is not JSON", job_id=job_id
+                ) from None
+            if not isinstance(export, dict):
+                raise PermanentError(
+                    "bad_result_json", "result is not a JSON object", job_id=job_id
+                )
+            return export
 
     # -- the run ---------------------------------------------------------
 

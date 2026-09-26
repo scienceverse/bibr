@@ -124,8 +124,13 @@ model more VRAM. Add it later with:
 
 ```powershell
 uv sync --extra all --extra gpu
-uv pip install "onnxruntime-gpu[cuda,cudnn]"
+uv pip install --reinstall-package onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"
 ```
+
+`uv sync` also installs the CPU `onnxruntime` package, and the two write the
+same `onnxruntime` folder, so either can end up loaded. The second command
+writes the GPU package's files last. Keep `--extra gpu` on every later
+`uv sync`; see [GPU ONNX Runtime](getting-started/install.md#gpu-onnx-runtime).
 
 ### 3. Configure the recommended hybrid setup
 
@@ -385,7 +390,9 @@ uv run bibr doctor
 ```
 
 The `.env` file is not touched by an update. Repeat any hardware extras you
-installed, for example `uv sync --extra all --extra vllm` on Linux/CUDA.
+installed, for example `uv sync --extra all --extra vllm` on Linux/CUDA. With
+`--extra gpu`, run the `onnxruntime-gpu` reinstall from
+[GPU ONNX Runtime](getting-started/install.md#gpu-onnx-runtime) again afterwards.
 
 ## Reporting issues
 

@@ -51,6 +51,12 @@ machine is too weak but privacy still matters, use the private-server path:
 run the Docker OCR/API stack on a GPU machine and point your laptop's `.env`
 at that server.
 
+Re-running `bibr setup` merges into an existing `.env` by default and keeps
+values it does not ask about. When you choose an LLM provider, it also writes
+`LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
+entered none, so that a key or server left by an earlier setup, in `./.env`
+or `~/.bibr/.env`, cannot override the one you entered.
+
 ## Namespaces
 
 There's no global `BIBR_` prefix. Instead, each settings group has its own
@@ -103,6 +109,14 @@ bibr chew paper.pdf --ocr glm-http --ocr-url https://ocr.example.org
 
 Remote OCR requires HTTPS by default. For a trusted private network without
 TLS, explicitly set `OCR_ALLOW_INSECURE_HTTP=true`; loopback HTTP is allowed.
+
+An `LLM_BASE_URL` (or `OCR_VISION_BASE_URL`) that receives an API key may use
+plain `http://` for loopback and private-network hosts — a local vLLM or
+Ollama, a GPU box on the LAN or tailnet. For a public host bibr refuses to
+send the key over plain HTTP unless `LLM_ALLOW_INSECURE_HTTP=true`; the
+pipeline, `bibr setup` and `bibr doctor` apply the same rule. The vision
+endpoint receives the LLM provider's key, so the LLM setting governs it too,
+not `OCR_ALLOW_INSECURE_HTTP`.
 
 ### Model and profile overrides
 
@@ -161,6 +175,10 @@ expected; install a CUDA build of `llama-server` and skip the `gpu` extra.
 fallbacks such as section classification and citation linking: `{{ default_llm_provider }}`
 (the default), `openai`, `anthropic`, `groq`, or `ollama` (a local Ollama
 server). `LLM_MODEL` picks the model for that provider.
+
+For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
+`http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under
+`/v1`, so both `http://localhost:11434` and `http://localhost:11434/v1` work.
 
 `LLM_BACKEND=cloud` is the default: bibr uses the configured provider/endpoint.
 That endpoint can also be your own OpenAI-compatible server:
@@ -227,6 +245,11 @@ bibr preset diff fast-gemini    # compare a preset against the current .env
 bibr preset rm fast-gemini      # delete a preset
 bibr preset deactivate          # clear the active-preset marker (no other changes)
 ```
+
+The "current `.env`" is the file whose values win: `./.env` when the working
+directory has one, otherwise `~/.bibr/.env` (or the last existing file in
+`BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
+changed.
 
 Presets are stored as JSON under `~/.bibr/presets/`. Secrets (API keys and
 similar) are excluded by default when saving; endpoint URLs and other private
@@ -309,3 +332,32 @@ PyTorch stack — `torch.compile` on the layout model in particular — and sinc
 classifier revisions it bakes now also carry an `onnx/` bundle, leaving the
 setting unset would let `auto` move serve onto ONNX Runtime the next time the
 image is built. Switching it is a deliberate choice, not a build-time accident.
+
+### Layout model generation
+
+bibr ships with PP-DocLayoutV3 and can also run PP-DocLayoutV4, which keeps
+V3's 25 region labels but predicts a quadrilateral per region (bibr uses the
+rectangle enclosing it) and decodes reading order from a successor head as well
+as V3's relative-order head. V4 is not the default: PaddlePaddle has not yet
+published its weights (`PaddlePaddle/PP-DocLayoutV4_safetensors`), and the
+downstream layout rules were tuned on V3, so switching goes through the
+evaluation gate like any other model change.
+
+Each runtime selects the generation on its own:
+
+- **ONNX** (the default runtime): the bundle's `bibr_onnx.json` names the
+  architecture it was exported from, and that picks the pre- and
+  post-processing. Point `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION` at a V4
+  export — `scripts/export_onnx_layout.py --model-id
+  PaddlePaddle/PP-DocLayoutV4_safetensors --revision <sha>` writes one and checks
+  it against transformers.
+- **PyTorch**: set `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` to the V4
+  checkpoint. This needs a transformers release that includes PP-DocLayoutV4.
+
+Under the ONNX runtime `LAYOUT_MODEL_ID` and `LAYOUT_MODEL_REVISION` are not
+used, and bibr logs a warning when they name a different checkpoint than the
+bundle was exported from. bibr refuses a V4 bundle or checkpoint whose label
+list differs from the one it maps, or a V4 bundle that declares none, since
+every downstream rule keys on the label names. The OCR disk cache keys on all
+four layout settings and on `ML_RUNTIME`, so switching either never replays
+cached regions of the other model.

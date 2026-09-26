@@ -20,8 +20,3 @@ def vllm_mlx_unavailable_reason() -> str | None:
     if server_spec is None:
         return "vllm_mlx.server was not found"
     return None
-
-
-def vllm_mlx_available() -> bool:
-    """Whether the vllm-mlx package has a runnable server entrypoint."""
-    return vllm_mlx_unavailable_reason() is None

@@ -534,6 +534,292 @@ async def test_rapid_mlx_recycle_failure_recovers_on_next_request(monkeypatch):
     assert spawn_count == 3
 
 
+# ---------------------------------------------------------------------------
+# local-runtimes sweep: recycle result preservation + parked-waiter error (8)
+# ---------------------------------------------------------------------------
+
+
+def _recycle_test_client(
+    monkeypatch, mod, *, fail_restarts=0, recognize_delay=0.0, restart_delay=0.0
+):
+    """_ManagedRapidMlxOcrClient with a fake server; the first *fail_restarts*
+    recycle restarts raise, later ones succeed. *recognize_delay* stalls fake
+    OCR so concurrent callers overlap inside a recycle; *restart_delay* stalls
+    a failing restart so a late caller parks on the drain while it fails."""
+    import asyncio as _asyncio
+    import time as _time
+
+    from bibr.config import Settings
+
+    calls = {"n": 0}
+
+    class FakeServer:
+        base_url = "http://127.0.0.1:1"
+
+        @property
+        def loaded(self):
+            return True
+
+        def shutdown(self):
+            return None
+
+    class FakeHttp:
+        def __init__(self, **kwargs):
+            self.gen = calls["n"]
+
+        async def recognize(self, image, prompt):
+            if recognize_delay:
+                await _asyncio.sleep(recognize_delay)
+            return f"text-gen{self.gen}"
+
+        async def shutdown(self):
+            return None
+
+    def start_generation():
+        calls["n"] += 1
+        if calls["n"] > 1 and calls["n"] - 1 <= fail_restarts:
+            if restart_delay:
+                _time.sleep(restart_delay)
+            raise RuntimeError("Metal OOM")
+        return FakeServer(), FakeHttp()
+
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_model", "mlx-community/GLM-OCR-8bit")
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_port", 8772)
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_extra_args", "")
+    monkeypatch.setattr(Settings.ocr, "rapid_mlx_recycle_after", 1)
+    client = mod.RapidMlxOcrClient.__new__(mod.RapidMlxOcrClient)
+    # Bypass __init__ (spawns a real server): install the async state directly.
+    import asyncio
+
+    client._settings = Settings
+    client._model = "m"
+    client._profile = None
+    client._server, client._http_client = start_generation()
+    client._start_generation = start_generation
+    client._recycle_after = 1
+    client._request_count = 0
+    client._inflight = 0
+    client._recycle_lock = asyncio.Lock()
+    client._drain_event = asyncio.Event()
+    client._drain_event.set()
+    client._restart_error = None
+    return client, calls
+
+
+async def test_recycler_returns_result_despite_successful_recycle(monkeypatch):
+    """The threshold-triggering caller gets its own result back (8 guard)."""
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    assert await client.recognize(None, "Text Recognition:") == "text-gen1"
+    assert client._request_count == 0  # recycled onto a fresh generation
+
+
+async def test_recycler_returns_result_when_restart_fails(monkeypatch):
+    """A failed restart no longer throws away the completed region result (8).
+
+    The threshold-triggering caller gets its own transcription back; the
+    restart failure stays stashed and the next request's _ensure_generation
+    retries (and surfaces) it.
+    """
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod, fail_restarts=99)
+    assert await client.recognize(None, "Text Recognition:") == "text-gen1"
+    assert client._restart_error is not None
+    with pytest.raises(UpstreamServiceError, match="OCR restart failed"):
+        await client.recognize(None, "Text Recognition:")
+
+
+async def test_parked_waiter_gets_named_error_on_failed_restart(monkeypatch):
+    """Callers that already transcribed keep their results; a caller parked on
+    the drain while the restart fails gets UpstreamServiceError, not assert (8).
+
+    Worker 0 triggers the recycle and stalls in the in-flight drain while
+    worker 1 is still transcribing; both transcribed before the failure, so
+    both get their text back. Worker 2 slips in after the drain clears but
+    while the slow restart is still failing, so it parks — and must wake to
+    a named error rather than the old bare AssertionError.
+    """
+    import asyncio
+
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(
+        monkeypatch, mod, fail_restarts=99, recognize_delay=0.6, restart_delay=0.5
+    )
+    results = {}
+
+    async def worker(i, delay=0):
+        await asyncio.sleep(delay)
+        try:
+            results[i] = ("ok", await client.recognize(None, "Text Recognition:"))
+        except Exception as e:  # noqa: BLE001
+            results[i] = ("err", f"{type(e).__name__}: {e}")
+
+    await asyncio.gather(worker(0), worker(1, delay=0.05), worker(2, delay=0.61))
+    assert results[0][0] == "ok" and results[0][1] == "text-gen1"
+    assert results[1][0] == "ok" and results[1][1] == "text-gen1"
+    assert results[2][0] == "err" and "UpstreamServiceError" in results[2][1]
+    assert "while parked" in results[2][1]
+
+
+async def test_ensure_generation_shuts_down_dead_generation(monkeypatch):
+    """Replacing a dead generation releases its pool/handles first (8)."""
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    closed = []
+
+    class DeadServer:
+        base_url = "http://127.0.0.1:1"
+
+        @property
+        def loaded(self):
+            return False
+
+        def shutdown(self):
+            closed.append("server")
+
+    class DeadHttp:
+        async def shutdown(self):
+            closed.append("http")
+
+    client._server = DeadServer()
+    client._http_client = DeadHttp()
+    await client._ensure_generation()
+
+    assert closed == ["http", "server"]
+    assert client.loaded is True
+    assert client._request_count == 0
+    assert client._restart_error is None
+
+
+async def test_ensure_generation_failure_closes_dead_generation(monkeypatch):
+    """A failed restart still releases the dead generation's pool/handles (8).
+
+    Removing the failure-branch close leaves the dead HTTP pool and server
+    handles open while the client reports no generation at all.
+    """
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    closed = []
+
+    class DeadServer:
+        base_url = "http://127.0.0.1:1"
+
+        @property
+        def loaded(self):
+            return False
+
+        def shutdown(self):
+            closed.append("server")
+
+    class DeadHttp:
+        async def shutdown(self):
+            closed.append("http")
+
+    client._server = DeadServer()
+    client._http_client = DeadHttp()
+
+    def boom():
+        raise RuntimeError("Metal OOM")
+
+    client._start_generation = boom
+
+    with pytest.raises(UpstreamServiceError, match="OCR restart failed"):
+        await client._ensure_generation()
+
+    assert closed == ["http", "server"]
+    assert client._server is None
+    assert client._http_client is None
+    assert client._restart_error is not None
+
+
+async def test_parked_waiter_retries_failed_restart(monkeypatch):
+    """A caller parked on the drain retries the failed restart once (8).
+
+    The recycle failed while this caller was parked, but the next start
+    would succeed — it must get its transcription, not 'OCR restart failed
+    while parked' (which is reserved for a retry that fails again).
+    """
+    from bibr.exceptions import UpstreamServiceError
+    from bibr.local import rapid_mlx as mod
+
+    client, _ = _recycle_test_client(monkeypatch, mod)
+    real_wait = client._drain_event.wait
+
+    async def sabotage():
+        await real_wait()
+        # A recycle failed while we were parked: generation gone, failure
+        # stashed, drain open again — the retry below must recover.
+        client._server = None
+        client._http_client = None
+        client._restart_error = UpstreamServiceError("rapid-mlx", "OCR restart failed: Metal OOM")
+
+    client._drain_event.wait = sabotage
+    assert await client.recognize(None, "Text Recognition:") == "text-gen2"
+    assert client._restart_error is None
+
+
+def test_spawned_http_client_inherits_pipeline_settings(monkeypatch):
+    """The recycled HTTP client gets the pipeline settings, not globals (9)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    settings = GlobalSettings()
+    captured = {}
+
+    def fake_http(**kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(mod, "HttpOcrClient", fake_http)
+    client = mod.RapidMlxOcrClient.__new__(mod.RapidMlxOcrClient)
+    client._settings = settings
+    client._model = "candidate/model"
+
+    server = MagicMock(base_url="http://127.0.0.1:8772")
+    client._spawn_http_client(server)
+
+    assert captured["settings"] is settings
+    assert captured["model"] == "candidate/model"
+
+
+def test_requested_model_path_beats_candidate_model(monkeypatch):
+    """An explicit `--ocr-model` request wins over the candidate default.
+
+    The factory passes the raw requested model as `model_path` and the
+    winning candidate's model as `model`; the request must be served, as on
+    main — the candidate is only the default when nothing was requested.
+    """
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    captured = {}
+
+    def fake_server(**kwargs):
+        captured.update(kwargs)
+        server = MagicMock(base_url="http://127.0.0.1:8772")
+        server.loaded = True
+        return server
+
+    monkeypatch.setattr(mod, "RapidMlxServer", fake_server)
+    monkeypatch.setattr(mod, "HttpOcrClient", MagicMock())
+
+    client = mod.RapidMlxOcrClient(
+        model="candidate/model",
+        model_path="requested/model",
+        settings=GlobalSettings(),
+    )
+
+    assert client._model == "requested/model"
+    assert captured["served_model_name"] == "requested/model"
+
+
 def test_rapid_mlx_llm_server_configures_qwen_no_think_defaults(monkeypatch):
     from bibr.config import GlobalSettings
     from bibr.local import rapid_mlx as mod
@@ -840,3 +1126,106 @@ def test_explicit_mtp_does_not_fall_back(monkeypatch):
         )
 
     assert len(cmds) == 1
+
+
+def test_spawn_and_wait_shuts_down_on_keyboard_interrupt(monkeypatch):
+    """Ctrl-C during the health wait still shuts down the child (4/13)."""
+    from bibr.config import Settings
+    from bibr.local import rapid_mlx as mod
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 123456789  # no such group: killpg falls through to terminate
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: proc)
+
+    def _interrupt(_url, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mod, "request_bytes", _interrupt)
+
+    server = mod.RapidMlxServer.__new__(mod.RapidMlxServer)
+    server._settings = Settings
+    server._model = "test-model"
+    server._served_model_name = "test-model"
+    server._port = 8871
+    server._multimodal = False
+    server._strict_ocr_smoke = False
+    server._process = None
+    server._stderr_log = None
+    server._stderr_fh = None
+    server._reused = False
+
+    with pytest.raises(KeyboardInterrupt):
+        server._spawn_and_wait(["sleep", "30"])
+    # shutdown() ran: the module fixture neuters os.killpg, so the child is
+    # reaped through the killpg path and _process is cleared.
+    assert server._process is None
+
+
+def _mk_llm_server():
+    """RapidMlxLlmServer without spawning: configure_llm_client only."""
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    server = mod.RapidMlxLlmServer.__new__(mod.RapidMlxLlmServer)
+    server._settings = GlobalSettings()
+    server._model = "test-model"
+    server._server = MagicMock(base_url="http://127.0.0.1:8871")
+    return server
+
+
+def test_llm_server_raises_rate_limit_rpm_when_unset():
+    """Local rapid-mlx must not inherit the 60 rpm cloud default (12)."""
+    from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+
+    server = _mk_llm_server()
+    assert "rate_limit_rpm" not in server._settings.llm.model_fields_set
+
+    server.configure_llm_client()
+
+    assert server._settings.llm.rate_limit_rpm == MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+
+
+def test_llm_server_respects_explicit_rate_limit_rpm():
+    """A user-set LLM_RATE_LIMIT_RPM must not be silently overridden."""
+    server = _mk_llm_server()
+    server._settings.llm.rate_limit_rpm = 25
+    server._settings.llm.model_fields_set.add("rate_limit_rpm")
+
+    server.configure_llm_client()
+
+    assert server._settings.llm.rate_limit_rpm == 25
+
+
+def test_spawn_and_wait_shuts_down_on_task_cancellation(monkeypatch):
+    """Task cancellation during the health wait still shuts down the child (13)."""
+    import asyncio
+
+    from bibr.config import Settings
+    from bibr.local import rapid_mlx as mod
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 123456789
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: proc)
+
+    def _cancelled(_url, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(mod, "request_bytes", _cancelled)
+
+    server = mod.RapidMlxServer.__new__(mod.RapidMlxServer)
+    server._settings = Settings
+    server._model = "test-model"
+    server._served_model_name = "test-model"
+    server._port = 8871
+    server._multimodal = False
+    server._strict_ocr_smoke = False
+    server._process = None
+    server._stderr_log = None
+    server._stderr_fh = None
+    server._reused = False
+
+    with pytest.raises(asyncio.CancelledError):
+        server._spawn_and_wait(["sleep", "30"])
+    assert server._process is None

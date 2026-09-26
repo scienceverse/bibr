@@ -3,8 +3,15 @@
 A fresh interpreter (clean ``sys.modules``) imports every module ``bibr chew``
 touches for a PDF with ``OCR_BACKEND=paddle-http`` and a cloud LLM, then
 constructs the ONNX layout detector, section/paper classifiers and NER parser
-on tiny bundles exported here and runs each once. Only then is ``sys.modules``
-checked for ``torch`` (and ``transformers``/``cv2``).
+on the committed torch-free bundles (``tests/fixtures/onnx/``, see
+``scripts/generate_onnx_test_bundles.py``) and runs each once. Only then is
+``sys.modules`` checked for ``torch`` (and ``transformers``/``cv2``).
+
+This test needs no torch to build fixtures, so it runs in the core-only CI
+jobs — the environments that match a user's default install. ``onnxruntime``
+is a core dependency (not an optional one), so it is imported directly:
+if it were missing, skipping would silently drop the only core coverage of
+the default runtime.
 """
 
 from __future__ import annotations
@@ -14,15 +21,9 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
+import onnxruntime  # noqa: F401  # core dependency; must be importable here.
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("transformers")
-pytest.importorskip("torchcrf")
-pytest.importorskip("onnx")
-pytest.importorskip("onnxruntime")
-
-from tests import onnx_fixtures as fx  # noqa: E402
+BUNDLES = Path(__file__).parent / "fixtures" / "onnx"
 
 CHILD = r"""
 import json, os, sys
@@ -81,24 +82,17 @@ print(json.dumps({"leaked": leaked, "ok": True}))
 """
 
 
-def test_http_path_with_onnx_bundles_never_imports_torch(monkeypatch, tmp_path):
-    tok = fx.tiny_tokenizer()
-    layout_root = tmp_path / "layout"
-    fx.export_layout_bundle(fx.tiny_layout_module(), layout_root)
-    section_root = tmp_path / "section"
-    fx.export_section_bundle(fx.tiny_section_model(monkeypatch), tok, section_root)
-    paper_root = tmp_path / "paper"
-    fx.export_paper_bundle(fx.tiny_paper_model(), tok, paper_root)
-    ner_root = tmp_path / "ner"
-    fx.export_ner_bundle(fx.tiny_ner_model(monkeypatch), tok, ner_root)
+def test_http_path_with_onnx_bundles_never_imports_torch(tmp_path):
+    for name in ("section", "paper", "ner", "layout"):
+        assert (BUNDLES / name / "onnx" / "bibr_onnx.json").is_file()
 
     cfg = {
         "env": {
             "ML_RUNTIME": "onnx",
-            "LAYOUT_ONNX_MODEL_ID": str(layout_root),
-            "ML_SECTION_CLASSIFIER_MODEL_ID": str(section_root),
-            "ML_PAPER_CLASSIFIER_MODEL_ID": str(paper_root),
-            "NER_PARSER_CKPT": str(ner_root),
+            "LAYOUT_ONNX_MODEL_ID": str(BUNDLES / "layout"),
+            "ML_SECTION_CLASSIFIER_MODEL_ID": str(BUNDLES / "section"),
+            "ML_PAPER_CLASSIFIER_MODEL_ID": str(BUNDLES / "paper"),
+            "NER_PARSER_CKPT": str(BUNDLES / "ner"),
             "OCR_BACKEND": "paddle-http",
             "OCR_BASE_URL": "http://127.0.0.1:1",
             "LLM_PROVIDER": "google",
@@ -107,9 +101,9 @@ def test_http_path_with_onnx_bundles_never_imports_torch(monkeypatch, tmp_path):
             "BIBR_DISABLE_DOTENV": "1",
             "CUDA_VISIBLE_DEVICES": "",
         },
-        "section": str(section_root),
-        "paper": str(paper_root),
-        "ner": str(ner_root),
+        "section": str(BUNDLES / "section"),
+        "paper": str(BUNDLES / "paper"),
+        "ner": str(BUNDLES / "ner"),
     }
     root = Path(__file__).resolve().parents[1]
     proc = subprocess.run(

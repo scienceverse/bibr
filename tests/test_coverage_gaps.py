@@ -9,8 +9,8 @@ Covers:
 - clients/crossref.py: _is_retryable(), get_client() singleton
 - clients/llm.py: _cap_input()
 - extract/extractor.py: _parse_year(), _map_bib_text_ids(), _collect_last_unknown_section_rows()
-- extract/equation_extractor.py: helpers (_normalize_comp, _split_respecting_brackets,
-  _find_toplevel_comp, _iter_parenthesized_groups), extract_with_llm_fallback()
+- extract/equation_extractor.py: helpers (_normalize_comp, _find_toplevel_comp,
+  _iter_parenthesized_groups), extract_with_llm_fallback()
 - input/consolidate_text.py: strip_latex_commands(), _fix_operatorname_spacing()
 - structure/pdf_parser.py: _is_copyright_notice()
 - structure/study_detector.py: _backprop_content_section_ids()
@@ -128,6 +128,29 @@ class TestMigrateBibType:
     def test_report_variants(self):
         assert migrate_bib_type("techreport") == "report"
         assert migrate_bib_type("report") == "report"
+
+    @pytest.mark.parametrize(
+        ("crossref_type", "expected"),
+        [
+            ("monograph", "book"),
+            ("edited-book", "book"),
+            ("reference-book", "book"),
+            ("book-set", "book"),
+            ("book-part", "book_chapter"),
+            ("book-track", "book_chapter"),
+            ("report-component", "report"),
+            ("report-series", "report"),
+            ("database", "dataset"),
+            ("standard", "other"),
+            ("journal-issue", "other"),
+        ],
+    )
+    def test_crossref_work_types(self, crossref_type, expected):
+        """A matched Cambridge monograph came back as "other"."""
+        assert migrate_bib_type(crossref_type) == expected
+
+    def test_non_string_returns_other(self):
+        assert migrate_bib_type(3) == "other"  # type: ignore[arg-type]
 
     def test_preprint_variants(self):
         assert migrate_bib_type("unpublished") == "preprint"
@@ -866,37 +889,6 @@ class TestNormalizeComp:
         assert _normalize_comp("\u2248") == "\u2248"  # ≈
 
 
-class TestSplitRespectingBrackets:
-    def test_simple_split(self):
-        from bibr.extract.equation_extractor import _split_respecting_brackets
-
-        assert _split_respecting_brackets("a, b, c") == ["a", " b", " c"]
-
-    def test_nested_parens_preserved(self):
-        from bibr.extract.equation_extractor import _split_respecting_brackets
-
-        result = _split_respecting_brackets("t(28) = 3.42, p < .001")
-        assert len(result) == 2
-        assert "t(28) = 3.42" in result[0]
-
-    def test_nested_brackets_preserved(self):
-        from bibr.extract.equation_extractor import _split_respecting_brackets
-
-        result = _split_respecting_brackets("[1, 2], [3, 4]")
-        assert len(result) == 2
-
-    def test_semicolon_split(self):
-        from bibr.extract.equation_extractor import _split_respecting_brackets
-
-        result = _split_respecting_brackets("a = 1; b = 2")
-        assert len(result) == 2
-
-    def test_no_separators(self):
-        from bibr.extract.equation_extractor import _split_respecting_brackets
-
-        assert _split_respecting_brackets("t(28) = 3.42") == ["t(28) = 3.42"]
-
-
 class TestFindToplevelComp:
     def test_finds_toplevel_equals(self):
         from bibr.extract.equation_extractor import _find_toplevel_comp
@@ -1136,6 +1128,10 @@ class TestStripLatexCommands:
         assert strip_latex_commands(r"\leq") == "\u2264"
         assert strip_latex_commands(r"\geq") == "\u2265"
         assert strip_latex_commands(r"\approx") == "\u2248"
+        # Not "\u2264slant": the equation extractor reads these, and the export
+        # locates its statistic in the cleaned text
+        assert strip_latex_commands(r"p \leqslant 0.05") == "p \u2264 0.05"
+        assert strip_latex_commands(r"p \geqslant 0.05") == "p \u2265 0.05"
 
     def test_unknown_command_stripped(self):
         from bibr.input.consolidate_text import strip_latex_commands

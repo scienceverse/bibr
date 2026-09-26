@@ -568,7 +568,7 @@ class TestTableParsing:
 
         OCR control-char corruption can shred tag attributes while leaving
         row/cell structure intact; html5lib then sees an unknown tag and
-        ``read_html`` finds no table. A salvage retry with normalized table
+        the table parser finds no table. A salvage retry with normalized table
         tags must recover it.
         """
         corrupted = (
