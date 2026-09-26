@@ -147,20 +147,18 @@ def _fail_preflight(monkeypatch):
 def test_chew_fails_on_missing_credentials_before_any_model_loads(stub_pipeline, monkeypatch):
     """The CLI checks the key before OCR; the library used to find out after it."""
     import bibr
-    from bibr.exceptions import ConfigurationError
 
     _fail_preflight(monkeypatch)
-    with pytest.raises(ConfigurationError, match="GOOGLE_API_KEY"):
+    with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
         bibr.chew("paper.pdf")
     assert stub_pipeline.instances == []
 
 
 def test_chewer_fails_on_missing_credentials_at_construction(stub_pipeline, monkeypatch):
     import bibr
-    from bibr.exceptions import ConfigurationError
 
     _fail_preflight(monkeypatch)
-    with pytest.raises(ConfigurationError, match="GOOGLE_API_KEY"):
+    with pytest.raises(ValueError, match="GOOGLE_API_KEY"):
         bibr.Chewer()
     assert stub_pipeline.instances == []
 

@@ -413,9 +413,10 @@ released.
   tool". `BibrError` messages are scrubbed the same way, and `chew_url`
   reports the downloaded file name rather than the URL.
 - `bibr mcp` without cloud credentials prints the one-line missing-key
-  message and exits 1 instead of dumping a traceback. The credential
-  preflight raises `ConfigurationError`, so a `ValueError` escaping the
-  running server session keeps its traceback.
+  message and exits 1 instead of dumping a traceback. Only the startup
+  credential check is reported that way; a `ValueError` from the running
+  server session keeps its traceback, and `bibr.chew()`/`Chewer` still raise
+  the provider's `ValueError`.
 - The offline batch docs no longer claim batch runs prefill the LLM
   response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
 - The Crossref bulk DOI prefetch sends no request and seeds nothing when

@@ -635,6 +635,14 @@ def run_mcp(args: argparse.Namespace) -> int:
     if getattr(args, "ref_seg", None):
         options["ref_seg"] = args.ref_seg
 
-    server = build_server(refs=getattr(args, "refs", None), **options)
+    try:
+        server = build_server(refs=getattr(args, "refs", None), **options)
+    except ValueError as e:
+        # The Chewer preflight raises the provider's ValueError for a missing
+        # cloud credential; report it like the other CLI configuration errors.
+        # Errors from the running session below keep their traceback.
+        from bibr.exceptions import ConfigurationError
+
+        raise ConfigurationError(str(e)) from e
     server.run(transport="stdio")
     return 0

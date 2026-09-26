@@ -1,7 +1,7 @@
 """``bibr mcp`` reports missing credentials without a traceback.
 
-The ``Chewer`` preflight raises ``ConfigurationError`` for a missing key,
-which the shared handler converts to a one-line stderr message plus exit 1.
+``run_mcp`` turns the Chewer preflight's ``ValueError`` for a missing key into
+``ConfigurationError``, which the shared handler prints as one line with exit 1.
 A ``ValueError`` escaping the server session itself keeps its traceback.
 """
 
@@ -65,12 +65,42 @@ def test_mcp_serve_value_error_is_not_swallowed(monkeypatch):
         main()
 
 
-def test_chewer_preflight_wraps_missing_key_as_configuration_error():
+def test_library_preflight_keeps_the_provider_value_error():
+    """bibr.chew()/Chewer callers still get the provider's ValueError."""
     from bibr.api import _preflight_llm
     from bibr.config import GlobalSettings
-    from bibr.exceptions import ConfigurationError
 
     settings = GlobalSettings(llm={"provider": "anthropic", "api_key": None})
     settings.ANTHROPIC_API_KEY = None
-    with pytest.raises(ConfigurationError, match="API key required"):
+    with pytest.raises(ValueError, match="API key required"):
         _preflight_llm(settings, {})
+
+
+def test_run_mcp_reports_a_build_time_value_error_as_configuration(monkeypatch):
+    _need_mcp()
+    import argparse
+
+    import bibr.mcp_server
+    from bibr.exceptions import ConfigurationError
+
+    def no_key(**_kwargs):
+        raise ValueError("Anthropic API key required.")
+
+    monkeypatch.setattr(bibr.mcp_server, "build_server", no_key)
+    with pytest.raises(ConfigurationError, match="API key required"):
+        bibr.mcp_server.run_mcp(argparse.Namespace())
+
+
+def test_run_mcp_leaves_session_value_errors_alone(monkeypatch):
+    _need_mcp()
+    import argparse
+
+    import bibr.mcp_server
+
+    class Server:
+        def run(self, transport):
+            raise ValueError("pydantic validation failed mid-session")
+
+    monkeypatch.setattr(bibr.mcp_server, "build_server", lambda **_kwargs: Server())
+    with pytest.raises(ValueError, match="mid-session"):
+        bibr.mcp_server.run_mcp(argparse.Namespace())
