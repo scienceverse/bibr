@@ -214,6 +214,22 @@ async def test_paper_id_with_existing_directory_output(tmp_path, monkeypatch):
     assert seen == {"paper.xml": "my-id"}
 
 
+async def test_dry_run_previews_directory_output_without_creating_it(tmp_path, monkeypatch, capsys):
+    """Guard: `chew paper.xml -o newdir/ --dry-run` previews
+    `paper.xml -> newdir/paper.json` (what the real run writes) and
+    creates nothing."""
+    from bibr.local.cli import _build_parser, _run_process
+
+    src = tmp_path / "paper.xml"
+    src.write_text("<article/>")
+    out_raw = str(tmp_path / "results") + "/"
+    args = _build_parser().parse_args(["chew", str(src), "-o", out_raw, "--dry-run", "--no-llm"])
+    await _run_process(args)  # must not raise
+
+    assert f"paper.xml -> {tmp_path / 'results' / 'paper.json'}" in capsys.readouterr().out
+    assert not (tmp_path / "results").exists()
+
+
 async def test_single_file_output_unchanged(tmp_path, monkeypatch):
     """Guard: ``chew paper.xml -o result.json`` still writes the file itself."""
     from bibr.local.cli import _build_parser, _run_process
