@@ -1460,6 +1460,7 @@ def _build_qualification_provenance(
     from bibr.clients.nuextract import (
         NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256,
         NUEXTRACT3_FP8_EXPECTED_REVISION,
+        NUEXTRACT3_FP8_MODEL_ID,
     )
     from bibr.export.qualification_provenance import (
         DeploymentIdentity,
@@ -1468,17 +1469,19 @@ def _build_qualification_provenance(
 
     structured_backend = getattr(llm_client, "resolved_structured_backend", None)
     model_id = settings.llm.model
-    is_nuextract = (
-        structured_backend == "nuextract-native" or "nuextract3" in (model_id or "").lower()
-    )
+    # The expected pins belong to the FP8 repo. Stamping them on any other
+    # NuExtract 3 deployment (bf16, GGUF, MLX, whichever backend) would record a
+    # commit and template that deployment never loaded, so it reports only
+    # what LLM_MODEL_REVISION / LLM_JINJA_SHA256 declare.
+    is_nuextract_fp8 = (model_id or "").strip().lower() == NUEXTRACT3_FP8_MODEL_ID.lower()
     identity = DeploymentIdentity(
         bibr_sha=settings.pipeline.bibr_sha or settings.BIBR_BUILD_SHA,
         platform_sha=settings.pipeline.platform_sha,
         model_id=model_id,
         model_revision=settings.llm.model_revision
-        or (NUEXTRACT3_FP8_EXPECTED_REVISION if is_nuextract else None),
+        or (NUEXTRACT3_FP8_EXPECTED_REVISION if is_nuextract_fp8 else None),
         jinja_sha256=settings.llm.jinja_sha256
-        or (NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 if is_nuextract else None),
+        or (NUEXTRACT3_FP8_EXPECTED_JINJA_SHA256 if is_nuextract_fp8 else None),
         structured_backend=structured_backend,
         # Temperature is a declared qualification axis only for the native
         # protocol arms. For non-native backends it is not part of the

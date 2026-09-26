@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import re
-from io import StringIO
 from typing import Any
 
 import pandas as pd
@@ -31,6 +30,7 @@ from bibr.paper_contents import (
 )
 from bibr.structure.assembler import DeferredText, DocumentAssembler
 from bibr.structure.float_labels import caption_label
+from bibr.structure.html_table import html_table_frame, is_hidden_table
 from bibr.structure.xref_utils import URL_RE, detect_xrefs
 from bibr.utils.text import clean_extracted_url, collapse_ws
 
@@ -560,20 +560,32 @@ class HtmlParser:
         return any(word in tokens for word in ("reference", "bibliography", "citation"))
 
     def _handle_table(self, tag: Tag) -> None:
+        if is_hidden_table(tag):
+            # A display:none table (a print-only or responsive duplicate of a
+            # visible one) is not part of the page as read.
+            return
         caption_tag = tag.find("caption")
         caption = _text(caption_tag) or None
+        label = caption_label(caption, "table")
         try:
-            dfs = pd.read_html(StringIO(str(tag)), flavor="html5lib")
+            df = html_table_frame(tag)
         except Exception as exc:  # noqa: BLE001
             logger.warning("HTML table parse failed: %s", exc)
-            return
-        if not dfs:
-            return
+            df = None
+        if df is None:
+            # No cell grid (an image-only table, say). A table whose caption
+            # prints a table label ("Table 3. ...") is still a table that
+            # mentions resolve to, so it is kept with its markup and no
+            # contents. Any other grid-less table is dropped: a spacer, or a
+            # layout table holding a figure ("Figure 1. ...").
+            if label is None:
+                return
+            df = pd.DataFrame()
         html = str(tag)
         self.tables.append(
             PaperTable(
                 table_id=self._table_counter,
-                df=dfs[0],
+                df=df,
                 tbl_html=html,
                 section_id=self._current_section_id,
                 caption=caption,
@@ -583,10 +595,10 @@ class HtmlParser:
                         page_number=None,
                         bbox=None,
                         tbl_html=html,
-                        df=dfs[0],
+                        df=df,
                     )
                 ],
-                label=caption_label(caption, "table"),
+                label=label,
             )
         )
         self._table_counter += 1

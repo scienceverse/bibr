@@ -174,3 +174,16 @@ def _pin_cuda_probe_for_platform_tests(monkeypatch):
     against the old unconditional chain, so pin a roomy GPU here; tests that
     exercise the CPU-only / small-GPU paths patch the probe themselves."""
     monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+
+
+@pytest.fixture(autouse=True)
+def _skip_installed_onnxruntime_builds_check(monkeypatch):
+    """Keep ``get_ort_providers()``'s installed-builds check off the test venv.
+
+    It reads the installed distributions and warns, once per process, when
+    ``onnxruntime`` and ``onnxruntime-gpu`` are both installed and the CPU
+    build loads. In a venv with the ``gpu`` extra, the first test to mock a
+    CPU-only onnxruntime would log that warning. Mark it checked;
+    tests/test_onnx_providers_builds.py resets it with stubbed metadata.
+    """
+    monkeypatch.setattr("bibr.utils.onnx_providers._gpu_build_shadowed", False)

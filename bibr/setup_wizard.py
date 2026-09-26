@@ -4,6 +4,7 @@ Run with ``bibr setup`` after installation for the recommended easy flow, or
 ``bibr setup --advanced`` for the detailed provider/backend picker.
 """
 
+import importlib.metadata
 import importlib.resources as resources
 import importlib.util
 import os
@@ -33,6 +34,7 @@ from bibr.local.llm_models import (
     variants_for,
 )
 from bibr.presets import PresetManager
+from bibr.utils.onnx_providers import onnxruntime_gpu_reinstall_command
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -47,6 +49,12 @@ EXTRAS = {
     "gpu": "GPU acceleration for sentence splitting (NVIDIA CUDA)",
     "demo": "Interactive web demo UI",
 }
+
+# Prints whether the onnxruntime that imports is the GPU build: only its binary
+# registers the CUDA execution provider, with or without a GPU present.
+_GPU_BUILD_PROBE = (
+    "import onnxruntime; print('CUDAExecutionProvider' in onnxruntime.get_available_providers())"
+)
 
 LLM_DEFAULTS: dict[str, dict[str, str]] = {
     "google": {"model": "gemini-3.5-flash-lite", "key_env": "GOOGLE_API_KEY"},
@@ -1047,26 +1055,64 @@ class SetupWizard:
                 )
             raise SystemExit(result.returncode)
 
-        # onnxruntime-gpu and onnxruntime share the same namespace but are
-        # different PyPI packages — override the CPU-only version.
         if "gpu" in self.selected_extras:
-            gpu_cmd = (
-                [uv_bin, "pip", "install", "onnxruntime-gpu[cuda,cudnn]"]
-                if uv_bin
-                else [sys.executable, "-m", "pip", "install", "onnxruntime-gpu[cuda,cudnn]"]
+            self._reinstall_onnxruntime_gpu(uv_bin)
+
+    def _reinstall_onnxruntime_gpu(self, uv_bin: str | None) -> None:
+        """Make the GPU build of onnxruntime the one that loads.
+
+        The core ``onnxruntime`` dependency and the ``gpu`` extra's
+        ``onnxruntime-gpu`` write the same ``onnxruntime/`` directory. The
+        extras install just wrote both wheels at once, and which one's files
+        landed last is a race. Reinstalling the ``onnxruntime-gpu`` version that
+        install chose rewrites every shared file from the GPU wheel.
+        ``onnxruntime`` stays installed: ``uv run`` reinstalls a missing one,
+        and its files would replace the GPU build's.
+        """
+        from rich.markup import escape
+
+        importlib.invalidate_caches()  # the install above ran in another process
+        try:
+            version = importlib.metadata.version("onnxruntime-gpu")
+        except importlib.metadata.PackageNotFoundError:
+            ui.warn(
+                self.console,
+                "onnxruntime-gpu is not installed, so ONNX models will run on CPU",
             )
-            with self.console.status("Installing onnxruntime-gpu override …"):
-                gpu_result = subprocess.run(  # noqa: S603
-                    gpu_cmd,
+            return
+        cmd = onnxruntime_gpu_reinstall_command(version, uv=uv_bin)
+        with self.console.status(f"Reinstalling onnxruntime-gpu {version} over the CPU build …"):
+            result = subprocess.run(  # noqa: S603
+                cmd,
+                capture_output=True,
+                text=True,
+            )
+            # A fresh interpreter: this one may hold a build it imported earlier.
+            probe = (
+                subprocess.run(  # noqa: S603
+                    [sys.executable, "-c", _GPU_BUILD_PROBE],
                     capture_output=True,
                     text=True,
                 )
-            if gpu_result.returncode == 0:
-                self.console.print("[green]onnxruntime-gpu installed.[/green]")
-            else:
-                self.console.print(
-                    f"[yellow]onnxruntime-gpu install warning:[/yellow] {gpu_result.stderr.strip()}"
-                )
+                if result.returncode == 0
+                else None
+            )
+        if probe is not None and probe.stdout.strip() == "True":
+            ui.ok(self.console, f"onnxruntime-gpu {version} is the onnxruntime build that loads")
+            return
+        if probe is None:
+            reason = (
+                result.stderr.strip() or result.stdout.strip() or f"exit status {result.returncode}"
+            )
+        else:
+            lines = probe.stderr.strip().splitlines()
+            reason = lines[-1] if lines else "The CPU build still loads."
+        ui.warn(
+            self.console,
+            f"onnxruntime-gpu {version} is not the onnxruntime build that loads, "
+            "so ONNX models will run on CPU",
+            hint=escape(f"{reason}\nRun: {shlex.join(cmd)}"),
+        )
 
     def _step_llm_provider(self) -> None:
         ui.step(self.console, 2, 6, "LLM provider")
