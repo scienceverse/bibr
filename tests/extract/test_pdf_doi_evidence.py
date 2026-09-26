@@ -79,30 +79,59 @@ def test_reads_doi_links_with_the_text_printed_around_them():
     assert x1 < x2 and y1 < y2 and y2 > 900
 
 
-def test_reads_info_and_xmp_dois():
+def test_reads_the_document_information_dois_and_no_xmp():
+    # An XMP packet anywhere in the file may belong to an embedded object that
+    # names another article; only the document-information dictionary is read.
     pdf = _paper_pdf(
         info={
             "Subject": "Example Journal 11 (2026) 1-12. doi:10.1234/abc.5",
             "doi": "10.1234/abc.5",
             "Title": "A Study of Examples",
         },
-        xmp=xmp_packet(
-            prism_doi="10.1234/abc.5",
-            dc_identifier="doi:10.1234/abc.5",
-            prism_url="https://doi.org/10.1234/abc.5",
-            dc_title="10.5555/not.an.identifier",
-        ),
+        xmp=xmp_packet(prism_doi="10.5555/embedded.9"),
     )
 
     evidence = read_pdf_doi_evidence(pdf, (1,))
 
-    assert [(item.source, item.key) for item in evidence.metadata] == [
-        ("pdf_info", "Subject"),
-        ("pdf_info", "doi"),
-        ("pdf_xmp", "prism:doi"),
-        ("pdf_xmp", "dc:identifier"),
-        ("pdf_xmp", "prism:url"),
+    assert [(item.source, item.key, item.value) for item in evidence.metadata] == [
+        ("pdf_info", "Subject", "Example Journal 11 (2026) 1-12. doi:10.1234/abc.5"),
+        ("pdf_info", "doi", "10.1234/abc.5"),
     ]
+
+
+@pytest.mark.parametrize("render_mode", [3, 7])
+def test_text_that_paints_nothing_is_not_read(render_mode):
+    # A scan's hidden OCR layer (3) and clip-only text (7) are not printed.
+    pdf = build_pdf(
+        [
+            Page(
+                runs=[
+                    TextRun(72, 700, "A Study of Examples"),
+                    TextRun(72, 60, "https://doi.org/10.1234/shown.5"),
+                    TextRun(
+                        580, 400, "doi:10.1234/hidden.7", size=6, angle=90, render_mode=render_mode
+                    ),
+                ],
+                links=[((70, 57, 230, 70), "https://doi.org/10.1234/shown.5")],
+            )
+        ]
+    )
+
+    evidence = read_pdf_doi_evidence(pdf, (1,))
+
+    assert [line.text for line in evidence.lines] == ["https://doi.org/10.1234/shown.5"]
+    assert "hidden" not in evidence.links[0].printed_text
+
+
+def test_doi_links_per_page_are_capped():
+    links = [
+        ((10, 10 + i % 40, 60, 12 + i % 40), f"https://doi.org/10.1234/ref.{i}") for i in range(230)
+    ]
+    pdf = build_pdf([Page(runs=[TextRun(72, 700, "A Study of Examples")], links=links)])
+
+    evidence = read_pdf_doi_evidence(pdf, (1,))
+
+    assert len(evidence.links) == 200
 
 
 def test_pages_the_pdf_lacks_are_skipped():

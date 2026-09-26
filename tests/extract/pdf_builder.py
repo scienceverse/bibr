@@ -18,6 +18,7 @@ class TextRun:
     text: str
     size: float = 10.0
     angle: float = 0.0  # degrees counter-clockwise
+    render_mode: int = 0  # 3 = invisible, 7 = clip only
 
 
 @dataclass
@@ -52,8 +53,8 @@ def build_pdf(
         for run in page.runs:
             cos, sin = math.cos(math.radians(run.angle)), math.sin(math.radians(run.angle))
             content += (
-                f"BT /F1 {run.size:g} Tf {cos:.4f} {sin:.4f} {-sin:.4f} {cos:.4f} "
-                f"{run.x:g} {run.y:g} Tm "
+                f"BT {run.render_mode} Tr /F1 {run.size:g} Tf {cos:.4f} {sin:.4f} {-sin:.4f} "
+                f"{cos:.4f} {run.x:g} {run.y:g} Tm "
             ).encode()
             content += _literal(run.text) + b" Tj ET\n"
         stream = add(

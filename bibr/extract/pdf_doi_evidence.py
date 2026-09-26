@@ -4,9 +4,9 @@ The identity stage reads the paper's DOI from the parsed text: sentences, page
 furniture and the input's structured metadata. A PDF carries it in places the
 parse never reads. Text-layer lines the layout did not turn into a region (a
 repository banner rotated into the page margin, a masthead) never reach the
-text. Link annotations, the document-information dictionary and the XMP
-packet are not text at all. :func:`read_pdf_doi_evidence` reads those, best
-effort, from the input bytes. ``doi_identity`` decides what each is worth: a
+text. Link annotations and the document-information dictionary are not text
+at all. :func:`read_pdf_doi_evidence` reads those, best effort, from the input
+bytes. ``doi_identity`` decides what each is worth: a
 DOI the pages print can name the paper, one found only in metadata or in a
 link target can only agree with a printed one.
 
@@ -17,55 +17,32 @@ can be matched to the region it was printed in.
 
 from __future__ import annotations
 
-import logging
-import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from bibr.utils.text import DOI_CANDIDATE_RE
 
-logger = logging.getLogger(__name__)
-
 # Document-information keys publishers put a DOI in: Elsevier and Springer a
 # citation line in Subject ("… doi:10.1016/…"), Elsevier also a ``/doi`` key,
 # Wiley ``/WPS-ARTICLEDOI``.
 _INFO_KEYS = ("Subject", "Keywords", "doi", "DOI", "WPS-ARTICLEDOI")
-# XMP properties that name the document's DOI. ``prism:url`` and
-# ``dc:identifier`` also carry other identifiers; only DOI-shaped values count.
-_XMP_PROPERTIES = (
-    "prism:doi",
-    "dc:identifier",
-    "crossmark:DOI",
-    "pdfx:doi",
-    "pdfx:DOI",
-    "pdfx:WPS-ARTICLEDOI",
-    "prism:url",
-)
-_XMP_PROPERTY_RE = re.compile(
-    r"<(?P<tag>" + "|".join(re.escape(p) for p in _XMP_PROPERTIES) + r")\b[^>]*>"
-    r"(?P<value>.{0,2000}?)</(?P=tag)>"
-    r"|\b(?P<attr>" + "|".join(re.escape(p) for p in _XMP_PROPERTIES) + r")\s*=\s*"
-    r"\"(?P<attr_value>[^\"]{0,500})\"",
-    re.DOTALL,
-)
-_XMP_START = b"<x:xmpmeta"
-_XMP_END = b"</x:xmpmeta>"
-# A document-level packet is a few kilobytes; bound the read and the count so a
-# file full of per-image packets cannot make this slow.
-_MAX_XMP_PACKET_BYTES = 256 * 1024
-_MAX_XMP_PACKETS = 4
-
 # Hyphen and dash look-alikes some typesetters use inside DOIs, mapped one to
 # one so character positions stay aligned with the text layer.
 _HYPHEN_LOOKALIKES = str.maketrans({"\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2212": "-"})
-# Invisible characters that split a DOI in the text layer without printing
+# Zero-width characters that split a DOI in the text layer without printing
 # anything (a zero-width space after each hyphen in BMC DOIs).
-_INVISIBLE = frozenset({"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"})
+_ZERO_WIDTH = frozenset({"\u200b", "\u200c", "\u200d", "\u2060", "\ufeff"})
+
+# Text render modes that paint nothing: invisible text (3), such as a scan's
+# hidden OCR layer, and text that only clips (7). Such text is not printed.
+_UNPAINTED_RENDER_MODES = frozenset({3, 7})
 
 # How far around a link rectangle, in points, the printed DOI may sit: a link on
 # the first line of a wrapped resolver URL covers only that line.
 _LINK_MARGIN_X = 2.0
 _LINK_MARGIN_LINES = 1.0
+# DOI links read per page; a page of thousands of links is a reference index.
+_MAX_DOI_LINKS_PER_PAGE = 200
 
 
 @dataclass(frozen=True)
@@ -98,8 +75,8 @@ class LinkDoi:
 class MetadataDoi:
     """A DOI-bearing value of the document metadata."""
 
-    source: str  # "pdf_info" or "pdf_xmp"
-    key: str  # Info key or XMP property
+    source: str  # "pdf_info"
+    key: str  # Info key
     value: str
 
 
@@ -138,6 +115,48 @@ def _to_layout_point(
     return (u, v)
 
 
+def _printed_char_records(textpage) -> list[tuple[str, float, float, bool]]:
+    """``(char, centre x, centre y, is_newline)`` for each printed character.
+
+    Characters in an unpainted text object (render mode 3 or 7) are left out,
+    and so is a character the text layer gives no box.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    records: list[tuple[str, float, float, bool]] = []
+    count = textpage.count_chars()
+    index = 0
+    while index < count:
+        code = pdfium_c.FPDFText_GetUnicode(textpage.raw, index)
+        width = 1
+        # Non-BMP text arrives as a UTF-16 surrogate pair.
+        if 0xD800 <= code <= 0xDBFF and index + 1 < count:
+            low = pdfium_c.FPDFText_GetUnicode(textpage.raw, index + 1)
+            if 0xDC00 <= low <= 0xDFFF:
+                code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00)
+                width = 2
+        ch = "\ufffd" if 0xD800 <= code <= 0xDFFF or code > 0x10FFFF else chr(code)
+        if ch in ("\n", "\r"):
+            records.append((ch, 0.0, 0.0, True))
+            index += width
+            continue
+        text_object = pdfium_c.FPDFText_GetTextObject(textpage.raw, index)
+        if (
+            text_object
+            and pdfium_c.FPDFTextObj_GetTextRenderMode(text_object) in _UNPAINTED_RENDER_MODES
+        ):
+            index += width
+            continue
+        try:
+            left, bottom, right, top = textpage.get_charbox(index)
+        except Exception:  # noqa: BLE001 - a char without a box is not placed
+            index += width
+            continue
+        records.append((ch, (left + right) / 2.0, (bottom + top) / 2.0, False))
+        index += width
+    return records
+
+
 def _page_lines(records, to_layout) -> list[tuple[str, tuple[tuple[float, float] | None, ...]]]:
     """Split the page's character records into lines, as the text layer breaks them."""
     lines: list[tuple[str, tuple[tuple[float, float] | None, ...]]] = []
@@ -149,7 +168,7 @@ def _page_lines(records, to_layout) -> list[tuple[str, tuple[tuple[float, float]
                 lines.append(("".join(chars), tuple(centers)))
                 chars, centers = [], []
             continue
-        if ch in _INVISIBLE:
+        if ch in _ZERO_WIDTH:
             continue
         chars.append(ch.translate(_HYPHEN_LOOKALIKES))
         centers.append(to_layout(cx, cy))
@@ -170,47 +189,27 @@ def _text_near(records, rect_pts: tuple[float, float, float, float]) -> str:
             if parts and parts[-1] != "\n":
                 parts.append("\n")
             continue
-        if ch not in _INVISIBLE and left <= cx <= right and bottom <= cy <= top:
+        if ch not in _ZERO_WIDTH and left <= cx <= right and bottom <= cy <= top:
             parts.append(ch.translate(_HYPHEN_LOOKALIKES))
     return "".join(parts).strip()
 
 
-def _xmp_values(pdf_bytes: bytes) -> list[MetadataDoi]:
-    found: list[MetadataDoi] = []
-    start = 0
-    for _ in range(_MAX_XMP_PACKETS):
-        begin = pdf_bytes.find(_XMP_START, start)
-        if begin < 0:
-            break
-        end = pdf_bytes.find(_XMP_END, begin, begin + _MAX_XMP_PACKET_BYTES)
-        if end < 0:
-            break
-        packet = pdf_bytes[begin:end].decode("utf-8", "replace")
-        start = end + len(_XMP_END)
-        for match in _XMP_PROPERTY_RE.finditer(packet):
-            key = match.group("tag") or match.group("attr")
-            value = match.group("value") if match.group("tag") else match.group("attr_value")
-            if value and DOI_CANDIDATE_RE.search(value):
-                found.append(MetadataDoi("pdf_xmp", key, " ".join(value.split())[:300]))
-    return found
-
-
 def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvidence:
-    """Read the text-layer DOI lines and DOI links of *pages*, and the metadata DOIs.
+    """Read the text-layer DOI lines and DOI links of *pages*, and the Info DOIs.
 
-    *pages* are 1-based; pages the PDF does not have are skipped. Raises on an
+    *pages* are 1-based; pages the PDF does not have are skipped. Only the
+    character and link records are read under the process-wide PDFium lock;
+    lines and link texts are built after it is released. Raises on an
     unreadable PDF; the caller treats that as no evidence.
     """
     import pypdfium2
 
-    from bibr.ocr.native_text import _build_page_char_records, _page_crop_box, _page_rotation
+    from bibr.ocr.native_text import _page_crop_box, _page_rotation
     from bibr.ocr.pdf_links import doi_from_uri, page_uri_links
     from bibr.ocr.utils import pdfium_lock
 
-    lines: list[TextLayerLine] = []
-    links: list[LinkDoi] = []
     metadata: list[MetadataDoi] = []
-    read_pages: list[int] = []
+    read: list[tuple[int, tuple, int, list, list]] = []
     with pdfium_lock:
         document = pypdfium2.PdfDocument(pdf_bytes)
         try:
@@ -224,48 +223,54 @@ def read_pdf_doi_evidence(pdf_bytes: bytes, pages: Iterable[int]) -> PdfDoiEvide
                     continue
                 page = document[page_number - 1]
                 try:
-                    crop_box = _page_crop_box(page)
-                    rotation = _page_rotation(page)
-
-                    def to_layout(x, y, crop_box=crop_box, rotation=rotation):
-                        return _to_layout_point(x, y, crop_box, rotation)
-
                     textpage = page.get_textpage()
                     try:
-                        records = _build_page_char_records(textpage)
+                        records = _printed_char_records(textpage)
                     finally:
                         textpage.close()
-                    read_pages.append(page_number)
-                    page_lines = _page_lines(records, to_layout)
-                    for index, (text, centers) in enumerate(page_lines):
-                        if "10." in text and DOI_CANDIDATE_RE.search(text):
-                            following = (
-                                page_lines[index + 1][0] if index + 1 < len(page_lines) else ""
-                            )
-                            lines.append(TextLayerLine(page_number, text, centers, following))
-                    for link in page_uri_links(document, page, page_number - 1):
-                        doi = doi_from_uri(link.uri)
-                        if doi is None:
-                            continue
-                        left, bottom, right, top = link.rect
-                        corners = (to_layout(left, top), to_layout(right, bottom))
-                        rect = (
-                            min(c[0] for c in corners),
-                            min(c[1] for c in corners),
-                            max(c[0] for c in corners),
-                            max(c[1] for c in corners),
+                    page_links = page_uri_links(document, page, page_number - 1)
+                    read.append(
+                        (
+                            page_number,
+                            _page_crop_box(page),
+                            _page_rotation(page),
+                            records,
+                            page_links,
                         )
-                        links.append(
-                            LinkDoi(
-                                page_number, doi, link.uri, rect, _text_near(records, link.rect)
-                            )
-                        )
+                    )
                 finally:
                     page.close()
         finally:
             document.close()
-    try:
-        metadata.extend(_xmp_values(pdf_bytes))
-    except Exception:  # noqa: BLE001 - a malformed packet is no evidence, not a failure
-        logger.debug("XMP DOI read failed", exc_info=True)
-    return PdfDoiEvidence(tuple(read_pages), tuple(lines), tuple(links), tuple(metadata))
+
+    lines: list[TextLayerLine] = []
+    links: list[LinkDoi] = []
+    for page_number, crop_box, rotation, records, page_links in read:
+
+        def to_layout(x, y, crop_box=crop_box, rotation=rotation):
+            return _to_layout_point(x, y, crop_box, rotation)
+
+        page_lines = _page_lines(records, to_layout)
+        for index, (text, centers) in enumerate(page_lines):
+            if "10." in text and DOI_CANDIDATE_RE.search(text):
+                following = page_lines[index + 1][0] if index + 1 < len(page_lines) else ""
+                lines.append(TextLayerLine(page_number, text, centers, following))
+        doi_links = 0
+        for link in page_links:
+            doi = doi_from_uri(link.uri)
+            if doi is None:
+                continue
+            doi_links += 1
+            if doi_links > _MAX_DOI_LINKS_PER_PAGE:
+                break
+            left, bottom, right, top = link.rect
+            corners = (to_layout(left, top), to_layout(right, bottom))
+            rect = (
+                min(c[0] for c in corners),
+                min(c[1] for c in corners),
+                max(c[0] for c in corners),
+                max(c[1] for c in corners),
+            )
+            links.append(LinkDoi(page_number, doi, link.uri, rect, _text_near(records, link.rect)))
+    pages_read = tuple(page_number for page_number, *_rest in read)
+    return PdfDoiEvidence(pages_read, tuple(lines), tuple(links), tuple(metadata))

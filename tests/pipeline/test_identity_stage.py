@@ -202,7 +202,7 @@ async def test_streaming_backhalf_runs_identity_immediately_after_post_parse():
 
 
 def _banner_pdf() -> bytes:
-    from tests.extract.pdf_builder import Page, TextRun, build_pdf, xmp_packet
+    from tests.extract.pdf_builder import Page, TextRun, build_pdf
 
     return build_pdf(
         [
@@ -219,7 +219,7 @@ def _banner_pdf() -> bytes:
                 ]
             )
         ],
-        xmp=xmp_packet(prism_doi="10.1234/banner.7"),
+        info={"doi": "10.1234/banner.7"},
     )
 
 
@@ -259,7 +259,7 @@ async def test_identity_stage_reads_the_input_pdf_that_was_processed(tmp_path):
     assert receipt["selected"]["marker_kind"] == "first_published_as"
     assert [(c["source_kind"], c["rejection_reason"]) for c in receipt["candidates"]] == [
         ("text_layer", None),
-        ("pdf_xmp", "agreement_only"),
+        ("pdf_info", "agreement_only"),
     ]
 
 
