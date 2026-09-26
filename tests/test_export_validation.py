@@ -449,6 +449,8 @@ def test_abstract_suspect_emits_once_with_bounded_source_ids():
 def test_abstract_suspect_is_replay_fallback_when_payload_already_has_issue():
     p = _base()
     p["metadata"]["abstract"] = "A" * 2501
+    # Stored exports up to 11.x kept the gate block at the root `validation`
+    # (extraction.validation is null there), so the dedup guard reads it.
     p["validation"] = {
         "errors": 0,
         "warnings": 1,
@@ -465,6 +467,33 @@ def test_abstract_suspect_is_replay_fallback_when_payload_already_has_issue():
                 "blocking": False,
             }
         ],
+    }
+
+    assert "VAL_ABSTRACT_SUSPECT" not in _codes(validate_export(p))
+
+
+def test_abstract_suspect_dedup_reads_extraction_validation():
+    """Guard: the schema-12 block location suppresses a re-emit too."""
+    p = _base()
+    p["metadata"]["abstract"] = "A" * 2501
+    p["extraction"] = {
+        "validation": {
+            "errors": 0,
+            "warnings": 1,
+            "blocking": 0,
+            "promotable": True,
+            "issues": [
+                {
+                    "code": "VAL_ABSTRACT_SUSPECT",
+                    "severity": "warning",
+                    "message": "abstract suspicion: length_gt_2500",
+                    "origin_stage": "extract",
+                    "evidence_ids": ["text:1"],
+                    "count": 1,
+                    "blocking": False,
+                }
+            ],
+        }
     }
 
     assert "VAL_ABSTRACT_SUSPECT" not in _codes(validate_export(p))
@@ -721,3 +750,146 @@ def test_real_fixture_defects(fixture, expected):
     payload = json.loads(path.read_text())
     codes = _codes(validate_export(payload))
     assert expected <= codes, f"{fixture}: missing {expected - codes}"
+
+
+# ── audit export-3: VAL_EMPTY_EQ as blank lhs OR blank rhs ──────────────
+
+
+def test_empty_eq_flags_blank_lhs():
+    """The dossier's case: a null lhs coerced to '' ships as ('', '=', '.04').
+    Fails on base (no issue)."""
+    p = _base()
+    p["eq"] = [{"text_id": 1, "grp_id": 1, "lhs": "", "df": "", "comp": "=", "rhs": ".04"}]
+    assert "VAL_EMPTY_EQ" in _codes(validate_export(p))
+
+
+def test_empty_eq_flags_blank_rhs():
+    p = _base()
+    p["eq"] = [{"text_id": 1, "grp_id": 1, "lhs": "x", "df": "", "comp": "<", "rhs": "  "}]
+    assert "VAL_EMPTY_EQ" in _codes(validate_export(p))
+
+
+def test_empty_eq_all_blank_still_flags():
+    p = _base()
+    p["eq"] = [{"text_id": 1, "grp_id": 1, "lhs": "", "df": "", "comp": "", "rhs": ""}]
+    assert "VAL_EMPTY_EQ" in _codes(validate_export(p))
+
+
+# ── audit export-8: dangling-reference coverage and duplicate keys ──────
+
+
+def test_dangling_ref_flags_orphan_text_ids_and_author_ids():
+    """The dossier's case: xref text_id=99 with no such sentence, and an
+    affiliation naming author 7 of a one-author paper. Fails on base."""
+    p = _base()
+    p["author"] = [{"author_id": 1, "given": "A", "family": "B"}]
+    p["affiliation"] = [{"affiliation_id": 1, "text": "Orphan Institute", "author_ids": [7]}]
+    p["bib"] = [{"bib_id": 1, "text_id": 1}]
+    p["xref"] = [{"xref_id": 1, "target_id": 1, "xref_type": "bib", "text_id": 99}]
+    assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
+def test_dangling_ref_flags_orphan_match_rows():
+    p = _base()
+    p["author"] = [{"author_id": 1, "given": "A", "family": "B"}]
+    p["affiliation"] = [{"affiliation_id": 1, "text": "X", "author_ids": [1]}]
+    p["funding"] = [{"funding_id": 1, "funder": "Y", "award_ids": []}]
+    p["affiliation_match"] = [{"affiliation_id": 9, "service": "ror"}]
+    p["funding_match"] = [{"funding_id": 9, "service": "ror"}]
+    p["bib_match"] = [{"bib_id": 9, "service": "crossref"}]
+    assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
+def test_dangling_ref_flags_orphan_url_and_eq_text_ids():
+    p = _base()
+    p["url"] = [{"url_id": 1, "href": "https://example.com/x", "text_id": 77}]
+    p["eq"] = [{"eq_id": 1, "text_id": 78, "lhs": "x", "comp": "=", "rhs": "1"}]
+    assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
+def test_dangling_ref_flags_orphan_extraction_rows():
+    p = _base()
+    p["extraction"] = {
+        "text_regions": [{"text_id": 55, "page_number": 1}],
+        "float_parts": [{"object_type": "figure", "object_id": 3, "part_index": 1}],
+        "diagnostics": {
+            "section_classification": [{"section_id": 44}],
+            "xref_tier": [{"xref_id": 45, "tier": "direct"}],
+        },
+    }
+    assert "VAL_DANGLING_REF" in _codes(validate_export(p))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "xref_text_id",
+        "url_text_id",
+        "eq_text_id",
+        "affiliation_author_ids",
+        "affiliation_match",
+        "funding_match",
+        "bib_match",
+        "text_regions",
+        "float_parts",
+        "section_classification",
+        "xref_tier",
+    ],
+)
+def test_dangling_ref_single_orphan_pins_each_foreign_key(case):
+    """One orphan per new foreign key, each tripping exactly one dangling
+    reference. The grouped tests above plant several orphans at once, so any
+    single check satisfies them — a regression in one key would go unnoticed.
+    Each case here asserts VAL_DANGLING_REF with count == 1."""
+    p = _base()
+    if case == "xref_text_id":
+        p["xref"] = [{"xref_id": 1, "target_id": None, "xref_type": "bib", "text_id": 99}]
+    elif case == "url_text_id":
+        p["url"] = [{"url_id": 1, "href": "https://example.com/x", "text_id": 77}]
+    elif case == "eq_text_id":
+        p["eq"] = [{"eq_id": 1, "text_id": 78, "lhs": "x", "comp": "=", "rhs": "1"}]
+    elif case == "affiliation_author_ids":
+        p["author"] = [{"author_id": 1, "given": "A", "family": "B"}]
+        p["affiliation"] = [{"affiliation_id": 1, "text": "X", "author_ids": [7]}]
+    elif case == "affiliation_match":
+        p["affiliation_match"] = [{"affiliation_id": 9, "service": "ror"}]
+    elif case == "funding_match":
+        p["funding_match"] = [{"funding_id": 9, "service": "ror"}]
+    elif case == "bib_match":
+        p["bib_match"] = [{"bib_id": 9, "service": "crossref"}]
+    elif case == "text_regions":
+        p["extraction"] = {"text_regions": [{"text_id": 55, "page_number": 1}]}
+    elif case == "float_parts":
+        p["extraction"] = {
+            "float_parts": [{"object_type": "figure", "object_id": 3, "part_index": 1}]
+        }
+    elif case == "section_classification":
+        p["extraction"] = {"diagnostics": {"section_classification": [{"section_id": 44}]}}
+    elif case == "xref_tier":
+        p["extraction"] = {"diagnostics": {"xref_tier": [{"xref_id": 45, "tier": "direct"}]}}
+    else:  # pragma: no cover - parametrize list is exhaustive
+        raise AssertionError(f"unknown dangling-ref case: {case}")
+
+    issues = [issue for issue in validate_export(p) if issue.code == "VAL_DANGLING_REF"]
+    assert len(issues) == 1
+    assert issues[0].count == 1
+
+
+def test_duplicate_pk_flags_repeated_ids():
+    """Two author rows sharing an author_id. Fails on base (no such code)."""
+    p = _base()
+    p["author"] = [
+        {"author_id": 1, "given": "A", "family": "B"},
+        {"author_id": 1, "given": "C", "family": "D"},
+    ]
+    assert "VAL_DUPLICATE_PK" in _codes(validate_export(p))
+
+
+def test_duplicate_pk_clean_tables_are_silent():
+    p = _base()
+    p["author"] = [
+        {"author_id": 1, "given": "A", "family": "B"},
+        {"author_id": 2, "given": "C", "family": "D"},
+    ]
+    assert "VAL_DUPLICATE_PK" not in _codes(validate_export(p))
+    assert "VAL_DANGLING_REF" not in _codes(validate_export(p))

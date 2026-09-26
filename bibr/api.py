@@ -82,8 +82,13 @@ _TABLE_KEYS = (
 _ALIASES = {
     "references": "bib",
     "authors": "author",
+    "affiliations": "affiliation",
     "sections": "section",
     "footnotes": "footnote",
+    "figures": "figure",
+    "tables": "table",
+    "urls": "url",
+    "equations": "eq",
 }
 
 # chew()/achew() option → LocalPipeline constructor argument. Identity
@@ -490,7 +495,9 @@ def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str
     from bibr.local.pipeline import LOCAL_LLM_BACKENDS, resolve_llm_backend
 
     effective = settings if settings is not None else snapshot_settings()
-    backend = resolve_llm_backend(pipeline_kwargs.get("llm_backend") or effective.llm.backend)
+    backend = resolve_llm_backend(
+        pipeline_kwargs.get("llm_backend") or effective.llm.backend, settings=effective
+    )
     if backend == "cloud":
         from bibr.clients.llm import preflight_credentials
 

@@ -32,15 +32,24 @@ def serve_ocr_defaults(settings: GlobalSettings) -> tuple[str | None, str | None
 
     ``bibr serve`` always proxies over HTTP, so ``OCR_BACKEND`` cannot pick a
     runtime — but ``paddle-http`` still says which *family* of server sits at
-    ``OCR_BASE_URL``. Then the served alias defaults to ``OCR_PADDLE_SERVED_MODEL``
+    ``OCR_BASE_URL``, as does an explicit ``OCR_PROFILE=paddle``. Then the
+    served alias defaults to ``OCR_PADDLE_SERVED_MODEL``
     (``paddle-ocr-vl-1.6``) and the profile to ``paddle``, instead of the GLM
     ``glm-ocr`` defaults every other value keeps (vLLM 404s on a wrong alias).
     An explicit ``OCR_MODEL`` / ``OCR_PROFILE`` always wins.
     """
+    from bibr.ocr.profiles import resolve_served_family
+
     ocr = settings.ocr
     model = ocr.model
     profile = ocr.profile
-    if (ocr.backend or "").lower() == "paddle-http":
+    if (
+        resolve_served_family(
+            requested_backend=(ocr.backend or "serve-http").lower(),
+            explicit_profile=ocr.profile,
+        )
+        == "paddle"
+    ):
         model = model or ocr.paddle_served_model
         profile = profile or "paddle"
     return model, profile
@@ -74,8 +83,8 @@ class ServePipeline(Pipeline):
         from bibr.serve import ocr_backend  # noqa: F401
 
         # Served-model name for the co-located OCR server: the ``glm-ocr``
-        # alias, or the Paddle alias under ``OCR_BACKEND=paddle-http``; set
-        # ``OCR_MODEL`` to target any other served model — vLLM 404s on a
+        # alias, or the Paddle alias under ``OCR_BACKEND=paddle-http`` or
+        # ``OCR_PROFILE=paddle``; set ``OCR_MODEL`` to target any other served model — vLLM 404s on a
         # mismatch.
         settings_snapshot = snapshot_settings(settings)
         ocr_model, default_ocr_profile = serve_ocr_defaults(settings_snapshot)

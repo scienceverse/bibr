@@ -218,9 +218,13 @@ tracebacks included.
 Metering (`METER_ENABLED`, default on) emits one JSON line per HTTP request
 from the API process and one per extraction — with LLM token usage — from the
 worker. With `METER_LOG_PATH` unset they go to stderr with the other logs; set
-it to route them to a size-rotated JSONL file instead (`METER_LOG_MAX_BYTES`,
-`METER_LOG_BACKUP_COUNT`), which both processes append to. Metering does not
-follow `SERVE_LOG_LEVEL`.
+it to route them to size-rotated JSONL files instead (`METER_LOG_MAX_BYTES`,
+`METER_LOG_BACKUP_COUNT`). The API process writes `METER_LOG_PATH` itself
+(request records), while the worker writes the sibling
+`<stem>.worker<suffix>` file (extraction records, the only ones carrying
+`llm_usage_totals`): each process rotates only its own file, so tallying
+usage from `METER_LOG_PATH` alone misses every extraction — read both files.
+Metering does not follow `SERVE_LOG_LEVEL`.
 
 ## Authentication
 

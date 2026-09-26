@@ -92,6 +92,12 @@ def test_serve_ocr_defaults_follow_the_backend_family():
     )
     explicit = GlobalSettings(ocr={"backend": "paddle-http", "model": "my/alias", "profile": "glm"})
     assert serve_ocr_defaults(explicit) == ("my/alias", "glm")
+    # An explicit paddle profile selects the Paddle family even when the
+    # backend is not paddle-http (serve-http with OCR_PROFILE=paddle).
+    assert serve_ocr_defaults(GlobalSettings(ocr={"profile": "paddle"})) == (
+        "paddle-ocr-vl-1.6",
+        "paddle",
+    )
 
 
 def test_serve_pipeline_requests_the_paddle_alias_under_paddle_http():

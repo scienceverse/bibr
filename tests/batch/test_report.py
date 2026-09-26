@@ -86,6 +86,27 @@ def test_compute_report_stage_shares_sum_to_100_and_sort_desc():
     assert shares == {"ocr": 80.0, "extract": 15.0, "enrich": 5.0}
 
 
+def test_compute_report_excludes_overlapped_prefetch_from_stage_shares():
+    # enrich_prefetch runs under extract and is already inside its wall
+    # clock (like extraction.timings.total_seconds excludes it): it must
+    # not appear as a phantom stage or deflate the real shares.
+    rows = [
+        _row(
+            "p",
+            duration_s=42.0,
+            stage_times={"ocr": 30.0, "extract": 10.0, "enrich": 2.0, "enrich_prefetch": 8.0},
+        ),
+    ]
+    shares = compute_report(rows)["stage_shares_pct"]
+    assert "enrich_prefetch" not in shares
+    assert shares == {"ocr": 71.4, "extract": 23.8, "enrich": 4.8}
+
+
+def test_compute_report_stage_shares_all_overlapped_is_empty():
+    rows = [_row("p", duration_s=8.0, stage_times={"enrich_prefetch": 8.0})]
+    assert compute_report(rows)["stage_shares_pct"] == {}
+
+
 def test_compute_report_tokens_and_references():
     report = compute_report(_ledger())
     assert report["llm_tokens"] == {"total": 4500, "papers": 3, "mean_per_paper": 1500.0}

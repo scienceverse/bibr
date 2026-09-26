@@ -47,6 +47,13 @@ class BibrServeOcrBackend:
 
     name: ClassVar[str] = "serve-http"
 
+    #: A failed readiness poll keeps this instance published on the
+    #: ``ResourceManager`` so later requests fail fast on its cooldown
+    #: instead of rebuilding and re-polling for the full timeout. Backends
+    #: without this flag are discarded (and shut down) on readiness failure,
+    #: never reused.
+    keeps_readiness_cooldown: ClassVar[bool] = True
+
     #: Served-model alias used when the caller passes no model. The documented
     #: convention for externally-managed GLM-OCR servers; a server serving a
     #: different model (e.g. a NuExtract vLLM instance) must be pointed at via
@@ -130,18 +137,30 @@ class BibrServeOcrBackend:
                 "Waiting up to %ds for OCR server at %s…", self._ready_timeout, self._base_url
             )
             host_was_unreachable = False
+            last_status: int | None = None
             observed_model_ids: list[str] = []
             while time.monotonic() < deadline:
                 try:
                     resp = await self._http.get(f"{self._base_url}/v1/models", timeout=5.0)
+                    # Any response proves the host is up, whatever its status.
                     host_was_unreachable = False
                     if resp.status_code == 200:
                         data = resp.json()
                         observed_model_ids = [item["id"] for item in data["data"]]
+                        # A 200 answers the key question in the affirmative —
+                        # forget any earlier 401 so the failure names the
+                        # model the server keeps not listing, not a key the
+                        # server has since accepted.
+                        last_status = None
                         if self._model in observed_model_ids:
                             self._ready = True
                             logger.info("OCR server ready at %s", self._base_url)
                             return
+                    else:
+                        # A non-200 answer still proves the host is up; remember
+                        # which status so the failure names the key (401), not
+                        # the model alias.
+                        last_status = resp.status_code
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     host_was_unreachable = True
                 except Exception:  # noqa: S110
@@ -157,6 +176,17 @@ class BibrServeOcrBackend:
                     self._ready_timeout,
                 )
                 raise UpstreamServiceError("ocr", "OCR server is unreachable.")
+            if last_status == 401:
+                logger.error(
+                    "OCR server at %s returned 401 (unauthorized — check OCR_API_KEY); "
+                    "observed model ids: %r",
+                    self._base_url,
+                    observed_model_ids,
+                )
+                raise UpstreamServiceError(
+                    "ocr",
+                    "OCR server unauthorized (401): check OCR_API_KEY.",
+                )
             logger.error(
                 "OCR server at %s did not serve model %r within %.0fs; observed model ids: %r",
                 self._base_url,

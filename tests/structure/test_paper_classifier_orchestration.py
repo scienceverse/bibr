@@ -94,3 +94,42 @@ async def test_managed_resource_is_used_instead_of_lazy_singleton(monkeypatch):
     assert result is not None
     assert result[0] == "Social Sciences"
     assert fake.calls == [[("Managed", "batch")]]
+
+
+async def test_empty_title_and_abstract_returns_none_without_running_model(monkeypatch):
+    """structure-sections-classifiers-11: empty title+abstract carries no
+    signal, so the model must not run — None sends the caller down the LLM
+    path with the full classification text."""
+    fake = _FakeModel()
+    monkeypatch.setattr(Settings.ml, "paper_classifier_model_id", "fake/repo")
+    monkeypatch.setattr(pc, "_paper_model_cache", fake)
+
+    assert await pc.classify_paper_async("", "") is None
+    assert await pc.classify_paper_async("   ", "  ") is None
+    assert fake.calls == []
+
+
+async def test_empty_input_short_circuits_managed_resource(monkeypatch):
+    """The empty-input guard applies before the managed-resource path too."""
+
+    class Managed:
+        async def classify_paper(self, item):  # pragma: no cover - must not run
+            raise AssertionError("model must not run on empty input")
+
+    assert (
+        await pc.classify_paper_async(
+            "", "", classifier_resources=Managed(), settings=GlobalSettings()
+        )
+        is None
+    )
+
+
+async def test_nonempty_title_with_empty_abstract_still_runs_model(monkeypatch):
+    """Guard: the empty-input rule only fires when _build_input_text is empty —
+    a real title with no abstract still goes to the model."""
+    fake = _FakeModel()
+    monkeypatch.setattr(Settings.ml, "paper_classifier_model_id", "fake/repo")
+    monkeypatch.setattr(pc, "_paper_model_cache", fake)
+
+    assert await pc.classify_paper_async("Some title", "") is not None
+    assert fake.calls == [[("Some title", "")]]
