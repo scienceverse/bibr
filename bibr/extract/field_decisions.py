@@ -312,7 +312,7 @@ def decide_authors(
         "author",
         selected.value,
         selected,
-        _AUTHOR_RULES.get(selected.source, "extracted"),
+        _AUTHOR_RULES.get(selected.source or "", "extracted"),
         tuple(considered),
     )
 
@@ -380,8 +380,7 @@ def decide_keywords(
 ) -> FieldDecision:
     """Keywords: the extracted list, else the PDF doc-info, else the Keywords section."""
     producer = incumbent.source if incumbent is not None else None
-    usable = incumbent is not None and incumbent.veto is None
-    empty_value = incumbent.value if usable else []
+    empty_value = incumbent.value if incumbent is not None and incumbent.veto is None else []
     if abstained:
         return FieldDecision("keywords", empty_value, None, "abstained", producer=producer)
     considered: list[Verdict] = []
@@ -461,7 +460,7 @@ def decide_classification(
         "paper_type",
         selected.value,
         selected,
-        _CLASSIFICATION_RULES.get(selected.source, "extracted"),
+        _CLASSIFICATION_RULES.get(selected.source or "", "extracted"),
         tuple(considered),
     )
 

@@ -15,9 +15,13 @@ import difflib
 import logging
 import re
 import unicodedata
+from typing import TYPE_CHECKING
 
 from bibr.extract.field_decisions import FieldCandidate
 from bibr.validation import IssueSeverity, ValidationIssue
+
+if TYPE_CHECKING:
+    from bibr.extract.front_matter import FrontMatterCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +371,7 @@ def selected_title_candidate(
         and _safe_title_candidate(candidate, journal=journal, publisher=publisher)
     ]
 
-    distinct: dict[str, object] = {}
+    distinct: dict[str, FrontMatterCandidate] = {}
     for candidate in safe:
         distinct.setdefault(_normalize_for_match(candidate.raw_text), candidate)
     if len(distinct) != 1:
