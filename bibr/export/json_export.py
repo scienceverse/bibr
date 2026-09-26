@@ -74,7 +74,7 @@ from bibr.export.spans import SpanLocator, equation_span, url_span, xref_span
 from bibr.export.structure_ids import ExportIds, export_ids
 from bibr.extract.research_integrity import collect_affiliations
 from bibr.models import ORGANIZATION_ROLE, BibType, canonicalize_orcid, migrate_bib_type
-from bibr.processing_warnings import ProcessingWarning
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
@@ -446,21 +446,24 @@ def _normalize_export_url(url: str) -> str:
     return cleaned.rstrip(".")
 
 
-def _sane_export_links(links: list) -> list:
-    """Filter *links* to those passing :func:`_is_sane_url`, logging drops.
+def _sane_export_links(links: list) -> tuple[list, list]:
+    """Split *links* into ``(kept, dropped)`` by :func:`_is_sane_url`.
 
     Normalizes before the sanity check so a wrapped URL is judged on its
-    repaired form, not its raw (possibly truncated-looking) one. A link whose
-    scheme would run script is dropped too.
+    repaired form, not its raw (possibly truncated-looking) one. Callers warn
+    about *dropped* without re-running the predicate. A link whose scheme
+    would run script is left out of both lists: it is dropped silently.
     """
     kept = []
+    dropped = []
     for link in links:
         href = _normalize_export_url(link.url)
         if not _is_sane_url(href):
             logger.debug("Dropping malformed URL from export: %r", link.url)
+            dropped.append(link)
         elif _without_active_scheme(href) is not None:
             kept.append(link)
-    return kept
+    return kept, dropped
 
 
 def validate_export(data: dict) -> list[str]:
@@ -1030,7 +1033,19 @@ def _export_paper_payload(
     xref_locator = SpanLocator(texts, shared=True)
     url_locator = SpanLocator(texts, shared=False)
     eq_locator = SpanLocator(texts, shared=False)
-    exported_links = _sane_export_links(paper.contents.links)
+    exported_links, dropped_links = _sane_export_links(paper.contents.links)
+    # A dropped link leaves no trace in the payload, so record each loss as a
+    # coded warning (read on by the extraction-warnings union below). Without
+    # this the malformed-URL loss is silent (audit export-3). These stay local
+    # to the export: appending to paper.processing_warnings here would add a
+    # duplicate on every export call.
+    link_drop_warnings = [
+        ProcessingWarning(
+            WarningCode.URL_MALFORMED_DROPPED,
+            f"Dropped malformed URL from export: {link.url[:160]!r}",
+        )
+        for link in dropped_links
+    ]
     exported_xrefs = list(enumerate(paper.contents.xrefs, start=1))
 
     # Processing facts about content rows, keyed by the rows' primary keys.
@@ -1138,10 +1153,16 @@ def _export_paper_payload(
             extraction_data["pages"] = pages
         # Warnings are unioned rather than overwritten: the stage snapshots
         # ``paper.processing_warnings`` when it builds the block, but callers
-        # (and the stage itself) may append after that point.
+        # (and the stage itself) may append after that point. The link-drop
+        # warnings computed above join here without touching the Paper, so
+        # repeated exports stay identical.
         warnings = map(
             ProcessingWarning.from_dict,
-            [*(extraction_data.get("warnings") or []), *paper.processing_warnings],
+            [
+                *(extraction_data.get("warnings") or []),
+                *paper.processing_warnings,
+                *link_drop_warnings,
+            ],
         )
         extraction_data["warnings"] = [w.to_dict() for w in dict.fromkeys(warnings)]
 

@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 REMOTE_OCR_BACKENDS = frozenset(
     {"glm-http", "paddle-http", "serve-http", "gemini", "openai", "anthropic"}
 )
+# Cloud vision-LLM OCR backends hold no local weights: the client is a thin
+# HTTPS handle, so per-chunk teardown only forces re-handshakes (and a fresh
+# key read) with no VRAM to reclaim. Kept separate from REMOTE_OCR_BACKENDS,
+# which also covers self-hosted HTTP proxies with their own lifecycle.
+CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
 
 # Shared GPU execution is serialized by the runtime; keep this concurrency default aligned with
 # the settings model.
@@ -800,6 +805,7 @@ def _should_unload_ocr_after_chunk(
     memory_mode: str,
     llm_backend: str,
     settings: GlobalSettings | None = None,
+    ocr_backend: str | None = None,
 ) -> bool:
     """Whether to tear down the OCR engine at the end of an OCR stage.
 
@@ -814,6 +820,10 @@ def _should_unload_ocr_after_chunk(
       backend follows (``vllm`` / ``vllm-mlx``, or the unresolved ``local``
       alias).
 
+    Cloud vision OCR (gemini/openai/anthropic) never unloads between chunks:
+    the client holds no local weights, so teardown only forces a re-handshake
+    (and a fresh key read) with no VRAM to reclaim.
+
     ``OCR_UNLOAD_BETWEEN_CHUNKS`` overrides the heuristic: ``always`` forces the
     per-chunk teardown, ``never`` keeps OCR loaded, ``auto`` (default) applies
     the rules above.
@@ -822,6 +832,11 @@ def _should_unload_ocr_after_chunk(
     if override == "always":
         return True
     if override == "never":
+        return False
+    backend = ocr_backend
+    if backend is None and settings is not None:
+        backend = settings.ocr.backend
+    if backend in CLOUD_VISION_OCR_BACKENDS:
         return False
     if memory_mode == "keep_all":
         return False
@@ -1000,7 +1015,7 @@ class OcrStage:
             # (InterleavedRenderOcrStage) run OCR per file-window yet tear the
             # engine down just once for the whole chunk, not once per window.
             if not ctx.signals.defer_ocr_teardown and _should_unload_ocr_after_chunk(
-                cfg.memory_mode, cfg.llm_backend, settings
+                cfg.memory_mode, cfg.llm_backend, settings, cfg.ocr_backend
             ):
                 await rm.shutdown_ocr()
 

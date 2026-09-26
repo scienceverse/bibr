@@ -549,7 +549,8 @@ class LlmOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp LLM server command. "
-            "Overrides bibr defaults for the same flags. Role-based LLM defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based LLM defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, plus probe-gated "
             "--parallel 2 --kv-unified, --spec-type ngram-mod, and --no-mmproj when supported "
             "(else --parallel 1)."
@@ -643,12 +644,18 @@ class OcrOptions(_BibrSettings):
         "olragon/PaddleOCR-VL-1.6-8bit",
         description="Model id for the managed Paddle MLX OCR server.",
     )
-    paddle_mlx_port: int = Field(8775, description="Port for the managed Paddle MLX OCR server.")
+    paddle_mlx_port: int = Field(
+        8775,
+        description="Port for the managed Paddle MLX OCR server (shared with the "
+        "paddle-rapid-mlx fallback candidate, which runs in sequence, never alongside).",
+    )
     paddle_mlx_startup_timeout: int = Field(
         600, description="Startup timeout in seconds for the managed Paddle MLX OCR server."
     )
     paddle_mlx_extra_args: str = Field(
-        "", description="Extra CLI args appended to the managed Paddle MLX OCR server command."
+        "",
+        description="Extra CLI args appended to the managed Paddle MLX OCR server command "
+        "(shared with the paddle-rapid-mlx fallback candidate; use only flags both CLIs accept).",
     )
     paddle_rapid_mlx_model: str = Field(
         "olragon/PaddleOCR-VL-1.6-8bit",
@@ -668,7 +675,8 @@ class OcrOptions(_BibrSettings):
         "",
         description=(
             "Extra CLI args appended to the managed llama.cpp OCR server command. "
-            "Overrides bibr defaults for the same flags. Role-based OCR defaults include "
+            "Overrides bibr defaults for the same flags. Pass each flag and its "
+            "value as separate tokens (--flag value, not --flag=value). Role-based OCR defaults include "
             "--flash-attn on, --cache-type-k/v q8_0, --n-gpu-layers 999, --parallel 1 "
             "(OCR image encode serializes across slots, so it stays single-slot)."
         ),

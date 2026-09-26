@@ -112,7 +112,13 @@ def load_manifest(path: str | Path) -> list[ManifestRecord]:
 
         content_sha256 = content_hashes.get(input_path)
         if content_sha256 is None:
-            content_sha256 = hashlib.sha256(input_path.read_bytes()).hexdigest()
+            # Stream: a dissertation PDF must not be loaded whole just to
+            # prove which bytes the record refers to.
+            digest = hashlib.sha256()
+            with input_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            content_sha256 = digest.hexdigest()
             content_hashes[input_path] = content_sha256
 
         records.append(

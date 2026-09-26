@@ -207,12 +207,12 @@ async def build_result_payload(ctx: PipelineContext, fs) -> dict:
     )
 
 
-async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> None:
+async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> bool:
     import asyncio
 
     mode = ctx.config.consolidate or ctx.settings.crossref.consolidate
     if mode == "off":
-        return
+        return False
     from bibr.enrich.consolidate import consolidate_bibs
     from bibr.export.json_export import append_payload_warning
 
@@ -226,6 +226,7 @@ async def _consolidate_payload(ctx: PipelineContext, payload: dict) -> None:
                 "consolidate enabled but Crossref enrichment is off — no matches to merge",
             ),
         )
+    return True
 
 
 def _load_checkpoint_core(sink, fs) -> dict:
@@ -271,9 +272,27 @@ class ExportStage:
                     # Enrichment was not requested (including refs=off). The
                     # checkpoint stage already serialized and materialized the
                     # authoritative core, so do not serialize Paper a second
-                    # time merely to discard that result.
+                    # time merely to discard that result. Consolidation still
+                    # runs here so the -o file matches the unsinked export
+                    # (which always consolidates, e.g. the
+                    # CONSOLIDATE_WITHOUT_ENRICHMENT warning); the change is
+                    # re-materialized only when consolidation ran, so the
+                    # default consolidate-off run does not rewrite identical
+                    # bytes. The sibling core stays immutable. A
+                    # consolidate failure keeps the verified core (audit
+                    # pipeline-stages-12).
                     if not isinstance(fs.result_json, dict):
                         raise RuntimeError("Verified in-memory core checkpoint is unavailable")
+                    try:
+                        if await _consolidate_payload(ctx, fs.result_json):
+                            sink.materialize(fs, fs.result_json)
+                    except Exception as exc:  # noqa: BLE001 - consolidation is optional
+                        logger.warning(
+                            "Consolidation failed for %s; keeping verified core: %s",
+                            fs.path.name,
+                            exc,
+                            exc_info=True,
+                        )
                     continue
 
                 enriched_payload = await build_result_payload(ctx, fs)
@@ -317,6 +336,16 @@ class ExportStage:
                             durable_sidecar,
                             expected_settings_digest=settings_digest,
                         )
+                        # The replayed core's extraction block predates
+                        # enrichment, so its timings omit the enrich stage even
+                        # though enrichment ran. Carry the enriched run's
+                        # timings over so sinked and unsinked exports report the
+                        # same provenance (audit pipeline-stages-12).
+                        enriched_timings = (enriched_payload.get("extraction") or {}).get("timings")
+                        if isinstance(enriched_timings, dict):
+                            replayed_payload.setdefault("extraction", {})["timings"] = (
+                                copy.deepcopy(enriched_timings)
+                            )
                         await _consolidate_payload(ctx, replayed_payload)
                         sink.materialize(fs, replayed_payload)
                         materialized = True

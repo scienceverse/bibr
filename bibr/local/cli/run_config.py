@@ -71,7 +71,8 @@ def resolve_run_config(args) -> ResolvedRunConfig:
 
     Reads (but never mutates) ``Settings`` for the OCR backend fallback;
     flag/preset overrides are applied separately by ``_apply_runtime_settings``.
-    Raises ``ValueError`` for an invalid ``--pages`` value.
+    Raises ``ValueError`` describing the offending option (``--pages``,
+    ``--ocr-model``/``--ocr-profile``).
     """
     # Determine OCR backend. ``--ocr-url`` follows the Paddle-first default;
     # an explicit GLM selection deliberately retains the established GLM HTTP
