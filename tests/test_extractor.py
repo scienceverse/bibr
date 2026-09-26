@@ -1129,12 +1129,14 @@ class TestCollectReferenceRowsLayoutFallback:
 
     def test_no_fallback_without_layout_hints(self):
         """Without layout hints, missing REFERENCES section raises ValueError."""
-        sections = ["Introduction"] * 5 + ["Literaturverzeichnis"] * 3
+        # A heading that is not a references heading in any language: the
+        # header-text fallback would take "Literaturverzeichnis".
+        sections = ["Introduction"] * 5 + ["Anhang"] * 3
         texts = [f"Sentence {i}" for i in range(8)]
 
         paper_sections = [
             PaperSection(0, "Introduction", 2, None, CanonicalSection.INTRODUCTION, 1.0),
-            PaperSection(1, "Literaturverzeichnis", 2, None, CanonicalSection.UNKNOWN, 0.3),
+            PaperSection(1, "Anhang", 2, None, CanonicalSection.UNKNOWN, 0.3),
         ]
         ext = _make_extractor(sections, texts, paper_sections=paper_sections)
         ext.contents.layout_hints = []

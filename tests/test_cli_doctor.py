@@ -110,6 +110,7 @@ def test_check_llm_local_backend_vllm_ok_with_uv():
     with (
         mock.patch.object(importlib.util, "find_spec", return_value=None),
         mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 24.0)),
     ):
         _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
     assert rec.calls[0][0] == "ok"
@@ -130,6 +131,7 @@ def test_check_llm_local_backend_vllm_uv_runner_is_honest_about_python_314(monke
     with (
         mock.patch.object(importlib.util, "find_spec", return_value=None),
         mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 24.0)),
     ):
         _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
     assert rec.calls[0][0] == "ok"
@@ -149,11 +151,43 @@ def test_check_llm_local_backend_vllm_missing_launcher():
     with (
         mock.patch.object(importlib.util, "find_spec", return_value=None),
         mock.patch.object(shutil, "which", return_value=None),
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=("cuda", 24.0)),
     ):
         _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
-    assert rec.calls[0][0] == "fail"
-    assert "vllm" in rec.calls[0][1]
-    assert rec.calls[0][2]  # non-empty hint
+    assert rec.calls == [
+        (
+            "fail",
+            "LLM backend: vllm — cannot start here",
+            "vllm backend selected but neither the 'vllm' package nor 'uv' is available. "
+            "Install with: uv sync --extra vllm, or install uv "
+            "(curl -LsSf https://astral.sh/uv/install.sh | sh).",
+        )
+    ]
+
+
+def test_check_llm_local_backend_refuses_vllm_without_a_gpu():
+    """chew refuses vLLM on a host with no NVIDIA GPU or Apple Silicon; doctor must too."""
+    import importlib.util
+    import shutil
+
+    from bibr.local.cli import _check_llm_local_backend
+
+    rec = _Recorder()
+    with (
+        mock.patch.object(importlib.util, "find_spec", return_value=None),
+        mock.patch.object(shutil, "which", return_value="/usr/bin/uv"),
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=(None, None)),
+    ):
+        _check_llm_local_backend("vllm", "org/model", rec.ok, rec.fail)
+    assert rec.calls == [
+        (
+            "fail",
+            "LLM backend: vllm — cannot start here",
+            "--llm local needs an NVIDIA GPU (vLLM) or Apple Silicon (vllm-mlx); neither was "
+            "detected. Use --llm cloud (hosted API) or run a local Ollama server "
+            "(LLM_PROVIDER=ollama, LLM_BACKEND=cloud).",
+        )
+    ]
 
 
 def test_check_llm_local_backend_vllm_mlx_missing():
@@ -162,10 +196,14 @@ def test_check_llm_local_backend_vllm_mlx_missing():
     from bibr.local.cli import _check_llm_local_backend
 
     rec = _Recorder()
-    with mock.patch.object(importlib.util, "find_spec", return_value=None):
+    with (
+        mock.patch.object(importlib.util, "find_spec", return_value=None),
+        mock.patch("bibr.local.llm_models.detect_hardware", return_value=("mlx", 32.0)),
+    ):
         _check_llm_local_backend("vllm-mlx", "org/model", rec.ok, rec.fail)
     assert rec.calls[0][0] == "fail"
     assert "vllm-mlx" in rec.calls[0][1]
+    assert rec.calls[0][2].startswith("vllm-mlx backend selected but not installed")
 
 
 def test_check_llm_local_backend_vllm_mlx_stale_namespace_fails(monkeypatch):
@@ -190,6 +228,7 @@ def test_check_llm_local_backend_vllm_mlx_stale_namespace_fails(monkeypatch):
     rec = _Recorder()
     monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
     monkeypatch.setattr(importlib.metadata, "version", fake_version)
+    monkeypatch.setattr("bibr.local.llm_models.detect_hardware", lambda: ("mlx", 32.0))
 
     _check_llm_local_backend("vllm-mlx", "org/model", rec.ok, rec.fail)
 
@@ -346,6 +385,9 @@ def test_check_explicit_paddle_vllm_reports_uv_runner_and_cache_without_green(mo
     rec = _Recorder()
     monkeypatch.setattr(Settings.ocr, "backend", "paddle-vllm")
     monkeypatch.setattr(
+        "bibr.local.cli.run_config._ocr_candidate_unavailable_reason", lambda backend: None
+    )
+    monkeypatch.setattr(
         "bibr.local.cli.doctor._paddle_vllm_status",
         lambda model: (True, "launch: uv isolated vllm runner; model cache: cached"),
     )
@@ -375,6 +417,12 @@ def test_check_automatic_linux_paddle_uses_vllm_package_runner_cache_status(monk
     monkeypatch.setattr(
         "bibr.local.cli.doctor._paddle_vllm_status",
         lambda model: (False, "launch unavailable; package absent; model cache not checked"),
+    )
+    # paddle-vllm cannot launch, but the glm-llama fallback can, so the chain
+    # still starts and doctor describes the primary instead of failing.
+    monkeypatch.setattr(
+        "bibr.local.cli.run_config._ocr_candidate_unavailable_reason",
+        lambda backend: "vllm is not installed" if backend == "paddle-vllm" else None,
     )
 
     _check_ocr_backend(rec.ok, rec.warn, rec.fail)
@@ -542,9 +590,14 @@ def test_check_llm_local_backend_llama_cpp_missing_uses_install_hint():
         ),
     ):
         _check_llm_local_backend("llama-cpp", "org/model:Q4", rec.ok, rec.fail)
-    assert rec.calls[0][0] == "fail"
-    assert "launcher not available" in rec.calls[0][1]
-    assert "CUDA build" in rec.calls[0][2]
+    assert rec.calls == [
+        (
+            "fail",
+            "LLM backend: llama-cpp — cannot start here",
+            "llama.cpp backend selected but no server executable was found. "
+            "Install a CUDA build from releases",
+        )
+    ]
 
 
 def test_check_ref_strategies_llm_ok(monkeypatch):
@@ -655,17 +708,17 @@ def test_check_ref_strategies_off_reports_disabled(monkeypatch):
 def test_run_doctor_exits_1_when_a_check_fails(monkeypatch):
     """``bibr doctor`` must exit 1 if any check reports a hard failure.
 
-    Forces the LLM-provider check to fail (no API key resolvable) without
-    hitting the network: ``provider="openai"`` with ``api_key=None`` fails
-    the provider check (component 3) and, since ``api_key`` is falsy, also
-    skips straight to the "LLM connection: skipped" fail (component 4) —
-    no real API call is made either way.
+    Forces the LLM-provider check to fail without hitting the network:
+    ``provider="openai"`` with no ``api_key`` and no ``base_url`` makes the
+    adapter's credential check raise, so the provider check fails and the
+    connection test is reported as skipped instead of being sent.
     """
     import bibr.config
     from bibr.local.cli import _run_doctor
 
     monkeypatch.setattr(bibr.config.Settings.llm, "provider", "openai")
     monkeypatch.setattr(bibr.config.Settings.llm, "api_key", None)
+    monkeypatch.setattr(bibr.config.Settings.llm, "base_url", None)
 
     with pytest.raises(SystemExit) as exc_info:
         _run_doctor()
@@ -692,18 +745,22 @@ def test_check_ref_strategies_off_with_geom_seg_still_ok(monkeypatch):
 # --- LLM connection check redaction (audit M2) --------------------------------
 
 
-def _run_check_llm_connection(rec, *, provider="google", model="gemini-x", api_key, base_url=None):
+def _run_check_llm_connection(rec, monkeypatch, *, api_key, ping):
     import io
 
     from rich.console import Console
 
+    import bibr.config
     from bibr.local.cli.doctor import _check_llm_connection
 
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "google")
+    monkeypatch.setattr(bibr.config.Settings, "GOOGLE_API_KEY", api_key)
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", ping)
     console = Console(file=io.StringIO())
-    _check_llm_connection(provider, model, api_key, base_url, console, rec.ok, rec.warn, rec.fail)
+    _check_llm_connection(bibr.config.Settings, console, rec.ok, rec.fail)
 
 
-def test_llm_connection_failure_redacts_api_key():
+def test_llm_connection_failure_redacts_api_key(monkeypatch):
     """A transient SDK error whose text embeds ``?key=<API_KEY>`` must not leak the
     key into doctor output (which users paste into GitHub issues)."""
     key = "AIzaSyA1234567890abcdefGHIJKLMNOPqrstuv"
@@ -711,13 +768,11 @@ def test_llm_connection_failure_redacts_api_key():
         f"403 Forbidden: GET https://generativelanguage.googleapis.com/v1?key={key}"
     )
 
-    class _RaisingClient:
-        def create(self, *a, **k):
-            raise boom
+    def ping(settings=None):
+        raise boom
 
     rec = _Recorder()
-    with mock.patch("instructor.from_provider", return_value=_RaisingClient()):
-        _run_check_llm_connection(rec, api_key=key)
+    _run_check_llm_connection(rec, monkeypatch, api_key=key, ping=ping)
 
     assert len(rec.calls) == 1
     status, msg, _hint = rec.calls[0]
@@ -727,13 +782,453 @@ def test_llm_connection_failure_redacts_api_key():
     assert key[:12] not in msg
 
 
-def test_llm_connection_ok_reports_success():
-    class _OkClient:
-        def create(self, *a, **k):
-            return SimpleNamespace(reply="OK")
-
+def test_llm_connection_ok_reports_success(monkeypatch):
     rec = _Recorder()
-    with mock.patch("instructor.from_provider", return_value=_OkClient()):
-        _run_check_llm_connection(rec, api_key="AIzaSyAsomethinglongenough12345")
+    _run_check_llm_connection(
+        rec, monkeypatch, api_key="AIzaSyAsomethinglongenough12345", ping=lambda settings=None: "OK"
+    )
 
     assert rec.calls == [("ok", "LLM connection OK", "")]
+
+
+# --- the whole doctor run, with the device and OCR checks stubbed ------------
+
+
+class _Completion:
+    """What the fake Instructor client returns; awaitable, like the async client's result."""
+
+    reply = "OK"
+
+    def __await__(self):
+        async def _result():
+            return self
+
+        return _result().__await__()
+
+
+class _FakeInstructor:
+    """Stands in for ``instructor.from_provider``: records clients built and requests sent."""
+
+    def __init__(self):
+        self.clients: list[tuple[str, dict]] = []
+        self.requests: list[dict] = []
+
+    def __call__(self, model, **kwargs):
+        self.clients.append((model, kwargs))
+        return self
+
+    def create(self, **kwargs):
+        self.requests.append(
+            {
+                k: v
+                for k, v in kwargs.items()
+                if k not in {"response_model", "messages", "max_retries"}
+            }
+        )
+        return _Completion()
+
+
+def _run_doctor_lines(monkeypatch) -> tuple[list[str], int, _FakeInstructor]:
+    """Run ``bibr doctor`` offline; return its output lines, exit code and fake client."""
+    import io
+
+    import rich.console
+
+    import bibr.local.cli.doctor as doctor
+
+    out = io.StringIO()
+    real_console = rich.console.Console
+    monkeypatch.setattr(
+        rich.console,
+        "Console",
+        lambda *a, **k: real_console(file=out, width=400, color_system=None),
+    )
+    monkeypatch.setattr(doctor, "_check_device", lambda ok, warn, fail: ok("Device: stub"))
+    monkeypatch.setattr(
+        doctor, "_check_ocr_backend", lambda ok, warn, fail: ok("OCR backend: stub")
+    )
+    fake = _FakeInstructor()
+    monkeypatch.setattr("instructor.from_provider", fake)
+    code = 0
+    try:
+        doctor._run_doctor()
+    except SystemExit as exc:
+        code = exc.code
+    return [line.strip() for line in out.getvalue().splitlines() if line.strip()], code, fake
+
+
+def test_doctor_pings_gemini_with_the_adapters_thinking_config(monkeypatch):
+    """gemini-3.5-flash-lite cannot turn thinking off; the adapter always sends a budget.
+
+    doctor's hand-built ping sent none (and a 64-token cap), so it did not test
+    the request extraction sends.
+    """
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "google")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gemini-3.5-flash-lite")
+
+    lines, _code, fake = _run_doctor_lines(monkeypatch)
+
+    assert "✓ LLM connection OK" in lines
+    assert fake.requests == [
+        {
+            "generation_config": {"temperature": 0.0, "max_tokens": 4096},
+            "thinking_config": {"thinking_budget": 1},
+        }
+    ]
+
+
+def test_doctor_pings_openai_with_max_completion_tokens(monkeypatch):
+    """OpenAI reasoning models (the wizard's gpt-5-nano) reject ``max_tokens``."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "openai")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gpt-5-nano")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", "sk-test-key-placeholder")
+    monkeypatch.setattr(bibr.config.Settings.llm, "base_url", None)
+
+    lines, _code, fake = _run_doctor_lines(monkeypatch)
+
+    assert "✓ LLM connection OK" in lines
+    assert fake.requests == [
+        {"temperature": 0.0, "max_completion_tokens": 4096, "reasoning_effort": "minimal"}
+    ]
+
+
+def test_doctor_accepts_llm_api_key_for_google(monkeypatch):
+    """The adapter reads LLM_API_KEY before GOOGLE_API_KEY, and chew runs with it."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "google")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gemini-3.5-flash-lite")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", "AIza-test-key-placeholder")
+    monkeypatch.setattr(bibr.config.Settings, "GOOGLE_API_KEY", None)
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if line.startswith(("✓ LLM", "✗ LLM"))] == [
+        "✓ LLM provider: google (gemini-3.5-flash-lite)",
+        "✓ LLM connection OK",
+    ]
+    assert code == 0
+
+
+def test_doctor_accepts_a_keyless_openai_compatible_server(monkeypatch):
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "openai")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "served-model")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", None)
+    monkeypatch.setattr(bibr.config.Settings.llm, "base_url", "http://gpu-box:8000/v1")
+
+    lines, code, fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if line.startswith(("✓ LLM", "✗ LLM"))] == [
+        "✓ LLM provider: openai (served-model)",
+        "✓ LLM connection OK",
+    ]
+    assert fake.clients[-1][1]["base_url"] == "http://gpu-box:8000/v1"
+    assert code == 0
+
+
+def test_doctor_reports_a_missing_google_key_and_sends_nothing(monkeypatch):
+    """The most common first-run failure: the adapter's own message, and no request."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "google")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gemini-3.5-flash-lite")
+    monkeypatch.setattr(bibr.config.Settings.llm, "api_key", None)
+    monkeypatch.setattr(bibr.config.Settings, "GOOGLE_API_KEY", None)
+
+    lines, code, fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("LLM")
+    assert lines[start + 1 : start + 5] == [
+        "✗ LLM provider: google — Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY "
+        "environment variable.",
+        "Run bibr setup or set the key in .env",
+        "✗ LLM connection: skipped",
+        "Fix the LLM provider first",
+    ]
+    assert fake.clients == []
+    assert fake.requests == []
+    assert code == 1
+
+
+def _failing_ping(monkeypatch, error):
+    import bibr.config
+
+    def ping(settings=None):
+        raise error
+
+    monkeypatch.setattr("bibr.clients.llm.ping_llm", ping)
+    return bibr.config
+
+
+def test_doctor_ping_failure_for_ollama_names_the_server_and_model(monkeypatch):
+    config = _failing_ping(monkeypatch, ConnectionError("Connection error."))
+    monkeypatch.setattr(config.Settings.llm, "provider", "ollama")
+    monkeypatch.setattr(config.Settings.llm, "model", "gpt-oss:20b")
+    monkeypatch.setattr(config.Settings.llm, "ollama_base_url", "http://gpu-box:11434")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("✗ LLM connection failed: Connection error.")
+    assert lines[start + 1] == (
+        "Check that Ollama is running at http://gpu-box:11434 and has the model "
+        "(ollama pull gpt-oss:20b)"
+    )
+    assert code == 1
+
+
+def test_doctor_ping_failure_for_a_custom_server_hides_its_key(monkeypatch):
+    """A self-hosted server's key need not look like a vendor key; it is masked anyway."""
+    key = "local-server-secret-42"
+    config = _failing_ping(monkeypatch, RuntimeError(f"401 Unauthorized: bad token {key}"))
+    monkeypatch.setattr(config.Settings.llm, "provider", "openai")
+    monkeypatch.setattr(config.Settings.llm, "model", "served-model")
+    monkeypatch.setattr(config.Settings.llm, "api_key", key)
+    monkeypatch.setattr(config.Settings.llm, "base_url", "http://gpu-box:8000/v1")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    start = lines.index("✗ LLM connection failed: 401 Unauthorized: bad token ***")
+    assert lines[start + 1] == (
+        "Check that the server at http://gpu-box:8000/v1 is running and serves served-model"
+    )
+    assert not [line for line in lines if key in line or key[:12] in line]
+    assert code == 1
+
+
+def test_doctor_with_dotenv_disabled_says_so_and_passes(monkeypatch):
+    monkeypatch.setenv("BIBR_DISABLE_DOTENV", "1")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if ".env" in line] == [
+        "✓ .env files ignored (BIBR_DISABLE_DOTENV); settings come from the environment"
+    ]
+    assert code == 0
+
+
+def test_doctor_tests_ollama_on_its_v1_api(monkeypatch):
+    """Ollama was reported as "not tested"; it is now pinged like any provider."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "provider", "ollama")
+    monkeypatch.setattr(bibr.config.Settings.llm, "model", "gpt-oss:20b")
+    monkeypatch.setattr(bibr.config.Settings.llm, "ollama_base_url", "http://localhost:11434")
+
+    lines, _code, fake = _run_doctor_lines(monkeypatch)
+
+    assert "✓ LLM connection OK" in lines
+    assert fake.clients[-1] == (
+        "ollama/gpt-oss:20b",
+        {"async_client": True, "base_url": "http://localhost:11434/v1"},
+    )
+
+
+def test_doctor_resolves_the_local_backend_alias(monkeypatch):
+    """LLM_BACKEND=local is checked as the backend chew resolves, not as a cloud key."""
+    import platform
+
+    import bibr.config
+    from bibr.local.cli.run_config import _managed_llm_model
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "backend", "local")
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr("bibr.local.llm_models.detect_hardware", lambda: ("cuda", 24.0))
+    checked = []
+    monkeypatch.setattr(
+        "bibr.local.cli.doctor._check_llm_local_backend",
+        lambda backend, model, ok, fail: checked.append((backend, model)),
+    )
+
+    lines, _code, fake = _run_doctor_lines(monkeypatch)
+
+    assert checked == [("vllm", _managed_llm_model("vllm", bibr.config.Settings))]
+    assert not [line for line in lines if line.startswith(("✓ LLM provider", "✗ LLM provider"))]
+    assert fake.requests == []
+
+
+def test_doctor_names_the_home_env_file(monkeypatch, tmp_path):
+    """Settings read ~/.bibr/.env, so a project directory without .env is not a failure."""
+    from pathlib import Path
+
+    home = tmp_path / "home"
+    (home / ".bibr").mkdir(parents=True)
+    env_file = home / ".bibr" / ".env"
+    env_file.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.delenv("BIBR_ENV_FILE", raising=False)
+    monkeypatch.delenv("BIBR_DISABLE_DOTENV", raising=False)
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if ".env" in line] == [f"✓ .env: {env_file.resolve()}"]
+    assert code == 0
+
+
+def test_doctor_without_env_file_warns_and_passes(monkeypatch):
+    """Configuration from the environment alone is legitimate (containers, CI)."""
+    monkeypatch.setenv("BIBR_ENV_FILE", "")
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "! No .env file found; settings come from the environment and defaults" in lines
+    assert code == 0
+
+
+def test_doctor_without_uv_warns_and_passes(monkeypatch):
+    """``pip install bibr`` is a documented setup; only the uv-managed runners need uv."""
+    import shutil
+
+    real_which = shutil.which
+    monkeypatch.setattr(
+        shutil, "which", lambda name, *a, **k: None if name == "uv" else real_which(name, *a, **k)
+    )
+
+    lines, code, _fake = _run_doctor_lines(monkeypatch)
+
+    assert "! uv not on PATH" in lines
+    assert code == 0
+
+
+# --- OCR: the same verdict as chew's preflight --------------------------------
+
+
+def _linux_chain(monkeypatch, *backends):
+    from bibr.ocr.registry import OcrBackendCandidate
+
+    monkeypatch.setattr(
+        "bibr.ocr.registry.resolve_backend_candidates",
+        lambda backend, settings: tuple(
+            OcrBackendCandidate(name, f"model-for-{name}", "paddle" if "paddle" in name else "glm")
+            for name in backends
+        ),
+    )
+
+
+def test_check_ocr_backend_fails_a_glm_llama_only_chain_without_llama_cpp(monkeypatch):
+    """CPU-only Linux and Windows resolve ``paddle`` to glm-llama alone; chew needs llama.cpp."""
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend
+
+    monkeypatch.setattr(Settings.ocr, "backend", "paddle")
+    _linux_chain(monkeypatch, "glm-llama")
+    monkeypatch.setattr("bibr.local.llama_cpp.find_llama_server", lambda: None)
+    monkeypatch.setattr("bibr.local.llama_cpp.install_hint", lambda: "Install llama.cpp")
+
+    rec = _Recorder()
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert rec.calls == [
+        ("fail", "OCR backend: paddle → glm-llama: llama.cpp not installed", "Install llama.cpp")
+    ]
+
+
+def test_check_ocr_backend_fails_when_no_chain_candidate_can_start(monkeypatch):
+    from types import SimpleNamespace
+
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend, run_config
+
+    monkeypatch.setattr(Settings.ocr, "backend", "paddle")
+    _linux_chain(monkeypatch, "paddle-vllm", "glm-llama")
+    monkeypatch.setattr(
+        run_config, "_ocr_candidate_unavailable_reason", lambda backend: f"{backend} is missing"
+    )
+    chew_refusal = run_config._preflight_ocr_runtime(
+        SimpleNamespace(ocr_backend="paddle", ocr_url=None)
+    )
+
+    rec = _Recorder()
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert chew_refusal is not None
+    assert rec.calls == [
+        ("fail", "OCR backend: paddle (automatic) — no OCR runtime can start here", chew_refusal)
+    ]
+
+
+def test_check_explicit_paddle_vllm_fails_without_a_gpu(monkeypatch):
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend
+
+    monkeypatch.setattr(Settings.ocr, "backend", "paddle-vllm")
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: None)
+
+    rec = _Recorder()
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert rec.calls == [
+        (
+            "fail",
+            "OCR backend: paddle-vllm — cannot start here: no NVIDIA GPU detected "
+            "(paddle-vllm needs CUDA)",
+            "Set OCR_BACKEND=paddle to use the local runtime this machine supports, "
+            "or use an external or cloud OCR backend.",
+        )
+    ]
+
+
+_NO_GEMINI_KEY = (
+    "fail",
+    "OCR backend: gemini: no API key",
+    "Set GOOGLE_API_KEY (or LLM_API_KEY) in .env",
+)
+_NO_OPENAI_KEY = ("fail", "OCR backend: openai: no API key", "Set LLM_API_KEY in .env")
+
+
+@pytest.mark.parametrize(
+    ("backend", "llm_key", "google_key", "openai_env_key", "expected"),
+    [
+        ("gemini", None, None, None, _NO_GEMINI_KEY),
+        ("gemini", None, "AIza-test-key", None, ("ok", "OCR backend: gemini", "")),
+        ("gemini", "AIza-test-key", None, None, ("ok", "OCR backend: gemini", "")),
+        ("openai", None, None, None, _NO_OPENAI_KEY),
+        ("openai", "sk-test-key", None, None, ("ok", "OCR backend: openai", "")),
+        # The OpenAI SDK reads OPENAI_API_KEY from the process environment itself.
+        ("openai", None, None, "sk-test-key", ("ok", "OCR backend: openai", "")),
+    ],
+)
+def test_check_ocr_backend_vision_needs_a_key(
+    monkeypatch, backend, llm_key, google_key, openai_env_key, expected
+):
+    from bibr.config import Settings
+    from bibr.local.cli import _check_ocr_backend
+
+    monkeypatch.setattr(Settings.ocr, "backend", backend)
+    monkeypatch.setattr(Settings.llm, "api_key", llm_key)
+    monkeypatch.setattr(Settings, "GOOGLE_API_KEY", google_key)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    if openai_env_key:
+        monkeypatch.setenv("OPENAI_API_KEY", openai_env_key)
+
+    rec = _Recorder()
+    _check_ocr_backend(rec.ok, rec.warn, rec.fail)
+
+    assert rec.calls == [expected]
+
+
+def test_doctor_reports_an_unknown_llm_backend(monkeypatch):
+    """chew rejects an unknown LLM_BACKEND; doctor used to check it as cloud."""
+    import bibr.config
+
+    monkeypatch.setattr(bibr.config.Settings.llm, "backend", "vlm")
+
+    lines, code, fake = _run_doctor_lines(monkeypatch)
+
+    assert [line for line in lines if "LLM" in line] == [
+        "LLM",
+        "✗ LLM backend: Unknown LLM backend 'vlm'. Valid values: cloud, local, vllm, "
+        "vllm-mlx, rapid-mlx, llama-cpp, llmster.",
+        "Fix LLM_BACKEND in your .env or environment",
+    ]
+    assert fake.requests == []
+    assert code == 1

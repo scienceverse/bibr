@@ -51,6 +51,12 @@ machine is too weak but privacy still matters, use the private-server path:
 run the Docker OCR/API stack on a GPU machine and point your laptop's `.env`
 at that server.
 
+Re-running `bibr setup` merges into an existing `.env` by default and keeps
+values it does not ask about. When you choose an LLM provider, it also writes
+`LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL` where you
+entered none, so that a key or server left by an earlier setup, in `./.env`
+or `~/.bibr/.env`, cannot override the one you entered.
+
 ## Namespaces
 
 There's no global `BIBR_` prefix. Instead, each settings group has its own
@@ -162,6 +168,10 @@ fallbacks such as section classification and citation linking: `{{ default_llm_p
 (the default), `openai`, `anthropic`, `groq`, or `ollama` (a local Ollama
 server). `LLM_MODEL` picks the model for that provider.
 
+For Ollama, `LLM_OLLAMA_BASE_URL` names the server (default
+`http://localhost:11434`). bibr talks to Ollama's OpenAI-compatible API under
+`/v1`, so both `http://localhost:11434` and `http://localhost:11434/v1` work.
+
 `LLM_BACKEND=cloud` is the default: bibr uses the configured provider/endpoint.
 That endpoint can also be your own OpenAI-compatible server:
 
@@ -227,6 +237,11 @@ bibr preset diff fast-gemini    # compare a preset against the current .env
 bibr preset rm fast-gemini      # delete a preset
 bibr preset deactivate          # clear the active-preset marker (no other changes)
 ```
+
+The "current `.env`" is the file whose values win: `./.env` when the working
+directory has one, otherwise `~/.bibr/.env` (or the last existing file in
+`BIBR_ENV_FILE`). `save`, `use` and `deactivate` name the file they read or
+changed.
 
 Presets are stored as JSON under `~/.bibr/presets/`. Secrets (API keys and
 similar) are excluded by default when saving; endpoint URLs and other private

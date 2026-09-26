@@ -179,6 +179,7 @@ class InterleavedRenderOcrStage:
                     code="ocr_failed",
                     stage=self.name,
                     exc=exc,
+                    outage=True,
                 )
         if log:
             logger.warning("OCR backend init failed", exc_info=exc)
