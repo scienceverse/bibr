@@ -84,6 +84,21 @@ _DOI_URL_PREFIXES = (
 # reference locators (segment_filter).
 DOI_BODY = r"10\.\d{4,9}/"
 
+# A DOI as printed in running text, for the paper-DOI extractors
+# (doi_identity, front_matter). The suffix class stops at whitespace and prose
+# punctuation. Wiley's 1996–2004 SICI DOIs
+# ("10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K") also carry an
+# angle-bracketed ``item::AID-code`` segment. Brackets are accepted only in that
+# ``::`` shape, so an inline tag such as ``<sup>`` never becomes part of a DOI.
+# Both parts are bounded and the first excludes ``:``, so a long unclosed
+# ``<:::`` run (OCR separator lines) cannot make the match backtrack.
+DOI_CANDIDATE_RE = re.compile(
+    r"\b"
+    + DOI_BODY
+    + r"(?:[-._;()/:A-Za-z0-9]|<[-._;()/A-Za-z0-9]{0,40}::[-._;()/:A-Za-z0-9]{0,60}>)+",
+    re.IGNORECASE,
+)
+
 # Bare DOI pattern: registrant body then a non-whitespace suffix that does not
 # end on a hyphen. A DOI printed across a line wrap breaks at one of its own
 # hyphens ("10.1037/0033-" / "2909.115.1.102") and the leading fragment would

@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from bibr.pipeline.context import RunConfig
 from bibr.serve.deployments.pipeline import BibrPipelineAPI
 
@@ -33,6 +35,9 @@ class _SharedCache:
 
     async def set(self, key, value):
         self.values[key] = value
+
+    async def lease_alive(self, key):  # noqa: ARG002
+        return self.lease_held
 
     async def try_acquire_lease(self, key, *, ttl_seconds):  # noqa: ARG002
         if self.lease_held:
@@ -146,3 +151,249 @@ async def test_opt_out_does_not_touch_redis_lease(monkeypatch, tmp_path):
     api = _api(tmp_path, cache, _Pipeline(delay=0), settings=settings)
 
     assert (await api.predict(_inputs()))["success"] is True
+
+
+async def test_wait_budget_follows_pipeline_timeout_when_unset(tmp_path):
+    """An unset wait outlasts a small default window via PIPELINE_TIMEOUT.
+
+    ``singleflight_wait_seconds`` holds a small value but is not marked
+    explicit, so the budget follows ``pipeline.timeout`` and a ~0.3 s owner
+    is still coalesced. Fails when the budget always uses the flat value
+    (the waiter extracts a duplicate after 0.05 s).
+    """
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.distributed_singleflight = True
+    settings.cache.singleflight_wait_seconds = 0.05
+    settings.cache.model_fields_set.discard("singleflight_wait_seconds")
+    assert "singleflight_wait_seconds" not in settings.cache.model_fields_set
+    settings.cache.singleflight_poll_interval_ms = 5
+    settings.pipeline.timeout = 5
+    cache = _SharedCache()
+    owner = _api(tmp_path, cache, _Pipeline(delay=0.3), settings=settings)
+    waiter = _api(tmp_path, cache, _Pipeline(delay=0.3), settings=settings)
+
+    owner_task = asyncio.create_task(owner.predict(_inputs()))
+    await asyncio.sleep(0.05)  # let the owner take the lease first
+    waiter_result = await waiter.predict(_inputs())
+    owner_result = await owner_task
+
+    assert owner_result["success"] is True
+    assert waiter_result["success"] is True
+    assert owner._pipeline.calls + waiter._pipeline.calls == 1
+
+
+async def test_explicit_wait_keeps_the_flat_budget(tmp_path):
+    """An explicitly set wait still bounds the wait (the old fallback).
+
+    Twin of the test above with the field marked explicit: the waiter
+    gives up after 0.05 s and extracts a duplicate while the ~0.3 s owner
+    is still running.
+    """
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.distributed_singleflight = True
+    settings.cache.singleflight_wait_seconds = 0.05
+    assert "singleflight_wait_seconds" in settings.cache.model_fields_set
+    settings.cache.singleflight_poll_interval_ms = 5
+    settings.pipeline.timeout = 5
+    cache = _SharedCache()
+    owner = _api(tmp_path, cache, _Pipeline(delay=0.3), settings=settings)
+    waiter = _api(tmp_path, cache, _Pipeline(delay=0.3), settings=settings)
+
+    owner_task = asyncio.create_task(owner.predict(_inputs()))
+    await asyncio.sleep(0.05)  # let the owner take the lease first
+    waiter_result = await waiter.predict(_inputs())
+    owner_result = await owner_task
+
+    assert owner_result["success"] is True
+    assert waiter_result["success"] is True
+    assert owner._pipeline.calls + waiter._pipeline.calls == 2
+
+
+@pytest.mark.slow
+async def test_waiter_outlasts_the_default_wait_window(tmp_path):
+    """A waiter coalesces an extraction slower than the old 10 s flat wait.
+
+    No explicit ``singleflight_wait_seconds``: the budget follows
+    ``PIPELINE_TIMEOUT``, so a ~10.5 s owner is still coalesced instead of
+    extracted twice. Fails on the pre-fix default (wait 10 s, duplicate run).
+    """
+    import time
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    assert "singleflight_wait_seconds" not in settings.cache.model_fields_set
+    settings.cache.singleflight_poll_interval_ms = 50
+    cache = _SharedCache()
+    owner = _api(tmp_path, cache, _Pipeline(delay=10.5), settings=settings)
+    waiter = _api(tmp_path, cache, _Pipeline(delay=10.5), settings=settings)
+
+    owner_task = asyncio.create_task(owner.predict(_inputs()))
+    await asyncio.sleep(0.2)  # let the owner take the lease first
+    started = time.monotonic()
+    waiter_result = await waiter.predict(_inputs())
+    waiter_latency = time.monotonic() - started
+    owner_result = await owner_task
+
+    assert owner_result["success"] is True
+    assert waiter_result["success"] is True
+    assert owner._pipeline.calls + waiter._pipeline.calls == 1
+    assert waiter_latency >= 10.0
+
+
+async def test_waiter_takes_over_when_the_owner_dies(tmp_path):
+    """A vanished lease ends the wait at once instead of burning the budget.
+
+    The owner holds the lease for two polls then dies without publishing (its
+    TTL expires); the waiter must fall back to its own extraction quickly,
+    far inside the pipeline-timeout budget.
+    """
+    import time
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 5
+    cache = _SharedCache()
+    cache.lease_held = True
+    polls = {"n": 0}
+
+    async def lease_alive(key):  # noqa: ARG001
+        polls["n"] += 1
+        alive = polls["n"] < 3
+        if not alive:
+            # A dead owner's lease key is gone (expired), so the takeover
+            # acquisition succeeds exactly as against real Redis.
+            cache.lease_held = False
+        return alive
+
+    cache.lease_alive = lease_alive
+    api = _api(tmp_path, cache, _Pipeline(delay=0), settings=settings)
+
+    started = time.monotonic()
+    result = await api.predict(_inputs())
+    elapsed = time.monotonic() - started
+
+    assert result["success"] is True
+    assert api._pipeline.calls == 1
+    assert elapsed < 5.0
+
+
+async def test_lease_check_error_fails_open(tmp_path):
+    """A failing lease liveness check extracts normally (fail-open)."""
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 1
+    cache = _SharedCache()
+    cache.lease_held = True
+
+    async def lease_alive(key):  # noqa: ARG001
+        raise ConnectionError("redis unavailable")
+
+    cache.lease_alive = lease_alive
+    api = _api(tmp_path, cache, _Pipeline(delay=0), settings=settings)
+
+    result = await api.predict(_inputs())
+
+    assert result["success"] is True
+    assert api._pipeline.calls == 1
+
+
+async def test_waiter_re_reads_cache_when_the_lease_vanishes(tmp_path):
+    """No duplicate extraction when the owner's publish lands between the
+    waiter's cache read and its lease check.
+
+    The owner finishes right after the waiter's first in-loop cache miss; the
+    waiter must see the published result on its re-read instead of extracting.
+    Fails without the re-read (waiter calls == 1).
+    """
+    import pathlib
+    import tempfile
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 5
+    cache = _SharedCache()
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    owner = _api(tmp, cache, _Pipeline(delay=0.2), settings=settings)
+    waiter = _api(tmp, cache, _Pipeline(delay=0.2), settings=settings)
+
+    owner_task = asyncio.create_task(owner.predict(_inputs()))
+    await asyncio.sleep(0.05)
+    real_get = cache.get
+    state = {"n": 0}
+
+    async def get(key):
+        value = await real_get(key)
+        state["n"] += 1
+        if value is None and state["n"] == 3:
+            # First in-loop poll (after the two pre-lease lookups): the owner
+            # publishes and releases right after this miss.
+            await owner_task
+        return value
+
+    cache.get = get
+    await waiter.predict(_inputs())
+
+    assert owner._pipeline.calls == 1
+    assert waiter._pipeline.calls == 0
+
+
+async def test_only_one_waiter_takes_over_when_the_owner_dies(tmp_path):
+    """Two waiters on a dead owner's key: exactly one extracts, the other
+    consumes the winner's published result.
+
+    Fails without the takeover acquisition (both waiters extract).
+    """
+    import pathlib
+    import tempfile
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 5
+    cache = _SharedCache()
+    cache.lease_held = True
+    tmp = pathlib.Path(tempfile.mkdtemp())
+
+    async def lease_alive(key):  # noqa: ARG001
+        # Yield so both waiters observe the dead lease before either
+        # acquires: without this the first waiter checks, re-reads and
+        # acquires without suspending, and the `takeover is None` branch
+        # never runs.
+        await asyncio.sleep(0)
+        return cache.lease_held
+
+    cache.lease_alive = lease_alive
+
+    real_try_acquire = cache.try_acquire_lease
+
+    async def try_acquire_lease(key, *, ttl_seconds):
+        # Yield before the atomic check-and-set so both waiters attempt
+        # the takeover after observing the dead lease; the loser gets
+        # None and must keep polling (the `takeover is None` branch).
+        await asyncio.sleep(0)
+        return await real_try_acquire(key, ttl_seconds=ttl_seconds)
+
+    cache.try_acquire_lease = try_acquire_lease
+
+    async def die_soon():
+        await asyncio.sleep(0.05)
+        cache.lease_held = False
+
+    first = _api(tmp, cache, _Pipeline(delay=0.05), settings=settings)
+    second = _api(tmp, cache, _Pipeline(delay=0.05), settings=settings)
+    results = await asyncio.gather(
+        first.predict(_inputs()),
+        second.predict(_inputs()),
+        die_soon(),
+    )
+
+    assert all(result["success"] for result in results[:2])
+    assert first._pipeline.calls + second._pipeline.calls == 1

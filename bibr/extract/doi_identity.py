@@ -11,7 +11,7 @@ from difflib import SequenceMatcher
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.paper_contents import CanonicalSection
 from bibr.pipeline.identity import DoiCandidate, DoiSelection, ExpectedIdentity
-from bibr.utils.text import normalize_doi
+from bibr.utils.text import DOI_CANDIDATE_RE, normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 EXPECTED_VISIBLE = 4
@@ -19,15 +19,42 @@ EXPLICIT_SELF_ID = 3
 FRONT_MATTER_OR_REPEATED_FURNITURE = 2
 UNCONTESTED_UNTYPED = 1
 
-_DOI_RE = re.compile(r"\b10\.\d{4,9}/[-._;()/:A-Za-z0-9]+", re.IGNORECASE)
+_DOI_RE = DOI_CANDIDATE_RE
 _REFERENCE_PREFIX_RE = re.compile(r"^\s*(?:\[\d+[A-Za-z]?\]|\d+[.)]\s)")
-_COMPONENT_SUFFIX_RE = re.compile(r"\.(?:g|f|fig|t|table)\d+[A-Za-z]*$", re.IGNORECASE)
+# Component and supplement DOIs extend the article DOI they belong to. PLOS
+# numbers a figure, table or supporting file with a zero-padded suffix
+# (``.g001``, ``.t002``, ``.s003``); the padding is what separates it from the
+# BMJ's 2013-14 article DOIs (``bmj.f1049``, ``bmj.g2276``), whose e-locators use
+# the same letters. Supplements append a token instead: APA ``.supp``,
+# Copernicus ``-supplement``, MDPI ``/s1`` and PeerJ ``/supp-1`` (PeerJ also
+# prints ``/fig-1`` and ``/table-1``).
+_COMPONENT_SUFFIX_RE = re.compile(
+    r"(?:\.(?:[fgst]0\d{2}|fig\d+|table\d+)[A-Za-z]*"
+    r"|\.supp|-supplement|/[^/]+/s\d+|/(?:fig|table|supp)-\d+)$",
+    re.IGNORECASE,
+)
+# A sentence that labels a figure, table or supplement is a caption, and a DOI in
+# it is the component's (eLife PDFs print "DOI: 10.7554/eLife.00013.003" under
+# each figure, a number the suffix rule cannot tell from an article's).
+_COMPONENT_LABEL_RE = re.compile(r"\b(?:fig(?:ure)?|table|component|supplement)\s*\d+")
+# A supplement issue in a citation line ("30 (Supplement 5)", "Volume 30,
+# Supplement 5") is the journal's issue, not such a label.
+_SUPPLEMENT_ISSUE_RE = re.compile(r"(?:\(\s*|\bvol(?:ume)?\.?\s*\d+\s*,?\s*)supplement\s*\d+")
 _NON_SELF_MARKERS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"reference\s+doi\s*[:.]?\s*$", re.IGNORECASE), "reference_doi"),
     (re.compile(r"parent(?:\s+article)?\s+doi\s*[:.]?\s*$", re.IGNORECASE), "parent_doi"),
     (
         re.compile(
             r"(?:component|supplement(?:ary)?|figure|table)\s+doi\s*[:.]?\s*$",
+            re.IGNORECASE,
+        ),
+        "component_doi",
+    ),
+    # APA author notes label the supplement's own DOI: "Supplemental
+    # materials: https://doi.org/10.1037/xge0001234.supp".
+    (
+        re.compile(
+            r"supplement(?:al|ary)?\s+(?:materials?|information|data|files?)\s*[:.]\s*$",
             re.IGNORECASE,
         ),
         "component_doi",
@@ -58,12 +85,27 @@ _REPOSITORY_NAME_RE = re.compile(
     re.IGNORECASE,
 )
 _FUNDER_REGISTRY_PREFIX = "10.13039/"
+# Registrants that mint DOIs only for deposited data, code and materials:
+# Zenodo, OSF projects and registrations, Figshare and Dryad. The OSF-hosted
+# preprint servers (PsyArXiv ``10.31234/osf.io/...``, SocArXiv ``10.31235``, OSF
+# Preprints ``10.31219``, ...) are articles and use registrants of their own.
+_DATA_REGISTRANT_RE = re.compile(
+    r"10\.(?:5281/zenodo\.|17605/osf\.io/|6084/m9\.figshare\.|5061/dryad\.)",
+    re.IGNORECASE,
+)
 _REPOSITORY_CONTEXT_RE = re.compile(
     r"\b(?:data|datasets?|code|software|materials?)\s+(?:availability|repository)\b"
     r"|\b(?:data|datasets?|code|software|materials?)\s+(?:are|is)\s+"
     r"(?:available|deposited|archived|hosted)\b"
     r"|\brepository\s+(?:doi|record|link|url)\s*[:.]?",
     re.IGNORECASE,
+)
+_FRONT_MATTER_SECTIONS = frozenset(
+    {
+        CanonicalSection.TITLE.value,
+        CanonicalSection.ABSTRACT.value,
+        CanonicalSection.KEYWORDS.value,
+    }
 )
 
 
@@ -111,12 +153,17 @@ def _candidate_from_match(
     region_type: str | None,
     text_id: int | None,
     repeated_count: int = 0,
+    front_block: bool = False,
 ) -> DoiCandidate | None:
     normalized = _canonical_doi(match.group(0))
     if normalized is None:
         return None
     marker_kind = _marker_kind(text, match.start())
     lowered = text.casefold()
+    # A repository name inside this DOI is not context: PsyArXiv's
+    # 10.31234/osf.io/... names OSF in the identifier itself. Another DOI in the
+    # sentence still is (a Zenodo DOI beside it marks a software citation).
+    context = text.replace(match.group(0), " ")
     section_value = str(section_type or "").casefold()
 
     rejection_reason = None
@@ -148,9 +195,9 @@ def _candidate_from_match(
         tier = EXPLICIT_SELF_ID
     elif (
         section_value == CanonicalSection.OPEN_DATA.value
-        or _REPOSITORY_NAME_RE.search(text)
-        or _REPOSITORY_CONTEXT_RE.search(text)
-        or normalized.casefold().startswith("10.5281/zenodo.")
+        or _REPOSITORY_NAME_RE.search(context)
+        or _REPOSITORY_CONTEXT_RE.search(context)
+        or _DATA_REGISTRANT_RE.match(normalized)
     ):
         semantic_context = "data_or_code"
         rejection_reason = "data_or_code_candidate"
@@ -158,7 +205,7 @@ def _candidate_from_match(
     elif (
         section_value in {CanonicalSection.FIGURE.value, CanonicalSection.TABLE.value}
         or _COMPONENT_SUFFIX_RE.search(normalized)
-        or re.search(r"\b(?:fig(?:ure)?|table|component|supplement)\s*\d+", lowered)
+        or _COMPONENT_LABEL_RE.search(_SUPPLEMENT_ISSUE_RE.sub(" ", lowered))
     ):
         semantic_context = "parent_or_component"
         rejection_reason = "component_candidate"
@@ -172,11 +219,7 @@ def _candidate_from_match(
     elif source_kind in {"header", "footer"}:
         semantic_context = "repeated_furniture" if repeated_count > 1 else "structural_furniture"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
-    elif section_value in {
-        CanonicalSection.TITLE.value,
-        CanonicalSection.ABSTRACT.value,
-        CanonicalSection.KEYWORDS.value,
-    } or (page is not None and page <= 2):
+    elif section_value in _FRONT_MATTER_SECTIONS or (page is not None and page <= 2) or front_block:
         semantic_context = "front_matter"
         tier = FRONT_MATTER_OR_REPEATED_FURNITURE
     else:
@@ -406,10 +449,35 @@ def _sentence_region_index(sentence) -> int | None:
     return region_meta.get("region_index")
 
 
+_UNCLASSIFIED_FRONT_SECTIONS = frozenset({None, CanonicalSection.UNKNOWN, CanonicalSection.TITLE})
+
+
+def _pageless_front_block_end(contents, section_map) -> int | None:
+    """First text id after the front block of an input without pages.
+
+    Native parses (DOCX, ePub, HTML, JATS) give no sentence a page, so "page 1
+    or 2" cannot mark their title page. The front block is the unclassified
+    text (the Root section, a title heading) before the first sentence of a
+    classified section, usually the Abstract. Without a classified section
+    there is no bound, and nothing counts.
+    """
+
+    if not contents.sentences or any(s.page_number is not None for s in contents.sentences):
+        return None
+    classified = [
+        sentence.text_id
+        for sentence in contents.sentences
+        if (section := section_map.get(sentence.section_id)) is not None
+        and section.section_type not in _UNCLASSIFIED_FRONT_SECTIONS
+    ]
+    return min(classified, default=None)
+
+
 def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
     """Collect every source-visible DOI with sentence or furniture provenance."""
 
     section_map = {section.section_id: section for section in contents.sections}
+    front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
     for sentence in contents.sentences:
         section = section_map.get(sentence.section_id)
@@ -426,6 +494,7 @@ def collect_doi_candidates(contents) -> tuple[DoiCandidate, ...]:
                 region_index=_sentence_region_index(sentence),
                 region_type=region_meta.get("region_type"),
                 text_id=sentence.text_id,
+                front_block=front_block_end is not None and sentence.text_id < front_block_end,
             )
         )
 
@@ -503,6 +572,17 @@ def _drop_truncated_prefixes(candidates: list[DoiCandidate]) -> list[DoiCandidat
     return kept or candidates
 
 
+def _prefer_structured(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
+    """Prefer the publisher's structured article DOI (JATS, HTML meta) over body text.
+
+    Body text of the same tier is figure, box or supplement furniture
+    (eLife's ``DOI: 10.7554/eLife.00013.005``) or a cited work.
+    """
+
+    structured = [c for c in candidates if c.source_kind == "structured_metadata"]
+    return structured or candidates
+
+
 def _prefer_marked(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
     """Prefer a labelled or resolver-URL DOI over one printed with no marker."""
 
@@ -511,9 +591,19 @@ def _prefer_marked(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
 
 
 def _prefer_body_sources(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
-    """Prefer a DOI read from the page body over running header/footer furniture."""
+    """Prefer a DOI read from the page body over running header/footer furniture.
 
-    body = [c for c in candidates if c.source_kind not in _FURNITURE_SOURCES]
+    A header or footer printed once may be an OCR twin or a stray reference line.
+    One the running furniture repeats on several pages is the paper's own and is
+    kept, so a DOI cited in an early footnote cannot displace it: the tie then
+    abstains.
+    """
+
+    body = [
+        c
+        for c in candidates
+        if c.source_kind not in _FURNITURE_SOURCES or c.repeated_header_footer_count > 1
+    ]
     return body or candidates
 
 
@@ -526,7 +616,11 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
     return [c for c in candidates if c.page == lowest]
 
 
+# Lowest tier that can name the paper without an expected DOI.
+_MIN_IDENTITY_TIER = FRONT_MATTER_OR_REPEATED_FURNITURE
+
 _TIE_BREAK_LADDER = (
+    _prefer_structured,
     _drop_truncated_prefixes,
     _prefer_marked,
     _prefer_body_sources,
@@ -534,8 +628,14 @@ _TIE_BREAK_LADDER = (
 )
 
 
-def _select_without_expected(candidates: tuple[DoiCandidate, ...]) -> DoiSelection:
-    eligible = [candidate for candidate in candidates if candidate.rejection_reason is None]
+def _select_without_expected(
+    candidates: tuple[DoiCandidate, ...], *, min_tier: int = UNCONTESTED_UNTYPED
+) -> DoiSelection:
+    eligible = [
+        candidate
+        for candidate in candidates
+        if candidate.rejection_reason is None and candidate.selection_tier >= min_tier
+    ]
     if not eligible:
         return DoiSelection(None, candidates, ())
     highest_tier = max(candidate.selection_tier for candidate in eligible)
@@ -577,13 +677,24 @@ def select_doi_candidates(
     An equal-tier conflict always raises ``VAL_DOI_AMBIGUOUS``; it resolves to a
     candidate only when the provenance ladder in ``_select_without_expected``
     collapses it to a single DOI, and abstains otherwise.
+
+    Without a matching expected DOI only tiers 2 and 3 can name the paper. A
+    tier-1 candidate is a DOI that no label names the article's (a bare DOI or
+    a doi.org link) printed outside the front matter and the running
+    furniture, or a journal-level DOI. In a manuscript with no DOI of its own
+    such a DOI is a cited work. It becomes the paper's DOI only when it matches
+    the expected identity; when only tier-1 candidates remain, a required or
+    mismatched expected DOI reports ``VAL_EXPECTED_ID_MISSING``. The front
+    matter is the title, abstract and keywords sections, pages 1-2, and in an
+    input without pages the unclassified block before its first classified
+    section.
     """
 
     candidate_tuple = tuple(candidates)
     if expected_identity is None or not (
         expected_identity.expected_doi or expected_identity.expected_doi_sha256
     ):
-        selection = _select_without_expected(candidate_tuple)
+        selection = _select_without_expected(candidate_tuple, min_tier=_MIN_IDENTITY_TIER)
         if expected_identity and expected_identity.doi_required and selection.selected is None:
             issue = ValidationIssue(
                 code="VAL_EXPECTED_ID_MISSING",
@@ -623,7 +734,7 @@ def select_doi_candidates(
         )
         return DoiSelection(boosted[matching_indexes[0]], boosted, ())
 
-    fallback = _select_without_expected(candidate_tuple)
+    fallback = _select_without_expected(candidate_tuple, min_tier=_MIN_IDENTITY_TIER)
     if fallback.selected is None:
         issue = ValidationIssue(
             code="VAL_EXPECTED_ID_MISSING",
@@ -648,6 +759,13 @@ def select_doi_candidates(
 
 
 def select_doi_from_text(text: str) -> DoiSelection:
+    """Select a DOI from front-matter text that has no page or section provenance.
+
+    Every unmarked DOI in such text is tier 1, so unlike ``select_doi_candidates``
+    this still selects an uncontested tier-1 DOI. Its caller passes only the
+    metadata region and the page furniture.
+    """
+
     candidates: list[DoiCandidate] = []
     # OCR cleanup can legitimately join a line-ending DOI with the next
     # doi.org URL. Restore only that unmistakable identifier boundary so the

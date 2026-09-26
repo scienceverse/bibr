@@ -28,6 +28,12 @@ def _capture_enable_cuda(use_gpu, *, cuda_available):
 
     with (
         mock.patch("wtpsplit_lite.SaT", return_value=mock.MagicMock()),
+        # The pinned default model is materialised from the Hub before SaT
+        # loads it; SaT is faked, so no snapshot is needed.
+        mock.patch(
+            "bibr.segmenter_base.materialize_hub_snapshot",
+            return_value=("sat-snapshot-placeholder", None),
+        ),
         mock.patch(
             "bibr.utils.onnx_providers.get_ort_providers",
             side_effect=fake_get_ort_providers,
@@ -70,6 +76,10 @@ def test_explicit_threshold_reaches_serve_warmup(monkeypatch):
     monkeypatch.setattr(Settings, "WTPSPLIT_THRESHOLD", None)
     with (
         mock.patch("wtpsplit_lite.SaT", return_value=model),
+        mock.patch(
+            "bibr.segmenter_base.materialize_hub_snapshot",
+            return_value=("sat-snapshot-placeholder", None),
+        ),
         mock.patch(
             "bibr.utils.onnx_providers.get_ort_providers",
             return_value=["CPUExecutionProvider"],

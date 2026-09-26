@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from bibr.pipeline.enrich_prefetch import cancel_leftover_prefetches, discard_prefetches
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.redact import describe_error
 
 if TYPE_CHECKING:
     from bibr.pipeline.context import PipelineContext
@@ -121,7 +122,7 @@ class EnrichmentStage:
                         )
                         warning = ProcessingWarning(
                             WarningCode.ENRICHER_FAILED,
-                            f"{enricher_name} failed: {type(res).__name__}: {res}",
+                            f"{enricher_name} failed: {describe_error(res)}",
                         )
                         fs.warnings.append(warning)
                         enrichment_warnings[id(fs)].append(warning)

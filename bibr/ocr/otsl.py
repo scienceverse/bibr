@@ -36,6 +36,31 @@ class OtslCompleteness:
     reasons: tuple[str, ...] = ()
 
 
+#: Completeness reasons that signal the generation was cut short (worth one
+#: retry at a higher token budget). Everything else — ``malformed_structure``,
+#: ``no_grid_cells``, ``empty`` — reproduces deterministically, so retrying
+#: only burns a second full table generation.
+_TRUNCATION_REASONS = frozenset({"missing_terminal_nl", "ragged_rows"})
+
+
+def otsl_looks_truncated(completeness: OtslCompleteness, finish_reason: str | None) -> bool:
+    """Whether a Paddle table result deserves a higher-budget retry.
+
+    ``finish_reason == \"length\"`` is the provider saying it ran out of
+    budget. A ``\"stop\"`` (or any other reported reason) means the model
+    ended on EOS: at temperature 0 the same greedy decode reproduces
+    identically, so even a ragged or unterminated grid is not worth a
+    second generation. The structural truncation signals (an unterminated
+    grid, ragged rows from a cut-off tail) only qualify when the provider
+    reports no finish reason at all.
+    """
+    if finish_reason == "length":
+        return True
+    if finish_reason is not None:
+        return False
+    return any(reason in _TRUNCATION_REASONS for reason in completeness.reasons)
+
+
 def check_otsl_completeness(raw: str) -> OtslCompleteness:
     """Validate raw OTSL before tolerant decoding pads ragged rows."""
     stripped = raw.strip()
@@ -65,11 +90,17 @@ def check_otsl_completeness(raw: str) -> OtslCompleteness:
 
 def decode_otsl(raw: str) -> OtslDecodeResult:
     """Decode native Paddle OTSL, preserving text if its spans are malformed."""
+    stripped = raw.strip()
+    if not stripped:
+        # A blank table result carries no grid at all. Decoding it to
+        # ``<table></table>`` used to count as filled content downstream and
+        # dilute the OCR success-rate gate.
+        return OtslDecodeResult("")
     # ``check_otsl_completeness`` normalises with ``.strip()`` and this did
     # not, so a single trailing newline — routine from OpenAI-compatible chat
     # completions, i.e. the default PaddleOCR-VL path — became a phantom cell
     # and destroyed the row's rowspan/colspan structure.
-    rows = _tokenize(raw.strip())
+    rows = _tokenize(stripped)
     _pad_rows(rows)
     try:
         return OtslDecodeResult(_render_spanned(rows))
@@ -94,10 +125,22 @@ def _tokenize(raw: str) -> list[list[_Cell]]:
         marker = parts[index]
         content = parts[index + 1]
         if marker == "<nl>":
-            if content.strip():
-                row.append(_Cell("<text>", content))
             rows.append(row)
             row = []
+            if content.strip():
+                # Stray text after a row terminator precedes the next row —
+                # it must open the new row, not extend the closed one.
+                row.append(_Cell("<text>", content))
+        elif marker in _ANCHOR_MARKERS:
+            if marker == "<ecel>" and not content.strip():
+                # An empty-cell marker carrying only spaces is still empty.
+                content = ""
+            row.append(_Cell(marker, content))
+        elif not content.strip():
+            # Whitespace between structural markers is layout, not a cell —
+            # a continuation or empty marker carrying only spaces still
+            # continues (or empties) its span.
+            row.append(_Cell(marker, ""))
         else:
             row.append(_Cell(marker, content))
 

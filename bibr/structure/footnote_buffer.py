@@ -37,14 +37,15 @@ def printed_marker(text: str) -> str | None:
 class FootnoteBuffer:
     """Buffer for footnote records pending relocation to a Footnotes section.
 
-    Each record is a 4-tuple ``(text, page_number, body_section_id,
-    deferred_text_index)`` — the index lets ``create_content_sections``
-    find the nearest preceding sentence after segmentation populates real
-    text_ids.
+    Each record is a 5-tuple ``(text, page_number, body_section_id,
+    deferred_text_index, from_ocr)`` — the index lets
+    ``create_content_sections`` find the nearest preceding sentence after
+    segmentation populates real text_ids, and ``from_ocr`` is False when the
+    note was read from the PDF text layer.
     """
 
     def __init__(self) -> None:
-        self._records: list[tuple[str, int, int, int]] = []
+        self._records: list[tuple[str, int, int, int, bool]] = []
         self._seen: set[tuple[str, int]] = set()
 
     def record(
@@ -54,6 +55,7 @@ class FootnoteBuffer:
         page_number: int,
         body_section_id: int,
         deferred_text_index: int,
+        from_ocr: bool = True,
     ) -> None:
         """Append a footnote record (deferred to create_content_sections).
 
@@ -68,11 +70,11 @@ class FootnoteBuffer:
         if key in self._seen:
             return
         self._seen.add(key)
-        self._records.append((text, page_number, body_section_id, deferred_text_index))
+        self._records.append((text, page_number, body_section_id, deferred_text_index, from_ocr))
 
     def is_empty(self) -> bool:
         return not self._records
 
-    def __iter__(self) -> Iterator[tuple[str, int, int, int]]:
+    def __iter__(self) -> Iterator[tuple[str, int, int, int, bool]]:
         """Iterate records in insertion order without consuming the buffer."""
         return iter(self._records)

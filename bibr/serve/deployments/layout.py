@@ -30,6 +30,7 @@ from bibr.layout_utils import (
     _iou,
     _is_contained,
     _nms,
+    effective_layout_batch_size,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,7 +104,9 @@ class LayoutDetector(BaseLayoutDetector):
         timeout = max(0.0, self._settings.layout.batch_timeout_ms / 1000.0)
         return GpuBatcher(
             self._detect_images,
-            max_batch_size=self._settings.layout.batch_size,
+            max_batch_size=effective_layout_batch_size(
+                self._settings, getattr(getattr(self, "_device", None), "type", None)
+            ),
             batch_timeout=timeout,
             executor=getattr(self, "_gpu_executor", None),
             name="layout",
@@ -151,7 +154,10 @@ class LayoutDetector(BaseLayoutDetector):
 
         if self._runtime == "onnx":
             try:
-                self._model.run([Image.new("RGB", (640, 480))] * self._settings.layout.batch_size)
+                batch_size = effective_layout_batch_size(
+                    self._settings, getattr(getattr(self, "_device", None), "type", None)
+                )
+                self._model.run([Image.new("RGB", (640, 480))] * batch_size)
                 logger.info("Layout model warmup complete (onnxruntime)")
             except Exception:
                 logger.warning("Layout model warmup failed", exc_info=True)
@@ -162,7 +168,10 @@ class LayoutDetector(BaseLayoutDetector):
         try:
             dummy = Image.new("RGB", (640, 480))
             inputs = self._image_processor(
-                images=[dummy] * self._settings.layout.batch_size,
+                images=[dummy]
+                * effective_layout_batch_size(
+                    self._settings, getattr(getattr(self, "_device", None), "type", None)
+                ),
                 return_tensors="pt",
             )
             inputs = {k: v.to(self._device) for k, v in inputs.items()}

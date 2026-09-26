@@ -12,8 +12,9 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 
-from rapidfuzz.distance import JaroWinkler, Levenshtein
+from rapidfuzz.distance import JaroWinkler, LCSseq, Levenshtein
 from rapidfuzz.fuzz import token_sort_ratio
 
 # ---------------------------------------------------------------------------
@@ -121,16 +122,14 @@ def _greedy_match_pairs(pairs: list[tuple[float, int, int]]) -> list[tuple[int, 
 
 
 def _lcs_length(x: list[str], y: list[str]) -> int:
-    """Length of the longest common subsequence between two token lists."""
-    m, n = len(x), len(y)
-    dp = [[0] * (n + 1) for _ in range(m + 1)]
-    for i in range(1, m + 1):
-        for j in range(1, n + 1):
-            if x[i - 1] == y[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1] + 1
-            else:
-                dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-    return dp[m][n]
+    """Length of the longest common subsequence between two token lists.
+
+    rapidfuzz's bit-parallel LCS over the token lists: the same value as the
+    textbook (m+1)x(n+1) table at a fraction of the cost and O(n) memory.
+    """
+    if not x or not y:
+        return 0
+    return int(LCSseq.similarity(x, y))
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +193,8 @@ def title_soft_match(extracted: str, ground_truth: str) -> float | None:
 def title_soft_containment(extracted: str, ground_truth: str) -> float | None:
     """1.0 when ``title_soft_match`` scored 1.0 via containment, not exact match.
 
-    Reported per paper so the aggregate makes reliance on the containment
-    branch visible: summed over a run it is ``title_soft_containment_n``, the
-    number of papers whose title_soft point rests on the tolerance rather than
-    on a real match. None when the ground truth has no title (same exclusion as
+    A diagnostic helper only: it is not reported per paper and no aggregate
+    sums it. None when the ground truth has no title (same exclusion as
     ``title_soft_match``).
     """
     if not ground_truth.strip():
@@ -312,70 +309,6 @@ def abstract_ned(extracted: str, ground_truth: str) -> float | None:
     return Levenshtein.normalized_similarity(
         extracted.strip().lower(), ground_truth.strip().lower()
     )
-
-
-# ---------------------------------------------------------------------------
-# Keyword metrics
-# ---------------------------------------------------------------------------
-
-
-def keywords_f1(extracted: list[str], ground_truth: list[str]) -> float:
-    """F1 score on lowercased keyword sets (0-1)."""
-    ext_set = {k.lower().strip() for k in extracted if k}
-    gt_set = {k.lower().strip() for k in ground_truth if k}
-
-    if not ext_set and not gt_set:
-        return 1.0
-    if not ext_set or not gt_set:
-        return 0.0
-
-    intersection = len(ext_set & gt_set)
-    precision = intersection / len(ext_set)
-    recall = intersection / len(gt_set)
-
-    if precision + recall == 0:
-        return 0.0
-
-    return 2 * (precision * recall) / (precision + recall)
-
-
-def _normalize_keyword(kw: str) -> str:
-    """Normalize a keyword for fuzzy comparison: lowercase, strip, replace hyphens."""
-    return kw.lower().strip().replace("-", " ").replace("\u2013", " ").replace("\u2014", " ")
-
-
-def keywords_fuzzy_f1(
-    extracted: list[str], ground_truth: list[str], threshold: float = 80.0
-) -> float:
-    """F1 on keywords with fuzzy matching (token_sort_ratio >= threshold).
-
-    Uses globally-greedy matching on the similarity matrix instead of
-    sequential greedy to avoid order-dependent matching artifacts.
-    """
-    ext_list = [_normalize_keyword(k) for k in extracted if k]
-    gt_list = [_normalize_keyword(k) for k in ground_truth if k]
-
-    if not ext_list and not gt_list:
-        return 1.0
-    if not ext_list or not gt_list:
-        return 0.0
-
-    # Build pairwise scores above threshold and match globally
-    pairs = []
-    for gi, gt_kw in enumerate(gt_list):
-        for ei, ext_kw in enumerate(ext_list):
-            score = token_sort_ratio(gt_kw, ext_kw)
-            if score >= threshold:
-                pairs.append((score, gi, ei))
-
-    tp = _greedy_match_count(pairs)
-
-    precision = tp / len(ext_list)
-    recall = tp / len(gt_list)
-
-    if precision + recall == 0:
-        return 0.0
-    return 2 * (precision * recall) / (precision + recall)
 
 
 # ---------------------------------------------------------------------------
@@ -526,67 +459,6 @@ def authors_fullname_f1(extracted: list[dict], ground_truth: list[dict]) -> floa
     ext_names = [n for n in (_full_name(d) for d in extracted) if n]
     gt_names = [n for n in (_full_name(d) for d in ground_truth) if n]
     return _fuzzy_name_f1(ext_names, gt_names, full_names=True)
-
-
-def authors_count_ratio(extracted: list, ground_truth: list) -> float:
-    """min(len(extracted), len(ground_truth)) / max(...), or 1.0 if both empty."""
-    n_ext = len(extracted)
-    n_gt = len(ground_truth)
-
-    if n_ext == 0 and n_gt == 0:
-        return 1.0
-    if n_ext == 0 or n_gt == 0:
-        return 0.0
-
-    return min(n_ext, n_gt) / max(n_ext, n_gt)
-
-
-def authors_order_score(extracted: list[dict], ground_truth: list[dict]) -> float:
-    """Kendall's tau-like order correlation on matched authors (0-1).
-
-    Matches authors by fuzzy family name, then measures how well the extraction
-    preserves the ground-truth ordering. Returns 1.0 for perfect order,
-    0.0 for fully reversed, 0.5 for random.
-    """
-    ext_names = [_normalize_name(d.get("family", "")) for d in extracted if d.get("family")]
-    gt_names = [_normalize_name(d.get("family", "")) for d in ground_truth if d.get("family")]
-
-    if len(ext_names) < 2 or len(gt_names) < 2:
-        return 1.0
-
-    threshold = 0.85
-    pairs = []
-    for gi, gt_name in enumerate(gt_names):
-        for ei, ext_name in enumerate(ext_names):
-            sim = JaroWinkler.normalized_similarity(ext_name, gt_name)
-            if sim >= threshold:
-                pairs.append((sim, gi, ei))
-
-    matched = _greedy_match_pairs(pairs)
-
-    if len(matched) < 2:
-        return 1.0
-
-    # Count concordant and discordant pairs
-    n = len(matched)
-    concordant = 0
-    discordant = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            gt_order = matched[i][0] - matched[j][0]
-            ext_order = matched[i][1] - matched[j][1]
-            if gt_order * ext_order > 0:
-                concordant += 1
-            elif gt_order * ext_order < 0:
-                discordant += 1
-
-    total_pairs = concordant + discordant
-    if total_pairs == 0:
-        return 1.0
-
-    # Normalize tau from [-1, 1] to [0, 1]
-    tau = (concordant - discordant) / total_pairs
-    return (tau + 1) / 2
 
 
 # ---------------------------------------------------------------------------
@@ -791,28 +663,84 @@ def _ref_similarity(ext_ref: dict, gt_ref: dict) -> float:
     return 0.0
 
 
-def ref_matching_f1(extracted_refs: list[dict], ground_truth_refs: list[dict]) -> float:
+# Gold-side "does this reference carry the field?" getters, one per
+# ref_field_scores() metric. This table is the single source for both the
+# accuracy denominators below and the pooled counts in
+# evaluate.ref_field_counts, so the two can never disagree the way two copied
+# predicate tables could.
+_REF_GOLD_FIELD_GETTERS = {
+    "title": _get_ref_title,
+    "year": _get_ref_year,
+    "doi": lambda ref: normalize_doi(ref.get("doi") or ref.get("DOI") or ""),
+    "author": _ref_surname_tokens,
+    "journal": _get_ref_container,
+    "volume": _get_ref_volume,
+    "pages": lambda ref: _get_ref_pages(ref)[0],
+}
+
+
+@dataclass(frozen=True)
+class ReferenceMatchResult:
+    """One shared reference-matching pass.
+
+    The n×m similarity matrix is built and greedily matched once; every
+    reference metric derives from this instead of re-matching. ``pairs`` holds
+    (gold_idx, ext_idx) in greedy-match order. ``gold_has_field`` maps each
+    field to per-gold-reference presence, computed once from the getters above.
+    """
+
+    pairs: tuple[tuple[int, int], ...]
+    n_extracted: int
+    n_gold: int
+    gold_has_field: dict[str, tuple[bool, ...]]
+
+
+def match_references(
+    extracted_refs: list[dict], ground_truth_refs: list[dict]
+) -> ReferenceMatchResult:
+    """Match extracted references to gold once; all ref metrics derive from this."""
+    pairs: list[tuple[int, int]] = []
+    if extracted_refs and ground_truth_refs:
+        scored = []
+        for gi, gt_ref in enumerate(ground_truth_refs):
+            for ei, ext_ref in enumerate(extracted_refs):
+                sim = _ref_similarity(ext_ref, gt_ref)
+                if sim > 0:
+                    scored.append((sim, gi, ei))
+        pairs = _greedy_match_pairs(scored)
+    return ReferenceMatchResult(
+        pairs=tuple(pairs),
+        n_extracted=len(extracted_refs),
+        n_gold=len(ground_truth_refs),
+        gold_has_field={
+            field: tuple(bool(get(ref)) for ref in ground_truth_refs)
+            for field, get in _REF_GOLD_FIELD_GETTERS.items()
+        },
+    )
+
+
+def ref_matching_f1(
+    extracted_refs: list[dict],
+    ground_truth_refs: list[dict],
+    match: ReferenceMatchResult | None = None,
+) -> float:
     """F1 for individual reference matching using globally-greedy bipartite matching.
 
     Computes pairwise similarity using DOI > title > author+year > unstructured
     cascade, then matches using globally-greedy algorithm (picks highest-scoring
     pair first). This avoids the order-dependent artifacts of sequential greedy
     matching.
+
+    Pass a ``match_references()`` result to reuse a shared matching pass.
     """
     if not extracted_refs and not ground_truth_refs:
         return 1.0
     if not extracted_refs or not ground_truth_refs:
         return 0.0
 
-    # Build similarity pairs above threshold
-    pairs = []
-    for gi, gt_ref in enumerate(ground_truth_refs):
-        for ei, ext_ref in enumerate(extracted_refs):
-            sim = _ref_similarity(ext_ref, gt_ref)
-            if sim > 0:
-                pairs.append((sim, gi, ei))
-
-    tp = _greedy_match_count(pairs)
+    if match is None:
+        match = match_references(extracted_refs, ground_truth_refs)
+    tp = len(match.pairs)
 
     precision = tp / len(extracted_refs)
     recall = tp / len(ground_truth_refs)
@@ -823,7 +751,9 @@ def ref_matching_f1(extracted_refs: list[dict], ground_truth_refs: list[dict]) -
 
 
 def ref_field_scores(
-    extracted_refs: list[dict], ground_truth_refs: list[dict]
+    extracted_refs: list[dict],
+    ground_truth_refs: list[dict],
+    match: ReferenceMatchResult | None = None,
 ) -> dict[str, float | None]:
     """Per-field accuracy on matched reference pairs.
 
@@ -844,16 +774,19 @@ def ref_field_scores(
     (nothing to evaluate against, e.g. a paper that prints no reference
     DOIs) — callers must exclude None from aggregates rather than average
     it as 0.
+
+    Pass a ``match_references()`` result to reuse a shared matching pass.
     """
-    gold_title_total = sum(1 for r in ground_truth_refs if _get_ref_title(r))
-    gold_year_total = sum(1 for r in ground_truth_refs if _get_ref_year(r))
-    gold_doi_total = sum(
-        1 for r in ground_truth_refs if normalize_doi(r.get("doi") or r.get("DOI") or "")
-    )
-    gold_author_total = sum(1 for r in ground_truth_refs if _ref_surname_tokens(r))
-    gold_journal_total = sum(1 for r in ground_truth_refs if _get_ref_container(r))
-    gold_volume_total = sum(1 for r in ground_truth_refs if _get_ref_volume(r))
-    gold_pages_total = sum(1 for r in ground_truth_refs if _get_ref_pages(r)[0])
+    if match is None:
+        match = match_references(extracted_refs, ground_truth_refs)
+    gold_has = match.gold_has_field
+    gold_title_total = sum(gold_has["title"])
+    gold_year_total = sum(gold_has["year"])
+    gold_doi_total = sum(gold_has["doi"])
+    gold_author_total = sum(gold_has["author"])
+    gold_journal_total = sum(gold_has["journal"])
+    gold_volume_total = sum(gold_has["volume"])
+    gold_pages_total = sum(gold_has["pages"])
 
     title_gt_matched = 0
     title_correct = 0
@@ -866,47 +799,44 @@ def ref_field_scores(
     pages_gt_matched = pages_correct_n = 0
 
     if extracted_refs and ground_truth_refs:
-        pairs = []
-        for gi, gt_ref in enumerate(ground_truth_refs):
-            for ei, ext_ref in enumerate(extracted_refs):
-                sim = _ref_similarity(ext_ref, gt_ref)
-                if sim > 0:
-                    pairs.append((sim, gi, ei))
-
-        for gi, ei in _greedy_match_pairs(pairs):
+        for gi, ei in match.pairs:
             gt_ref = ground_truth_refs[gi]
             ext_ref = extracted_refs[ei]
 
-            # Title accuracy (only count pairs where GT has a title)
-            gt_title = _get_ref_title(gt_ref)
-            if gt_title:
+            # Presence comes from the shared gold-presence table above —
+            # never re-derived inline — so these denominators cannot drift
+            # from the pooled ``<field>_matched`` counts in
+            # ``evaluate.ref_field_counts``. Only the comparison values are
+            # fetched here.
+            if gold_has["title"][gi]:
                 title_gt_matched += 1
+                gt_title = _get_ref_title(gt_ref)
                 ext_title = _get_ref_title(ext_ref)
                 if ext_title and token_sort_ratio(ext_title.lower(), gt_title.lower()) >= 85.0:
                     title_correct += 1
 
             # Year accuracy (only count pairs where GT has a year)
-            gt_year = _get_ref_year(gt_ref)
-            if gt_year:
+            if gold_has["year"][gi]:
                 year_gt_matched += 1
+                gt_year = _get_ref_year(gt_ref)
                 ext_year = _get_ref_year(ext_ref)
                 if ext_year and gt_year == ext_year:
                     year_correct += 1
 
-            gt_doi = normalize_doi(gt_ref.get("doi") or gt_ref.get("DOI") or "")
-            if gt_doi:
+            if gold_has["doi"][gi]:
+                gt_doi = normalize_doi(gt_ref.get("doi") or gt_ref.get("DOI") or "")
                 ext_doi = normalize_doi(ext_ref.get("doi") or ext_ref.get("DOI") or "")
                 if ext_doi and ext_doi == gt_doi:
                     doi_correct += 1
 
-            if _ref_surname_tokens(gt_ref):
+            if gold_has["author"][gi]:
                 author_gt_matched += 1
                 if _author_list_correct(ext_ref, gt_ref):
                     author_correct += 1
 
-            gt_container = _get_ref_container(gt_ref)
-            if gt_container:
+            if gold_has["journal"][gi]:
                 journal_gt_matched += 1
+                gt_container = _get_ref_container(gt_ref)
                 ext_container = _get_ref_container(ext_ref)
                 if (
                     ext_container
@@ -914,13 +844,12 @@ def ref_field_scores(
                 ):
                     journal_correct += 1
 
-            gt_volume = _get_ref_volume(gt_ref)
-            if gt_volume:
+            if gold_has["volume"][gi]:
                 volume_gt_matched += 1
-                if _get_ref_volume(ext_ref) == gt_volume:
+                if _get_ref_volume(ext_ref) == _get_ref_volume(gt_ref):
                     volume_correct += 1
 
-            if _get_ref_pages(gt_ref)[0]:
+            if gold_has["pages"][gi]:
                 pages_gt_matched += 1
                 if _pages_correct(ext_ref, gt_ref):
                     pages_correct_n += 1

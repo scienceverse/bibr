@@ -1,5 +1,6 @@
 """Model-specific OCR output normalization."""
 
+import re
 from dataclasses import dataclass
 
 from bibr.ocr.otsl import decode_otsl
@@ -34,7 +35,7 @@ def normalize_ocr_output(
         )
     elif task == "formula":
         content = _strip_markdown_fence(content)
-        content = _strip_one_balanced_formula_wrapper(content)
+        content = strip_one_balanced_formula_wrapper(content)
 
     return NormalizedOcrOutput(content=content, raw_content=raw_content)
 
@@ -57,14 +58,35 @@ def _strip_markdown_fence(value: str) -> str:
     return body.strip()
 
 
-def _strip_one_balanced_formula_wrapper(value: str) -> str:
-    """Remove one matching outer formula delimiter without touching LaTeX bytes."""
+_FORMULA_DELIMITERS = ((r"\[", r"\]"), (r"\(", r"\)"), ("$$", "$$"))
+
+# A dollar sign behind an odd number of backslashes is a literal ``\$``
+# ("\text{cost} = \$5"), not a math delimiter.
+_ESCAPED_DOLLAR_RE = re.compile(r"(?<!\\)((?:\\\\)*)\\\$")
+
+
+def strip_one_balanced_formula_wrapper(value: str, *, single_dollar: bool = False) -> str:
+    """Remove one matching outer formula delimiter without touching LaTeX bytes.
+
+    The wrapper is removed only when its opening delimiter is closed by the
+    final one: ``\\(a\\) + \\(b\\)`` is two formulas, not one wrapped formula.
+    ``single_dollar`` also accepts one inline ``$…$`` pair, which the OCR stage
+    would otherwise nest inside the ``$$`` it wraps formula regions in. An
+    escaped ``\\$`` is a dollar sign in the formula and never counts as a
+    delimiter.
+    """
     trimmed = value.strip()
-    if not _has_balanced_formula_delimiters(trimmed):
+    # Match delimiters on a copy where each escaped dollar is blanked out; it
+    # keeps every index, so the wrapper is sliced off the original.
+    probe = _ESCAPED_DOLLAR_RE.sub(lambda m: m.group(1) + "\x00\x00", trimmed)
+    delimiters = (*_FORMULA_DELIMITERS, ("$", "$")) if single_dollar else _FORMULA_DELIMITERS
+    if not all(
+        _has_balanced_delimiters(probe, opening, closing) for opening, closing in delimiters
+    ):
         return trimmed
 
-    for opening, closing in ((r"\[", r"\]"), (r"\(", r"\)"), ("$$", "$$")):
-        if _has_balanced_outer_pair(trimmed, opening, closing):
+    for opening, closing in delimiters:
+        if _has_balanced_outer_pair(probe, opening, closing):
             return trimmed[len(opening) : -len(closing)].strip()
     return trimmed
 
@@ -90,14 +112,6 @@ def _has_balanced_outer_pair(value: str, opening: str, closing: str) -> bool:
             return False
 
     return depth == 0
-
-
-def _has_balanced_formula_delimiters(value: str) -> bool:
-    """Return whether every recognized formula delimiter family is balanced."""
-    return all(
-        _has_balanced_delimiters(value, opening, closing)
-        for opening, closing in ((r"\[", r"\]"), (r"\(", r"\)"), ("$$", "$$"))
-    )
 
 
 def _has_balanced_delimiters(value: str, opening: str, closing: str) -> bool:

@@ -78,11 +78,13 @@ def test_xref_tiers_cover_figure_and_table_resolution():
 def test_eq_comparators_match_the_equation_extractor():
     import re
 
-    from bibr.extract.equation_extractor import _COMP_PATTERN, _normalize_comp
+    from bibr.extract.equation_extractor import _COMP_PATTERN, _LATEX_COMPS, _normalize_comp
 
     spellings = re.findall(r"[^(?:|)]+", _COMP_PATTERN)
     produced = {_normalize_comp(spelling) for spelling in spellings}
     assert produced == set(get_args(models.EqCompLiteral))
+    # "$p \leq .05$": LaTeX relations normalize into the same vocabulary
+    assert {_normalize_comp(command) for command in _LATEX_COMPS} <= produced
 
 
 def test_severities_match_issue_severity():
