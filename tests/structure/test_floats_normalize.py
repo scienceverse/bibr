@@ -5,6 +5,7 @@ Synthetic cases cover panels with uppercase, numeric, or empty captions and a se
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from bibr.paper_contents import PaperFigure, PaperTable
 from bibr.structure.floats_normalize import merge_figure_panels, merge_table_continuations
@@ -306,6 +307,40 @@ class TestMergeTableContinuations:
         assert len(out) == 1
         assert out[0].df["Species"].tolist() == ["a", "d", "e"]
         assert out[0].df["Uses"].tolist() == ["1", "4", "5"]
+
+    @pytest.mark.parametrize(
+        ("header", "repeated"),
+        [
+            pytest.param(["Variable", "Mean (SD)"], ["VARIABLE", "Mean(SD)"], id="spacing-case"),
+            pytest.param(
+                ["Variable", "Mean (SD)"], ["Ｖａｒｉａｂｌｅ", "Ｍｅａｎ (SD)"], id="full-width"
+            ),
+            pytest.param(["Variable", "Range 1\u20135"], ["Variable", "Range 1-5"], id="en-dash"),
+            pytest.param(
+                ["Variable", "\u0394 score (\u22121 to 1)"],
+                ["Variable", "\u0394 score (-1 to 1)"],
+                id="minus-sign",
+            ),
+            pytest.param(["Variable", "p-value"], ["Variable", "p value"], id="hyphen-space"),
+            pytest.param(["No.", "Cases"], ["No", "Cases"], id="dropped-period"),
+        ],
+    )
+    def test_repeated_header_read_differently_is_not_a_data_row(self, header, repeated):
+        """Each page is read on its own, so the header a continuation page
+        repeats comes back with other spacing, case, width, dashes or
+        punctuation; the exact comparison took it for a promoted data row and
+        inserted it mid-table."""
+        df1 = pd.DataFrame([["Age", "34.1 (5.2)"]], columns=header)
+        df2 = pd.DataFrame([["BMI", "24.3 (3.1)"]], columns=repeated)
+        tables = [
+            _tbl(1, 4, "Table 1. Sample", df1),
+            _tbl(2, 5, "Table 1. Sample (continued)", df2),
+        ]
+
+        out = merge_table_continuations(tables)
+
+        assert len(out) == 1
+        assert out[0].contents == [header, ["Age", "34.1 (5.2)"], ["BMI", "24.3 (3.1)"]]
 
     def test_unlabeled_tables_are_untouched(self):
         tables = [_tbl(1, 4, None), _tbl(2, 5, None)]

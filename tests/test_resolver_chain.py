@@ -471,12 +471,8 @@ async def test_primary_miss_uses_openalex_fallback_with_separate_concurrency():
     ref = _make_ref()
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
-    resolver.search_many = mock.AsyncMock(
-        side_effect=[
-            [[]],
-            [[_candidate(id="W123", doi="10.1234/fallback")]],
-        ]
-    )
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.search = mock.AsyncMock(return_value=[_candidate(id="W123", doi="10.1234/fallback")])
 
     await enrich_references(
         [ref],
@@ -485,13 +481,44 @@ async def test_primary_miss_uses_openalex_fallback_with_separate_concurrency():
         settings=_fallback_settings(fallback_search_concurrency=3),
     )
 
-    assert resolver.search_many.await_count == 2
-    fallback_call = resolver.search_many.await_args_list[1]
+    resolver.search_many.assert_awaited_once()
+    resolver.search.assert_awaited_once()
+    fallback_call = resolver.search.await_args
     assert fallback_call.kwargs["sources"] == ["openalex"]
-    assert fallback_call.kwargs["concurrency"] == 3
     assert fallback_call.kwargs["raise_on_error"] is True
     assert MatchSource.OPENALEX in ref.match
     assert ref.match[MatchSource.OPENALEX].id == "10.1234/fallback"
+
+
+async def test_fallback_searches_run_at_most_the_fallback_concurrency_at_once():
+    from bibr.enrich.references import enrich_references
+
+    refs = [_make_ref(bib_id=i, title=f"A distinct fallback title number {i}") for i in range(7)]
+    crossref = _mock_crossref()
+    resolver = mock.AsyncMock()
+    resolver.search_many = mock.AsyncMock(side_effect=lambda queries, **kw: [[] for _ in queries])
+    in_flight = 0
+    peak = 0
+
+    async def search(title, year, limit, **kwargs):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return []
+
+    resolver.search = mock.AsyncMock(side_effect=search)
+
+    await enrich_references(
+        refs,
+        crossref_client=crossref,
+        resolver_client=resolver,
+        settings=_fallback_settings(fallback_search_concurrency=3),
+    )
+
+    assert resolver.search.await_count == 7
+    assert peak == 3
 
 
 async def test_fallback_removes_sources_already_used_by_primary():
@@ -500,12 +527,8 @@ async def test_fallback_removes_sources_already_used_by_primary():
     ref = _make_ref()
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
-    resolver.search_many = mock.AsyncMock(
-        side_effect=[
-            [[]],
-            [[_candidate(id="W123")]],
-        ]
-    )
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.search = mock.AsyncMock(return_value=[_candidate(id="W123")])
 
     await enrich_references(
         [ref],
@@ -514,7 +537,7 @@ async def test_fallback_removes_sources_already_used_by_primary():
         settings=_fallback_settings(fallback_sources=["crossref", "openalex"]),
     )
 
-    assert resolver.search_many.await_args_list[1].kwargs["sources"] == ["openalex"]
+    assert resolver.search.await_args.kwargs["sources"] == ["openalex"]
 
 
 async def test_fallback_accepts_same_normalized_printed_doi():
@@ -524,7 +547,7 @@ async def test_fallback_accepts_same_normalized_printed_doi():
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
     resolver.lookup_doi = mock.AsyncMock(return_value=None)
-    resolver.search_many = mock.AsyncMock(return_value=[[_candidate(id="W123", doi="10.1234/abc")]])
+    resolver.search = mock.AsyncMock(return_value=[_candidate(id="W123", doi="10.1234/abc")])
 
     await enrich_references(
         [ref],
@@ -533,8 +556,8 @@ async def test_fallback_accepts_same_normalized_printed_doi():
         settings=_fallback_settings(),
     )
 
-    resolver.search_many.assert_awaited_once()
-    assert resolver.search_many.await_args.kwargs["sources"] == ["openalex"]
+    resolver.search.assert_awaited_once()
+    assert resolver.search.await_args.kwargs["sources"] == ["openalex"]
     assert MatchSource.OPENALEX in ref.match
 
 
@@ -548,8 +571,8 @@ async def test_fallback_rejects_missing_or_conflicting_candidate_doi():
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
     resolver.lookup_doi = mock.AsyncMock(return_value=None)
-    resolver.search_many = mock.AsyncMock(
-        return_value=[
+    resolver.search = mock.AsyncMock(
+        side_effect=[
             [_candidate(id="W-missing")],
             [_candidate(id="W-conflict", doi="10.1234/different")],
         ]
@@ -562,8 +585,8 @@ async def test_fallback_rejects_missing_or_conflicting_candidate_doi():
         settings=_fallback_settings(),
     )
 
-    resolver.search_many.assert_awaited_once()
-    assert resolver.search_many.await_args.kwargs["sources"] == ["openalex"]
+    assert resolver.search.await_count == 2
+    assert resolver.search.await_args.kwargs["sources"] == ["openalex"]
     assert all(not ref.match for ref in refs)
 
 
@@ -573,7 +596,8 @@ async def test_fallback_clean_miss_remains_unmatched_without_failure():
     ref = _make_ref()
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
-    resolver.search_many = mock.AsyncMock(side_effect=[[[]], [[]]])
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.search = mock.AsyncMock(return_value=[])
 
     report = await enrich_references(
         [ref],
@@ -582,7 +606,8 @@ async def test_fallback_clean_miss_remains_unmatched_without_failure():
         settings=_fallback_settings(),
     )
 
-    assert resolver.search_many.await_count == 2
+    resolver.search_many.assert_awaited_once()
+    resolver.search.assert_awaited_once()
     assert not ref.match
     assert report.failed == 0
     assert report.details == ()
@@ -594,7 +619,8 @@ async def test_fallback_item_error_warns_without_marking_enrichment_partial():
     ref = _make_ref()
     crossref = _mock_crossref()
     resolver = mock.AsyncMock()
-    resolver.search_many = mock.AsyncMock(side_effect=[[[]], [RuntimeError("openalex down")]])
+    resolver.search_many = mock.AsyncMock(return_value=[[]])
+    resolver.search = mock.AsyncMock(side_effect=RuntimeError("openalex down"))
 
     report = await enrich_references(
         [ref],
@@ -611,7 +637,7 @@ async def test_fallback_item_error_warns_without_marking_enrichment_partial():
     assert "openalex down" in report.details[0].message
 
 
-async def test_fallback_timeout_discards_batch_and_cancels_search():
+async def test_fallback_timeout_cancels_the_searches_still_outstanding():
     from bibr.enrich.references import enrich_references
 
     refs = [_make_ref(bib_id=1), _make_ref(bib_id=2, title="Another Excellent Testing Paper")]
@@ -620,9 +646,7 @@ async def test_fallback_timeout_discards_batch_and_cancels_search():
     fallback_started = asyncio.Event()
     fallback_cancelled = asyncio.Event()
 
-    async def search_many(queries, **kwargs):
-        if kwargs["sources"] == ["crossref"]:
-            return [[] for _ in queries]
+    async def search(title, year, limit, **kwargs):
         fallback_started.set()
         try:
             await asyncio.Event().wait()
@@ -630,7 +654,8 @@ async def test_fallback_timeout_discards_batch_and_cancels_search():
             fallback_cancelled.set()
             raise
 
-    resolver.search_many = mock.AsyncMock(side_effect=search_many)
+    resolver.search_many = mock.AsyncMock(side_effect=lambda queries, **kw: [[] for _ in queries])
+    resolver.search = mock.AsyncMock(side_effect=search)
 
     report = await enrich_references(
         refs,

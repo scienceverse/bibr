@@ -120,6 +120,7 @@ async def test_upstream_ocr_error_fails_file_even_if_other_pages_succeed():
 
     assert fs.error is not None
     assert isinstance(fs.original_error, UpstreamServiceError)
+    assert fs.error_outage is True
 
 
 @pytest.mark.asyncio
@@ -431,6 +432,7 @@ async def test_ocr_init_failure_marks_all_files_errored_without_raising():
         assert fs.error_code == "ocr_failed"
         assert fs.failed_stage == "ocr"
         assert isinstance(fs.original_error, RuntimeError)
+        assert fs.error_outage is True  # the engine's failure, not the paper's
 
 
 @pytest.mark.asyncio
@@ -458,6 +460,7 @@ async def test_wait_for_server_failure_errors_files_without_unpaired_ocr_end():
 
     assert fs.error is not None
     assert fs.error_code == "ocr_failed"
+    assert fs.error_outage is True
     progress.ocr_start.assert_not_called()
     progress.ocr_end.assert_not_called()
 
@@ -521,6 +524,7 @@ async def test_ocr_init_failure_not_retried_within_chunk():
     for fs in (fs1, fs2):
         assert fs.error_code == "ocr_failed"
         assert isinstance(fs.original_error, RuntimeError)
+        assert fs.error_outage is True
 
 
 @pytest.mark.asyncio

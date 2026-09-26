@@ -73,6 +73,7 @@ class LayoutStage:
                             code="layout_failed",
                             stage=self.name,
                             exc=exc,
+                            outage=True,
                         )
                 ctx.signals.any_needs_ocr = False
                 logger.warning("Layout initialization failed", exc_info=True)
