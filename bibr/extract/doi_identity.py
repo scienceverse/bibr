@@ -178,6 +178,28 @@ _SELF_CITATION_RE = re.compile(
 )
 
 
+# A reference entry's tail, split from it into a sentence of its own, opens
+# with the DOI label, a URL or the DOI, a page range or volume, or in lower case.
+_TAIL_OPENING_RE = re.compile(r"(?:doi\b|https?://|www\.|10\.\d)", re.IGNORECASE)
+
+
+def _reads_as_reference_tail(text: str) -> bool:
+    """Whether *text* is the end of a reference entry split from its start.
+
+    "doi: 10.1186/…" alone, "131-138. Doi: …" or "prevalence rates. Clin J.
+    (2018) 18:38–44. doi: …": no prose sentence opens that way.
+    """
+    opening = text.lstrip()
+    if not opening:
+        return False
+    return bool(
+        _TAIL_OPENING_RE.match(opening)
+        or opening[0].isdigit()
+        or opening[0] in "(["
+        or opening[0].islower()
+    )
+
+
 def _reads_as_citation(text: str) -> bool:
     """Whether *text* is a bibliographic citation (an author-date or numbered entry).
 
@@ -277,8 +299,9 @@ def _candidate_from_match(
         # A DOI label outside the front matter never outranks the front matter,
         # but it can still name the paper as the only DOI left standing (a
         # preprint's "shared as a preprint …, doi: …" note), unless it is a
-        # cited work's DOI printed in a citation.
-        semantic_context = "cited_work" if _reads_as_citation(text) else "labelled_body"
+        # cited work's DOI: in a citation or in the tail of a reference entry.
+        cited = _reads_as_citation(text) or _reads_as_reference_tail(text)
+        semantic_context = "cited_work" if cited else "labelled_body"
         tier = UNCONTESTED_UNTYPED
     elif marker_kind == "citation":
         semantic_context = "article_self"

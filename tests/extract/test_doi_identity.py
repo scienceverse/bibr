@@ -1347,3 +1347,29 @@ def test_a_correction_notice_names_the_original_article_as_its_parent():
     assert (parent.marker_kind, parent.rejection_reason) == ("parent_doi", "component_candidate")
     assert selection.selected is not None
     assert selection.selected.normalized == "10.1234/notice.2"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "doi: 10.1234/cited.5",
+        "131-138. Doi: 10.1234/cited.5",
+        "prevalence and predictors. Example J. (2018) 18:38-44. doi: 10.1234/cited.5",
+        "DOI: 10.1234/cited.5, https://example.org/stable/5.",
+    ],
+)
+def test_the_tail_of_a_reference_entry_is_a_cited_work(tail):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("Works", CanonicalSection.UNKNOWN, tail, 12),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.semantic_context == "cited_work"
+    assert selection.selected is None
