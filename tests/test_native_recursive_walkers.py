@@ -995,6 +995,15 @@ class TestDocxSectionWordTitle:
         contents = DocxParser(_save(doc)).parse()
         assert contents.detected_title is None
 
+    def test_title_styled_paragraph_after_body_is_not_the_title(self):
+        # The _seen_content_block guard: a non-section Heading 1 only reads
+        # as the title when nothing preceded it.
+        doc = Document()
+        doc.add_paragraph("Body text first.")
+        doc.add_heading("A follow-up discussion of results", level=1)
+        contents = DocxParser(_save(doc)).parse()
+        assert contents.detected_title is None
+
 
 class TestDocxUnpairedCaptions:
     _LINKED_DRAWING = (
