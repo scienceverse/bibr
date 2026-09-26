@@ -2180,36 +2180,50 @@ class CoreMetadataExtractor:
             return pt, l1, l2, None, None
 
         from bibr.structure import paper_classifier
+        from bibr.structure.paper_classifier_common import _build_input_text
 
         degraded_reason: str | None = None
-        try:
-            if self._explicit_classifier_runtime:
-                result = await paper_classifier.classify_paper_async(
-                    title,
-                    abstract,
-                    classifier_resources=self._classifier_resources,
-                    settings=self._settings,
-                )
-            else:
-                result = await paper_classifier.classify_paper_async(title, abstract)
-        except ProcessingError:
-            raise
-        except Exception as exc:
-            logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
-            result = None
-            degraded_reason = type(exc).__name__
+        result = None
+        # Empty title+abstract carries no signal — the model would return a
+        # training-prior artifact — so skip it and let the LLM classify from
+        # the full text. This is missing input, not a classifier outage, so
+        # no PAPER_CLASSIFIER_DEGRADED warning is recorded below.
+        empty_input = not _build_input_text(title, abstract)
+        if empty_input:
+            logger.info(
+                "Skipping trained paper classifier on empty title+abstract; using LLM fallback"
+            )
+        else:
+            try:
+                if self._explicit_classifier_runtime:
+                    result = await paper_classifier.classify_paper_async(
+                        title,
+                        abstract,
+                        classifier_resources=self._classifier_resources,
+                        settings=self._settings,
+                    )
+                else:
+                    result = await paper_classifier.classify_paper_async(title, abstract)
+            except ProcessingError:
+                raise
+            except Exception as exc:
+                logger.warning("Trained paper classifier unavailable; using LLM fallback: %s", exc)
+                result = None
+                degraded_reason = type(exc).__name__
         if result is None:
             # The exception type only — never its message, which can quote
-            # document text.
-            self._record_metadata_warning(
-                WarningCode.PAPER_CLASSIFIER_DEGRADED,
-                (
-                    f"trained classifier raised {degraded_reason}"
-                    if degraded_reason
-                    else "trained classifier unavailable"
+            # document text. Empty input skips the warning: the model was
+            # never run, so nothing degraded.
+            if not empty_input:
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFIER_DEGRADED,
+                    (
+                        f"trained classifier raised {degraded_reason}"
+                        if degraded_reason
+                        else "trained classifier unavailable"
+                    )
+                    + "; the LLM classified the paper",
                 )
-                + "; the LLM classified the paper",
-            )
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             else:

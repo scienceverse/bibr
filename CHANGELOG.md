@@ -1138,6 +1138,53 @@ released.
   own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
   defaults and `--dry-run` now agree on the paddle alias, and the dry-run
   preview prints the resolved alias.
+- The author-email harvester no longer hands an unrelated nearby address to an
+  author with no email. Ranked candidates pass the gate first, so a
+  lower-ranked candidate whose local part names the author wins over a nearer
+  one it does not name; a candidate is assigned only when the address sits on
+  a correspondence-marker line, its local part names the author (family or
+  given token, covering forms like `bathri@` for Bathrinath, plus a 2-letter
+  family name leading the address, as in `lixh@` for Xiaohong Li), or the
+  surname is printed in the same sentence. The single-corresponding-author
+  elimination fallback accepts a correspondence marker in the window, or a
+  PLOS-style `* E-mail:` line, only when no sentence pairs the marker with an
+  explicit address — those pairings are exhaustive. An editorial-office or
+  affiliation address printed before the real one is therefore skipped,
+  leaving the author empty for their own address instead of consuming them
+  with someone else's. On the JATS benchmark (3,617 gold addresses) this
+  assigns more addresses correctly than before (3,299 vs 3,287) with fewer
+  misassignments (38 vs 82); the addresses it newly leaves empty are opaque
+  ones with no textual link to any name (initials, numbers, transliterations
+  the harvester cannot match), which are left empty rather than guessed.
+- A `Published by ...` / `Published under ...` line no longer blocks
+  publication-date refinement for the whole record. Those tails carry no date,
+  so the label is skipped and scanning continues; only a date-like tail that
+  fails to parse still marks the record ambiguous. A history label mid-line
+  after prose is still ignored, and already-full dates are untouched.
+- The trained paper classifier no longer runs on an empty title+abstract. With
+  no signal the model returns a training-prior artifact, so the extractor
+  skips it and takes the LLM path with the full classification text. Skipping
+  is missing input, not an outage, so no `PAPER_CLASSIFIER_DEGRADED` warning
+  is recorded.
+- Bare OECD L1 short forms an LLM may return now validate: `Humanities`,
+  `Engineering`, `Medicine`, `Agriculture` (plus `Agricultural Sciences` and
+  `Medical Sciences`) canonicalize through the shared token-set matcher and a
+  two-entry synonym map, instead of dropping to empty. A string naming two
+  domains at once (`Humanities and Social Sciences`) stays empty instead of
+  resolving to one of them. Every other observed label string maps exactly
+  as before.
+- Equation cross-references no longer fire on unit spellings or software
+  names. A hyphen before a lowercase short form kills `CO2-eq.` matches while
+  a hyphen before longhand `Equation` still reads as a range dash (`Equation
+  5-Equation 7` keeps both halves), a `%` directly trailing the number kills
+  shares like `eq. (39.1%)`, and an all-caps `EQS` with no period is dropped
+  as the SEM package's name, dotted or not (`EQS 6.1`, `EQS 6`). Bare printed
+  forms (`eq 5`, `eqs 4 and 8`, `Eq (1)`) and dotted ids (`Eq. (2.3)`) still
+  match. Equation and section recall against the JATS corpora's gold links
+  is unchanged. Per-number expansion of ranges
+  (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
+  untouched, as is the reversed-range policy (`5-3` yields no rows), which is
+  now documented on `_expand_nums`.
 
 ### Added
 
