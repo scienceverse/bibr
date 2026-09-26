@@ -24,7 +24,12 @@ from pathlib import Path
 from typing import ClassVar
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+    LocalHttpError,
+    guard_managed_server_port,
+    request_bytes,
+)
 from bibr.local.ocr import HttpOcrClient, PaddleHttpOcrClient
 from bibr.ocr.registry import register
 
@@ -680,6 +685,13 @@ class RapidMlxLlmServer:
             self._settings.llm.model_fields_set.add("max_tokens")
         if "timeout_seconds" not in self._settings.llm.model_fields_set:
             self._settings.llm.timeout_seconds = 300
+        if "rate_limit_rpm" not in self._settings.llm.model_fields_set:
+            # Loopback: the limiter must not throttle local inference.
+            self._settings.llm.rate_limit_rpm = MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+            logger.info(
+                "Local rapid-mlx backend — raising llm.rate_limit_rpm to %d",
+                MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
+            )
         if "max_concurrency" not in self._settings.llm.model_fields_set:
             # Serialized by default despite server-side continuous batching: measured
             # 2026-07-09 on M4/16GB, 3 concurrent bibr-shaped calls ran 0.71x the speed

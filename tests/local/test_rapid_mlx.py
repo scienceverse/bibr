@@ -1042,3 +1042,72 @@ def test_spawn_and_wait_shuts_down_on_keyboard_interrupt(monkeypatch):
     # shutdown() ran: the module fixture neuters os.killpg, so the child is
     # reaped through the killpg path and _process is cleared.
     assert server._process is None
+
+
+def _mk_llm_server():
+    """RapidMlxLlmServer without spawning: configure_llm_client only."""
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    server = mod.RapidMlxLlmServer.__new__(mod.RapidMlxLlmServer)
+    server._settings = GlobalSettings()
+    server._model = "test-model"
+    server._server = MagicMock(base_url="http://127.0.0.1:8871")
+    return server
+
+
+def test_llm_server_raises_rate_limit_rpm_when_unset():
+    """Local rapid-mlx must not inherit the 60 rpm cloud default (12)."""
+    from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+
+    server = _mk_llm_server()
+    assert "rate_limit_rpm" not in server._settings.llm.model_fields_set
+
+    server.configure_llm_client()
+
+    assert server._settings.llm.rate_limit_rpm == MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
+
+
+def test_llm_server_respects_explicit_rate_limit_rpm():
+    """A user-set LLM_RATE_LIMIT_RPM must not be silently overridden."""
+    server = _mk_llm_server()
+    server._settings.llm.rate_limit_rpm = 25
+    server._settings.llm.model_fields_set.add("rate_limit_rpm")
+
+    server.configure_llm_client()
+
+    assert server._settings.llm.rate_limit_rpm == 25
+
+
+def test_spawn_and_wait_shuts_down_on_task_cancellation(monkeypatch):
+    """Task cancellation during the health wait still shuts down the child (13)."""
+    import asyncio
+
+    from bibr.config import Settings
+    from bibr.local import rapid_mlx as mod
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.pid = 123456789
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *a, **k: proc)
+
+    def _cancelled(_url, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(mod, "request_bytes", _cancelled)
+
+    server = mod.RapidMlxServer.__new__(mod.RapidMlxServer)
+    server._settings = Settings
+    server._model = "test-model"
+    server._served_model_name = "test-model"
+    server._port = 8871
+    server._multimodal = False
+    server._strict_ocr_smoke = False
+    server._process = None
+    server._stderr_log = None
+    server._stderr_fh = None
+    server._reused = False
+
+    with pytest.raises(asyncio.CancelledError):
+        server._spawn_and_wait(["sleep", "30"])
+    assert server._process is None
