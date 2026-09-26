@@ -161,7 +161,7 @@ Configure caching:
 | `REDIS_URL` | Redis connection URL | auto-generated |
 | `REDIS_PASSWORD` | Redis password | (none) |
 | `CACHE_VERSION` | Cache key prefix version | auto-computed from source hash |
-| `CACHE_TTL_SECONDS` | Cache TTL | `86400` (24h) |
+| `CACHE_TTL_SECONDS` | Cache TTL (`0` = no expiry) | `86400` (24h) |
 | `CACHE_OPERATION_TIMEOUT_SECONDS` | Maximum wait for one cache operation | `5` |
 
 ## Request metering

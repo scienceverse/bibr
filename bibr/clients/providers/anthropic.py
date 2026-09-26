@@ -16,10 +16,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Anthropic rejects extended thinking unless 1024 <= budget_tokens <
-# max_tokens. The per-task caps in ``Settings.llm`` (paper_type 512,
-# classification 1024, title/equations 4096) can be at or below a configured
-# ``LLM_THINKING_BUDGET``, which the API answers with a 400.
+# max_tokens, and thinking tokens come out of max_tokens. The per-task caps
+# in ``Settings.llm`` (paper_type 512, classification 1024, title/equations
+# 4096) can be at or below a configured ``LLM_THINKING_BUDGET``, which the
+# API answers with a 400 — and a cap just above the budget leaves almost no
+# room for the answer itself.
 _MIN_THINKING_BUDGET = 1024
+
+# Minimum answer room kept above the thinking budget before thinking is
+# sent. A 4096 cap with a 4000 budget would otherwise leave 96 tokens for
+# the JSON answer and risk truncation.
+_THINKING_OUTPUT_MARGIN = 1024
 
 
 @register
@@ -45,10 +52,18 @@ class AnthropicProvider:
         budget = self._settings.llm.thinking_budget
         if budget and budget > 0:
             effective = max(int(budget), _MIN_THINKING_BUDGET)
-            if kwargs["max_tokens"] <= effective:
-                # The task cap cannot fit thinking (budgets must stay below
-                # max_tokens) — send an ordinary temperature-0 call rather
-                # than a request the API rejects with a 400.
+            if int(budget) < _MIN_THINKING_BUDGET:
+                logger.info(
+                    "LLM_THINKING_BUDGET %d is below Anthropic's minimum %d — using %d",
+                    int(budget),
+                    _MIN_THINKING_BUDGET,
+                    effective,
+                )
+            if kwargs["max_tokens"] < effective + _THINKING_OUTPUT_MARGIN:
+                # The task cap cannot fit thinking plus room for the answer
+                # (budgets must stay below max_tokens) — send an ordinary
+                # temperature-0 call rather than a request the API rejects
+                # with a 400 or truncates.
                 logger.debug(
                     "thinking budget %d does not fit max_tokens %d — sending without thinking",
                     effective,

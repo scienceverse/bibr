@@ -99,6 +99,34 @@ async def test_chew_url_reports_non_bibr_failure_without_url(monkeypatch):
         assert "https://arxiv.org/pdf/1234.5678" not in text
 
 
+async def test_chew_url_bibr_error_reports_filename_without_url(monkeypatch):
+    import bibr.utils.safe_fetch as safe_fetch
+    from bibr.exceptions import BibrError
+
+    async def fake_fetch(url, *, max_size, allowed_hosts=None, **kwargs):
+        return safe_fetch.FetchedFile(
+            content=b"%PDF-1.4 stub",
+            filename="1234.5678.pdf",
+            content_type="application/pdf",
+            final_url=url,
+        )
+
+    async def failing_achew_file(self, path, *, paper_id=None, progress=None):
+        raise BibrError("parse failed with key=secret-token-value")
+
+    monkeypatch.setattr(safe_fetch, "fetch_url_safely", fake_fetch)
+    monkeypatch.setattr(bibr.api.Chewer, "achew_file", failing_achew_file)
+
+    server = build_server()
+    async with client_session(server) as client:
+        text = _error_text(
+            await client.call_tool("chew_url", {"url": "https://arxiv.org/pdf/1234.5678"})
+        )
+        assert "extraction failed for 1234.5678.pdf" in text
+        assert "https://arxiv.org/pdf/1234.5678" not in text
+        assert "secret-token-value" not in text
+
+
 async def test_save_paper_requires_json_and_refuses_overwrite(tmp_path):
     server = build_server()
     async with client_session(server) as client:

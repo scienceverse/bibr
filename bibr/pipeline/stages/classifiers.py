@@ -34,7 +34,7 @@ class ClassifierStage:
         )
         message = (
             f"Required classifier(s) failed to start with ML_CLASSIFIERS_REQUIRED=true "
-            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to fall back to the LLM tier"
+            f"({detail}); set ML_CLASSIFIERS_REQUIRED=false to allow the run to continue without them"
         )
         for fs in ctx.file_states:
             if fs.error is None:

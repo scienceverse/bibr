@@ -64,7 +64,8 @@ pipeline — the first call may take minutes while models load. All three return
 summary and a paper_id for the query tools: get_metadata, get_sections, get_text,
 search_text, get_references, get_reference_citations, get_tables, get_figures. Full
 exports are large, so query the slices you need instead of asking for everything;
-save_paper writes the complete export JSON to disk.
+save_paper writes the complete export JSON to a .json path (it refuses to
+overwrite an existing file unless overwrite=True).
 """
 
 
@@ -490,7 +491,9 @@ def build_server(
                 try:
                     result = await chewer.achew_file(target, paper_id=paper_id, progress=tracker)
                 except BibrError as e:
-                    raise ToolError(f"extraction failed for {target.name}: {e}") from e
+                    raise ToolError(
+                        f"extraction failed for {target.name}: {scrub_secrets(str(e))}"
+                    ) from e
                 except Exception as e:  # noqa: BLE001 — MCP drops non-ToolError detail
                     raise ToolError(
                         f"extraction failed for {target.name}: "
@@ -538,7 +541,9 @@ def build_server(
                             target, paper_id=paper_id, progress=tracker
                         )
                     except BibrError as e:
-                        raise ToolError(f"extraction failed for {url}: {e}") from e
+                        raise ToolError(
+                            f"extraction failed for {fetched.filename}: {scrub_secrets(str(e))}"
+                        ) from e
                     except Exception as e:  # noqa: BLE001 — MCP drops non-ToolError detail
                         raise ToolError(
                             f"extraction failed for {fetched.filename}: "
@@ -579,7 +584,11 @@ def build_server(
         paper_id: str, path: str, compact: bool = False, overwrite: bool = False
     ) -> dict[str, Any]:
         """Write a paper's complete export JSON (schema-versioned, everything the
-        query tools slice from) to the given path."""
+        query tools slice from) to a `.json` path.
+
+        Refuses to overwrite an existing file unless `overwrite=True` is
+        passed explicitly.
+        """
         entry = store.get(paper_id)
         out = Path(path).expanduser()
         if out.suffix.lower() != ".json":

@@ -1171,7 +1171,10 @@ class CacheOptions(_BibrSettings):
         description="Cache version namespace; invalidates stored entries on change. Defaults to a "
         "hash of the code — override only to pin or force-invalidate manually.",
     )
-    ttl_seconds: int = Field(86400, description="Result cache entry TTL in seconds.")
+    ttl_seconds: int = Field(
+        86400,
+        description="Result cache entry TTL in seconds. 0 or a negative value means no expiry.",
+    )
     distributed_singleflight: bool = Field(
         True,
         description="Coalesce identical Redis-backed cache misses across workers. Fail-open.",

@@ -424,8 +424,9 @@ def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str
     Mirrors ``bibr chew``: a missing cloud credential, or a managed local
     backend with no launcher or unsupported hardware, used to surface only on
     the first LLM call — after the caller had already paid for layout and
-    OCR. Raises the provider's ``ValueError`` for credentials and
-    :class:`~bibr.exceptions.ConfigurationError` for a local backend.
+    OCR. Raises :class:`~bibr.exceptions.ConfigurationError` in both cases
+    so every entry point (including ``bibr mcp``, whose server session must
+    not swallow ``ValueError``) reports it as a one-line message.
     """
     if pipeline_kwargs.get("no_llm"):
         return
@@ -437,7 +438,12 @@ def _preflight_llm(settings: GlobalSettings | None, pipeline_kwargs: Mapping[str
     if backend == "cloud":
         from bibr.clients.llm import preflight_credentials
 
-        preflight_credentials(settings)
+        try:
+            preflight_credentials(settings)
+        except ValueError as e:
+            from bibr.exceptions import ConfigurationError
+
+            raise ConfigurationError(str(e)) from e
     elif backend in LOCAL_LLM_BACKENDS:
         from bibr.local.cli.run_config import _preflight_local_backend
 

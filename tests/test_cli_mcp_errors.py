@@ -1,22 +1,26 @@
-"""``bibr mcp`` must not crash with a traceback when cloud credentials are missing.
+"""``bibr mcp`` reports missing credentials without a traceback.
 
-The ``Chewer`` preflight raises the provider's plain ``ValueError`` for a
-missing key; the mcp branch converts it to a one-line stderr message plus
-exit 1, like the batch branch already does.
+The ``Chewer`` preflight raises ``ConfigurationError`` for a missing key,
+which the shared handler converts to a one-line stderr message plus exit 1.
+A ``ValueError`` escaping the server session itself keeps its traceback.
 """
 
 import pytest
 
-pytest.importorskip("mcp")
-
 from bibr.local.cli import main
 
 
+def _need_mcp():
+    pytest.importorskip("mcp")
+
+
 def test_mcp_missing_credentials_exits_1_without_traceback(monkeypatch, capsys):
+    _need_mcp()
     import bibr.mcp_server
+    from bibr.exceptions import ConfigurationError
 
     def no_creds(args):
-        raise ValueError(
+        raise ConfigurationError(
             "Google API key required. Set LLM_API_KEY or GOOGLE_API_KEY environment variable."
         )
 
@@ -31,6 +35,7 @@ def test_mcp_missing_credentials_exits_1_without_traceback(monkeypatch, capsys):
 
 
 def test_mcp_bibr_error_still_exits_1(monkeypatch, capsys):
+    _need_mcp()
     import bibr.mcp_server
     from bibr.exceptions import BibrError
 
@@ -43,3 +48,29 @@ def test_mcp_bibr_error_still_exits_1(monkeypatch, capsys):
         main()
     assert exc_info.value.code == 1
     assert "something known went wrong" in capsys.readouterr().err
+
+
+def test_mcp_serve_value_error_is_not_swallowed(monkeypatch):
+    """A ValueError from the running session keeps its traceback."""
+
+    _need_mcp()
+    import bibr.mcp_server
+
+    def serve_bug(args):
+        raise ValueError("pydantic validation failed mid-session")
+
+    monkeypatch.setattr(bibr.mcp_server, "run_mcp", serve_bug)
+    monkeypatch.setattr("sys.argv", ["bibr", "mcp"])
+    with pytest.raises(ValueError, match="mid-session"):
+        main()
+
+
+def test_chewer_preflight_wraps_missing_key_as_configuration_error():
+    from bibr.api import _preflight_llm
+    from bibr.config import GlobalSettings
+    from bibr.exceptions import ConfigurationError
+
+    settings = GlobalSettings(llm={"provider": "anthropic", "api_key": None})
+    settings.ANTHROPIC_API_KEY = None
+    with pytest.raises(ConfigurationError, match="API key required"):
+        _preflight_llm(settings, {})

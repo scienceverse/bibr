@@ -277,10 +277,9 @@ def main():
             except BibrError as e:
                 _print_error(str(e))
                 sys.exit(1)
-            except ValueError as e:
-                # ``Chewer`` preflight: missing LLM credentials surface as ValueError.
-                _print_error(str(e))
-                sys.exit(1)
+            # No ``except ValueError`` here: the Chewer preflight raises
+            # ConfigurationError (handled with the other entry points below),
+            # so a ValueError escaping the server session keeps its traceback.
         elif args.command == "preset":
             # Pull the preset subparser out of argparse's tree so ``bibr preset``
             # (no subcommand) can render its help via the standard argparse path
