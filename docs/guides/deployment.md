@@ -113,7 +113,7 @@ Scale concurrency with these settings:
 | `PIPELINE_RESTART_WORKERS` | `false` | Fail-stop on worker death. `true` is an unsupported opt-in until the locked death-path gate proves reliable completion notification. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
 | `PIPELINE_PAGE_WINDOW_SIZE` | `8` | Maximum PDF pages rendered per file at once. Images are released after each window's layout, native-text reconstruction, and OCR work. This bounds memory without shortening the document. |
-| `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 72, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 72 DPI is rejected before rasterization. |
+| `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 24, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 24 DPI is rejected before rasterization. |
 | `LAYOUT_MAX_RENDER_DIMENSION` | `10000` | Largest rasterized width or height for one PDF page, handled like `LAYOUT_MAX_RENDER_PIXELS`. |
 | `LAYOUT_BATCH_TIMEOUT_MS` | `5` | Coalescing window for the layout `GpuBatcher` — how long it waits for more concurrent pages before flushing a partial batch. |
 | `SEGMENTER_BATCH_TIMEOUT_MS` | `5` | Same coalescing window for the sentence segmenter's `GpuBatcher`. |
