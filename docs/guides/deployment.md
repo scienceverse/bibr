@@ -113,7 +113,7 @@ Scale concurrency with these settings:
 | `PIPELINE_RESTART_WORKERS` | `false` | Fail-stop on worker death. `true` is an unsupported opt-in until the locked death-path gate proves reliable completion notification. |
 | `PIPELINE_MAX_PAGES` | `200` | Hard per-file processing cap for compact many-page PDF protection. |
 | `PIPELINE_PAGE_WINDOW_SIZE` | `8` | Maximum PDF pages rendered per file at once. Images are released after each window's layout, native-text reconstruction, and OCR work. This bounds memory without shortening the document. |
-| `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 72, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 72 DPI is rejected before rasterization. |
+| `LAYOUT_MAX_RENDER_PIXELS` | `25000000` | Pixel budget for one rasterized PDF page. A page over it (or over `LAYOUT_MAX_RENDER_DIMENSION` on a side) at the configured DPI renders at the largest DPI that fits, down to 24, with a `PAGE_DPI_REDUCED` warning; a page that does not fit even at 24 DPI is rejected before rasterization. |
 | `LAYOUT_MAX_RENDER_DIMENSION` | `10000` | Largest rasterized width or height for one PDF page, handled like `LAYOUT_MAX_RENDER_PIXELS`. |
 | `LAYOUT_BATCH_TIMEOUT_MS` | `5` | Coalescing window for the layout `GpuBatcher` — how long it waits for more concurrent pages before flushing a partial batch. |
 | `SEGMENTER_BATCH_TIMEOUT_MS` | `5` | Same coalescing window for the sentence segmenter's `GpuBatcher`. |
@@ -171,6 +171,7 @@ Every job status carries `replica`, the id of the instance executing it.
 JOBS_STORE=redis
 # Redis for job state. Unset it to reuse the cache's REDIS_URL / REDIS_PASSWORD
 # (the usual choice); set it to keep job state on a separate Redis or database.
+# REDIS_PASSWORD is added to it when it names the same host and port as REDIS_URL.
 JOBS_REDIS_URL=redis://redis-host:6379/1
 JOBS_KEY_PREFIX=bibr:jobs   # identical on every replica that shares a namespace
 JOBS_REPLICA_ID=api-1       # optional; defaults to <hostname>:<pid>
@@ -238,6 +239,19 @@ curl -X POST http://localhost:8000/papers/extract \
   -H "Authorization: Bearer your-secret-token" \
   -F "file=@paper.pdf"
 ```
+
+Without `AUTH_API_KEY` the server binds only `127.0.0.1`, `::1` or
+`localhost`, and it refuses requests that a web page open in your browser
+could make on your behalf: any request whose `Host` header is not one of
+those names (`localhost`, `127.0.0.1`, `[::1]`, any port; a DNS-rebinding
+page sends its own) gets a `421`, and a `POST` or other state-changing
+request from another site's `Origin` (or with `Sec-Fetch-Site: cross-site`)
+gets a `403`. REST routes and `/mcp` apply the same rule. `bibr batch
+--serve-url`, MCP clients, curl, and your own browser on
+`http://127.0.0.1:8000/docs` keep working; origins listed by name in
+`CORS_ORIGINS` are accepted too, but `CORS_ORIGINS=*` admits none here. To
+put a reverse proxy or tunnel in front of the server, set `AUTH_API_KEY`:
+with a key the bearer token is the boundary and these checks are off.
 
 When `ENVIRONMENT=production`, the server refuses to start at all unless
 its production hardening checks pass:

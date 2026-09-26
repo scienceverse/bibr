@@ -18,9 +18,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Lowest DPI a page is rendered at to fit the render budget: one pixel per PDF
-# point. A page that does not fit even there is refused as before.
-MIN_REDUCED_RENDER_DPI = 72
+# Lowest DPI a page is rendered at to fit the render budget. Only a page that is
+# huge in PDF points needs a reduced DPI (a poster, a fold-out, or a scan stored
+# at several times its paper size), and its text is as large in points, so it
+# stays legible below one pixel per point. The largest page PDF allows, 14,400 pt
+# (200 in) a side, fits the default budget at 25 DPI; a page that does not fit
+# even at this floor is refused as before.
+MIN_REDUCED_RENDER_DPI = 24
 
 
 def pil_to_bytes(img, fmt: str = "JPEG") -> bytes:

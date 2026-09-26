@@ -49,7 +49,7 @@ second file return `400`.
 | `include_figures` | bool | No | Emit figure images as `data:` URIs (default: `false`) |
 | `include_regions` | bool | No | Emit the `extraction.regions` layout debug payload (default: `false`). Contains per-region geometry and recognition content; response size depends on the document. |
 | `crossref` | bool | No | Run Crossref/resolver reference enrichment for this request (`true`) or skip it (`false`). Omit to follow the server's `CROSSREF_ENRICH` setting, which is off by default. The response cache keys on the effective value. |
-| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
+| `consolidate` | `fill` \| `replace` | No | Merge accepted Crossref matches into `bib` before export (`fill` fills only missing fields, `replace` also overwrites disagreeing ones, but only from a match carrying the reference's printed DOI; a match's catch-all `bib_type` `other` fills a missing type but never replaces a printed one). Omit to defer to the server's `CROSSREF_CONSOLIDATE` setting. |
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
@@ -138,8 +138,10 @@ curl -X POST http://localhost:8000/papers/extract \
 ```
 
 A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
-header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving;
-network-visible binds require a key at least 32 characters long.
+header. When `AUTH_API_KEY` is unset, the CLI permits loopback-only serving,
+and the server then refuses non-loopback `Host` headers (`421`) and
+state-changing requests from other sites (`403`); network-visible binds
+require a key at least 32 characters long.
 See [Authentication](../guides/deployment.md#authentication) in the
 deployment guide for the production-hardening checks (`ENVIRONMENT=production`)
 that force it on.
@@ -154,10 +156,11 @@ abstention (`VAL_METADATA_MULTI_ITEM`), incomplete enrichment, and warnings
 such as `OCR_REGION_FAILED`, `CROSSREF_ENRICHMENT_TIMEOUT` or an LLM task's
 `*_LLM_FAILED`. A deterministic failure, such as `REF_SEG_FAILED`, fails the
 same way on every run, so its response is cached. Keys distinguish file
-content, page range, figure/region output, consolidation, and
-reference-strategy overrides. The cache namespace also includes a settings
-fingerprint and code version. Identical concurrent cache misses are coalesced;
-failed Redis operations are bounded and extraction continues without the cache.
+content (its full SHA-256), the file extension (which picks the parser), page
+range, figure/region output, consolidation, and reference-strategy overrides.
+The cache namespace also includes a settings fingerprint and code version.
+Identical concurrent cache misses are coalesced; failed Redis operations are
+bounded and extraction continues without the cache.
 
 Configure caching:
 

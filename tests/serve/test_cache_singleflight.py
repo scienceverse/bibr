@@ -99,9 +99,11 @@ async def test_cache_hit_rebinds_filename_to_current_request(tmp_path):
 async def test_corrupt_cached_json_is_deleted_and_recomputed(tmp_path):
     api, pipeline, cache = _api(tmp_path)
     inputs = _inputs()
-    digest = __import__("hashlib").sha256(inputs["content"]).hexdigest()[:16]
+    digest = __import__("hashlib").sha256(inputs["content"]).hexdigest()
     ref_seg, refs = _resolve_ref_strategies(None, None)
-    key = api._cache_key(digest, None, None, False, False, None, refs=refs, ref_seg=ref_seg)
+    key = api._cache_key(
+        digest, None, None, False, False, None, refs=refs, ref_seg=ref_seg, input_format=".pdf"
+    )
     cache.values[key] = b"{broken-json"
 
     result = await api.predict(inputs)
@@ -109,3 +111,38 @@ async def test_corrupt_cached_json_is_deleted_and_recomputed(tmp_path):
     assert result["success"] is True
     assert pipeline.calls == 1
     assert cache.delete_calls == [key]
+
+
+async def test_same_bytes_under_another_extension_are_extracted_again(tmp_path):
+    """serve-2: the extension picks the parser, so .html and .xml of one file
+    are two results; a hit must never report the other format's output."""
+    api, pipeline, cache = _api(tmp_path)
+    as_html = _inputs(b"<article>same bytes</article>")
+    as_html["filename"] = "article.html"
+    as_xml = dict(as_html, filename="article.xml")
+
+    await api.predict(as_html)
+    await api.predict(as_xml)
+    await api.predict(dict(as_xml, filename="other.XML"))
+
+    assert pipeline.calls == 2
+    assert sorted(key.rsplit(":", 1)[1] for key in cache.values) == ["html", "xml"]
+
+
+async def test_cache_key_carries_the_full_content_hash(tmp_path):
+    """x-security-6: a 64-bit prefix can be collided on purpose, and the shared
+    cache would then answer one upload with another upload's extraction."""
+    import hashlib
+
+    api, _, cache = _api(tmp_path)
+    inputs = _inputs()
+
+    result = await api.predict(inputs)
+
+    ref_seg, refs = _resolve_ref_strategies(None, None)
+    digest = hashlib.sha256(inputs["content"]).hexdigest()
+    assert list(cache.values) == [
+        f"json:{digest}:refs:{refs}:rseg:{ref_seg}:fmt:pdf",
+    ]
+    # The short form stays the display id.
+    assert result["paper_json"]["paper_id"] == digest[:16]

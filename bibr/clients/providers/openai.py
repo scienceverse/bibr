@@ -9,6 +9,7 @@ import instructor
 
 from bibr.clients.providers import register
 from bibr.config import snapshot_settings
+from bibr.utils.hosts import refuse_plaintext_llm_key
 
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
@@ -49,6 +50,11 @@ class OpenAIProvider:
             raise ValueError("OpenAI API key required. Set LLM_API_KEY environment variable.")
         kwargs: dict = {"async_client": True, "api_key": api_key or "not-needed"}
         if self._settings.llm.base_url:
+            refuse_plaintext_llm_key(
+                self._settings.llm.base_url,
+                api_key,
+                allow_insecure_http=self._settings.llm.allow_insecure_http,
+            )
             kwargs["base_url"] = self._settings.llm.base_url
             # A custom base_url means a local/self-hosted OpenAI-compatible
             # server (LM Studio, vLLM, llama.cpp, …). Those commonly reject

@@ -8,15 +8,25 @@ split into a separate ``df`` field: ``lhs="t", df="28"``).
 
 Four-pass strategy:
 1. **Parenthesized statistical groups** — find ``(...)`` containing statistical
-   patterns, split on commas/semicolons, decompose each into lhs/comp/rhs.
+   patterns and decompose each statistic in it into lhs/comp/rhs.
 2. **Bare statistical expressions** — scan the sentence for stat expressions
    outside parenthesized groups (e.g. comma-separated ``t(df)=…, p=…, d=…``
    after a closing paren).
 3. **LaTeX-delimited equations** — parse ``$...$`` / ``$$...$$`` content for
    ``lhs = rhs`` structure.
 4. **Broad equation detection** — a permissive regex (improved by Lisa
-   DeBruine) catches remaining stat-like expressions (e.g. ``Cohen's d``,
-   ``BF10``, scientific notation) that the structured passes missed.
+   DeBruine) catches remaining stat-like expressions (e.g. ``BF10``, ``ICC``,
+   ``P``) that the structured passes missed.
+
+A pass skips any match overlapping a component an earlier pass emitted, so no
+two passes export the same printed statistic. Pass 1 groups each parenthesis;
+the components of the later passes are grouped by where they are printed:
+adjacent ones share a group, and one inside a pass-1 parenthesis joins its
+group. Values are captured whole, as printed: scientific notation
+(``2.3 × 10−5``, ``1e-10``), decimal commas (``0,05``) and ranges
+(``.85–.94``). The passes read a line break as one character, and names and
+values are exported on one line (``_single_char_line_breaks``,
+``_print_on_one_line``).
 
 Optional LLM fallback for sentences in methods/results sections that contain
 parenthesized numeric groups but where regex extraction found nothing.
@@ -25,61 +35,200 @@ parenthesized numeric groups but where regex extraction found nothing.
 import asyncio
 import logging
 import re
+from bisect import bisect_right
+from collections.abc import Iterator
 
 from bibr.exceptions import ProcessingError
 from bibr.paper_contents import PaperEquation, PaperSection, PaperSentence
 
 logger = logging.getLogger(__name__)
 
+# (start, end) character range in a sentence's text
+Span = tuple[int, int]
+
 # ---------------------------------------------------------------------------
 # Comparison operators (order matters: longer patterns first)
 # ---------------------------------------------------------------------------
 
-_COMP_PATTERN = r"(?:≤|≥|≈|≠|≪|≫|<=|>=|<<|>>|<|>|=|~)"
-_COMP_RE = re.compile(_COMP_PATTERN)
+_COMP_PATTERN = r"(?:≤|≥|⩽|⩾|≈|≠|≪|≫|<=|>=|<<|>>|<|>|=|~)"
+
+# LaTeX relations, as OCR prints them inside $...$ before late clean-up, and
+# the operator _normalize_comp maps each to.
+_LATEX_COMPS = {
+    r"\le": "≤",
+    r"\leq": "≤",
+    r"\leqslant": "≤",
+    r"\ge": "≥",
+    r"\geq": "≥",
+    r"\geqslant": "≥",
+    r"\ne": "≠",
+    r"\neq": "≠",
+    r"\approx": "≈",
+    r"\sim": "~",
+    r"\ll": "≪",
+    r"\gg": "≫",
+    r"\lt": "<",
+    r"\gt": ">",
+}
+_LATEX_COMP_PATTERN = (
+    r"(?:"
+    + "|".join(re.escape(cmd) for cmd in sorted(_LATEX_COMPS, key=len, reverse=True))
+    + r")(?![A-Za-z])"
+)
+_ANY_COMP_PATTERN = r"(?:" + _LATEX_COMP_PATTERN + r"|" + _COMP_PATTERN + r")"
+_COMP_RE = re.compile(_ANY_COMP_PATTERN)
 
 # ---------------------------------------------------------------------------
 # Statistical LHS patterns
 # ---------------------------------------------------------------------------
 
-# Test statistics with parenthesized df: t(df), F(df1, df2), χ²(df), X²(df, N=n)
-_STAT_WITH_DF = re.compile(r"(?:F|t|χ²|χ2|X²|X2)\s*\(\s*[\d.,\s=Nn]+\s*\)")
+# Characters that continue a statistic's name, so no name starts right after
+# one: ASCII word characters, Greek letters, superscript/subscript digits and
+# letters, and the increment sign ∆ (U+2206) that PDF text layers and Word
+# print for Δ. "η²p" is partial eta squared, not a p-value, and "ΔR²" is not
+# R². Unicode \w would also stop a name printed flush against CJK text.
+_NAME_CHARS = r"A-Za-z0-9_\u0370-\u03FF\u00B2\u00B3\u00B9\u2070-\u209F\u2206"
+
+# A change in a statistic: "ΔR²", "Δχ²(1)", "∆AIC"
+_DELTA = r"(?:[Δ∆]\s?)?"
+
+# Chi-square, also as PDF text layers and eLife HTML flatten its superscript:
+# "χ 2 = 148.9", "χ 2 (4) = 2.09"
+_CHI_SQUARE = r"(?:χ|X)\s?[²2]"
+
+# Test statistics with parenthesized df: t(df), F(df1, df2), χ²(df),
+# X²(df, N=n), r(df) (APA correlation), H(df) (Kruskal-Wallis)
+_DF_STAT_NAMES = r"(?:F|t|r|H|" + _CHI_SQUARE + r")"
+_STAT_WITH_DF = re.compile(_DF_STAT_NAMES + r"\s*\(\s*[\d.,\s=Nn]+\s*\)")
+# χ² as OCR prints it inside $...$: "\chi^2", "\chi^{2}"
+_LATEX_CHI_SQUARE = r"(?:\\chi|X)\s*\^\s*(?:2|\{\s*2\s*\})"
 
 # Simple named statistics (no parenthesized args)
 _STAT_SIMPLE_NAMES = (
     r"(?:"
-    r"95\s*%?\s*CI|CI"  # confidence intervals (95% CI before CI)
+    # Confidence intervals, with their level ("90% CI", "99.9% CI") before CI
+    r"\d{1,2}(?:\.\d+)?\s*%\s*CI|95\s*%?\s*CI|CI"
     r"|R²|R2|adj\.\s*R²|adj\.\s*R2"  # R-squared variants
-    r"|η[²p]?|η2p?|ηp²"  # eta-squared variants
-    r"|ω²|ω2"  # omega-squared
+    # Eta and omega squared, partial or generalized, however the sub- and
+    # superscript are printed: "η²p", "ηp²", "ηₚ²", "ηG²", and as JATS, HTML
+    # and PDF text layers flatten them, "ηp2", "η2p", "η2 p", "η 2 p", "η p 2"
+    # and "η 2". Read piecemeal, the p of "η 2 p = .05" was a p-value.
+    r"|η(?:\s?[²2]\s?[pPₚG]|\s?[pPₚG]\s?[²2]|\s?[²2]|[pₚ])?"
+    r"|ω(?:\s?[²2]\s?[pPₚG]|\s?[pPₚG]\s?[²2]|\s?[²2])"
+    rf"|{_CHI_SQUARE}"  # chi-square printed without its df
     r"|OR|RR|HR"  # odds/risk/hazard ratios
     r"|AIC|BIC|VIF"  # model fit
     r"|Mdn|SD|SE"  # descriptives (before single-letter)
-    r"|[MNndfzWUkrpdβBb]"  # single-letter stats
+    # A p-value by its full name: "P-value = 2.3 × 10−5", "p value < .05"
+    r"|[pP](?:\s?[-‐‑–]\s?|\s)?values?"
+    # Spearman's r_s, and Cohen's d_z and d_av with the subscript flattened
+    # as an HTML or PDF text layer prints it: "r s = .42", "d z = 0.30". A
+    # tight "dz" is an integral's differential as often as a d_z.
+    r"|r\s?s|d\s(?:z|av)"
+    r"|Cohen['\u2019]s\s+d(?:\s?(?:z|av))?"  # before its bare "d"
+    r"|[MNndfzZWUkrpdgβBb]"  # single-letter stats
     r")"
 )
-_STAT_SIMPLE_RE = re.compile(_STAT_SIMPLE_NAMES)
 
 # "chi2(1, N = 100)" is a statistic's own df argument, not a parenthesized stat
 # group of its own. Treating it as one emitted a bare "N = 100" and recorded
 # the span, which then vetoed the correct full match in both later passes.
-_DF_ARGUMENT_INNER_RE = re.compile(r"^[\d.,\s=Nn]+$")
-_DF_ARGUMENT_OWNER_RE = re.compile(r"(?:F|t|χ²|χ2|X²|X2)\s*$")
+# The owner must be a whole name: the "r" ending "number (N = 100)" is not.
+_DF_ARGUMENT_INNER_RE = re.compile(r"[\d.,\s=Nn]+")
+_DF_ARGUMENT_OWNER_RE = re.compile(
+    r"(?<!["
+    + _NAME_CHARS
+    + r"])"
+    + _DELTA
+    + r"(?:"
+    + _DF_STAT_NAMES
+    + r"|"
+    + _LATEX_CHI_SQUARE
+    + r")\s*$"
+)
+# A LaTeX statistic whose parenthesis is its df: "\chi^2(1)" has df "1",
+# while "y(n)" and "P''(1)" are function values
+_LATEX_DF_NAME_RE = re.compile(
+    r"(?:\\Delta\s*|[Δ∆]\s?)?(?:" + _DF_STAT_NAMES + r"|" + _LATEX_CHI_SQUARE + r")"
+)
 
-# Full LHS pattern: either stat-with-df or simple stat name
-_LHS_PATTERN = r"(?:" + _STAT_WITH_DF.pattern + r"|" + _STAT_SIMPLE_NAMES + r")"
+# Full LHS pattern: either stat-with-df or simple stat name, optionally a
+# change in it
+_LHS_PATTERN = _DELTA + r"(?:" + _STAT_WITH_DF.pattern + r"|" + _STAT_SIMPLE_NAMES + r")"
 
 # ---------------------------------------------------------------------------
-# RHS patterns: signed decimals, bracket ranges, negative numbers
+# RHS patterns: decimals, decimal commas, scientific notation, ranges
 # ---------------------------------------------------------------------------
+
+# A power of ten written with its exponent: "10^-5", OCR LaTeX "10^{-5}",
+# "10**-5", or Unicode superscripts "10⁻⁵". Appended to a literal "10".
+_POWER = (
+    r"(?:\s*(?:\^|\*\*)\s*"
+    r"(?:\{\s*[+−–-]?\s*\d+\s*\}|\(\s*[+−–-]?\s*\d+\s*\)|[+−–-]?\s*\d+)"
+    r"|[⁺⁻]?[⁰¹²³⁴⁵⁶⁷⁸⁹]+)"
+)
+
+# Exponent of a number in scientific notation, as the extractor sees it
+# (sentence text before late clean-up). Without it "p = 2.3 × 10−5" exported
+# as "p = 2.3".
+_EXPONENT = (
+    # e notation without a sign, printed tight: "2.3e5", "8.0E04"
+    r"(?:[eE]\d+"
+    # with a sign, tight or spaced: "2.3e-5", "1E−06", "3.2 e -5"
+    r"|\s*[eE]\s*[+−–-]\s*\d+"
+    # times a power of ten: "× 10⁻⁵", "x 10^-4", "3.8∙10−35", OCR LaTeX
+    # "\times 10^{-5}", and "× 10−5" or "× 103" where a JATS or PDF text
+    # layer flattened the superscript
+    r"|\s*(?:[×xX*·⋅∙]|\\times|\\cdot)\s*10(?:" + _POWER + r"|\s*[+−–-]\s*\d+|\d+))"
+)
+
+# A whole number: not continued by a digit or a decimal fraction
+_WHOLE = r"\d+(?!\d|[.,·]\d)"
+
+# A power of ten ahead, whose "10" a "·" before it multiplies ("6·10−6" is
+# 6 × 10⁻⁶): its exponent is a whole number, so "0·10–0·20" is a range
+_POWER_OF_TEN_AHEAD = r"10(?:\s*(?:\^|\*\*)|[⁺⁻⁰¹²³⁴⁵⁶⁷⁸⁹]|\s*[+−–-]\s*" + _WHOLE + r")"
+
+_NUMBER = (
+    # Grouped digits first: without it "1,204" matched only "1", so a sample
+    # size was exported three orders of magnitude too small.
+    r"\d{1,3}(?:,\d{3})+(?:\.\d+)?(?!\d)"
+    # Decimal comma ("0,05", "3,45", "0,0001"): a comma between digits that
+    # does not group thousands separates the fraction, and cutting there made
+    # "p = 0,05" "p = 0". Not when a comma continues the run ("i = 1,2,3",
+    # "2,3,7,8-TCDD", "k = 1,2,..."): that is a list. Degrees of freedom are
+    # safe, since they belong to the LHS ("F(1,23)"), and the value lists that
+    # APA prints ("p = .03, .04") put a space after the comma. A count takes
+    # no decimal comma at all (_count_value).
+    r"|\d+,\d+(?!\d|,[\d.…−–-])"
+    r"|\d+\{,\}\d+"  # decimal comma in OCR LaTeX: "0{,}05"
+    # Mid-dot decimal, as the Lancet and Oxford journals print it: "p=0·008"
+    # was "p = 0"
+    r"|\d+·(?!" + _POWER_OF_TEN_AHEAD + r")\d+"
+    r"|\d+(?:\.\d+)?"
+    r"|\.\d+"
+)
+
+# One printed value: a power of ten, or a number with an optional exponent
+_VALUE = r"(?:10" + _POWER + r"|(?:" + _NUMBER + r")" + _EXPONENT + r"?)"
+
+# A dash spaced on one side only, then a whole number: a power of ten a text
+# layer flattened, "p < 10 −9" and "P < 10− 3" from 10⁻⁹ and 10⁻³, and
+# "p = 3.10 −9" from 3·10⁻⁹
+_FLATTENED_EXPONENT = r"(?:\s+[−–-]|[−–-]\s+)" + _WHOLE
+
+# A range is one value: cut at its dash, "r = .85–.94" read "r = .85". Its
+# dash is tight or spaced on both sides, or an en dash after a space, as
+# eLife HTML prints "η = 5.1×10 −4 –9.2 × 10 −4". A minus sign or hyphen
+# after a space alone is the sign of the next number of a table flattened to
+# text, "β = 0.21 −0.05 0.47", unless it is a flattened exponent. "p < 10−8"
+# reads as a range too.
+_RANGE_END = r"(?:(?:[−–-]\s*|\s+[−–-]\s+|\s+–)[−–-]?" + _VALUE + r"|" + _FLATTENED_EXPONENT + r")?"
 
 _RHS_PATTERN = (
     r"(?:"
     r"\[[\d.,\s−–-]+\]"  # bracket range [a, b]
-    # Grouped digits first: without it "1,204" matched only "1", so a sample
-    # size was exported three orders of magnitude too small.
-    r"|[−–-]?\s*(?:\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?|\.\d+)"
-    r")"
+    r"|[−–-]?\s*" + _VALUE + _RANGE_END + r")"
 )
 
 # ---------------------------------------------------------------------------
@@ -87,11 +236,14 @@ _RHS_PATTERN = (
 # ---------------------------------------------------------------------------
 
 _COMPONENT_RE = re.compile(
-    r"(?<![A-Za-z0-9_])"
+    # A name starts neither inside another nor as a superscript: "l^b \geq 0"
+    # holds no statistic b. A caret after a space is a footnote mark, as in
+    # "*p < .05, ^p < .01".
+    r"(?<![" + _NAME_CHARS + r"])(?<![A-Za-z0-9})]\^)"
     r"(" + _LHS_PATTERN + r")"  # group 1: lhs
     r"(?![A-Za-z0-9_])"
     r"\s*"
-    r"(" + _COMP_PATTERN + r")"  # group 2: comp
+    r"(" + _ANY_COMP_PATTERN + r")"  # group 2: comp
     r"\s*"
     r"(" + _RHS_PATTERN + r")",  # group 3: rhs
     re.UNICODE,
@@ -103,44 +255,56 @@ _COMPONENT_RE = re.compile(
 
 _LATEX_DISPLAY_RE = re.compile(r"\$\$(.+?)\$\$", re.DOTALL)
 _LATEX_INLINE_RE = re.compile(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)")
+# A LaTeX command. It makes a "$" before a digit open math rather than an
+# amount (see _inline_math), as in "$2 \times 2$" and "$95 \% \mathrm{CI}$",
+# and marks a broad-pass LHS as a LaTeX fragment that pass 3 handles.
+_LATEX_COMMAND_RE = re.compile(r"\\[A-Za-z%]")
+# A lone number, which makes "$0.5$" math too
+_LONE_NUMBER_RE = re.compile(r"\s*\d[\d.,]*\s*")
 
 # ---------------------------------------------------------------------------
 # Broad equation detection — regex improved by Lisa DeBruine
 # ---------------------------------------------------------------------------
-# Catches a wider range of stat-like expressions (e.g. Cohen's d, BF10,
-# scientific notation) that the structured passes above may miss.
+# Catches stat-like expressions whose names the structured passes do not
+# list (e.g. BF10, ICC, uppercase P, t without df).
 
-_BROAD_OP_CHARS = "=<>~\u2248\u2260\u2264\u2265\u226a\u226b"
+_BROAD_OP_CHARS = "=<>~\u2248\u2260\u2264\u2265\u226a\u226b\u2a7d\u2a7e"
 # Group 2 of _BROAD_EQUATION_RE is one or two of these, so a sentence without
 # any cannot match — a necessary condition, not a heuristic. Measured on 86
 # real exports (29,521 sentences) 5.3% carry one, and the broad pass is the
 # most expensive of the four: ~25 ms/paper of the shared serve event loop.
 _BROAD_OP_PRESCAN_RE = re.compile("[" + re.escape(_BROAD_OP_CHARS) + "]")
 
-# LaTeX command in an LHS means the broad pass picked up a LaTeX fragment
-# that should be handled by the LaTeX pass (pass 3) instead.
-_LATEX_CMD_RE = re.compile(r"\\[a-zA-Z]")
-
 # "Trivial" LaTeX: bare superscript/subscript of digits and commas (citation
 # markers like ^{6} or ^{18,28}), not real mathematical content.
 _TRIVIAL_LATEX_RE = re.compile(r"^[\^_]\{[\d,\s]+\}$")
 
 _NUMERIC_ONLY_RE = re.compile(r"^-?\d+$")
-_SMALL_INTEGER_RE = re.compile(r"^-?\d$")
+# "i = 1", and "z \le - 1" as a display formula spaces it
+_SMALL_INTEGER_RE = re.compile(r"^-?\s*\d$")
+
+# Greek letters (both cases, and the increment sign ∆), so "ΔCFI" and "Δt"
+# are names of their own rather than "CFI" and a t statistic
+_BROAD_NAME_CHARS = r"\u0391-\u03A9\u03B1-\u03C9\u2206a-zA-Z\-_\.0-9\{\}\^\\²"
 
 _BROAD_EQUATION_RE = re.compile(
+    # A name starts at the start of its token. A match starting inside one
+    # read the end of a name as the statistic ("x = 120" of "4x = 120"), and
+    # on a long token without an operator every start rescanned the rest of
+    # it, which is quadratic.
+    r"(?<![" + _BROAD_NAME_CHARS + r"])"
     r"("  # group 1: lhs
     r"(?:(?:Cohen['\u2019]s|\d{1,2}%)\s+)?"  #   optional prefix
-    r"[\u03B1-\u03C9a-zA-Z\-_\.0-9\{\}\^\\²]+"  #   statistic name
+    r"[" + _BROAD_NAME_CHARS + r"]+"  #   statistic name
     r"(?:\s*\([^)]*\))?"  #   optional parenthesized args
     r")"
     r"\s*"
     r"([" + _BROAD_OP_CHARS + r"]{1,2})"  # group 2: comp
     r"\s*"
     r"("  # group 3: rhs
-    r"[0-9.,+\-\u2212\u2013]*[0-9]"  #   number
-    r"(?:\s*e\s*-\s*\d+)?"  #   scientific notation
-    r"(?:\s*[x\*]\s*10\s*\^\s*-?\s*\d+)?"  #   power-of-10
+    r"[−–-]?10" + _POWER + r"|"  #   power of ten: 10⁻⁵, 10^{-5}
+    #   number, e-5, × 10−5, 10 −9; a mid-dot decimal, 0·008
+    r"[0-9.,·+\-\u2212\u2013]*[0-9](?:" + _EXPONENT + r"|" + _FLATTENED_EXPONENT + r")?"
     r"|\[[^\]]+\]"  #   or bracketed range
     r")",
     re.UNICODE,
@@ -151,7 +315,7 @@ _BROAD_EQUATION_RE = re.compile(
 # ``dark green >60%`` into an equation. Keep the useful broad cases while
 # requiring an LHS that actually resembles mathematical/statistical notation.
 _PLAUSIBLE_BROAD_LHS_RE = re.compile(
-    r"^(?:"
+    r"^[Δ∆]?(?:"
     r"Cohen['\u2019]s\s+d"
     r"|\d{1,2}%\s+CI"
     r"|[A-Z]{2,8}\d*"
@@ -160,6 +324,72 @@ _PLAUSIBLE_BROAD_LHS_RE = re.compile(
     r"|[A-Za-z]"
     r")(?:\s*\([^)]*\))?$"
 )
+
+# ---------------------------------------------------------------------------
+# Matches that are not the statistic they look like
+# ---------------------------------------------------------------------------
+
+# A lowercase letter printed after a statistic's symbol and a space is that
+# symbol's subscript, flattened by an HTML or PDF text layer: "p h = 0.74" (a
+# Holm-adjusted p), "R m", "η p", "ε 2 p". Read alone it is another
+# statistic: h is a test to Metacheck, p a p-value. (The names above read the
+# common ones whole: "r s", "d z", "η 2 p".) The symbol stands alone: "CpxI-3R n = 49" is a group's n, and
+# "versus P P < 0.05" a group P's p-value. Only a Greek symbol takes a
+# subscript p: "Se d p<0.001" is a p-value.
+_STANDALONE = r"(?<![A-Za-z0-9\u0370-\u03FF_.-])"
+_GREEK_SYMBOL = r"[\u0370-\u03FF]\s?[²2]?"
+_SUBSCRIPT_OWNER_RE = re.compile(_STANDALONE + r"(?:[pPrRdt]|" + _GREEK_SYMBOL + r")\s$")
+_GREEK_SUBSCRIPT_OWNER_RE = re.compile(_STANDALONE + _GREEK_SYMBOL + r"\s$")
+
+# A value that runs on was cut: an integer before "/" or ":" is a fraction, a
+# time or a ratio ("b \leq 1/3", "t = 12:30"), and a number flush against a
+# Greek letter or product sign a coefficient ("M \leq 14\eta M"), though
+# "63.0\pm 9.0" is whole. A count before "/" is kept, cut at the slash:
+# "n = 12/20 cells" is n = 12 of 20, and "n = 150/123 WT/KO" n = 150 and 123.
+_INTEGER_RE = re.compile(r"[−–-]?\s*\d+")
+_FRACTION_OR_TIME_RE = re.compile(r"[/:]\d")
+_COEFFICIENT_RE = re.compile(
+    r"\\(?:var)?(?:[Aa]lpha|[Bb]eta|[Gg]amma|[Dd]elta|epsilon|[Zz]eta|[Ee]ta|[Tt]heta|iota"
+    r"|kappa|[Ll]ambda|mu|nu|[Xx]i|[Pp]i|rho|[Ss]igma|tau|[Uu]psilon|[Pp]hi|chi|[Pp]si"
+    r"|[Oo]mega|cdot|times)(?![A-Za-z])"
+)
+
+# Counts are whole numbers, so a comma after a count's digits is no decimal
+# comma: "n = 9,7 cells" lists two sample sizes, "(n=304,3% of ACSs)" runs
+# into a percentage, and "n = 9380,37" into a citation number flattened from
+# a superscript. The comma still groups thousands: "N = 1,204".
+_COUNT_NAMES = frozenset({"n", "N", "k"})
+_THOUSANDS_RE = re.compile(r"[−–-]?\s*\d{1,3}(?:,\d{3})+(?!\d)")
+
+
+def _misread(text: str, lhs: str, start: int, rhs: str, end: int) -> bool:
+    """Whether the match ``text[start:end]`` of *lhs* and *rhs* is not a statistic.
+
+    See the patterns above: a spaced subscript read as a name, or a value
+    that runs on past *end*.
+    """
+    if len(lhs) == 1 and lhs.isascii() and lhs.islower():
+        owner = _GREEK_SUBSCRIPT_OWNER_RE if lhs == "p" else _SUBSCRIPT_OWNER_RE
+        if owner.search(text, max(0, start - 4), start):
+            return True
+    if _COEFFICIENT_RE.match(text, end):
+        return True
+    if lhs in _COUNT_NAMES and text.startswith("/", end):
+        return False
+    return bool(_INTEGER_RE.fullmatch(rhs) and _FRACTION_OR_TIME_RE.match(text, end))
+
+
+def _count_value(lhs: str, rhs: str) -> str:
+    """*rhs* up to a comma after its digits when *lhs* names a count (see above).
+
+    Not after a 0: "k = 0,75" is a coefficient with a decimal comma.
+    """
+    if lhs not in _COUNT_NAMES or _THOUSANDS_RE.match(rhs):
+        return rhs
+    whole = _INTEGER_RE.match(rhs)
+    if whole and rhs.startswith((",", "{,}"), whole.end()) and whole.group().strip("−–- 0"):
+        return whole.group()
+    return rhs
 
 
 def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
@@ -186,6 +416,46 @@ def _llm_rhs_is_grounded(rhs: str | None, source_text: str) -> bool:
     elif compact_rhs.startswith("-0."):
         variants.add("-" + compact_rhs[2:])
     return any(variant in compact_source for variant in variants)
+
+
+# ---------------------------------------------------------------------------
+# Line breaks
+# ---------------------------------------------------------------------------
+
+
+def _single_char_line_breaks(text: str) -> str:
+    """*text* with each line break, ``"\\r\\n"`` or ``"\\r"``, as one ``"\\n"``.
+
+    The passes read the text before late clean-up, where pdfium ends each
+    line of a PDF text layer with "\\r\\n", also the lines of stacked sub-
+    and superscripts: partial eta squared is "η\\r\\n2\\r\\np = 0.11"
+    (Frontiers) or "ηp\\r\\n2 = .61" (SAGE). A name allows one whitespace
+    character between a symbol and its scripts ("η 2 p"), so the p of the
+    first was a p-value and the second was not read at all. The passes'
+    offsets are into this text and stay inside the extractor: the export
+    locates each component in the final sentence text.
+    """
+    if "\r" not in text:
+        return text
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# A name, df or value printed across lines is exported on one, as late
+# clean-up prints the sentence: "Cohen’s \r\ndz" is "Cohen’s dz" and "[0.30,
+# \r\n0.42]" "[0.30, 0.42]", which a consumer folding names or reading values
+# would miss. A display formula's LaTeX, where a line break is a space too,
+# is exported on one line as well. Otherwise they stay as printed.
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _print_on_one_line(eq: PaperEquation) -> None:
+    """Collapse each whitespace run in *eq*'s lhs, df and rhs to one space."""
+    if eq.lhs:
+        eq.lhs = _WHITESPACE_RUN_RE.sub(" ", eq.lhs)
+    if eq.df:
+        eq.df = _WHITESPACE_RUN_RE.sub(" ", eq.df)
+    if eq.rhs:
+        eq.rhs = _WHITESPACE_RUN_RE.sub(" ", eq.rhs)
 
 
 # ---------------------------------------------------------------------------
@@ -236,20 +506,29 @@ class EquationExtractor:
         equations: list[PaperEquation] = []
 
         for sent in sentences:
+            text = _single_char_line_breaks(sent.text)
+            # Each pass marks the characters of the components it emitted,
+            # and a later pass skips any match overlapping them. Only those
+            # characters: a statistic the structured patterns do not know,
+            # such as "BF10" in "(p < .001, BF10 = 12.3)", stays available to
+            # the broad pass and joins the group of its parenthesis.
+            taken = bytearray(len(text))
+            parens = _ParenGroups(text)
             # Pass 1: parenthesized statistical groups
-            stat_eqs, paren_spans = self._extract_stat_groups(sent)
-            equations.extend(stat_eqs)
-            # Pass 2: bare statistical expressions outside parenthesized groups
-            bare_eqs = self._extract_bare_stats(sent, paren_spans)
-            equations.extend(bare_eqs)
-            # Pass 3: LaTeX-delimited equations
-            latex_eqs = self._extract_latex_equations(sent)
-            equations.extend(latex_eqs)
+            found = self._extract_stat_groups(sent, text, taken, parens)
+            # Pass 2: bare statistical expressions
+            loose = self._extract_bare_stats(sent, text, taken, parens)
+            # Pass 3: LaTeX-delimited equations the structured passes did not
+            # already decompose ("$t(28) = 2.10$" is pass 1's t)
+            loose += self._extract_latex_equations(sent, text, taken)
             # Pass 4: broad equation detection for missed cases
-            existing_keys = {
-                (eq.text_id, eq.lhs, eq.comp, eq.rhs) for eq in stat_eqs + bare_eqs + latex_eqs
-            }
-            equations.extend(self._extract_broad_equations(sent, existing_keys, paren_spans))
+            loose += self._extract_broad_equations(sent, text, taken, parens)
+            # Grouped together, by where they are printed: "Z = 2.84; P =
+            # 0.035" is one result though pass 2 reads Z and pass 4 P.
+            found += self._group_by_position(text, loose, parens)
+            for eq in found:
+                _print_on_one_line(eq)
+            equations.extend(found)
 
         logger.info(
             "Regex equation extraction: %d components from %d sentences",
@@ -306,6 +585,9 @@ class EquationExtractor:
             if regex_equations is None
             else regex_equations
         )
+        # Results handed in may come from another extractor instance; new
+        # groups must not reuse their grp_ids.
+        self._grp_counter = max(self._grp_counter, max((eq.grp_id for eq in equations), default=0))
 
         if llm_client is None:
             return equations
@@ -410,9 +692,11 @@ class EquationExtractor:
                         eq.rhs,
                     )
                     continue
-                # Dedupe on (text_id, lhs, comp, rhs), mirroring the regex
-                # passes' existing_keys approach — both within this LLM
-                # batch and against everything already extracted.
+                _print_on_one_line(eq)
+                # Dedupe on (text_id, lhs, comp, rhs), within this LLM batch
+                # and against everything already extracted. The regex passes
+                # dedupe by where a component is printed, which the LLM's
+                # components do not record.
                 key = (eq.text_id, eq.lhs, eq.comp, eq.rhs)
                 if key in existing_keys:
                     continue
@@ -425,21 +709,17 @@ class EquationExtractor:
         return equations
 
     def _extract_stat_groups(
-        self, sent: PaperSentence
-    ) -> tuple[list[PaperEquation], list[tuple[int, int]]]:
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+    ) -> list[PaperEquation]:
         """Extract statistical equations from parenthesized groups in a sentence.
 
-        Returns
-        -------
-        tuple[list[PaperEquation], list[tuple[int, int]]]
-            (equations, extracted_spans) where extracted_spans are the
-            (start, end) character ranges of parenthesized groups that
-            produced equations, used to avoid double-extraction in the
-            bare-stats pass.
+        *text* is the sentence's text as the passes read it (see
+        _single_char_line_breaks). Marks each emitted component's characters
+        in *taken*, which later passes must not extract again, and records in
+        *parens* each group that produced equations, whose group a later
+        pass's match inside it joins.
         """
         results: list[PaperEquation] = []
-        extracted_spans: list[tuple[int, int]] = []
-        text = sent.text
 
         for inner, paren_start, paren_end in _iter_parenthesized_groups(text):
             # Validate: must contain a comparison operator and a digit
@@ -448,227 +728,167 @@ class EquationExtractor:
 
             # Unwrapped APA form: "chi2(1, N = 100) = 3.84". The df parenthesis
             # is part of the statistic, not a group in its own right.
-            if _DF_ARGUMENT_INNER_RE.match(inner) and _DF_ARGUMENT_OWNER_RE.search(
-                text[:paren_start]
-            ):
+            if parens.in_df_argument(paren_start, paren_end):
                 continue
 
-            # Split on commas/semicolons that are NOT inside () or []
-            parts = _split_respecting_brackets(inner)
-
+            # Every component of the group, matched across it rather than
+            # part by part, so a value sees what follows its part: "(k =
+            # 1,2,…,K)" is a list. Two in one part are both printed counts:
+            # "(n = 3 for soil and n = 4 for litter)".
             group_equations: list[PaperEquation] = []
-            for part in parts:
-                part = part.strip()
-                if not part:
+            for m in _COMPONENT_RE.finditer(text, paren_start + 1, paren_end - 1):
+                if parens.in_df_argument(m.start(), m.end()):
+                    continue  # "N = 100" of "($\chi^{2}(1, N = 100) = 3.84$)"
+                component = _structured_component(text, m)
+                if component is None:
                     continue
-
-                comp_match = _COMPONENT_RE.search(part)
-                if comp_match:
-                    lhs = comp_match.group(1).strip()
-                    comp = comp_match.group(2).strip()
-                    rhs = comp_match.group(3).strip()
-
-                    # Normalize comparison operators
-                    comp = _normalize_comp(comp)
-                    # Split parenthesized degrees of freedom off the LHS:
-                    # "t(28)" -> lhs="t", df="28".
-                    lhs, df = _split_lhs_df(lhs)
-
-                    group_equations.append(
-                        PaperEquation(
-                            text_id=sent.text_id,
-                            grp_id=0,  # assigned below
-                            lhs=lhs,
-                            df=df,
-                            comp=comp,
-                            rhs=rhs,
-                        )
-                    )
-
-            if group_equations:
-                grp_id = self._next_grp_id()
-                for eq in group_equations:
-                    eq.grp_id = grp_id
-                results.extend(group_equations)
-                extracted_spans.append((paren_start, paren_end))
-
-        return results, extracted_spans
-
-    def _extract_bare_stats(
-        self,
-        sent: PaperSentence,
-        extracted_spans: list[tuple[int, int]],
-    ) -> list[PaperEquation]:
-        """Extract stat expressions not inside already-extracted parenthesized groups.
-
-        Finds comma-separated stat patterns like ``t(97.7)=2.9, p=0.005, d=0.59``
-        that appear at the sentence level (outside wrapper parentheses).
-        Consecutive matches separated only by commas/semicolons/whitespace share
-        the same ``grp_id``.
-        """
-        results: list[PaperEquation] = []
-        text = sent.text
-
-        matches = list(_COMPONENT_RE.finditer(text))
-
-        # Keep only matches whose spans do NOT overlap with extracted paren groups
-        bare_matches = []
-        for m in matches:
-            overlaps = any(m.start() < end and m.end() > start for start, end in extracted_spans)
-            if not overlaps:
-                bare_matches.append(m)
-
-        if not bare_matches:
-            return results
-
-        # Group consecutive matches separated only by commas/semicolons/whitespace
-        groups: list[list[re.Match]] = []
-        current_group: list[re.Match] = []
-
-        for m in bare_matches:
-            if current_group:
-                between = text[current_group[-1].end() : m.start()]
-                if re.fullmatch(r"[\s,;]+", between):
-                    current_group.append(m)
-                else:
-                    groups.append(current_group)
-                    current_group = [m]
-            else:
-                current_group.append(m)
-
-        if current_group:
-            groups.append(current_group)
-
-        for group in groups:
-            grp_id = self._next_grp_id()
-            for m in group:
-                lhs = m.group(1).strip()
-                comp = _normalize_comp(m.group(2).strip())
-                rhs = m.group(3).strip()
-                if _NUMERIC_ONLY_RE.match(lhs):
-                    continue
-                if len(lhs) <= 2 and _SMALL_INTEGER_RE.match(rhs):
-                    continue
-                # Split df after the reject filters so a stat like "t(28)"
-                # (len > 2) is not collapsed to "t" before the length check.
-                lhs, df = _split_lhs_df(lhs)
-                results.append(
+                (start, end), lhs, df, comp, rhs = component
+                group_equations.append(
                     PaperEquation(
                         text_id=sent.text_id,
-                        grp_id=grp_id,
+                        grp_id=0,  # assigned below
                         lhs=lhs,
                         df=df,
                         comp=comp,
                         rhs=rhs,
                     )
                 )
+                _take(taken, start, end)
+
+            if group_equations:
+                grp_id = self._next_grp_id()
+                for eq in group_equations:
+                    eq.grp_id = grp_id
+                results.extend(group_equations)
+                parens.add_group(paren_start, paren_end, grp_id)
 
         return results
 
-    def _extract_latex_equations(self, sent: PaperSentence) -> list[PaperEquation]:
-        """Extract equations from LaTeX-delimited content in a sentence."""
-        results: list[PaperEquation] = []
-        text = sent.text
+    def _extract_bare_stats(
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+    ) -> list[tuple[Span, PaperEquation]]:
+        """Extract stat expressions the parenthesized-group pass did not.
 
-        # Collect all LaTeX spans (display math first, then inline)
-        latex_spans: list[tuple[str, str]] = []  # (content, format)
-        seen_ranges: list[tuple[int, int]] = []
+        Finds comma-separated stat patterns like ``t(97.7)=2.9, p=0.005, d=0.59``
+        that appear at the sentence level (outside wrapper parentheses).
+        Returns each component with its span, ungrouped, and marks it in
+        *taken*.
+        """
+        results: list[tuple[Span, PaperEquation]] = []
+
+        for m in _COMPONENT_RE.finditer(text):
+            if _is_taken(taken, m.start(), m.end()) or parens.in_df_argument(m.start(), m.end()):
+                continue
+            component = _structured_component(text, m)
+            if component is None:
+                continue
+            (start, end), lhs, df, comp, rhs = component
+            raw_lhs = m.group(1).strip()
+            if _NUMERIC_ONLY_RE.match(raw_lhs):
+                continue
+            # On the LHS as printed, so "t(28)" (len > 2) is not collapsed to
+            # "t" before the length check.
+            if len(raw_lhs) <= 2 and _SMALL_INTEGER_RE.match(rhs):
+                continue
+            results.append(
+                (
+                    (start, end),
+                    PaperEquation(
+                        text_id=sent.text_id, grp_id=0, lhs=lhs, df=df, comp=comp, rhs=rhs
+                    ),
+                )
+            )
+            _take(taken, start, end)
+
+        return results
+
+    def _extract_latex_equations(
+        self, sent: PaperSentence, text: str, taken: bytearray
+    ) -> list[tuple[Span, PaperEquation]]:
+        """Extract equations from LaTeX-delimited content in a sentence.
+
+        Of an inline formula the other passes read part of, only the rest is
+        read: ``$t(28) = 2.10$`` is theirs alone, and of ``$\\chi^2(1) =
+        3.84, p = .05$`` this pass reads ``\\chi^2(1) = 3.84``. Returns each
+        equation with the span it was read from, ungrouped, and marks that
+        span in *taken*.
+        """
+        results: list[tuple[Span, PaperEquation]] = []
+
+        # Collect all LaTeX spans (display math first, then inline):
+        # (content, format, formula span, content span)
+        latex_spans: list[tuple[str, str, Span, Span]] = []
+        seen_ranges: list[Span] = []
 
         if sent.is_display_formula:
             # The entire sentence is a display formula (no $$ delimiters).
-            latex_spans.append((text, "display"))
+            latex_spans.append((text, "display", (0, len(text)), (0, len(text))))
         else:
             for m in _LATEX_DISPLAY_RE.finditer(text):
-                latex_spans.append((m.group(1), "display"))
+                latex_spans.append((m.group(1), "display", m.span(), m.span(1)))
                 seen_ranges.append((m.start(), m.end()))
 
-            for m in _LATEX_INLINE_RE.finditer(text):
+            for m in _inline_math(text):
                 # Skip if overlaps with display math
                 overlaps = any(not (m.end() <= s or m.start() >= e) for s, e in seen_ranges)
                 if not overlaps:
-                    latex_spans.append((m.group(1), "inline"))
+                    latex_spans.append((m.group(1), "inline", m.span(), m.span(1)))
 
-        for content, fmt in latex_spans:
-            # Look for lhs = rhs pattern in LaTeX content.
-            # Use top-level search to skip operators inside _{...} / ^{...}
-            # subscripts/superscripts (e.g. \sum_{i=1} should not match).
-            comp_match = _find_toplevel_comp(content)
-            if comp_match:
-                lhs = content[: comp_match.start()].strip()
-                comp = _normalize_comp(comp_match.group())
-                rhs = content[comp_match.end() :].strip()
-
-                # Strip LaTeX commands for cleaner output but keep the substance
-                if lhs and rhs:
-                    results.append(
-                        PaperEquation(
-                            text_id=sent.text_id,
-                            grp_id=self._next_grp_id(),
-                            lhs=lhs,
-                            comp=comp,
-                            rhs=rhs,
-                        )
-                    )
-            elif fmt == "display":
-                # Pure display formula with no comparison operator (e.g. $$\Delta_{i}$$).
-                # Still record it so all LaTeX formulas appear in the equations array.
-                # Inline math without an operator is typically just notation, not an equation.
-                stripped_content = content.strip()
-                if stripped_content and not _TRIVIAL_LATEX_RE.match(stripped_content):
-                    results.append(
-                        PaperEquation(
-                            text_id=sent.text_id,
-                            grp_id=self._next_grp_id(),
-                            lhs=stripped_content,
-                            comp="",
-                            rhs="",
-                        )
-                    )
+        for content, fmt, span, content_span in latex_spans:
+            if _covered(text, content_span, taken):
+                continue
+            if fmt == "inline" and _is_taken(taken, *content_span):
+                # "$p < 0.001^{***}$" is the structured passes' "p < 0.001",
+                # and "$t = 2.1, p = .03$" no t of "2.1, p = .03"
+                pieces = list(_untaken_runs(text, taken, *content_span))
+            else:
+                pieces = [(content, span)]
+            for piece, piece_span in pieces:
+                eq = _latex_equation(sent.text_id, piece, fmt)
+                if eq is not None:
+                    results.append((piece_span, eq))
+                    _take(taken, *piece_span)
 
         return results
 
     def _extract_broad_equations(
-        self,
-        sent: PaperSentence,
-        existing_keys: set[tuple[int, str, str, str]],
-        paren_spans: list[tuple[int, int]],
-    ) -> list[PaperEquation]:
+        self, sent: PaperSentence, text: str, taken: bytearray, parens: "_ParenGroups"
+    ) -> list[tuple[Span, PaperEquation]]:
         """Broad regex pass to catch equations missed by the structured passes.
 
-        Uses the permissive ``_BROAD_EQUATION_RE`` pattern.  Matches that
-        overlap with already-extracted parenthesized groups or that duplicate
-        an existing ``(text_id, lhs, comp, rhs)`` key are skipped.
-        Consecutive matches separated only by commas/semicolons/whitespace
-        share the same ``grp_id``.
+        Uses the permissive ``_BROAD_EQUATION_RE`` pattern. Matches that
+        overlap a component an earlier pass extracted are skipped: the
+        broad pattern reads "t(28) = 2.10" too, which pass 2 already
+        exported. Returns each equation with its span, ungrouped.
         """
-        results: list[PaperEquation] = []
-        text = sent.text
+        results: list[tuple[Span, PaperEquation]] = []
         if not _BROAD_OP_PRESCAN_RE.search(text):
             return results
 
-        kept: list[tuple[re.Match, str, str, str, str]] = []
         for m in _BROAD_EQUATION_RE.finditer(text):
-            # Skip if overlapping with an already-extracted parenthesized group
-            if any(m.start() < end and m.end() > start for start, end in paren_spans):
+            start, end = m.span()
+            if _is_taken(taken, start, end):
+                continue
+            # A match reaching into a pass-1 group from outside took its name
+            # from the prose around it: "PPR (0.97 ± 0.05; t(d.f.16)=1.58".
+            if parens.crosses(start, end):
                 continue
 
             raw_lhs = m.group(1).strip()
-            comp = _normalize_comp(m.group(2).strip())
             rhs = m.group(3).strip()
-            # Split parenthesized df off the LHS ("t(28)" -> "t", "28") so the
-            # dedup key matches the structured passes, which also split.
-            lhs, df = _split_lhs_df(raw_lhs)
-
-            if (sent.text_id, lhs, comp, rhs) in existing_keys:
-                continue
 
             # Skip if LHS contains a LaTeX command — these are LaTeX fragments
             # that should be handled by the LaTeX pass, not classified as stat.
-            if _LATEX_CMD_RE.search(raw_lhs):
+            if _LATEX_COMMAND_RE.search(raw_lhs):
                 continue
 
             if not _PLAUSIBLE_BROAD_LHS_RE.fullmatch(raw_lhs):
                 continue
+
+            if _misread(text, raw_lhs, start, rhs, end):
+                continue
+            rhs = _count_value(raw_lhs, rhs)
+            end = m.start(3) + len(rhs)
 
             # Skip trivial equations: purely numeric LHS (6 = 24), or
             # short LHS with small bare integer RHS (i = 1, b = 5).
@@ -678,45 +898,210 @@ class EquationExtractor:
             if len(raw_lhs) <= 2 and _SMALL_INTEGER_RE.match(rhs):
                 continue
 
-            kept.append((m, lhs, df, comp, rhs))
-
-        if not kept:
-            return results
-
-        # Group consecutive matches separated only by commas/semicolons/whitespace
-        groups: list[list[tuple[re.Match, str, str, str, str]]] = []
-        current_group: list[tuple[re.Match, str, str, str, str]] = []
-
-        for item in kept:
-            m = item[0]
-            if current_group:
-                between = text[current_group[-1][0].end() : m.start()]
-                if re.fullmatch(r"[\s,;]+", between):
-                    current_group.append(item)
-                else:
-                    groups.append(current_group)
-                    current_group = [item]
-            else:
-                current_group.append(item)
-
-        if current_group:
-            groups.append(current_group)
-
-        for group in groups:
-            grp_id = self._next_grp_id()
-            for _, lhs, df, comp, rhs in group:
-                results.append(
+            # Split parenthesized df off the LHS ("t(28)" -> "t", "28"),
+            # as the structured passes do.
+            lhs, df = _split_lhs_df(raw_lhs)
+            results.append(
+                (
+                    (start, end),
                     PaperEquation(
                         text_id=sent.text_id,
-                        grp_id=grp_id,
+                        grp_id=0,
                         lhs=lhs,
                         df=df,
-                        comp=comp,
+                        comp=_normalize_comp(m.group(2).strip()),
                         rhs=rhs,
-                    )
+                    ),
                 )
+            )
 
         return results
+
+    def _group_by_position(
+        self, text: str, components: list[tuple[Span, PaperEquation]], parens: "_ParenGroups"
+    ) -> list[PaperEquation]:
+        """Assign grp_ids to passes 2-4's components, in the order printed.
+
+        Consecutive components separated only by commas, semicolons,
+        whitespace or "$" share a group; one inside a pass-1 parenthesis
+        joins that parenthesis's group.
+        """
+        components.sort(key=lambda component: component[0][0])
+        grouped: list[PaperEquation] = []
+        grp_id = 0
+        previous_end = 0
+        for (start, end), eq in components:
+            if not grouped or not _GROUP_SEPARATOR_RE.fullmatch(text, previous_end, start):
+                grp_id = parens.group_of(start, end) or self._next_grp_id()
+            eq.grp_id = grp_id
+            grouped.append(eq)
+            previous_end = end
+        return grouped
+
+
+class _ParenGroups:
+    """The parentheses of one sentence that the passes treat specially.
+
+    The groups pass 1 emitted components for (outermost, so in text order
+    and never nested), whose grp_id a later pass's match inside them joins;
+    and statistics' own df arguments, at any depth: "(1, N = 100)" of
+    "χ²(1, N = 100) = 3.84" or of OCR's "$\\chi^{2}(1, N = 100) = 3.84$" holds
+    no statistic of its own, since the statistic's df holds it.
+    """
+
+    def __init__(self, text: str) -> None:
+        self._starts: list[int] = []
+        self._ends: list[int] = []
+        self._grp_ids: list[int] = []
+        self._edges: list[int] = []
+        df_arguments: list[Span] = []
+        stack: list[int] = []
+        for index, char in enumerate(text):
+            if char == "(":
+                stack.append(index)
+            elif char == ")" and stack:
+                start = stack.pop()
+                if _DF_ARGUMENT_INNER_RE.fullmatch(
+                    text, start + 1, index
+                ) and _DF_ARGUMENT_OWNER_RE.search(text, max(0, start - 24), start):
+                    df_arguments.append((start, index + 1))
+        # They hold no parenthesis, so they never nest either
+        df_arguments.sort()
+        self._df_starts = [start for start, _ in df_arguments]
+        self._df_ends = [end for _, end in df_arguments]
+
+    def add_group(self, start: int, end: int, grp_id: int) -> None:
+        self._starts.append(start)
+        self._ends.append(end)
+        self._grp_ids.append(grp_id)
+        self._edges += (start, end)
+
+    def group_of(self, start: int, end: int) -> int | None:
+        """grp_id of the group enclosing ``[start, end)``, if any."""
+        index = bisect_right(self._starts, start) - 1
+        if index >= 0 and end <= self._ends[index]:
+            return self._grp_ids[index]
+        return None
+
+    def crosses(self, start: int, end: int) -> bool:
+        """Whether a group's parenthesis lies strictly inside ``(start, end)``."""
+        index = bisect_right(self._edges, start)
+        return index < len(self._edges) and self._edges[index] < end
+
+    def in_df_argument(self, start: int, end: int) -> bool:
+        """Whether ``[start, end)`` lies in a statistic's df argument."""
+        index = bisect_right(self._df_starts, start) - 1
+        return index >= 0 and end <= self._df_ends[index]
+
+
+# What may separate the components of one reported result: "t(28) = 2.10, p =
+# .04" and, in OCR text that wraps each statistic, "$t(28) = 2.10$, $p < .05$".
+_GROUP_SEPARATOR_RE = re.compile(r"[\s,;$]+")
+
+# What may be left of a formula whose statistics the structured passes read
+_FORMULA_SEPARATORS = frozenset(" \t\n,;.")
+# What separates the statistics printed in one formula
+_RUN_SEPARATORS = " \t\n,;"
+
+
+def _structured_component(text: str, m: re.Match[str]) -> tuple[Span, str, str, str, str] | None:
+    """(span, lhs, df, comp, rhs) of a _COMPONENT_RE match, or None if misread."""
+    lhs = m.group(1).strip()
+    rhs = m.group(3).strip()
+    if _misread(text, lhs, m.start(), rhs, m.end()):
+        return None
+    rhs = _count_value(lhs, rhs)
+    name, df = _split_lhs_df(lhs)
+    return (m.start(), m.start(3) + len(rhs)), name, df, _normalize_comp(m.group(2).strip()), rhs
+
+
+def _take(taken: bytearray, start: int, end: int) -> None:
+    taken[start:end] = b"\x01" * (end - start)
+
+
+def _is_taken(taken: bytearray, start: int, end: int) -> bool:
+    return taken.find(1, start, end) != -1
+
+
+def _covered(text: str, span: Span, taken: bytearray) -> bool:
+    """Whether *taken* covers every character of ``text[span]`` but separators."""
+    start, end = span
+    return all(taken[index] or text[index] in _FORMULA_SEPARATORS for index in range(start, end))
+
+
+def _inline_math(text: str) -> Iterator[re.Match[str]]:
+    """The inline ``$...$`` formulas of *text*, without currency amounts.
+
+    A "$" before a digit opens an amount ("US$26.3 billion ... to US$42.5"),
+    unless the span it would open reads as math: it holds a LaTeX command
+    ("$2 \\times 2$") or a lone number ("$0.5$"), and its closing "$" does
+    not itself start an amount. After an amount the scan resumes past its
+    "$", as late clean-up's strip_inline_math does, so a formula later in
+    the sentence still pairs up.
+    """
+    position = 0
+    while (m := _LATEX_INLINE_RE.search(text, position)) is not None:
+        content = m.group(1)
+        if content[0].isdigit() and (
+            text[m.end() : m.end() + 1].isdigit()
+            or not (_LATEX_COMMAND_RE.search(content) or _LONE_NUMBER_RE.fullmatch(content))
+        ):
+            position = m.start() + 1
+            continue
+        yield m
+        position = m.end()
+
+
+def _latex_equation(text_id: int, content: str, fmt: str) -> PaperEquation | None:
+    """The equation LaTeX *content* holds, ungrouped, or None.
+
+    A display formula without a relation is recorded whole, so every display
+    formula appears in the equations; inline math without one is notation.
+    """
+    # Top-level search skips operators inside _{...} / ^{...} (\sum_{i=1})
+    comp_match = _find_toplevel_comp(content)
+    if comp_match is None:
+        stripped = content.strip()
+        if fmt != "display" or not stripped or _TRIVIAL_LATEX_RE.match(stripped):
+            return None
+        return PaperEquation(text_id=text_id, grp_id=0, lhs=stripped, comp="", rhs="")
+    lhs = content[: comp_match.start()].strip()
+    rhs = content[comp_match.end() :].strip()
+    if not (lhs and rhs):
+        return None
+    # "\chi^2(1)" -> "\chi^2", df "1", as the structured passes split
+    # "t(28)"; not "y(n)" or "P''(1)", which are function values.
+    name, df = _split_lhs_df(lhs)
+    if (
+        df
+        and _LATEX_DF_NAME_RE.fullmatch(name)
+        and _DF_ARGUMENT_INNER_RE.fullmatch(df)
+        and re.search(r"\d", df)
+    ):
+        lhs = name
+    else:
+        df = ""
+    return PaperEquation(
+        text_id=text_id,
+        grp_id=0,
+        lhs=lhs,
+        df=df,
+        comp=_normalize_comp(comp_match.group()),
+        rhs=rhs,
+    )
+
+
+def _untaken_runs(text: str, taken: bytearray, start: int, end: int) -> Iterator[tuple[str, Span]]:
+    """The runs of ``text[start:end]`` no pass took, without the separators around them."""
+    position = start
+    while (run_start := taken.find(0, position, end)) != -1:
+        run_end = taken.find(1, run_start, end)
+        position = end if run_end == -1 else run_end
+        run = text[run_start:position]
+        left = len(run) - len(run.lstrip(_RUN_SEPARATORS))
+        run = run.strip(_RUN_SEPARATORS)
+        if run:
+            yield run, (run_start + left, run_start + left + len(run))
 
 
 def _find_toplevel_comp(content: str) -> re.Match | None:
@@ -725,60 +1110,35 @@ def _find_toplevel_comp(content: str) -> re.Match | None:
     Skips operators inside ``_{...}`` and ``^{...}`` subscript/superscript
     groups as well as any nested ``{...}`` braces.  This prevents
     ``\\sum_{i=1}`` from being split into ``lhs={i, comp==, rhs=1``.
+    An operator inside parentheses is an argument, not the formula's
+    relation: ``P(X \\geq x) = ...`` and ``\\chi^{2}(1, N = 100) = 3.84``
+    split at the ``=`` after the parenthesis. Only when there is none
+    outside parentheses (an unclosed one, or ``P(X < x)`` alone) does a
+    plain operator inside them count, as it did before.
 
     Returns the first :class:`re.Match` at brace depth 0, or ``None``.
     """
     depth = 0
-    i = 0
-    while i < len(content):
-        ch = content[i]
+    parens = 0
+    fallback: re.Match | None = None
+    for i, ch in enumerate(content):
         if ch == "{":
             depth += 1
-            i += 1
-            continue
-        if ch == "}":
+        elif ch == "}":
             depth = max(0, depth - 1)
-            i += 1
-            continue
-        if depth == 0:
+        elif ch == "(":
+            parens += 1
+        elif ch == ")":
+            parens = max(0, parens - 1)
+        elif depth == 0:
             m = _COMP_RE.match(content, i)
-            if m:
-                return m
-        i += 1
-    return None
-
-
-def _split_respecting_brackets(text: str) -> list[str]:
-    """Split on commas/semicolons that are not inside parentheses or brackets."""
-    parts: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for idx, ch in enumerate(text):
-        if ch in "([":
-            depth += 1
-            current.append(ch)
-        elif ch in ")]":
-            depth = max(0, depth - 1)
-            current.append(ch)
-        elif ch in ",;" and depth == 0:
-            # A comma between digits is a thousands separator, not a
-            # component boundary: splitting "N = 1,204" gave "N = 1".
-            if (
-                ch == ","
-                and idx > 0
-                and text[idx - 1].isdigit()
-                and idx + 1 < len(text)
-                and text[idx + 1].isdigit()
-            ):
-                current.append(ch)
+            if m is None:
                 continue
-            parts.append("".join(current))
-            current = []
-        else:
-            current.append(ch)
-    if current:
-        parts.append("".join(current))
-    return parts
+            if not parens:
+                return m
+            if fallback is None and not m.group().startswith("\\"):
+                fallback = m
+    return fallback
 
 
 def _normalize_comp(comp: str) -> str:
@@ -786,8 +1146,11 @@ def _normalize_comp(comp: str) -> str:
     return {
         "<=": "≤",
         ">=": "≥",
+        "⩽": "≤",
+        "⩾": "≥",
         "<<": "≪",
         ">>": "≫",
+        **_LATEX_COMPS,
     }.get(comp, comp)
 
 

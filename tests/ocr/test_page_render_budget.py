@@ -14,7 +14,11 @@ import pytest
 
 from bibr.export.geometry import PageGeometry
 from bibr.ocr.image_processing import crop_image_region
-from bibr.ocr.image_utils import fitting_render_dpi, iter_pdf_pages_with_index
+from bibr.ocr.image_utils import (
+    MIN_REDUCED_RENDER_DPI,
+    fitting_render_dpi,
+    iter_pdf_pages_with_index,
+)
 
 
 def _pdf(pages: list[tuple[float, float, str]]) -> bytes:
@@ -77,6 +81,18 @@ def test_fitting_dpi_for_a_poster_page():
 def test_fitting_dpi_respects_the_dimension_limit_and_the_configured_dpi():
     assert fitting_render_dpi(612, 7200, 200, 10**9, 10_000) == 100
     assert fitting_render_dpi(612, 792, 200, 25_000_000, 10_000) == 200
+
+
+def test_the_floor_admits_a_scan_stored_at_eight_times_its_paper_size():
+    # A scanned fold-out stored at 65.6 x 90.3 in: 13116 x 18063 px at 200 DPI.
+    dpi = fitting_render_dpi(4722, 6502, 200, 25_000_000, 10_000)
+
+    assert dpi == 64
+    assert dpi >= MIN_REDUCED_RENDER_DPI
+
+
+def test_the_floor_admits_the_largest_page_pdf_allows():
+    assert fitting_render_dpi(14_400, 14_400, 200, 25_000_000, 10_000) >= MIN_REDUCED_RENDER_DPI
 
 
 def test_oversized_page_renders_at_a_reduced_dpi_and_reports_it():
@@ -156,7 +172,7 @@ async def test_layout_stage_warns_for_each_reduced_page():
     from bibr.pipeline.state import FileState
 
     def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension, **kwargs):
-        assert kwargs["min_dpi"] == 72
+        assert kwargs["min_dpi"] == MIN_REDUCED_RENDER_DPI
         kwargs["on_reduced_dpi"](1, 129)
         return iter([(0, MagicMock()), (1, MagicMock())])
 

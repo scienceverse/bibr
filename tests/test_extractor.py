@@ -917,12 +917,14 @@ class TestCollectReferenceRowsLayoutFallback:
 
     def test_no_fallback_without_layout_hints(self):
         """Without layout hints, missing REFERENCES section raises ValueError."""
-        sections = ["Introduction"] * 5 + ["Literaturverzeichnis"] * 3
+        # A heading that is not a references heading in any language: the
+        # header-text fallback would take "Literaturverzeichnis".
+        sections = ["Introduction"] * 5 + ["Anhang"] * 3
         texts = [f"Sentence {i}" for i in range(8)]
 
         paper_sections = [
             PaperSection(0, "Introduction", 2, None, CanonicalSection.INTRODUCTION, 1.0),
-            PaperSection(1, "Literaturverzeichnis", 2, None, CanonicalSection.UNKNOWN, 0.3),
+            PaperSection(1, "Anhang", 2, None, CanonicalSection.UNKNOWN, 0.3),
         ]
         ext = _make_extractor(sections, texts, paper_sections=paper_sections)
         ext.contents.layout_hints = []
@@ -1131,6 +1133,9 @@ class TestNormalizeDoi:
         assert normalize_doi("10.1093///brain/110.3.747") == "10.1093/brain/110.3.747"
 
 
+# The LLM reference path falls back to the NER parser for segments the LLM
+# skipped, and these tests load the real checkpoint from the Hub for it.
+@pytest.mark.network
 class TestRefExtractionStrategy:
     """Tests for LLM reference extraction in extract_all_metadata."""
 
@@ -3346,6 +3351,7 @@ class TestSequenceReferences:
         assert [r.bib_id for r in out] == [1, 2]
 
 
+@pytest.mark.network  # loads the real NER checkpoint for skipped segments
 class TestLLMPathContiguousBibIds:
     """A junk ref the LLM emits (no title, no authors) must not leave a gap in
     bib_ids: filter first, then sequence — same contract as the NER path."""

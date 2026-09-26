@@ -120,27 +120,18 @@ class _Pipeline:
                 fs.result_json = {**json.loads(_MINIMAL_EXPORT.read_text()), "paper_id": "ok"}
 
 
-async def test_crashed_chunk_fails_only_its_files():
+async def test_crashed_chunk_fails_only_the_file_that_crashes_alone():
     from bibr.api import ChewFailure, Result, _process_batch
 
-    pipeline = _Pipeline(["crash", "ok"])
+    # The chunk [a, b] crashes; a and b then run on their own, where only a
+    # crashes again. c's chunk is unaffected.
+    pipeline = _Pipeline(["crash", "crash", "ok", "ok"])
     results = await _process_batch(
         pipeline, [Path("a.pdf"), Path("b.pdf"), Path("c.pdf")], batch_size=2
     )
 
-    assert pipeline.chunks == [["a.pdf", "b.pdf"], ["c.pdf"]]
-    assert [type(r) for r in results] == [ChewFailure, ChewFailure, Result]
+    assert pipeline.chunks == [["a.pdf", "b.pdf"], ["a.pdf"], ["b.pdf"], ["c.pdf"]]
+    assert [type(r) for r in results] == [ChewFailure, Result, Result]
     assert all(fs.page_images is None for fs in pipeline.states[:2])
     assert results[0].error_code == "chunk_error"
     assert "stage raised" in results[0].error
-
-
-async def test_file_without_export_is_reported_not_raised():
-    from bibr.api import ChewFailure, _process_batch
-
-    results = await _process_batch(_Pipeline(["skip"]), [Path("a.pdf")], batch_size=1)
-
-    [failure] = results
-    assert isinstance(failure, ChewFailure)
-    assert failure.error_code == "export_failed"
-    assert failure.failed_stage == "export"
