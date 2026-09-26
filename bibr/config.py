@@ -271,28 +271,6 @@ def _is_list_annotation(annotation) -> bool:
     return False
 
 
-def _is_dict_annotation(annotation) -> bool:
-    """Whether *annotation* is (or wraps) a ``dict``."""
-    import typing
-
-    ann = annotation
-    while typing.get_origin(ann) is typing.Annotated or hasattr(ann, "__metadata__"):
-        args = typing.get_args(ann)
-        if not args:
-            break
-        ann = args[0]
-    if ann is dict:
-        return True
-    origin = typing.get_origin(ann)
-    if origin is dict:
-        return True
-    if isinstance(ann, type) and issubclass(ann, dict):
-        return True
-    if origin is typing.Union or str(type(origin)) == "<class 'types.UnionType'>":
-        return any(_is_dict_annotation(a) for a in typing.get_args(ann) if a is not type(None))
-    return False
-
-
 def _is_plain_str_annotation(annotation) -> bool:
     """Whether *annotation* is exactly ``str`` (nullable or not)."""
     import types
@@ -2840,14 +2818,13 @@ def _settings_error(exc: SettingsError) -> ConfigurationError:
 @contextlib.contextmanager
 def _overlaid_environ(overrides: Mapping[str, str]):
     """Temporarily layer *overrides* over ``os.environ`` (restored on exit)."""
-    sentinel = object()
-    saved = {key: os.environ.get(key, sentinel) for key in overrides}
+    saved: dict[str, str | None] = {key: os.environ.get(key) for key in overrides}
     os.environ.update(overrides)
     try:
         yield
     finally:
         for key, value in saved.items():
-            if value is sentinel:
+            if value is None:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value

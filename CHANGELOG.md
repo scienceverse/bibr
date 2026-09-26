@@ -1075,11 +1075,13 @@ released.
   `LLM_REASONING_EFFORT_CITATIONS=`) omits the parameter for that call while
   the global effort still applies elsewhere, `BIBR_RESOLVER_SOURCES=` still
   means the resolver's own tier, and other blank lists stay empty. A blank
-  for a plain `str` field stays blank, as before; a blank for any other
-  field now loads as the default — or `None` where the field is nullable —
-  instead of failing. The one blank that changes meaning is
-  `RAPID_MLX_SPEC_DECODE=`: it used to load as blank and disable speculative
-  decoding with a warning, and now means `auto`.
+  for a plain `str` field stays blank, as before, unless its default is
+  computed; a blank for any other field now loads as the default — or `None`
+  where the field is nullable — instead of failing. Two blanks change
+  meaning: `RAPID_MLX_SPEC_DECODE=` used to load as blank and disable
+  speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
+  used to pin the serve result cache to an empty version, and now means the
+  computed code hash, so a deploy invalidates cached results again.
 
 ### Security
 

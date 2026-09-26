@@ -275,7 +275,8 @@ class PresetManager:
                 validate_env_overrides(candidate)
             except ConfigurationError as exc:
                 problems = list(getattr(exc, "problems", None) or [str(exc)])
-                new = [p for p in problems if p not in baseline_problems()]
+                baseline = baseline_problems()
+                new = [p for p in problems if p not in baseline]
                 if new:
                     path = self._path(name)
                     prefixed = [f"Preset {name!r}: {problem}" for problem in new]
