@@ -87,7 +87,12 @@ def main():
 
     import gradio as gr
 
-    from bibr.demo.local_app import _TABLE_SCROLL_CSS, _TABLE_SCROLL_JS, create_local_demo
+    from bibr.demo.local_app import (
+        _MAX_FILE_SIZE_MB,
+        _TABLE_SCROLL_CSS,
+        _TABLE_SCROLL_JS,
+        create_local_demo,
+    )
 
     launch_kwargs = {
         "server_name": args.host,
@@ -97,6 +102,9 @@ def main():
         "theme": gr.themes.Soft(),
         "css": _TABLE_SCROLL_CSS,
         "js": _TABLE_SCROLL_JS,
+        # Refuse an oversized upload while it arrives (HTTP 413) instead of
+        # storing all of it before the size check in the click handler.
+        "max_file_size": f"{_MAX_FILE_SIZE_MB}mb",
     }
 
     password = os.environ.get("GRADIO_PASSWORD", "")

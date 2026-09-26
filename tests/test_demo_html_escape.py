@@ -4,7 +4,47 @@ gr = pytest.importorskip("gradio")  # demo is gated behind gradio
 if not hasattr(gr, "Blocks"):
     pytest.skip("gradio not fully installed", allow_module_level=True)
 
-from bibr.demo.local_app import _build_tables_html, _build_text_html
+from bibr.demo.local_app import _build_summary_md, _build_tables_html, _build_text_html
+
+
+def test_summary_md_shows_extracted_metadata_literally():
+    """A crafted title or keyword must not become an image, link or HTML in the summary."""
+    result = {
+        "metadata": {
+            "title": "Evil ![x](https://attacker.example/p.png) "
+            "<img src=https://attacker.example/q.png>\n# Heading",
+            "doi": "10.1234/a`b",
+            "paper_type": "<b>article</b>",
+            "oecd_l1": "Social [sciences](https://attacker.example)",
+            "oecd_l2": "Psychology ![y](https://attacker.example/r.png)",
+            "keywords": ["*bold*", "[k](https://attacker.example)"],
+        }
+    }
+    md = _build_summary_md(result)
+    assert "](" not in md  # no Markdown link or image syntax survives
+    assert "<img" not in md
+    assert "<b>" not in md
+    assert "\n# Heading" not in md
+    assert "`" not in md.replace("\\`", "")
+    assert "Evil" in md
+    assert "Heading" in md
+    assert " > Psychology" in md
+
+
+def test_summary_md_keeps_plain_titles_readable():
+    md = _build_summary_md(
+        {
+            "metadata": {
+                "title": "Ageing and memory",
+                "doi": "10.1/x",
+                "oecd_l1": "Social sciences",
+                "oecd_l2": "Psychology",
+            }
+        }
+    )
+    assert md.startswith("### Ageing and memory")
+    assert "10\\.1/x" in md
+    assert "**OECD domain:** Social sciences > Psychology" in md
 
 
 def test_text_html_escapes_script_tags():

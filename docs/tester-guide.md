@@ -363,6 +363,10 @@ The demo uses `PIPELINE_MEMORY_MODE` and `LLM_BACKEND` from the `.env` created
 by `bibr setup`; pass `--memory aggressive` or `--llm llama-cpp` only when you
 want to override that setup for this run.
 
+Uploads are limited to `DEMO_MAX_FILE_SIZE_MB` (default 10). Uploaded papers
+and JSON downloads are deleted an hour after they were made, and when the demo
+stops; set `DEMO_CACHE_TTL_SECONDS` to change the hour, or to `0` to keep them.
+
 For a remote demo, run it on the host that has bibr configured. Protect it with
 a username and a strong password before creating a temporary public share link.
 In PowerShell:
