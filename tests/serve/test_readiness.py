@@ -98,3 +98,22 @@ def test_ready_stays_ready_when_the_alias_is_served(monkeypatch):
     resp = client.get("/ready")
     assert resp.status_code == 200
     assert resp.json()["checks"]["ocr"] == "ok"
+
+
+def test_ready_names_a_malformed_models_body(monkeypatch):
+    """A 200 /v1/models body without a data/id list is unhealthy, and the
+    detail must say the body is bad — not blame a status that was 200."""
+    import httpx
+
+    from bibr.config import GlobalSettings
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"unexpected": "shape"})
+
+    settings = GlobalSettings()
+    client = _ready_client(monkeypatch, settings, httpx.MockTransport(handler))
+    resp = client.get("/ready")
+    assert resp.status_code == 503
+    assert resp.json()["checks"]["ocr"] == "unhealthy (bad /v1/models body)"

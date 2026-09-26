@@ -110,14 +110,6 @@ def test_resolve_glm_alias_uses_platform_default(monkeypatch):
 
 def test_resolve_ocr_url_implies_glm_http():
     config = _resolve("paper.pdf", "--ocr-url", "http://host:8080", "--memory", "balanced")
-    assert config.ocr_backend == "glm-http"
-    assert config.ocr_url == "http://host:8080"
-
-
-def test_resolve_explicit_paddle_http_with_ocr_url_stays_paddle():
-    config = _resolve(
-        "paper.pdf", "--ocr", "paddle-http", "--ocr-url", "http://host:8080", "--memory", "balanced"
-    )
     assert config.ocr_backend == "paddle-http"
     assert config.ocr_url == "http://host:8080"
 

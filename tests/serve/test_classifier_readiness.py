@@ -159,6 +159,68 @@ def test_local_classifier_dir_counts_as_present(tmp_path):
             os.environ["HF_HUB_OFFLINE"] = old_offline
 
 
+def _torch_classifier_dir(tmp_path):
+    """A torch-format baked-in classifier: safetensors weights, no onnx/ bundle."""
+    local = tmp_path / "paper-cls-torch"
+    local.mkdir(parents=True)
+    for name in ("config.json", "model.safetensors", "label_maps.json", "tokenizer.json"):
+        (local / name).write_text("{}")
+    return local
+
+
+def test_torch_format_local_dir_counts_as_present_when_torch_allowed(tmp_path, monkeypatch):
+    """A baked-in torch-format directory loads via the torch runtime, so
+    /ready must not demand an ONNX bundle unless ML_RUNTIME=onnx."""
+    from types import SimpleNamespace
+
+    import bibr.utils.ml_runtime as ml_runtime
+    from bibr.serve.app import classifier_artifact_readiness
+
+    monkeypatch.setattr(ml_runtime, "torch_available", lambda: True)
+    local = _torch_classifier_dir(tmp_path)
+    ml = SimpleNamespace(
+        paper_classifier_model_id=str(local),
+        paper_classifier_revision=None,
+        section_classifier_model_id=None,
+        section_classifier_revision=None,
+        classifiers_required=True,
+        runtime="torch",
+    )
+
+    def _must_not_download(*args, **kwargs):
+        raise AssertionError("local paths must not reach snapshot_download")
+
+    assert classifier_artifact_readiness(
+        SimpleNamespace(ml=ml), snapshot_download=_must_not_download
+    ) == ("ok", True)
+
+
+def test_torch_format_local_dir_still_missing_when_onnx_required(tmp_path, monkeypatch):
+    """ML_RUNTIME=onnx keeps requiring the ONNX bundle for a local directory."""
+    from types import SimpleNamespace
+
+    import bibr.utils.ml_runtime as ml_runtime
+    from bibr.serve.app import classifier_artifact_readiness
+
+    monkeypatch.setattr(ml_runtime, "torch_available", lambda: True)
+    local = _torch_classifier_dir(tmp_path)
+    ml = SimpleNamespace(
+        paper_classifier_model_id=str(local),
+        paper_classifier_revision=None,
+        section_classifier_model_id=None,
+        section_classifier_revision=None,
+        classifiers_required=False,
+        runtime="onnx",
+    )
+
+    def _must_not_download(*args, **kwargs):
+        raise AssertionError("local paths must not reach snapshot_download")
+
+    assert classifier_artifact_readiness(
+        SimpleNamespace(ml=ml), snapshot_download=_must_not_download
+    ) == ("degraded", True)
+
+
 def _ready_client(monkeypatch, settings, snapshot_download):
     """Mount the real /ready route with a stubbed OCR server + Hub probe."""
     import httpx

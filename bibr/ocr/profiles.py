@@ -205,9 +205,12 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
     server merely to discover its identity.
     """
     requested_backend = cfg.ocr_backend or settings.ocr.backend
-    from bibr.ocr.registry import resolve_url_backend
-
-    backend = resolve_url_backend(requested_backend, cfg.ocr_url) or requested_backend
+    backend = (
+        "glm-http"
+        if cfg.ocr_url
+        and requested_backend not in {"paddle-http", "serve-http", "gemini", "openai", "anthropic"}
+        else requested_backend
+    )
     model = (
         settings.ocr.paddle_served_model
         if requested_backend == "paddle-vllm"

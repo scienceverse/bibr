@@ -375,9 +375,9 @@ class ResourceManager:
         if backend_name != "serve-http" and backend_name not in known:
             raise ValueError(f"Unknown OCR backend: {backend_name!r}. Known: {known}")
 
-        from bibr.ocr.registry import resolve_url_backend
-
-        return resolve_url_backend(backend_name, self.ocr_url) or backend_name
+        if self.ocr_url and backend_name not in ("glm-http", "paddle-http", "serve-http"):
+            return "glm-http"
+        return backend_name
 
     _VISION_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
 
@@ -527,6 +527,7 @@ class ResourceManager:
             failures: list[str] = []
             for candidate in candidates:
                 client = None
+                published = False
                 try:
                     client = await self._construct_ocr_candidate(candidate)
                     if client is None:
@@ -534,14 +535,19 @@ class ResourceManager:
                     try:
                         await self._await_ocr_client_ready(client)
                     except Exception:
-                        # A readiness-gated HTTP backend (serve-http) owns a
-                        # cross-request cooldown: publish the failed instance
-                        # so later requests fail fast on its cooldown instead
-                        # of rebuilding and re-polling for the full timeout.
-                        # Local engines have no such gate — a broken one must
-                        # be discarded, never reused.
-                        if client is not None and hasattr(client, "wait_for_server"):
+                        # Only a backend that owns a cross-request readiness
+                        # cooldown publishes its failed instance, so later
+                        # requests fail fast on the cooldown instead of
+                        # rebuilding and re-polling for the full timeout. A
+                        # published instance stays live — it is never shut
+                        # down here. Anything else is discarded, never reused
+                        # (every OCR client defines wait_for_server, so that
+                        # gate cannot tell them apart).
+                        if client is not None and getattr(
+                            client, "keeps_readiness_cooldown", False
+                        ):
                             self._ocr = client
+                            published = True
                             try:
                                 self._set_ocr_runtime_identity(candidate)
                             except Exception:
@@ -550,7 +556,10 @@ class ResourceManager:
                         raise
                 except BaseException as exc:  # dispose unpublished clients on cancellation too
                     try:
-                        await await_owned(self._shutdown_client(client))
+                        # A published instance stays live for its cooldown —
+                        # never shut it down here.
+                        if not published:
+                            await await_owned(self._shutdown_client(client))
                     except Exception:
                         if not isinstance(exc, Exception):
                             logger.warning(

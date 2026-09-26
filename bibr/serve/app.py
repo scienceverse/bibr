@@ -52,8 +52,6 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
     if snapshot_download is None:
         from huggingface_hub import snapshot_download
 
-    from bibr.utils.ml_runtime import find_onnx_bundle
-
     configured = (
         (
             settings.ml.paper_classifier_model_id,
@@ -68,14 +66,22 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
         for model_id, revision in configured:
             if not model_id:
                 continue
-            # The loaders accept a local directory or file as the model id
-            # (find_onnx_bundle), while snapshot_download rejects filesystem
-            # paths outright — resolve those exactly as the loaders do so a
-            # baked-in classifier is not reported missing. Local-only: no Hub
-            # access, so this never slows the readiness probe.
+            # A local directory or file resolves exactly as the loaders
+            # resolve it (resolve_runtime) without loading any model: torch
+            # loads the directory itself, so the ONNX bundle is required
+            # only when ML_RUNTIME=onnx. snapshot_download rejects
+            # filesystem paths outright, so without this a baked-in
+            # classifier is reported missing. Local-only: no Hub access,
+            # so this never slows the readiness probe.
             if Path(str(model_id)).expanduser().exists():
-                if find_onnx_bundle(model_id, revision) is None:
-                    raise FileNotFoundError(f"no ONNX bundle at {model_id}")
+                from bibr.utils.ml_runtime import find_onnx_bundle, resolve_runtime
+
+                resolve_runtime(
+                    "classifier",
+                    settings=settings,
+                    bundle=lambda _m=model_id, _r=revision: find_onnx_bundle(_m, _r),
+                    bundle_hint="publish an onnx/ bundle or run a torch runtime",
+                )
                 continue
             snapshot_download(model_id, revision=revision, local_files_only=True)
     except Exception:  # noqa: BLE001 - readiness reports missing/corrupt cache
@@ -83,6 +89,22 @@ def classifier_artifact_readiness(settings, *, snapshot_download=None) -> tuple[
             return ("failed_required", False)
         return ("degraded", True)
     return ("ok", True)
+
+
+def _request_metering_line(
+    *, request_id: str, method: str, path: str, status: int, duration_ms: int, outstanding: int
+) -> str:
+    """One JSON metering line, shared by the normal and 500 request paths."""
+    return json.dumps(
+        {
+            "request_id": request_id,
+            "method": method,
+            "path": path,
+            "status": status,
+            "duration_ms": duration_ms,
+            "inference_outstanding": outstanding,
+        }
+    )
 
 
 def readiness_payload(
@@ -312,19 +334,17 @@ def _build_server(upload_stores):
             # header can be attached there without changing error body shapes.
             duration_ms = int((time.perf_counter() - start) * 1000)
             metering_logger.info(
-                json.dumps(
-                    {
-                        "request_id": request_id,
-                        "method": request.method,
-                        "path": request.url.path,
-                        "status": 500,
-                        "duration_ms": duration_ms,
-                        "inference_outstanding": getattr(
-                            request.state,
-                            "inference_outstanding",
-                            server.app.state.inference_tracker.outstanding,
-                        ),
-                    }
+                _request_metering_line(
+                    request_id=request_id,
+                    method=request.method,
+                    path=request.url.path,
+                    status=500,
+                    duration_ms=duration_ms,
+                    outstanding=getattr(
+                        request.state,
+                        "inference_outstanding",
+                        server.app.state.inference_tracker.outstanding,
+                    ),
                 )
             )
             raise
@@ -332,19 +352,17 @@ def _build_server(upload_stores):
         response.headers["x-request-id"] = request_id
         response.headers["x-bibr-duration-ms"] = str(duration_ms)
         metering_logger.info(
-            json.dumps(
-                {
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status": response.status_code,
-                    "duration_ms": duration_ms,
-                    "inference_outstanding": getattr(
-                        request.state,
-                        "inference_outstanding",
-                        server.app.state.inference_tracker.outstanding,
-                    ),
-                }
+            _request_metering_line(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                duration_ms=duration_ms,
+                outstanding=getattr(
+                    request.state,
+                    "inference_outstanding",
+                    server.app.state.inference_tracker.outstanding,
+                ),
             )
         )
         return response
@@ -514,7 +532,7 @@ def _register_readiness_route(server, Settings) -> None:
                         try:
                             served_ids = [item["id"] for item in models_resp.json()["data"]]
                         except Exception:
-                            checks["ocr"] = f"unhealthy ({models_resp.status_code})"
+                            checks["ocr"] = "unhealthy (bad /v1/models body)"
                             check_results.append(False)
                         else:
                             if expected_ocr_model in served_ids:

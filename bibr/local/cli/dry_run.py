@@ -88,13 +88,15 @@ def _dry_run_ocr_model(config: ResolvedRunConfig) -> tuple[str, str | None]:
     if backend == "paddle-http":
         return config.ocr_model or Settings.ocr.paddle_served_model, None
     if backend in _OCR_HTTP_DEFAULT_SERVED_NAME:
+        from bibr.config import snapshot_settings
         from bibr.ocr.profiles import resolve_served_model
 
+        snapshot = snapshot_settings()
         served = config.ocr_model or resolve_served_model(
             requested_backend=backend,
             concrete_backend=backend,
-            settings=Settings,
-            explicit_profile=config.ocr_profile or Settings.ocr.profile,
+            settings=snapshot,
+            explicit_profile=config.ocr_profile or snapshot.ocr.profile,
         )
         return served, None
     if backend in ("gemini", "openai", "anthropic"):

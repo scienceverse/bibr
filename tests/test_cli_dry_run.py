@@ -107,7 +107,7 @@ async def test_dry_run_paddle_automatic_chain_lists_ordered_exact_identities(
     assert "4. glm-llama | ggml-org/GLM-OCR-GGUF:Q8_0 | glm" in out
 
 
-async def test_dry_run_url_only_uses_glm_served_model_and_profile(tmp_path, capsys, monkeypatch):
+async def test_dry_run_url_only_uses_paddle_served_model_and_profile(tmp_path, capsys, monkeypatch):
     from bibr.config import Settings
     from bibr.local.cli import _build_parser, _run_process
 
@@ -117,27 +117,6 @@ async def test_dry_run_url_only_uses_glm_served_model_and_profile(tmp_path, caps
 
     args = _build_parser().parse_args(
         ["chew", str(pdf), "--dry-run", "--ocr-url", "http://ocr.example"]
-    )
-    await _run_process(args)
-
-    out = capsys.readouterr().out
-    assert "OCR backend: glm-http" in out
-    assert "OCR model: glm-ocr" in out
-    assert "OCR profile: glm" in out
-
-
-async def test_dry_run_explicit_paddle_http_with_url_keeps_paddle_served_model(
-    tmp_path, capsys, monkeypatch
-):
-    from bibr.config import Settings
-    from bibr.local.cli import _build_parser, _run_process
-
-    monkeypatch.setattr(Settings.ocr, "paddle_served_model", "paddle-ocr-vl-1.6")
-    pdf = tmp_path / "paper.pdf"
-    pdf.write_bytes(_pdf_bytes())
-
-    args = _build_parser().parse_args(
-        ["chew", str(pdf), "--dry-run", "--ocr", "paddle-http", "--ocr-url", "http://ocr.example"]
     )
     await _run_process(args)
 

@@ -169,9 +169,12 @@ Configure caching:
 With `METER_ENABLED=true` (the default), non-probe HTTP responses carry
 `x-request-id` and `x-bibr-duration-ms`. A valid client-supplied `x-request-id`
 is echoed; otherwise the server generates one. Request and extraction records
-go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds a
-rotating JSONL file. Cache hits do not count the original extraction's LLM
-tokens as new usage.
+go to the `bibr.serve.metering` logger; `METER_LOG_PATH` optionally adds
+rotating JSONL files: the API process writes request records to `METER_LOG_PATH`
+itself, while the worker writes extraction records (the only ones carrying
+LLM token usage) to the sibling `<stem>.worker<suffix>` file. Each process
+rotates only its own file, so usage tallies must read both files. Cache hits
+do not count the original extraction's LLM tokens as new usage.
 
 ## Error responses
 

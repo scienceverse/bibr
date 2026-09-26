@@ -163,17 +163,6 @@ class _PaperStore:
             raise ToolError(f"unknown paper_id {paper_id!r}; loaded papers: {known}")
         return entry
 
-    def __len__(self) -> int:
-        return len(self._papers)
-
-    def evict_oldest(self) -> str | None:
-        """Drop the oldest-inserted paper (process-wide cap); return its id."""
-        if not self._papers:
-            return None
-        paper_id = next(iter(self._papers))
-        del self._papers[paper_id]
-        return paper_id
-
     def rows(self, paper_id: str, key: str) -> list[dict[str, Any]]:
         value = self.get(paper_id).data.get(key)
         return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []

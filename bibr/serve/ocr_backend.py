@@ -47,6 +47,13 @@ class BibrServeOcrBackend:
 
     name: ClassVar[str] = "serve-http"
 
+    #: A failed readiness poll keeps this instance published on the
+    #: ``ResourceManager`` so later requests fail fast on its cooldown
+    #: instead of rebuilding and re-polling for the full timeout. Backends
+    #: without this flag are discarded (and shut down) on readiness failure,
+    #: never reused.
+    keeps_readiness_cooldown: ClassVar[bool] = True
+
     #: Served-model alias used when the caller passes no model. The documented
     #: convention for externally-managed GLM-OCR servers; a server serving a
     #: different model (e.g. a NuExtract vLLM instance) must be pointed at via
@@ -140,6 +147,11 @@ class BibrServeOcrBackend:
                     if resp.status_code == 200:
                         data = resp.json()
                         observed_model_ids = [item["id"] for item in data["data"]]
+                        # A 200 answers the key question in the affirmative —
+                        # forget any earlier 401 so the failure names the
+                        # model the server keeps not listing, not a key the
+                        # server has since accepted.
+                        last_status = None
                         if self._model in observed_model_ids:
                             self._ready = True
                             logger.info("OCR server ready at %s", self._base_url)

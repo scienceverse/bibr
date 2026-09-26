@@ -658,6 +658,7 @@ class BibrPipelineAPI(ls.LitAPI):
             )
             return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
 
+        assert self._cache is not None  # predict() returns early without a cache
         try:
             lease = await asyncio.wait_for(
                 self._cache.try_acquire_lease(
@@ -753,12 +754,84 @@ class BibrPipelineAPI(ls.LitAPI):
                 )
                 return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
             if not lease_alive:
+                # The owner's publish and lease release may both have landed
+                # between this poll's cache read and the lease check — re-read
+                # once before falling back, or a result already in Redis pays
+                # for a duplicate extraction.
+                try:
+                    cached_response = await self._read_cached_response(
+                        cache_key,
+                        file_hash=file_hash,
+                        filename=filename,
+                        started_at=started_at,
+                        request_id=inputs.get("request_id"),
+                        job_id=inputs.get("job_id"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Distributed cache wait failed; extracting normally", exc_info=True
+                    )
+                    _emit_singleflight_metric(
+                        "redis_error_fallback",
+                        cache_key=cache_key,
+                        settings=self._settings,
+                    )
+                    return await self._run_pipeline(
+                        inputs, file_hash=file_hash, cache_key=cache_key
+                    )
+                if cached_response is not None:
+                    _emit_singleflight_metric(
+                        "waiter_hit",
+                        cache_key=cache_key,
+                        settings=self._settings,
+                    )
+                    return cached_response
+                # Only one waiter takes over: the lease acquisition is atomic,
+                # so losers keep polling for the winner's result instead of
+                # every waiter extracting at once.
+                try:
+                    takeover = await asyncio.wait_for(
+                        self._cache.try_acquire_lease(
+                            cache_key,
+                            ttl_seconds=self._settings.cache.singleflight_lease_ttl_seconds,
+                        ),
+                        timeout=self._settings.cache.operation_timeout_seconds,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Distributed cache lease takeover failed; extracting normally",
+                        exc_info=True,
+                    )
+                    _emit_singleflight_metric(
+                        "redis_error_fallback",
+                        cache_key=cache_key,
+                        settings=self._settings,
+                    )
+                    return await self._run_pipeline(
+                        inputs, file_hash=file_hash, cache_key=cache_key
+                    )
+                if takeover is None:
+                    continue
                 _emit_singleflight_metric(
                     "owner_gone_fallback",
                     cache_key=cache_key,
                     settings=self._settings,
                 )
-                return await self._run_pipeline(inputs, file_hash=file_hash, cache_key=cache_key)
+                renew_task = asyncio.create_task(self._renew_cache_lease(takeover, cache_key))
+                try:
+                    return await self._run_pipeline(
+                        inputs, file_hash=file_hash, cache_key=cache_key
+                    )
+                finally:
+                    renew_task.cancel()
+                    await asyncio.gather(renew_task, return_exceptions=True)
+                    try:
+                        await asyncio.wait_for(
+                            takeover.release(),
+                            timeout=self._settings.cache.operation_timeout_seconds,
+                        )
+                    except Exception:
+                        logger.warning("Failed to release distributed cache lease", exc_info=True)
 
         _emit_singleflight_metric(
             "timeout_fallback",

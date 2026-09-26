@@ -167,30 +167,6 @@ def resolve_backend_candidates(
     return tuple(_candidate(backend, settings) for backend in names)
 
 
-#: Backends an ``ocr_url`` override leaves alone: they already name a remote
-#: endpoint (HTTP) or never use the URL (cloud vision providers).
-_URL_PRESERVED_BACKENDS = frozenset(
-    {"glm-http", "paddle-http", "serve-http", "gemini", "openai", "anthropic"}
-)
-
-
-def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | None:
-    """Apply the ``ocr_url`` override to a requested OCR backend.
-
-    A URL names an external server, so any managed-local runtime it is paired
-    with can never start: rewrite those to the GLM HTTP compatibility path.
-    Backends that already name a remote endpoint (the HTTP backends and the
-    cloud vision providers) are kept as-is. ``None`` stays ``None`` without a
-    URL so the caller's own default still applies. Single rule behind the
-    CLI, ``LocalPipeline``, ``ResourceManager`` and the runtime identity —
-    a bare URL always selects ``glm-http`` (pass ``--ocr paddle-http`` /
-    ``ocr="paddle-http"`` for a Paddle server).
-    """
-    if ocr_url and (requested or "") not in _URL_PRESERVED_BACKENDS:
-        return "glm-http"
-    return requested
-
-
 def resolve_backend_name(name: str | None, settings: GlobalSettings | None = None) -> str:
     """Expand OCR backend aliases to concrete registry names.
 

@@ -73,15 +73,12 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     flag/preset overrides are applied separately by ``_apply_runtime_settings``.
     Raises ``ValueError`` for an invalid ``--pages`` value.
     """
-    # Determine OCR backend. A bare ``--ocr-url`` selects the GLM HTTP
-    # compatibility path — the same single rule (``resolve_url_backend``)
-    # the library, ResourceManager and the static identity use — so pass
-    # ``--ocr paddle-http`` explicitly for a Paddle server.
+    # Determine OCR backend. ``--ocr-url`` follows the Paddle-first default;
+    # an explicit GLM selection deliberately retains the established GLM HTTP
+    # contract for existing private servers.
     ocr_backend = args.ocr
     if args.ocr_url:
-        from bibr.ocr.registry import resolve_url_backend
-
-        ocr_backend = resolve_url_backend(args.ocr, args.ocr_url) or "glm-http"
+        ocr_backend = "glm-http" if (args.ocr or "").startswith("glm") else "paddle-http"
     elif ocr_backend == "paddle":
         # ``paddle`` is a startup selector, not a concrete backend. Keep it
         # intact for ResourceManager's transactional fallback chain.

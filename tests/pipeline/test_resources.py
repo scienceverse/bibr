@@ -211,18 +211,70 @@ async def test_await_ocr_no_preload_loads_sync():
 
 
 @pytest.mark.asyncio
-async def test_readiness_failure_without_self_gate_discards_client():
-    """Guard: only a readiness-gated HTTP backend is kept after a readiness
-    failure — a plain client must still be discarded, never reused."""
-    rm = ResourceManager(ocr_backend="glm-llama")
-    broken = MagicMock(spec=["loaded", "shutdown"], loaded=True)
-    broken.shutdown = AsyncMock()
+async def test_readiness_failure_without_cooldown_discards_client():
+    """Guard: only a backend that owns a cross-request readiness cooldown is
+    kept after a readiness failure. A plain HTTP client also defines
+    ``wait_for_server``, so the gate must not use that — it must still be
+    discarded and shut down, never reused."""
+    from bibr.local.ocr_transport import BaseHttpOcrClient
+
+    class _PlainHttpClient(BaseHttpOcrClient):
+        name = "glm-http"
+
+        def __init__(self):
+            self._loaded = True
+            self.shutdown_calls = 0
+
+        async def wait_for_server(self):
+            raise RuntimeError("not ready")
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+            self._loaded = False
+
+    rm = ResourceManager(ocr_backend="glm-http")
+    broken = _PlainHttpClient()
     with patch.object(rm, "_create_ocr_client", return_value=broken):
         ready = AsyncMock(side_effect=RuntimeError("not ready"))
         with patch.object(rm, "_await_ocr_client_ready", new=ready):
             with pytest.raises(RuntimeError, match="not ready"):
                 await rm.await_ocr()
     assert rm._ocr is None
+    assert broken.shutdown_calls == 1
+    assert broken.loaded is False
+
+
+@pytest.mark.asyncio
+async def test_readiness_failure_with_cooldown_publishes_without_shutdown():
+    """A backend with ``keeps_readiness_cooldown`` stays published and live
+    after a readiness failure, so later requests fail fast on its cooldown."""
+    from bibr.local.ocr_transport import BaseHttpOcrClient
+
+    class _CooldownHttpClient(BaseHttpOcrClient):
+        name = "glm-http"
+        keeps_readiness_cooldown = True
+
+        def __init__(self):
+            self._loaded = True
+            self.shutdown_calls = 0
+
+        async def wait_for_server(self):
+            raise RuntimeError("not ready")
+
+        async def shutdown(self):
+            self.shutdown_calls += 1
+            self._loaded = False
+
+    rm = ResourceManager(ocr_backend="glm-http")
+    failed = _CooldownHttpClient()
+    with patch.object(rm, "_create_ocr_client", return_value=failed):
+        ready = AsyncMock(side_effect=RuntimeError("not ready"))
+        with patch.object(rm, "_await_ocr_client_ready", new=ready):
+            with pytest.raises(RuntimeError, match="not ready"):
+                await rm.await_ocr()
+    assert rm._ocr is failed
+    assert failed.shutdown_calls == 0
+    assert failed.loaded is True
 
 
 @pytest.mark.asyncio
@@ -285,6 +337,7 @@ async def test_automatic_paddle_falls_back_only_during_startup_and_records_ident
         _candidate("glm-rapid-mlx", "glm/rapid", "glm"),
     )
     rejected = MagicMock(loaded=True)
+    rejected.keeps_readiness_cooldown = False  # local engines own no cooldown
     rejected.wait_for_server = AsyncMock(side_effect=RuntimeError("smoke rejected"))
     rejected.shutdown = AsyncMock()
     accepted = MagicMock(loaded=True)

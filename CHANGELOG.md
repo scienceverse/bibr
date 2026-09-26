@@ -344,46 +344,40 @@ released.
 - `bibr serve` cache-miss waiters no longer give up after a flat 10 seconds and
   pay for a duplicate extraction. Unless the operator set an explicit wait, the
   wait budget now follows the pipeline timeout, and a waiter whose owner's
-  lease disappears takes over at once instead of waiting out the budget.
-- `bibr serve` no longer runs two rotating writers against one
-  `METER_LOG_PATH`: the API process keeps the single rotating writer while the
-  worker forwards without rotating, so records are neither lost nor duplicated
-  across rotation.
+  lease disappears re-reads the cache once before falling back (the owner's
+  publish may have landed between the waiter's read and its lease check) and
+  otherwise takes over only after atomically acquiring the lease, so exactly
+  one waiter extracts instead of every waiter at once.
 - `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
-  to report them degraded without ever checking the directory), re-checks a
-  failed classifier verdict after a bounded interval instead of caching it
-  forever, and still loads no model on the request path. It also probes the
-  OCR server's `/v1/models` for the served-model alias the backend will ask
-  for, so a healthy `/health` with the wrong models listed no longer reads
-  ready; a 401 there is reported as unauthorized (check the key), not as a
-  missing model. The backend's startup wait remembers the last non-200 status
-  for the same reason.
-- `bibr serve` keeps a `serve-http` OCR backend that fails its readiness poll
-  instead of discarding it, so the backend's own cooldown fail-fasts later
-  requests instead of every request paying a full poll. Plain (non-HTTP)
-  clients are still discarded on failure.
-- `bibr serve` MCP paper state is now bounded process-wide:
-  `MCP_MAX_PAPERS_TOTAL` (default 128) evicts the oldest paper of the oldest
-  session past the total, and the chew result reports the evicted ids so their
-  owners know to re-chew. The per-session cap is unchanged.
+  to report them degraded without ever checking the directory): a local
+  directory counts as present exactly when the loaders could use it (torch
+  loads the directory itself; the ONNX bundle is required only when
+  `ML_RUNTIME=onnx`), re-checks a failed classifier verdict after a bounded
+  interval instead of caching it forever, and still loads no model on the
+  request path. It also probes the OCR server's `/v1/models` for the
+  served-model alias the backend will ask for, so a healthy `/health` with
+  the wrong models listed no longer reads ready; a 401 there is reported as
+  unauthorized (check the key), not as a missing model. The backend's startup
+  wait remembers the last non-200 status for the same reason, cleared by any
+  later 200.
+- `bibr serve` keeps a failed `serve-http` OCR backend — one that owns a
+  cross-request readiness cooldown — instead of discarding it, so the
+  backend's own cooldown fail-fasts later requests instead of every request
+  paying a full poll. The published instance is never shut down. Clients
+  without such a cooldown are still discarded on failure.
 - `bibr serve` extraction metering records now carry the `request_id` of the
   request that submitted them (and the `job_id` for async jobs), so the
   worker-side `extract` record joins back to the API-side request record.
   Unhandled route failures also emit their request record with status 500
   before the 500 response is built; the 500 body itself is unchanged.
-- The export stage's periodic collection now sweeps only the young
-  generations. A full `gc.collect()` holds the GIL for the whole pass, so the
-  old code's thread offload could not spare the event loop during a sweep; the
-  bounded pass stays short and the old generation is left to automatic GC.
+- The export stage's periodic collection keeps its full `gc.collect()` between
+  chunks; only its misleading comment is corrected (a full sweep holds the
+  GIL throughout, so the executor offload never spared the event loop).
 - The served-model choice for HTTP OCR endpoints now lives in one place. With
   `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
   own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
   defaults and `--dry-run` now agree on the paddle alias, and the dry-run
-  preview prints the resolved alias. A bare `--ocr-url`/`ocr_url` now selects
-  the GLM compatibility path on both the CLI and the library (the CLI used to
-  select Paddle); pass `--ocr paddle-http` explicitly for a Paddle server.
-  Vision backends (`gemini`, `openai`, `anthropic`) keep their own identity
-  when a URL is set, matching the static identity.
+  preview prints the resolved alias.
 
 ### Added
 
@@ -432,6 +426,13 @@ released.
 
 ### Changed
 
+- `bibr serve` no longer runs two rotating writers against one
+  `METER_LOG_PATH`. The API process writes request records to `METER_LOG_PATH`
+  itself while the worker writes extraction records — the only ones carrying
+  `llm_usage_totals` — to the sibling `<stem>.worker<suffix>` file, each
+  process rotating only its own file, so records are neither lost nor
+  duplicated across rotation. Operators tallying token usage must read both
+  files: `METER_LOG_PATH` alone holds no extraction records.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

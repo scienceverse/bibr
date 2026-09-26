@@ -64,7 +64,7 @@ async def test_gc_collect_throttled(monkeypatch):
     import bibr.pipeline.stages.export as mod
 
     calls = []
-    monkeypatch.setattr(mod.gc, "collect", lambda *a: calls.append(1))
+    monkeypatch.setattr(mod.gc, "collect", lambda: calls.append(1))
 
     stage = ExportStage()
     for _ in range(5):
@@ -82,7 +82,7 @@ async def test_gc_throttle_is_per_instance(monkeypatch):
     import bibr.pipeline.stages.export as mod
 
     calls = []
-    monkeypatch.setattr(mod.gc, "collect", lambda *a: calls.append(1))
+    monkeypatch.setattr(mod.gc, "collect", lambda: calls.append(1))
 
     for _ in range(2):
         fs = FileState(path=Path("x.pdf"))

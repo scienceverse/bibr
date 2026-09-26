@@ -2,6 +2,8 @@
 
 import asyncio
 
+import pytest
+
 from bibr.pipeline.context import RunConfig
 from bibr.serve.deployments.pipeline import BibrPipelineAPI
 
@@ -151,6 +153,7 @@ async def test_opt_out_does_not_touch_redis_lease(monkeypatch, tmp_path):
     assert (await api.predict(_inputs()))["success"] is True
 
 
+@pytest.mark.slow
 async def test_waiter_outlasts_the_default_wait_window(tmp_path):
     """A waiter coalesces an extraction slower than the old 10 s flat wait.
 
@@ -201,7 +204,12 @@ async def test_waiter_takes_over_when_the_owner_dies(tmp_path):
 
     async def lease_alive(key):  # noqa: ARG001
         polls["n"] += 1
-        return polls["n"] < 3
+        alive = polls["n"] < 3
+        if not alive:
+            # A dead owner's lease key is gone (expired), so the takeover
+            # acquisition succeeds exactly as against real Redis.
+            cache.lease_held = False
+        return alive
 
     cache.lease_alive = lease_alive
     api = _api(tmp_path, cache, _Pipeline(delay=0), settings=settings)
@@ -234,3 +242,82 @@ async def test_lease_check_error_fails_open(tmp_path):
 
     assert result["success"] is True
     assert api._pipeline.calls == 1
+
+
+async def test_waiter_re_reads_cache_when_the_lease_vanishes(tmp_path):
+    """No duplicate extraction when the owner's publish lands between the
+    waiter's cache read and its lease check.
+
+    The owner finishes right after the waiter's first in-loop cache miss; the
+    waiter must see the published result on its re-read instead of extracting.
+    Fails without the re-read (waiter calls == 1).
+    """
+    import pathlib
+    import tempfile
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 5
+    cache = _SharedCache()
+    tmp = pathlib.Path(tempfile.mkdtemp())
+    owner = _api(tmp, cache, _Pipeline(delay=0.2), settings=settings)
+    waiter = _api(tmp, cache, _Pipeline(delay=0.2), settings=settings)
+
+    owner_task = asyncio.create_task(owner.predict(_inputs()))
+    await asyncio.sleep(0.05)
+    real_get = cache.get
+    state = {"n": 0}
+
+    async def get(key):
+        value = await real_get(key)
+        state["n"] += 1
+        if value is None and state["n"] == 3:
+            # First in-loop poll (after the two pre-lease lookups): the owner
+            # publishes and releases right after this miss.
+            await owner_task
+        return value
+
+    cache.get = get
+    await waiter.predict(_inputs())
+
+    assert owner._pipeline.calls == 1
+    assert waiter._pipeline.calls == 0
+
+
+async def test_only_one_waiter_takes_over_when_the_owner_dies(tmp_path):
+    """Two waiters on a dead owner's key: exactly one extracts, the other
+    consumes the winner's published result.
+
+    Fails without the takeover acquisition (both waiters extract).
+    """
+    import pathlib
+    import tempfile
+
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.cache.singleflight_poll_interval_ms = 5
+    cache = _SharedCache()
+    cache.lease_held = True
+    tmp = pathlib.Path(tempfile.mkdtemp())
+
+    async def lease_alive(key):  # noqa: ARG001
+        return cache.lease_held
+
+    cache.lease_alive = lease_alive
+
+    async def die_soon():
+        await asyncio.sleep(0.05)
+        cache.lease_held = False
+
+    first = _api(tmp, cache, _Pipeline(delay=0.05), settings=settings)
+    second = _api(tmp, cache, _Pipeline(delay=0.05), settings=settings)
+    results = await asyncio.gather(
+        first.predict(_inputs()),
+        second.predict(_inputs()),
+        die_soon(),
+    )
+
+    assert all(result["success"] for result in results[:2])
+    assert first._pipeline.calls + second._pipeline.calls == 1
