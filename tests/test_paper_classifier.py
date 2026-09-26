@@ -72,6 +72,26 @@ class TestValidateOecdL1:
         assert validate_oecd_l1("Quantum Physics") == ""
         assert validate_oecd_l1("Computer Science") == ""
 
+    def test_short_forms_resolve(self):
+        # structure-sections-classifiers-17: bare subsets of multi-word L1
+        # labels resolve like the L2 matcher handles bare "Psychology".
+        assert validate_oecd_l1("Humanities") == "Humanities and the Arts"
+        assert validate_oecd_l1("Engineering") == "Engineering and Technology"
+        assert validate_oecd_l1("Medicine") == "Medical and Health Sciences"
+        assert validate_oecd_l1("Agriculture") == "Agricultural and Veterinary Sciences"
+        assert validate_oecd_l1("Agricultural Sciences") == "Agricultural and Veterinary Sciences"
+        assert validate_oecd_l1("Medical Sciences") == "Medical and Health Sciences"
+
+    def test_short_forms_case_insensitive(self):
+        assert validate_oecd_l1("humanities") == "Humanities and the Arts"
+        assert validate_oecd_l1("MEDICINE") == "Medical and Health Sciences"
+
+    def test_ambiguous_short_input_stays_empty(self):
+        # No token overlap with any label (or a near-tie across labels) is
+        # still rejected rather than guessed.
+        assert validate_oecd_l1("Science") == ""
+        assert validate_oecd_l1("Physics") == ""
+
 
 # ---------------------------------------------------------------------------
 # OECD L2 validation tests

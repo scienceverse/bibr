@@ -75,6 +75,26 @@ def _given_name_affinity(given: str | None, local_compact: str) -> int:
     return 1 if local_compact.startswith(token[0]) else 0
 
 
+def _email_name_affinity(given: str | None, family: str | None, local_compact: str) -> bool:
+    """Whether an email local part plausibly names the author.
+
+    Gates the email assignment itself (not just the corresponding flag): a
+    surname or given-name token (3+ chars) inside the local part, or the
+    local part inside such a token. Covers 'jane.doe' for Doe, 'yxiangmind'
+    for Xiang-Min Yang, and diminutives like 'bathri' for Bathrinath.
+    Without this gate any nearby unrelated address (editorial office, lab,
+    journal) is handed to whoever is still emailless, and the author's real
+    marker-anchored address is then blocked.
+    """
+    if not local_compact or len(local_compact) < 3:
+        return False
+    for name in (given or "", family or ""):
+        for token in re.findall(r"[a-z0-9]+", name.lower()):
+            if len(token) >= 3 and (token in local_compact or local_compact in token):
+                return True
+    return False
+
+
 class AuthorEmailHarvester:
     """Promote corresponding authors and attach their emails.
 
@@ -146,9 +166,15 @@ class AuthorEmailHarvester:
 
         Selection algorithm per email:
           1. Skip if the email is already claimed by another author.
-          2. Rank candidates by (sentence distance, -surname-affinity).
+          2. Rank candidates by (sentence distance, -surname-affinity), then
+             assign only an explicitly marker-paired address, one whose local
+             part names the author, or one printed in the same sentence as
+             their surname — never on window proximity alone.
           3. Final fallback: a single still-corresponding author missing an
-             email gets it by elimination.
+             email gets it by elimination, only with a marker-paired address,
+             a correspondence marker in the window, or a name match.
+             Anything else is skipped, leaving the author emailless for
+             their real address instead of blocking it with someone else's.
 
         Mutates ``authors`` in place.  Skips silently when no authors or no
         email-bearing text are available.
@@ -242,27 +268,53 @@ class AuthorEmailHarvester:
                 if candidates:
                     candidates.sort(key=lambda c: (c[0], c[1], c[2]))
                     _, _, _, family, author = candidates[0]
-                    author.email = email
-                    claimed_emails.add(email.lower())
-                    # Strict mode: when some sentence pairs the marker with
-                    # explicit email(s), only those emails are corresponding.
-                    if email.lower() in strict_emails if strict_emails else window_has_marker:
-                        author.corresponding = True
-                    _drop_filled_author(authors_by_family, family, author)
-                    harvested += 1
+                    # The surname window alone must not license the address:
+                    # the window routinely covers an unrelated earlier email
+                    # (editorial office, lab, journal) next to the byline, and
+                    # a correspondence marker elsewhere in it may belong to the
+                    # author's real address printed lines below. Assign an
+                    # explicitly paired address (strict), one that names the
+                    # author, or one printed in the same sentence as their
+                    # surname; otherwise leave them emailless for their real
+                    # one instead of blocking it with someone else's.
+                    best_dist = candidates[0][0]
+                    if (
+                        email.lower() in strict_emails
+                        or best_dist == 0
+                        or _email_name_affinity(author.given, author.family, local_compact)
+                    ):
+                        author.email = email
+                        claimed_emails.add(email.lower())
+                        # Strict mode: when some sentence pairs the marker with
+                        # explicit email(s), only those emails are corresponding.
+                        if email.lower() in strict_emails if strict_emails else window_has_marker:
+                            author.corresponding = True
+                        _drop_filled_author(authors_by_family, family, author)
+                        harvested += 1
                 else:
                     fallback = [
                         a for group in authors_by_family.values() for a in group if a.corresponding
                     ]
                     if len(fallback) == 1:
-                        fallback[0].email = email
-                        claimed_emails.add(email.lower())
-                        _drop_filled_author(
-                            authors_by_family,
-                            fallback[0].family.lower().strip(),
-                            fallback[0],
-                        )
-                        harvested += 1
+                        # Elimination with no surname evidence at all: only an
+                        # explicitly paired address, a correspondence marker in
+                        # the email's own window, or a name-matching address.
+                        candidate = fallback[0]
+                        if (
+                            email.lower() in strict_emails
+                            or window_has_marker
+                            or _email_name_affinity(
+                                candidate.given, candidate.family, local_compact
+                            )
+                        ):
+                            candidate.email = email
+                            claimed_emails.add(email.lower())
+                            _drop_filled_author(
+                                authors_by_family,
+                                candidate.family.lower().strip(),
+                                candidate,
+                            )
+                            harvested += 1
 
                 if not authors_by_family:
                     break

@@ -245,3 +245,157 @@ def test_single_author_without_email_stays_unflagged():
     authors = [PaperAuthor(author_id=1, given="A", family="One", affiliation="x")]
     AuthorEmailHarvester(contents).harvest(authors)
     assert authors[0].corresponding is False
+
+
+def test_unrelated_earlier_email_does_not_block_real_one():
+    """extract-metadata-8: an editorial-office address printed before the
+    corresponding author's own marker-anchored address must not be handed to
+    them (by surname-window proximity), blocking the real one."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "Editorial office: editor@appliedthings.org",
+            "Filler sentence one.",
+            "Filler sentence two.",
+            "Corresponding author: Jane Doe, jane.doe@uni.edu",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jane.doe@uni.edu"
+    assert jane.corresponding is True
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_elimination_fallback_needs_marker_or_name_match():
+    """extract-metadata-8: with no surname near any email (wide gap), the pure
+    elimination fallback must not hand an unrelated address to the single
+    corresponding author."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Editorial office: editor@appliedthings.org",
+            "Filler one.",
+            "Filler two.",
+            "Filler three.",
+            "Filler four.",
+            "Filler five.",
+            "Filler six.",
+            "Jane Doe and John Roe",
+            "Filler seven.",
+            "Filler eight.",
+            "Filler nine.",
+            "Filler ten.",
+            "Corresponding author: Jane Doe, jane.doe@uni.edu",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    jane = next(a for a in authors if a.family == "Doe")
+    assert jane.email == "jane.doe@uni.edu"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_fallback_with_marker_still_assigns_opaque_address():
+    """The elimination fallback keeps working for a marker-anchored address
+    whose local part names nobody (e.g. a lab contact next to the
+    'Corresponding author' line, far from every surname)."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Filler one.",
+            "Filler two.",
+            "Filler three.",
+            "Filler four.",
+            "Corresponding author.",
+            "Contact the lab at contact@lab.org for reagents.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X", corresponding=True),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Doe").email == "contact@lab.org"
+
+
+def test_given_name_affinity_assigns_without_marker():
+    """A diminutive local part ('bathri' for Bathrinath) licenses the address
+    even with no correspondence marker anywhere nearby."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Bathrinath Sankaranarayanan and John Roe",
+            "Department of X",
+            "Filler sentence one.",
+            "Dr. S. Bathrinath can be contacted at bathri@gmail.com for samples.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Bathrinath", family="Sankaranarayanan", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Sankaranarayanan").email == "bathri@gmail.com"
+    assert next(a for a in authors if a.family == "Roe").email in (None, "")
+
+
+def test_same_sentence_pairing_still_assigns_opaque_address():
+    """An address printed in the same sentence as the surname keeps the
+    historical pairing behaviour (no marker, no name match)."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "Jane Doe, contact@lab.org, provided the samples.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert next(a for a in authors if a.family == "Doe").email == "contact@lab.org"
+    assert next(a for a in authors if a.family == "Doe").corresponding is False
+
+
+def test_distant_opaque_email_without_marker_is_dropped():
+    """Window proximity alone (surname nearby, nothing else) no longer
+    licenses an opaque address — it is left unassigned, not misassigned."""
+    from bibr.extract.author_email_harvester import AuthorEmailHarvester
+
+    contents = _make_contents_with_text(
+        [
+            "Jane Doe and John Roe",
+            "Department of X",
+            "The reagents came from contact@lab.org in a previous study.",
+        ]
+    )
+    authors = [
+        PaperAuthor(author_id=1, given="Jane", family="Doe", affiliation="X"),
+        PaperAuthor(author_id=2, given="John", family="Roe", affiliation="X"),
+    ]
+    AuthorEmailHarvester(contents).harvest(authors)
+
+    assert all(a.email in (None, "") for a in authors)

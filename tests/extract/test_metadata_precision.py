@@ -154,6 +154,42 @@ def test_date_evidence_and_ambiguity(printed, expected):
 
 
 @pytest.mark.parametrize(
+    "boilerplate",
+    [
+        "Published by Elsevier Ltd.",
+        "Published under a CC BY 4.0 license.",
+        "Published in partnership with the Society.",
+        "Published as part of the proceedings.",
+    ],
+)
+@pytest.mark.parametrize("position", ["before", "after"])
+def test_publisher_boilerplate_does_not_block_refinement(boilerplate, position):
+    """extract-metadata-15: 'Published by/under/...' carries no date, so it
+    must not veto refinement from a labelled date elsewhere in the block."""
+    from bibr.extract.metadata_precision import refine_publication_date
+
+    history = "Received: 2 January 2021 / Accepted: 1 March 2021 / Published online: 12 March 2021"
+    source = f"{boilerplate}\n{history}" if position == "before" else f"{history}\n{boilerplate}"
+    assert refine_publication_date("2021-03", source) == "2021-03-12"
+
+
+def test_boilerplate_alone_leaves_date_unchanged():
+    """Boilerplate with no labelled date anywhere refines nothing."""
+    from bibr.extract.metadata_precision import refine_publication_date
+
+    assert refine_publication_date("2021-03", "Published by Elsevier Ltd.") == "2021-03"
+
+
+def test_unparseable_date_like_tail_still_blocks_refinement():
+    """A date-like tail that fails to parse ('31 April') stays ambiguous even
+    when a valid labelled date follows — only non-date boilerplate is skipped."""
+    from bibr.extract.metadata_precision import refine_publication_date
+
+    source = "Published: 31 April 2020\nPublished online: 11 April 2020"
+    assert refine_publication_date("2020", source) == "2020"
+
+
+@pytest.mark.parametrize(
     "published, expected",
     [
         (None, None),

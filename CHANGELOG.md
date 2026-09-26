@@ -341,6 +341,43 @@ released.
   no re-scoring. Full printed names (`authors_fullname_f1`) were already its
   primary author metric in 0.5.0, with family-name-only `authors_f1` as a
   diagnostic.
+- The author-email harvester no longer hands an unrelated nearby address to an
+  author with no email. A proximity candidate is assigned only when the address
+  sits on a correspondence-marker line, its local part names the author
+  (family or given token, covering forms like `bathri@` for Bathrinath), or
+  the surname is printed in the same sentence; the single-corresponding-author
+  elimination fallback additionally accepts a correspondence marker in the
+  window. An editorial-office address printed before the real corresponding
+  address is now skipped, leaving the author empty for their own address
+  instead of consuming them with someone else's. Opaque addresses with no
+  textual link to any name (initials, numbers, transliterations the harvester
+  cannot match) are left empty rather than guessed.
+- A `Published by ...` / `Published under ...` line no longer blocks
+  publication-date refinement for the whole record. Those tails carry no date,
+  so the label is skipped and scanning continues; only a date-like tail that
+  fails to parse still marks the record ambiguous. A history label mid-line
+  after prose is still ignored, and already-full dates are untouched.
+- The trained paper classifier no longer runs on an empty title+abstract. With
+  no signal the model returns a training-prior artifact, so classification now
+  returns `None` and the caller takes the LLM path with the full
+  classification text. Seven gate192 papers have an empty title+abstract in
+  their exports and take that path.
+- Bare OECD L1 short forms an LLM may return now validate: `Humanities`,
+  `Engineering`, `Medicine`, `Agriculture` (plus `Agricultural Sciences` and
+  `Medical Sciences`) canonicalize through the shared token-set matcher and a
+  two-entry synonym map, instead of dropping to empty. Every other label
+  string observed in the gate192 exports maps exactly as before.
+- Equation cross-references no longer fire on unit spellings or software
+  names. A hyphen before the word kills `CO2-eq.` matches, a `%` directly
+  trailing the number kills shares like `eq. (39.1%)`, and an all-caps short
+  form without a period followed by a dotted number (`EQS 6.1`, the SEM
+  package) is dropped as a version string. Bare printed forms (`eq 5`,
+  `eqs 4 and 8`, `Eq (1)`) and dotted ids (`Eq. (2.3)`) still match. Of the
+  distinct equation/section contents in the gate192 exports, only `EQS 6.1`
+  stops emitting; equation/section recall on the JATS corpora is unchanged.
+  Per-number expansion of ranges (`Eqs. 1-5` stays five rows) and the
+  first-number-only section rows are untouched, as is the reversed-range
+  policy (`5-3` yields no rows), which is now documented on `_expand_nums`.
 
 ### Added
 

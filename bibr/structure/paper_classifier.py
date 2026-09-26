@@ -19,6 +19,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 
 from bibr.config import GlobalSettings, snapshot_settings
+from bibr.structure.paper_classifier_common import _build_input_text
 from bibr.utils.locks import LOCAL_INFERENCE_LOCK
 
 if TYPE_CHECKING:
@@ -54,6 +55,16 @@ OECD_L1_LABELS = [
     "Social Sciences",
     "Humanities and the Arts",
 ]
+
+# Bare short forms with no usable token overlap against their canonical L1
+# label. Keyed by casefolded input; consulted by validate_oecd_l1 before
+# fuzzy scoring ('Medicine' token-matches nothing in 'Medical and Health
+# Sciences', and 'Agriculture' nothing in 'Agricultural and Veterinary
+# Sciences').
+_OECD_L1_SYNONYMS = {
+    "medicine": "Medical and Health Sciences",
+    "agriculture": "Agricultural and Veterinary Sciences",
+}
 
 OECD_L2_MAP: dict[str, list[str]] = {
     "Natural Sciences": [
@@ -195,8 +206,11 @@ PaperTypeLiteral = Literal[
 def validate_oecd_l1(raw: str | None) -> str:
     """Validate and canonicalize an LLM-returned OECD L1 label.
 
-    Tries exact match first, then fuzzy matching via rapidfuzz.
-    Returns the canonical label or "" if no match.
+    Tries exact match first, then a small synonym map for bare short forms
+    ('Medicine', 'Agriculture'), then fuzzy matching via rapidfuzz
+    (token_set_ratio with a runner-up margin, shared with the L2 matcher so
+    subset phrases like 'Humanities' resolve). Returns the canonical label
+    or "" if no match.
     """
     if not raw or not raw.strip():
         return ""
@@ -213,22 +227,16 @@ def validate_oecd_l1(raw: str | None) -> str:
         if label.lower() == raw_lower:
             return label
 
-    # Fuzzy fallback
-    from rapidfuzz import fuzz
+    # Bare short forms share no usable token overlap with their multi-word
+    # canonical labels ('Medicine' vs 'Medical and Health Sciences'), so map
+    # them explicitly before fuzzy scoring.
+    synonym = _OECD_L1_SYNONYMS.get(raw_lower)
+    if synonym is not None:
+        return synonym
 
-    best_score = 0.0
-    best_label = ""
-    for label in OECD_L1_LABELS:
-        score = fuzz.ratio(raw_stripped, label)
-        if score > best_score:
-            best_score = score
-            best_label = label
-
-    if best_score >= 80:
-        logger.debug(
-            "Fuzzy-matched OECD L1 '%s' → '%s' (score=%.1f)", raw_stripped, best_label, best_score
-        )
-        return best_label
+    result = _match_l2_label(raw_stripped, OECD_L1_LABELS)
+    if result:
+        return result
 
     logger.warning("Could not match OECD L1 label '%s' to any known domain", raw_stripped)
     return ""
@@ -436,7 +444,15 @@ async def classify_paper_async(
     caller to fall back to the existing LLM classification path. The forward
     pass is a synchronous PyTorch call, offloaded to a thread (under the shared
     inference lock) so the async caller stays non-blocking.
+
+    An empty title+abstract carries no signal — the model would return a
+    training-prior artifact — so return ``None`` without running it and let
+    the caller take the LLM path with the full classification text.
     """
+    if not _build_input_text(title, abstract):
+        logger.info("Skipping trained paper classifier on empty title+abstract; using LLM fallback")
+        return None
+
     if classifier_resources is not None:
         prediction = await classifier_resources.classify_paper((title, abstract))
         if prediction is None:
