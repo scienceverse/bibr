@@ -76,13 +76,23 @@ uv run python -m evaluation.evaluate \
     --gold-dirs /path/to/gold
 ```
 
+A `bibr batch --out` directory works as `--results-dir` too. The evaluator
+reads every `*.json` file in it except `run_info.json`, the batch's own run
+record, and `validation_report.json`. They are not scored, not listed as
+predictions and not part of `predictions_tree_sha256`. The batch's other
+records (`outcomes.jsonl`, `runs.jsonl`, `tables/`) are not `*.json` files.
+
 ## Metrics reference
 
 Metric scores are in [0, 1], with higher being better. A metric can be `null`
 when gold provides nothing to score; those entries are excluded from its mean.
-The current definitions are **`metrics_version: 4`**, recorded in every saved
-evaluation. Re-score predictions when definitions change rather than comparing
-means from different versions.
+The current definitions are **`metrics_version: 5`**, recorded in every saved
+evaluation, including section-text results. Re-score predictions when
+definitions change rather than comparing means from different versions:
+scores with `metrics_version` 4 and 5 do not compare. Version 5 skips a batch's
+`run_info.json`, counts the gold references of a paper with no matched pair
+carrying a field as misses in the micro-averaged reference scores, and
+tokenizes section text in every script (see below).
 
 ### Title
 
@@ -138,6 +148,13 @@ Per-author front-matter fields (`affiliation_sim`, `email_f1`, `orcid_f1`, `corr
     include field coverage, counts, and micro-averaged scores to make these
     denominators visible.
 
+A paper whose gold references carry a field but whose matched pairs do not, for
+example because extraction lost the bibliography, scores 0.0 on that `ref_*_acc`
+metric. The micro average (`micro_mean`, `micro_correct`, `micro_denominator`)
+counts that paper's gold references with the field as misses, so it does not
+leave out the papers the mean scores lowest. A paper whose gold lacks the field
+is null and counts in neither.
+
 ## Output format
 
 `--output` writes a JSON artifact containing:
@@ -181,6 +198,13 @@ uv run python -m evaluation.evaluate \
 This mode emits section recall, coverage, and a drop report. It has a separate
 output shape from metadata scoring, and returns before the metadata
 `--threshold` gate. Per-type section recall is diagnostic.
+
+Recall and precision count tokens. Section text is casefolded and NFKD
+normalized, diacritics are removed from Latin letters, and the text is split
+on runs of non-word characters (`[\W_]+`), so letters and digits of every
+script count. "Straße" is one token, and combining marks on letters of other
+scripts stay inside their word. Scripts written without spaces between words
+(Han, hiragana and katakana, Thai) give one token per character.
 
 ## Interpreting results
 
