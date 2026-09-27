@@ -1404,6 +1404,24 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
 
 ### Changed
 
