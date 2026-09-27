@@ -11,6 +11,8 @@ import pytest
         ({"cuda_available": False}, "cpu"),
         ({"free_vram_bytes": 3_000, "estimated_peak_bytes": 2_000}, "cpu"),
         ({"free_vram_bytes": 9_000, "estimated_peak_bytes": 2_000}, "cuda"),
+        # A classifier already placed comes off the headroom of the next one.
+        ({"placed_vram_bytes": 3_000}, "cpu"),
     ],
 )
 def test_choose_classifier_device(kwargs, expected):
@@ -183,3 +185,195 @@ async def test_unconfigured_resource_returns_none_without_loading():
     assert await resources.classify_paper("x") is None
     await resources.close()
     assert resources.status()["paper"].state is ClassifierState.CLOSED
+
+
+# --- VRAM budget across both classifiers and managed servers (pipeline-core-6) ---
+
+_GIB = 1024**3
+
+
+def _recorder(devices, name):
+    """A loader that records the device it was given instead of loading a model."""
+
+    def load(model_id, revision, device, settings=None):
+        devices[name] = device
+        return _Model(name)
+
+    return load
+
+
+def _recording_loaders(monkeypatch, devices):
+    import bibr.pipeline.classifier_resources as cr
+
+    monkeypatch.setattr(cr, "_load_paper_model", _recorder(devices, "paper"))
+    monkeypatch.setattr(cr, "_load_section_model", _recorder(devices, "section"))
+    monkeypatch.setattr(cr, "_peak_vram_bytes", lambda device: None)
+
+
+def _default_peaks_settings(*, paper_device=None):
+    """The shipped peak estimates and safety reserve (1536 / 512 / 2048 MiB)."""
+    from bibr.config import MlOptions
+
+    fields = MlOptions.model_fields
+    settings = _settings()
+    settings.ml.paper_classifier_device = paper_device
+    for name in (
+        "paper_classifier_estimated_peak_mb",
+        "section_classifier_estimated_peak_mb",
+        "classifier_vram_safety_reserve_mb",
+    ):
+        setattr(settings.ml, name, fields[name].default)
+    return settings
+
+
+async def _placed(monkeypatch, settings, *, fraction, free_gib, total_gib):
+    from bibr.pipeline.classifier_resources import ClassifierResources
+
+    monkeypatch.setattr("bibr.pipeline.classifier_resources._peak_vram_bytes", lambda device: None)
+    devices = {}
+    resources = ClassifierResources(
+        settings,
+        memory_mode="balanced",
+        managed_vllm_fraction=fraction,
+        cuda_available=True,
+        free_vram_bytes=int(free_gib * _GIB),
+        total_vram_bytes=int(total_gib * _GIB),
+        paper_loader=_recorder(devices, "paper"),
+        section_loader=_recorder(devices, "section"),
+    )
+    try:
+        await resources.start()
+    finally:
+        await resources.close()
+    return devices
+
+
+async def test_second_classifier_budgets_for_the_first(monkeypatch):
+    """24 GB GPU, local vLLM LLM at 0.85: 1638 MiB usable after the reserve.
+
+    Each model fit alone, so both went to CUDA (2048 MiB together) and ate
+    into the reserve kept for vLLM. The section model now sees what the paper
+    model already took and goes to CPU.
+    """
+    devices = await _placed(
+        monkeypatch, _default_peaks_settings(), fraction=0.85, free_gib=20, total_gib=24
+    )
+    assert devices == {"paper": "cuda", "section": "cpu"}
+
+
+async def test_explicit_device_wins_and_counts_toward_the_budget(monkeypatch):
+    devices = await _placed(
+        monkeypatch,
+        _default_peaks_settings(paper_device="cuda"),
+        fraction=0.85,
+        free_gib=20,
+        total_gib=24,
+    )
+    assert devices == {"paper": "cuda", "section": "cpu"}
+
+
+def _pipeline_devices(monkeypatch, *, free_gib, total_gib, **pipeline_kwargs):
+    """Build a LocalPipeline and start its classifiers against a fake GPU."""
+    import asyncio
+
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import LocalPipeline
+
+    devices = {}
+    _recording_loaders(monkeypatch, devices)
+    monkeypatch.setattr(
+        "bibr.pipeline.classifier_resources._cuda_memory_info",
+        lambda: (True, int(free_gib * _GIB), int(total_gib * _GIB)),
+    )
+    settings = GlobalSettings()
+    # The suite blanks the model ids so nothing downloads; the loaders are fakes.
+    settings.ml.paper_classifier_model_id = "paper/model"
+    settings.ml.section_classifier_model_id = "section/model"
+    pipe = LocalPipeline(memory_mode="balanced", settings=settings, **pipeline_kwargs)
+
+    async def start():
+        try:
+            await pipe._resources.start_classifiers()
+        finally:
+            await pipe._resources.close_classifiers()
+
+    asyncio.run(start())
+    return pipe, devices
+
+
+def _pin_linux_x86(monkeypatch, *, vram_gb):
+    import platform
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: vram_gb)
+
+
+@pytest.mark.parametrize("ocr_backend", ["paddle-vllm", "paddle"])
+def test_classifiers_leave_room_for_managed_paddle_vllm_ocr(monkeypatch, ocr_backend):
+    """Cloud LLM + managed Paddle OCR vLLM on a 24 GB GPU.
+
+    The streaming plan loads the classifiers before OCR starts; with a cloud
+    LLM nothing was reserved, so both went to CUDA and vLLM's 92% claim then
+    found the memory gone. Both now go to CPU (same results, slower).
+    """
+    _pin_linux_x86(monkeypatch, vram_gb=24.0)
+    _, devices = _pipeline_devices(
+        monkeypatch, free_gib=22, total_gib=24, llm_backend="cloud", ocr_backend=ocr_backend
+    )
+    assert devices == {"paper": "cpu", "section": "cpu"}
+
+
+def test_local_vllm_llm_keeps_its_own_fraction_beside_paddle_vllm(monkeypatch):
+    """The OCR claim only widens the classifier reserve, not the LLM launch."""
+    _pin_linux_x86(monkeypatch, vram_gb=80.0)
+    pipe, devices = _pipeline_devices(
+        monkeypatch, free_gib=78, total_gib=80, llm_backend="vllm", ocr_backend="paddle-vllm"
+    )
+    assert pipe._resources._managed_vllm_fraction == pipe._settings.llm.local_mem_fraction
+    assert pipe._resources.classifiers._managed_vllm_fraction == 0.92
+    # 8% of 80 GiB minus the 2 GiB reserve still holds both models.
+    assert devices == {"paper": "cuda", "section": "cuda"}
+
+
+@pytest.mark.parametrize(
+    ("pipeline_kwargs", "vram_gb"),
+    [
+        # Remote OCR, cloud LLM: no managed GPU server at all.
+        ({"ocr_url": "http://127.0.0.1:9/v1"}, 24.0),
+        # A small GPU: the automatic chain skips paddle-vllm (llama.cpp OCR).
+        ({"ocr_backend": "paddle"}, 6.0),
+    ],
+)
+def test_free_gpu_without_managed_vllm_keeps_both_on_cuda(monkeypatch, pipeline_kwargs, vram_gb):
+    _pin_linux_x86(monkeypatch, vram_gb=vram_gb)
+    _, devices = _pipeline_devices(
+        monkeypatch,
+        free_gib=vram_gb - 1,
+        total_gib=vram_gb,
+        llm_backend="cloud",
+        **pipeline_kwargs,
+    )
+    assert devices == {"paper": "cuda", "section": "cuda"}
+
+
+@pytest.mark.parametrize(
+    ("llm_backend", "llm_fraction", "ocr_backend", "expected"),
+    [
+        ("cloud", 0.85, "paddle-vllm", 0.92),
+        ("cloud", 0.85, "glm-http", 0.0),
+        ("cloud", 0.85, "glm-llama", 0.0),
+        ("vllm", 0.85, "glm-llama", 0.85),
+        # 0.85 + 0.92 cannot both be up on one GPU: whichever is up is the bound.
+        ("vllm", 0.85, "paddle-vllm", 0.92),
+        # Shares that fit together can be up at once (keep_all, later chunks).
+        ("vllm", 0.05, "paddle-vllm", 0.97),
+    ],
+)
+def test_managed_gpu_fraction(llm_backend, llm_fraction, ocr_backend, expected):
+    from bibr.config import GlobalSettings
+    from bibr.local.pipeline import _managed_gpu_fraction
+
+    settings = GlobalSettings()
+    settings.llm.local_mem_fraction = llm_fraction
+    assert _managed_gpu_fraction(llm_backend, ocr_backend, settings) == pytest.approx(expected)

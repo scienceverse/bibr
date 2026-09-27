@@ -213,6 +213,19 @@ released.
 
 ### Fixed
 
+- The local paper and section classifiers no longer take the GPU memory a
+  managed vLLM server needs. Free VRAM was measured once and each model was
+  checked against it alone, so both could land on CUDA when only one fit; the
+  second model's check now subtracts what the first one took. The check also
+  left nothing for the managed PaddleOCR-VL vLLM server, which claims 92% of
+  the GPU and, with a cloud LLM, starts after the classifiers have loaded, so
+  on a 24 GB card the classifiers took its room and OCR could fail to start.
+  The picker now keeps free what the managed vLLM servers the run may start
+  claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
+  both when they fit on the GPU together, else the larger), and a classifier
+  that does not fit beside that and the safety reserve runs on CPU, with the
+  same results, only slower.
+  `ML_PAPER_CLASSIFIER_DEVICE` and `ML_SECTION_CLASSIFIER_DEVICE` still win.
 - JATS input keeps the paper's structure instead of flattening it. References
   accumulate across every `<ref-list>` with one continuous counter: a later
   'Methods references' list extends the main bibliography instead of replacing

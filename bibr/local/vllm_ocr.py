@@ -18,7 +18,7 @@ from typing import ClassVar
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
 from bibr.local.ocr import PaddleHttpOcrClient
-from bibr.ocr.registry import register
+from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, register
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class VllmOcrServer:
                 "--served-model-name",
                 self._served_model,
                 "--gpu-memory-utilization",
-                "0.92",
+                str(PADDLE_VLLM_GPU_MEMORY_UTILIZATION),
                 "--max-model-len",
                 "16384",
                 "--max-num-seqs",

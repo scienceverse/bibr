@@ -43,8 +43,15 @@ def choose_classifier_device(
     managed_vllm_fraction: float,
     estimated_peak_bytes: int,
     safety_reserve_bytes: int,
+    placed_vram_bytes: int = 0,
 ) -> str:
-    """Choose CUDA only when classifier and reserve fit after vLLM allocation."""
+    """Choose CUDA only when classifier and reserve fit after vLLM allocation.
+
+    ``managed_vllm_fraction`` is the share of total VRAM the managed vLLM
+    servers of this run claim. ``placed_vram_bytes`` is the estimated
+    peak of classifiers already put on the device since ``free_vram_bytes``
+    was measured; it comes off the headroom before this model is placed.
+    """
     if explicit_device:
         return explicit_device
     if memory_mode == "aggressive" or not cuda_available:
@@ -52,7 +59,7 @@ def choose_classifier_device(
     if free_vram_bytes is None or total_vram_bytes is None:
         return "cpu"
     post_vllm_capacity = int(total_vram_bytes * max(0.0, 1.0 - managed_vllm_fraction))
-    usable = min(free_vram_bytes, post_vllm_capacity) - safety_reserve_bytes
+    usable = min(free_vram_bytes, post_vllm_capacity) - safety_reserve_bytes - placed_vram_bytes
     return "cuda" if usable > estimated_peak_bytes else "cpu"
 
 
@@ -131,8 +138,13 @@ class ClassifierResources:
                     self._free_vram_bytes,
                     self._total_vram_bytes,
                 ) = await asyncio.to_thread(_cuda_memory_info)
-            await self._start_one(self._paper)
-            await self._start_one(self._section)
+            # Free VRAM is measured once, before either model loads, so each
+            # model loaded on that device comes off the budget of the next.
+            placed = 0
+            for resource in (self._paper, self._section):
+                await self._start_one(resource, placed_vram_bytes=placed)
+                if resource.model is not None and _on_measured_device(resource.status.device):
+                    placed += resource.estimated_peak_bytes
             self._started = True
 
     async def classify_paper(self, item):
@@ -169,7 +181,7 @@ class ClassifierResources:
             resource.model = None
             resource.status = ClassifierStatus(ClassifierState.CLOSED, resource.status.device)
 
-    async def _start_one(self, resource: _ManagedClassifier) -> None:
+    async def _start_one(self, resource: _ManagedClassifier, *, placed_vram_bytes: int) -> None:
         if not resource.model_id:
             resource.status = ClassifierStatus(ClassifierState.UNCONFIGURED)
             return
@@ -182,6 +194,7 @@ class ClassifierResources:
             managed_vllm_fraction=self._managed_vllm_fraction,
             estimated_peak_bytes=resource.estimated_peak_bytes,
             safety_reserve_bytes=self._settings.ml.classifier_vram_safety_reserve_mb * _MIB,
+            placed_vram_bytes=placed_vram_bytes,
         )
         resource.status = ClassifierStatus(ClassifierState.LOADING, device)
         try:
@@ -212,6 +225,11 @@ def _locked_load(loader, model_id: str, revision: str, device: str):
 def _locked_forward(model, items):
     with LOCAL_INFERENCE_LOCK:
         return model.classify_batch(items)
+
+
+def _on_measured_device(device: str | None) -> bool:
+    """Whether ``device`` is the GPU ``_cuda_memory_info`` measured (the default one)."""
+    return device in ("cuda", "cuda:0")
 
 
 def _safe_error(exc: Exception) -> str:
