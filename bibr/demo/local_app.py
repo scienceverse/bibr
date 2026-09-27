@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 _MAX_FILE_SIZE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
 _MAX_FILE_SIZE_BYTES = _MAX_FILE_SIZE_MB * 1024 * 1024
 
+# Uploaded papers and the JSON downloads made from them are deleted once they
+# are this old, and all of them when the server stops.
+_DEFAULT_CACHE_TTL_SECONDS = 3600
+# Gradio looks for files to delete this often (or every TTL, when that is
+# shorter), so a file lives at most its TTL plus this long.
+_CACHE_SWEEP_SECONDS = 300
+
 _ALLOWED_EXTENSIONS: list[str] = sorted(SUPPORTED_EXTENSIONS)
 
 _TABLE_SCROLL_CSS = """\
@@ -190,16 +197,49 @@ def _parse_json_response(paper_json: dict) -> dict:
     }
 
 
+def _cache_lifetime() -> tuple[int, int] | None:
+    """Gradio ``delete_cache`` (frequency, age) from ``DEMO_CACHE_TTL_SECONDS``.
+
+    Files are deleted once they are ``ttl`` seconds old, checked every
+    ``_CACHE_SWEEP_SECONDS`` (or every ``ttl`` when shorter). ``0`` keeps them
+    and returns None. Any other value that is not a positive whole number of
+    seconds raises ValueError, so a typo cannot silently keep every file.
+    """
+    raw = os.environ.get("DEMO_CACHE_TTL_SECONDS", str(_DEFAULT_CACHE_TTL_SECONDS))
+    try:
+        ttl = int(raw)
+        if ttl < 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError(
+            "DEMO_CACHE_TTL_SECONDS must be a whole number of seconds, "
+            f"or 0 to keep uploads and downloads; got {raw!r}"
+        ) from None
+    if ttl == 0:
+        return None
+    return (min(ttl, _CACHE_SWEEP_SECONDS), ttl)
+
+
 def _write_json_file(paper_json: dict, suffix: str = "") -> str:
     """Serialize the full bibr JSON to a temp file, named after the DOI/title.
 
     Returns the path so a DownloadButton can serve it; the basename becomes the
     downloaded filename. ``suffix`` disambiguates variants (e.g. no-images).
+
+    The file is written inside Gradio's temp folder, so Gradio serves it in
+    place and deletes it with the uploads (``DEMO_CACHE_TTL_SECONDS``). A file
+    outside it would be copied in, and the original never deleted. Gradio
+    removes only the file, not its empty ``bibr_json_*`` folder; the tester
+    guide describes a sweep for a hosted demo.
     """
+    from gradio.utils import get_upload_folder
+
     metadata = paper_json.get("metadata", {}) or {}
     slug = metadata.get("doi") or metadata.get("title") or "bibr"
     slug = re.sub(r"[^A-Za-z0-9._-]+", "_", str(slug)).strip("_")[:60] or "bibr"
-    tmpdir = tempfile.mkdtemp(prefix="bibr_json_")
+    upload_folder = get_upload_folder()
+    os.makedirs(upload_folder, exist_ok=True)
+    tmpdir = tempfile.mkdtemp(prefix="bibr_json_", dir=upload_folder)
     path = os.path.join(tmpdir, f"{slug}{suffix}.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(paper_json, fh, indent=2, ensure_ascii=False)
@@ -221,26 +261,43 @@ def _strip_figure_images(paper_json: dict) -> dict:
     return stripped
 
 
+# ``:`` and ``@`` stop GFM autolinks (bare URLs and email addresses), ``$``
+# stops gr.Markdown's ``$$`` LaTeX delimiter.
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|>~:@$])")
+
+
+def _md_text(value: object) -> str:
+    """Show extracted text literally in Markdown: no HTML, links, images or emphasis.
+
+    Titles and keywords come from the uploaded document, so a crafted PDF could
+    otherwise make the viewer's browser load an outside image or follow a link.
+    Quotes are left as they are: the ``#`` of an entity such as ``&#x27;``
+    would be escaped, and the entity shown literally.
+    """
+    flat = " ".join(str(value).split())
+    return _MD_SPECIAL.sub(r"\\\1", _esc(flat, quote=False))
+
+
 def _build_summary_md(result: dict) -> str:
     """Build a markdown summary card from the API result dict."""
     meta = result.get("metadata", {})
     lines = []
-    lines.append(f"### {meta.get('title') or '(untitled)'}")
+    lines.append(f"### {_md_text(meta.get('title') or '(untitled)')}")
     if meta.get("doi"):
-        lines.append(f"**DOI:** `{meta['doi']}`")
+        lines.append(f"**DOI:** {_md_text(meta['doi'])}")
     if meta.get("paper_type"):
         conf = (
             f" ({meta['paper_type_confidence']:.2f})" if meta.get("paper_type_confidence") else ""
         )
-        lines.append(f"**Paper type:** {meta['paper_type']}{conf}")
+        lines.append(f"**Paper type:** {_md_text(meta['paper_type'])}{conf}")
     if meta.get("oecd_l1"):
-        domain = meta["oecd_l1"]
+        domain = _md_text(meta["oecd_l1"])
         if meta.get("oecd_l2"):
-            domain += f" > {meta['oecd_l2']}"
+            domain += f" > {_md_text(meta['oecd_l2'])}"
         conf = f" ({meta['oecd_confidence']:.2f})" if meta.get("oecd_confidence") else ""
         lines.append(f"**OECD domain:** {domain}{conf}")
     if meta.get("keywords"):
-        lines.append(f"**Keywords:** {', '.join(meta['keywords'])}")
+        lines.append(f"**Keywords:** {', '.join(_md_text(k) for k in meta['keywords'])}")
     authors = result.get("authors", [])
     refs = result.get("bib", [])
     sections = result.get("sections", [])
@@ -624,12 +681,16 @@ def create_local_demo(
     from bibr.local.cli import normalize_ocr_backend
     from bibr.local.pipeline import LocalPipeline
 
+    # Read first, so a bad DEMO_CACHE_TTL_SECONDS fails before models load.
+    cache_lifetime = _cache_lifetime()
     ocr_backend = normalize_ocr_backend(ocr_backend)
 
-    if "ocr" not in Settings.cache.model_fields_set:
+    if cache_lifetime is None and "ocr" not in Settings.cache.model_fields_set:
         # Demo users repeatedly re-run the same PDF while poking at the UI;
         # skipping OCR inference on repeat runs is a better default here than
         # in the batch pipeline, where silently caching results is unwanted.
+        # Only when the demo keeps its files: the cache keeps each paper's OCR
+        # text with no expiry, so a demo that deletes uploads leaves it off.
         Settings.cache.ocr = True
         logger.info("Local demo — enabling OCR disk cache (CACHE_OCR) by default")
 
@@ -671,7 +732,7 @@ def create_local_demo(
         getattr(pipeline_state["pipeline"], "llm_backend", llm_backend or Settings.llm.backend),
     )
 
-    with gr.Blocks(title="bibr 🦫 Demo") as demo:
+    with gr.Blocks(title="bibr 🦫 Demo", delete_cache=cache_lifetime) as demo:
         gr.Markdown(_HEADER_MD)
         status_display = gr.Markdown(status_md)
 

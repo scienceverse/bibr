@@ -306,6 +306,7 @@ def test_ocr_options_default_to_paddle_profile_settings():
     assert ocr.paddle_mlx_startup_timeout == 600
     assert ocr.paddle_mlx_extra_args == ""
     assert ocr.paddle_rapid_mlx_model == "olragon/PaddleOCR-VL-1.6-8bit"
+    assert ocr.paddle_rapid_mlx_extra_args == ""
 
 
 def test_unknown_ocr_alias_requires_explicit_profile(monkeypatch):

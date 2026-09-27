@@ -270,6 +270,116 @@ released.
 
 ### Fixed
 
+- The local paper and section classifiers no longer take the GPU memory a
+  managed vLLM server needs. Free VRAM was measured once and each model was
+  checked against it alone, so both could land on CUDA when only one fit; the
+  second model's check now subtracts what the first one took. The check also
+  left nothing for the managed PaddleOCR-VL vLLM server, which claims 92% of
+  the GPU and, with a cloud LLM, starts after the classifiers have loaded, so
+  on a 24 GB card the classifiers took its room and OCR could fail to start.
+  The picker now keeps free what the managed vLLM servers the run may start
+  claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
+  both when they fit on the GPU together, else the larger), and a classifier
+  that does not fit beside that and the safety reserve runs on CPU, with the
+  same results, only slower. With automatic OCR on x86 Linux, a 24 GB card now
+  runs both classifiers on CPU. `ML_PAPER_CLASSIFIER_DEVICE` and
+  `ML_SECTION_CLASSIFIER_DEVICE` still win, and a model pinned to `cuda` that
+  way comes off the other model's budget.
+- JATS input keeps the paper's structure instead of flattening it. References
+  accumulate across every `<ref-list>` with one continuous counter: a later
+  'Methods references' list extends the main bibliography instead of replacing
+  it, nested Springer-style wrappers contribute their refs and rows, and a
+  `<ref-list>` that is a back `<sec>`'s substance reuses that section while
+  one nested in other prose opens its own references section. An
+  `<alternatives>` emits one representation — MathML when present, else the
+  TeX body without its document preamble — and the same trim applies to a bare
+  `<tex-math>`, so LaTeX preambles no longer pollute sentences. Figures,
+  tables and display formulas nested inside `<p>` are registered as figures,
+  tables and formulas instead of being merged into the paragraph text, with
+  captions, table footnotes and every grid of a multi-table wrap kept, and an
+  article- or back-level `<floats-group>` is walked the same way. Body
+  `<boxed-text>`, `<fig-group>` (including grouped eLife figures),
+  `<supplementary-material>` and `<list>` wrappers beside `<p>` are kept too,
+  with each wrapper heading and caption title emitted once and list and
+  footnote markers left out of the sentences. Back-matter `<notes>`,
+  appendices, glossaries and biographies become sections built from their
+  titles (data-availability notes typed as open-data, COI statements as
+  conflicts, financial disclosures as funding). Author affiliations resolve
+  multi-id `rid` references and shared group-level `<aff>` elements, never
+  inheriting an affiliation another group claims, and a consortium byline
+  appears once as an organization followed by its credited members. Body
+  `<ext-link>`/`<uri>` targets are recorded as links with their display text
+  (bare-DOI hrefs as `https://doi.org/` URLs; scheme-less accessions skipped),
+  each attributed by anchor offset to the sentence holding it, so a short
+  display text no longer lands on an earlier sentence that happens to contain
+  it. HTML and ePub `<a href>` anchors are attributed the same way, to the
+  sentence holding them rather than the paragraph's last sentence. Reference
+  rows prefer the printed `<mixed-citation>` text — every citation in the
+  `<ref>` — else the separated fields of an `<element-citation>`,
+  `<nlm-citation>` or `<citation>`, with the label kept apart and sibling
+  notes in document order; a note never replaces the citation.
+- Settings, presets and `config set` now go through one parser, so a preset
+  or written value behaves exactly like the same line in `.env`: comma and
+  JSON-array lists arrive parsed, `Literal`/case validators run, and the
+  Ollama RPM, OCR region and resolver-enrichment auto-tunes apply
+  (`BIBR_RESOLVER_URL` in a preset raises `enrich_concurrency` to 16, as in
+  `.env`). `bibr preset use` validates through the real settings model
+  before writing, and `chew --preset` / `batch --preset` and the demo
+  validate on apply; a preset that adds any failure beyond what the current
+  environment already reports — including model-level errors, alias
+  spellings and lowercase keys that never mention the preset's own key —
+  raises a `ConfigurationError` naming the preset file and the setting
+  instead of corrupting `.env` or crashing with a traceback (the error says
+  `Fix the preset file`), while a preset that is valid on its own still
+  applies when an unrelated setting is broken, and unknown preset keys
+  are still reported. `bibr preset show`/`diff`/`save`/`use`/`rm` with a bad
+  preset name (for example a name with a space or `..`) and `chew --preset`
+  with such a name now exit 1 with a message naming the preset instead of
+  printing a traceback.
+- `parse_env` (used by `preset save`/`diff`/`show`) now reads `.env` files
+  with the same dotenv parser the runtime uses, so inline comments, `export`
+  prefixes and quoted escapes no longer bake comment text or quote
+  characters into snapshot values. `merge_env` rewrites every duplicate
+  definition of a key (including `export KEY=` lines), so the runtime can no
+  longer read back an older duplicate. The `*_MAX_TOKENS` tuning knobs and
+  `JOBS_KEY_PREFIX` are no longer mistaken for secrets and excluded from
+  snapshots, while third-party secrets
+  (`AWS_SECRET_ACCESS_KEY`, `*_PASSWD`, `*_CREDENTIALS`, `*_KEY` and
+  friends) are still excluded and redacted.
+- `bibr config example --full` renders lists as comma values, `None`
+  defaults as `null`, and factory list defaults as their value, so every one
+  of its lines loads unchanged when uncommented. `BIBR_RESOLVER_SOURCES`
+  also accepts the JSON-array form the resolver itself parses. `bibr config
+  set` validates through the real settings model and attributes failures to
+  the key being set, so an unrelated invalid value no longer blocks the
+  write — including a value that is only valid together with `.env` context
+  (a private `OCR_BACKEND` with its `OCR_PROFILE` in `.env`); error messages
+  name the env var (alias spellings verbatim, so no more `OCR_OCR_LOCAL_GPUS`)
+  and malformed mappings name the setting instead of printing a
+  `SettingsError` traceback.
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written, and so is a closing tag with nothing left to close, such as
+  `[/tmp/x]` in an error message, which used to crash the command with a
+  `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that
@@ -567,6 +677,15 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -606,6 +725,21 @@ released.
   is bit-identical to the serial loop. The OOM batch-halving retry restores
   torch.compile padding afterwards instead of leaving it disabled.
 
+- Front matter no longer abstains (`VAL_METADATA_MULTI_ITEM`, no title, authors
+  or abstract) on a paper whose first pages print its record twice or whose
+  furniture starts a second block. Any second block with a byline, a DOI or
+  abstract text used to block selection, even a publisher cover page, a
+  repository landing page, a citation box, a translated title and abstract, an
+  email list, a date line or an "article info" sidebar. Where that check
+  abstains, bibr now compares what each block prints about its paper: the DOI
+  (exactly), the title, and for a title in another language or script the
+  authors' surnames (all of them, or at least two). It selects the paper's own
+  record when all records agree and prefers the article's title page over a
+  cover page or citation box. The selected block must print a byline, and the
+  parser's detected title must belong to the selected paper or a translation of
+  it. Records that disagree still abstain, and so does a DOI shared by two
+  different titles, so compiled abstract books and proceedings pages still fail
+  closed. Pages the old check resolved are selected exactly as before.
 - A failed LLM call now says how it failed. Every LLM task raised a bare
   `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
   answered all of them with 502, so a response truncated at the token limit
@@ -773,6 +907,24 @@ released.
   installed, because `uv run` reinstalls a missing one and its files would
   replace the GPU build's. When both packages are installed and the CPU build is
   the one loaded, bibr logs a warning once, with the command that fixes it.
+- `bibr doctor` now reports which ONNX Runtime build loads, CPU or GPU, and its
+  version. Before, it said nothing about it once torch was installed. When
+  `onnxruntime-gpu` is installed but the CPU build is the one loaded, the line
+  is a warning, and its hint gives the reinstall command.
+- After a GPU install, a `uv sync` without `--extra gpu` uninstalls
+  `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
+  `onnxruntime` stays installed, but its package is left empty or gone. An
+  empty package still imports, and the first ONNX model failed with an
+  `AttributeError`. A gone one raised an `ImportError` that suggested `pip
+  install onnxruntime`, which does nothing while the package counts as
+  installed. bibr now raises a `ConfigurationError` for an empty package, and
+  for an installed one that fails to import, an `ImportError` with the import
+  error. Both give the repair, `uv pip install --python <interpreter>
+  --reinstall-package onnxruntime onnxruntime==<version>` (a pinned pip
+  reinstall where pip manages the environment), and tell GPU users to repeat
+  the `onnxruntime-gpu` reinstall afterwards, since the repair writes the CPU
+  build. `bibr doctor` fails its ONNX Runtime line with the same command, and
+  names the import error when there is one.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
@@ -931,11 +1083,10 @@ released.
 - The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
   `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
   harness that are not part of this repository. The evaluator here,
-  `evaluation/evaluate.py`, records `metrics_version: 4`, as it did in 0.5.0 and
-  0.5.1. No metric definition has changed since v4, so saved v4 evaluations need
-  no re-scoring. Full printed names (`authors_fullname_f1`) were already its
-  primary author metric in 0.5.0, with family-name-only `authors_f1` as a
-  diagnostic.
+  `evaluation/evaluate.py`, recorded `metrics_version: 4` in 0.5.0 and 0.5.1,
+  and no definition changed after that until version 5 (see Changed). Full
+  printed names (`authors_fullname_f1`) were already its primary author metric
+  in 0.5.0, with family-name-only `authors_f1` as a diagnostic.
 - Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
   exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
   `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
@@ -1403,6 +1554,60 @@ released.
   (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
   untouched, as is the reversed-range policy (`5-3` yields no rows), which is
   now documented on `_expand_nums`.
+- `bibr setup` writes a retried cloud API key back to `.env` instead of
+  keeping it in memory. When the connection test failed and a different key
+  passed, setup finished "successfully" with the old key in the file, so the
+  next run failed the same way. The corrected key is merged unless the save
+  step was skipped, and a skipped save stays skipped.
+- `bibr setup` no longer runs `uv add` in a project it does not belong to.
+  From a source checkout it still uses `uv sync --inexact --extra=…`, and after
+  `uv add bibr` it still uses `uv add` — but only when bibr runs from that
+  project's own environment. Anywhere else it installs with
+  `uv pip install --python <the running interpreter>`, so the extras land in
+  the interpreter setup runs on instead of whichever `uv` happens to find.
+- `bibr setup --advanced` honours a step-1 ml decline in step 4. Declining
+  the `ml` extra used to install it anyway in step 4, without asking, and a
+  failed install exited before `.env` was written; now that decline stands
+  and step 4 prints a one-line hint with the command that adds it later.
+  Accepting `ml` in step 1 still installs it there.
+- The setup wizard no longer lets Rich markup in errors eat its own output.
+  Dynamic text (exceptions, `uv`/smoke-test detail) is escaped before
+  printing, so a hint such as `pip install 'bibr[torch]'` prints in full; a
+  startup failure caused by a `ConfigurationError` (which `chew()` reports
+  wrapped in a `ProcessingError`) prints once instead of twice.
+- `bibr setup` now offers the LLM connection test for the private-server
+  tier too, matching the cloud fallback: the URL, key and model were just
+  collected either way.
+- `bibr batch` re-downloads a finished result that fails to download
+  instead of re-submitting the paper. A reset connection on
+  `/papers/jobs/{id}/result` is retried against the same job before the
+  resubmit fallback runs, and the input file is read once: the ledger sha256
+  comes from the uploaded bytes. The outcome ledger now carries the
+  documented `n_validation_errors` and `n_validation_warnings` counts, which
+  `summarize_export` computed but the ledger dropped.
+- `bibr batch` only reads manifest-like files as manifests (`.txt`, `.lst`,
+  `.list`, `.manifest`, or no extension). Any other explicit file (a stray
+  `.doc`, a `.md`, an `.nxml` from a shell glob) is reported as unsupported
+  and skipped instead of being read line by line as paths — on real data an
+  `.nxml`'s XML lines became "missing" entries and over-long lines crashed
+  discovery with `OSError`. An unreadable manifest-like file names itself in
+  `unreadable` instead of raising a bare codec error.
+- `bibr export tables` converts rows from the validated 12.x model instead
+  of the raw payload, so a value lax validation coerces (a `"2"` page
+  number) no longer crashes the Parquet write with `ArrowInvalid` after
+  validation passed. A residual failure names the table and the buffered
+  papers (an in-memory export, and any per-paper conversion failure, by its
+  `paper_id`) instead
+  of only the Arrow type error. A non-bibr export that omits a defaulted key
+  takes the model default instead of null (an omitted `author.role` writes
+  `[]`). Clean-corpus output is unchanged: all 25 tables are byte-identical
+  before and after.
+- The NuExtract native client builds each response model's contract once
+  and shares it: one `create()` call built it twice (request kwargs, then
+  parse), and every call rebuilt it from scratch. Contracts are memoized per
+  model with independent copies per caller, the recorded wire-shape check
+  runs once at build, and hand-assembled contracts still pay the per-parse
+  check. The built contract is unchanged.
 - The byline check that reports authors missing from the extracted list
   (`VAL_AUTHOR_MISSING`) read a byline joined with French "et", Dutch "en",
   German "und", Danish or Norwegian "og", Swedish "och" or Indonesian "dan"
@@ -1490,6 +1695,29 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1534,6 +1762,89 @@ released.
   sentences with digit-bearing parentheticals are skipped, all
   citation/reference-only; no equation in the stored exports came from a
   skipped sentence.
+- Choice-like settings are validated at load: `LLM_PROVIDER`, `LLM_BACKEND`,
+  `LLM_INSTRUCTOR_MODE`, `LLM_STRUCTURED_BACKEND` and `RAPID_MLX_SPEC_DECODE`
+  only accept their documented choices. Values match case-insensitively (so
+  `OLLAMA` still works and now normalizes to `ollama` instead of skipping
+  the auto-tune), and the description's own `json_object` spelling of
+  `LLM_INSTRUCTOR_MODE` now means `json`. `OCR_BACKEND` stays free-form on
+  purpose: private OCR aliases with an explicit `OCR_PROFILE` still load.
+  Migration: a typo that used to load and misbehave now fails at startup
+  with an error listing the allowed values.
+- Semaphore/RPM settings reject `0`: `LLM_RATE_LIMIT_RPM`,
+  `OCR_VISION_RATE_LIMIT_RPM`, `CROSSREF_RATE_LIMIT_RPM`,
+  `OCR_MAX_CONCURRENT_FILES`, `OCR_MAX_CONCURRENT_REGIONS`,
+  `OCR_CONCURRENT_REGIONS_PER_FILE`, `CROSSREF_ENRICH_CONCURRENCY`,
+  `BIBR_RESOLVER_LIMIT` and `PIPELINE_MAX_CONCURRENT_POST_PARSE`, plus
+  `CROSSREF_REQUEST_TIMEOUT`, `ROR_REQUEST_TIMEOUT` and
+  `BIBR_RESOLVER_TIMEOUT`. (`BIBR_RESOLVER_SEARCH_CONCURRENCY` already had
+  its bound.) A zero RPM used to raise `ZeroDivisionError` on the first LLM
+  call and a zero concurrency deadlocked the counting semaphore, so `0`
+  never worked — set an explicit positive value instead. Probability-like
+  knobs (`LLM_LOCAL_MEM_FRACTION`, `OCR_MIN_SUCCESS_RATE`, the
+  `ML_*_MIN_CONFIDENCE` thresholds, `REF_GEOM_SEG_CASCADE_THRESHOLD`,
+  `REF_GEOM_MIN_ALIGN_YIELD`, `REF_SEG_MIN_SOURCE_RECALL`) reject values
+  outside `0`–`1`.
+- The literal `null` now sets `None` on nullable fields, so a section field
+  can be set to its documented null from the environment (top-level fields
+  already accepted it). Blank values keep the meaning they had: a blank
+  nullable string disables (`LLM_REASONING_EFFORT=`, `ML_*_MODEL_ID=`), a
+  blank per-call override (`LLM_REASONING_EFFORT_AUTHORS=`,
+  `LLM_REASONING_EFFORT_CITATIONS=`) omits the parameter for that call while
+  the global effort still applies elsewhere, `BIBR_RESOLVER_SOURCES=` still
+  means the resolver's own tier, and other blank lists stay empty. A blank
+  for a plain `str` field stays blank, as before, unless its default is
+  computed; a blank for any other field now loads as the default — or `None`
+  where the field is nullable — instead of failing. Two blanks change
+  meaning: `RAPID_MLX_SPEC_DECODE=` used to load as blank and disable
+  speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
+  used to pin the serve result cache to an empty version, and now means the
+  computed code hash, so a deploy invalidates cached results again.
+- Evaluator metric definitions changed, and `evaluation/evaluate.py` now
+  records `metrics_version: 5`. Scores with `metrics_version` 4 and 5 do not
+  compare; re-score saved predictions before comparing them. The
+  `run_info.json` that `bibr batch` writes into `--out` is no longer read as a
+  prediction: it added an unmatched paper with an empty id, was listed in
+  `prediction_ids`, and changed `predictions_tree_sha256` on every run. The
+  micro-averaged reference accuracies (`micro_mean` on the `ref_*_acc`
+  metrics) count a paper whose gold carries the field but whose matched pairs
+  do not, for example one whose bibliography was lost, as misses over its gold
+  references; they left it out, so a paper that lost every reference could
+  leave `micro_mean` at 1.0. Section-text tokens keep letters in every script:
+  only ASCII letters and digits survived, so a Cyrillic or Chinese section was
+  scored on its numbers and "Straße" split in two. Han, kana and Thai text
+  gives one token per character. Section-text results record
+  `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). Given a
+  URL, the library used to start `glm-http` for every request except
+  `paddle-http` and `serve-http`: a bare `ocr_url`, the `paddle` selector,
+  every local Paddle runtime (`paddle-vllm`, `paddle-rapid-mlx`,
+  `paddle-mlx-vlm`) and the cloud vision backends. A Paddle server therefore
+  got GLM prompts and its tables came back as undecoded OTSL markup.
+  Without an explicit backend (`--ocr`, `ocr=`, `ocr_backend=`), the
+  configured `OCR_BACKEND` is the request, so `OCR_BACKEND=glm-http` keeps
+  GLM at every entry point; `bibr chew --ocr-url` used to ignore it. A
+  cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
+  tier of `bibr setup` writes `gemini`) never replaces a URL the caller
+  passes: the run uses that server as `paddle-http` and sends no page image
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  endpoint) and drops the URL, so it no longer splits the OCR cache; the
+  library used to start `glm-http` for it and the CLI `paddle-http`. A
+  `ResourceManager` built directly with a URL now starts the backend its
+  OCR cache identity names; it could record `gemini` or a local runtime and
+  start `glm-http`. Migration: library users who pass a bare `ocr_url` for
+  a GLM server must now pass `ocr_backend="glm"` (or `"glm-http"`;
+  `ocr="glm"` in `bibr.chew`).
 
 ### Security
 

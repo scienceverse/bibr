@@ -1,0 +1,1181 @@
+"""Regression tests for audit action 16 (settings validation).
+
+Presets and ``config set`` go through the real settings parser
+(``validate_env_overrides``), numeric/probability settings are bounded,
+choice-like settings are Literals, blank ``.env`` values keep their
+disable/empty meaning (nullable → None, resolver sources → []), and preset
+misuse fails cleanly. Each test fails on the pre-fix tree and passes with
+the fix; guard tests pin the boundaries the fix must not cross.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from bibr.presets import InvalidPresetError, PresetManager
+
+
+@pytest.fixture()
+def manager(tmp_path):
+    return PresetManager(presets_dir=tmp_path / "presets")
+
+
+@pytest.fixture()
+def clean_env(monkeypatch):
+    """Drop every settings-related process variable the test does not set itself."""
+    for var in (
+        "BIBR_RESOLVER_SOURCES",
+        "BIBR_RESOLVER_LIMIT",
+        "BIBR_RESOLVER_TIMEOUT",
+        "LLM_PROVIDER",
+        "LLM_BACKEND",
+        "LLM_STRUCTURED_BACKEND",
+        "LLM_INSTRUCTOR_MODE",
+        "LLM_CHAT_TEMPLATE_KWARGS",
+        "LLM_RATE_LIMIT_RPM",
+        "LLM_LOCAL_MEM_FRACTION",
+        "LLM_MAX_TOKENS",
+        "LLM_MODEL",
+        "OCR_BACKEND",
+        "OCR_LOCAL_GPUS",
+        "OCR_MAX_CONCURRENT_FILES",
+        "OCR_MIN_SUCCESS_RATE",
+        "OCR_VISION_RATE_LIMIT_RPM",
+        "CROSSREF_RATE_LIMIT_RPM",
+        "CROSSREF_ENRICH_CONCURRENCY",
+        "CROSSREF_REQUEST_TIMEOUT",
+        "CROSSREF_CONSOLIDATE",
+        "CORS_ORIGINS",
+        "LAYOUT_DPI",
+        "LAYOUT_USE_GPU",
+        "PIPELINE_MEMORY_MODE",
+        "PIPELINE_MAX_CONCURRENT_POST_PARSE",
+        "REF_PARSE_STRATEGY",
+        "REF_GEOM_SEG_CASCADE_THRESHOLD",
+        "ROR_ENRICH",
+        "ROR_REQUESTS_PER_5MIN",
+        "MCP_ENABLED",
+        "JOBS_KEY_PREFIX",
+        "REF_PARSE_MAX_TOKENS",
+        "WTPSPLIT_MODEL",
+        "SEGMENTER_USE_GPU",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+# --- config-1: presets go through the real settings parser ------------------
+
+
+def test_preset_applies_lists_dicts_and_literals(manager, clean_env):
+    """List/dict preset values must arrive parsed; Literal/case validators run."""
+    from bibr.config import GlobalSettings
+
+    manager.save(
+        "local",
+        {
+            "BIBR_RESOLVER_SOURCES": "crossref,openalex",
+            "LLM_CHAT_TEMPLATE_KWARGS": '{"enable_thinking": false}',
+            "PIPELINE_MEMORY_MODE": "balanced",
+            "CROSSREF_CONSOLIDATE": "FILL",
+        },
+    )
+    settings = GlobalSettings()
+    assert manager.apply_to_settings("local", settings) == []
+    assert settings.resolver.sources == ["crossref", "openalex"]
+    assert settings.llm.chat_template_kwargs == {"enable_thinking": False}
+    assert settings.pipeline.memory_mode == "balanced"
+    assert settings.crossref.consolidate == "fill"
+
+
+def test_preset_reruns_auto_tune_validators(manager, clean_env):
+    """LLM_PROVIDER=ollama must auto-lower RPM; OCR_LOCAL_GPUS must scale regions."""
+    from bibr.config import GlobalSettings
+
+    manager.save("tuned", {"LLM_PROVIDER": "ollama", "OCR_LOCAL_GPUS": "4"})
+    settings = GlobalSettings()
+    assert settings.llm.rate_limit_rpm == 60
+    manager.apply_to_settings("tuned", settings)
+    assert settings.llm.provider == "ollama"
+    assert settings.llm.rate_limit_rpm == 10
+    assert settings.ocr.local_gpus == 4
+    assert settings.ocr.max_concurrent_regions == 16 * settings.ocr.local_gpus
+
+
+def test_preset_resolves_ror_mcp_and_alias_prefixes(manager, clean_env):
+    """ROR_/MCP_ keys and aliases such as OCR_SGLANG_GPUS are known settings."""
+    from bibr.config import GlobalSettings
+
+    manager.save(
+        "prefixes",
+        {"ROR_ENRICH": "false", "MCP_ENABLED": "true", "OCR_SGLANG_GPUS": "2"},
+    )
+    settings = GlobalSettings()
+    assert manager.apply_to_settings("prefixes", settings) == []
+    assert settings.ror.enrich is False
+    assert settings.mcp.enabled is True
+    assert settings.ocr.local_gpus == 2
+
+
+def test_preset_applies_to_the_settings_proxy(manager, clean_env):
+    """The real chew/demo entry points pass the Settings proxy, not a bare model."""
+    import bibr.config
+
+    proxy = bibr.config.Settings
+    object.__setattr__(proxy, "_instance", None)
+    try:
+        manager.save("toponly", {"WTPSPLIT_MODEL": "sat-12l-sm", "SEGMENTER_USE_GPU": "false"})
+        unknown = manager.apply_to_settings("toponly", proxy)
+        assert unknown == []
+        assert proxy.WTPSPLIT_MODEL == "sat-12l-sm"
+        assert proxy.SEGMENTER_USE_GPU is False
+    finally:
+        # Drop the mutated instance so later tests rebuild from the environment.
+        object.__setattr__(proxy, "_instance", None)
+
+
+def test_preset_invalid_value_names_the_setting(manager, clean_env):
+    """A preset value that fails validation raises InvalidPresetError naming it."""
+    from bibr.config import GlobalSettings
+
+    manager.save("bad", {"LAYOUT_DPI": "0"})
+    with pytest.raises(InvalidPresetError, match="LAYOUT_DPI"):
+        manager.apply_to_settings("bad", GlobalSettings())
+
+
+def test_preset_apply_preserves_untouched_sections(manager, clean_env):
+    """Guard: applying a preset must not clobber unrelated in-memory values."""
+    from bibr.config import GlobalSettings
+
+    manager.save("ocronly", {"OCR_BACKEND": "gemini"})
+    settings = GlobalSettings()
+    settings.llm.model = "custom-in-memory"
+    manager.apply_to_settings("ocronly", settings)
+    assert settings.ocr.backend == "gemini"
+    assert settings.llm.model == "custom-in-memory"
+
+
+def test_preset_apply_still_reports_unknown_keys(manager, clean_env):
+    """Guard: keys matching no setting are still returned, not applied."""
+    from bibr.config import GlobalSettings
+
+    manager.save("weird", {"LLM_PROVIDER": "google", "LLM_NONEXISTENT_FIELD": "x"})
+    settings = GlobalSettings()
+    unknown = manager.apply_to_settings("weird", settings)
+    assert unknown == ["LLM_NONEXISTENT_FIELD"]
+    assert settings.llm.provider == "google"
+
+
+# --- config-2: one .env parser ----------------------------------------------
+
+
+def test_parse_env_matches_the_runtime_parser(tmp_path):
+    """Inline comments, `export` prefixes and escapes read as dotenv reads them."""
+    from bibr.env_utils import parse_env, read_dotenv
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'LLM_PROVIDER=openai  # local vLLM\nexport OCR_BACKEND=glm-http\nLLM_API_KEY="it\\\'s"\n',
+        encoding="utf-8",
+    )
+    assert parse_env(env_path) == {k: v for k, v in read_dotenv(env_path).items() if v is not None}
+    assert parse_env(env_path)["LLM_PROVIDER"] == "openai"
+    assert parse_env(env_path)["OCR_BACKEND"] == "glm-http"
+
+
+def test_preset_save_use_roundtrip_with_comments_and_export(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """save + use on a hand-edited .env must not bake comments into values."""
+    from bibr.config import GlobalSettings
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "LLM_PROVIDER=openai  # local vLLM\nexport OCR_BACKEND=glm-http\n",
+        encoding="utf-8",
+    )
+    data = manager.snapshot_from_env(env_path)
+    assert data == {"LLM_PROVIDER": "openai", "OCR_BACKEND": "glm-http"}
+    manager.save("local", data)
+    manager.apply("local", env_path)
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    fresh = GlobalSettings()
+    assert fresh.llm.provider == "openai"
+    assert fresh.ocr.backend == "glm-http"
+
+
+# --- config-3: end-anchored secret filter ------------------------------------
+
+
+def test_is_secret_key_is_end_anchored():
+    from bibr.presets import is_secret_key
+
+    for key in (
+        "LLM_MAX_TOKENS",
+        "LLM_TITLE_MAX_TOKENS",
+        "LLM_AUTHORS_MAX_TOKENS",
+        "REF_PARSE_MAX_TOKENS",
+        "OCR_VISION_MAX_TOKENS",
+        "OCR_GENERATION_MAX_TOKENS",
+        "FIG_MAX_TOKENS",
+        "JOBS_KEY_PREFIX",
+        "CORS_ALLOW_CREDENTIALS",
+    ):
+        assert not is_secret_key(key), key
+    for key in ("LLM_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN", "REDIS_PASSWORD", "CLIENT_SECRET"):
+        assert is_secret_key(key), key
+
+
+def test_preset_snapshot_keeps_tuning_knobs(manager, tmp_path):
+    """MAX_TOKENS knobs and JOBS_KEY_PREFIX must survive save; diff must show them."""
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "LLM_PROVIDER=google\n"
+        "LLM_MAX_TOKENS=4096\n"
+        "REF_PARSE_MAX_TOKENS=2048\n"
+        "JOBS_KEY_PREFIX=myjobs\n"
+        "LLM_API_KEY=sk-test-key-placeholder\n",
+        encoding="utf-8",
+    )
+    data = manager.snapshot_from_env(env_path)
+    assert data == {
+        "LLM_PROVIDER": "google",
+        "LLM_MAX_TOKENS": "4096",
+        "REF_PARSE_MAX_TOKENS": "2048",
+        "JOBS_KEY_PREFIX": "myjobs",
+    }
+    manager.save("small", data)
+    changed, only_in_preset, only_in_env = manager.diff_against("small", data)
+    assert (changed, only_in_preset, only_in_env) == ({}, {}, {})
+
+
+# --- config-4: config set validates through the real model -------------------
+
+
+def test_config_set_accepts_csv_and_json_lists(clean_env):
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    assert config_cli.validate_value(
+        docs["CORS_ORIGINS"], "https://a.example,https://b.example"
+    ) == [
+        "https://a.example",
+        "https://b.example",
+    ]
+    assert config_cli.validate_value(docs["CORS_ORIGINS"], '["https://a.example"]') == [
+        "https://a.example"
+    ]
+    assert config_cli.validate_value(
+        docs["LLM_CHAT_TEMPLATE_KWARGS"], '{"enable_thinking": false}'
+    ) == {"enable_thinking": False}
+
+
+def test_config_set_rejects_bad_values_naming_the_setting(clean_env):
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    with pytest.raises(ValueError, match="LAYOUT_DPI"):
+        config_cli.validate_value(docs["LAYOUT_DPI"], "0")
+    with pytest.raises(ValueError, match="BIBR_BUILD_SHA"):
+        config_cli.validate_value(docs["BIBR_BUILD_SHA"], "abc")
+    with pytest.raises(ValueError, match="WTPSPLIT_THRESHOLD"):
+        config_cli.validate_value(docs["WTPSPLIT_THRESHOLD"], "7")
+    with pytest.raises(ValueError, match="SERVE_LOG_LEVEL"):
+        config_cli.validate_value(docs["SERVE_LOG_LEVEL"], "verbose")
+
+
+def test_config_set_accepts_runtime_case_variants(clean_env):
+    """Guard: values the runtime normalizes (REF_PARSE_STRATEGY=NER) still validate."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    assert config_cli.validate_value(docs["REF_PARSE_STRATEGY"], "NER") == "ner"
+
+
+def test_config_set_never_leaks_secret_values(clean_env, monkeypatch):
+    """Guard: unrelated breakage no longer blocks the write, and failures redact secrets."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    # Break an unrelated cross-field rule: the valid secret value still validates.
+    monkeypatch.setenv("WTPSPLIT_BLOCK_SIZE", "512")
+    monkeypatch.delenv("WTPSPLIT_STRIDE", raising=False)
+    assert config_cli.validate_value(docs["GOOGLE_API_KEY"], "sk-liv...date") == "sk-liv...date"
+    # When validation itself fails, the secret value must not be echoed back.
+    from bibr.config import validate_env_overrides
+    from bibr.exceptions import ConfigurationError
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "sk-liv...date")
+    with pytest.raises(ConfigurationError) as exc_info:
+        validate_env_overrides({})
+    assert "sk-liv...date" not in str(exc_info.value)
+
+
+# --- config-14: merge_env rewrites every duplicate ---------------------------
+
+
+def test_merge_env_rewrites_every_duplicate(tmp_path):
+    from bibr.env_utils import merge_env, read_dotenv
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_MODEL=old\nOTHER=1\nLLM_MODEL=older-duplicate\n", encoding="utf-8")
+    merge_env(env_path, {"LLM_MODEL": "new"})
+    assert read_dotenv(env_path).get("LLM_MODEL") == "new"
+    assert env_path.read_text(encoding="utf-8").count("LLM_MODEL=") == 1
+
+
+def test_merge_env_matches_export_prefixed_lines(tmp_path):
+    """Guard: an `export KEY=` line merges in place instead of appending a duplicate."""
+    from bibr.env_utils import merge_env, read_dotenv
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("export LLM_MODEL=old\n", encoding="utf-8")
+    merge_env(env_path, {"LLM_MODEL": "new"})
+    assert read_dotenv(env_path).get("LLM_MODEL") == "new"
+    assert env_path.read_text(encoding="utf-8").count("LLM_MODEL=") == 1
+
+
+# --- config-10: the resolver JSON form ---------------------------------------
+
+
+def test_resolver_sources_accept_json_and_csv(clean_env):
+    import os
+
+    from bibr.config import GlobalSettings
+
+    os.environ["BIBR_RESOLVER_SOURCES"] = '["crossref","openalex"]'
+    try:
+        assert GlobalSettings().resolver.sources == ["crossref", "openalex"]
+    finally:
+        del os.environ["BIBR_RESOLVER_SOURCES"]
+    os.environ["BIBR_RESOLVER_SOURCES"] = "crossref,openalex"
+    try:
+        assert GlobalSettings().resolver.sources == ["crossref", "openalex"]
+    finally:
+        del os.environ["BIBR_RESOLVER_SOURCES"]
+
+
+# --- config-5: zero rate/concurrency values fail fast ------------------------
+
+
+@pytest.mark.parametrize(
+    "var",
+    [
+        "LLM_RATE_LIMIT_RPM",
+        "OCR_VISION_RATE_LIMIT_RPM",
+        "OCR_MAX_CONCURRENT_FILES",
+        "CROSSREF_RATE_LIMIT_RPM",
+        "CROSSREF_ENRICH_CONCURRENCY",
+        "BIBR_RESOLVER_LIMIT",
+        "PIPELINE_MAX_CONCURRENT_POST_PARSE",
+    ],
+)
+def test_zero_semaphore_and_rpm_values_are_rejected(var, monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv(var, "0")
+    with pytest.raises(ValidationError):
+        GlobalSettings()
+
+
+@pytest.mark.parametrize(
+    "var",
+    ["CROSSREF_REQUEST_TIMEOUT", "BIBR_RESOLVER_TIMEOUT", "ROR_REQUEST_TIMEOUT"],
+)
+def test_zero_timeouts_are_rejected(var, monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv(var, "0")
+    with pytest.raises(ValidationError):
+        GlobalSettings()
+
+
+def test_zero_rejection_names_the_setting(monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings, _configuration_error
+
+    monkeypatch.setenv("LLM_RATE_LIMIT_RPM", "0")
+    with pytest.raises(ValidationError) as exc_info:
+        GlobalSettings()
+    assert "LLM_RATE_LIMIT_RPM" in str(_configuration_error(exc_info.value))
+
+
+def test_boundary_values_stay_accepted(monkeypatch):
+    """Guard: 1 is a valid RPM/concurrency; 0 stays valid where it means unlimited/off."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_RATE_LIMIT_RPM", "1")
+    monkeypatch.setenv("OCR_MIN_SUCCESS_RATE", "0")
+    monkeypatch.setenv("LLM_LOCAL_MEM_FRACTION", "1")
+    settings = GlobalSettings()
+    assert settings.llm.rate_limit_rpm == 1
+    assert settings.ocr.min_success_rate == 0
+    assert settings.llm.local_mem_fraction == 1
+
+
+# --- config-16: choice-like settings are Literals ----------------------------
+
+
+def test_unknown_provider_fails_with_choices(monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings, _configuration_error
+
+    monkeypatch.setenv("LLM_PROVIDER", "bogus")
+    with pytest.raises(ValidationError) as exc_info:
+        GlobalSettings()
+    message = str(_configuration_error(exc_info.value))
+    assert "LLM_PROVIDER" in message
+    for choice in ("google", "openai", "anthropic", "groq", "ollama"):
+        assert choice in message
+
+
+@pytest.mark.parametrize("provider", ["google", "openai", "anthropic", "groq", "ollama"])
+def test_known_providers_load(provider, monkeypatch):
+    """Guard: every documented provider still loads."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_PROVIDER", provider)
+    assert GlobalSettings().llm.provider == provider
+
+
+def test_json_object_alias_maps_to_json(monkeypatch):
+    """LLM_INSTRUCTOR_MODE=json_object (the description's own spelling) means json."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_INSTRUCTOR_MODE", "json_object")
+    assert GlobalSettings().llm.instructor_mode == "json"
+
+
+def test_unknown_structured_backend_and_spec_decode_fail(monkeypatch):
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_STRUCTURED_BACKEND", "bogus")
+    with pytest.raises(ValidationError):
+        GlobalSettings()
+    monkeypatch.delenv("LLM_STRUCTURED_BACKEND")
+    monkeypatch.setenv("RAPID_MLX_SPEC_DECODE", "bogus")
+    with pytest.raises(ValidationError):
+        GlobalSettings()
+
+
+# --- config-9: empty values and the full example -----------------------------
+
+
+def test_empty_value_falls_back_to_default_and_null_sets_none(monkeypatch):
+    from bibr.config import GlobalSettings
+
+    # Nullable blanks disable (None); the resolver's blank means its own tier.
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    monkeypatch.setenv("ML_PAPER_CLASSIFIER_MODEL_ID", "")
+    monkeypatch.setenv("BIBR_RESOLVER_SOURCES", "")
+    monkeypatch.setenv("CORS_ALLOW_METHODS", "")
+    assert GlobalSettings().llm.reasoning_effort is None
+    assert GlobalSettings().ml.paper_classifier_model_id is None
+    assert GlobalSettings().resolver.sources == []
+    assert GlobalSettings().cors.allow_methods == []
+    monkeypatch.setenv("PIPELINE_MEMORY_MODE", "null")
+    assert GlobalSettings().pipeline.memory_mode is None
+
+
+def test_full_example_every_line_loads_and_matches_default():
+    """Uncommenting any `bibr config example --full` line must load unchanged."""
+    import os
+    import re
+
+    from bibr.config import GlobalSettings
+    from bibr.config_cli import render_env_example
+
+    pairs: list[tuple[str, str]] = []
+    for line in render_env_example(full=True).splitlines():
+        match = re.match(r"^# ([A-Z][A-Z0-9_]*)=(.*)$", line)
+        if match:
+            pairs.append((match.group(1), match.group(2)))
+    assert len(pairs) > 200
+    # Compare against defaults with every example key unset, so harness pins
+    # (REDIS_URL, REF_PARSE_STRATEGY, ...) cannot masquerade as a behavior
+    # change when their example line renders the production default.
+    saved = {key: os.environ.pop(key) for key, _ in pairs if key in os.environ}
+    try:
+        baseline = GlobalSettings().model_dump(mode="json")
+        failures: list[str] = []
+        for key, value in pairs:
+            os.environ[key] = value
+            try:
+                dump = GlobalSettings().model_dump(mode="json")
+            except Exception as exc:  # noqa: BLE001
+                failures.append(f"{key}={value}: fails to load ({type(exc).__name__})")
+            else:
+                if dump != baseline:
+                    failures.append(f"{key}={value}: silently changes behavior")
+            finally:
+                del os.environ[key]
+    finally:
+        os.environ.update(saved)
+    assert failures == []
+
+
+def test_full_example_renders_lists_as_csv_and_nulls_explicitly():
+    from bibr.config_cli import render_env_example
+
+    text = render_env_example(full=True)
+    assert "# CORS_ALLOW_METHODS=*" in text
+    assert "['*']" not in text
+    assert "# LLM_API_KEY=null" in text
+
+
+# --- local-cli-15: preset misuse fails cleanly --------------------------------
+
+
+def test_invalid_preset_name_is_a_configuration_error():
+    from bibr.exceptions import ConfigurationError
+
+    assert issubclass(InvalidPresetError, ConfigurationError)
+    manager = PresetManager(presets_dir="/nonexistent-presets-dir")
+    with pytest.raises(InvalidPresetError):
+        manager.load("my preset")
+
+
+def test_corrupt_preset_file_names_the_file(manager):
+    manager.directory.mkdir(parents=True, exist_ok=True)
+    (manager.directory / "corrupt.json").write_text("{broken", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="corrupt"):
+        manager.load("corrupt")
+
+
+def test_preset_show_bad_name_exits_cleanly(manager, monkeypatch, capsys):
+    """`bibr preset show ../x` must exit 1 with a message, not a traceback."""
+    import argparse
+
+    from bibr.local.cli.presets import _run_preset
+
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(manager.directory))
+    with pytest.raises(SystemExit) as exc_info:
+        _run_preset(argparse.Namespace(preset_command="show", name="../x"))
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Traceback" not in out.out + out.err
+
+
+def test_chew_preset_bad_name_raises_configuration_error(manager, monkeypatch):
+    """`chew --preset 'my preset'` surfaces as ConfigurationError (clean exit 1)."""
+    from argparse import Namespace
+
+    from bibr.exceptions import ConfigurationError
+    from bibr.local.cli.run_config import _apply_runtime_settings
+
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(manager.directory))
+    args = Namespace(
+        preset="my preset",
+        llm_provider=None,
+        llm_model=None,
+        no_equations=False,
+        refs=None,
+        ref_seg=None,
+    )
+    with pytest.raises(ConfigurationError):
+        _apply_runtime_settings(args)
+
+
+# --- fix round 1: third-party secrets stay out of presets --------------------
+
+_THIRD_PARTY_SECRETS = (
+    "AWS_SECRET_ACCESS_KEY",
+    "OPENROUTER_KEY",
+    "DB_PASSWD",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "LLM_API_KEY_2",
+    "OPENAI_API_KEYS",
+    "CLIENT_SECRETS",
+    "LANGFUSE_SECRET_KEY",
+    "S3_PRIVATE_KEY",
+    "PRIVATE_KEY",
+    "ENCRYPTION_KEY",
+)
+
+
+def test_is_secret_key_excludes_third_party_secrets():
+    """Unknown keys use the conservative substring rule (no plaintext leak)."""
+    from bibr.presets import is_secret_key
+
+    for key in _THIRD_PARTY_SECRETS:
+        assert is_secret_key(key), key
+    # Known tuning knobs and the contact email are still snapshotted.
+    for key in (
+        "LLM_MAX_TOKENS",
+        "JOBS_KEY_PREFIX",
+        "CORS_ALLOW_CREDENTIALS",
+        "CROSSREF_API_EMAIL",
+    ):
+        assert not is_secret_key(key), key
+
+
+def test_preset_snapshot_excludes_third_party_secrets(manager, tmp_path):
+    """A .env with foreign secrets snapshots only the behaviour keys."""
+    env_path = tmp_path / ".env"
+    lines = ["LLM_PROVIDER=openai"]
+    lines += [f"{key}=sk-test-value-placeholder" for key in _THIRD_PARTY_SECRETS]
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    data = manager.snapshot_from_env(env_path)
+    assert data == {"LLM_PROVIDER": "openai"}
+
+
+def test_preset_show_redacts_third_party_secrets(manager, monkeypatch, capsys):
+    """`preset show`/`diff` print redacted secrets, never the raw value."""
+    import argparse
+
+    from bibr.local.cli.presets import _run_preset
+    from bibr.presets import redact_value
+
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(manager.directory))
+    manager.save("leaky", {"LLM_PROVIDER": "openai", "OPENROUTER_KEY": "or-test-key-placeholder"})
+    assert redact_value("OPENROUTER_KEY", "or-test-key-placeholder") != "or-test-key-placeholder"
+    _run_preset(argparse.Namespace(preset_command="show", name="leaky"))
+    out = capsys.readouterr()
+    assert "or-test-key-placeholder" not in out.out + out.err
+
+
+# --- fix round 1: blank values keep their disable/empty meaning --------------
+
+_BLANK_CLEAN_VARS = (
+    "LLM_REASONING_EFFORT",
+    "LLM_REASONING_EFFORT_AUTHORS",
+    "LLM_REASONING_EFFORT_CITATIONS",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "ML_PAPER_CLASSIFIER_MODEL_ID",
+    "ML_SECTION_CLASSIFIER_MODEL_ID",
+    "ML_FRONT_ROLE_MODEL_ID",
+    "LAYOUT_ONNX_MODEL_ID",
+    "BIBR_RESOLVER_SOURCES",
+    "BIBR_RESOLVER_URL",
+    "CORS_ALLOW_METHODS",
+    "CORS_ALLOW_HEADERS",
+)
+
+
+@pytest.fixture()
+def blank_env(monkeypatch):
+    """Drop every process variable the blank-value tests set themselves."""
+    for var in _BLANK_CLEAN_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_blank_reasoning_effort_omits_the_parameter(blank_env, monkeypatch):
+    """`LLM_REASONING_EFFORT=` disables the parameter (models that reject it)."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "")
+    assert GlobalSettings().llm.reasoning_effort is None
+
+
+def test_blank_ml_model_id_disables_the_model(blank_env, monkeypatch):
+    """`ML_*_MODEL_ID=` (and layout ONNX) must not load the published model."""
+    from bibr.config import GlobalSettings
+
+    for var in (
+        "ML_PAPER_CLASSIFIER_MODEL_ID",
+        "ML_SECTION_CLASSIFIER_MODEL_ID",
+        "ML_FRONT_ROLE_MODEL_ID",
+        "LAYOUT_ONNX_MODEL_ID",
+    ):
+        monkeypatch.setenv(var, "")
+    settings = GlobalSettings()
+    assert settings.ml.paper_classifier_model_id is None
+    assert settings.ml.section_classifier_model_id is None
+    assert settings.ml.front_role_model_id is None
+    assert settings.layout.onnx_model_id is None
+
+
+def test_blank_resolver_sources_means_the_resolver_tier(blank_env, monkeypatch):
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("BIBR_RESOLVER_SOURCES", "")
+    assert GlobalSettings().resolver.sources == []
+
+
+def test_blank_cors_lists_stay_empty(blank_env, monkeypatch):
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("CORS_ALLOW_METHODS", "")
+    monkeypatch.setenv("CORS_ALLOW_HEADERS", "")
+    assert GlobalSettings().cors.allow_methods == []
+    assert GlobalSettings().cors.allow_headers == []
+
+
+def test_blank_process_env_masks_dotenv(blank_env, tmp_path, monkeypatch):
+    """A blank process variable beats a .env value (env always wins)."""
+    from bibr.config import GlobalSettings
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("BIBR_RESOLVER_URL=http://dotenv-host:2010\n", encoding="utf-8")
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    monkeypatch.setenv("BIBR_RESOLVER_URL", "")
+    assert GlobalSettings().resolver.url is None
+
+
+def test_blank_cwd_dotenv_masks_home_dotenv(blank_env, tmp_path, monkeypatch):
+    """The wizard writes blanks so a stale ~/.bibr/.env cannot win back."""
+    import os
+
+    from bibr.config import GlobalSettings
+
+    home_env = tmp_path / "home.env"
+    cwd_env = tmp_path / "cwd.env"
+    home_env.write_text("LLM_BASE_URL=http://old-server.example:8000/v1\n", encoding="utf-8")
+    cwd_env.write_text("LLM_BASE_URL=\nLLM_PROVIDER=openai\nLLM_MODEL=x\n", encoding="utf-8")
+    monkeypatch.setenv("BIBR_ENV_FILE", os.pathsep.join((str(home_env), str(cwd_env))))
+    assert GlobalSettings().llm.base_url is None
+
+
+def test_top_level_blank_keeps_direct_construction_semantics(monkeypatch):
+    """`GlobalSettings(SEGMENTER_USE_GPU='')` is None; `ENVIRONMENT=''` fails."""
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings
+
+    for var in ("LLM_REASONING_EFFORT", "BIBR_RESOLVER_URL", "ENVIRONMENT"):
+        monkeypatch.delenv(var, raising=False)
+    assert GlobalSettings(SEGMENTER_USE_GPU="").SEGMENTER_USE_GPU is None
+    with pytest.raises(ValidationError):
+        GlobalSettings(ENVIRONMENT="")
+
+
+# --- fix round 1: preset use validates; malformed values name the setting ----
+
+
+def test_preset_use_rejects_invalid_values_without_writing(manager, tmp_path):
+    """`preset use` with bad values fails naming the preset file; .env kept."""
+    manager.save("bad", {"LLM_PROVIDER": "bogus", "LLM_RATE_LIMIT_RPM": "0"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="bad"):
+        manager.apply("bad", env_path)
+    assert "bogus" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_accepts_valid_values(manager, tmp_path):
+    """Guard: a valid preset still applies through `preset use`."""
+    manager.save("good", {"LLM_PROVIDER": "openai"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    manager.apply("good", env_path)
+    assert "LLM_PROVIDER=openai" in env_path.read_text(encoding="utf-8")
+
+
+def test_malformed_dict_preset_names_the_setting(manager, clean_env):
+    """A preset with malformed JSON dict raises InvalidPresetError, no traceback."""
+    from bibr.config import GlobalSettings
+
+    manager.save("badjson", {"LLM_CHAT_TEMPLATE_KWARGS": "{bad"})
+    with pytest.raises(InvalidPresetError, match="LLM_CHAT_TEMPLATE_KWARGS"):
+        manager.apply_to_settings("badjson", GlobalSettings())
+
+
+def test_validate_env_overrides_malformed_dict_names_env_var(clean_env, monkeypatch):
+    from bibr.config import validate_env_overrides
+    from bibr.exceptions import ConfigurationError
+
+    monkeypatch.setenv("LLM_CHAT_TEMPLATE_KWARGS", "{bad")
+    with pytest.raises(ConfigurationError, match="LLM_CHAT_TEMPLATE_KWARGS"):
+        validate_env_overrides({})
+
+
+def test_settings_proxy_malformed_dict_names_env_var(clean_env, monkeypatch):
+    """The lazy Settings proxy reports the env var, not a raw traceback."""
+    import bibr.config
+    from bibr.exceptions import ConfigurationError
+
+    proxy = bibr.config.Settings
+    object.__setattr__(proxy, "_instance", None)
+    monkeypatch.setenv("LLM_CHAT_TEMPLATE_KWARGS", "{bad")
+    try:
+        with pytest.raises(ConfigurationError, match="LLM_CHAT_TEMPLATE_KWARGS"):
+            _ = proxy.llm
+    finally:
+        object.__setattr__(proxy, "_instance", None)
+
+
+def test_settings_proxy_never_echoes_secret_values():
+    from pydantic_settings import SettingsError
+
+    from bibr.config import _env_names_for_attr, _settings_error
+
+    names = _env_names_for_attr("api_key")
+    assert "LLM_API_KEY" in names and "CROSSREF_API_KEY" in names
+    exc = SettingsError('error parsing value for field "api_key" from source "EnvSettingsSource"')
+    err = _settings_error(exc)
+    assert "could not be parsed" in str(err)
+    assert "LLM_API_KEY" in str(err)
+    assert "EnvSettingsSource" not in str(err)
+    assert err.problems and all(p.startswith("Invalid value for ") for p in err.problems)
+
+
+# --- fix round 1: cross-section auto-tunes -----------------------------------
+
+
+def test_preset_with_resolver_url_matches_dotenv_enrich_concurrency(manager, clean_env):
+    """A preset setting BIBR_RESOLVER_URL must raise enrich_concurrency like .env."""
+    from bibr.config import GlobalSettings
+
+    manager.save("resolved", {"BIBR_RESOLVER_URL": "http://resolver-host:2010"})
+    settings = GlobalSettings()
+    assert settings.crossref.enrich_concurrency == 12
+    manager.apply_to_settings("resolved", settings)
+    assert settings.resolver.url == "http://resolver-host:2010"
+    assert settings.crossref.enrich_concurrency == 16
+
+
+# --- fix round 1: config set attribution -------------------------------------
+
+
+def test_config_set_unrelated_broken_key_still_writes(monkeypatch):
+    """`config set` for a valid key works when an unrelated setting is invalid."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    monkeypatch.setenv("LAYOUT_DPI", "0")
+    assert config_cli.validate_value(docs["LLM_MODEL"], "gemini-x") == "gemini-x"
+
+
+def test_config_set_broken_key_names_itself(monkeypatch):
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    monkeypatch.delenv("LAYOUT_DPI", raising=False)
+    with pytest.raises(ValueError, match="LAYOUT_DPI"):
+        config_cli.validate_value(docs["LAYOUT_DPI"], "0")
+
+
+def test_configuration_error_names_alias_without_doubling(monkeypatch):
+    """An alias value error names OCR_LOCAL_GPUS, not OCR_OCR_LOCAL_GPUS."""
+    from bibr.config import validate_env_overrides
+    from bibr.exceptions import ConfigurationError
+
+    monkeypatch.setenv("OCR_LOCAL_GPUS", "x")
+    with pytest.raises(ConfigurationError) as exc_info:
+        validate_env_overrides({})
+    assert "OCR_LOCAL_GPUS=x is invalid" in str(exc_info.value)
+    assert "OCR_OCR_LOCAL_GPUS" not in str(exc_info.value)
+
+
+def test_configuration_error_nested_loc_names_env_var():
+    """Direct nested kwargs (`llm={...}`) still resolve to the env spelling."""
+    from pydantic import ValidationError
+
+    from bibr.config import GlobalSettings, _configuration_error
+
+    with pytest.raises(ValidationError) as exc_info:
+        GlobalSettings(llm={"rate_limit_rpm": 0})
+    err = _configuration_error(exc_info.value)
+    assert "LLM_RATE_LIMIT_RPM" in str(err)
+
+
+def test_env_prefix_for_attr_resolves_live():
+    from bibr.config import _env_prefix_for_attr
+
+    assert _env_prefix_for_attr("llm") == "LLM_"
+    assert _env_prefix_for_attr("crossref") == "CROSSREF_"
+    assert _env_prefix_for_attr("no_such_section") == ""
+
+
+# --- fix round 1: numeric bounds and choice literals --------------------------
+
+_BOUND_CASES = (
+    ("LLM_RATE_LIMIT_RPM", "0"),
+    ("OCR_VISION_RATE_LIMIT_RPM", "0"),
+    ("CROSSREF_RATE_LIMIT_RPM", "0"),
+    ("OCR_MAX_CONCURRENT_FILES", "0"),
+    ("OCR_MAX_CONCURRENT_REGIONS", "0"),
+    ("OCR_CONCURRENT_REGIONS_PER_FILE", "0"),
+    ("CROSSREF_ENRICH_CONCURRENCY", "0"),
+    ("BIBR_RESOLVER_LIMIT", "0"),
+    ("PIPELINE_MAX_CONCURRENT_POST_PARSE", "0"),
+    ("CROSSREF_REQUEST_TIMEOUT", "0"),
+    ("ROR_REQUEST_TIMEOUT", "0"),
+    ("BIBR_RESOLVER_TIMEOUT", "0"),
+    ("LLM_LOCAL_MEM_FRACTION", "2"),
+    ("OCR_MIN_SUCCESS_RATE", "2"),
+    ("ML_SECTION_CLASSIFIER_MIN_CONFIDENCE", "-0.5"),
+    ("ML_PAPER_CLASSIFIER_MIN_CONFIDENCE", "1.5"),
+    ("ML_PAPER_CLASSIFIER_L2_MIN_CONFIDENCE", "7"),
+    ("REF_GEOM_SEG_CASCADE_THRESHOLD", "-1"),
+    ("REF_GEOM_MIN_ALIGN_YIELD", "42"),
+    ("REF_SEG_MIN_SOURCE_RECALL", "1.01"),
+)
+
+
+@pytest.mark.parametrize("env_name,raw", _BOUND_CASES)
+def test_out_of_range_values_rejected_at_load(clean_env, monkeypatch, env_name, raw):
+    from bibr.config import validate_env_overrides
+    from bibr.exceptions import ConfigurationError
+
+    monkeypatch.setenv(env_name, raw)
+    with pytest.raises(ConfigurationError, match=env_name):
+        validate_env_overrides({})
+
+
+_UPPERCASE_LITERAL_CASES = (
+    ("LLM_PROVIDER", "OLLAMA", "ollama"),
+    ("LLM_BACKEND", "VLLM", "vllm"),
+    ("LLM_STRUCTURED_BACKEND", "INSTRUCTOR", "instructor"),
+    ("LLM_INSTRUCTOR_MODE", "JSON_OBJECT", "json"),
+    ("RAPID_MLX_SPEC_DECODE", "MTP", "mtp"),
+    ("REF_PARSE_STRATEGY", "NER", "ner"),
+    ("CROSSREF_CONSOLIDATE", "FILL", "fill"),
+)
+
+
+@pytest.mark.parametrize("env_name,raw,expected", _UPPERCASE_LITERAL_CASES)
+def test_uppercase_choice_values_normalize(clean_env, monkeypatch, env_name, raw, expected):
+    from bibr.config import validate_env_overrides
+
+    monkeypatch.setenv(env_name, raw)
+    settings = validate_env_overrides({})
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    section_attr, field_name = config_cli._locate_doc_field(docs[env_name])
+    actual = (
+        getattr(getattr(settings, section_attr), field_name)
+        if section_attr
+        else getattr(settings, field_name)
+    )
+    assert actual == expected
+
+
+def test_top_level_empty_str_is_none(clean_env, monkeypatch):
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("REF_SEG_STRATEGY", "")
+    assert GlobalSettings().REF_SEG_STRATEGY is None
+
+
+def test_non_string_preset_values_parse_as_env_spellings(manager, clean_env):
+    """Hand-edited JSON numbers/lists/bools apply like their .env spellings."""
+    from bibr.config import GlobalSettings
+
+    manager.save("typed", {"BIBR_RESOLVER_SOURCES": ["crossref", "openalex"], "LAYOUT_DPI": 200})
+    settings = GlobalSettings()
+    assert manager.apply_to_settings("typed", settings) == []
+    assert settings.resolver.sources == ["crossref", "openalex"]
+    assert settings.layout.dpi == 200
+
+
+def test_clamped_semaphore_never_deadlocks():
+    """Injected zeros still yield a semaphore that acquires immediately."""
+    import asyncio
+
+    from bibr.utils.semaphore import clamped_semaphore
+
+    async def _acquires(limit: int) -> bool:
+        sem = clamped_semaphore(limit)
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=1)
+        except TimeoutError:
+            return False
+        sem.release()
+        return True
+
+    assert asyncio.run(_acquires(0))
+    assert asyncio.run(_acquires(-3))
+    assert asyncio.run(_acquires(4))
+
+
+def test_local_region_limit_clamps_injected_zero(clean_env):
+    from bibr.config import GlobalSettings
+    from bibr.pipeline.stages.ocr import _local_region_limit
+
+    settings = GlobalSettings()
+    settings.ocr.max_concurrent_regions = 0
+    settings.ocr.concurrent_regions_per_file = 0
+    assert _local_region_limit(settings, "glm-http") == 1
+
+
+# --- fix round 1: CLI misuse exits --------------------------------------------
+
+
+@pytest.mark.parametrize("subcommand", ["show", "diff", "rm", "save"])
+def test_preset_cli_bad_name_exits_cleanly(manager, tmp_path, monkeypatch, capsys, subcommand):
+    import argparse
+
+    from bibr.local.cli.presets import _run_preset
+
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(manager.directory))
+    if subcommand in ("save", "diff"):
+        # Reach the name check (not the missing-.env exit) via BIBR_ENV_FILE.
+        env_path = tmp_path / ".env"
+        env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+        monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    ns = argparse.Namespace(preset_command=subcommand, name="my preset")
+    if subcommand == "save":
+        ns.force = True
+    if subcommand == "rm":
+        ns.yes = True
+    with pytest.raises(SystemExit) as exc_info:
+        _run_preset(ns)
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Traceback" not in out.out + out.err
+
+
+def test_preset_use_cli_bad_name_exits_cleanly(manager, tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from bibr.local.cli.presets import _run_preset
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    monkeypatch.setenv("BIBR_PRESETS_DIR", str(manager.directory))
+    with pytest.raises(SystemExit) as exc_info:
+        _run_preset(argparse.Namespace(preset_command="use", name="my preset"))
+    assert exc_info.value.code == 1
+    out = capsys.readouterr()
+    assert "Traceback" not in out.out + out.err
+
+
+# --- fix round 2: per-call blank omits; ownership by difference --------------
+
+
+def test_blank_per_call_reasoning_effort_omits_the_parameter(blank_env, monkeypatch):
+    """A blank per-call override omits reasoning_effort; the global still applies.
+
+    The blank keeps its empty-string spelling: ``None`` would inherit the
+    global effort, so mapping it to None sends the global effort to the
+    authors/citation calls instead of omitting the parameter.
+    """
+    from bibr.clients.providers.openai import OpenAIProvider
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_AUTHORS", "")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_CITATIONS", "")
+    settings = GlobalSettings()
+    assert settings.llm.reasoning_effort_authors == ""
+    assert settings.llm.reasoning_effort_citations == ""
+    provider = OpenAIProvider(settings)
+    assert "reasoning_effort" not in provider.call_kwargs(settings.llm.reasoning_effort_authors)
+    assert "reasoning_effort" not in provider.call_kwargs(settings.llm.reasoning_effort_citations)
+    assert provider.call_kwargs(None)["reasoning_effort"] == "high"
+
+
+def test_null_per_call_reasoning_effort_inherits_the_global(blank_env, monkeypatch):
+    """The literal null still spells 'inherit' for the per-call overrides."""
+    from bibr.config import GlobalSettings
+
+    monkeypatch.setenv("LLM_REASONING_EFFORT", "high")
+    monkeypatch.setenv("LLM_REASONING_EFFORT_AUTHORS", "null")
+    settings = GlobalSettings()
+    assert settings.llm.reasoning_effort_authors is None
+
+
+def test_preset_use_rejects_model_level_error_without_writing(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """A backend without a profile is rejected even though no key names it."""
+    monkeypatch.delenv("OCR_PROFILE", raising=False)
+    manager.save("private", {"OCR_BACKEND": "private-foo"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="OCR_PROFILE"):
+        manager.apply("private", env_path)
+    assert "private-foo" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_rejects_alias_spelling_without_writing(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """An alias key with a bad value is rejected under its canonical spelling."""
+    for var in ("OCR_LOCAL_GPUS", "OCR_SGLANG_GPUS"):
+        monkeypatch.delenv(var, raising=False)
+    manager.save("alias", {"OCR_SGLANG_GPUS": "abc"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="OCR_LOCAL_GPUS"):
+        manager.apply("alias", env_path)
+    assert "abc" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_rejects_lowercase_key_without_writing(manager, tmp_path, clean_env):
+    """A lowercase preset key is validated case-insensitively, not written."""
+    manager.save("lower", {"llm_provider": "bogus"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError, match="LLM_PROVIDER"):
+        manager.apply("lower", env_path)
+    assert "bogus" not in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_writes_when_only_unrelated_key_broken(
+    manager, tmp_path, clean_env, monkeypatch
+):
+    """Guard: a valid preset still applies when an unrelated setting is broken."""
+    monkeypatch.setenv("LAYOUT_DPI", "0")
+    manager.save("good", {"LLM_PROVIDER": "openai"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    manager.apply("good", env_path)
+    assert "LLM_PROVIDER=openai" in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_prefix_overlap_still_writes(manager, tmp_path, clean_env, monkeypatch):
+    """Guard: a valid key sharing a prefix with a broken one still applies."""
+    monkeypatch.setenv("CROSSREF_ENRICH_CONCURRENCY", "0")
+    manager.save("enrich", {"CROSSREF_ENRICH": "true"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    manager.apply("enrich", env_path)
+    assert "CROSSREF_ENRICH=true" in env_path.read_text(encoding="utf-8")
+
+
+def test_preset_use_error_names_the_file_not_dotenv(manager, tmp_path, clean_env):
+    """Preset errors say 'Fix the preset file', once, with no .env instruction."""
+    manager.save("bad", {"LLM_PROVIDER": "bogus"})
+    env_path = tmp_path / ".env"
+    env_path.write_text("LLM_PROVIDER=google\n", encoding="utf-8")
+    with pytest.raises(InvalidPresetError) as exc_info:
+        manager.apply("bad", env_path)
+    message = str(exc_info.value)
+    assert "Fix the preset file." in message
+    assert "Fix these in your .env or environment." not in message
+    assert "Fix it in your .env or environment." not in message
+    assert message.count(str(manager.directory / "bad.json")) == 1
+
+
+def test_config_set_accepts_context_dependent_value_with_unrelated_breakage(tmp_path, monkeypatch):
+    """A private backend with its profile in .env is accepted; LAYOUT_DPI=0 ignored."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    env_path = tmp_path / ".env"
+    env_path.write_text("OCR_PROFILE=paddle\nLAYOUT_DPI=0\n", encoding="utf-8")
+    monkeypatch.setenv("BIBR_ENV_FILE", str(env_path))
+    for var in ("OCR_BACKEND", "OCR_PROFILE", "LAYOUT_DPI"):
+        monkeypatch.delenv(var, raising=False)
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    assert config_cli.validate_value(docs["OCR_BACKEND"], "private-foo") == "private-foo"
+
+
+def test_config_set_rejects_new_failure_despite_unrelated_breakage(monkeypatch):
+    """Guard: an invalid candidate still fails naming itself when others break."""
+    from bibr import config_cli
+    from bibr.config_introspect import iter_setting_docs
+
+    monkeypatch.setenv("LAYOUT_DPI", "0")
+    docs = {doc.env_name: doc for doc in iter_setting_docs()}
+    with pytest.raises(ValueError, match="LLM_PROVIDER"):
+        config_cli.validate_value(docs["LLM_PROVIDER"], "bogus")

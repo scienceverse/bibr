@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from bibr.exceptions import LlmCallError, ProcessingError
 from bibr.field_states import FieldScope
 from bibr.processing_warnings import ProcessingWarning, WarningCode
+from bibr.utils.semaphore import clamped_semaphore
 from bibr.utils.text import NAME_CHAR_CLS
 
 if TYPE_CHECKING:
@@ -1505,7 +1506,9 @@ class PostParseStage:
         ctx.progress.stage_start(self.name)
         t0 = time.monotonic()
         alive = ctx.alive()
-        sem = asyncio.Semaphore(ctx.settings.pipeline.max_concurrent_post_parse)
+        # Clamped: settings load rejects 0, but an injected settings object can
+        # still carry it, and Semaphore(0) would hang every task forever.
+        sem = clamped_semaphore(ctx.settings.pipeline.max_concurrent_post_parse)
         # Start enrichment's network prefetch under the LLM tail only when this
         # run will actually enrich (post_parse itself skips it for refs=off /
         # no_llm / no references).

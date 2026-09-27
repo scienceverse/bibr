@@ -7,12 +7,14 @@ presence, and ROUGE-L/NED; plus per-type aggregation and a drop report.
 
 from __future__ import annotations
 
+import functools
 import re
 import statistics
+import unicodedata
 from collections import Counter
 
 from evaluation.validation_metrics import (
-    _normalize_unicode,
+    _SCRIPTIO_CONTINUA_RE,
     abstract_ned,
     abstract_rouge_l,
 )
@@ -52,20 +54,64 @@ BODY_SECTION_TYPES: frozenset[str] = frozenset(
 # Per-type metrics reported for these canonical IMRaD types + abstract.
 SCORED_TYPES: tuple[str, ...] = ("abstract", "intro", "method", "results", "discussion")
 
-_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+# One token per character of a script written without inter-word spaces (the
+# same scripts title_soft special-cases), or one per run of other word characters.
+_CONTINUA_CLASS = _SCRIPTIO_CONTINUA_RE.pattern
+_CONTINUA_PIECE_RE = re.compile(rf"{_CONTINUA_CLASS}|(?:(?!{_CONTINUA_CLASS}).)+")
+
+
+@functools.lru_cache(maxsize=4096)
+def _is_latin(char: str) -> bool:
+    return unicodedata.name(char, "").startswith("LATIN ")
+
+
+def _word_text(text: str) -> str:
+    r"""Casefolded NFKD text with every non-word character replaced by a space.
+
+    Word characters are those ``[\W_]`` does not match: letters and digits in
+    every script. Combining marks on Latin letters (and on anything that is not
+    a letter) are dropped, so "Méthode" reads "methode"; marks on letters of
+    other scripts stay in their word, since ``\W`` would otherwise split a
+    Devanagari word at every vowel sign. NFC then recomposes what is left.
+    """
+    decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKD", text).casefold())
+    out: list[str] = []
+    keep_marks = False
+    for char in decomposed:
+        if char < "\x80":
+            keep_marks = False
+            out.append(char if char.isalnum() else " ")
+        elif unicodedata.category(char)[0] == "M":
+            if keep_marks:
+                out.append(char)
+        elif char.isalnum():
+            keep_marks = char.isalpha() and not _is_latin(char)
+            out.append(char)
+        else:
+            keep_marks = False
+            out.append(" ")
+    return unicodedata.normalize("NFC", "".join(out))
 
 
 def tokenize(text: str) -> list[str]:
-    """Lowercase -> unicode-normalize -> split on non-alphanumeric -> drop empties.
+    r"""Casefold -> NFKD -> split on ``[\W_]+`` -> drop empties.
 
-    Numbers are kept (content); no stopword removal (we measure true coverage).
-    Prediction and reference go through the SAME tokenizer, so any exotic
-    characters dropped here are dropped on both sides (recall stays consistent).
+    Letters survive in every script ("Straße" is one token, "strasse"), and
+    diacritics on Latin letters are stripped. Scripts written without spaces
+    between words (Han, kana, Thai) give one token per character, so recall on
+    them measures their text rather than the digits around it. Numbers are kept
+    (content); no stopword removal (we measure true coverage). Prediction and
+    reference go through the SAME tokenizer.
     """
     if not text:
         return []
-    norm = _normalize_unicode(text.lower())
-    return [t for t in _TOKEN_SPLIT_RE.split(norm) if t]
+    tokens: list[str] = []
+    for word in _word_text(text).split():
+        if _SCRIPTIO_CONTINUA_RE.search(word):
+            tokens.extend(_CONTINUA_PIECE_RE.findall(word))
+        else:
+            tokens.append(word)
+    return tokens
 
 
 def unigram_recall(pred_tokens: list[str], ref_tokens: list[str]) -> float | None:

@@ -162,7 +162,11 @@ def _add_pipeline_options(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--ocr-url",
-        help="URL for external OCR server (default profile: Paddle; --ocr glm-http keeps GLM)",
+        help=(
+            "URL of an external OCR server. Connects as paddle-http unless --ocr (or, without "
+            "--ocr, OCR_BACKEND) names a GLM backend, then glm-http; --ocr gemini, openai or "
+            "anthropic ignores the URL"
+        ),
     )
     parser.add_argument(
         "--ocr-model",
@@ -606,7 +610,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mcp_parser.add_argument(
         "--ocr-url",
-        help="URL for external OCR server (as for 'bibr chew')",
+        help=(
+            "URL of an external OCR server (as for 'bibr chew': paddle-http unless --ocr or "
+            "OCR_BACKEND names a GLM backend)"
+        ),
     )
     mcp_parser.add_argument(
         "--ocr-model",
