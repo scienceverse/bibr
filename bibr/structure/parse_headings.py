@@ -56,6 +56,7 @@ _HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
     "references": frozenset(
         {
             "references",
+            "reference list",
             "list of references",
             "references and notes",
             "references cited",

@@ -129,6 +129,11 @@ class TestWordBoundaryMatching:
         assert section == CanonicalSection.REFERENCES
         assert score == 1.0
 
+    def test_reference_list_matches_references(self):
+        section, score = _classify_lookup("reference list")
+        assert section == CanonicalSection.REFERENCES
+        assert score == 1.0
+
 
 class TestClassifyWithNormalization:
     """Tests for classify_header() which normalizes input before lookup."""

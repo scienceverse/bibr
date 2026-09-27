@@ -146,6 +146,7 @@ CANONICAL_SECTION_ALIASES = {
         "literature cited",
         "citations",
         "cited literature",
+        "reference list",
     ],
     CanonicalSection.ACKNOWLEDGMENT: [
         "acknowledgments",

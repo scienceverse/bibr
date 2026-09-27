@@ -22,7 +22,13 @@ def _printed_sections(parser):
 
 def test_printed_alias_heading_owns_reference_entries():
     """Heading-first: alias headings reuse the hint section (no synthetic)."""
-    for heading in ("Literature Cited", "5 References", "Bibliography", "References:"):
+    for heading in (
+        "Literature Cited",
+        "5 References",
+        "Bibliography",
+        "References:",
+        "Reference List",
+    ):
         parser, _ = _parse(
             [
                 [

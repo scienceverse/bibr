@@ -1262,10 +1262,11 @@ released.
   study's Method/Results no longer fold under the first study's. Reference
   and abstract hint regions reuse the adjacent printed heading when it spells
   the hint's name differently ("Literature Cited", "5 References",
-  "Bibliography", "Abstract:", or "Summary" directly above a front-page
-  abstract) instead of leaving an empty printed section beside a synthetic
-  one; "Author summary", a later "Summary" or "Supplementary references"
-  stay separate sections.
+  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
+  a front-page abstract) instead of leaving an empty printed section beside
+  a synthetic one; "Author summary", a later "Summary" or "Supplementary
+  references" stay separate sections. A "Reference List" heading now
+  classifies as References.
 - PDF float accounting no longer duplicates caption text that de-duplication
   already consumed, and unowned captions replay where they were printed
   instead of after all body text. Uppercase or unmarked panel titles with a
