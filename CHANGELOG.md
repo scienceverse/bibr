@@ -785,11 +785,10 @@ released.
 - The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
   `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
   harness that are not part of this repository. The evaluator here,
-  `evaluation/evaluate.py`, records `metrics_version: 4`, as it did in 0.5.0 and
-  0.5.1. No metric definition has changed since v4, so saved v4 evaluations need
-  no re-scoring. Full printed names (`authors_fullname_f1`) were already its
-  primary author metric in 0.5.0, with family-name-only `authors_f1` as a
-  diagnostic.
+  `evaluation/evaluate.py`, recorded `metrics_version: 4` in 0.5.0 and 0.5.1,
+  and no definition changed after that until version 5 (see Changed). Full
+  printed names (`authors_fullname_f1`) were already its primary author metric
+  in 0.5.0, with family-name-only `authors_f1` as a diagnostic.
 - Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
   exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
   `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
@@ -1446,6 +1445,21 @@ released.
   speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
   used to pin the serve result cache to an empty version, and now means the
   computed code hash, so a deploy invalidates cached results again.
+- Evaluator metric definitions changed, and `evaluation/evaluate.py` now
+  records `metrics_version: 5`. Scores with `metrics_version` 4 and 5 do not
+  compare; re-score saved predictions before comparing them. The
+  `run_info.json` that `bibr batch` writes into `--out` is no longer read as a
+  prediction: it added an unmatched paper with an empty id, was listed in
+  `prediction_ids`, and changed `predictions_tree_sha256` on every run. The
+  micro-averaged reference accuracies (`micro_mean` on the `ref_*_acc`
+  metrics) count a paper whose gold carries the field but whose matched pairs
+  do not, for example one whose bibliography was lost, as misses over its gold
+  references; they left it out, so a paper that lost every reference could
+  leave `micro_mean` at 1.0. Section-text tokens keep letters in every script:
+  only ASCII letters and digits survived, so a Cyrillic or Chinese section was
+  scored on its numbers and "Straße" split in two. Scripts written without
+  spaces between words give one token per character. Section-text results
+  record `metrics_version` too.
 
 ### Security
 

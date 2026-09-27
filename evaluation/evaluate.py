@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 
+from bibr.batch.runner import RUN_INFO_FILENAME
 from bibr.validation import payload_validation
 from evaluation.section_metrics import (
     BODY_SECTION_TYPES,
@@ -55,10 +56,14 @@ logger = logging.getLogger(__name__)
 # v3: bounded title containment, empty-gold DOI penalties, stricter author matching.
 # v4: full-cohort pass rate; prediction abstracts come only from metadata.abstract
 #     (info.abstract before schema 11, still read).
+# v5: bibr batch's run_info.json is not a prediction; micro reference accuracy
+#     counts a paper with no matched pair carrying the field as misses; section
+#     tokens keep letters in every script, one per character where words are
+#     not space-delimited.
 # Reading schema 11 and 12 exports changed no definition. The 0.5.0 changelog's
 # metrics_version=6 was a counter shared with scorers that are not in this
 # repository; it does not apply to this evaluator.
-METRICS_VERSION = 4
+METRICS_VERSION = 5
 
 # Suffix for the shadow columns holding a metric's value *before* an abstention
 # suppressed it (see _apply_abstentions). Never emitted in ``per_paper`` — they
@@ -149,12 +154,20 @@ def eval_code_sha256(repo_root: Path = _BIBR_REPO_ROOT) -> str | None:
     return digest.hexdigest()
 
 
+# JSON files a prediction directory can hold that are not paper exports. The
+# out dir of bibr batch holds its run record next to the exports (its other
+# sidecars, outcomes.jsonl and runs.jsonl, do not match *.json). Scoring one would
+# add a phantom unmatched prediction, and its per-run timestamps would change the
+# predictions digest when no export changed.
+NON_EXPORT_JSON_NAMES = frozenset({RUN_INFO_FILENAME, "validation_report.json"})
+
+
 def _scored_prediction_paths(json_dir: Path, ids: set[str] | None = None) -> list[Path]:
     """The prediction files ``evaluate_json_exports`` would actually read."""
     return [
         p
         for p in sorted(json_dir.glob("*.json"))
-        if p.name != "validation_report.json" and (ids is None or p.stem in ids)
+        if p.name not in NON_EXPORT_JSON_NAMES and (ids is None or p.stem in ids)
     ]
 
 
@@ -842,7 +855,13 @@ def save_section_results(
         "and are excluded from per-type scoring; their body text is absorbed into the "
         "preceding slice and still captured in _total_body.",
     ]
-    output = {"per_type": per_type, "drop_report": drop_rows, "coverage": coverage, "notes": notes}
+    output = {
+        "metrics_version": METRICS_VERSION,
+        "per_type": per_type,
+        "drop_report": drop_rows,
+        "coverage": coverage,
+        "notes": notes,
+    }
     output_path.write_text(json.dumps(output, indent=2, ensure_ascii=False))
     logger.info("Section results saved to %s", output_path)
 
@@ -1437,8 +1456,13 @@ def _ref_coverage_annotations(results: pd.DataFrame, col: str) -> dict:
     weighing as much as one with fifty.
 
     The numerator is reconstructed as ``round(macro_value * denominator)`` from
-    the value ``ref_field_scores`` already returned, so the micro companion can
-    never disagree with the macro it accompanies.
+    the value ``ref_field_scores`` already returned, so each paper adds to the
+    micro exactly the correct count its macro value implies. A paper whose gold
+    carries the field but whose matched pairs do not (extraction lost the
+    bibliography, or no reference matched) scores 0.0 in the macro; its
+    ``<field>_gold`` references enter the micro denominator as misses, so the
+    micro does not skip the papers the macro scores worst. Papers whose gold
+    lacks the field are null in the macro and add nothing to either.
     """
     if "ref_field_counts" not in results.columns or col not in results.columns:
         return {}
@@ -1457,6 +1481,9 @@ def _ref_coverage_annotations(results: pd.DataFrame, col: str) -> dict:
         if n:
             correct += round(float(value) * n)
             denominator += n
+        else:
+            # Gold carries the field, no matched pair does: the macro's 0.0.
+            denominator += int(counts.get(f"{field}_gold", 0))
 
     return {
         "micro_mean": round(correct / denominator, 4) if denominator else None,
