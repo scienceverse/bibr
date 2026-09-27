@@ -224,8 +224,10 @@ released.
   claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
   both when they fit on the GPU together, else the larger), and a classifier
   that does not fit beside that and the safety reserve runs on CPU, with the
-  same results, only slower.
-  `ML_PAPER_CLASSIFIER_DEVICE` and `ML_SECTION_CLASSIFIER_DEVICE` still win.
+  same results, only slower. With automatic OCR on x86 Linux, a 24 GB card now
+  runs both classifiers on CPU. `ML_PAPER_CLASSIFIER_DEVICE` and
+  `ML_SECTION_CLASSIFIER_DEVICE` still win, and a model pinned to `cuda` that
+  way comes off the other model's budget.
 - JATS input keeps the paper's structure instead of flattening it. References
   accumulate across every `<ref-list>` with one continuous counter: a later
   'Methods references' list extends the main bibliography instead of replacing

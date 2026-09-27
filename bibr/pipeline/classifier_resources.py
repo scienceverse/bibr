@@ -141,7 +141,10 @@ class ClassifierResources:
             # Free VRAM is measured once, before either model loads, so each
             # model loaded on that device comes off the budget of the next.
             placed = 0
-            for resource in (self._paper, self._section):
+            # Explicitly placed models go first so the automatic pick budgets for them.
+            for resource in sorted(
+                (self._paper, self._section), key=lambda r: r.explicit_device is None
+            ):
                 await self._start_one(resource, placed_vram_bytes=placed)
                 if resource.model is not None and _on_measured_device(resource.status.device):
                     placed += resource.estimated_peak_bytes

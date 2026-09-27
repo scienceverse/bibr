@@ -210,13 +210,14 @@ def _recording_loaders(monkeypatch, devices):
     monkeypatch.setattr(cr, "_peak_vram_bytes", lambda device: None)
 
 
-def _default_peaks_settings(*, paper_device=None):
+def _default_peaks_settings(*, paper_device=None, section_device=None):
     """The shipped peak estimates and safety reserve (1536 / 512 / 2048 MiB)."""
     from bibr.config import MlOptions
 
     fields = MlOptions.model_fields
     settings = _settings()
     settings.ml.paper_classifier_device = paper_device
+    settings.ml.section_classifier_device = section_device
     for name in (
         "paper_classifier_estimated_peak_mb",
         "section_classifier_estimated_peak_mb",
@@ -270,6 +271,23 @@ async def test_explicit_device_wins_and_counts_toward_the_budget(monkeypatch):
         total_gib=24,
     )
     assert devices == {"paper": "cuda", "section": "cpu"}
+
+
+async def test_explicit_section_device_counts_toward_the_paper_budget(monkeypatch):
+    """Section pinned to CUDA, paper on auto: the paper pick sees the section model.
+
+    The paper model used to be picked first with nothing placed, so both went
+    to CUDA (2048 MiB against 1638 MiB usable). The explicitly placed section
+    model now loads first, and the paper model goes to CPU.
+    """
+    devices = await _placed(
+        monkeypatch,
+        _default_peaks_settings(section_device="cuda"),
+        fraction=0.85,
+        free_gib=20,
+        total_gib=24,
+    )
+    assert devices == {"paper": "cpu", "section": "cuda"}
 
 
 def _pipeline_devices(monkeypatch, *, free_gib, total_gib, **pipeline_kwargs):
