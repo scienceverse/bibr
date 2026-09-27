@@ -152,7 +152,7 @@ async def test_identity_stage_exports_additive_expected_identity_and_candidate_r
     state.paper.extraction = _build_extraction(ctx, state.paper, state)
     payload = state.paper.export_to_json()
 
-    assert payload["schema_version"] == "12.0"
+    assert payload["schema_version"] == "12.1"
     assert payload["metadata"]["doi"] == doi
     identity = payload["extraction"]["identity"]
     assert identity["expected"]["queue_record_id"] == "record-1"

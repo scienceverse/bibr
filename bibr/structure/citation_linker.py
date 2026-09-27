@@ -656,7 +656,13 @@ def _is_non_citation_digit_run(text: str, digits: str, end: int) -> bool:
 _TIER3_BATCH_SIZE = 40
 
 
-async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> list[PaperXref]:
+async def _resolve_with_llm(
+    ambiguous,
+    references,
+    llm_client,
+    file_hash,
+    failures: list[tuple[str, list[str]]] | None = None,
+) -> list[PaperXref]:
     """Tier 3: resolve unresolved citation candidates in LLM batches.
 
     Args:
@@ -664,6 +670,9 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
         references: list of PaperReference objects
         llm_client: LlmClient instance
         file_hash: file hash for rate-limit tracking
+        failures: receives, per failed batch, the call's error code and the
+            citation texts that batch asked about
+        failures: receives the error code of a failed call
 
     Batches run concurrently within the client's own concurrency and rate
     limits; a failed batch yields no matches without affecting the others.
@@ -688,6 +697,7 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
                 references,
                 llm_client,
                 file_hash,
+                failures,
             )
             for index in range(0, len(ambiguous), _TIER3_BATCH_SIZE)
         ),
@@ -702,7 +712,7 @@ async def _resolve_with_llm(ambiguous, references, llm_client, file_hash) -> lis
 
 
 async def _resolve_batch_with_llm(
-    ambiguous, reference_summary, references, llm_client, file_hash
+    ambiguous, reference_summary, references, llm_client, file_hash, failures=None
 ) -> list[PaperXref]:
     """Resolve one Tier-3 batch; returns gracefully with [] on any failure."""
     try:
@@ -737,7 +747,11 @@ async def _resolve_batch_with_llm(
     except ProcessingError:
         raise
     except Exception as e:
+        from bibr.clients.llm import llm_failure_code
+
         logger.warning("Tier 3 LLM citation resolution failed: %s", e)
+        if failures is not None:
+            failures.append((llm_failure_code(e), [cite_text for _text_id, cite_text in ambiguous]))
         return []
 
 
@@ -1634,12 +1648,33 @@ async def detect_bib_xrefs_with_receipt(
             unique_cites: dict[str, int] = {}
             for text_id, cite_text, _start, _end in ambiguous:
                 unique_cites.setdefault(_normalize_citation_text(cite_text), text_id)
+            tier3_failures: list[tuple[str, list[str]]] = []
             tier3 = await _resolve_with_llm(
                 [(text_id, cite_text) for cite_text, text_id in unique_cites.items()],
                 references,
                 llm_client,
                 file_hash,
+                tier3_failures,
             )
+            if tier3_failures:
+                # Record on the receipt why the candidates a failed batch was
+                # asked about stay unresolved, instead of looking like no match.
+                failed_reason: dict[str, str] = {}
+                for code, batch_texts in tier3_failures:
+                    for batch_text in batch_texts:
+                        failed_reason.setdefault(batch_text, f"llm_failed:{code}")
+                affected = {
+                    (text_id, start, end): failed_reason[normalized]
+                    for text_id, cite_text, start, end in ambiguous
+                    if (normalized := _normalize_citation_text(cite_text)) in failed_reason
+                }
+                for index, candidate in enumerate(candidates):
+                    key = (candidate.text_id, candidate.start, candidate.end)
+                    if not candidate.accepted and key in affected:
+                        candidates[index] = replace(
+                            candidate,
+                            rejection_reasons=(*candidate.rejection_reasons, affected[key]),
+                        )
             # One citation text can name several works, so keep every match;
             # a text that names one work takes one (a hedge links nothing).
             resolved_map: dict[str, list[int]] = {}

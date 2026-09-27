@@ -107,6 +107,7 @@ _OUTAGE_EXC_NAMES: frozenset[str] = frozenset(
         "ClientConnectionError",  # aiohttp
         "CircuitOpenError",  # bibr's breaker, open after repeated service failures
         "LocalEntryNotFoundError",  # huggingface_hub: Hub unreachable, file not cached
+        "LlmUnreachableError",  # bibr: the LLM service refused, dropped or never took the call
     }
 )
 _TIMEOUT_EXC_NAMES: frozenset[str] = frozenset(

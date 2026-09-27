@@ -15,7 +15,7 @@ import logging
 import platform
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 from bibr.ocr.backend import OcrBackend
 
@@ -37,10 +37,16 @@ class OcrBackendCandidate:
     profile: OcrProfileName
 
 
+# The managed PaddleOCR-VL vLLM server's ``--gpu-memory-utilization``. vLLM
+# claims this fraction of total VRAM and will not start when less is free, so
+# the classifier device picker leaves it free (``bibr.local.pipeline``).
+PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
+
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
 # for the ~1.8 GB bf16 weights plus vLLM's KV/activation budget at
-# ``--gpu-memory-utilization 0.92``. Below this floor bibr's documented Linux
-# contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to ``glm-llama``.
+# ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``. Below this floor bibr's documented
+# Linux contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to
+# ``glm-llama``.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
 
 
@@ -147,24 +153,92 @@ def resolve_backend_candidates(
 
     if name != "paddle":
         return (_candidate(name, settings),)
+    return tuple(_candidate(backend, settings) for backend in automatic_backend_names())
 
+
+def automatic_backend_names() -> tuple[str, ...]:
+    """The concrete runtimes the automatic ``paddle`` selector tries here, in order."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
-        names = ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
-    elif sys.platform == "win32":
-        names = ("glm-llama",)
-    elif sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
+        return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
+    if sys.platform == "win32":
+        return ("glm-llama",)
+    if sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
         # The managed vLLM runtime is only a candidate on hardware that can
         # run it. Otherwise a CPU-only or small-GPU box spent the whole 900 s
         # startup budget bootstrapping vLLM before falling through to llama.cpp.
         vllm_blocker = paddle_vllm_unavailable_reason()
         if vllm_blocker is None:
-            names = ("paddle-vllm", "glm-llama")
-        else:
-            logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)
-            names = ("glm-llama",)
-    else:
-        names = ("glm-llama",)
-    return tuple(_candidate(backend, settings) for backend in names)
+            return ("paddle-vllm", "glm-llama")
+        logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)
+    return ("glm-llama",)
+
+
+#: The cloud vision-LLM OCR backends. They call their provider's API (set
+#: ``OCR_VISION_BASE_URL`` to move it), never an OCR server, and hold no local
+#: weights. The one definition every OCR module imports.
+CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
+
+#: Requests an ``ocr_url`` leaves alone: the two HTTP clients already address
+#: the URL, and the cloud vision backends ignore it.
+_URL_KEEPS_BACKEND = CLOUD_VISION_OCR_BACKENDS | {"paddle-http", "serve-http"}
+
+
+def url_request(explicit: str | None, configured: str | None) -> str | None:
+    """Return the OCR backend request an ``ocr_url`` is resolved from.
+
+    ``explicit`` is the caller's backend (``--ocr``, ``ocr_backend=``,
+    ``RunConfig.ocr_backend``) and is the request whenever it is set.
+    Without it the configured ``OCR_BACKEND`` is the request, unless it names
+    a cloud vision provider: a server URL the caller named outranks a
+    configured cloud default, so page images never go to a cloud provider
+    because of a ``.env`` setting. ``None`` means no request (the default
+    ``paddle`` selector). Every entry point calls this before
+    :func:`resolve_url_backend`.
+    """
+    if explicit:
+        return explicit
+    if configured in CLOUD_VISION_OCR_BACKENDS:
+        return None
+    return configured
+
+
+@overload
+def resolve_url_backend(requested: str | None, ocr_url: str) -> str: ...
+
+
+@overload
+def resolve_url_backend(requested: str, ocr_url: str | None) -> str: ...
+
+
+@overload
+def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | None: ...
+
+
+def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | None:
+    """Apply an explicit OCR server URL to an OCR backend request.
+
+    The one rule behind ``bibr chew --ocr-url``, ``LocalPipeline(ocr_url=...)``
+    (and so ``bibr.chew``), ``ResourceManager`` and the OCR runtime identity,
+    so they all start, cache and report the same backend. ``requested`` comes
+    from :func:`url_request`. An OCR URL means Paddle, bibr's default OCR:
+
+    - without a URL the request is returned unchanged;
+    - ``paddle-http``, ``serve-http`` and the cloud vision backends
+      (:data:`CLOUD_VISION_OCR_BACKENDS`) are kept;
+    - a GLM request (``glm``, any ``glm-*`` name, or the legacy ``http``
+      alias of ``glm-http``) becomes ``glm-http``;
+    - anything else, including the ``paddle`` selector and no request at
+      all, becomes ``paddle-http``.
+
+    Idempotent: a resolved backend resolves to itself.
+    """
+    if not ocr_url:
+        return requested
+    if requested in _URL_KEEPS_BACKEND:
+        return requested
+    if requested is not None and (requested == "http" or requested.startswith("glm")):
+        return "glm-http"
+    return "paddle-http"
 
 
 def resolve_backend_name(name: str | None, settings: GlobalSettings | None = None) -> str:

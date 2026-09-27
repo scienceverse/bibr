@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.pipeline.context import RunConfig
@@ -202,18 +204,22 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
 
     This is intentionally independent of a constructed backend client: the
     cache must be able to distinguish model families without starting a local
-    server merely to discover its identity.
+    server merely to discover its identity. An ``ocr_url`` resolves the
+    request through the shared rule the pipeline starts its client with
+    (:func:`bibr.ocr.registry.url_request`, then
+    :func:`bibr.ocr.registry.resolve_url_backend`).
     """
+    from bibr.ocr.registry import resolve_url_backend, url_request
+
     requested_backend = cfg.ocr_backend or settings.ocr.backend
-    backend = (
-        "glm-http"
-        if cfg.ocr_url
-        and requested_backend not in {"paddle-http", "serve-http", "gemini", "openai", "anthropic"}
-        else requested_backend
-    )
+    if cfg.ocr_url:
+        # A configured cloud OCR_BACKEND is no request next to a server URL;
+        # no request at all is the default ``paddle`` selector.
+        requested_backend = url_request(cfg.ocr_backend, settings.ocr.backend) or "paddle"
+    backend = resolve_url_backend(requested_backend, cfg.ocr_url)
     model = (
         settings.ocr.paddle_served_model
-        if requested_backend == "paddle-vllm"
+        if backend == "paddle-vllm"
         else cfg.ocr_model
         or _default_ocr_model(
             requested_backend=requested_backend,
@@ -223,7 +229,7 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
         )
     )
     explicit_profile = cfg.ocr_profile or settings.ocr.profile
-    if (backend in {"gemini", "openai", "anthropic"} and explicit_profile is None) or (
+    if (backend in CLOUD_VISION_OCR_BACKENDS and explicit_profile is None) or (
         backend == "serve-http"
         and explicit_profile is None
         and _infer_profile_name(backend, model) is None
@@ -277,7 +283,7 @@ def resolve_served_model(
     ``ocr_url`` rewrite.
     """
     ocr = settings.ocr
-    if concrete_backend in {"gemini", "openai", "anthropic"}:
+    if concrete_backend in CLOUD_VISION_OCR_BACKENDS:
         return ocr.model or settings.ocr_vision.model
     if concrete_backend == "serve-http":
         if (
@@ -293,7 +299,9 @@ def resolve_served_model(
         # rewrites any local GLM runtime to glm-http — asks for the served
         # alias rather than the local backend's HuggingFace repo id.
         return ocr.model or GLM_SERVED_MODEL_ALIAS
-    if requested_backend in {"paddle-http", "paddle-vllm"}:
+    if concrete_backend == "paddle-http" or requested_backend == "paddle-vllm":
+        # paddle-http likewise: the ``ocr_url`` rule turns the ``paddle``
+        # selector and every local Paddle runtime into it.
         return ocr.paddle_served_model
     if requested_backend == "paddle-mlx-vlm":
         return ocr.paddle_mlx_model

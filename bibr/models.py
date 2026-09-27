@@ -9,9 +9,13 @@ at serialization sites.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from enum import StrEnum
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+
+from bibr.extract.field_decisions import FieldDecisions
 
 
 class _Base(BaseModel):
@@ -300,6 +304,9 @@ class PaperMetadata(_Base):
     # Bounded, non-schema diagnostic carried until Paper assembly turns it into
     # a typed validation issue. It is never serialized as metadata directly.
     _references_incomplete_diagnostic: str = PrivateAttr(default="")
+    # Each decided field's proposals and receipt
+    # (``bibr.extract.field_decisions``); feeds ``extraction.fields``.
+    _field_decisions: FieldDecisions = PrivateAttr(default_factory=FieldDecisions)
     # The paper's OWN bibliographic self-identity, verbatim from the front
     # matter (journal-issue line, footers, copyright/license lines). Null when
     # not printed — never inferred or backfilled from enrichment.
@@ -344,6 +351,19 @@ class PaperMetadata(_Base):
     # timed out / failed (so bib_match is a partial prefix), None if it never ran.
     enrichment_complete: bool | None = None
 
+    # A copy gets its own receipts, so a decision on it never rewrites the
+    # original's; a field an ``update`` rewrites loses its now stale receipt.
+    def __copy__(self) -> Self:
+        copied = super().__copy__()
+        copied._field_decisions = self._field_decisions.copy()
+        return copied
+
+    def model_copy(self, *, update: Mapping[str, Any] | None = None, deep: bool = False) -> Self:
+        copied = super().model_copy(update=update, deep=deep)
+        if update:
+            copied._field_decisions.forget_attributes(update)
+        return copied
+
 
 class ErrorCode(StrEnum):
     """Structured error codes for pipeline failures."""
@@ -360,6 +380,7 @@ class ErrorCode(StrEnum):
     PARSE_FAILED = "parse_failed"
     EXTRACTION_FAILED = "extraction_failed"
     LLM_INVALID_OUTPUT = "llm_invalid_output"
+    LLM_TRUNCATED = "llm_truncated"
     EXPORT_FAILED = "export_failed"
 
     # Upstream
