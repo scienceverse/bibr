@@ -634,11 +634,18 @@ released.
   is a warning, and its hint gives the reinstall command.
 - After a GPU install, a `uv sync` without `--extra gpu` uninstalls
   `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
-  `onnxruntime` stays installed but its package is empty: `import onnxruntime`
-  still works, and the first ONNX model failed with an `AttributeError`. bibr
-  now raises a `ConfigurationError` that gives the repair, `uv sync
-  --reinstall-package onnxruntime`, and `bibr doctor` fails its ONNX Runtime
-  line with the same command.
+  `onnxruntime` stays installed, but its package is left empty or gone. An
+  empty package still imports, and the first ONNX model failed with an
+  `AttributeError`. A gone one raised an `ImportError` that suggested `pip
+  install onnxruntime`, which does nothing while the package counts as
+  installed. bibr now raises a `ConfigurationError` for an empty package, and
+  for an installed one that fails to import, an `ImportError` with the import
+  error. Both give the repair, `uv pip install --python <interpreter>
+  --reinstall-package onnxruntime onnxruntime==<version>` (a pinned pip
+  reinstall where pip manages the environment), and tell GPU users to repeat
+  the `onnxruntime-gpu` reinstall afterwards, since the repair writes the CPU
+  build. `bibr doctor` fails its ONNX Runtime line with the same command, and
+  names the import error when there is one.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.

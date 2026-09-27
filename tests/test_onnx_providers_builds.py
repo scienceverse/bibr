@@ -12,6 +12,7 @@ import re
 import shlex
 import sys
 import tomllib
+from contextlib import contextmanager
 from importlib import metadata
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -246,7 +247,47 @@ def _hollow_module():
     return module
 
 
-_UV_REPAIR = "uv sync --reinstall-package onnxruntime"
+def _uv_repair(requirement="onnxruntime==1.27.0"):
+    """The uv repair: ``uv pip`` with this interpreter works outside a uv project too."""
+    return [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--reinstall-package",
+        "onnxruntime",
+        requirement,
+    ]
+
+
+_UV_REPAIR = shlex.join(_uv_repair())
+_GPU_STEP = (
+    "a GPU install, repeat the onnxruntime-gpu reinstall afterwards, since this writes the "
+    "CPU build: https://bibr.org/getting-started/install/#gpu-onnx-runtime"
+)
+_REPAIR_LINE = f"Reinstall it with: {_UV_REPAIR}; on {_GPU_STEP}"
+_REPAIR_HINT_LINES = [f"Reinstall it with: {_UV_REPAIR}", f"On {_GPU_STEP}"]
+
+
+class _FailingImport:
+    """A meta path finder that makes ``import onnxruntime`` raise ``exc``."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def find_spec(self, name, path=None, target=None):
+        if name == "onnxruntime":
+            raise self.exc
+        return None
+
+
+@contextmanager
+def _import_fails(exc):
+    finders = [_FailingImport(exc), *sys.meta_path]
+    with patch.dict("sys.modules"), patch.object(sys, "meta_path", finders):
+        sys.modules.pop("onnxruntime", None)
+        yield
 
 
 def test_hollow_module_raises_configuration_error_naming_the_repair(monkeypatch):
@@ -258,7 +299,17 @@ def test_hollow_module_raises_configuration_error_naming_the_repair(monkeypatch)
         onnx_providers.get_ort_providers(model_name="layout")
 
     assert "the onnxruntime package is empty" in str(excinfo.value)
-    assert str(excinfo.value).endswith(_UV_REPAIR)
+    assert str(excinfo.value).endswith(_REPAIR_LINE)
+
+
+def test_get_ort_providers_names_the_model_in_the_hollow_error(monkeypatch):
+    """The segmenter builds its chain with get_ort_providers, not create_session."""
+    _installed(monkeypatch, gpu=None)
+    with (
+        patch.dict("sys.modules", {"onnxruntime": _hollow_module()}),
+        pytest.raises(ConfigurationError, match="^wtpsplit-sat requires onnxruntime"),
+    ):
+        onnx_providers.get_ort_providers(model_name="wtpsplit-sat")
 
 
 def test_create_session_on_a_hollow_module_names_the_model_and_repair(monkeypatch):
@@ -270,7 +321,7 @@ def test_create_session_on_a_hollow_module_names_the_model_and_repair(monkeypatc
         onnx_providers.create_session("model.onnx", model_name="section classifier")
 
     assert str(excinfo.value).startswith("section classifier requires onnxruntime")
-    assert str(excinfo.value).endswith(_UV_REPAIR)
+    assert _UV_REPAIR in str(excinfo.value)
 
 
 def test_hollow_pip_install_gets_the_pinned_pip_repair(monkeypatch):
@@ -285,12 +336,19 @@ def test_hollow_pip_install_gets_the_pinned_pip_repair(monkeypatch):
         [sys.executable, "-m", "pip", "install", "--force-reinstall", "--no-deps",
          "onnxruntime==1.27.0"]
     )  # fmt: skip
-    assert str(excinfo.value).endswith(repair)
+    assert f"Reinstall it with: {repair}" in str(excinfo.value)
 
 
-def test_hollow_module_without_metadata_falls_back_to_the_uv_repair(monkeypatch):
+def test_uv_repair_pins_the_version_and_names_the_interpreter(monkeypatch):
+    """``uv sync`` only works inside the uv project; a venv filled by ``uv pip
+    install bibr`` records the same INSTALLER."""
+    _installed(monkeypatch, gpu=None)
+    assert onnx_providers.onnxruntime_repair_command() == _uv_repair()
+
+
+def test_hollow_module_without_metadata_falls_back_to_the_unpinned_uv_repair(monkeypatch):
     _installed(monkeypatch, cpu=None, gpu=None)
-    assert onnx_providers.onnxruntime_repair_command() == _UV_REPAIR.split()
+    assert onnx_providers.onnxruntime_repair_command() == _uv_repair("onnxruntime")
 
 
 def test_hollow_module_is_no_cuda_provider_not_a_crash():
@@ -301,11 +359,18 @@ def test_hollow_module_is_no_cuda_provider_not_a_crash():
 # --- bibr doctor --------------------------------------------------------------
 
 
-def _doctor_onnx_line(*, module) -> tuple[str, str, str]:
+def _doctor_onnx_line(*, module=None, import_error=None) -> tuple[str, str, str]:
+    """The doctor line for ``module`` in ``sys.modules``, or for an ``import
+    onnxruntime`` that raises ``import_error``."""
     from bibr.local.cli import _check_onnx_runtime
 
     calls = []
-    with patch.dict("sys.modules", {"onnxruntime": module}):
+    context = (
+        _import_fails(import_error)
+        if import_error is not None
+        else patch.dict("sys.modules", {"onnxruntime": module})
+    )
+    with context:
         _check_onnx_runtime(
             lambda msg: calls.append(("ok", msg, "")),
             lambda msg, hint="": calls.append(("warn", msg, hint)),
@@ -346,16 +411,39 @@ def test_doctor_fails_on_a_hollow_module_with_the_repair(monkeypatch):
 
     assert status == "fail"
     assert "its files are missing" in msg
-    assert hint.endswith(_UV_REPAIR)
+    assert hint.splitlines() == _REPAIR_HINT_LINES
 
 
-def test_missing_onnxruntime_keeps_the_import_error():
+def test_missing_onnxruntime_keeps_the_import_error(monkeypatch):
     """Not installed at all is an ImportError naming the feature, not the hollow error."""
+    _installed(monkeypatch, cpu=None, gpu=None)
     with (
         patch.dict("sys.modules", {"onnxruntime": None}),
-        pytest.raises(ImportError, match="^layout detector requires onnxruntime"),
+        pytest.raises(ImportError) as excinfo,
     ):
         onnx_providers.import_onnxruntime("layout detector")
+
+    assert str(excinfo.value) == (
+        "layout detector requires onnxruntime, which ships with the core install: "
+        "pip install onnxruntime (or reinstall bibr)"
+    )
+
+
+def test_failed_import_with_metadata_present_gives_the_repair(monkeypatch):
+    """Uninstalling onnxruntime-gpu can remove the whole onnxruntime/ directory;
+    ``pip install onnxruntime`` then reports the requirement already satisfied."""
+    _installed(monkeypatch, gpu=None)
+    with (
+        _import_fails(ModuleNotFoundError("No module named 'onnxruntime'")),
+        pytest.raises(ImportError) as excinfo,
+    ):
+        onnx_providers.import_onnxruntime("layout detector")
+
+    assert not isinstance(excinfo.value, ConfigurationError)
+    assert str(excinfo.value) == (
+        "layout detector requires onnxruntime, but onnxruntime 1.27.0 is installed and "
+        f"importing it failed: No module named 'onnxruntime'. {_REPAIR_LINE}"
+    )
 
 
 def test_doctor_fails_when_onnxruntime_is_not_installed(monkeypatch):
@@ -364,6 +452,32 @@ def test_doctor_fails_when_onnxruntime_is_not_installed(monkeypatch):
 
     assert (status, msg) == ("fail", "ONNX Runtime: not installed")
     assert "core dependency" in hint
+
+
+def test_doctor_reports_the_import_error_and_repair_when_metadata_is_present(monkeypatch):
+    """A CPU/GPU file mix or a missing native library, not a missing package."""
+    _installed(monkeypatch, gpu=None)
+    error = ImportError("cannot import name 'get_all_providers' from 'onnxruntime.capi'")
+    status, msg, hint = _doctor_onnx_line(import_error=error)
+
+    assert (status, msg) == (
+        "fail",
+        "ONNX Runtime: onnxruntime 1.27.0 is installed, but importing it failed: "
+        "cannot import name 'get_all_providers' from 'onnxruntime.capi'",
+    )
+    assert hint.splitlines() == _REPAIR_HINT_LINES
+
+
+def test_doctor_reports_an_import_that_fails_another_way(monkeypatch):
+    """Anything else ``import onnxruntime`` raises is a failed line, not a traceback."""
+    _installed(monkeypatch, gpu=None)
+    error = OSError("libcudart.so.12: cannot open shared object file: No such file or directory")
+
+    assert _doctor_onnx_line(import_error=error) == (
+        "fail",
+        "ONNX Runtime: libcudart.so.12: cannot open shared object file: No such file or directory",
+        "",
+    )
 
 
 def test_doctor_fails_when_the_loaded_build_cannot_list_providers(monkeypatch):

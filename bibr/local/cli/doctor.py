@@ -446,9 +446,10 @@ def _check_onnx_runtime(ok, warn, fail) -> None:
 
     from bibr.utils.onnx_providers import (
         _installed_builds,
+        _installed_onnxruntime_version,
         import_onnxruntime,
         onnxruntime_gpu_reinstall_command,
-        onnxruntime_repair_command,
+        onnxruntime_repair_hint,
     )
 
     try:
@@ -456,11 +457,28 @@ def _check_onnx_runtime(ok, warn, fail) -> None:
     except ConfigurationError:
         fail(
             "ONNX Runtime: onnxruntime is installed, but its files are missing",
-            hint=escape(f"Reinstall it: {shlex.join(onnxruntime_repair_command())}"),
+            hint=escape(onnxruntime_repair_hint(lines=True)),
         )
         return
-    except ImportError:
-        fail("ONNX Runtime: not installed", hint="Reinstall bibr; onnxruntime is a core dependency")
+    except ImportError as e:
+        installed = _installed_onnxruntime_version()
+        if installed is None:
+            fail(
+                "ONNX Runtime: not installed",
+                hint="Reinstall bibr; onnxruntime is a core dependency",
+            )
+        else:
+            # The metadata is there, so reinstalling bibr or `pip install
+            # onnxruntime` would change nothing: rewrite the package's files.
+            cause = e.__cause__ if isinstance(e.__cause__, ImportError) else e
+            fail(
+                f"ONNX Runtime: onnxruntime {installed} is installed, but importing it "
+                f"failed: {cause}",
+                hint=escape(onnxruntime_repair_hint(lines=True)),
+            )
+        return
+    except Exception as e:  # noqa: BLE001 — e.g. a native library that fails to load
+        fail(f"ONNX Runtime: {e}")
         return
 
     try:

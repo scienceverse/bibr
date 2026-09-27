@@ -16,6 +16,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+GPU_ONNX_RUNTIME_DOCS = "https://bibr.org/getting-started/install/#gpu-onnx-runtime"
+
 _preload_lock = threading.Lock()
 _cuda_libraries_preloaded = False
 
@@ -156,11 +158,24 @@ def _installed_builds() -> tuple[str, str, str] | None:
         return None
 
 
+def _installed_onnxruntime_version() -> str | None:
+    """The ``onnxruntime`` distribution's version, or ``None`` when its metadata is missing."""
+    from importlib import metadata
+
+    try:
+        return metadata.version("onnxruntime")
+    except Exception:  # noqa: BLE001 — not installed, or unreadable metadata
+        return None
+
+
 def onnxruntime_repair_command() -> list[str]:
     """The command that rewrites the ``onnxruntime`` distribution's files.
 
-    The uv form resyncs the project; the pip form is for environments pip
-    manages, pinned to the installed version when metadata still has one.
+    It pins the installed version when metadata still has one. The uv form
+    names this interpreter, so it works in a uv project and in a plain venv
+    that ``uv pip install`` filled alike; the pip form is for environments pip
+    manages. Either one writes the CPU build's files (see
+    :func:`onnxruntime_repair_hint`).
     """
     from importlib import metadata
 
@@ -168,7 +183,7 @@ def onnxruntime_repair_command() -> list[str]:
         dist = metadata.distribution("onnxruntime")
         installer = (dist.read_text("INSTALLER") or "").strip()
         requirement = f"onnxruntime=={dist.version}"
-    except Exception:  # noqa: BLE001 — missing or unreadable metadata: assume a uv project
+    except Exception:  # noqa: BLE001 — missing or unreadable metadata: uv, unpinned
         installer, requirement = "uv", "onnxruntime"
     if installer == "pip":
         return [
@@ -180,38 +195,69 @@ def onnxruntime_repair_command() -> list[str]:
             "--no-deps",
             requirement,
         ]
-    return ["uv", "sync", "--reinstall-package", "onnxruntime"]
+    return [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        sys.executable,
+        "--reinstall-package",
+        "onnxruntime",
+        requirement,
+    ]
+
+
+def onnxruntime_repair_hint(*, lines: bool = False) -> str:
+    """The repair command, then the GPU step to repeat after it.
+
+    One line for an error message, or two lines for a ``bibr doctor`` hint.
+    """
+    import shlex
+
+    command = f"Reinstall it with: {shlex.join(onnxruntime_repair_command())}"
+    gpu = (
+        "a GPU install, repeat the onnxruntime-gpu reinstall afterwards, since this "
+        f"writes the CPU build: {GPU_ONNX_RUNTIME_DOCS}"
+    )
+    return f"{command}\nOn {gpu}" if lines else f"{command}; on {gpu}"
 
 
 def import_onnxruntime(feature: str = "ONNX Runtime inference"):
-    """Import ``onnxruntime``, raising a fixable error when it is missing or hollow.
+    """Import ``onnxruntime``, raising a fixable error when it is missing or broken.
 
     ``onnxruntime`` and ``onnxruntime-gpu`` write the same ``onnxruntime/``
     directory, so uninstalling one deletes files the other still needs. A
-    ``uv sync`` without ``--extra gpu`` after a GPU install does exactly that:
-    ``onnxruntime`` stays installed per its metadata, ``import onnxruntime``
-    finds only a namespace package, and ``get_available_providers`` is missing.
-    That raises :class:`ConfigurationError` with the repair command instead of
-    an ``AttributeError`` somewhere later.
+    ``uv sync`` without ``--extra gpu`` after a GPU install does exactly that,
+    and ``onnxruntime`` stays installed per its metadata. When ``import
+    onnxruntime`` then finds only a namespace package, without
+    ``get_available_providers``, this raises :class:`ConfigurationError` with
+    the repair command instead of an ``AttributeError`` somewhere later. When
+    the import itself fails while the metadata is there (the whole directory
+    gone, a CPU/GPU file mix, a missing native library), the ``ImportError``
+    gives the same repair: ``pip install onnxruntime`` would do nothing, since
+    the requirement is already satisfied.
     """
     try:
         import onnxruntime as ort
     except ImportError as e:
-        from bibr.utils.ml_extra import onnxruntime_import_error
+        version = _installed_onnxruntime_version()
+        if version is None:
+            from bibr.utils.ml_extra import onnxruntime_import_error
 
-        raise onnxruntime_import_error(feature) from e
+            raise onnxruntime_import_error(feature) from e
+        raise ImportError(
+            f"{feature} requires onnxruntime, but onnxruntime {version} is installed and "
+            f"importing it failed: {e}. {onnxruntime_repair_hint()}"
+        ) from e
 
     if not hasattr(ort, "get_available_providers"):
-        import shlex
-
         from bibr.exceptions import ConfigurationError
 
         raise ConfigurationError(
             f"{feature} requires onnxruntime, but the onnxruntime package is empty: its "
             "files were deleted, typically by uninstalling onnxruntime-gpu (which a "
             "`uv sync` without `--extra gpu` does after a GPU install), since the two "
-            "share the onnxruntime/ directory. Reinstall it with: "
-            f"{shlex.join(onnxruntime_repair_command())}"
+            f"share the onnxruntime/ directory. {onnxruntime_repair_hint()}"
         )
     return ort
 
@@ -229,7 +275,7 @@ def get_ort_providers(
 
     Args:
         enable_cuda: Whether to include CUDAExecutionProvider.
-        model_name: Human-readable model name for logging.
+        model_name: Human-readable model name for logging and import errors.
         gpu_mem_limit: Optional cap on the CUDA EP arena size in bytes.
 
     Returns:
@@ -238,8 +284,9 @@ def get_ort_providers(
     Raises:
         ConfigurationError: onnxruntime is installed but its files are gone
             (see :func:`import_onnxruntime`).
+        ImportError: onnxruntime is missing or fails to import.
     """
-    ort = import_onnxruntime()
+    ort = import_onnxruntime(model_name or "ONNX Runtime inference")
     available = set(ort.get_available_providers())
     providers: list[str | tuple[str, dict]] = []
 
@@ -270,9 +317,9 @@ def get_ort_providers(
             if torch is not None and torch.cuda.is_available():
                 logger.warning(
                     "CUDA GPU detected but onnxruntime-gpu is not installed — "
-                    "%s will run on CPU. Install the gpu extra as described at "
-                    "https://bibr.org/getting-started/install/#gpu-onnx-runtime",
+                    "%s will run on CPU. Install the gpu extra as described at %s",
                     model_name or "model",
+                    GPU_ONNX_RUNTIME_DOCS,
                 )
         except Exception as exc:  # noqa: BLE001 — a broken torch must not break ORT setup
             logger.debug("torch CUDA probe failed while building ORT providers: %s", exc)
