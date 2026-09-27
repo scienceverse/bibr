@@ -379,9 +379,10 @@ with `GRADIO_PASSWORD` below. In PowerShell, for example:
 While the demo deletes its files, it leaves the OCR disk cache off unless you
 set `CACHE_OCR` yourself. With `DEMO_CACHE_TTL_SECONDS=0` it turns that cache
 on, so a paper you run again skips OCR. The cache keeps each paper's OCR text,
-with no expiry, in `CACHE_OCR_DIR` (default `~/.cache/bibr/ocr`). On a demo
-other people upload to, keep the cleanup on and do not turn `CACHE_OCR` on,
-in the shell or in `.env`.
+with no expiry, in `CACHE_OCR_DIR` (default `$XDG_CACHE_HOME/bibr/ocr`, or
+`~/.cache/bibr/ocr` when `XDG_CACHE_HOME` is unset). On a demo other people
+upload to, keep the cleanup on and do not turn `CACHE_OCR` on, in the shell or
+in `.env`.
 
 For a remote demo, run it on the host that has bibr configured. Protect it with
 a username and a strong password before creating a temporary public share link.
