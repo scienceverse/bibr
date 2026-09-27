@@ -605,6 +605,15 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -1422,6 +1431,11 @@ released.
   refuses to continue a run over other paper ids, or when the server's GROBID
   version, the request parameters or a `--grobid-image` given on the resume
   differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1519,6 +1533,11 @@ released.
   scored on its numbers and "Straße" split in two. Han, kana and Thai text
   gives one token per character. Section-text results record
   `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
 
 ### Security
 

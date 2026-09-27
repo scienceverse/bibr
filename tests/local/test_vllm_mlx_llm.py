@@ -54,6 +54,7 @@ def test_llm_server_uses_serial_engine_by_default(monkeypatch):
         multimodal=False,
         extra_args=[],
         settings=wrapped._settings,
+        stop_event=None,
     )
     assert wrapped._server is server
 

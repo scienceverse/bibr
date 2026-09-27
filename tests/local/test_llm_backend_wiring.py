@@ -1,6 +1,7 @@
 """--llm local resolution and the managed-vllm resources branch."""
 
-from unittest.mock import MagicMock, patch
+import threading
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -127,7 +128,8 @@ async def test_start_llm_server_vllm_branch(monkeypatch):
     resources = ResourceManager(settings=custom)
     await resources.start_llm_server(backend="vllm")
     assert resources._llm_server is instance
-    factory.assert_called_once_with(settings=custom)
+    factory.assert_called_once_with(settings=custom, stop_event=ANY)
+    assert isinstance(factory.call_args.kwargs["stop_event"], threading.Event)
     instance.configure_llm_client.assert_called_once()
 
 
