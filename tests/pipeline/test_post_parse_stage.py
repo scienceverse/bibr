@@ -1,5 +1,6 @@
 """PostParseStage — extractor invocation (post_parse helper)."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -74,6 +75,26 @@ async def test_sets_error_on_exception():
     assert fs.error is not None
     assert fs.error_code == "extraction_failed"
     assert fs.failed_stage == "extract"
+
+
+@pytest.mark.asyncio
+async def test_zero_post_parse_concurrency_still_finishes():
+    """An injected 0 must not hang the stage (clamped at the build site).
+
+    Settings load rejects 0, but the semaphore is built from the settings
+    object — a raw ``asyncio.Semaphore(0)`` here would hang every task, so
+    this runs under a timeout and fails if the clamp regresses.
+    """
+    fs = FileState(path=Path("x.pdf"))
+    fs.contents = MagicMock(layout_hints=None)
+    fs.file_hash = "abc"
+    ctx = _ctx([fs])
+    ctx.settings.pipeline.max_concurrent_post_parse = 0
+
+    with patch("bibr.pipeline.stages.post_parse.post_parse", AsyncMock(return_value=MagicMock())):
+        await asyncio.wait_for(PostParseStage().run(ctx), timeout=10)
+
+    assert fs.error is None
 
 
 @pytest.mark.asyncio

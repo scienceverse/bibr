@@ -5,6 +5,16 @@ from __future__ import annotations
 import asyncio
 
 
+def clamped_semaphore(limit: int) -> asyncio.Semaphore:
+    """An ``asyncio.Semaphore`` that cannot deadlock on a zero limit.
+
+    Settings load rejects 0 for every semaphore-sized field, but an injected
+    settings object can still carry it — and ``Semaphore(0)`` would hang every
+    task forever. Clamp to 1 at the construction site.
+    """
+    return asyncio.Semaphore(max(1, limit))
+
+
 class DualSemaphore:
     """Async context manager acquiring a global then a per-caller semaphore.
 
