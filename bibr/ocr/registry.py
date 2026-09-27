@@ -37,10 +37,16 @@ class OcrBackendCandidate:
     profile: OcrProfileName
 
 
+# The managed PaddleOCR-VL vLLM server's ``--gpu-memory-utilization``. vLLM
+# claims this fraction of total VRAM and will not start when less is free, so
+# the classifier device picker leaves it free (``bibr.local.pipeline``).
+PADDLE_VLLM_GPU_MEMORY_UTILIZATION = 0.92
+
 # PaddleOCR-VL through the managed vLLM server needs an NVIDIA GPU with room
 # for the ~1.8 GB bf16 weights plus vLLM's KV/activation budget at
-# ``--gpu-memory-utilization 0.92``. Below this floor bibr's documented Linux
-# contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to ``glm-llama``.
+# ``PADDLE_VLLM_GPU_MEMORY_UTILIZATION``. Below this floor bibr's documented
+# Linux contract ("NVIDIA GPU <= 8 GB uses llama.cpp") routes OCR to
+# ``glm-llama``.
 PADDLE_VLLM_MIN_VRAM_GB = 8.0
 
 
@@ -147,24 +153,24 @@ def resolve_backend_candidates(
 
     if name != "paddle":
         return (_candidate(name, settings),)
+    return tuple(_candidate(backend, settings) for backend in automatic_backend_names())
 
+
+def automatic_backend_names() -> tuple[str, ...]:
+    """The concrete runtimes the automatic ``paddle`` selector tries here, in order."""
     if sys.platform == "darwin" and platform.machine() == "arm64":
-        names = ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
-    elif sys.platform == "win32":
-        names = ("glm-llama",)
-    elif sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
+        return ("paddle-rapid-mlx", "paddle-mlx-vlm", "glm-rapid-mlx", "glm-llama")
+    if sys.platform == "win32":
+        return ("glm-llama",)
+    if sys.platform.startswith("linux") and platform.machine().lower() in {"x86_64", "amd64"}:
         # The managed vLLM runtime is only a candidate on hardware that can
         # run it. Otherwise a CPU-only or small-GPU box spent the whole 900 s
         # startup budget bootstrapping vLLM before falling through to llama.cpp.
         vllm_blocker = paddle_vllm_unavailable_reason()
         if vllm_blocker is None:
-            names = ("paddle-vllm", "glm-llama")
-        else:
-            logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)
-            names = ("glm-llama",)
-    else:
-        names = ("glm-llama",)
-    return tuple(_candidate(backend, settings) for backend in names)
+            return ("paddle-vllm", "glm-llama")
+        logger.debug("paddle-vllm skipped in the automatic OCR chain: %s", vllm_blocker)
+    return ("glm-llama",)
 
 
 #: The cloud vision-LLM OCR backends. They call their provider's API (set

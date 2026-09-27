@@ -1,4 +1,4 @@
-"""Small stdlib HTTP helper for managed local runtime probes."""
+"""Small stdlib helpers for managed local runtime probes and startup waits."""
 
 from __future__ import annotations
 
@@ -6,10 +6,39 @@ import http.client
 import json
 import logging
 import socket
+import threading
+import time
 import urllib.parse
 from collections.abc import Callable, Mapping
 
 logger = logging.getLogger(__name__)
+
+
+class StartupCancelled(Exception):
+    """The owner of a managed server stopped its startup (Ctrl-C or task cancellation).
+
+    A startup wait raises it once its stop event is set, so the constructor's
+    own cleanup shuts the half-started process down, as it does on a timeout.
+    ``await_owned`` then re-raises the owner's cancellation, not this error.
+    """
+
+
+def check_startup_stop(stop_event: threading.Event | None, server_label: str) -> None:
+    """Raise :class:`StartupCancelled` if *stop_event* is set."""
+    if stop_event is not None and stop_event.is_set():
+        raise StartupCancelled(f"{server_label} startup was cancelled")
+
+
+def pause_startup_poll(
+    seconds: float, stop_event: threading.Event | None, server_label: str
+) -> None:
+    """Sleep between startup polls; wake early and raise once *stop_event* is set."""
+    if stop_event is None:
+        time.sleep(seconds)
+    else:
+        stop_event.wait(seconds)
+    check_startup_stop(stop_event, server_label)
+
 
 # Rate limit applied to a managed local LLM server bibr started itself.
 # ``LLM_RATE_LIMIT_RPM``'s 60 default guards a cloud provider's quota; against

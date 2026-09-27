@@ -1440,18 +1440,30 @@ class TestArtifactProvenance:
         save_results(self._df(), out)
         assert _json.loads(out.read_text())["metrics_version"] == METRICS_VERSION
 
-    def test_metrics_version_is_four(self):
+    def test_metrics_version_is_five(self):
         """Bumped whenever a metric definition moves, so numbers from different
         versions can never be silently compared.
 
         v4 (campaign triage 2026-08-01) redefined `pass_rate` to count a
         front-matter abstention as a failure and stopped re-deriving a
-        PREDICTION's abstract from section text. Both change published numbers,
-        so the constant — and the changelog beside it — must move with them.
+        PREDICTION's abstract from section text. v5 stopped scoring bibr batch's
+        run_info.json, counted papers with no matched pair carrying a field in
+        the micro reference accuracies, and made section tokens Unicode-aware.
+        Each changes published numbers, so the constant — and the changelog
+        beside it — must move with them.
         """
         from evaluation.evaluate import METRICS_VERSION
 
-        assert METRICS_VERSION == 4
+        assert METRICS_VERSION == 5
+
+    def test_section_artifact_records_the_metrics_version(self, tmp_path):
+        import json as _json
+
+        from evaluation.evaluate import METRICS_VERSION, save_section_results
+
+        out = tmp_path / "sections.json"
+        save_section_results({}, [], {}, out)
+        assert _json.loads(out.read_text())["metrics_version"] == METRICS_VERSION
 
     def test_evaluation_guide_states_the_current_metrics_version(self):
         """The guide tells readers which definitions their saved artifacts carry.
@@ -1559,6 +1571,104 @@ class TestPredictionsTreeDigest:
 
         pred = self._dir(tmp_path)
         assert predictions_tree_sha256(pred, ids={"a"}) != predictions_tree_sha256(pred)
+
+    def test_digest_ignores_the_batch_run_record(self, tmp_path):
+        """run_info.json changes on every `bibr batch` run; the exports did not."""
+        from bibr.batch.runner import write_run_info
+        from evaluation.evaluate import predictions_tree_sha256
+
+        pred = self._dir(tmp_path)
+        before = predictions_tree_sha256(pred)
+        write_run_info(pred, {"run_id": "r1", "started_at": "t1"}, append_history=True)
+        assert predictions_tree_sha256(pred) == before
+        write_run_info(pred, {"run_id": "r2", "started_at": "t2"}, append_history=True)
+        assert predictions_tree_sha256(pred) == before
+
+
+class TestBatchOutputDir:
+    """`bibr batch --out` puts its own records next to the exports it scores."""
+
+    _PAPER = {
+        "paper_id": "sample",
+        "info": {"doi": "10.1234/example", "file_name": "sample.pdf", "title": "Paper Boats"},
+        "author": [],
+        "bib": [],
+    }
+
+    def _batch_dir(self, tmp_path) -> Path:
+        from bibr.batch.runner import write_run_info
+
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "sample.json").write_text(json.dumps(self._PAPER))
+        write_run_info(out, {"run_id": "r1", "out": str(out)}, append_history=True)
+        return out
+
+    def test_every_json_sidecar_the_batch_writes_is_excluded(self):
+        from bibr.batch import ledger, runner
+        from evaluation.evaluate import NON_EXPORT_JSON_NAMES
+
+        sidecars = {
+            value
+            for module in (runner, ledger)
+            for name, value in vars(module).items()
+            if name.endswith("_FILENAME") and isinstance(value, str) and value.endswith(".json")
+        }
+        assert "run_info.json" in sidecars
+        assert sidecars <= NON_EXPORT_JSON_NAMES
+
+    def test_run_record_is_neither_scored_nor_listed(self, tmp_path):
+        from evaluation.evaluate import evaluate_json_exports
+
+        gt = pd.DataFrame(
+            [
+                {
+                    "doi": "10.1234/example",
+                    "file_name": "sample.pdf",
+                    "title": "Paper Boats",
+                    "authors": [],
+                    "references": [],
+                }
+            ]
+        )
+        report: dict = {}
+        results = evaluate_json_exports(self._batch_dir(tmp_path), gt, report=report)
+        assert len(results) == 1
+        assert report["prediction_ids"] == ["sample"]
+        assert report["unmatched_ids"] == []
+
+    def test_cli_on_a_batch_out_dir_reports_no_phantom_paper(self, tmp_path):
+        out = self._batch_dir(tmp_path)
+        gold = tmp_path / "gold"
+        gold.mkdir()
+        (gold / "sample.json").write_text(json.dumps(self._PAPER))
+        expected = tmp_path / "expected.json"
+        expected.write_text(json.dumps(["sample", "missing"]))
+        scores = tmp_path / "scores.json"
+        result = subprocess.run(  # noqa: S603
+            [
+                sys.executable,
+                "-m",
+                "evaluation.evaluate",
+                "--results-dir",
+                str(out),
+                "--gold-dir",
+                str(gold),
+                "--expected-ids",
+                str(expected),
+                "--output",
+                str(scores),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 0, result.stderr
+        report = json.loads(scores.read_text())
+        assert report["papers_unmatched"] == 0
+        assert report["unmatched_ids"] == []
+        assert report["missing_ids"] == ["missing"]
+        assert report["papers_attempted"] == 2
 
 
 class TestExpectedIds:
@@ -1858,6 +1968,80 @@ class TestRefCoverageAndMicroAverages:
         assert block["micro_denominator"] == 10
         assert block["micro_denominator_kind"] == "gold_refs_with_field"
         assert block["micro_mean"] == 0.6
+
+    def test_paper_with_no_matched_pair_counts_its_gold_refs_as_misses(self, tmp_path):
+        """Paper B lost its bibliography: 0.0 in the macro, so 30 misses in the micro."""
+        import json as _json
+
+        from evaluation.evaluate import save_results
+
+        df = pd.DataFrame(
+            [
+                {
+                    "file_name": "a.pdf",
+                    "ref_title_acc": 1.0,
+                    "ref_field_counts": {"gold_refs": 30, "title_gold": 30, "title_matched": 30},
+                },
+                {
+                    "file_name": "b.pdf",
+                    "ref_title_acc": 0.0,
+                    "ref_field_counts": {"gold_refs": 30, "title_gold": 30, "title_matched": 0},
+                },
+            ]
+        )
+        out = tmp_path / "eval.json"
+        save_results(df, out)
+        block = _json.loads(out.read_text())["metrics"]["ref_title_acc"]
+        assert block["mean"] == 0.5
+        assert block["micro_correct"] == 30
+        assert block["micro_denominator"] == 60
+        assert block["micro_mean"] == 0.5
+
+    def test_lost_bibliography_scored_end_to_end_drags_the_micro_down(self, tmp_path):
+        import json as _json
+
+        from evaluation.evaluate import save_results, score_paper
+
+        refs = [
+            {"title": f"Study number {i} of paper boats", "year": str(2000 + i)} for i in range(4)
+        ]
+        base = {"title": "T", "doi": "", "abstract": "", "authors": []}
+        rows = []
+        for name, extracted in (("a.pdf", refs), ("b.pdf", [])):
+            scores = score_paper({**base, "references": extracted}, {**base, "references": refs})
+            rows.append({"file_name": name, **scores})
+        assert [r["ref_title_acc"] for r in rows] == [1.0, 0.0]
+
+        out = tmp_path / "eval.json"
+        save_results(pd.DataFrame(rows), out)
+        block = _json.loads(out.read_text())["metrics"]["ref_title_acc"]
+        assert block["micro_denominator"] == 8
+        assert block["micro_mean"] == 0.5
+
+    def test_paper_whose_gold_lacks_the_field_adds_nothing(self, tmp_path):
+        import json as _json
+
+        from evaluation.evaluate import save_results
+
+        df = pd.DataFrame(
+            [
+                {
+                    "file_name": "a.pdf",
+                    "ref_pages_acc": 1.0,
+                    "ref_field_counts": {"gold_refs": 5, "pages_gold": 5, "pages_matched": 5},
+                },
+                {
+                    "file_name": "b.pdf",
+                    "ref_pages_acc": None,
+                    "ref_field_counts": {"gold_refs": 5, "pages_gold": 0, "pages_matched": 0},
+                },
+            ]
+        )
+        out = tmp_path / "eval.json"
+        save_results(df, out)
+        block = _json.loads(out.read_text())["metrics"]["ref_pages_acc"]
+        assert block["micro_denominator"] == 5
+        assert block["micro_mean"] == 1.0
 
     def test_no_counts_column_leaves_the_annotations_absent(self, tmp_path):
         import json as _json

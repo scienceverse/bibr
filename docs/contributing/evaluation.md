@@ -76,13 +76,23 @@ uv run python -m evaluation.evaluate \
     --gold-dirs /path/to/gold
 ```
 
+A `bibr batch --out` directory works as `--results-dir` too. The evaluator
+reads every `*.json` file in it except `run_info.json`, the batch's own run
+record, and `validation_report.json`. They are not scored, not listed as
+predictions and not part of `predictions_tree_sha256`. The batch's other
+records (`outcomes.jsonl`, `runs.jsonl`, `tables/`) are not `*.json` files.
+
 ## Metrics reference
 
 Metric scores are in [0, 1], with higher being better. A metric can be `null`
 when gold provides nothing to score; those entries are excluded from its mean.
-The current definitions are **`metrics_version: 4`**, recorded in every saved
-evaluation. Re-score predictions when definitions change rather than comparing
-means from different versions.
+The current definitions are **`metrics_version: 5`**, recorded in every saved
+evaluation, including section-text results. Re-score predictions when
+definitions change rather than comparing means from different versions:
+scores with `metrics_version` 4 and 5 do not compare. Version 5 skips a batch's
+`run_info.json`, counts the gold references of a paper with no matched pair
+carrying a field as misses in the micro-averaged reference scores, and
+tokenizes section text in every script (see below).
 
 ### Title
 
@@ -138,6 +148,13 @@ Per-author front-matter fields (`affiliation_sim`, `email_f1`, `orcid_f1`, `corr
     include field coverage, counts, and micro-averaged scores to make these
     denominators visible.
 
+A paper whose gold references carry a field but whose matched pairs do not, for
+example because extraction lost the bibliography, scores 0.0 on that `ref_*_acc`
+metric. The micro average (`micro_mean`, `micro_correct`, `micro_denominator`)
+counts that paper's gold references with the field as misses, so it does not
+leave out the papers the mean scores lowest. A paper whose gold lacks the field
+is null and counts in neither.
+
 ## Output format
 
 `--output` writes a JSON artifact containing:
@@ -181,6 +198,74 @@ uv run python -m evaluation.evaluate \
 This mode emits section recall, coverage, and a drop report. It has a separate
 output shape from metadata scoring, and returns before the metadata
 `--threshold` gate. Per-type section recall is diagnostic.
+
+Recall and precision count tokens. Section text is casefolded and NFKD
+normalized, diacritics are removed from Latin letters, and the text is split
+on runs of non-word characters (`[\W_]+`), so letters and digits of every
+script count. "Straße" is one token, and combining marks on letters of other
+scripts stay inside their word. Scripts written without spaces between words
+(Han, hiragana and katakana, Thai) give one token per character.
+
+## Scoring GROBID output
+
+The harness can score [GROBID](https://github.com/kermitt2/grobid) with the
+same metrics as bibr. `evaluation.grobid_run` sends each PDF to a GROBID
+server's `/api/processFulltextDocument` with consolidation off (bibr is scored
+before enrichment) and the printed reference and affiliation strings included.
+It writes one TEI file per paper, a failure record for each paper that did not
+convert, and a `manifest.json` with the GROBID version, the request
+parameters, and each PDF's SHA-256, wall time and attempts.
+`evaluation.grobid_tei` then writes each TEI file as a bibr export, with
+`extraction.producer` naming GROBID and `extraction.converter` the converter:
+
+```bash
+uv run python -m evaluation.grobid_run --grobid-url http://localhost:8070 \
+    --pdf-dir papers/ --ids-file cohort-ids.txt --out grobid-tei/
+uv run python -m evaluation.grobid_tei --tei-dir grobid-tei/ --out grobid-json/
+uv run python -m evaluation.evaluate \
+    --results-dir grobid-json/ \
+    --gold-dirs /path/to/gold \
+    --expected-ids grobid-tei/manifest.json \
+    --output grobid-eval.json
+```
+
+Score both tools against the same `--expected-ids` list. `cohort-ids.txt`
+holds the paper ids (PDF stems) of the cohort bibr is scored on, one per line,
+with `#` starting a comment line. The runner then processes exactly those
+papers, and the manifest's `ids` are the same ids as bibr's `--expected-ids`
+file. A paper GROBID failed on has no prediction file, and the manifest keeps
+it in the denominator as a failure. Without `--ids-file` every PDF in
+`--pdf-dir` enters the manifest, so a GROBID failure on a PDF outside the
+cohort would count against GROBID but not against bibr.
+
+A failure is recorded per paper, whatever its cause, and the run goes on. The
+converter does the same for a TEI file it cannot read or convert. `--resume`
+continues an interrupted run in the same `--out` directory, over the same
+paper ids, so pass the `--pdf-dir` and `--ids-file` the run started with. It
+refuses other paper ids, a server that reports another GROBID version, and
+other request parameters. It also refuses a `--grobid-image` other than the
+one the manifest records, including one given when the first run named none.
+A resume without `--grobid-image` keeps the recorded image and checks none.
+The version check reads only the version string the server reports, so two
+images of one GROBID release, such as its CRF-only and full images, are told
+apart only when the first run and every resume name `--grobid-image`. The
+server's model configuration is not checked.
+
+For the headline comparison, read `pass_rate` in both runs, and compare
+bibr's `mean_incl_abstained` with GROBID's `mean` for the front-matter fields.
+`pass_rate` counts missing papers and abstentions as failures for both tools.
+bibr's per-field `mean` leaves out the papers where its front matter
+abstained, but converted GROBID output never abstains, so GROBID's `mean`
+covers every paper it returned. The evaluator writes `mean_incl_abstained`
+only for the fields an abstention suppresses, and only when bibr abstained on
+at least one paper. Where it is absent, bibr's `mean` already covers every
+paper.
+
+The converter carries over every field the metrics credit when GROBID emits
+it, including reference DOIs at any level, editors kept apart from authors,
+and given names. GROBID does not classify body sections, so its body text is
+typed `unknown`. In the section-text benchmark only the label-independent
+`layout_recall` is comparable between the two tools.
 
 ## Interpreting results
 

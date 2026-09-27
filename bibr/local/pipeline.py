@@ -195,6 +195,32 @@ def _auto_batch_size(memory_mode: str) -> int:
     return 8  # balanced default
 
 
+def _managed_gpu_fraction(llm_backend: str, ocr_backend: str, settings: GlobalSettings) -> float:
+    """Share of total VRAM the managed vLLM servers of this run claim.
+
+    The classifiers load before these servers start (before Paddle OCR in the
+    streaming plan, before the LLM in the barrier plan), and a vLLM server will
+    not start unless its whole share is still free. With a local vLLM LLM and
+    Paddle OCR vLLM both managed, the barrier plan can run them at once (OCR
+    kept resident under ``keep_all``, or a later chunk's OCR beside the LLM),
+    so both shares are claimed when they fit together. When they do not (the
+    defaults, 0.85 + 0.92), only one is ever up and the larger share is what
+    the classifiers must leave free.
+    """
+    from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, automatic_backend_names
+
+    llm_share = settings.llm.local_mem_fraction if llm_backend in ("local", "vllm") else 0.0
+    # The automatic ``paddle`` chain lists paddle-vllm only on hardware that
+    # can run it, so a small GPU keeps its room for the classifiers.
+    starts_paddle_vllm = ocr_backend == "paddle-vllm" or (
+        ocr_backend == "paddle" and "paddle-vllm" in automatic_backend_names()
+    )
+    ocr_share = PADDLE_VLLM_GPU_MEMORY_UTILIZATION if starts_paddle_vllm else 0.0
+    if llm_share + ocr_share <= 1.0:
+        return llm_share + ocr_share
+    return max(llm_share, ocr_share)
+
+
 class LocalPipeline(Pipeline):
     """Single-machine pipeline orchestrator.
 
@@ -339,6 +365,7 @@ class LocalPipeline(Pipeline):
                 if llm_backend in ("local", "vllm")
                 else 0.0
             ),
+            managed_gpu_fraction=_managed_gpu_fraction(llm_backend, ocr_backend, settings_snapshot),
             settings=settings_snapshot,
         )
 
