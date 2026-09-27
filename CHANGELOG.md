@@ -583,13 +583,14 @@ released.
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
 - Ctrl-C or task cancellation while a managed local server is still starting
-  now returns within a couple of seconds and shuts the half-started server
-  down. Startup used to run its wait to the end first, which on a first-run
-  model download meant the whole startup timeout: 600 s for llama.cpp, vLLM,
-  Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM OCR server and 180 s for
-  vllm-mlx. This covers every managed runtime in both the LLM and OCR roles,
-  a preloaded OCR server, and OCR shutdown while a preload nobody collected
-  is still starting.
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
