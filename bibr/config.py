@@ -861,12 +861,19 @@ class OcrOptions(_BibrSettings):
     )
     paddle_mlx_extra_args: str = Field(
         "",
-        description="Extra CLI args appended to the managed Paddle MLX OCR server command "
-        "(shared with the paddle-rapid-mlx fallback candidate; use only flags both CLIs accept).",
+        description="Extra CLI args for the managed Paddle MLX-VLM OCR server (paddle-mlx-vlm "
+        "only). It shares OCR_PADDLE_MLX_PORT with paddle-rapid-mlx because the paddle chain "
+        "never runs them at the same time.",
     )
     paddle_rapid_mlx_model: str = Field(
         "olragon/PaddleOCR-VL-1.6-8bit",
         description="Model id for the managed Paddle Rapid-MLX OCR server.",
+    )
+    paddle_rapid_mlx_extra_args: str = Field(
+        "",
+        description="Extra CLI args for the managed Paddle Rapid-MLX OCR server (paddle-rapid-mlx "
+        "only). It shares OCR_PADDLE_MLX_PORT with paddle-mlx-vlm because the paddle chain "
+        "never runs them at the same time.",
     )
     llama_cpp_model: str = Field(
         "ggml-org/GLM-OCR-GGUF:Q8_0", description="Model id for the managed llama.cpp OCR server."

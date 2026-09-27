@@ -13,6 +13,7 @@ import concurrent.futures
 import importlib
 import inspect
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -136,6 +137,9 @@ class ResourceManager:
         self._ocr: OcrBackend | None = None
         self._ocr_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._ocr_future: concurrent.futures.Future[OcrBackend] | None = None
+        # Set to stop the preload's managed-server startup early (the preload
+        # is cancelled or discarded); None when no preload is in flight.
+        self._ocr_preload_stop: threading.Event | None = None
         self._ocr_init_lock = asyncio.Lock()
         self._llm_server: VllmMlxLlmServer | None = None
         self._llm_init_lock = asyncio.Lock()
@@ -420,15 +424,23 @@ class ResourceManager:
                 importlib.import_module("bibr.local.mlx_vlm_ocr")
         from bibr.ocr.registry import create
 
-        return create(backend_name, **self._ocr_kwargs(backend_name, candidate))
+        kwargs = self._ocr_kwargs(backend_name, candidate)
+        stop_event = getattr(self, "_startup_stop_event", None)
+        if stop_event is not None:
+            # Managed runtimes check it in their startup wait; the others
+            # ignore it through ``**_kw``.
+            kwargs["stop_event"] = stop_event
+        return create(backend_name, **kwargs)
 
-    def _create_ocr_client_for(self, candidate):
+    def _create_ocr_client_for(self, candidate, stop_event: threading.Event | None = None):
         """Construct one candidate while keeping the legacy factory seam stable."""
         self._startup_ocr_candidate = candidate
+        self._startup_stop_event = stop_event
         try:
             return self._create_ocr_client()
         finally:
             self._startup_ocr_candidate = None
+            self._startup_stop_event = None
 
     def start_ocr_preload(self) -> None:
         """Start OCR engine initialization in a background thread."""
@@ -458,7 +470,10 @@ class ResourceManager:
                 importlib.import_module("bibr.local.mlx_vlm_ocr")
         logger.info("Pre-loading OCR engine in background...")
         self._ocr_executor = concurrent.futures.ThreadPoolExecutor(1)
-        self._ocr_future = self._ocr_executor.submit(self._create_ocr_client_for, candidates[0])
+        self._ocr_preload_stop = threading.Event()
+        self._ocr_future = self._ocr_executor.submit(
+            self._create_ocr_client_for, candidates[0], self._ocr_preload_stop
+        )
 
     async def _shutdown_client(self, client) -> None:
         if client is None or not hasattr(client, "shutdown"):
@@ -471,19 +486,23 @@ class ResourceManager:
         """Collect a constructor without losing a late result to cancellation."""
         loop = asyncio.get_running_loop()
         if self._ocr_future is None:
+            stop_event = threading.Event()
             return await await_owned(
-                loop.run_in_executor(None, self._create_ocr_client_for, candidate),
+                loop.run_in_executor(None, self._create_ocr_client_for, candidate, stop_event),
                 on_cancel=self._shutdown_client,
+                stop_event=stop_event,
             )
         try:
             return await await_owned(
                 asyncio.wrap_future(self._ocr_future),
                 on_cancel=self._shutdown_client,
+                stop_event=self._ocr_preload_stop,
             )
         finally:
             # await_owned has settled the constructor, including cancellation
             # cleanup, before we forget the preload handle.
             self._ocr_future = None
+            self._ocr_preload_stop = None
             if self._ocr_executor is not None:
                 self._ocr_executor.shutdown(wait=False)
                 self._ocr_executor = None
@@ -624,11 +643,16 @@ class ResourceManager:
         subprocess outlives the run.
         """
         future, self._ocr_future = self._ocr_future, None
+        stop_event, self._ocr_preload_stop = self._ocr_preload_stop, None
         executor, self._ocr_executor = self._ocr_executor, None
         try:
             if future is None:
                 return
             future.cancel()
+            if stop_event is not None:
+                # The result is discarded either way: stop a managed server
+                # still starting instead of waiting out its startup timeout.
+                stop_event.set()
             client = None
             try:
                 client = await asyncio.wrap_future(future)
@@ -675,9 +699,12 @@ class ResourceManager:
     # -- LLM server (vllm-mlx on Apple Silicon, vllm on Linux/CUDA) --
 
     async def _construct_llm_server(self, factory):
+        """Run *factory(stop_event)* off the loop; cancellation sets the event."""
+        stop_event = threading.Event()
         return await await_owned(
-            asyncio.get_running_loop().run_in_executor(None, factory),
+            asyncio.get_running_loop().run_in_executor(None, factory, stop_event),
             on_cancel=self._shutdown_client,
+            stop_event=stop_event,
         )
 
     async def start_llm_server(self, backend: str) -> None:
@@ -697,36 +724,44 @@ class ResourceManager:
                 from bibr.local.llm import VllmMlxLlmServer
 
                 server = await self._construct_llm_server(
-                    lambda: _make_settings_aware(VllmMlxLlmServer, self._settings),
+                    lambda stop: _make_settings_aware(
+                        VllmMlxLlmServer, self._settings, stop_event=stop
+                    ),
                 )
             elif backend == "rapid-mlx":
                 import bibr.local.rapid_mlx as rapid_mlx
 
                 server = await self._construct_llm_server(
-                    lambda: _make_settings_aware(rapid_mlx.RapidMlxLlmServer, self._settings),
+                    lambda stop: _make_settings_aware(
+                        rapid_mlx.RapidMlxLlmServer, self._settings, stop_event=stop
+                    ),
                 )
             elif backend == "vllm":
                 # Module (not class) import so tests can monkeypatch the symbol.
                 import bibr.local.vllm_llm as vllm_llm
 
                 server = await self._construct_llm_server(
-                    lambda: _make_settings_aware(
+                    lambda stop: _make_settings_aware(
                         vllm_llm.VllmLlmServer,
                         self._settings,
                         mem_fraction=self._managed_vllm_fraction or None,
+                        stop_event=stop,
                     ),
                 )
             elif backend == "llama-cpp":
                 from bibr.local.llama_cpp import LlamaCppLlmServer
 
                 server = await self._construct_llm_server(
-                    lambda: _make_settings_aware(LlamaCppLlmServer, self._settings),
+                    lambda stop: _make_settings_aware(
+                        LlamaCppLlmServer, self._settings, stop_event=stop
+                    ),
                 )
             elif backend == "llmster":
                 from bibr.local.llmster import LlmsterLlmServer
 
                 server = await self._construct_llm_server(
-                    lambda: _make_settings_aware(LlmsterLlmServer, self._settings),
+                    # No startup wait loop: `lms` commands carry their own timeout.
+                    lambda _stop: _make_settings_aware(LlmsterLlmServer, self._settings),
                 )
 
             if server is None:

@@ -582,6 +582,14 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now returns within a couple of seconds and shuts the half-started server
+  down. Startup used to run its wait to the end first, which on a first-run
+  model download meant the whole startup timeout: 600 s for llama.cpp, vLLM,
+  Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM OCR server and 180 s for
+  vllm-mlx. This covers every managed runtime in both the LLM and OCR roles,
+  a preloaded OCR server, and OCR shutdown while a preload nobody collected
+  is still starting.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -1364,6 +1372,11 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1446,6 +1459,11 @@ released.
   speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
   used to pin the serve result cache to an empty version, and now means the
   computed code hash, so a deploy invalidates cached results again.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
 
 ### Security
 
