@@ -33,16 +33,29 @@ class WarningCode(StrEnum):
     OCR_CONTROL_CHARS = "OCR_CONTROL_CHARS"
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
+    PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
     SECTION_CLASSIFIER_DEGRADED = "SECTION_CLASSIFIER_DEGRADED"
+    SECTION_CLASSIFIER_LLM_FAILED = "SECTION_CLASSIFIER_LLM_FAILED"
+    IMPLICIT_SECTIONS_LLM_FAILED = "IMPLICIT_SECTIONS_LLM_FAILED"
     PAPER_CLASSIFIER_DEGRADED = "PAPER_CLASSIFIER_DEGRADED"
+    PAPER_CLASSIFICATION_FAILED = "PAPER_CLASSIFICATION_FAILED"
     # Metadata, statements and equations
     AUTHORS_EMPTY = "AUTHORS_EMPTY"
     AUTHORS_FABRICATED = "AUTHORS_FABRICATED"
     AUTHORS_ANOMALY = "AUTHORS_ANOMALY"
+    AUTHORS_LLM_FAILED = "AUTHORS_LLM_FAILED"
+    AUTHORS_TRUNCATED = "AUTHORS_TRUNCATED"
+    AUTHORS_PARTIAL = "AUTHORS_PARTIAL"
+    LLM_RESPONSE_REPAIRED = "LLM_RESPONSE_REPAIRED"
     STATEMENT_LEXICAL_FALLBACK = "STATEMENT_LEXICAL_FALLBACK"
+    RESEARCH_INTEGRITY_LLM_FAILED = "RESEARCH_INTEGRITY_LLM_FAILED"
     EQUATION_LLM_FALLBACK_TIMEOUT = "EQUATION_LLM_FALLBACK_TIMEOUT"
     EQUATION_LLM_FALLBACK_FAILED = "EQUATION_LLM_FALLBACK_FAILED"
+    CITATION_LLM_FAILED = "CITATION_LLM_FAILED"
+    # Reference section
+    REF_SECTION_NOT_FOUND = "REF_SECTION_NOT_FOUND"
+    REF_SECTION_INFERRED = "REF_SECTION_INFERRED"
     # Reference segmentation
     REF_SEG_GEOM_CASCADE = "REF_SEG_GEOM_CASCADE"
     REF_SEG_REGION_CASCADE = "REF_SEG_REGION_CASCADE"
@@ -67,6 +80,7 @@ class WarningCode(StrEnum):
     RESOLVER_FALLBACK_TIMEOUT = "RESOLVER_FALLBACK_TIMEOUT"
     RESOLVER_FALLBACK_FAILED = "RESOLVER_FALLBACK_FAILED"
     ROR_MATCHING_TIMEOUT = "ROR_MATCHING_TIMEOUT"
+    ROR_MATCHING_FAILED = "ROR_MATCHING_FAILED"
     ENRICHER_FAILED = "ENRICHER_FAILED"
     ENRICHMENT_INCOMPLETE = "ENRICHMENT_INCOMPLETE"
     CONSOLIDATE_WITHOUT_ENRICHMENT = "CONSOLIDATE_WITHOUT_ENRICHMENT"
@@ -90,22 +104,48 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK: "Embedded PDF text used private-use characters; "
     "those regions were read with OCR instead.",
     WarningCode.LOW_TEXT_QUALITY: "The text-quality score is below the warning threshold.",
+    WarningCode.PAGE_DPI_REDUCED: "A page too large for the render budget at the configured "
+    "DPI was rendered at a lower DPI for layout and OCR.",
     WarningCode.SECTION_CLASSIFIER_DEGRADED: "The trained section classifier did not answer; "
     "the LLM classified the section headers.",
+    WarningCode.SECTION_CLASSIFIER_LLM_FAILED: "The LLM section classification call failed; "
+    "the headers it was asked about keep an alias prior or stay unknown.",
+    WarningCode.IMPLICIT_SECTIONS_LLM_FAILED: "The LLM front-matter section detection call "
+    "failed; the positional page-1 heuristic placed the abstract.",
     WarningCode.PAPER_CLASSIFIER_DEGRADED: "The trained paper classifier did not answer; the "
     "LLM classified the paper.",
+    WarningCode.PAPER_CLASSIFICATION_FAILED: "Paper classification failed; paper_type and the "
+    "OECD fields are empty.",
     WarningCode.AUTHORS_EMPTY: "No authors were extracted from a paper that is not a "
     "correction notice.",
     WarningCode.AUTHORS_FABRICATED: "Extracted authors were discarded because none appears in "
     "the text the extraction was given.",
     WarningCode.AUTHORS_ANOMALY: "The extracted author list looked degenerate and was trimmed "
     "or emptied.",
+    WarningCode.AUTHORS_LLM_FAILED: "The author LLM call failed; the authors come from the "
+    "empty-author recovery or a fallback, or are empty.",
+    WarningCode.AUTHORS_TRUNCATED: "The author response stopped at the output-token limit; its "
+    "complete leading authors were kept, and the list may be incomplete.",
+    WarningCode.AUTHORS_PARTIAL: "The author response failed validation; the leading authors "
+    "that validated were kept, and the list may be incomplete.",
+    WarningCode.LLM_RESPONSE_REPAIRED: "A finished core-metadata LLM response failed validation "
+    "and was repaired locally (invalid backslash escapes, or prose around its JSON); the "
+    "repaired response passed the same validation.",
     WarningCode.STATEMENT_LEXICAL_FALLBACK: "A research-integrity statement was filled by "
     "lexical anchor matching.",
+    WarningCode.RESEARCH_INTEGRITY_LLM_FAILED: "The research-integrity LLM call failed; "
+    "structured funding, author roles and parsed affiliation parts are missing.",
     WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT: "The equation LLM fallback timed out; only "
     "regex-extracted equations are kept.",
-    WarningCode.EQUATION_LLM_FALLBACK_FAILED: "The equation LLM fallback failed; only "
-    "regex-extracted equations are kept.",
+    WarningCode.EQUATION_LLM_FALLBACK_FAILED: "The equation LLM fallback failed for some or all "
+    "batches; their candidate sentences keep only regex-extracted equations.",
+    WarningCode.CITATION_LLM_FAILED: "The LLM citation-resolution call failed; the ambiguous "
+    "in-text citations it was asked about stay unlinked.",
+    WarningCode.REF_SECTION_NOT_FOUND: "No reference section was found; the reference list is "
+    "empty.",
+    WarningCode.REF_SECTION_INFERRED: "No heading was classified as the reference section; "
+    "layout found reference regions, so the last unclassified section was taken as the "
+    "reference list.",
     WarningCode.REF_SEG_GEOM_CASCADE: "Geometry reference segmentation declined; the next tier "
     "segmented the references.",
     WarningCode.REF_SEG_REGION_CASCADE: "Region-anchor reference segmentation declined or found "
@@ -141,6 +181,8 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.RESOLVER_FALLBACK_FAILED: "The resolver fallback failed.",
     WarningCode.ROR_MATCHING_TIMEOUT: "ROR matching stopped at its time budget; some "
     "affiliation and funder strings are unmatched.",
+    WarningCode.ROR_MATCHING_FAILED: "ROR lookups failed (an HTTP error, a transport failure "
+    "or the rate-limit backoff); those affiliation and funder strings are unmatched.",
     WarningCode.ENRICHER_FAILED: "An enricher raised an unexpected error.",
     WarningCode.ENRICHMENT_INCOMPLETE: "Enrichment ended incomplete; the message is the reason "
     "recorded with the checkpoint.",
@@ -151,6 +193,36 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.EPUB_SPINE_MEMBER_SKIPPED: "An ePub spine member was missing from the "
     "archive; its text is absent from the export.",
 }
+
+
+# Codes that record a failure a later run of the same input may not repeat: a
+# timeout, an outage, or a call that failed. An export carrying one is not a
+# final answer, so serve does not cache it. Decide for each new code whether
+# it belongs here.
+NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
+    {
+        WarningCode.OCR_REGION_FAILED,
+        WarningCode.OCR_PAGE_FAILED,
+        WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
+        WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
+        WarningCode.PAPER_CLASSIFICATION_FAILED,
+        WarningCode.AUTHORS_LLM_FAILED,
+        WarningCode.RESEARCH_INTEGRITY_LLM_FAILED,
+        WarningCode.EQUATION_LLM_FALLBACK_TIMEOUT,
+        WarningCode.EQUATION_LLM_FALLBACK_FAILED,
+        WarningCode.CITATION_LLM_FAILED,
+        WarningCode.REF_EXTRACTION_ERROR,
+        WarningCode.CROSSREF_ENRICHMENT_TIMEOUT,
+        WarningCode.CROSSREF_ENRICHMENT_FAILED,
+        WarningCode.ENRICHMENT_LOOKUP_FAILED,
+        WarningCode.RESOLVER_FALLBACK_TIMEOUT,
+        WarningCode.RESOLVER_FALLBACK_FAILED,
+        WarningCode.ROR_MATCHING_TIMEOUT,
+        WarningCode.ROR_MATCHING_FAILED,
+        WarningCode.ENRICHER_FAILED,
+        WarningCode.ENRICHMENT_INCOMPLETE,
+    }
+)
 
 
 @dataclass(frozen=True)

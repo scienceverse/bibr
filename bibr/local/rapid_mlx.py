@@ -19,6 +19,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import ClassVar
@@ -27,7 +28,9 @@ from bibr.config import GlobalSettings, snapshot_settings
 from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
+    check_startup_stop,
     guard_managed_server_port,
+    pause_startup_poll,
     request_bytes,
 )
 from bibr.local.ocr import HttpOcrClient, PaddleHttpOcrClient
@@ -109,6 +112,9 @@ class RapidMlxServer:
     users can keep model files on an external drive.
     """
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         *,
@@ -122,7 +128,9 @@ class RapidMlxServer:
         extra_args: list[str] | None = None,
         strict_ocr_smoke: bool = False,
         settings=None,
+        stop_event: threading.Event | None = None,
     ) -> None:
+        self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         self._model = model
         self._served_model_name = served_model_name or model
@@ -265,6 +273,7 @@ class RapidMlxServer:
         deadline = time.monotonic() + timeout
         health_url = f"{self.base_url}/health"
         while time.monotonic() < deadline:
+            check_startup_stop(self._stop_event, "Rapid-MLX")
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
@@ -287,7 +296,7 @@ class RapidMlxServer:
                     return
             except LocalHttpError:
                 pass
-            time.sleep(2.0)
+            pause_startup_poll(2.0, self._stop_event, "Rapid-MLX")
 
         try:
             self.shutdown()
@@ -446,6 +455,7 @@ class _ManagedRapidMlxOcrClient:
         model: str | None = None,
         profile=None,
         settings=None,
+        stop_event: threading.Event | None = None,
         **_kw: object,
     ) -> None:
         self._settings = settings if settings is not None else snapshot_settings()
@@ -457,7 +467,9 @@ class _ManagedRapidMlxOcrClient:
         self._profile = profile
         self._server: RapidMlxServer | None
         self._http_client: HttpOcrClient | None
-        self._server, self._http_client = self._start_generation()
+        # Only the first start honors the owner's stop event; a recycle later
+        # in the run starts its generation without one.
+        self._server, self._http_client = self._start_generation(stop_event)
         # rapid-mlx's MLLM vision-embedding cache (vllm_mlx MLLMBatchGenerator ->
         # VisionEmbeddingCache) retains full float32 pixel tensors for up to 100
         # requests, evicted by entry COUNT only — no byte cap. bibr sends a unique
@@ -477,7 +489,7 @@ class _ManagedRapidMlxOcrClient:
         # recycle fails beneath them (cleared by every successful start).
         self._restart_error: Exception | None = None
 
-    def _spawn_server(self) -> RapidMlxServer:
+    def _spawn_server(self, stop_event: threading.Event | None = None) -> RapidMlxServer:
         return RapidMlxServer(
             model=self._model,
             served_model_name=self._model,
@@ -488,6 +500,7 @@ class _ManagedRapidMlxOcrClient:
             extra_args=shlex.split(getattr(self._settings.ocr, self._extra_args_option) or ""),
             strict_ocr_smoke=self._strict_ocr_smoke,
             settings=self._settings,
+            stop_event=stop_event,
         )
 
     def _spawn_http_client(self, server: RapidMlxServer) -> HttpOcrClient:
@@ -505,9 +518,11 @@ class _ManagedRapidMlxOcrClient:
             settings=self._settings,
         )
 
-    def _start_generation(self) -> tuple[RapidMlxServer, HttpOcrClient]:
+    def _start_generation(
+        self, stop_event: threading.Event | None = None
+    ) -> tuple[RapidMlxServer, HttpOcrClient]:
         """Construct one complete server/client generation transactionally."""
-        server = self._spawn_server()
+        server = self._spawn_server(stop_event)
         try:
             return server, self._spawn_http_client(server)
         except Exception:
@@ -676,22 +691,26 @@ class PaddleRapidMlxOcrClient(_ManagedRapidMlxOcrClient):
 
     name: ClassVar[str] = "paddle-rapid-mlx"
     _model_option = "paddle_rapid_mlx_model"
-    # NOTE: the port/extra-args options below are shared with MlxVlmOcrServer's
-    # own server (paddle-mlx-vlm backend): both read paddle_mlx_port /
-    # paddle_mlx_extra_args. The two are consecutive fallback candidates in the
-    # automatic paddle chain, so a fallback run uses both in sequence — never
-    # at once, which is why the shared port does not collide. Separate
-    # PADDLE_RAPID_MLX_* settings are deferred to an owner decision (new knobs
-    # need docs + wizard surfacing pre-freeze).
+    # The port is shared with MlxVlmOcrServer (paddle-mlx-vlm): both read
+    # paddle_mlx_port. They are consecutive candidates in the automatic paddle
+    # chain, which never runs them at the same time, so the port cannot
+    # collide. Extra args are separate because the two CLIs accept different
+    # flags.
     _port_option = "paddle_mlx_port"
-    _extra_args_option = "paddle_mlx_extra_args"
+    _extra_args_option = "paddle_rapid_mlx_extra_args"
     _strict_ocr_smoke = True
 
 
 class RapidMlxLlmServer:
     """Managed Rapid-MLX server for local LLM inference."""
 
-    def __init__(self, model: str | None = None, settings=None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        settings=None,
+        *,
+        stop_event: threading.Event | None = None,
+    ) -> None:
         self._settings = settings if settings is not None else snapshot_settings()
         # An explicitly-set LLM_LOCAL_MODEL (e.g. written by `bibr setup`) wins
         # over the rapid-mlx alias default, so the served model never silently
@@ -712,6 +731,7 @@ class RapidMlxLlmServer:
             max_tokens=max_tokens,
             extra_args=shlex.split(self._settings.llm.rapid_mlx_extra_args or ""),
             settings=self._settings,
+            stop_event=stop_event,
         )
 
     def configure_llm_client(self) -> None:

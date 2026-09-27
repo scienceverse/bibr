@@ -224,6 +224,20 @@ async def test_private_fallback_state_machine_keeps_native_diagnostic_typed():
     assert raised.value is native_error
 
 
+async def test_native_recovery_request_takes_its_own_limiter_slot():
+    """clients-llm-3: the recovery is a further physical request."""
+    native = _SequenceBackend([_invalid("non_json")])
+    instructor = _SequenceBackend([_title()])
+    client, _ = _client(native, instructor)
+    limiter = mock.Mock()
+    limiter.acquire = mock.AsyncMock()
+    client._limiter = limiter
+
+    assert (await _invoke(client)).title == "Recovered"
+    # One slot for the native request, one for its recovery.
+    assert limiter.acquire.await_count == 2
+
+
 async def test_invalid_native_falls_back_once_and_first_fallback_is_not_retry():
     native = _SequenceBackend([_invalid("non_json")])
     instructor = _SequenceBackend([_title()])

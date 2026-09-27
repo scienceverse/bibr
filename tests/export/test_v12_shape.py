@@ -92,7 +92,7 @@ def test_gate_findings_are_not_mirrored_into_warnings():
 
 
 def test_schema_version_is_at_the_root(export_payload):
-    assert export_payload["schema_version"] == "12.0"
+    assert export_payload["schema_version"] == "12.1"
     assert "schema_version" not in export_payload.get("metadata", {})
 
 

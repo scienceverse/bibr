@@ -14,7 +14,9 @@ import logging
 import time
 from typing import TYPE_CHECKING
 
+from bibr.ocr.image_utils import MIN_REDUCED_RENDER_DPI
 from bibr.ocr.image_utils import iter_pdf_pages_with_index as _iter_pdf_pages
+from bibr.processing_warnings import ProcessingWarning, WarningCode
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -94,6 +96,10 @@ class LayoutStage:
             if fs.pdf_bytes is None:
                 raise RuntimeError("PDF bytes missing — validate stage did not load file")
             pdf_bytes_local: bytes = fs.pdf_bytes
+            # A page over the render budget at the configured DPI (a poster or
+            # a scanned broadsheet) renders at the largest DPI that fits instead
+            # of failing the paper; boxes are resolution-independent.
+            reduced: list[tuple[int, int]] = []
 
             def _render_all() -> list[tuple[int, Image.Image]]:
                 return list(
@@ -104,10 +110,21 @@ class LayoutStage:
                         end_page,
                         settings.layout.max_render_pixels,
                         settings.layout.max_render_dimension,
+                        min_dpi=MIN_REDUCED_RENDER_DPI,
+                        on_reduced_dpi=lambda page_idx, dpi: reduced.append((page_idx, dpi)),
                     )
                 )
 
             page_tuples = await loop.run_in_executor(None, _render_all)
+            if reduced:
+                fs.warnings.extend(
+                    ProcessingWarning(
+                        WarningCode.PAGE_DPI_REDUCED,
+                        f"page {page_idx + 1} rendered at {dpi} DPI instead of "
+                        f"{settings.layout.dpi} to fit the render budget",
+                    )
+                    for page_idx, dpi in reduced
+                )
             fs.page_images = [img for _, img in page_tuples]
             fs.page_indices = [idx for idx, _ in page_tuples]
             return fs.page_images

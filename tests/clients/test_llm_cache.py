@@ -244,9 +244,9 @@ async def test_every_call_site_routes_through_the_single_acquisition():
         for line in source.read_text().splitlines()
         if line.strip() == "await self._acquire_rate_limit()"
     ]
-    # Initial request, transient retry, and explicit decoder-abort recovery
-    # each acquire a slot for their physical request.
-    assert len(hits) == 3
+    # Initial request, transient retry, the native-to-Instructor recovery and
+    # the decoder-abort recovery each acquire a slot for their physical request.
+    assert len(hits) == 4
 
 
 @pytest.mark.parametrize(

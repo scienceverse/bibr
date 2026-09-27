@@ -7,17 +7,11 @@ heading is asserted as the article title; and there is no byline-adjacency
 policy for multilingual front matter).
 """
 
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from bibr.pipeline.stages.post_parse import (
-    _is_ordinary_body_heading,
-    _prefer_byline_adjacent_title,
-    _resolve_detected_title_fallback,
-    _resolve_selected_title,
-)
+from bibr.extract.title_candidates import _is_ordinary_body_heading
 
 
 def _candidate(candidate_id, text, roles, *, reading_order=0, region_label="text"):
@@ -41,7 +35,17 @@ def _candidate(candidate_id, text, roles, *, reading_order=0, region_label="text
     )
 
 
-def _case(selected, *, llm_title=None, journal=None, publisher=None, detected_title=""):
+def _decide(
+    selected,
+    *,
+    llm_title=None,
+    journal=None,
+    publisher=None,
+    detected_title="",
+    prefer_byline_adjacent=False,
+):
+    """The title decision of an ownership-scoped run whose record is *selected*."""
+    from bibr.extract.field_decisions import FieldCandidate, decide_title
     from bibr.extract.front_matter import FrontMatterBlock, FrontMatterResolution
 
     block = FrontMatterBlock(
@@ -60,13 +64,18 @@ def _case(selected, *, llm_title=None, journal=None, publisher=None, detected_ti
         allowed_text_ids=frozenset(),
         allowed_section_ids=frozenset(),
     )
-    contents = SimpleNamespace(
+    return decide_title(
+        FieldCandidate("title", "llm", llm_title),
+        resolution=resolution,
         detected_title=detected_title,
         sections=[],
-        front_matter_resolution=resolution,
+        journal=journal,
+        publisher=publisher,
+        scoped=True,
+        abstained=False,
+        prefer_byline_adjacent=prefer_byline_adjacent,
+        doc_info=None,
     )
-    metadata = SimpleNamespace(title=llm_title, journal=journal, publisher=publisher)
-    return contents, metadata, []
 
 
 class TestDetectedTitleFallback:
@@ -78,10 +87,12 @@ class TestDetectedTitleFallback:
     )
 
     def test_lsm_printed_title_is_recovered(self):
-        contents, metadata, issues = _case([], detected_title=self.LSM_TITLE)
+        decision = _decide([], detected_title=self.LSM_TITLE)
 
-        assert _resolve_detected_title_fallback(contents, metadata, validation_issue_sink=issues)
-        assert metadata.title == self.LSM_TITLE
+        assert decision.rule == "layout_title_fallback"
+        assert decision.value == self.LSM_TITLE
+        assert decision.source == "layout_title"
+        issues = decision.issues
         assert issues[-1].code == "VAL_TITLE_RECOVERED"
         assert issues[-1].severity == "warning"
         assert not issues[-1].blocking
@@ -95,42 +106,30 @@ class TestDetectedTitleFallback:
         ],
     )
     def test_masthead_and_furniture_detected_titles_stay_null(self, detected, journal):
-        contents, metadata, issues = _case([], journal=journal, detected_title=detected)
+        decision = _decide([], journal=journal, detected_title=detected)
 
-        assert not _resolve_detected_title_fallback(
-            contents, metadata, validation_issue_sink=issues
-        )
-        assert not metadata.title
-        assert issues == []
+        assert decision.selected is None
+        assert not decision.value
+        assert decision.issues == ()
 
     @pytest.mark.parametrize("detected", ["", "   ", None])
     def test_absent_detected_title_stays_null(self, detected):
-        contents, metadata, issues = _case([], detected_title=detected)
+        decision = _decide([], detected_title=detected)
 
-        assert not _resolve_detected_title_fallback(
-            contents, metadata, validation_issue_sink=issues
-        )
-        assert not metadata.title
+        assert decision.selected is None
+        assert not decision.value
 
     def test_never_overwrites_a_title_already_asserted(self):
-        contents, metadata, issues = _case(
-            [], llm_title="Model title", detected_title=self.LSM_TITLE
-        )
+        decision = _decide([], llm_title="Model title", detected_title=self.LSM_TITLE)
 
-        assert not _resolve_detected_title_fallback(
-            contents, metadata, validation_issue_sink=issues
-        )
-        assert metadata.title == "Model title"
+        assert decision.rule == "extracted"
+        assert decision.value == "Model title"
 
     def test_body_heading_detected_title_stays_null(self):
-        contents, metadata, issues = _case(
-            [], detected_title="APRESENTAÇÃO E ANÁLISE DOS RESULTADOS"
-        )
+        decision = _decide([], detected_title="APRESENTAÇÃO E ANÁLISE DOS RESULTADOS")
 
-        assert not _resolve_detected_title_fallback(
-            contents, metadata, validation_issue_sink=issues
-        )
-        assert not metadata.title
+        assert decision.selected is None
+        assert not decision.value
 
     async def test_ownership_scope_recovers_detected_title_end_to_end(self, monkeypatch):
         """The gate is at the call site, so exercise the whole stage."""
@@ -150,8 +149,8 @@ class TestDetectedTitleFallback:
             sections_text={0: "", 1: "something unknown"},
             detected_title=self.LSM_TITLE,
         )
-        # A selected block with no safe title candidate: `_resolve_selected_title`
-        # fails closed, and only the detected-title branch can recover.
+        # A selected block with no safe title candidate: the selected-record
+        # fallback fails closed, and only the detected-title branch can recover.
         byline = _candidate("byline", "Alice Author, Bob Author", roles={"byline"})
         resolution = FrontMatterResolution(
             candidates=(byline,),
@@ -234,20 +233,20 @@ class TestOrdinaryBodyHeadingGuard:
         assert not _is_ordinary_body_heading(title)
 
     def test_portuguese_body_heading_is_not_asserted_as_the_title(self):
-        contents, metadata, issues = _case(
+        decision = _decide(
             [_candidate("heading", "APRESENTAÇÃO E ANÁLISE DOS RESULTADOS", roles={"title"})]
         )
 
-        assert not _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert not metadata.title
-        assert issues == []
+        assert decision.selected is None
+        assert not decision.value
+        assert decision.issues == ()
 
     def test_a_real_portuguese_title_still_recovers(self):
         real = "Gestão do conhecimento em pequenas empresas de tecnologia"
-        contents, metadata, issues = _case([_candidate("title", real, roles={"title"})])
+        decision = _decide([_candidate("title", real, roles={"title"})])
 
-        assert _resolve_selected_title(contents, metadata, validation_issue_sink=issues)
-        assert metadata.title == real
+        assert decision.rule == "selected_record_title"
+        assert decision.value == real
 
 
 class TestBylineAdjacentTitlePreference:
@@ -256,85 +255,70 @@ class TestBylineAdjacentTitlePreference:
     FRENCH = "Le contrôle de constitutionnalité des lois de finances"
     ENGLISH = "Constitutional review of finance acts"
 
-    @staticmethod
-    def _settings(enabled):
-        return SimpleNamespace(pipeline=SimpleNamespace(title_prefer_byline_adjacent=enabled))
-
-    def _redp_case(self):
-        return _case(
+    def _redp_case(self, *, enabled):
+        return _decide(
             [
                 _candidate("fr", self.FRENCH, roles={"title"}, reading_order=0),
                 _candidate("byline", "Alice Auteur", roles={"byline"}, reading_order=1),
                 _candidate("en", self.ENGLISH, roles={"title"}, reading_order=7),
             ],
             llm_title=self.ENGLISH,
+            prefer_byline_adjacent=enabled,
         )
 
     def test_default_settings_leave_the_model_title_untouched(self):
-        contents, metadata, issues = self._redp_case()
+        from bibr.config import Settings
 
-        assert not _prefer_byline_adjacent_title(
-            contents,
-            metadata,
-            validation_issue_sink=issues,
-            settings=SimpleNamespace(pipeline=SimpleNamespace()),
-        )
-        assert metadata.title == self.ENGLISH
-        assert issues == []
+        assert Settings.pipeline.title_prefer_byline_adjacent is False
+        decision = self._redp_case(enabled=Settings.pipeline.title_prefer_byline_adjacent)
+
+        assert decision.value == self.ENGLISH
+        assert decision.issues == ()
 
     def test_disabled_flag_leaves_the_model_title_untouched(self):
-        contents, metadata, issues = self._redp_case()
+        decision = self._redp_case(enabled=False)
 
-        assert not _prefer_byline_adjacent_title(
-            contents, metadata, validation_issue_sink=issues, settings=self._settings(False)
-        )
-        assert metadata.title == self.ENGLISH
+        assert decision.value == self.ENGLISH
 
     def test_enabled_prefers_the_row_printed_above_the_byline(self):
-        contents, metadata, issues = self._redp_case()
+        decision = self._redp_case(enabled=True)
 
-        assert _prefer_byline_adjacent_title(
-            contents, metadata, validation_issue_sink=issues, settings=self._settings(True)
-        )
-        assert metadata.title == self.FRENCH
+        assert decision.rule == "byline_adjacent_title"
+        assert decision.value == self.FRENCH
+        issues = decision.issues
         assert issues[-1].code == "VAL_TITLE_BYLINE_ADJACENT"
         assert issues[-1].evidence_ids == ("fr",)
 
     def test_enabled_keeps_a_model_title_grounded_in_the_adjacent_row(self):
-        contents, metadata, issues = _case(
+        decision = _decide(
             [
                 _candidate("fr", self.FRENCH, roles={"title"}, reading_order=0),
                 _candidate("byline", "Alice Auteur", roles={"byline"}, reading_order=1),
             ],
             llm_title=self.FRENCH,
+            prefer_byline_adjacent=True,
         )
 
-        assert not _prefer_byline_adjacent_title(
-            contents, metadata, validation_issue_sink=issues, settings=self._settings(True)
-        )
-        assert metadata.title == self.FRENCH
+        assert decision.value == self.FRENCH
+        assert decision.selected.source == "llm"
 
     def test_enabled_never_promotes_an_unsafe_row(self):
-        contents, metadata, issues = _case(
+        decision = _decide(
             [
                 _candidate("heading", "RESUMO", roles={"title"}, reading_order=0),
                 _candidate("byline", "Alice Auteur", roles={"byline"}, reading_order=1),
             ],
             llm_title=self.ENGLISH,
+            prefer_byline_adjacent=True,
         )
 
-        assert not _prefer_byline_adjacent_title(
-            contents, metadata, validation_issue_sink=issues, settings=self._settings(True)
-        )
-        assert metadata.title == self.ENGLISH
+        assert decision.value == self.ENGLISH
 
     def test_enabled_is_a_no_op_without_a_byline_row(self):
-        contents, metadata, issues = _case(
+        decision = _decide(
             [_candidate("fr", self.FRENCH, roles={"title"}, reading_order=0)],
             llm_title=self.ENGLISH,
+            prefer_byline_adjacent=True,
         )
 
-        assert not _prefer_byline_adjacent_title(
-            contents, metadata, validation_issue_sink=issues, settings=self._settings(True)
-        )
-        assert metadata.title == self.ENGLISH
+        assert decision.value == self.ENGLISH

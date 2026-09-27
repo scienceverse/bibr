@@ -46,8 +46,9 @@ def _cache_ocr_state():
 
 
 def test_create_local_demo_defaults_ocr_cache_on(monkeypatch, caplog, _cache_ocr_state):
-    """No CACHE_OCR set by the user — the demo turns the disk cache on."""
+    """No CACHE_OCR set, and the demo keeps its files — it turns the disk cache on."""
     _capture_pipeline_kwargs(monkeypatch)
+    monkeypatch.setenv("DEMO_CACHE_TTL_SECONDS", "0")
     section = _cache_ocr_state
     section.ocr = False
     section.model_fields_set.discard("ocr")
@@ -59,17 +60,40 @@ def test_create_local_demo_defaults_ocr_cache_on(monkeypatch, caplog, _cache_ocr
     assert any("OCR disk cache" in r.message for r in caplog.records)
 
 
-def test_create_local_demo_respects_explicit_ocr_cache_off(monkeypatch, caplog, _cache_ocr_state):
-    """CACHE_OCR=0 (or any explicit value) set by the user is left alone."""
+def test_create_local_demo_leaves_ocr_cache_off_when_deleting_files(
+    monkeypatch, caplog, _cache_ocr_state
+):
+    """The cache keeps each paper's OCR text with no expiry, so a demo that
+    deletes uploads (the default) does not turn it on."""
     _capture_pipeline_kwargs(monkeypatch)
+    monkeypatch.delenv("DEMO_CACHE_TTL_SECONDS", raising=False)
     section = _cache_ocr_state
     section.ocr = False
-    section.model_fields_set.add("ocr")
+    section.model_fields_set.discard("ocr")
 
     with caplog.at_level(logging.INFO):
         local_app.create_local_demo(ocr_backend="glm-mlx")
 
     assert section.ocr is False
+    assert not any("OCR disk cache" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("ttl", ["0", "3600"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_create_local_demo_respects_explicit_ocr_cache(
+    monkeypatch, caplog, _cache_ocr_state, ttl, explicit
+):
+    """An explicit CACHE_OCR set by the user is left alone, whatever the cleanup."""
+    _capture_pipeline_kwargs(monkeypatch)
+    monkeypatch.setenv("DEMO_CACHE_TTL_SECONDS", ttl)
+    section = _cache_ocr_state
+    section.ocr = explicit
+    section.model_fields_set.add("ocr")
+
+    with caplog.at_level(logging.INFO):
+        local_app.create_local_demo(ocr_backend="glm-mlx")
+
+    assert section.ocr is explicit
     assert not any("OCR disk cache" in r.message for r in caplog.records)
 
 
