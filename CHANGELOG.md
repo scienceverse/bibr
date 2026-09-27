@@ -1340,8 +1340,9 @@ released.
   denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
   both tools share one list. Whatever fails one paper is recorded for that
   paper, in the runner and the converter, and the rest go on. `--resume`
-  refuses to continue a run when the server's GROBID version, the
-  `--grobid-image` or the request parameters differ from the manifest's.
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
 
 ### Changed
 

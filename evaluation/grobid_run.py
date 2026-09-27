@@ -25,9 +25,11 @@ and the run goes on. Full run, from a server to scores::
 
 ``--ids-file`` lists the cohort bibr is scored on, so the manifest's ``ids``
 are the same ``--expected-ids`` list as bibr's. ``--resume`` continues an
-interrupted run, and refuses when the server's GROBID version, the
-``--grobid-image`` or the request parameters differ from the ones the
-manifest records.
+interrupted run over the same paper ids. It refuses other paper ids, a
+server that reports another GROBID version, other request parameters, and a
+``--grobid-image`` other than the one the manifest records, including one
+given when the first run named none. A resume without ``--grobid-image``
+keeps the recorded image.
 
 Wall times are measured under the chosen ``--workers`` concurrency; compare
 them with bibr timings taken at the same concurrency.
@@ -298,17 +300,49 @@ def resume_conflict(prior: dict[str, Any], version: str, image: str | None) -> s
             f"its manifest records GROBID {recorded.get('version')}, "
             f"but the server runs {version}; use a new --out directory"
         )
-    if recorded.get("image") and image and recorded["image"] != image:
-        return (
-            f"its manifest records the image {recorded['image']}, not {image}; "
-            "use a new --out directory"
-        )
+    # Without --grobid-image the resume keeps the recorded image; with it, the
+    # image must be the recorded one, since papers made under an unnamed image
+    # cannot be credited to a named one.
+    if image and recorded.get("image") != image:
+        named = f"the image {recorded['image']}" if recorded.get("image") else "no image"
+        return f"its manifest records {named}, not {image}; use a new --out directory"
     if prior.get("parameters") != GROBID_PARAMETERS:
         return (
             "its manifest records other GROBID parameters than this runner sends; "
             "use a new --out directory"
         )
     return None
+
+
+def _papers(count: int) -> str:
+    return f"{count} paper" + ("" if count == 1 else "s")
+
+
+def _some(ids: list[str], shown: int = 5) -> str:
+    listed = ", ".join(ids[:shown])
+    return listed + (f", and {len(ids) - shown} more" if len(ids) > shown else "")
+
+
+def paper_set_conflict(prior: dict[str, Any], jobs: list[Job]) -> str | None:
+    """Why *jobs* are not the papers a previous manifest records, or None.
+
+    A resume over other papers would widen or narrow the cohort under one
+    manifest, and drop the records of the papers it leaves out.
+    """
+    recorded = {str(paper_id) for paper_id in prior.get("ids") or []}
+    current = {job.paper_id for job in jobs}
+    if recorded == current:
+        return None
+    differences = []
+    if added := sorted(current - recorded):
+        differences.append(f"{len(added)} not in the manifest ({_some(added)})")
+    if dropped := sorted(recorded - current):
+        differences.append(f"{len(dropped)} left out of this run ({_some(dropped)})")
+    return (
+        f"its manifest lists {_papers(len(recorded))} and this run {len(current)}: "
+        + "; ".join(differences)
+        + "; pass the --pdf-dir and --ids-file the run started with"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -344,9 +378,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Continue an interrupted run in --out: keep papers already done, redo the "
-        "rest. Refused when the server's GROBID version, the --grobid-image or the "
-        "request parameters differ from the ones the manifest records",
+        help="Continue an interrupted run in --out over the same paper ids: keep papers "
+        "already done, redo the rest. Refused when the paper ids, the server's GROBID "
+        "version or the request parameters differ from the ones the manifest records, "
+        "or when --grobid-image names another image than the recorded one; without "
+        "--grobid-image the recorded image is kept",
     )
     args = parser.parse_args(argv)
     if args.workers < 1 or args.attempts < 1 or args.timeout <= 0:
@@ -363,14 +399,24 @@ def main(argv: list[str] | None = None) -> int:
 
     ids = None
     if args.ids_file:
-        lines = args.ids_file.read_text(encoding="utf-8").splitlines()
+        try:
+            # utf-8-sig: a byte-order mark would otherwise become part of the first id.
+            lines = args.ids_file.read_text(encoding="utf-8-sig").splitlines()
+        except (OSError, UnicodeDecodeError) as error:
+            parser.error(f"cannot read --ids-file {args.ids_file}: {error}")
         ids = {stripped for line in lines if (stripped := line.strip()) and stripped[0] != "#"}
+    if not args.pdf_dir.is_dir():
+        parser.error(f"--pdf-dir {args.pdf_dir} is not a directory")
     try:
         jobs = discover(args.pdf_dir, ids)
+    except OSError as error:
+        parser.error(f"cannot read --pdf-dir {args.pdf_dir}: {error}")
     except ValueError as error:
         parser.error(f"{args.pdf_dir}: {error}")
     if not jobs:
         parser.error(f"no PDFs to process in {args.pdf_dir}")
+    if prior is not None and (conflict := paper_set_conflict(prior, jobs)):
+        parser.error(f"cannot resume the run in {args.out}: {conflict}")
 
     from evaluation.evaluate import bibr_commit
 

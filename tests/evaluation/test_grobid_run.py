@@ -233,23 +233,34 @@ def _mock_clients(monkeypatch, handler):
 
 
 def _grobid_server(state):
-    """A GROBID that reports ``state["version"]`` and answers every PDF with TEI."""
+    """A GROBID that reports ``state["version"]`` and answers every PDF with TEI.
+
+    A PDF named in ``state["reject"]`` gets a 400, which is not retried.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/api/version":
             return httpx.Response(200, text=state["version"])
-        return httpx.Response(200, content=TEI if request.method == "POST" else b"true")
+        if request.method == "POST":
+            for name in state.get("reject", ()):
+                if f'filename="{name}"'.encode() in request.content:
+                    return httpx.Response(400)
+            return httpx.Response(200, content=TEI)
+        return httpx.Response(200, content=b"true")
 
     return handler
 
 
 def test_cli_resume_refuses_another_grobid_or_parameter_set(pdfs, tmp_path, monkeypatch, capsys):
-    state = {"version": "0.9.0"}
+    state = {"version": "0.9.0", "reject": ["b.pdf"]}
     _mock_clients(monkeypatch, _grobid_server(state))
     out = tmp_path / "tei"
-    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs), "--out", str(out)]
-    assert main([*argv, "--ids-file", str(_ids(tmp_path, "a")), "--grobid-image", "g:0.9.0"]) == 0
+    ids = str(_ids(tmp_path, "a", "b"))
+    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs), "--ids-file", ids]
+    argv += ["--out", str(out)]
+    assert main([*argv, "--grobid-image", "g:0.9.0"]) == 1
     first = (out / MANIFEST_NAME).read_text()
+    state["reject"] = []
 
     def refused(*extra):
         with pytest.raises(SystemExit) as exit_info:
@@ -277,24 +288,118 @@ def test_cli_resume_refuses_another_grobid_or_parameter_set(pdfs, tmp_path, monk
     assert resumed["grobid"]["image"] == "g:0.9.0" and len(resumed["resumed_at"]) == 1
 
 
-def _ids(tmp_path, *lines):
+def test_cli_resume_refuses_an_image_the_first_run_did_not_name(
+    pdfs, tmp_path, monkeypatch, capsys
+):
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1", "reject": ["b.pdf"]}))
+    out = tmp_path / "tei"
+    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs), "--out", str(out)]
+    assert main(argv) == 1
+    first = (out / MANIFEST_NAME).read_text()
+    with pytest.raises(SystemExit) as exit_info:
+        main([*argv, "--resume", "--grobid-image", "g:0.9.1"])
+    assert exit_info.value.code == 2
+    assert "records no image, not g:0.9.1" in capsys.readouterr().err
+    assert (out / MANIFEST_NAME).read_text() == first
+
+
+def test_cli_resume_refuses_another_paper_set(pdfs, tmp_path, monkeypatch, capsys):
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1", "reject": ["a.pdf"]}))
+    out = tmp_path / "tei"
+    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs), "--out", str(out)]
+    assert main([*argv, "--ids-file", str(_ids(tmp_path, "a"))]) == 1
+    first = (out / MANIFEST_NAME).read_text()
+
+    def refused(*extra):
+        with pytest.raises(SystemExit) as exit_info:
+            main([*argv, "--resume", *extra])
+        assert exit_info.value.code == 2
+        assert (out / MANIFEST_NAME).read_text() == first
+        return capsys.readouterr().err
+
+    # Without the --ids-file, every PDF in --pdf-dir would join the run.
+    assert "lists 1 paper and this run 2: 1 not in the manifest (b);" in refused()
+    other = str(_ids(tmp_path, "b", "gone"))
+    assert (
+        "lists 1 paper and this run 2: 2 not in the manifest (b, gone); "
+        "1 left out of this run (a);" in refused("--ids-file", other)
+    )
+
+
+def _ids(tmp_path, *lines, encoding="utf-8"):
     path = tmp_path / "ids.txt"
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding=encoding)
     return path
 
 
-def test_cli_ids_file_comments_and_duplicate_stems(pdfs, tmp_path, monkeypatch, capsys):
+def test_cli_ids_file_skips_comment_lines(pdfs, tmp_path, monkeypatch):
     _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1"}))
     ids = _ids(tmp_path, "a", "  # an indented comment", "#b", "")
     base = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs)]
     assert main([*base, "--ids-file", str(ids), "--out", str(tmp_path / "t1")]) == 0
     assert json.loads((tmp_path / "t1" / MANIFEST_NAME).read_text())["ids"] == ["a"]
 
+
+def test_cli_ids_file_ignores_a_byte_order_mark(pdfs, tmp_path, monkeypatch):
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1"}))
+    ids = _ids(tmp_path, "a", "b", encoding="utf-8-sig")
+    out = tmp_path / "tei"
+    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs), "--out", str(out)]
+    assert main([*argv, "--ids-file", str(ids)]) == 0
+    manifest = json.loads((out / MANIFEST_NAME).read_text())
+    assert manifest["ids"] == ["a", "b"] and manifest["counts"]["ok"] == 2
+
+
+def test_cli_duplicate_pdf_stems_are_a_usage_error(pdfs, tmp_path, monkeypatch, capsys):
+    if (pdfs / "A.PDF").exists():
+        pytest.skip("case-insensitive filesystem: a.pdf and a.PDF are one file")
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1"}))
     (pdfs / "a.PDF").write_bytes(b"%PDF-1.7 synthetic a, again")
+    argv = ["--grobid-url", "http://grobid.test", "--pdf-dir", str(pdfs)]
     with pytest.raises(SystemExit) as exit_info:
-        main([*base, "--out", str(tmp_path / "t2")])
+        main([*argv, "--out", str(tmp_path / "t2")])
     assert exit_info.value.code == 2
     assert "two PDFs share the paper id 'a'" in capsys.readouterr().err
+
+
+def _usage_error(argv, capsys):
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    assert exit_info.value.code == 2
+    return capsys.readouterr().err
+
+
+def test_cli_missing_pdf_dir_or_ids_file_is_a_usage_error(pdfs, tmp_path, monkeypatch, capsys):
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1"}))
+    base = ["--grobid-url", "http://grobid.test", "--out", str(tmp_path / "t")]
+    missing = str(tmp_path / "missing")
+    assert "is not a directory" in _usage_error([*base, "--pdf-dir", missing], capsys)
+    assert "is not a directory" in _usage_error([*base, "--pdf-dir", str(pdfs / "a.pdf")], capsys)
+    with_pdfs = [*base, "--pdf-dir", str(pdfs)]
+    assert "cannot read --ids-file" in _usage_error([*with_pdfs, "--ids-file", missing], capsys)
+    latin1 = tmp_path / "latin1.txt"
+    latin1.write_bytes("caf\xe9\n".encode("latin-1"))
+    assert "cannot read --ids-file" in _usage_error([*with_pdfs, "--ids-file", str(latin1)], capsys)
+    assert not (tmp_path / "t").exists()
+
+
+def test_cli_unreadable_pdf_dir_is_a_usage_error(tmp_path, monkeypatch, capsys):
+    _mock_clients(monkeypatch, _grobid_server({"version": "0.9.1"}))
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0)
+    try:
+        try:
+            list(locked.iterdir())
+        except PermissionError:
+            pass
+        else:
+            pytest.skip("this filesystem or user can list a directory without permissions")
+        argv = ["--grobid-url", "http://grobid.test", "--out", str(tmp_path / "t")]
+        err = _usage_error([*argv, "--pdf-dir", str(locked)], capsys)
+        assert "cannot read --pdf-dir" in err
+    finally:
+        locked.chmod(0o700)
 
 
 def test_cli_run_records_version_parameters_and_image(pdfs, tmp_path, monkeypatch):

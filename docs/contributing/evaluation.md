@@ -216,10 +216,16 @@ cohort would count against GROBID but not against bibr.
 
 A failure is recorded per paper, whatever its cause, and the run goes on. The
 converter does the same for a TEI file it cannot read or convert. `--resume`
-continues an interrupted run in the same `--out` directory. It refuses when the
-server's GROBID version, the `--grobid-image` or the request parameters differ
-from the ones the manifest records, so one manifest never covers two GROBID
-builds.
+continues an interrupted run in the same `--out` directory, over the same
+paper ids, so pass the `--pdf-dir` and `--ids-file` the run started with. It
+refuses other paper ids, a server that reports another GROBID version, and
+other request parameters. It also refuses a `--grobid-image` other than the
+one the manifest records, including one given when the first run named none.
+A resume without `--grobid-image` keeps the recorded image and checks none.
+The version check reads only the version string the server reports, so two
+images of one GROBID release, such as its CRF-only and full images, are told
+apart only when the first run and every resume name `--grobid-image`. The
+server's model configuration is not checked.
 
 For the headline comparison, read `pass_rate` in both runs, and compare
 bibr's `mean_incl_abstained` with GROBID's `mean` for the front-matter fields.
