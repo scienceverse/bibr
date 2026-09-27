@@ -91,8 +91,24 @@ def main():
         _MAX_FILE_SIZE_MB,
         _TABLE_SCROLL_CSS,
         _TABLE_SCROLL_JS,
+        _cache_lifetime,
         create_local_demo,
     )
+
+    try:
+        _cache_lifetime()
+    except ValueError as e:
+        from rich.console import Console
+        from rich.markup import escape
+
+        from bibr.local.cli import ui
+
+        ui.error(
+            Console(stderr=True),
+            escape(str(e)),
+            hint="Leave it unset to delete files after an hour.",
+        )
+        sys.exit(1)
 
     launch_kwargs = {
         "server_name": args.host,

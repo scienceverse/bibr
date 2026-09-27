@@ -363,9 +363,25 @@ The demo uses `PIPELINE_MEMORY_MODE` and `LLM_BACKEND` from the `.env` created
 by `bibr setup`; pass `--memory aggressive` or `--llm llama-cpp` only when you
 want to override that setup for this run.
 
-Uploads are limited to `DEMO_MAX_FILE_SIZE_MB` (default 10). Uploaded papers
-and JSON downloads are deleted an hour after they were made, and when the demo
-stops; set `DEMO_CACHE_TTL_SECONDS` to change the hour, or to `0` to keep them.
+Two more settings control what the demo keeps. They are process environment
+variables, not `.env` keys: set them in the shell that starts the demo, as
+with `GRADIO_PASSWORD` below. In PowerShell, for example:
+`$env:DEMO_CACHE_TTL_SECONDS="1800"`.
+
+- `DEMO_MAX_FILE_SIZE_MB` (default 10) limits uploads. A larger upload is
+  refused while it arrives.
+- `DEMO_CACHE_TTL_SECONDS` (default 3600) is how long uploaded papers and JSON
+  downloads are kept. Gradio looks for old files every five minutes, so a file
+  is deleted at most five minutes after it reaches that age. All of them are
+  deleted when the demo stops. `0` keeps them. Any other value that is not a
+  whole number of seconds stops the demo at start.
+
+While the demo deletes its files, it leaves the OCR disk cache off unless you
+set `CACHE_OCR` yourself. With `DEMO_CACHE_TTL_SECONDS=0` it turns that cache
+on, so a paper you run again skips OCR. The cache keeps each paper's OCR text,
+with no expiry, in `CACHE_OCR_DIR` (default `~/.cache/bibr/ocr`). On a demo
+other people upload to, keep the cleanup on and do not turn `CACHE_OCR` on,
+in the shell or in `.env`.
 
 For a remote demo, run it on the host that has bibr configured. Protect it with
 a username and a strong password before creating a temporary public share link.
@@ -382,6 +398,20 @@ models and processes uploaded papers; the supervisor only needs a browser.
 Treat a Gradio share link as a temporary evaluation endpoint, stop it after the
 session, and do not use it for confidential papers unless the hosting and data
 handling arrangements have been approved.
+
+Gradio deletes the files but not the folders they were in: an empty folder
+for each JSON download, and one named after a hash of each uploaded paper. Its
+cleanup also runs as one background task that stops for good after an error.
+For a hosted demo on Linux, give the demo a temp folder of its own with
+`GRADIO_TEMP_DIR` and sweep it from cron as well, with an age above
+`DEMO_CACHE_TTL_SECONDS`. For the default hour, every 15 minutes:
+
+```bash
+# Before starting the demo:
+export GRADIO_TEMP_DIR=/srv/bibr-demo/tmp
+# crontab entry (one line):
+*/15 * * * * find /srv/bibr-demo/tmp -mindepth 1 -type f -mmin +75 -delete; find /srv/bibr-demo/tmp -mindepth 1 -type d -empty -mmin +5 -delete
+```
 
 ## Updating
 

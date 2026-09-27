@@ -17,11 +17,20 @@ def test_summary_md_shows_extracted_metadata_literally():
             "paper_type": "<b>article</b>",
             "oecd_l1": "Social [sciences](https://attacker.example)",
             "oecd_l2": "Psychology ![y](https://attacker.example/r.png)",
-            "keywords": ["*bold*", "[k](https://attacker.example)"],
+            "keywords": [
+                "*bold*",
+                "[k](https://attacker.example)",
+                "https://1249717198/x",
+                "someone@attacker.example",
+                "$$x$$",
+            ],
         }
     }
     md = _build_summary_md(result)
     assert "](" not in md  # no Markdown link or image syntax survives
+    assert "https://" not in md  # no GFM autolink of a bare URL
+    assert "someone@" not in md  # nor of an email address
+    assert "$$" not in md  # no LaTeX
     assert "<img" not in md
     assert "<b>" not in md
     assert "\n# Heading" not in md
@@ -29,6 +38,24 @@ def test_summary_md_shows_extracted_metadata_literally():
     assert "Evil" in md
     assert "Heading" in md
     assert " > Psychology" in md
+
+
+def test_summary_md_shows_apostrophes_and_quotes_as_typed():
+    """No HTML entity whose ``#`` then gets escaped and shows as ``&#x27;``."""
+    md = _build_summary_md(
+        {
+            "metadata": {
+                "title": "Children's memory",
+                "keywords": ['"quoted"', "Parkinson's disease"],
+            }
+        }
+    )
+    assert md.startswith("### Children's memory")
+    assert "Parkinson's disease" in md
+    assert '"quoted"' in md
+    assert "&#x27;" not in md
+    assert "&quot;" not in md
+    assert "&\\#" not in md
 
 
 def test_summary_md_keeps_plain_titles_readable():

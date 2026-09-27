@@ -248,10 +248,14 @@ released.
   notes in document order; a note never replaces the citation.
 - `bibr demo` kept every uploaded paper and every JSON download in the temp
   folder until something else cleaned it: Gradio's cache was never cleared,
-  and each download was written twice, once outside that cache. Uploads and
-  downloads are now deleted an hour after they were made
-  (`DEMO_CACHE_TTL_SECONDS`, `0` keeps them), and all of them when the demo
-  stops. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
   arrives (HTTP 413) instead of after it has been stored.
 - The `bibr demo` summary card showed an extracted title, DOI, paper type,
   domain and keywords as Markdown, so a crafted PDF could make the viewer's

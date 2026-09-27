@@ -25,8 +25,11 @@ _MAX_FILE_SIZE_MB = int(os.environ.get("DEMO_MAX_FILE_SIZE_MB", "10"))
 _MAX_FILE_SIZE_BYTES = _MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Uploaded papers and the JSON downloads made from them are deleted once they
-# are this old (checked as often), and all of them when the server stops.
+# are this old, and all of them when the server stops.
 _DEFAULT_CACHE_TTL_SECONDS = 3600
+# Gradio looks for files to delete this often (or every TTL, when that is
+# shorter), so a file lives at most its TTL plus this long.
+_CACHE_SWEEP_SECONDS = 300
 
 _ALLOWED_EXTENSIONS: list[str] = sorted(SUPPORTED_EXTENSIONS)
 
@@ -195,9 +198,26 @@ def _parse_json_response(paper_json: dict) -> dict:
 
 
 def _cache_lifetime() -> tuple[int, int] | None:
-    """Gradio ``delete_cache`` setting: ``DEMO_CACHE_TTL_SECONDS``, 0 keeps files."""
-    ttl = int(os.environ.get("DEMO_CACHE_TTL_SECONDS", str(_DEFAULT_CACHE_TTL_SECONDS)))
-    return (ttl, ttl) if ttl > 0 else None
+    """Gradio ``delete_cache`` (frequency, age) from ``DEMO_CACHE_TTL_SECONDS``.
+
+    Files are deleted once they are ``ttl`` seconds old, checked every
+    ``_CACHE_SWEEP_SECONDS`` (or every ``ttl`` when shorter). ``0`` keeps them
+    and returns None. Any other value that is not a positive whole number of
+    seconds raises ValueError, so a typo cannot silently keep every file.
+    """
+    raw = os.environ.get("DEMO_CACHE_TTL_SECONDS", str(_DEFAULT_CACHE_TTL_SECONDS))
+    try:
+        ttl = int(raw)
+        if ttl < 0:
+            raise ValueError
+    except ValueError:
+        raise ValueError(
+            "DEMO_CACHE_TTL_SECONDS must be a whole number of seconds, "
+            f"or 0 to keep uploads and downloads; got {raw!r}"
+        ) from None
+    if ttl == 0:
+        return None
+    return (min(ttl, _CACHE_SWEEP_SECONDS), ttl)
 
 
 def _write_json_file(paper_json: dict, suffix: str = "") -> str:
@@ -208,7 +228,9 @@ def _write_json_file(paper_json: dict, suffix: str = "") -> str:
 
     The file is written inside Gradio's temp folder, so Gradio serves it in
     place and deletes it with the uploads (``DEMO_CACHE_TTL_SECONDS``). A file
-    outside it would be copied in, and the original never deleted.
+    outside it would be copied in, and the original never deleted. Gradio
+    removes only the file, not its empty ``bibr_json_*`` folder; the tester
+    guide describes a sweep for a hosted demo.
     """
     from gradio.utils import get_upload_folder
 
@@ -239,7 +261,9 @@ def _strip_figure_images(paper_json: dict) -> dict:
     return stripped
 
 
-_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|>~])")
+# ``:`` and ``@`` stop GFM autolinks (bare URLs and email addresses), ``$``
+# stops gr.Markdown's ``$$`` LaTeX delimiter.
+_MD_SPECIAL = re.compile(r"([\\`*_{}\[\]()#+\-.!|>~:@$])")
 
 
 def _md_text(value: object) -> str:
@@ -247,9 +271,11 @@ def _md_text(value: object) -> str:
 
     Titles and keywords come from the uploaded document, so a crafted PDF could
     otherwise make the viewer's browser load an outside image or follow a link.
+    Quotes are left as they are: the ``#`` of an entity such as ``&#x27;``
+    would be escaped, and the entity shown literally.
     """
     flat = " ".join(str(value).split())
-    return _MD_SPECIAL.sub(r"\\\1", _esc(flat))
+    return _MD_SPECIAL.sub(r"\\\1", _esc(flat, quote=False))
 
 
 def _build_summary_md(result: dict) -> str:
@@ -655,12 +681,16 @@ def create_local_demo(
     from bibr.local.cli import normalize_ocr_backend
     from bibr.local.pipeline import LocalPipeline
 
+    # Read first, so a bad DEMO_CACHE_TTL_SECONDS fails before models load.
+    cache_lifetime = _cache_lifetime()
     ocr_backend = normalize_ocr_backend(ocr_backend)
 
-    if "ocr" not in Settings.cache.model_fields_set:
+    if cache_lifetime is None and "ocr" not in Settings.cache.model_fields_set:
         # Demo users repeatedly re-run the same PDF while poking at the UI;
         # skipping OCR inference on repeat runs is a better default here than
         # in the batch pipeline, where silently caching results is unwanted.
+        # Only when the demo keeps its files: the cache keeps each paper's OCR
+        # text with no expiry, so a demo that deletes uploads leaves it off.
         Settings.cache.ocr = True
         logger.info("Local demo — enabling OCR disk cache (CACHE_OCR) by default")
 
@@ -702,7 +732,7 @@ def create_local_demo(
         getattr(pipeline_state["pipeline"], "llm_backend", llm_backend or Settings.llm.backend),
     )
 
-    with gr.Blocks(title="bibr 🦫 Demo", delete_cache=_cache_lifetime()) as demo:
+    with gr.Blocks(title="bibr 🦫 Demo", delete_cache=cache_lifetime) as demo:
         gr.Markdown(_HEADER_MD)
         status_display = gr.Markdown(status_md)
 
