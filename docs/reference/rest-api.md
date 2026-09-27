@@ -53,7 +53,7 @@ second file return `400`.
 | `refs` | `ner` \| `llm` \| `llm-chunked` \| `off` | No | Per-request override of the reference-parsing strategy (`REF_PARSE_STRATEGY`). |
 | `ref_seg` | `geom` \| `region` \| `llm` \| `crf` | No | Per-request override of the reference-segmentation strategy (`REF_SEG_STRATEGY`). |
 
-**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
+**Response:** JSON conforming to the bibr v{{ schema_version }} schema. Top-level keys, grouped by role: the paper and its input file — `paper_id`, `schema_version` (its presence at the root is how readers dispatch v11 and later from earlier versions), `source` (input-file identity: file name, SHA-256, format); what the paper says — `metadata` (scalar paper-level metadata), `author`, `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`, `table`, `footnote`, `eq`; what external registries returned — `metadata_match` (matches for the paper's own identity), `affiliation_match` and `funding_match` (ROR organizations), `bib_match`; how the output was produced — `extraction` (engines, per-run settings, timings, LLM usage, enrichment completeness, identity receipts, qualification provenance, the output-validation result (`extraction.validation`: error/warning counts, promotion disposition and issue list), diagnostics receipts, the state of each tracked field (`extraction.fields`, since 12.1: whether `title`, `author`, `abstract`, `keywords`, `doi`, `published`, `journal`, `funding_statement`, `funding`, `paper_type` and `bib` were `extracted`, `absent`, `abstained`, `failed` or `not_attempted`, with the producing step and the codes that explain the state), figure/table piece locations and warnings (`{code, message}` objects); `regions` is added there when `include_regions=true`). Every key is always present, and content rows carry no processing fields. Figure and table rows describe the whole object.
 
 `metadata` is scalar-only by design — pipeline telemetry lives under `extraction` and the input file's identity under `source` — so R consumers can call `as.data.frame(metadata)` cleanly.
 
@@ -149,10 +149,16 @@ that force it on.
 ## Caching
 
 When `CACHE_ENABLED=true` (the default) and Redis is configured, the API caches
-successful extraction responses. Keys distinguish file content (its full
-SHA-256), the file extension (which picks the parser), page range,
-figure/region output, consolidation, and reference-strategy overrides. The
-cache namespace also includes a settings fingerprint and code version.
+successful extraction responses that are final: a response shaped by a failure
+a retry could avoid is not cached, so the next request runs the extraction
+again. That covers a blocking validation issue other than a front-matter
+abstention (`VAL_METADATA_MULTI_ITEM`), incomplete enrichment, and warnings
+such as `OCR_REGION_FAILED`, `CROSSREF_ENRICHMENT_TIMEOUT` or an LLM task's
+`*_LLM_FAILED`. A deterministic failure, such as `REF_SEG_FAILED`, fails the
+same way on every run, so its response is cached. Keys distinguish file
+content (its full SHA-256), the file extension (which picks the parser), page
+range, figure/region output, consolidation, and reference-strategy overrides.
+The cache namespace also includes a settings fingerprint and code version.
 Identical concurrent cache misses are coalesced; failed Redis operations are
 bounded and extraction continues without the cache.
 
@@ -188,10 +194,10 @@ do not count the original extraction's LLM tokens as new usage.
 | `404` | Unknown job id (expired past `JOBS_TTL_SECONDS`, evicted by the retention limits, or never existed) |
 | `409` | Job result requested before the job finished |
 | `413` | Upload limit exceeded (50 MiB file / 51 MiB multipart envelope) |
-| `422` | Extraction processing error |
+| `422` | Extraction processing error, including an LLM response that was truncated at its token limit (`error_code: llm_truncated`) or failed validation (`llm_invalid_output`); retrying the same request fails the same way |
 | `429` | Upload admission or async-job active cap reached |
 | `500` | Unexpected internal error |
-| `502` | Upstream service failed (OCR server, LLM API) |
+| `502` | Upstream service failed (OCR server, LLM API); an LLM failure carries `error_code` `llm_timeout` or `llm_failed` |
 | `503` | `/ready` reports an unavailable dependency or required classifier artifact |
 | `504` | Pipeline processing timed out |
 | `503` | Job store unreachable (`JOBS_STORE=redis`): the upload was dropped and nothing queued — retry later |

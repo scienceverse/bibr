@@ -24,11 +24,20 @@ from typing import Annotated, Any, ClassVar, Literal, Union, cast, get_args, get
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
 from pydantic.fields import FieldInfo
 
-_SCHEMA_VERSION = "12.0"
+_SCHEMA_VERSION = "12.1"
 
 
 # ---------------------------------------------------------------------------
-# Pydantic v12.0 export schema — single source of truth for validation
+# Pydantic v12.1 export schema — single source of truth for validation
+#
+# v12.1 (vs 12.0) — additive:
+#   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
+#     ``abstract``, ``keywords``, ``doi``, ``published``, ``journal``,
+#     ``funding_statement``, ``funding``, ``paper_type``, ``bib``) a record
+#     ``{state, source, issues}``, where ``state`` is ``extracted``,
+#     ``absent``, ``abstained``, ``failed`` or ``not_attempted``. Omitted when
+#     the export was made outside the pipeline, so every 12.0 export is still
+#     a valid 12.1 reader input.
 #
 # v12.0 (vs 11.0) — BREAKING. The payload separates what the paper says from
 # how bibr produced it: ``extraction`` holds all processing data, and the
@@ -352,6 +361,9 @@ InputFormatLiteral = Literal["pdf", "docx", "jats", "tei", "html", "epub", "unkn
 EqCompLiteral = Literal["=", "<", ">", "≤", "≥", "≈", "≠", "≪", "≫", "~"]
 
 SeverityLiteral = Literal["error", "warning"]
+
+# ``bibr.field_states.FieldState``.
+FieldStateLiteral = Literal["extracted", "absent", "abstained", "failed", "not_attempted"]
 
 XrefTypeLiteral = Literal["bib", "table", "figure", "foot", "supplementary", "equation", "section"]
 
@@ -1585,6 +1597,51 @@ class ConsolidationExport(BaseModel):
     fields: list[str] = Field(description="bib[] field names filled or replaced, in field order.")
 
 
+class FieldRecordExport(BaseModel):
+    """What happened to one field (``extraction.fields``)."""
+
+    model_config = _STRICT
+
+    state: FieldStateLiteral = Field(
+        description="'extracted' (a value was exported), 'absent' (the extractor ran and found "
+        "none), 'abstained' (it declined to choose between candidates), 'failed' (the step that "
+        "produces it failed, so the value is missing) or 'not_attempted' (the run did not try, "
+        "as with no LLM or references off). A field with a value is always 'extracted'."
+    )
+    source: str | None = Field(
+        description="The step that produced the value, e.g. 'llm', 'layout_title', "
+        "'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', "
+        "'native' (declared by the input); for a failed field the step that failed. Null when "
+        "unknown or when nothing was produced."
+    )
+    issues: list[str] = Field(
+        description="Codes of the extraction.warnings or extraction.validation.issues entries "
+        "that explain this state, such as VAL_METADATA_FIELD_FAILED or AUTHORS_TRUNCATED."
+    )
+
+
+class FieldStatesExport(BaseModel):
+    """State of each tracked field, keyed by its export name."""
+
+    model_config = _STRICT
+
+    title: FieldRecordExport = Field(description="metadata.title.")
+    author: FieldRecordExport = Field(description="The author table.")
+    abstract: FieldRecordExport = Field(description="metadata.abstract.")
+    keywords: FieldRecordExport = Field(description="metadata.keywords.")
+    doi: FieldRecordExport = Field(description="metadata.doi.")
+    published: FieldRecordExport = Field(
+        description="metadata.published (and published_date, derived from it)."
+    )
+    journal: FieldRecordExport = Field(description="metadata.journal.")
+    funding_statement: FieldRecordExport = Field(description="metadata.funding_statement.")
+    funding: FieldRecordExport = Field(
+        description="The funding table, parsed from the funding statement."
+    )
+    paper_type: FieldRecordExport = Field(description="metadata.paper_type.")
+    bib: FieldRecordExport = Field(description="The bib table (the reference list).")
+
+
 class DiagnosticsExport(BaseModel):
     """Outcome flags and stage receipts — never raw payloads.
 
@@ -1908,6 +1965,12 @@ class ExtractionExport(BaseModel):
     diagnostics: DiagnosticsExport | None = Field(
         default=None, description="Outcome flags and stage receipts."
     )
+    fields: FieldStatesExport | None = Field(
+        default=None,
+        description="Per tracked field, whether it was extracted, absent, abstained, failed or "
+        "not attempted, and by which step. Added in 12.1; omitted when the export was made "
+        "outside the pipeline.",
+    )
     validation: ValidationExport | None = Field(
         default=None,
         description="Output validation gate result: error/warning counts, promotion disposition "
@@ -1957,6 +2020,7 @@ class ExtractionExport(BaseModel):
         "enrichment",
         "identity",
         "diagnostics",
+        "fields",
         "validation",
         "qualification",
         "timings",
@@ -2028,7 +2092,7 @@ class PaperExport(BaseModel):
         "(bibr batch writes its corpus-unique id, the name of the JSON file). A converter uses "
         "the name of source.file_name without its extension.",
     )
-    schema_version: Literal["12.0"] = Field(
+    schema_version: Literal["12.1"] = Field(
         description="Export schema version. Its presence at the root is how readers "
         "distinguish v11 and later from all earlier versions.",
     )

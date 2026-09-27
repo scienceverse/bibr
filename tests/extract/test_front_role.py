@@ -206,6 +206,48 @@ def test_loader_is_soft_and_caches_failures(monkeypatch, caplog):
     reset_front_role_cache()
 
 
+def test_loader_retries_after_a_network_failure(monkeypatch):
+    """One Hub blip must not disable the default prior for the process."""
+    import httpx
+
+    from bibr.config import snapshot_settings
+
+    reset_front_role_cache()
+    settings = snapshot_settings()
+    settings.ml.front_role_model_id = "org/front-role"
+    loaded = object()
+    attempts = []
+
+    def _flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise httpx.ConnectTimeout("hub unreachable")
+        return loaded
+
+    monkeypatch.setattr(front_role, "FrontRoleClassifier", _flaky)
+    assert load_front_role_classifier(settings) is None
+    assert load_front_role_classifier(settings) is loaded
+    assert load_front_role_classifier(settings) is loaded
+    assert len(attempts) == 2
+    reset_front_role_cache()
+
+
+def test_resources_pin_only_a_loaded_front_role_model(monkeypatch):
+    from bibr.config import snapshot_settings
+    from bibr.pipeline.resources import ResourceManager
+
+    results = [None, "model"]
+    monkeypatch.setattr(
+        "bibr.extract.front_role.load_front_role_classifier", lambda settings: results.pop(0)
+    )
+    rm = ResourceManager(settings=snapshot_settings())
+
+    assert rm.ensure_front_role() is None
+    assert rm.ensure_front_role() == "model"
+    assert rm.ensure_front_role() == "model"  # pinned: no third load
+    assert results == []
+
+
 def test_loader_respects_disabled_and_unset(monkeypatch):
     from bibr.config import snapshot_settings
 

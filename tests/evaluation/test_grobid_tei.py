@@ -13,7 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from bibr.export.models import PaperExport
+from bibr.export.models import _SCHEMA_VERSION, PaperExport
 from evaluation import grobid_tei
 from evaluation.evaluate import extract_comparable_from_json, load_expected_ids, score_paper
 from evaluation.grobid_tei import (
@@ -157,7 +157,7 @@ class TestHeader:
         assert out["metadata"]["title"] == "Placeholder Effects in Synthetic Samples"
         assert out["metadata"]["doi"] == "10.5555/synthetic.2026.001"
         assert out["paper_id"] == "paper-a"
-        assert out["schema_version"] == "12.0"
+        assert out["schema_version"] == _SCHEMA_VERSION
         extraction = out["extraction"]
         assert extraction["producer"] == {"name": "grobid", "version": "0.9.1", "build_sha": None}
         assert extraction["converter"] == {
@@ -715,7 +715,9 @@ class TestConvertDirectory:
         summary = convert_directory(tei_dir, out)
         assert summary.converted == ["good"]
         assert sorted(p.name for p in out.iterdir()) == ["good.json"]
-        assert summary.failed["invalid"].startswith("the converted export fails the 12.0 schema")
+        assert summary.failed["invalid"].startswith(
+            f"the converted export fails the {_SCHEMA_VERSION} schema"
+        )
         assert summary.failed["unreadable"].startswith("PermissionError")
         assert summary.failed["full"].startswith("OSError")
         assert summary.as_dict(None)["ids"] == ["full", "good", "invalid", "unreadable"]

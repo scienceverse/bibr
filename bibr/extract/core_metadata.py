@@ -25,6 +25,7 @@ from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, Author
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, _REF_HEADER_RE, RefLocator
+from bibr.field_states import set_field_source
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -51,6 +52,13 @@ _MAX_LLM_AUTHORS = 64
 # Drop/collapse count above which the sanitizer records a summary warning. A
 # lone stray blank/duplicate is trivial noise; two or more signals an anomaly.
 _AUTHOR_ANOMALY_MIN_DROP = 2
+
+# ``CoreMetadataLLM`` field -> the export's name for it, where they differ.
+_EXPORT_FIELD_NAMES = {
+    "authors": "author",
+    "oecd_domain": "oecd_l1",
+    "oecd_subdomain": "oecd_l2",
+}
 
 # Correction-notice title prefix — matches Psychological Science (and most
 # journals) corrigendum / erratum / correction / retraction front-matter.
@@ -1308,6 +1316,8 @@ class CoreMetadataExtractor:
         self._explicit_classifier_runtime = settings is not None or classifier_resources is not None
         self._front_matter_resolution = front_matter_resolution
         self.validation_issues: list[ValidationIssue] = []
+        # Which step decided paper_type, for ``extraction.fields``.
+        self._paper_type_source = "llm"
         self.locator = locator or RefLocator(contents, settings=self._settings)
         if email_harvester is not None:
             self._email_harvester = email_harvester
@@ -1426,12 +1436,45 @@ class CoreMetadataExtractor:
                     "The core-metadata call did not complete; the empty record is not a refusal",
                 )
                 return PaperMetadata(doi=doi if doi else "", title="", keywords=[], authors=[])
+            recorded = getattr(llm_metadata, "_field_failures", None)
+            field_failures = dict(recorded) if isinstance(recorded, dict) else {}
+            title_call_failed = "title" in field_failures
+            # The trained classifier reads the title and abstract; after a failed
+            # title/keywords call it would classify empty input, so its fields
+            # fail with that call.
+            skip_classifier = bool(
+                title_call_failed and self._settings.ml.paper_classifier_model_id
+            )
+            if skip_classifier:
+                for field in ("paper_type", "oecd_domain", "oecd_subdomain"):
+                    field_failures.setdefault(field, field_failures["title"])
+            if title_call_failed:
+                self._record_field_failures(field_failures)
+            else:
+                # The fan-out degraded these calls silently; say so.
+                if "authors" in field_failures:
+                    self._record_metadata_warning(
+                        WarningCode.AUTHORS_LLM_FAILED,
+                        f"{field_failures['authors']}: the author LLM call failed",
+                    )
+                if "paper_type" in field_failures:
+                    self._record_metadata_warning(
+                        WarningCode.PAPER_CLASSIFICATION_FAILED,
+                        f"{field_failures['paper_type']}: the paper classification LLM call failed",
+                    )
+            self._record_author_salvage(
+                getattr(llm_metadata, "_authors_salvaged_after", None), len(llm_metadata.authors)
+            )
+            repair_note = getattr(llm_metadata, "_repair_note", None)
+            if isinstance(repair_note, str):
+                self._record_metadata_warning(WarningCode.LLM_RESPONSE_REPAIRED, repair_note)
 
             authors = self._convert_llm_authors(llm_metadata.authors)
             self._record_author_anomaly(llm_metadata.authors, authors)
             if resolution is not None:
                 authors = self._drop_fabricated_authors(authors, full_text, resolution)
 
+            author_source = "llm"
             # Gate recovery on the sanitized author list: a nonempty raw response may contain no
             # usable names. Prefer the selected byline over repeating the same wide context.
             if not authors:
@@ -1441,10 +1484,13 @@ class CoreMetadataExtractor:
                 if recovered:
                     llm_metadata = llm_metadata.model_copy(update={"authors": recovered})
                     authors = self._convert_llm_authors(llm_metadata.authors)
+                    author_source = "llm_recovery"
             # Last resort, strictly inside the empty-author branch so it cannot
             # replace or reorder anything the extraction already found.
             if not authors:
                 authors = self._harvest_credit_authors()
+                if authors:
+                    author_source = "credit_statement"
             # Keep the complete frame so affiliation footnotes and repeated-name reconciliation
             # can inspect evidence on later pages.
             self._reconcile_numbered_affiliations(authors, self.sentences_df)
@@ -1454,9 +1500,9 @@ class CoreMetadataExtractor:
             # Title/abstract must resolve BEFORE classification: the trained
             # classifier consumes them as input. Order is behavior-neutral for
             # the LLM-validation path (which ignores title/abstract).
-            title = strip_affiliation_markers(llm_metadata.title or "")
+            model_title = strip_affiliation_markers(llm_metadata.title or "")
             title, title_issue = ground_title_to_printed_text(
-                title, resolution, full_text, printed_rows=self._printed_rows()
+                model_title, resolution, full_text, printed_rows=self._printed_rows()
             )
             if title_issue is not None:
                 self.validation_issues.append(title_issue)
@@ -1464,13 +1510,19 @@ class CoreMetadataExtractor:
             keywords = llm_metadata.keywords
             classification_context = classification_text or full_text
 
-            (
-                paper_type,
-                oecd_l1,
-                oecd_l2,
-                paper_type_confidence,
-                oecd_confidence,
-            ) = await self._classify_paper(title, abstract, llm_metadata, classification_context)
+            paper_type, oecd_l1, oecd_l2 = "", "", ""
+            paper_type_confidence: float | None = None
+            oecd_confidence: float | None = None
+            if not skip_classifier:
+                (
+                    paper_type,
+                    oecd_l1,
+                    oecd_l2,
+                    paper_type_confidence,
+                    oecd_confidence,
+                ) = await self._classify_paper(
+                    title, abstract, llm_metadata, classification_context
+                )
 
             is_notice, notice_type = self._apply_correction_notice_guard(title)
             if is_notice:
@@ -1525,6 +1577,16 @@ class CoreMetadataExtractor:
                 license=llm_metadata.license,
             )
             metadata._abstract_explicitly_absent = llm_metadata._abstract_explicitly_absent
+            for field, source in (
+                ("title", "llm" if title == model_title else "title_grounding"),
+                ("abstract", "llm"),
+                ("keywords", "llm"),
+                ("published", "llm"),
+                ("journal", "llm"),
+                ("author", author_source),
+                ("paper_type", "correction_notice" if is_notice else self._paper_type_source),
+            ):
+                set_field_source(metadata, field, source)
 
             self._email_harvester.harvest(metadata.authors)
             self.validation_issues.extend(
@@ -1810,6 +1872,9 @@ class CoreMetadataExtractor:
             )
             self._record_recovery_degraded("invalid_output")
             return None
+        self._record_author_salvage(
+            getattr(recovered, "_salvaged_after", None), len(recovered.authors)
+        )
         grounded, rejected = grounded_authors_in_context(recovered.authors, context)
         if rejected:
             self.validation_issues.append(
@@ -1831,6 +1896,46 @@ class CoreMetadataExtractor:
             "VAL_AUTHOR_RECOVERY_DEGRADED",
             reason,
             "Empty-author recovery did not complete; the empty author list is not a refusal",
+        )
+
+    def _record_author_salvage(self, salvaged_after: object, count: int) -> None:
+        """Say that an author list is the salvaged head of a failed response."""
+
+        if not isinstance(salvaged_after, str) or not count:
+            return
+        self._record_metadata_warning(
+            WarningCode.AUTHORS_TRUNCATED
+            if salvaged_after == ErrorCode.LLM_TRUNCATED.value
+            else WarningCode.AUTHORS_PARTIAL,
+            f"{salvaged_after}: kept the {count} leading author(s) of an unfinished response",
+        )
+
+    def _record_field_failures(self, field_failures: dict[str, str]) -> None:
+        """Mark metadata fields whose LLM call failed while the rest was kept.
+
+        Raised for a failed title/keywords call (or the merged core call), which
+        used to fail the whole paper. Blocking like ``VAL_REFERENCES_INCOMPLETE``:
+        the record is written but not promotable, so a checkpointed run routes it
+        to quarantine and keeps it retryable.
+        """
+
+        codes = sorted(set(field_failures.values()))
+        self.validation_issues.append(
+            ValidationIssue(
+                code="VAL_METADATA_FIELD_FAILED",
+                severity=IssueSeverity.ERROR,
+                message=(
+                    f"A metadata LLM call failed ({', '.join(codes)}); its fields are empty "
+                    "and the independently extracted metadata and references were kept"
+                ),
+                origin_stage="extract",
+                evidence_ids=tuple(f"reason:{code}" for code in codes)
+                + tuple(
+                    f"field:{_EXPORT_FIELD_NAMES.get(name, name)}"
+                    for name in sorted(field_failures)
+                ),
+                blocking=True,
+            )
         )
 
     def _record_degraded(self, code: str, reason: str, message: str) -> None:
@@ -2171,6 +2276,7 @@ class CoreMetadataExtractor:
         id set to null, the LLM validation path runs verbatim and confidences
         stay ``None``.
         """
+        self._paper_type_source = "llm"
         if not self._settings.ml.paper_classifier_model_id:
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=llm_metadata.oecd_domain,
@@ -2211,19 +2317,7 @@ class CoreMetadataExtractor:
                 result = None
                 degraded_reason = type(exc).__name__
         if result is None:
-            # The exception type only — never its message, which can quote
-            # document text. Empty input skips the warning: the model was
-            # never run, so nothing degraded.
-            if not empty_input:
-                self._record_metadata_warning(
-                    WarningCode.PAPER_CLASSIFIER_DEGRADED,
-                    (
-                        f"trained classifier raised {degraded_reason}"
-                        if degraded_reason
-                        else "trained classifier unavailable"
-                    )
-                    + "; the LLM classified the paper",
-                )
+            fallback_failure: str | None = None
             if self._settings.llm.merged_core_metadata:
                 fallback = llm_metadata
             else:
@@ -2235,8 +2329,34 @@ class CoreMetadataExtractor:
                 except ProcessingError:
                     raise
                 except Exception as exc:
+                    from bibr.clients.llm import llm_failure_code
+
                     logger.warning("Broad paper-classification LLM fallback failed: %s", exc)
                     fallback = PaperClassificationLLM()
+                    fallback_failure = llm_failure_code(exc)
+            # The exception type only — never its message, which can quote
+            # document text. Recorded once the fallback's outcome is known.
+            # Empty input skips it: the model was never run, so nothing degraded.
+            if not empty_input:
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFIER_DEGRADED,
+                    (
+                        f"trained classifier raised {degraded_reason}"
+                        if degraded_reason
+                        else "trained classifier unavailable"
+                    )
+                    + (
+                        f"; the LLM fallback failed too ({fallback_failure})"
+                        if fallback_failure
+                        else "; the LLM classified the paper"
+                    ),
+                )
+            if fallback_failure:
+                self._record_metadata_warning(
+                    WarningCode.PAPER_CLASSIFICATION_FAILED,
+                    f"{fallback_failure}: neither the trained classifier nor the LLM fallback "
+                    "answered",
+                )
             pt, l1, l2 = self._validate_classification(
                 oecd_domain=fallback.oecd_domain,
                 oecd_subdomain=fallback.oecd_subdomain,
@@ -2245,6 +2365,7 @@ class CoreMetadataExtractor:
             return pt, l1, l2, None, None
 
         oecd_l1, l1_score, oecd_l2, l2_score, paper_type, pt_score = result
+        self._paper_type_source = "classifier"
         paper_type_confidence: float | None = pt_score
         oecd_confidence: float | None = l1_score
 
@@ -2291,6 +2412,7 @@ class CoreMetadataExtractor:
             if label is not None and getattr(label, "paper_type", None):
                 paper_type = label.paper_type
                 paper_type_confidence = label.confidence
+                self._paper_type_source = "llm_label"
 
         return paper_type, oecd_l1, oecd_l2, paper_type_confidence, oecd_confidence
 

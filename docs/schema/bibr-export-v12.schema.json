@@ -1570,6 +1570,18 @@
           "default": null,
           "description": "Enrichment completeness; omitted when enrichment did not run."
         },
+        "fields": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FieldStatesExport"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per tracked field, whether it was extracted, absent, abstained, failed or not attempted, and by which step. Added in 12.1; omitted when the export was made outside the pipeline."
+        },
         "float_parts": {
           "default": null,
           "description": "Page and bounding box of every printed piece of the figures and tables; omitted when no piece has a location (natively parsed inputs).",
@@ -1780,6 +1792,112 @@
         "consolidate"
       ],
       "title": "ExtractionSettingsExport",
+      "type": "object"
+    },
+    "FieldRecordExport": {
+      "additionalProperties": false,
+      "description": "What happened to one field (``extraction.fields``).",
+      "properties": {
+        "issues": {
+          "description": "Codes of the extraction.warnings or extraction.validation.issues entries that explain this state, such as VAL_METADATA_FIELD_FAILED or AUTHORS_TRUNCATED.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "array"
+        },
+        "source": {
+          "description": "The step that produced the value, e.g. 'llm', 'layout_title', 'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', 'native' (declared by the input); for a failed field the step that failed. Null when unknown or when nothing was produced.",
+          "title": "Source",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "'extracted' (a value was exported), 'absent' (the extractor ran and found none), 'abstained' (it declined to choose between candidates), 'failed' (the step that produces it failed, so the value is missing) or 'not_attempted' (the run did not try, as with no LLM or references off). A field with a value is always 'extracted'.",
+          "enum": [
+            "extracted",
+            "absent",
+            "abstained",
+            "failed",
+            "not_attempted"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "source",
+        "issues"
+      ],
+      "title": "FieldRecordExport",
+      "type": "object"
+    },
+    "FieldStatesExport": {
+      "additionalProperties": false,
+      "description": "State of each tracked field, keyed by its export name.",
+      "properties": {
+        "abstract": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.abstract."
+        },
+        "author": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "The author table."
+        },
+        "bib": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "The bib table (the reference list)."
+        },
+        "doi": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.doi."
+        },
+        "funding": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "The funding table, parsed from the funding statement."
+        },
+        "funding_statement": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.funding_statement."
+        },
+        "journal": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.journal."
+        },
+        "keywords": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.keywords."
+        },
+        "paper_type": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.paper_type."
+        },
+        "published": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.published (and published_date, derived from it)."
+        },
+        "title": {
+          "$ref": "#/$defs/FieldRecordExport",
+          "description": "metadata.title."
+        }
+      },
+      "required": [
+        "title",
+        "author",
+        "abstract",
+        "keywords",
+        "doi",
+        "published",
+        "journal",
+        "funding_statement",
+        "funding",
+        "paper_type",
+        "bib"
+      ],
+      "title": "FieldStatesExport",
       "type": "object"
     },
     "FigureExport": {
@@ -4392,7 +4510,7 @@
       "type": "string"
     },
     "schema_version": {
-      "const": "12.0",
+      "const": "12.1",
       "description": "Export schema version. Its presence at the root is how readers distinguish v11 and later from all earlier versions.",
       "title": "Schema Version",
       "type": "string"

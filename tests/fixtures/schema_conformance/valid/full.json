@@ -1,6 +1,6 @@
 {
   "paper_id": "demo",
-  "schema_version": "12.0",
+  "schema_version": "12.1",
   "source": {
     "file_name": "demo.pdf",
     "sha256": "3a6eb0790f39ac87c94f3856b2dd2c5d110e6811602261a9a923d3bb23adc8b7",
@@ -416,6 +416,63 @@
           "tier": "label"
         }
       ]
+    },
+    "fields": {
+      "title": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "author": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "abstract": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "keywords": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "doi": {
+        "state": "extracted",
+        "source": null,
+        "issues": []
+      },
+      "published": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "journal": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "funding_statement": {
+        "state": "extracted",
+        "source": "integrity_statement",
+        "issues": []
+      },
+      "funding": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      },
+      "paper_type": {
+        "state": "extracted",
+        "source": "classifier",
+        "issues": []
+      },
+      "bib": {
+        "state": "extracted",
+        "source": "llm",
+        "issues": []
+      }
     },
     "warnings": [
       {

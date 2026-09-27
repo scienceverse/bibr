@@ -1405,7 +1405,7 @@ class TestExportTopLevel:
     def test_metadata_and_source_blocks(self):
         paper = _minimal_paper()
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.0"
+        assert result["schema_version"] == "12.1"
         assert result["metadata"]["title"] == "Test Paper"
         assert result["metadata"]["doi"] == "10.1234/test"
         # v11 split the input artifact's identity out of the paper's metadata;
@@ -2362,7 +2362,7 @@ class TestExtractionProvenance:
         paper = _minimal_paper()
         paper.extraction = _extraction_block(producer={"name": "bibr", "version": "9.9.9-test"})
         result = export_paper_to_json(paper)
-        assert result["schema_version"] == "12.0"
+        assert result["schema_version"] == "12.1"
         assert result["extraction"]["producer"]["version"] == "9.9.9-test"
         assert "schema_version" not in result["metadata"]
         assert "bibr_version" not in result["metadata"]

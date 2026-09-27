@@ -78,6 +78,22 @@ async def test_sets_error_on_exception():
 
 
 @pytest.mark.asyncio
+async def test_typed_llm_failure_keeps_its_code():
+    from bibr.exceptions import LlmTimeoutError
+
+    fs = FileState(path=Path("x.pdf"))
+    fs.contents = MagicMock(layout_hints=None)
+    error = LlmTimeoutError("Failed to extract title/keywords", cause="timed out after 240s")
+
+    with patch("bibr.pipeline.stages.post_parse.post_parse", AsyncMock(side_effect=error)):
+        await PostParseStage().run(_ctx([fs]))
+
+    assert fs.original_error is error
+    assert fs.error_code == "llm_timeout"
+    assert fs.failed_stage == "extract"
+
+
+@pytest.mark.asyncio
 async def test_zero_post_parse_concurrency_still_finishes():
     """An injected 0 must not hang the stage (clamped at the build site).
 
