@@ -1323,17 +1323,26 @@ class TestNestedHiddenChrome:
     def test_aria_hidden_element_with_a_child(self):
         texts = _html_texts(
             b"""<html><body><article><h2>Intro</h2>"""
-            b"""<p>Text <span aria-hidden="true"><i>x</i></span> here.</p></article></body></html>"""
+            b"""<div>Text <span aria-hidden="true"><i>x</i></span> here.</div></article></body></html>"""
         )
         assert texts == ["Text here."]
 
     def test_visuallyhidden_element_with_a_child(self):
         texts = _html_texts(
             b"""<html><body><article><h2>Intro</h2>"""
-            b"""<p>Text <span class="visuallyhidden">(<span class="n">0</span> notes)</span>"""
-            b""" here.</p></article></body></html>"""
+            b"""<div>Text <span class="visuallyhidden">(<span class="n">0</span> notes)</span>"""
+            b""" here.</div></article></body></html>"""
         )
         assert texts == ["Text here."]
+
+    def test_hidden_elements_with_children_inside_a_paragraph(self):
+        texts = _html_texts(
+            b"""<html><body><article><h2>Intro</h2>"""
+            b"""<p>Text <span aria-hidden="true"><i>x</i></span> and"""
+            b""" <span class="visuallyhidden">(<span class="n">0</span> notes)</span>"""
+            b""" here.</p></article></body></html>"""
+        )
+        assert texts == ["Text x and (0 notes) here."]
 
     def test_nested_landmark_roles(self):
         texts = _html_texts(
@@ -1341,6 +1350,58 @@ class TestNestedHiddenChrome:
             b"""<article><h2>Intro</h2><p>Body.</p></article></body></html>"""
         )
         assert texts == ["Body."]
+
+
+class TestHiddenTextInsideTextBlocks:
+    """Paragraph, list-item and heading text reads hidden spans as main did.
+
+    Dropping the screen-reader label beside each eLife author's ORCID link
+    ("This ORCID iD identifies the author of this article:") changed how the
+    author-detail list items segment, and the lexical competing-interests
+    capture then ran into the next author's name and affiliation. Hidden
+    elements are dropped only from the loose container text the recursive
+    walker newly reads.
+    """
+
+    _AUTHOR_DETAILS = (
+        b"""<html><body><article><h2>Author details</h2><ol>"""
+        b"""<li><div class="author-details"><h4>Gilles Ouanounou</h4>"""
+        b"""<section><h5>Competing interests</h5>"""
+        b"""<span>The authors declare that no competing interests exist.</span></section>"""
+        b"""<section><span class="orcid"><a href="https://orcid.org/0000-0001-5658-7005">"""
+        b"""<img src="/orcid.png" alt="ORCID icon"> """
+        b"""<span class="visuallyhidden">"This ORCID iD identifies the author of this article:"</span>"""
+        b""" 0000-0001-5658-7005</a></span></section></div></li>"""
+        b"""<li><div class="author-details"><h4>G\xc3\xa9rard Baux</h4>"""
+        b"""<section><span>Centre National de la Recherche Scientifique, France</span>"""
+        b"""</section></div></li></ol>"""
+        b"""<div><span class="visuallyhidden">Download asset</span>"""
+        b"""<span class="visuallyhidden">Open asset</span></div>"""
+        b"""</article></body></html>"""
+    )
+
+    def test_orcid_label_in_an_author_list_item_is_read_as_before(self):
+        texts = _html_texts(self._AUTHOR_DETAILS)
+        assert texts[0] == (
+            "Gilles Ouanounou Competing interests The authors declare that no competing "
+            'interests exist. "This ORCID iD identifies the author of this article:" '
+            "0000-0001-5658-7005"
+        )
+        assert texts[1] == "G\u00e9rard Baux Centre National de la Recherche Scientifique, France"
+
+    def test_hidden_loose_container_text_is_still_dropped(self):
+        texts = _html_texts(self._AUTHOR_DETAILS)
+        assert not any("asset" in text for text in texts)
+
+    def test_hidden_heading_suffix_is_read_as_before(self):
+        texts = HtmlParser(
+            b"""<html><body><article><h2>Downloads<span class="visuallyhidden">"""
+            b""" (link to download the article as PDF)</span></h2>"""
+            b"""<p>Body.</p></article></body></html>"""
+        ).parse()
+        assert [section.header for section in texts.sections][1:] == [
+            "Downloads (link to download the article as PDF)"
+        ]
 
 
 class TestPublisherFloatFurniture:

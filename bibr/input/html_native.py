@@ -62,6 +62,15 @@ _DROP_TAGS = {
 # Screen-reader-only classes (the visuallyhidden spans around viewer links
 # and download descriptions) and hidden subtrees carry no visible prose.
 _NOISE_CLASS_TOKENS = frozenset({"visuallyhidden", "visually-hidden", "sr-only"})
+# Paragraph, list-item and heading text was read in full before the walker
+# recursed, hidden spans included. Dropping them there shifted sentence
+# boundaries in author-detail lists (the "This ORCID iD identifies the author"
+# label beside each ORCID link) far enough that the lexical statement capture
+# ran into the next author's name and affiliation, so hidden elements inside
+# these blocks are still read; only loose container text drops them.
+_HIDDEN_KEPT_INSIDE = frozenset(
+    {"p", "blockquote", "pre", "li", "h1", "h2", "h3", "h4", "h5", "h6"}
+)
 # Replaced/void elements that sit inside a running sentence (an inline
 # image, a form value, an embedded object): they carry no block structure,
 # so they buffer inline instead of splitting the sentence around them.
@@ -229,6 +238,13 @@ _DATE_RE = re.compile(r"(\d{4})(?:[-/](\d{1,2})(?:[-/](\d{1,2}))?)?")
 
 def _tag_name(tag: Any) -> str:
     return (getattr(tag, "name", "") or "").lower()
+
+
+def _in_text_block(tag: Tag) -> bool:
+    """True when *tag* is, or sits inside, a paragraph, list item or heading."""
+    if _tag_name(tag) in _HIDDEN_KEPT_INSIDE:
+        return True
+    return any(_tag_name(parent) in _HIDDEN_KEPT_INSIDE for parent in tag.parents)
 
 
 def _flatten(tag: Tag) -> str:
@@ -795,14 +811,14 @@ class HtmlParser:
         for tag in soup.find_all(True):
             if tag.decomposed:
                 continue
-            if str(tag.get("aria-hidden") or "").lower() == "true":
+            if str(tag.get("aria-hidden") or "").lower() == "true" and not _in_text_block(tag):
                 tag.decompose()
         for tag in soup.find_all(class_=True):
             if tag.decomposed:
                 continue
             classes: list[str] = [str(token) for token in (tag.get("class") or [])]
             tokens = {token.lower() for token in classes}
-            if tokens & _NOISE_CLASS_TOKENS:
+            if tokens & _NOISE_CLASS_TOKENS and not _in_text_block(tag):
                 tag.decompose()
         # A spine chapter's <head><title> lands in the body of the combined
         # ePub document and would read as a paragraph; the <head> title the

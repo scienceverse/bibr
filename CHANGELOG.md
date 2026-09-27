@@ -968,9 +968,11 @@ released.
   containers is kept instead of dropped (display equations in `div` wrappers,
   for example), with the spaces between inline siblings preserved. Page chrome
   is still left out, and more of it than before: buttons and other form
-  controls, `visuallyhidden`/`sr-only` spans, `aria-hidden` subtrees, links
-  inside section headers, containers holding only link text (download links),
-  lists made only of button, download or table-of-contents links, float labels
+  controls, `visuallyhidden`/`sr-only` spans and `aria-hidden` subtrees
+  outside paragraphs, list items and headings (inside those they are still
+  read, as before), links inside section headers, containers holding only
+  link text (download links), lists made only of button, download or
+  table-of-contents links, float labels
   printed on their own outside a caption ("Figure 3", "Table 1", "Figure 2
   with 2 supplements see all", "Author response image 1"), lone bracketed
   years, and the article's own formatted "cite this article" block (a
