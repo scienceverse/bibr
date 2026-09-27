@@ -56,6 +56,7 @@ class WarningCode(StrEnum):
     # Reference section
     REF_SECTION_NOT_FOUND = "REF_SECTION_NOT_FOUND"
     REF_SECTION_INFERRED = "REF_SECTION_INFERRED"
+    REF_FOOTNOTE_CITATIONS = "REF_FOOTNOTE_CITATIONS"
     # Reference segmentation
     REF_SEG_GEOM_CASCADE = "REF_SEG_GEOM_CASCADE"
     REF_SEG_REGION_CASCADE = "REF_SEG_REGION_CASCADE"
@@ -146,6 +147,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.REF_SECTION_INFERRED: "No heading was classified as the reference section; "
     "layout found reference regions, so the last unclassified section was taken as the "
     "reference list.",
+    WarningCode.REF_FOOTNOTE_CITATIONS: "The paper prints no reference list, or one of at most "
+    "two entries; the references were read from the citations in its footnotes and endnotes, "
+    "one per cited work.",
     WarningCode.REF_SEG_GEOM_CASCADE: "Geometry reference segmentation declined; the next tier "
     "segmented the references.",
     WarningCode.REF_SEG_REGION_CASCADE: "Region-anchor reference segmentation declined or found "

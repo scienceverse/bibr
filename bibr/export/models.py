@@ -712,8 +712,9 @@ class BibExport(BaseModel):
     bib_id: Id = Field(description="Primary key; 1-based position in the reference list.")
     text_id: Id | None = Field(
         default=None,
-        description="text[].text_id of the reference-section sentence holding this entry; null "
-        "when it could not be matched.",
+        description="text[].text_id of the sentence holding this entry: its row in the reference "
+        "section, or the note that first cites the work when the references were read from the "
+        "notes; null when it could not be matched.",
     )
     bib_type: BibTypeLiteral | None = Field(
         default=None, description="Reference type; null when not determined."
@@ -1347,6 +1348,14 @@ class DoiCandidateExport(BaseModel):
     header and footer furniture, structured metadata, captions, footnotes,
     input parsed without layout analysis, and a sentence printed on a later
     page than the region that began its paragraph.
+
+    A ``text_layer`` candidate is a DOI a PDF's visible text layer prints on
+    page 1 or 2 where the parsed text does not hold it, such as a banner in the
+    page margin; ``region_index`` names the layout region it is printed in, or
+    is null outside every region. ``link_annotation`` and ``pdf_info`` rows are
+    a DOI a link target or the document-information dictionary names. They
+    take no part in the selection (``rejection_reason`` ``agreement_only``) and
+    record what the PDF says beside its print.
     """
 
     model_config = _STRICT
@@ -1354,8 +1363,9 @@ class DoiCandidateExport(BaseModel):
     raw: str = Field(description="The DOI as printed.")
     normalized: str = Field(description="The DOI normalized for comparison.")
     source_kind: str = Field(
-        description="Where it was read, e.g. 'sentence', 'text', 'structured_metadata' or "
-        "'publication_region'."
+        description="Where it was read: 'sentence', 'header', 'footer', 'structured_metadata', "
+        "'publication_region' or 'text_layer'; 'link_annotation' or 'pdf_info' for an "
+        "agreement-only row."
     )
     page: int | None = Field(description="1-based page, when known.")
     section_id: int | None = Field(description="section[].section_id, when known.")
@@ -1369,8 +1379,9 @@ class DoiCandidateExport(BaseModel):
     region_type: str | None = Field(description="Layout class of that region.")
     text_id: int | None = Field(description="text[].text_id of the sentence, when from text.")
     marker_kind: str = Field(
-        description="Label printed before the DOI, e.g. 'article_doi', 'data_doi' or "
-        "'structured_doi'."
+        description="Label printed before the DOI, e.g. 'article_doi', 'data_doi', "
+        "'structured_doi' or 'first_published_as' (a repository banner); for a link row "
+        "'link_uri', for a document-information row its key."
     )
     repeated_header_footer_count: int = Field(
         description="On how many pages the same DOI appears as header or footer furniture."
@@ -1382,7 +1393,10 @@ class DoiCandidateExport(BaseModel):
         "untyped."
     )
     rejection_reason: str | None = Field(
-        default=None, description="Why the candidate was not selected; null when eligible."
+        default=None,
+        description="Why the candidate was not selected, e.g. 'reference_candidate', "
+        "'component_candidate', 'line_join_overrun' (the DOI ran on into the next printed "
+        "field) or 'agreement_only'; null when eligible.",
     )
 
 
@@ -1612,8 +1626,9 @@ class FieldRecordExport(BaseModel):
     source: str | None = Field(
         description="The step that produced the value, e.g. 'llm', 'layout_title', "
         "'front_matter_candidate', 'doc_info', 'keywords_section', 'identity', 'classifier', "
-        "'native' (declared by the input); for a failed field the step that failed. Null when "
-        "unknown or when nothing was produced."
+        "'native' (declared by the input); for doi, the selected identity candidate's "
+        "source_kind; for a failed field the step that failed. Null when unknown or when "
+        "nothing was produced."
     )
     issues: list[str] = Field(
         description="Codes of the extraction.warnings or extraction.validation.issues entries "

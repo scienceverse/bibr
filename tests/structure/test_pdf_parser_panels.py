@@ -254,3 +254,49 @@ class TestPostAssemblyFloatNormalization:
         assert len(contents.tables) == 1
         assert contents.tables[0].caption == "Table 1 Inventory of plants"
         assert contents.tables[0].df["Species"].tolist() == ["alpha", "beta"]
+
+
+class TestUppercasePanelLabels:
+    """Uppercase or unmarked panel labels must reach the caption, not vanish."""
+
+    def _two_panel_pages(self, first, second):
+        return [
+            [
+                _region(0, "chart", ""),
+                _region(1, "figure_title", first),
+                _region(2, "chart", ""),
+                _region(3, "figure_title", second),
+                _region(4, "figure_title", "Figure 1. Reaction times by condition."),
+            ]
+        ]
+
+    def test_uppercase_parenthesized_panels_join_caption(self):
+        contents = _parse(self._two_panel_pages("(A) Congruent trials", "(B) Incongruent trials"))
+
+        assert contents.figures[0].caption == (
+            "Figure 1. Reaction times by condition. | (A) Congruent trials; (B) Incongruent trials"
+        )
+
+    def test_unmarked_panels_join_caption(self):
+        contents = _parse(self._two_panel_pages("A Congruent trials", "B Incongruent trials"))
+
+        assert contents.figures[0].caption == (
+            "Figure 1. Reaction times by condition. | A Congruent trials; B Incongruent trials"
+        )
+
+    def test_bare_uppercase_markers_are_still_dropped(self):
+        """Guard: bare "(A)"/"(B)" carry no description and stay out of the caption."""
+        contents = _parse(self._two_panel_pages("(A)", "(B)"))
+
+        assert contents.figures[0].caption == "Figure 1. Reaction times by condition."
+
+    def test_panel_description_shapes(self):
+        from bibr.structure.parse_media import MediaHandlersMixin
+
+        assert MediaHandlersMixin._panel_description("(A) Congruent trials") == "Congruent trials"
+        assert MediaHandlersMixin._panel_description("A Congruent trials") == "Congruent trials"
+        assert MediaHandlersMixin._panel_description("A. Congruent trials") == "Congruent trials"
+        assert MediaHandlersMixin._panel_description("(A)") == ""
+        assert MediaHandlersMixin._panel_description("A") == ""
+        # A longer word is body text, not a panel label.
+        assert MediaHandlersMixin._panel_description("Methods") == ""

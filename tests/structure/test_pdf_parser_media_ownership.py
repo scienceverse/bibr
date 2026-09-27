@@ -665,8 +665,12 @@ def test_printed_figure_id_reconciles_receipt_xref_and_content_section(decoratio
     )
     contents = parser.parse()
 
-    assert [figure.figure_id for figure in contents.figures] == list(range(1, decoration_count + 2))
-    printed_figure = contents.figures[0]
+    # Floats stay in document order (not resorted by printed id): the
+    # uncaptioned decorations precede the printed figure.
+    assert [figure.figure_id for figure in contents.figures] == list(
+        range(2, decoration_count + 2)
+    ) + [1]
+    printed_figure = next(figure for figure in contents.figures if figure.figure_id == 1)
     assert printed_figure.figure_id == 1
     assert printed_figure.image_b64 == "printed-figure-1"
     assert printed_figure.parts[0].image_b64 == "printed-figure-1"
@@ -714,8 +718,10 @@ def test_printed_roman_table_id_reconciles_receipt_xref_and_content_section():
     )
     contents = parser.parse()
 
-    assert [item.table_id for item in contents.tables] == [1, 2, 3]
-    printed_table = contents.tables[0]
+    # Floats stay in document order (not resorted by printed id): the two
+    # uncaptioned tables precede the printed TABLE I.
+    assert [item.table_id for item in contents.tables] == [2, 3, 1]
+    printed_table = next(item for item in contents.tables if item.table_id == 1)
     assert printed_table.caption == "TABLE I. Values"
     assert printed_table.parts[0].page_number == 2
     assignment = next(
@@ -784,10 +790,13 @@ def test_panel_grouping_does_not_merge_unrelated_distant_pages():
     contents = _parse(pages)
 
     assert len(contents.figures) == 2
-    assert [figure.figure_id for figure in contents.figures] == [1, 2]
-    assert [part.image_b64 for part in contents.figures[0].parts] == ["target"]
-    assert [part.image_b64 for part in contents.figures[1].parts] == ["unrelated"]
-    assert contents.figures[0].caption == "Figure 1. Target"
+    # Floats stay in document order (not resorted by printed id): the
+    # unrelated page-1 figure precedes the printed Figure 1.
+    assert [figure.figure_id for figure in contents.figures] == [2, 1]
+    by_id = {figure.figure_id: figure for figure in contents.figures}
+    assert [part.image_b64 for part in by_id[2].parts] == ["unrelated"]
+    assert [part.image_b64 for part in by_id[1].parts] == ["target"]
+    assert by_id[1].caption == "Figure 1. Target"
 
 
 def test_ord343_exact_split_labels_and_bare_continuations_form_three_tables():
@@ -988,3 +997,502 @@ def test_confirmed_table_caption_deduplicated_away_does_not_raise():
     parser._group_continuation_tables([])
 
     assert table.caption is None
+
+
+def _body_sentence_texts(parser, contents):
+    """Segment with identity splits and return non-float body sentence texts."""
+    parser.apply_segmentation(
+        contents,
+        [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation],
+    )
+    parser.create_content_sections(contents)
+    float_sections = {
+        section.section_id
+        for section in contents.sections
+        if getattr(section, "synthetic_kind", None) in {"figure", "table"}
+    }
+    return [s.text for s in contents.sentences if s.section_id not in float_sections]
+
+
+def test_duplicate_caption_copy_is_not_replayed_as_body():
+    """An owned canonical's near-duplicate (trailing period) stays out of the body."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    bbox = [100, 500, 900, 560]
+    parser = PDFParser(
+        [
+            [
+                _region(0, "chart", bbox=[100, 100, 900, 400], image_b64="fig"),
+                _region(
+                    1,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=bbox,
+                ),
+                _region(
+                    2,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition",
+                    bbox=bbox,
+                ),
+                _region(3, "text", "The effect was large.", bbox=[100, 600, 900, 650]),
+            ]
+        ]
+    )
+    contents = parser.parse()
+
+    assert contents.figures[0].caption == "Figure 1. Mean reaction times by condition."
+    body = _body_sentence_texts(parser, contents)
+    assert "The effect was large." in body
+    assert not [text for text in body if "Mean reaction times" in text]
+
+
+def test_unowned_duplicate_caption_replays_exactly_once():
+    """With no figure to own either copy, the canonical replays once, not twice."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    bbox = [100, 500, 900, 560]
+    parser = PDFParser(
+        [
+            [
+                _region(
+                    0,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=bbox,
+                ),
+                _region(
+                    1,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=bbox,
+                ),
+                _region(2, "text", "The effect was large.", bbox=[100, 600, 900, 650]),
+            ]
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert body.count("Figure 1. Mean reaction times by condition.") == 1
+
+
+def test_unowned_canonical_caption_still_replays():
+    """Guard: a single unowned caption is still rescued as body text."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(
+                    0,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=[100, 500, 900, 560],
+                ),
+                _region(1, "text", "The effect was large.", bbox=[100, 600, 900, 650]),
+            ]
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert "Figure 1. Mean reaction times by condition." in body
+
+
+def test_replayed_caption_keeps_reading_order():
+    """An unowned caption replays where printed, not after the References."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "paragraph_title", "Results", bbox=[100, 80, 900, 110]),
+                _region(1, "text", "The effect was large.", bbox=[100, 200, 900, 250]),
+                _region(2, "text", "We then examined moderators.", bbox=[100, 260, 900, 310]),
+            ],
+            [
+                _region(0, "paragraph_title", "Discussion", bbox=[100, 80, 900, 110]),
+                _region(
+                    1,
+                    "text",
+                    "These findings replicate prior work.",
+                    bbox=[100, 200, 900, 250],
+                ),
+            ],
+            [
+                _region(
+                    0,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=[100, 200, 900, 260],
+                ),
+                _region(
+                    1,
+                    "reference_content",
+                    "Smith, J. (2020). A paper.",
+                    bbox=[100, 300, 900, 350],
+                ),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    caption_pos = body.index("Figure 1. Mean reaction times by condition.")
+    refs_pos = body.index("Smith, J. (2020). A paper.")
+    assert caption_pos < refs_pos
+    caption_sent = next(s for s in contents.sentences if "Mean reaction times" in s.text)
+    refs_sent = next(s for s in contents.sentences if "Smith, J." in s.text)
+    assert caption_sent.text_id < refs_sent.text_id
+
+
+def test_replay_ahead_of_footnote_shifts_its_anchor():
+    """A replay inserted before a footnote moves the footnote's deferred index."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "text", "First sentence here.", bbox=[100, 200, 900, 250]),
+                _region(
+                    0,
+                    "figure_title",
+                    "Figure 1. Something unowned.",
+                    bbox=[100, 300, 900, 340],
+                ),
+                _region(0, "footnote", "1 A note.", bbox=[100, 850, 900, 900]),
+            ],
+        ]
+    )
+    contents = parser.parse()
+
+    (record,) = list(parser._footnotes)
+    assert record[3] == 2
+    parser.apply_segmentation(
+        contents,
+        [[entry.text] for entry in parser.assembler.entries if entry.needs_segmentation],
+    )
+    parser.create_content_sections(contents)
+    caption_sent = next(s for s in contents.sentences if "Something unowned" in s.text)
+    foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot_xrefs) == 1
+    assert foot_xrefs[0].text_id == caption_sent.text_id
+
+
+def test_footnote_captured_before_a_next_page_caption_keeps_its_anchor():
+    """A page-bottom note and a caption replayed from the next page can share
+    a deferred position (both after a pending paragraph). The note was
+    captured first, so the replay must not shift it past the caption: its
+    anchor stays on the note's page instead of the next page's caption."""
+    import re
+
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "doc_title", "A Study of Things", bbox=[100, 60, 900, 90]),
+                _region(1, "paragraph_title", "Method", bbox=[100, 300, 900, 320]),
+                _region(
+                    2,
+                    "text",
+                    "We sampled students. Participants were recruited from the local "
+                    "university and they",
+                    bbox=[100, 330, 900, 860],
+                ),
+                _region(3, "footnote", "1 Data source: survey office.", bbox=[100, 880, 900, 920]),
+            ],
+            [
+                _region(
+                    0,
+                    "figure_title",
+                    "Summary statistics for the sample by wave and group.",
+                    bbox=[100, 60, 900, 90],
+                ),
+                _region(
+                    1,
+                    "text",
+                    "Results were robust. We report them next.",
+                    bbox=[100, 420, 900, 700],
+                ),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    split = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+    parser.apply_segmentation(
+        contents, [split.split(text) for text in parser.assembler.segmentable_texts]
+    )
+    parser.create_content_sections(contents)
+
+    caption = next(s for s in contents.sentences if s.text.startswith("Summary statistics"))
+    foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot_xrefs) == 1
+    anchor = next(s for s in contents.sentences if s.text_id == foot_xrefs[0].text_id)
+    assert anchor.text_id < caption.text_id
+    assert anchor.page_number == 1
+    assert anchor.text.startswith("Participants were recruited")
+
+
+def test_footnote_captured_before_a_same_page_caption_keeps_its_anchor():
+    """The tie also arises on one page (note, then caption, below a paragraph
+    that continues overleaf); the page limit cannot tell them apart there,
+    so capture order must."""
+    import re
+
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "paragraph_title", "Method", bbox=[100, 100, 900, 130]),
+                _region(
+                    1,
+                    "text",
+                    "We sampled students. Participants were recruited from the local "
+                    "university and they",
+                    bbox=[100, 200, 900, 700],
+                ),
+                _region(2, "footnote", "1 Data source: survey office.", bbox=[100, 800, 900, 830]),
+                _region(
+                    3,
+                    "figure_title",
+                    "Summary statistics for the sample by wave and group.",
+                    bbox=[100, 850, 900, 880],
+                ),
+            ],
+            [
+                _region(
+                    0,
+                    "text",
+                    "completed the survey online. Data were cleaned.",
+                    bbox=[100, 100, 900, 300],
+                ),
+                _region(
+                    1,
+                    "text",
+                    "Results were robust. We report them next.",
+                    bbox=[100, 400, 900, 600],
+                ),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    split = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
+    parser.apply_segmentation(
+        contents, [split.split(text) for text in parser.assembler.segmentable_texts]
+    )
+    parser.create_content_sections(contents)
+
+    foot_xrefs = [x for x in contents.xrefs if x.xref_type == "foot"]
+    assert len(foot_xrefs) == 1
+    anchor = next(s for s in contents.sentences if s.text_id == foot_xrefs[0].text_id)
+    assert anchor.page_number == 1
+    assert anchor.text.startswith("Participants were recruited")
+
+
+def test_duplicated_bare_table_label_still_composes_with_fragment():
+    """Two overlapping 'Table 2' regions plus a fragment compose one caption.
+
+    The confirmed label is the non-canonical duplicate, so ownership keyed
+    by the parse-time id must be re-keyed through the dedup canonical.
+    """
+    table = "| Group | Mean |\n|---|---|\n| A | 1.0 |"
+    contents = _parse(
+        [
+            [
+                _region(0, "figure_title", "Table 2", bbox=[100, 100, 900, 120]),
+                _region(1, "figure_title", "Table 2", bbox=[100, 100, 900, 121]),
+                _region(
+                    2,
+                    "text",
+                    "Descriptive statistics by group",
+                    bbox=[100, 140, 900, 170],
+                ),
+                _region(3, "table", table, bbox=[100, 200, 900, 500]),
+            ]
+        ]
+    )
+
+    assert len(contents.tables) == 1
+    assert contents.tables[0].caption == "Table 2 Descriptive statistics by group"
+    fragment_assignment = next(
+        item
+        for item in contents.caption_assignment_receipt.assignments
+        if item.caption_id == "caption:3"
+    )
+    assert fragment_assignment.object_id == "table:2"
+
+
+def test_single_bare_table_label_composes_with_fragment():
+    """Guard: the unduplicated label/fragment composition still works."""
+    table = "| Group | Mean |\n|---|---|\n| A | 1.0 |"
+    contents = _parse(
+        [
+            [
+                _region(0, "figure_title", "Table 2", bbox=[100, 100, 900, 120]),
+                _region(
+                    1,
+                    "text",
+                    "Descriptive statistics by group",
+                    bbox=[100, 140, 900, 170],
+                ),
+                _region(2, "table", table, bbox=[100, 200, 900, 500]),
+            ]
+        ]
+    )
+
+    assert len(contents.tables) == 1
+    assert contents.tables[0].caption == "Table 2 Descriptive statistics by group"
+
+
+def test_dotted_table_labels_do_not_conflict_and_keep_document_order():
+    """'Table 3.1'/'Table 3.2' reserve no id, warn nothing, and stay in order."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    table = "| Group | Mean |\n|---|---|\n| A | 1.0 |"
+    pages = [
+        [
+            _region(0, "figure_title", "Table 3.1: Descriptives", bbox=[100, 100, 900, 130]),
+            _region(1, "table", table, bbox=[100, 150, 900, 700]),
+        ],
+        [
+            _region(0, "figure_title", "Table 3.2: Correlations", bbox=[100, 100, 900, 130]),
+            _region(1, "table", table, bbox=[100, 150, 900, 700]),
+        ],
+        [
+            _region(0, "figure_title", "Table 4: Summary", bbox=[100, 100, 900, 130]),
+            _region(1, "table", table, bbox=[100, 150, 900, 700]),
+        ],
+    ]
+    parser = PDFParser(pages)
+    contents = parser.parse()
+
+    assert [table.caption for table in contents.tables] == [
+        "Table 3.1: Descriptives",
+        "Table 3.2: Correlations",
+        "Table 4: Summary",
+    ]
+    # The plain label keeps its printed id; dotted siblings take unclaimed
+    # ids without moving ahead of it.
+    assert [table.table_id for table in contents.tables] == [5, 6, 4]
+    assert [
+        issue
+        for issue in parser._structure_validation_issues
+        if issue.code == "VAL_MEDIA_ID_CONFLICT"
+    ] == []
+
+
+def test_continuation_page_does_not_raise_id_conflict():
+    """'Table 2' plus a header-less '(continued)' page merges without warning."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    first = "| Group | Mean |\n|---|---|\n| A | 1.0 |"
+    continued = "| A | 2.0 |\n| B | 3.0 |"
+    pages = [
+        [
+            _region(0, "figure_title", "Table 2. Item statistics", bbox=[100, 100, 900, 130]),
+            _region(1, "table", first, bbox=[100, 150, 900, 800]),
+        ],
+        [
+            _region(
+                0,
+                "figure_title",
+                "Table 2. Item statistics (continued)",
+                bbox=[100, 60, 900, 90],
+            ),
+            _region(1, "table", continued, bbox=[100, 100, 900, 700]),
+        ],
+    ]
+    parser = PDFParser(pages)
+    contents = parser.parse()
+
+    assert len(contents.tables) == 1
+    assert contents.tables[0].table_id == 2
+    assert contents.tables[0].caption == "Table 2. Item statistics"
+    assert len(contents.tables[0].df) == 3
+    assert [
+        issue
+        for issue in parser._structure_validation_issues
+        if issue.code == "VAL_MEDIA_ID_CONFLICT"
+    ] == []
+
+
+def test_two_unowned_captions_each_replay_where_printed():
+    """Several replays keep their own positions (each insert shifts the next)."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "text", "First paragraph here.", bbox=[100, 100, 900, 150]),
+                _region(1, "figure_title", "Figure 1. Unowned one.", bbox=[100, 200, 900, 240]),
+                _region(2, "text", "Second paragraph here.", bbox=[100, 300, 900, 350]),
+            ],
+            [
+                _region(0, "figure_title", "Figure 2. Unowned two.", bbox=[100, 100, 900, 140]),
+                _region(1, "text", "Third paragraph here.", bbox=[100, 200, 900, 250]),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert body == [
+        "First paragraph here.",
+        "Figure 1. Unowned one.",
+        "Second paragraph here.",
+        "Figure 2. Unowned two.",
+        "Third paragraph here.",
+    ]
+
+
+def test_caption_printed_inside_a_pending_paragraph_replays_after_it():
+    """A caption captured while a paragraph is still buffered follows it."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "text", "The effect was", bbox=[100, 100, 900, 150]),
+                _region(1, "figure_title", "Figure 1. Unowned.", bbox=[100, 200, 900, 240]),
+                _region(2, "text", "large and robust.", bbox=[100, 300, 900, 350]),
+                _region(3, "text", "Next paragraph.", bbox=[100, 400, 900, 450]),
+            ],
+        ]
+    )
+    contents = parser.parse()
+    body = _body_sentence_texts(parser, contents)
+
+    assert body == ["The effect was large and robust.", "Figure 1. Unowned.", "Next paragraph."]
+
+
+def test_owned_caption_copy_with_a_trailing_doi_is_not_replayed():
+    """A second copy of an owned caption that only adds a DOI stays out of the body."""
+    from bibr.structure.pdf_parser import PDFParser
+
+    parser = PDFParser(
+        [
+            [
+                _region(0, "chart", bbox=[100, 100, 900, 400], image_b64="fig"),
+                _region(
+                    1,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition.",
+                    bbox=[100, 410, 900, 440],
+                ),
+                _region(2, "text", "The effect was large.", bbox=[100, 500, 900, 550]),
+                _region(
+                    3,
+                    "figure_title",
+                    "Figure 1. Mean reaction times by condition. https://doi.org/10.1234/abc",
+                    bbox=[100, 850, 900, 880],
+                ),
+            ]
+        ]
+    )
+    contents = parser.parse()
+
+    assert contents.figures[0].caption == "Figure 1. Mean reaction times by condition."
+    assert [e.text for e in parser.assembler.entries] == ["The effect was large."]

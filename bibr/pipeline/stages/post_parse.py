@@ -55,6 +55,14 @@ _RESULTS_CHILD_CUE_RE = re.compile(
 )
 
 
+def _references_from_notes(contents) -> bool:
+    """Whether references were read from the citations in the paper's notes."""
+    receipt = getattr(contents, "reference_yield_receipt", None)
+    return receipt is not None and any(
+        attempt.strategy == "footnotes" and attempt.selected for attempt in receipt.attempts
+    )
+
+
 def _reconcile_result_subsection_types(sections) -> None:
     """Repair weak METHOD predictions for result-oriented child headings.
 
@@ -481,6 +489,22 @@ async def _resolve_preparsed_references(
     try:
         ref_df = extractor._collect_reference_rows()
     except ValueError as e:
+        from_notes = extractor.refs.note_citations_for(0)
+        if from_notes is not None:
+            try:
+                paper_metadata.references = await extractor.refs.extract_from_notes(from_notes, [])
+            except asyncio.CancelledError:
+                raise
+            except ProcessingError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — refs are best-effort, never fatal
+                from bibr.validation import mark_references_incomplete
+
+                mark_references_incomplete(paper_metadata, exc)
+                return paper_metadata
+            if paper_metadata.references:
+                _notify_references(on_references_ready, paper_metadata.references)
+                return paper_metadata
         logger.warning(f"Reference section not found: {e}")
         contents.processing_warnings.append(
             ProcessingWarning(
@@ -962,6 +986,7 @@ async def _link_citations(
         llm_client=llm_client,
         file_hash=file_hash,
         receipt_sink=receipt_sink,
+        references_from_notes=_references_from_notes(contents),
     )
     contents.xrefs.extend(bib_xrefs)
     contents.citation_receipt = receipt_sink[0] if receipt_sink else None
@@ -1142,7 +1167,7 @@ async def post_parse(
         incumbent_candidate,
     )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
-    from bibr.paper import _merge_ocr_metadata, doc_info_candidates
+    from bibr.paper import doc_info_candidates
 
     # Single LLMClient for the entire post-parse pipeline — shared across
     # section classification, implicit section detection, and metadata extraction
@@ -1282,10 +1307,6 @@ async def post_parse(
             )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
-
-            # The OCR/doc-info DOI fills an empty DOI outside ownership scope.
-            if ocr_metadata and not metadata_ownership_scoped:
-                _merge_ocr_metadata(paper_metadata, ocr_metadata)
 
             # Build statement candidates while section labels and source IDs
             # are stable, but delay materialization until after late cleaning.
@@ -1444,10 +1465,14 @@ async def post_parse(
         no_llm=no_llm,
         native_metadata=contents.preparsed_metadata is not None,
         references_off=parse_strategy == "off",
-        # The reference list comes from the input's structured citations or
-        # the configured parser.
+        # The reference list comes from the input's structured citations, the
+        # paper's notes or the configured parser.
         references_source=(
-            "native" if contents.native_references is not None else str(parse_strategy or "llm")
+            "native"
+            if contents.native_references is not None
+            else "footnotes"
+            if _references_from_notes(contents)
+            else str(parse_strategy or "llm")
         ),
     )
     paper.field_decisions = field_decisions_of(paper_metadata)

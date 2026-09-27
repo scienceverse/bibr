@@ -48,11 +48,15 @@ def _page_crop_box(page) -> tuple[float, float, float, float]:
     """Return the page CropBox ``(x0, y0, x1, y1)`` in PDF points.
 
     This is the region pypdfium2 renders to the image PP-DocLayoutV3 indexes
-    into. Falls back to ``(0, 0, width, height)`` when the CropBox is missing
-    or degenerate so callers always get a usable box.
+    into: the CropBox clipped to the MediaBox, either inherited from the page
+    tree. ``get_cropbox()`` reads the page dictionary alone and falls back to
+    a US Letter MediaBox, so an A4 page whose MediaBox sits on the page tree
+    put the byline's text under the title region (audience_eval200/osf_cbu9e).
+    Falls back to ``(0, 0, width, height)`` when the box is missing or
+    degenerate so callers always get a usable box.
     """
     try:
-        x0, y0, x1, y1 = page.get_cropbox()
+        x0, y0, x1, y1 = page.get_bbox()
         if x1 - x0 > 0 and y1 - y0 > 0:
             return (float(x0), float(y0), float(x1), float(y1))
     except Exception:  # noqa: BLE001, S110 - fall back to mediabox-origin page size
@@ -119,6 +123,98 @@ def _normalized_bbox_to_pdf_points(
     return (left, bottom_pts, right, top_pts)
 
 
+def _pdf_points_to_normalized_bbox(
+    box_pts: tuple[float, float, float, float],
+    crop_box: tuple[float, float, float, float],
+    rotation: int = 0,
+) -> tuple[float, float, float, float]:
+    """Inverse of :func:`_normalized_bbox_to_pdf_points`.
+
+    Maps a ``(left, bottom, right, top)`` box in PDF points (the text layer's
+    frame) into the 0..1000 rendered-image space layout boxes use, as
+    ``(x1, y1, x2, y2)``, applying the page's ``/Rotate`` the way
+    ``page.render()`` does.
+    """
+    cx0, cy0, cx1, cy1 = crop_box
+    crop_w = (cx1 - cx0) or 1.0
+    crop_h = (cy1 - cy0) or 1.0
+    left, bottom, right, top = box_pts
+    u1 = (left - cx0) / crop_w * 1000.0
+    u2 = (right - cx0) / crop_w * 1000.0
+    v1 = (cy1 - top) / crop_h * 1000.0
+    v2 = (cy1 - bottom) / crop_h * 1000.0
+    if rotation == 90:
+        corners = ((1000.0 - v1, u1), (1000.0 - v2, u2))
+    elif rotation == 180:
+        corners = ((1000.0 - u1, 1000.0 - v1), (1000.0 - u2, 1000.0 - v2))
+    elif rotation == 270:
+        corners = ((v1, 1000.0 - u1), (v2, 1000.0 - u2))
+    else:
+        return (min(u1, u2), min(v1, v2), max(u1, u2), max(v1, v2))
+    xs = [corner[0] for corner in corners]
+    ys = [corner[1] for corner in corners]
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+# Whitespace placement in _build_page_char_records. A whitespace box flatter
+# than this fraction of the preceding glyph's height is flat (no ink).
+_FLAT_WHITESPACE_HEIGHT_RATIO = 0.25
+# The preceding glyph stands on the flat box's baseline when its own box
+# starts at most this fraction of its height above it.
+_BASELINE_TOLERANCE_RATIO = 0.1
+# A space lies inside the preceding ligature when its box starts within the
+# ligature's box and ends at most this fraction of its own width past it...
+_INNER_WHITESPACE_OVERSHOOT = 0.25
+# ...and it adds no gap when the next glyph's advance box then starts less
+# than this fraction of the space's width after the ligature's.
+_INNER_WHITESPACE_MAX_GAP = 0.25
+# Latin ligature presentation forms (ff, fi, fl, ffi, ffl, long st, st).
+_LIGATURE_CHARS = frozenset("\ufb00\ufb01\ufb02\ufb03\ufb04\ufb05\ufb06")
+
+
+def _loose_charbox(textpage, index: int) -> tuple[float, float, float, float] | None:
+    try:
+        return textpage.get_charbox(index, loose=True)
+    except Exception:  # noqa: BLE001 - pdfium per-char failures are noisy and benign here
+        return None
+
+
+def _is_inner_whitespace(
+    textpage,
+    n_chars: int,
+    ligature_index: int,
+    ligature_box: tuple[float, float, float, float],
+    space_box: tuple[float, float, float, float],
+    next_index: int,
+) -> bool:
+    """True for a space drawn inside the ligature before it that adds no gap.
+
+    Some fonts follow a ligature ("fi", "fl", "ff") with a space drawn inside
+    the ligature's box. Inside a word the next glyph then starts where the
+    ligature's advance ends ("Traffi cking" is one word); after a word-final
+    ligature the same space is a real word space and pushes the next glyph a
+    space-width further ("Sofi Oksanen"). Only the advance (loose) boxes tell
+    the two apart. Plain glyphs are never passed here: an italic "f" hangs
+    over the real space after it ("of pervasive").
+    """
+    import pypdfium2 as pdfium
+
+    gl, _gb, gr, _gt = ligature_box
+    sl, _sb, sr, _st = space_box
+    width = sr - sl
+    if not (width > 0 and gl <= sl and sr <= gr + _INNER_WHITESPACE_OVERSHOOT * width):
+        return False
+    if next_index >= n_chars:
+        return False
+    if chr(pdfium.raw.FPDFText_GetUnicode(textpage.raw, next_index)).isspace():
+        return False
+    ligature_loose = _loose_charbox(textpage, ligature_index)
+    next_loose = _loose_charbox(textpage, next_index)
+    if ligature_loose is None or next_loose is None:
+        return False
+    return next_loose[0] - ligature_loose[2] < _INNER_WHITESPACE_MAX_GAP * width
+
+
 def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
@@ -126,6 +222,22 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     INTERSECTS the query rect, so a region bbox edge that slices through an
     adjacent line bleeds in that neighbor's partial glyphs as garbage. Using the
     glyph's CENTER instead assigns each char to exactly one region.
+
+    Whitespace is placed against the glyph before it on the same line:
+
+    - A space's tight box is flat on the baseline, below the centre of the
+      letters around it. A region whose bottom edge crosses the line between
+      the baseline and the letters' centres kept the words and dropped the
+      spaces between them ("MODEL ANALYSIS" became "MODELANALYSIS"), so a flat
+      whitespace box is raised to the vertical centre of that glyph when the
+      glyph stands on the same baseline. A raised glyph (closing quote,
+      superscript) is skipped, since a region's top edge can cut it off its
+      line, and the space is never lowered to a comma hanging below the
+      baseline, which a region's bottom edge can cut off the same way.
+    - A space drawn inside a ligature that adds no gap (some fonts follow
+      "fi" with one) is dropped; keeping it split the word ("Traffi cking").
+      See :func:`_is_inner_whitespace`. A ligature is a presentation-form
+      char or a glyph whose box pdfium shares across the chars it maps to.
 
     Computing this once per page (rather than once per region) avoids
     O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
@@ -141,6 +253,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
     n_chars = textpage.count_chars()
     records: list[tuple[str, float, float, bool]] = []
+    # Index, box and ligature flag of the last non-whitespace glyph on the line.
+    line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
     i = 0
     while i < n_chars:
         code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
@@ -166,6 +280,7 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
         if ch in ("\n", "\r"):
             records.append((ch, 0.0, 0.0, True))
+            line_glyph = None
             i += consumed
             continue
 
@@ -177,7 +292,26 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         cb = min(box[1] for box in valid_boxes)
         cr = max(box[2] for box in valid_boxes)
         ct = max(box[3] for box in valid_boxes)
-        records.append((ch, (cl + cr) / 2.0, (cb + ct) / 2.0, False))
+        box = (cl, cb, cr, ct)
+        center_y = (cb + ct) / 2.0
+        if not ch.isspace():
+            is_ligature = ch in _LIGATURE_CHARS or (line_glyph is not None and line_glyph[1] == box)
+            line_glyph = (i, box, is_ligature)
+        elif line_glyph is not None:
+            glyph_index, glyph_box, glyph_is_ligature = line_glyph
+            if glyph_is_ligature and _is_inner_whitespace(
+                textpage, n_chars, glyph_index, glyph_box, box, i + consumed
+            ):
+                i += consumed
+                continue
+            gl, gb, _gr, gt = glyph_box
+            if (
+                gl <= cl
+                and ct - cb < _FLAT_WHITESPACE_HEIGHT_RATIO * (gt - gb)
+                and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
+            ):
+                center_y = max(center_y, (gb + gt) / 2.0)
+        records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
     return records
 
@@ -785,6 +919,197 @@ def _is_native_text_usable(text: str, min_printable_ratio: float) -> bool:
     if _has_disallowed_control_char(text):
         return False
     return _printable_ratio(text) >= min_printable_ratio
+
+
+# A scanned page run through an OCR engine (Acrobat Paper Capture, ABBYY,
+# Tesseract's PDF renderer) keeps the scan as a page-sized image and lays the
+# recognised text over it in an invisible text render mode, so the page is
+# searchable. That layer is usually printable, so the corruption gate above
+# accepts it, but it is the legacy engine's reading of the scan: misread titles
+# and merged reference lines. Such a page counts as a scan and is read by OCR.
+# Only the render mode is checked, not paint order: visible text painted under
+# an opaque image is hidden too, but PDFium cannot tell whether an image has a
+# soft mask, so a watermark over real text would look the same.
+# On the dev PDFs (2026-09-27), every scanned page of the targets is >= 0.93
+# covered by images with >= 0.96 of its text invisible; no born-digital page
+# has more than 2% of its text invisible.
+_INVISIBLE_TEXT_RENDER_MODES = frozenset({3, 7})  # FPDF_TEXTRENDERMODE_INVISIBLE, _CLIP
+_SCAN_PAGE_MIN_IMAGE_COVERAGE = 0.85
+_SCAN_PAGE_MIN_INVISIBLE_SHARE = 0.5
+# Coverage is the union of the largest image boxes, so a cap can only
+# under-count it (and keep a page on the text layer).
+_SCAN_PAGE_MAX_IMAGE_BOXES = 64
+_SCAN_PAGE_MAX_FORM_DEPTH = 8
+_UNCOUNTED_CHAR_CODES = frozenset({0x00, 0x02, 0xFFFE})
+
+
+def _object_bounds(pdfium_c, obj) -> tuple[float, float, float, float] | None:
+    left, bottom, right, top = (ctypes.c_float() for _ in range(4))
+    if not pdfium_c.FPDFPageObj_GetBounds(
+        obj, ctypes.byref(left), ctypes.byref(bottom), ctypes.byref(right), ctypes.byref(top)
+    ):
+        return None
+    return (left.value, bottom.value, right.value, top.value)
+
+
+def _compose(
+    inner: tuple[float, ...], outer: tuple[float, ...] | None
+) -> tuple[float, float, float, float, float, float]:
+    """The affine matrix applying *inner*, then *outer* (``None`` = identity)."""
+    a1, b1, c1, d1, e1, f1 = inner
+    if outer is None:
+        return (a1, b1, c1, d1, e1, f1)
+    a2, b2, c2, d2, e2, f2 = outer
+    return (
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    )
+
+
+def _transform_box(
+    matrix: tuple[float, ...], box: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    a, b, c, d, e, f = matrix
+    left, bottom, right, top = box
+    xs, ys = [], []
+    for x, y in ((left, bottom), (right, bottom), (left, top), (right, top)):
+        xs.append(a * x + c * y + e)
+        ys.append(b * x + d * y + f)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _collect_image_boxes(pdfium_c, objects, matrix, depth: int, boxes: list) -> None:
+    """Append the page-space box of every image object, descending into forms.
+
+    PDFium reports an object inside a Form XObject in the form's own space, so
+    each level's box goes through the matrices of the forms that contain it.
+    """
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+            box = _object_bounds(pdfium_c, obj)
+            if box is not None:
+                boxes.append(box if matrix is None else _transform_box(matrix, box))
+        elif kind == pdfium_c.FPDF_PAGEOBJ_FORM and depth < _SCAN_PAGE_MAX_FORM_DEPTH:
+            form_matrix = pdfium_c.FS_MATRIX()
+            if not pdfium_c.FPDFPageObj_GetMatrix(obj, ctypes.byref(form_matrix)):
+                continue
+            inner = _compose(
+                (
+                    form_matrix.a,
+                    form_matrix.b,
+                    form_matrix.c,
+                    form_matrix.d,
+                    form_matrix.e,
+                    form_matrix.f,
+                ),
+                matrix,
+            )
+            children = (
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            )
+            _collect_image_boxes(pdfium_c, children, inner, depth + 1, boxes)
+
+
+def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
+    """Exact area of the union of axis-aligned boxes, by vertical slabs."""
+    xs = sorted({x for left, _, right, _ in boxes for x in (left, right)})
+    total = 0.0
+    for x0, x1 in zip(xs, xs[1:], strict=False):
+        spans = sorted(
+            (bottom, top) for left, bottom, right, top in boxes if left <= x0 and right >= x1
+        )
+        covered = 0.0
+        run_bottom = run_top = None
+        for bottom, top in spans:
+            if run_top is None or bottom > run_top:
+                if run_top is not None:
+                    covered += run_top - run_bottom
+                run_bottom, run_top = bottom, top
+            elif top > run_top:
+                run_top = top
+        if run_top is not None:
+            covered += run_top - run_bottom
+        total += covered * (x1 - x0)
+    return total
+
+
+def _page_image_coverage(page, crop_box: tuple[float, float, float, float]) -> float:
+    """Fraction of the CropBox covered by the page's image objects (0..1)."""
+    import pypdfium2.raw as pdfium_c
+
+    cx0, cy0, cx1, cy1 = crop_box
+    area = (cx1 - cx0) * (cy1 - cy0)
+    if area <= 0:
+        return 0.0
+    boxes: list[tuple[float, float, float, float]] = []
+    top_level = (
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    )
+    _collect_image_boxes(pdfium_c, top_level, None, 0, boxes)
+    clipped = []
+    for left, bottom, right, top in boxes:
+        left, bottom = max(left, cx0), max(bottom, cy0)
+        right, top = min(right, cx1), min(top, cy1)
+        if right > left and top > bottom:
+            clipped.append((left, bottom, right, top))
+    if not clipped:
+        return 0.0
+    clipped.sort(key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True)
+    return min(1.0, _union_area(clipped[:_SCAN_PAGE_MAX_IMAGE_BOXES]) / area)
+
+
+def _invisible_text_share(textpage) -> float | None:
+    """Share of the page's characters drawn in an invisible text render mode.
+
+    Whitespace and the characters PDFium generates (inferred spaces and line
+    breaks) are not counted. ``None`` when nothing is countable, or when this
+    PDFium build cannot map a character to its text object.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    text_object_of = getattr(pdfium_c, "FPDFText_GetTextObject", None)
+    if text_object_of is None:
+        return None
+    is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
+    handle = textpage.raw
+    counted = invisible = 0
+    for index in range(textpage.count_chars()):
+        code = pdfium_c.FPDFText_GetUnicode(handle, index)
+        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated is not None and is_generated(handle, index) == 1:
+            continue
+        obj = text_object_of(handle, index)
+        if not obj:
+            continue
+        counted += 1
+        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible += 1
+    return invisible / counted if counted else None
+
+
+def _is_invisible_text_layer_page(
+    page, textpage, crop_box: tuple[float, float, float, float]
+) -> bool:
+    """True when the page is a scan whose text layer is a hidden OCR layer.
+
+    Images cover at least :data:`_SCAN_PAGE_MIN_IMAGE_COVERAGE` of the CropBox
+    and at least :data:`_SCAN_PAGE_MIN_INVISIBLE_SHARE` of the characters are
+    invisible (render mode 3 or 7). A born-digital page with a background image
+    keeps its visible text, and a figure-sized image never qualifies. Operates
+    on a caller-provided (lock-held) page and textpage.
+    """
+    if _page_image_coverage(page, crop_box) < _SCAN_PAGE_MIN_IMAGE_COVERAGE:
+        return False
+    share = _invisible_text_share(textpage)
+    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
 
 
 def fill_regions_from_native_text(

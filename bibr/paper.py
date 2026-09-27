@@ -53,7 +53,6 @@ __all__ = [
     "enforce_section_sanity",
     "format_bib_authors",
     "migrate_bib_type",
-    "_merge_ocr_metadata",
 ]
 
 logger = logging.getLogger(__name__)
@@ -223,19 +222,6 @@ def enforce_section_sanity(sections: list[PaperSection]) -> None:
             and any(s.section_type in _CORE_BODY_TYPES for s in sections[i + 1 :])
         ):
             _demote(section, "early references with body after")
-
-
-def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
-    """Fill an empty DOI from the OCR/doc-info metadata.
-
-    The title, keywords and authors it carries are candidates of those fields'
-    decisions instead (:func:`doc_info_candidates`). Mutates *metadata* in-place.
-    """
-    parsed = OcrFallbackMetadata.from_raw(ocr)
-
-    if not metadata.doi and parsed.doi and parsed.doi.startswith("10."):
-        metadata.doi = parsed.doi
-        logger.debug("OCR fallback: filled DOI")
 
 
 def doc_info_candidates(ocr: dict) -> "dict[str, FieldCandidate]":

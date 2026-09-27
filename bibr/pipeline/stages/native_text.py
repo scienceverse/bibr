@@ -41,7 +41,13 @@ class NativeTextStage:
     name = "native_text"
     # FileState fields consumed / populated (see validate_stage_contracts).
     requires = ("pdf_bytes", "page_indices", "layout_results")
-    produces = ("ref_line_geometry", "native_metadata", "pdf_outline")
+    produces = (
+        "ref_line_geometry",
+        "ref_page_lines",
+        "pdf_uri_links",
+        "native_metadata",
+        "pdf_outline",
+    )
 
     async def run(self, ctx: PipelineContext) -> None:
         ctx.progress.stage_start(self.name)
@@ -60,6 +66,7 @@ class NativeTextStage:
         )[0]
         eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
         native_skip_total = 0
+        invisible_layer_pages = 0
         for fs in ctx.alive():
             if not fs.pdf_bytes or fs.layout_results is None:
                 continue
@@ -76,6 +83,7 @@ class NativeTextStage:
                     min_chars=settings.ocr.native_text_min_chars,
                     min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
                     eligible_labels=eligible_labels,
+                    reject_invisible_text_layer=settings.ocr.native_text_reject_invisible_layer,
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:
@@ -89,16 +97,26 @@ class NativeTextStage:
             fs.native_metadata = inspection.metadata or None
             fs.pdf_outline = inspection.outline or None
             fs.ref_line_geometry = inspection.reference_lines or None
+            fs.ref_page_lines = inspection.page_lines or None
+            fs.pdf_uri_links = inspection.uri_links or None
             native_skip_total += sum(
                 1
                 for page in inspection.layout_results
                 for region in page
                 if region.get("_native_text_used")
             )
+            invisible_layer_pages += sum(
+                1 for page in inspection.pages if page.invisible_text_layer
+            )
 
         if native_skip_total:
             logger.info(
                 "Native text bypass: %d eligible text regions skipped OCR", native_skip_total
+            )
+        if invisible_layer_pages:
+            logger.info(
+                "Scanned pages with an invisible OCR text layer: %d, read with OCR",
+                invisible_layer_pages,
             )
 
         logger.debug("Native-text stage: %.1fs", time.monotonic() - t0)

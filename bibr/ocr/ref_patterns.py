@@ -128,9 +128,22 @@ def _looks_like_author_date_start(text: str) -> bool:
     return bool(_YEAR.search(match.group("tail")))
 
 
+# A line holding only entry labels: "[12]", "(3)", "7.", or "[3 [41" where the
+# OCR or the PDF text layer lost a bracket or read "]" as "1". The text layer of
+# a numbered list can hold its labels as one column before the entries (every
+# label, then every entry), while each entry box starts with its own label, so
+# the aggregate box's labels are one stretch its entry boxes seem to lack.
+_LABEL = r"[\[(]?\d{1,3}[\]).]?"
+_LABEL_ONLY_LINE = re.compile(rf"\s*{_LABEL}(?:\s+{_LABEL})*\s*")
+
+
 def alnum_key(text: str) -> str:
-    """Lowercased alphanumeric-only projection of *text* for coverage checks."""
-    return "".join(c for c in text.lower() if c.isalnum())
+    """Lowercased alphanumeric-only projection of *text* for coverage checks.
+
+    Lines holding only entry labels are left out on both sides of a comparison.
+    """
+    kept = "".join(line for line in text.splitlines() if not _LABEL_ONLY_LINE.fullmatch(line))
+    return "".join(c for c in kept.lower() if c.isalnum())
 
 
 # Fuzzy score at which one region's normalized text counts as already present in
@@ -158,6 +171,9 @@ _COVERED_MARGIN = 8
 # tens of seconds at 50k, as an OCR repetition loop can produce); a longer
 # needle is compared with the whole haystack instead.
 _COVERED_MAX_PARTIAL_CHARS = 10_000
+# Length of the needle runs looked up anywhere in the haystack when the two
+# reads hold the same text in a different order (``_covered_in_any_order``).
+_COVERED_MOVED_CHARS = 40
 
 
 def _matching_blocks(needle: str, haystack: str, min_size: int) -> list[MatchingBlock]:
@@ -198,6 +214,50 @@ def _missing_chars(needle: str, haystack: str, start: int = 0, end: int | None =
     return most
 
 
+def _covered_in_any_order(needle: str, haystack: str) -> bool:
+    """Whether *needle*'s text is in *haystack*, in whatever order.
+
+    Every run of 40 needle characters is looked up anywhere in the haystack,
+    exactly or with a fuzzy score of at least 95, and the characters in its
+    matching blocks there count as copied. The needle is covered when 95% of
+    its characters are and no 24 consecutive ones hold 16 without a copy, the
+    same bounds as for an ordered match. A run this long is usually an
+    entry's own text rather than a volume line many entries share, and the
+    characters where a run leaves its entry do not match the next entry's
+    text, so an entry the haystack lacks keeps its missing characters. A long
+    string printed twice, such as a journal name in a running header and in an
+    entry, can still be credited to the other copy.
+    """
+    from rapidfuzz import fuzz
+
+    size = min(_COVERED_MOVED_CHARS, len(needle))
+    stretch = min(_COVERED_STRETCH, len(needle))
+    budget = len(needle) - len(needle) * _COVERED_MIN_SCORE // 100
+    copied = bytearray(len(needle))
+    missing = window = 0
+    for i in range(len(needle)):
+        if i + size <= len(needle) and not all(copied[i : i + size]):
+            piece = needle[i : i + size]
+            if piece in haystack:
+                copied[i : i + size] = b"\x01" * size
+            else:
+                found = fuzz.partial_ratio_alignment(
+                    piece, haystack, score_cutoff=_COVERED_MIN_SCORE
+                )
+                if found is not None:
+                    copy = haystack[found.dest_start : found.dest_end]
+                    for block in _matching_blocks(piece, copy, _COVERED_MIN_BLOCK):
+                        copied[i + block.a : i + block.a + block.size] = b"\x01" * block.size
+        # No later run holds character i: its verdict is final.
+        missing += not copied[i]
+        window += not copied[i]
+        if i >= stretch:
+            window -= not copied[i - stretch]
+        if missing > budget or window >= _COVERED_MAX_MISSING:
+            return False
+    return True
+
+
 def alnum_text_covered(needle: str, haystack: str) -> bool:
     """Whether *needle* is already contained in *haystack* (both ``alnum_key`` output).
 
@@ -229,11 +289,17 @@ def alnum_text_covered(needle: str, haystack: str) -> bool:
         and _missing_chars(needle, haystack) < _COVERED_MAX_MISSING
     ):
         return True
-    if len(needle) >= len(haystack) or len(needle) > _COVERED_MAX_PARTIAL_CHARS:
+    if len(needle) > _COVERED_MAX_PARTIAL_CHARS:
         return False
-    alignment = fuzz.partial_ratio_alignment(needle, haystack, score_cutoff=_COVERED_MIN_SCORE)
-    if alignment is None:
-        return False
-    start = max(0, alignment.dest_start - _COVERED_MARGIN)
-    end = alignment.dest_end + _COVERED_MARGIN
-    return _missing_chars(needle, haystack, start, end) < _COVERED_MAX_MISSING
+    if len(needle) < len(haystack):
+        alignment = fuzz.partial_ratio_alignment(needle, haystack, score_cutoff=_COVERED_MIN_SCORE)
+        if alignment is not None:
+            start = max(0, alignment.dest_start - _COVERED_MARGIN)
+            end = alignment.dest_end + _COVERED_MARGIN
+            if _missing_chars(needle, haystack, start, end) < _COVERED_MAX_MISSING:
+                return True
+    # Both matches keep the needle's order. The two reads can hold the same
+    # text in different orders, though: a PDF text layer can list an entry
+    # after the one the entry boxes sort it after, or hold a numbered list's
+    # labels as one column before the entries.
+    return _covered_in_any_order(needle, haystack)

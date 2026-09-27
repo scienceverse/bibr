@@ -346,12 +346,290 @@ def _first_page(contents: PaperContents) -> int | None:
     return min(pages) if pages else None
 
 
+# Section types that close the title-to-abstract gap on the first page.
+_FRONT_GAP_END_TYPES = _BODY_SECTION_TYPES | {CanonicalSection.ABSTRACT, CanonicalSection.KEYWORDS}
+
+
+def _front_gap_section_ids(contents: PaperContents, first_page: int | None) -> frozenset[int]:
+    """Sections printed between the first-page title and the abstract or body.
+
+    The header classifier has no byline class. When the parser promotes the
+    cells of a grid or column byline to headings ("Enyuan Tian", "Sung Whan
+    Yoon shyoon8@kaist.ac.kr"), the classifier types some of them as endnotes
+    or acknowledgments, and those sections never reach the front matter. Only a
+    paper with no byline at all gets the page-1 probation rescue, so a byline
+    that loses some cells this way keeps the rest and drops those authors.
+    Between the title and the abstract nothing is body text, so a row there
+    with name evidence is admitted whatever its type: a byline-shaped heading
+    that is no field label, a name over an e-mail address, or a merged
+    paragraph whose first region reads as a byline. The gap opens only at the
+    parser's detected title: a body heading the classifier calls TITLE
+    ("1.1.1. An Efficient ...") would otherwise open one over related-work
+    citations. Without a closing abstract or body section the gap has no end,
+    and nothing is admitted.
+    """
+
+    detected_title = (contents.detected_title or "").strip()
+    if first_page is None or not detected_title:
+        return frozenset()
+    gap: list[int] = []
+    title_seen = False
+    for section in contents.sections:
+        if section.level <= 0:
+            continue
+        if not title_seen:
+            title_seen = section.header.strip() == detected_title and any(
+                item.page_no == first_page for item in section.provenance
+            )
+            continue
+        if section.section_type in _FRONT_GAP_END_TYPES:
+            return frozenset(gap)
+        gap.append(section.section_id)
+    return frozenset()
+
+
+_EMAIL_ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", re.UNICODE)
+
+
+def _looks_like_name_email_cell(text: str) -> bool:
+    """One byline cell: an author's name followed by that author's e-mail address.
+
+    Column bylines print each author over their address ("Jun Seo" /
+    "tjwns0630@kaist.ac.kr"); the address makes the legacy name-ratio test
+    fail, although the cell is the plainest byline evidence there is.
+    """
+
+    emails = _EMAIL_ADDRESS_RE.findall(text)
+    if len(emails) != 1:
+        return False
+    name, _, tail = text.partition(emails[0])
+    if tail.strip(" \t\r\n.,;)>"):
+        return False
+    name = name.strip(" \t\r\n.,;:(<")
+    return bool(name) and _looks_like_legacy_byline(
+        name, _normalize_text(name), source_kind="heading"
+    )
+
+
+_URL_TEXT_RE = re.compile(r"https?://|\bwww\.", re.IGNORECASE)
+
+
+def _front_gap_byline_evidence(text: str, summary: RegionSummary | None, *, regions: int) -> bool:
+    """Byline evidence accepted only for a mistyped paragraph inside the front gap.
+
+    A name over its author's e-mail address is a byline cell. Beyond that, the
+    parser can merge a byline row with the rows that follow it (a
+    correspondence block) into one paragraph spanning several layout regions,
+    and the merged text no longer reads as a byline. The paragraph's first
+    region still does; its preview is read here as evidence only, never as
+    candidate text. A one-region paragraph gets no such pass (its preview is
+    its own text), nor does one carrying a DOI or URL, like a how-to-cite box.
+    """
+
+    if _looks_like_name_email_cell(text):
+        return True
+    if regions < 2 or _DOI_RE.search(text) or _URL_TEXT_RE.search(text):
+        return False
+    preview = (summary.content or "").strip() if summary is not None else ""
+    return bool(preview) and _looks_like_byline(
+        preview, _normalize_text(preview), source_kind="paragraph"
+    )
+
+
+# Words that make a row a front-matter label ("Author Note", "Corresponding
+# Author:", "Credit Author Statement", "Supporting Information"), never a name.
+_FRONT_GAP_LABEL_WORDS = frozenset(
+    {
+        "abstract",
+        "acknowledgement",
+        "acknowledgements",
+        "acknowledgment",
+        "acknowledgments",
+        "address",
+        "affiliation",
+        "affiliations",
+        "author",
+        "authors",
+        "contact",
+        "contribution",
+        "contributions",
+        "correspondence",
+        "corresponding",
+        "credit",
+        "e-mail",
+        "email",
+        "information",
+        "keywords",
+        "note",
+        "notes",
+        "statement",
+        "supporting",
+    }
+)
+
+
+def _front_gap_heading_is_byline(
+    header: str,
+    summary: RegionSummary | None,
+    predictions: FrontRolePredictions | None,
+    policy: FrontRolePolicy,
+) -> bool:
+    """A mistyped heading inside the front gap, on a page that has a byline.
+
+    Label headings there ("Author Note", "Corresponding Author:") read as two
+    capitalised words, like a name, and a topic line set in capitals ("THE
+    DECISION TO REFINANCE") passes the capital-ratio test; neither is admitted.
+    """
+
+    if _looks_like_name_email_cell(header):
+        return True
+    words = [word.casefold() for word in _WORD_RE.findall(header)]
+    if any(word in _FRONT_GAP_LABEL_WORDS or word in _NON_NAME_CHUNK_WORDS for word in words):
+        return False
+    return _looks_like_byline(
+        header, _normalize_text(header), source_kind="heading"
+    ) or _model_role(_scores_for(predictions, summary), "byline", policy.min_confidence)
+
+
+# How far above the title's top edge a page-head byline may end, in the 0..1000
+# layout space of region boxes.
+_PAGE_HEAD_BYLINE_MAX_GAP = 60.0
+_PAGE_HEAD_BYLINE_MAX_WORDS = 5
+# Words of journal names, publisher badges and article-type labels, which are
+# as capitalised as a name ("Educational Review", "BioMed Central", "Original
+# Manuscript", "Case Report"). None of them is part of a person's name.
+_PAGE_HEAD_NON_NAME_WORDS = frozenset(
+    {
+        "access",
+        "article",
+        "bulletin",
+        "central",
+        "communication",
+        "communications",
+        "editorial",
+        "journal",
+        "letters",
+        "magazine",
+        "manuscript",
+        "paper",
+        "proceedings",
+        "publishing",
+        "quarterly",
+        "report",
+        "research",
+        "review",
+        "series",
+        "studies",
+        "transactions",
+    }
+)
+
+
+def _looks_like_person_name_row(text: str) -> bool:
+    """A row that is nothing but one person's name ("Eva-Maria Biermann-Ratjen")."""
+
+    if any(char.isdigit() or char in "@:/()[]" for char in text):
+        return False
+    words = _WORD_RE.findall(text)
+    if not 2 <= len(words) <= _PAGE_HEAD_BYLINE_MAX_WORDS:
+        return False
+    if any(
+        word.casefold() in _NON_NAME_CHUNK_WORDS or word.casefold() in _PAGE_HEAD_NON_NAME_WORDS
+        for word in words
+    ):
+        return False
+    if not all(word[:1].isupper() or word.casefold() in _NAME_PARTICLES for word in words):
+        return False
+    # Capitals mark a journal, publisher or section banner ("BMC Public Health",
+    # "CASE REPORT"), not a name row.
+    if any(len(word) > 1 and word.isupper() for word in words):
+        return False
+    normalized = _normalize_text(text)
+    return not (
+        is_exact_front_matter_furniture(text)
+        or _MASTHEAD_RE.match(text.strip())
+        or normalized in _ORDINARY_HEADING_TEXT
+    )
+
+
+def _page_head_byline_drafts(
+    contents: PaperContents, first_page: int | None
+) -> list[_CandidateDraft]:
+    """A byline printed above the title that layout labelled a page header.
+
+    Some journals and edited volumes set the author's name over the title
+    ("Hubert Heinen" / "German-Texan Attitudes toward the Civil War"), often
+    repeated later as the running head. Layout labels that row a header, the
+    parser files it with the running heads, and the sentence stream never sees
+    it, so the front matter has no author text at all. The row is admitted as
+    plain text, on probation: it widens what the author call reads without
+    becoming byline evidence, a title, or a record root. Its text is the
+    parser's own header string, never the region preview.
+    """
+
+    if first_page is None:
+        return []
+    rows = [
+        summary
+        for summary in contents.region_summaries or []
+        if summary.page == first_page and summary.bbox is not None
+    ]
+    title_tops = [
+        summary.bbox[1] for summary in rows if (summary.label or "").casefold() == "doc_title"
+    ]
+    if not title_tops:
+        return []
+    title_top = min(title_tops)
+    running_heads = {
+        _normalize_text(header): header.strip() for header in contents.detected_headers or []
+    }
+    title_words = {word.casefold() for word in _WORD_RE.findall(contents.detected_title or "")}
+    drafts: list[_CandidateDraft] = []
+    for summary in rows:
+        if (summary.label or "").casefold() != "header":
+            continue
+        text = running_heads.get(_normalize_text(summary.content or ""))
+        if not text or not _looks_like_person_name_row(text):
+            continue
+        # A page head made of the title's own words is the short title set as
+        # the running head ("Remythologising Satan." over "Remythologising
+        # Satan: A New Version of The Fall of Lucifer."), not a name.
+        if {word.casefold() for word in _WORD_RE.findall(text)} <= title_words:
+            continue
+        gap = title_top - summary.bbox[3]
+        if not 0.0 <= gap <= _PAGE_HEAD_BYLINE_MAX_GAP:
+            continue
+        drafts.append(
+            _CandidateDraft(
+                source_kind="paragraph",
+                source_order=-1,
+                region_order=(summary.page, summary.index),
+                page=summary.page,
+                bbox=summary.bbox,
+                # Not "header": a structural label reads as a leading masthead,
+                # and a masthead-led page without an abstract is taken for a
+                # table of contents.
+                region_label=None,
+                font_size=summary.font_size,
+                font_bold=summary.font_bold,
+                section_id=None,
+                text_ids=(),
+                paragraph_id=None,
+                raw_text=text,
+                section_type=CanonicalSection.UNKNOWN,
+                byline_probation=True,
+            )
+        )
+    return drafts
+
+
 def _paragraph_drafts(
     contents: PaperContents,
     *,
     first_page: int | None,
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
+    front_gap: frozenset[int] = frozenset(),
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
     predictions = contents.front_role_predictions
@@ -367,7 +645,7 @@ def _paragraph_drafts(
         section_type = section.section_type if section is not None else CanonicalSection.UNKNOWN
         key = (sentence.section_id, sentence.paragraph_id)
         if section_type not in _FRONT_MATTER_SECTION_TYPES and sentence.section_id != 0:
-            if not allow_byline_probation:
+            if not (allow_byline_probation or sentence.section_id in front_gap):
                 continue
             if first_page is None or first_page not in _sentence_pages(sentence):
                 continue
@@ -406,11 +684,25 @@ def _paragraph_drafts(
             is not None
         }
         summary = matched_summaries[min(matched_summaries)] if matched_summaries else None
-        if (section_id, paragraph_id) in byline_probation and not (
-            _looks_like_byline(raw_text, _normalize_text(raw_text), source_kind="paragraph")
-            or _model_role(_scores_for(predictions, summary), "byline", policy.min_confidence)
-        ):
-            continue
+        if (section_id, paragraph_id) in byline_probation:
+            gap_evidence = section_id in front_gap and _front_gap_byline_evidence(
+                raw_text, summary, regions=len(matched_summaries)
+            )
+            if allow_byline_probation:
+                admitted = (
+                    _looks_like_byline(raw_text, _normalize_text(raw_text), source_kind="paragraph")
+                    or _model_role(
+                        _scores_for(predictions, summary), "byline", policy.min_confidence
+                    )
+                    or gap_evidence
+                )
+            else:
+                # Outside the rescue only the front gap let this paragraph in,
+                # and on a page with a byline the looser shape tests admit
+                # publisher lines and affiliations.
+                admitted = gap_evidence
+            if not admitted:
+                continue
         region_label = first_meta.get("region_type") or (summary.label if summary else None)
         font_size = first_meta.get("font_size")
         if font_size is None and summary is not None:
@@ -450,6 +742,7 @@ def _heading_drafts(
     first_page: int | None,
     allow_byline_probation: bool,
     policy: FrontRolePolicy | None = None,
+    front_gap: frozenset[int] = frozenset(),
 ) -> list[_CandidateDraft]:
     policy = policy or FrontRolePolicy()
     predictions = contents.front_role_predictions
@@ -474,15 +767,23 @@ def _heading_drafts(
             # A byline promoted to a section header (common for Cyrillic and
             # Latin-American layouts where the byline is set above the
             # affiliation) is mistyped, not body text.
-            if not allow_byline_probation:
+            in_gap = section.section_id in front_gap
+            if not (allow_byline_probation or in_gap):
                 continue
             header = section.header.strip()
             if page is None or page != first_page:
                 continue
-            if not (
-                _looks_like_byline(header, _normalize_text(header), source_kind="heading")
-                or _model_role(_scores_for(predictions, summary), "byline", policy.min_confidence)
-            ):
+            if allow_byline_probation:
+                admitted = (
+                    _looks_like_byline(header, _normalize_text(header), source_kind="heading")
+                    or _model_role(
+                        _scores_for(predictions, summary), "byline", policy.min_confidence
+                    )
+                    or (in_gap and _looks_like_name_email_cell(header))
+                )
+            else:
+                admitted = _front_gap_heading_is_byline(header, summary, predictions, policy)
+            if not admitted:
                 continue
         following_orders = [
             draft.source_order
@@ -1026,27 +1327,59 @@ def _with_byline_probation(
         contents, allow_byline_probation=False, policy=policy, use_model=use_model
     )
     if any("byline" in candidate.roles for candidate in candidates):
-        return candidates
+        first_page = _first_page(contents)
+        # Bylines found only past the first page's abstract (a keyword line, a
+        # body heading that names a theorist, a closing biography) leave a name
+        # printed above the title as the only byline the page has.
+        if _first_page_prints_byline(candidates, first_page) or not _page_head_byline_drafts(
+            contents, first_page
+        ):
+            return candidates
+        return _collect_candidates(
+            contents,
+            allow_byline_probation=False,
+            page_heads=True,
+            policy=policy,
+            use_model=use_model,
+        )
     return _collect_candidates(
         contents, allow_byline_probation=True, policy=policy, use_model=use_model
     )
+
+
+def _first_page_prints_byline(
+    candidates: tuple[FrontMatterCandidate, ...], first_page: int | None
+) -> bool:
+    """Whether a byline row precedes the abstract on the first page."""
+
+    for candidate in candidates:
+        if candidate.page != first_page:
+            continue
+        if candidate.roles & {"abstract", "keywords"}:
+            return False
+        if "byline" in candidate.roles:
+            return True
+    return False
 
 
 def _collect_candidates(
     contents: PaperContents,
     *,
     allow_byline_probation: bool,
+    page_heads: bool = False,
     policy: FrontRolePolicy | None = None,
     use_model: bool = True,
 ) -> tuple[FrontMatterCandidate, ...]:
     policy = policy or FrontRolePolicy()
     predictions = contents.front_role_predictions if use_model else None
     first_page = _first_page(contents)
+    front_gap = _front_gap_section_ids(contents, first_page)
     paragraph_drafts = _paragraph_drafts(
         contents,
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
         policy=policy,
+        front_gap=front_gap,
     )
     drafts = paragraph_drafts + _heading_drafts(
         contents,
@@ -1054,7 +1387,12 @@ def _collect_candidates(
         first_page=first_page,
         allow_byline_probation=allow_byline_probation,
         policy=policy,
+        front_gap=front_gap,
     )
+    if allow_byline_probation or page_heads:
+        # A page head counts as author text only on a first page that prints
+        # no byline ahead of its abstract (see ``_with_byline_probation``).
+        drafts += _page_head_byline_drafts(contents, first_page)
     overloaded_abstract_sections = _overloaded_abstract_section_ids(drafts)
     # Region order is authoritative only when it covers the whole candidate
     # sequence.  A partial match must not bucket matched rows ahead of unmatched

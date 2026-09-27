@@ -67,6 +67,7 @@ _QUALIFYING_CODES: Mapping[str, frozenset[str]] = {
     "VAL_AUTHOR_RECOVERY_DEGRADED": frozenset({"author"}),
     "REF_SECTION_NOT_FOUND": frozenset({"bib"}),
     "REF_SECTION_INFERRED": frozenset({"bib"}),
+    "REF_FOOTNOTE_CITATIONS": frozenset({"bib"}),
     "VAL_DOI_AMBIGUOUS": frozenset({"doi"}),
     "VAL_EXPECTED_ID_MISSING": frozenset({"doi"}),
     "VAL_EXPECTED_ID_MISMATCH": frozenset({"doi"}),
@@ -87,7 +88,8 @@ class FieldScope:
     native_metadata: bool = False  # front matter declared by the input (JATS, HTML)
     references_off: bool = False
     # Where the reference list came from: "native" (the input's structured
-    # citations) or the configured parser.
+    # citations), "footnotes" (the citations in the paper's notes) or the
+    # configured parser.
     references_source: str | None = None
 
 

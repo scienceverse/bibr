@@ -119,11 +119,12 @@ def infer_level_from_numbering(header: str) -> int | None:
     return None
 
 
-# Study/experiment marker headers, anchored at header start. Runs on the RAW
-# header — normalize_text strips digits, which would destroy the marker token.
-# "Study 2: Methods" matches with token "2" and remainder "Methods".
+# Study/experiment marker headers, with an optional leading numbering prefix
+# ("2 Study 1", "3. Experiment 2"). Runs on the RAW header — normalize_text
+# strips digits, which would destroy the marker token. "Study 2: Methods"
+# matches with token "2" and remainder "Methods".
 STUDY_MARKER_RE = re.compile(
-    r"^\s*(?:study|experiment|exp\.?)\s+(\d+[a-z]?|[ivxl]+|[a-z])\b",
+    r"^\s*(?:\d+(?:\.\d+)*\.?\s+)?(?:study|experiment|exp\.?)\s+(\d+[a-z]?|[ivxl]+|[a-z])\b",
     re.IGNORECASE,
 )
 

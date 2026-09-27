@@ -36,6 +36,7 @@ def _adapt_outline_mock(monkeypatch):
         min_chars,
         min_printable_ratio,
         eligible_labels=None,
+        reject_invisible_text_layer=False,
     ):
         import bibr.input.pdf_metadata as metadata_mod
         import bibr.input.pdf_outline as outline_mod

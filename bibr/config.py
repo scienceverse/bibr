@@ -918,6 +918,13 @@ class OcrOptions(_BibrSettings):
         "Off by default pending an eval of DOI furniture and front-matter effects; "
         "enable to A/B. Short running heads use the short-text allowance.",
     )
+    native_text_reject_invisible_layer: bool = Field(
+        True,
+        description="Read a scanned page with OCR even when it carries a text layer, if "
+        "the page is a page-sized image under invisible text (the searchable layer an "
+        "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
+        "to trust it as before.",
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "
@@ -2386,6 +2393,16 @@ class GlobalSettings(_BibrSettings):
         True,
         description="Split a reference string containing a second author-date onset before parsing "
         "(segmenter-agnostic, post-segmentation merged-reference splitter).",
+    )
+    # Law, history and much of the humanities cite in notes and print no
+    # reference list. With no list found, or one of at most two entries, and
+    # at least five notes citing works in full, the notes' citations become
+    # the reference list (bibr.extract.footnote_citations).
+    REF_FOOTNOTE_CITATIONS: bool = Field(
+        True,
+        description="Read the reference list from the citations in the paper's footnotes and "
+        "endnotes when no reference list is found, or one of at most two entries, and at least "
+        "five notes cite works in full.",
     )
     # Layout-region anchor segmentation, the zero-cost fallback tier between
     # LLM seg and the CRF last resort: reference_content region onsets are

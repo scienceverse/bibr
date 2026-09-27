@@ -270,6 +270,94 @@ released.
 
 ### Fixed
 
+- The reference locator keeps the paper's own list when the page layout hides
+  or doubles it. Rows printed above the paper's title on its first page (the
+  end of the previous article on a scanned journal page, under the same
+  "References" heading) are no longer taken as its references; when nothing
+  else is left the next candidate is tried. When no section holds the list,
+  a references heading printed run-in at the start of a body row
+  ("Bibliography.—1. Dreyer, …") opens it, up to the first row that reads as
+  neither a list number, an entry onset nor a dated row, and a references
+  heading that heads no rows takes the tables declared under it when the
+  layout model read the list as tables (one row per table row, at least half
+  of them dated), instead of `REF_SECTION_NOT_FOUND`.
+  `reference_boundary_reason_flags` records each case
+  (`preceding_article_rows_dropped`, `run_in_reference_heading`,
+  `reference_table_rows`).
+- Old-style author-year bibliographies are parsed one work per reference.
+  An entry that prints several works under one byline ("Ehrke, G., 1931,
+  Arch. wissensch. Bot., 13, 221; 1932, 17, 650.") gives the NER parser each
+  later work with the byline in front, in a list written in that style and
+  only when the years do not decrease and the entry has no DOI or link; the
+  receipt records `same_byline_works_split`. In a list that marks a repeated
+  byline with a dash, an entry run on after the previous one's pages or into
+  the same segment on a new line ("… 24: 65-96. -1931b. The cytological
+  theory …", "- and Dark, S. O. S. 1932. …") reaches the parser as an entry
+  of its own (`inline_dash_entries_split`).
+- A numbered reference list that prints several works under one number
+  ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …", "[30] J.F.
+  Plebanski, …, 2511; J. Samuel, …") gives the NER parser one entry per
+  work. Unnumbered fragments of an entry ("Phys. Rev., D9 (1974),
+  3292-3300.", which parsed as no reference) first rejoin the numbered entry
+  above them when the next entry carries the following number and the entry
+  above does not already close on a number and a period; a later work
+  splits out only where an initials-first byline follows a page, year or
+  preprint number, and entries with a DOI or link stay whole. The receipt
+  records `numbered_fragments_joined` and `numbered_works_split`.
+  receipt records `same_byline_works_split`. The reference line stream now
+  also replaces a confident geometry or LLM segmentation that ran "same
+  author" dash entries ("-1931. Chiasmas in …") into the entry above, in two
+  or more of its segments, when the stream's quality is at least the
+  cascade's (trigger `cascade_merged_repeat_author`).
+- Chinese, Japanese and Korean author names now ground against the byline
+  however it is spaced. A byline printed one character per token
+  (奥　山　正　司) or with the family and given names run together no longer
+  makes the extracted author (奥山 正司) read as fabricated
+  (`VAL_AUTHOR_FABRICATED`), which left the paper without authors.
+- Byline rows printed between the first-page title and the abstract reach
+  the author call even when the section classifier types them as endnotes
+  or acknowledgments. When the parser promotes the cells of a grid or
+  column byline to headings, the mistyped cells dropped out, and their
+  authors with them, because the page-1 byline rescue runs only for a paper
+  with no byline at all. Rows in that gap (it opens at the parser's detected
+  title and needs a closing abstract, keywords or body section) are now
+  admitted on name evidence: a byline-shaped heading that is no field label
+  ("Author Note", "Corresponding Author:"), a name over an e-mail address,
+  or a paragraph spanning several layout regions whose first region reads
+  as a byline (a byline row merged into a correspondence block).
+- On a first page that prints no byline ahead of its abstract, an author's
+  name set above the title that layout labels a page header ("Hubert
+  Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
+  the author call; the parser filed it with the running heads, and the
+  front matter had no author text at all. The row joins the front matter as
+  plain text, using the parser's header string, only when it is a bare
+  person's name ending just above the title: no word in capitals, no
+  journal or article-type word ("Educational Review", "Case Report"), and
+  not the title's own words set as a short running head. It never becomes
+  the title, byline evidence or a record root. Byline-shaped rows after the
+  abstract (a German keyword line, a body heading that names a theorist)
+  no longer keep it out.
+- On a page that prints no byline, an author's name set above the title
+  that layout labels a page header ("Hubert Heinen" over "German-Texan
+  Attitudes toward the Civil War") now reaches the author call; the parser
+  filed it with the running heads, and the front matter had no author text
+  at all. The row joins the page-1 byline rescue as plain text, using the
+  parser's header string, only when it is a bare person's name ending just
+  above the title: no word in capitals, no journal or article-type word
+  ("Educational Review", "Case Report"), and not the title's own words set
+  as a short running head. It never becomes the title, byline evidence or a
+  record root.
+  parser's header string, only when it is a bare person's name (no word in
+  capitals) ending just above the title; it never becomes the title, byline
+  evidence or a record root.
+- A scanned page that carries the invisible text layer an OCR engine adds to a
+  scan (a page-sized image under text in an invisible render mode, as Acrobat
+  Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
+  that legacy layer, which misread titles and merged reference lines. No text
+  lines or font sizes are taken from such a page. Born-digital pages, including
+  pages on a background image, keep their text layer. Set
+  `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to trust these layers as
+  before.
 - The local paper and section classifiers no longer take the GPU memory a
   managed vLLM server needs. Free VRAM was measured once and each model was
   checked against it alone, so both could land on CUDA when only one fit; the
@@ -1016,6 +1104,11 @@ released.
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- A paper whose DOI is printed only in a citation line that opens with the
+  year ("2017. Proc Soc 2, 20:1-15. https://doi.org/…"), as some journals print
+  it above the title, was exported with no DOI: the year was read as the number
+  of a reference-list entry. Numbered entries ("12. …", "[3] …") are still
+  references.
 - `bibr.Result(data)` loads exports written by newer releases of the same
   major version, as the additive-only policy promises. It previously rejected
   any unknown key and any `schema_version` other than the exact one it writes.
@@ -1166,6 +1259,48 @@ released.
 - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
   were cut at the `<` when read as the paper's DOI or matched against a
   manifest's expected DOI. They are kept whole.
+- A PDF whose DOI is printed only in a repository banner up the page margin
+  ("… first published as 10.…/… on 1 May 1999. Downloaded from …"), or in a
+  masthead line the layout did not turn into a region, was exported with no
+  DOI. The identity stage now also reads the text layer of pages 1 and 2, in
+  any orientation, where the parsed text does not reach, including the banner
+  a publisher stamped on a scan. Invisible text (a scan's hidden OCR layer)
+  is not read. A banner's "first published as" names the paper. A text-layer
+  DOI printed in a reference entry, table or figure is rejected like the
+  region's text.
+- A footer DOI with the journal's ISSN on the next line ("…04.006" over
+  "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
+  (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
+  line's end into the next printed field, or that ends in a slash, is now
+  rejected as `line_join_overrun`, and the text layer's reading stands. A
+  parsed DOI that lost its last characters gives way to the complete reading
+  of its printed line.
+- A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
+  figure note outranked the paper's own DOI printed as a doi.org link on page
+  1. Outside the front matter and the running headers and footers, a labelled
+  DOI now ranks below every front-matter candidate. It still names the paper
+  when it is the only candidate left, as in a preprint's "The present work has
+  been shared as a preprint on …, doi: …"; two different ones are reported as
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside an
+  author-led or numbered citation (a reference entry outside the located
+  reference list, or a figure's source note citing another work) no longer
+  names the paper, and neither does the tail of a reference entry split into
+  a line of its own that opens with a page range, a volume or the DOI label
+  ("131-138. doi: …"). A line holding nothing but the labelled DOI ("DOI: …")
+  is not such a tail, so a paper's own DOI line after cover pages still names
+  it. An eLife JATS or HTML file's labelled figure DOIs no longer raise
+  `VAL_DOI_AMBIGUOUS` against its article-id.
+- A correction notice printed "DOI of original article: …" on its first page
+  and exported the corrected article's DOI as its own. That DOI is now the
+  notice's parent, like a "parent article DOI".
+- A reference entry under a "References" (or "Bibliography") heading that the
+  section classifier left untyped counted as body text, so its labelled DOI
+  could name a paper that prints none of its own. From page 3 on, the section
+  header now marks the section as the reference list for the DOI choice,
+  whether the page prints it or the parser made it up from the layout's
+  reference label. On pages 1 and 2 the section keeps its own type: there the
+  parser can head a "Cite as" box that the layout labels as reference text
+  "References", and the paper's own DOI in it still names the paper.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
@@ -1244,7 +1379,13 @@ released.
   so its entries were emitted twice, and it emptied a region holding a line
   that no text region had, such as the end of a reference continued from the
   previous page, when that line was a small share of the region's text. The
-  first is now emptied and the second kept.
+  first is now emptied and the second kept. The comparison also takes the
+  same text read in another order as the same text: a PDF text layer can list
+  a numbered list's labels as one column before the entries, or two entries
+  the other way round from the entry boxes, and the aggregate box then stayed
+  next to the entry boxes, so every entry was exported twice and the label
+  column became a reference of its own. Lines holding only entry labels
+  ("[12]", "(3)", "7.") are left out of the comparison.
 - The page-furniture filter on the reference lines the geometry segmenter
   reads removes only lines at the top or bottom edge of a page, as it was
   documented to. It removed every line whose text, with digits masked, matched
@@ -1642,9 +1783,138 @@ released.
   `reason:authors_script_mismatch`, then the empty-author recovery retries
   against the byline alone. Papers that also print the romanised names keep
   them.
+- PDF paragraphs that run across a page break no longer split in two when a
+  footnote or a figure intervenes. A join across such a region (or a heading
+  demoted to body text) needs a lowercase continuation on the same or the
+  next page, from a body-width row that does not end in a URL, so
+  front-matter rows and list items are not glued to what follows. A
+  footnote's xref anchors to the joined sentence printed on the note's page,
+  never to text printed after the note, such as a caption replayed from the
+  next page.
+  A paragraph ending in a closing quote or a footnote superscript, or in a
+  bare URL followed by a capitalised row, is no longer glued to the next
+  one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted
+  as a running header: only a repeated line in the margin band, or a block of
+  repeated rows such as a reprinted chart legend, is. On a sliced front page
+  (`pages=`), affiliation markers are stripped only from short, unterminated,
+  byline-shaped rows, so body citation superscripts there survive.
+- A title split across two `doc_title` regions is now joined into one title
+  section instead of truncating `detected_title` and stranding a level-1
+  section that later headings parent under; a first region that reads as a
+  journal masthead is not extended, and a later region that reads as a
+  personal-name byline keeps its own section, so the authors stay in the
+  byline. Numbered study headings ("2 Study 1",
+  "3. Experiment 2") now open scopes like unnumbered ones, so the second
+  study's Method/Results no longer fold under the first study's. Reference
+  and abstract hint regions reuse the adjacent printed heading when it spells
+  the hint's name differently ("Literature Cited", "5 References",
+  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
+  a front-page abstract) instead of leaving an empty printed section beside
+  a synthetic one; "Author summary", a later "Summary" or "Supplementary
+  references" stay separate sections. A "Reference List" heading now
+  classifies as References.
+- PDF float accounting no longer duplicates caption text that de-duplication
+  already consumed, and unowned captions replay where they were printed
+  instead of after all body text. Uppercase or unmarked panel titles with a
+  description ("(A) Congruent trials", "A Congruent trials") now reach the
+  figure caption instead of disappearing from the export. Dotted table
+  labels ("Table 3.1") no longer reserve a printed id, continuation pages
+  sharing one printed label no longer raise a false id-conflict warning, and
+  floats keep document order instead of being resorted by id. Header-only
+  tables (a `<th>` header with no rows, or a markdown header plus separator)
+  are kept instead of dropped and export their header row in `contents`; a
+  one-row region without `<th>` still drops, since that shape is usually a
+  publisher label or masthead box. A bare panel marker joins the vertically
+  nearest same-page figure group when one is near, and otherwise the next
+  labelled figure as before.
+- Reference lists are also segmented as one stream of printed lines, with the
+  evidence for where each entry starts pooled instead of tried tier by tier. The
+  cascade reconciled two readings of the list (layout rows with their line
+  breaks flattened, and text-layer lines captured from the first "References"
+  heading to the end of the file) through exact text probes under one gate, and
+  a declined tier's evidence was thrown away, so a list crossing a page break
+  with a running head in it, a list the geometry model labelled well but whose
+  lines did not align, or a list of short entries came out merged, cut short or
+  dropped. The stream reads the text-layer lines inside the located section's
+  layout boxes, page after page (a box without usable text-layer lines, such as
+  an OCR'd or scanned page, contributes its text line by line), keeps a line
+  the box edge cut short by a letter or two in the row text, reads a box that
+  repeats an aggregate box's text once, drops manuscript line numbers and page
+  furniture, and stops at a heading that ends the list (Acknowledgements,
+  Funding, Appendix, Data availability and the like) when the line before it
+  closes an entry. Furniture is a line in a header, footer or page-number box,
+  or a line at a page edge that is a running head (its text, digits masked,
+  recurs at an edge of two or more pages and has six letters or more, and it
+  holds no DOI, URL, arXiv id or ISBN) or a page number (a lone number whose
+  offset from the page index recurs on another page). Each line's start is voted
+  by the geometry model's per-line probability, author/year, Vancouver, all-caps
+  and corporate onsets, "same author" dashes, the first line of a layout box,
+  hanging indent, a vertical gap and the previous line ending in a DOI, a URL or
+  a DOI link. A line opening on an OCR speck glued to a family name (".lehrer,
+  H. R.") is not voted down as a continuation. A printed sequence counting up by
+  one ("[n]", "n.", "(n)", roman numerals, a second list numbered from 1 again
+  included), bullets or bracketed labels decide instead when the list has them.
+  A sequence keeps one marker style, and a line numbered 0, opening on an
+  edition, supplement or month word ("3. Aufl.", "10 Suppl") or standing off the
+  list's marker column takes no place in it. An entry printed out of order still
+  opens, and a numbered list ends with its last entry's box. A second work
+  printed on its own line under the same number opens an entry when it starts a
+  reference box of its own and both works carry a date or DOI; a manuscript
+  history line after the list ("Received April 26, 1972.") never does. A
+  fragment that opens in lower case with no date or DOI rejoins the entry before
+  it, an entry holding two DOIs is split after the first, and a numbered entry
+  is never dropped as a short fragment without a year. A reference list split
+  into two sections, a non-English heading ("Referencias") over the first page
+  and a synthetic "References" section for the reference boxes on the next, is
+  read whole. Parsing is unchanged.
+- The cascade still runs, and its result stands unless it fell back (region
+  recovery, CRF, marker split) or found nothing, most of its entries came from
+  the merged-reference splitter, or it under-yielded against its credible entry
+  starts; then the line stream's result is used when its quality is at least the
+  cascade's. A selected geometry or LLM-anchor result gives way only to a stream
+  whose quality is higher by 0.15. The stream never replaces a result with fewer
+  entries than that result has distinct ones (a segment read twice, nearly alike
+  and with the same years, counts once), nor on a paper with a rotated reference
+  page, where its line geometry is unreliable. Quality is the share of the
+  section's full text the entries cover (so text the stream leaves out costs it)
+  times the share of entries that look like one complete reference: not a
+  fragment, and not a merge (two DOIs, two publication years once access and
+  first-publication dates are set aside, two author-date or Vancouver dates, a
+  second reference the merged-reference splitter can see, or an outlier length).
+  Both segmentations are scored the same way, a numbered entry counting as
+  complete in either. `extraction.diagnostics.reference_yield.attempts` records
+  the stream as a `line_stream` attempt with the reason for the decision and
+  both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
+  attempt is marked `superseded_by_line_stream`. The stream's spans index its
+  own text (flag `stream_text_offsets`); a joined split section is flagged
+  `split_section_joined`. Any error in the stream keeps the cascade's result.
+- Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
+  a list numbered that way, as arabic ones already were. They were parsed into
+  the first author ("V. Lal, S. K. L.").
+- PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
+  printed line. The page lines the reference line stream reads break there
+  again; the geometry segmenter's own line capture is unchanged.
 
 ### Added
 
+- References from footnote and endnote citations. Law, history and much of the
+  humanities cite in notes and print no reference list, so bibr exported an
+  empty `bib` for them. When no reference list is found, or one of at most two
+  entries, and at least five notes cite works in full (fifteen times the
+  entries of a located list), the notes' citations become the reference list.
+  Each note is split into its citations; lead-ins ("See", "Cf.", "Voir",
+  "Véase") and commentary before a citation are dropped, repeats ("Ibid.",
+  "Id.", "op. cit.", "supra", "ref. 5") are skipped, and the rest goes through
+  the configured reference parser; a citation the parser finds nothing in keeps
+  the quoted title it opens on. A later short form of a work folds into its
+  first citation (never one dated to another year), so each cited work is one
+  reference, whose `text_id` is the note that first cites it. The export marks such a list with the
+  `REF_FOOTNOTE_CITATIONS` warning, `extraction.fields.bib.source` `footnotes`
+  and a selected `footnotes` attempt in `extraction.diagnostics.reference_yield`.
+  A paper with a reference list of three or more entries is never touched. The
+  new `REF_FOOTNOTE_CITATIONS` setting (default on) turns it off. The export
+  schema's `bib[].text_id` description now names the note row (schema
+  regenerated; no field changed).
 - New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
   footer regions from the PDF text layer instead of OCR on born-digital PDFs,
   under the same printable-ratio gate as body text. Default output is
@@ -1718,6 +1988,16 @@ released.
   `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
   share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
   the same time.
+- `bibr.ocr.pdf_links.read_uri_links()` reads a PDF's URI link annotations
+  (page, rectangle, target), and `doi_from_uri()` the DOI a doi.org or `doi:`
+  link targets, with HTML entities and percent-encoding undone; a target holding
+  a NUL or a replacement character, or not DOI-shaped once decoded, yields none.
+  The PDF inspection now captures every page's text-layer lines and its URI
+  links in the layout frame, numbered by PDF page. A reference whose text prints
+  no DOI takes the one targeted by the only DOI link over its own lines, as
+  MDPI, BMJ and IOP print it only behind a "[CrossRef]" label; the reference
+  yield receipt records `doi_from_link_annotation`. This applies with the NER
+  parser, the default.
 
 ### Changed
 
@@ -1738,6 +2018,20 @@ released.
   process rotating only its own file, so records are neither lost nor
   duplicated across rotation. Operators tallying token usage must read both
   files: `METER_LOG_PATH` alone holds no extraction records.
+- The OCR cache format is version 11: a bundle also holds the page text lines
+  and URI links the reference line stream reads. Older bundles are re-run
+  rather than read without them.
+- The identity stage is the only step that sets `metadata.doi`. The
+  core-metadata extractor no longer looks for a DOI, and the no-LLM
+  document-information fallback no longer fills one from a PDF's Subject or
+  Keywords: a DOI the paper does not print is never exported. A PDF's
+  document-information DOIs and its DOI link targets are recorded as
+  `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
+  `pdf_info`, `link_annotation`); they take no part in the selection.
+  `extraction.fields.doi.source` names the selected candidate's `source_kind`
+  (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
+  `native` for a JATS or HTML article-id) instead of `identity`. The export
+  schema changes only by describing the new receipt values.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

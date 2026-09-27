@@ -47,6 +47,8 @@ _WRITERS = {"extract/field_decisions.py", "input/jats_native.py", "input/html_na
 # The same attribute names on objects that are not the paper's metadata.
 _OTHER_OBJECTS = {
     ("extract/ref_extractor.py", "ref.authors"),
+    # References parsed from the notes' citations.
+    ("extract/footnote_citations.py", "ref.authors"),
     # The model's response, before any candidate is built from it.
     ("extract/core_metadata.py", "llm_metadata.model_copy"),
     # PaperMetadata's own copy, which drops the receipts of the fields an
