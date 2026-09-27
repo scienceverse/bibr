@@ -1457,9 +1457,9 @@ released.
   references; they left it out, so a paper that lost every reference could
   leave `micro_mean` at 1.0. Section-text tokens keep letters in every script:
   only ASCII letters and digits survived, so a Cyrillic or Chinese section was
-  scored on its numbers and "Straße" split in two. Scripts written without
-  spaces between words give one token per character. Section-text results
-  record `metrics_version` too.
+  scored on its numbers and "Straße" split in two. Han, kana and Thai text
+  gives one token per character. Section-text results record
+  `metrics_version` too.
 
 ### Security
 

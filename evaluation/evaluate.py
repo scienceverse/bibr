@@ -58,8 +58,8 @@ logger = logging.getLogger(__name__)
 #     (info.abstract before schema 11, still read).
 # v5: bibr batch's run_info.json is not a prediction; micro reference accuracy
 #     counts a paper with no matched pair carrying the field as misses; section
-#     tokens keep letters in every script, one per character where words are
-#     not space-delimited.
+#     tokens keep letters in every script, one per character for Han, kana and
+#     Thai.
 # Reading schema 11 and 12 exports changed no definition. The 0.5.0 changelog's
 # metrics_version=6 was a counter shared with scorers that are not in this
 # repository; it does not apply to this evaluator.
