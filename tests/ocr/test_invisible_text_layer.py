@@ -419,3 +419,247 @@ def test_setting_defaults_on_and_can_be_disabled(monkeypatch):
     assert GlobalSettings().ocr.native_text_reject_invisible_layer is True
     monkeypatch.setenv("OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER", "false")
     assert GlobalSettings().ocr.native_text_reject_invisible_layer is False
+
+
+# --- OCR returns nothing for a scanned page ------------------------------------
+
+
+def test_inspection_keeps_the_layer_text_as_an_ocr_fallback():
+    """The flagged page's regions carry the text the fill would have taken."""
+    inspection = _inspect(_cover_and_scan(), reject=True)
+
+    cover, scan = (page[0] for page in inspection.layout_results)
+    assert _TITLE in scan["_invisible_layer_text"]
+    # Only a fallback: OCR still reads the region.
+    assert scan["content"] == ""
+    assert not scan.get("_native_text_used")
+    assert "_invisible_layer_text" not in cover
+    kept = _inspect(_cover_and_scan(), reject=False).layout_results[1][0]
+    assert "_invisible_layer_text" not in kept
+
+
+def _scan_regions() -> list[dict]:
+    return [
+        {
+            "label": "doc_title",
+            "bbox_2d": [100, 80, 900, 140],
+            "content": "",
+            "_invisible_layer_text": _TITLE,
+        },
+        {
+            "label": "text",
+            "bbox_2d": [100, 200, 900, 700],
+            "content": "",
+            "_invisible_layer_text": "\n".join(_BODY),
+        },
+        # No layer text inside it: nothing to fall back to.
+        {"label": "table", "task_type": "table", "bbox_2d": [100, 720, 900, 900], "content": ""},
+    ]
+
+
+async def _ocr_scan_page(ocr_fn):
+    from PIL import Image
+
+    from bibr.pipeline.stages.ocr import ocr_page_regions
+
+    fallback_pages: list[int] = []
+    result = await ocr_page_regions(
+        Image.new("RGB", (612, 792), "white"),
+        _scan_regions(),
+        1,
+        "scan.pdf",
+        ocr_fn,
+        layer_fallback_sink=fallback_pages.append,
+    )
+    return result, fallback_pages
+
+
+@pytest.mark.parametrize("failure", ["empty", "raises"])
+async def test_scanned_page_falls_back_to_its_layer_when_ocr_returns_nothing(failure):
+    """An OCR outage (blank answers, or busy errors after the retries) must not
+    blank a page whose text layer the fill used to read."""
+
+    async def broken_ocr(image, prompt):
+        if failure == "raises":
+            raise RuntimeError("503 Service Unavailable")
+        return ""
+
+    result, fallback_pages = await _ocr_scan_page(broken_ocr)
+
+    assert [region["content"] for region in result] == [_TITLE, "\n".join(_BODY), ""]
+    # Restored exactly as the fill would have filled them, so the OCR success
+    # gate and the cleanup treat them as text-layer regions.
+    assert [region.get("_native_text_used") for region in result] == [True, True, None]
+    assert fallback_pages == [1]
+    assert not any("_invisible_layer_text" in region for region in result)
+
+
+async def test_ocr_text_wins_over_the_layer():
+    async def ocr(image, prompt):
+        return "Ultrahigh Carbon Steels"
+
+    result, fallback_pages = await _ocr_scan_page(ocr)
+
+    assert [region["content"] for region in result] == ["Ultrahigh Carbon Steels"] * 3
+    assert not any(region.get("_native_text_used") for region in result)
+    assert fallback_pages == []
+
+
+async def test_one_region_read_by_ocr_keeps_the_layer_out():
+    """OCR that reads part of the page is working: an empty region stays empty."""
+    answers = iter(["Ultrahigh Carbon Steels", "", ""])
+
+    async def ocr(image, prompt):
+        return next(answers)
+
+    result, fallback_pages = await _ocr_scan_page(ocr)
+
+    assert sorted(region["content"] for region in result) == ["", "", "Ultrahigh Carbon Steels"]
+    assert not any(region.get("_native_text_used") for region in result)
+    assert fallback_pages == []
+
+
+def _cover_and_two_scans() -> bytes:
+    scan = {"content": _image(612, 792) + _text([*_LAYER, *_REFERENCES], mode=3)}
+    return _pdf(
+        [{"content": _text(["Full Terms & Conditions of access and use", _TITLE])}, scan, scan]
+    )
+
+
+@pytest.mark.parametrize(
+    "answer", ["", RuntimeError("503 Service Unavailable"), "An OCR reading of the page"]
+)
+async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(monkeypatch, caplog, answer):
+    """NativeTextStage and OcrStage on a cover and two scanned pages: blank OCR
+    answers or failed requests fall back to each scan's layer, logged once for
+    the document."""
+    from pathlib import Path
+    from unittest.mock import AsyncMock, MagicMock
+
+    from PIL import Image
+
+    import bibr.pipeline.stages.ocr as ocr_mod
+    from bibr.config import Settings
+    from bibr.pipeline.context import PipelineContext, RunConfig, StageSignals
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.stages.native_text import NativeTextStage
+    from bibr.pipeline.state import FileState
+
+    monkeypatch.setattr(Settings.ocr, "native_text_enabled", True)
+    monkeypatch.setattr(Settings.ocr, "native_text_reject_invisible_layer", True)
+    fs = FileState(path=Path("scan.pdf"))
+    fs.pdf_bytes = _cover_and_two_scans()
+    fs.layout_results = _full_page_layout(3)
+    fs.page_indices = [0, 1, 2]
+    fs.page_images = [Image.new("RGB", (612, 792), "white") for _ in range(3)]
+    rm = MagicMock()
+    recognize = (
+        AsyncMock(side_effect=answer)
+        if isinstance(answer, Exception)
+        else AsyncMock(return_value=answer)
+    )
+    rm.ocr = MagicMock(recognize=recognize, loaded=True)
+    rm.await_ocr = AsyncMock(return_value=None)
+    rm.shutdown_ocr = AsyncMock(return_value=None)
+    del rm.ocr.wait_for_server
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=rm,
+        config=RunConfig(ocr_backend="glm-llama"),
+        signals=StageSignals(any_needs_ocr=True, preloading_ocr=False),
+    )
+
+    await NativeTextStage().run(ctx)
+    with caplog.at_level("WARNING", logger=ocr_mod.__name__):
+        await ocr_mod.OcrStage().run(ctx)
+
+    assert fs.error is None
+    assert rm.ocr.recognize.await_count == 2  # the cover page stays native
+    cover, *scans = (page[0].content for page in fs.ocr_regions)
+    assert _TITLE in cover
+    fallback_logs = [r for r in caplog.records if "invisible text layer" in r.getMessage()]
+    if isinstance(answer, str) and answer:
+        assert scans == [answer, answer]
+        assert fallback_logs == []
+    else:
+        assert all(_TITLE in scan and "Wadsworth J, Sherby OD" in scan for scan in scans)
+        assert [r.getMessage() for r in fallback_logs] == [
+            "OCR returned no text for 2 scanned page(s) of scan.pdf (pages 2, 3); "
+            "read them from their invisible text layer instead"
+        ]
+
+
+# --- detection failures are reported -------------------------------------------
+
+
+async def _run_native_text_stage(monkeypatch, caplog, pdf_bytes: bytes, pages: int):
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    import bibr.pipeline.stages.native_text as stage_mod
+    from bibr.config import Settings
+    from bibr.pipeline.context import PipelineContext, RunConfig
+    from bibr.pipeline.progress import NullProgress
+    from bibr.pipeline.state import FileState
+
+    monkeypatch.setattr(Settings.ocr, "native_text_enabled", True)
+    monkeypatch.setattr(Settings.ocr, "native_text_reject_invisible_layer", True)
+    fs = FileState(path=Path("scan.pdf"))
+    fs.pdf_bytes = pdf_bytes
+    fs.layout_results = _full_page_layout(pages)
+    ctx = PipelineContext(
+        file_states=[fs], progress=NullProgress(), resources=MagicMock(), config=RunConfig()
+    )
+    with caplog.at_level("INFO", logger=stage_mod.__name__):
+        await stage_mod.NativeTextStage().run(ctx)
+    detection_logs = [
+        record
+        for record in caplog.records
+        if record.name == stage_mod.__name__ and "layer detection" in record.getMessage()
+    ]
+    return fs, detection_logs
+
+
+async def test_detection_errors_are_logged_once_per_document(monkeypatch, caplog):
+    """A failing detector keeps every page on its text layer, silently before."""
+    import bibr.ocr.pdf_inspection as inspection_mod
+
+    def boom(page, textpage, crop_box):
+        raise RuntimeError("pdfium")
+
+    monkeypatch.setattr(inspection_mod, "_is_invisible_text_layer_page", boom)
+    fs, logs = await _run_native_text_stage(monkeypatch, caplog, _cover_and_two_scans(), 3)
+
+    assert all(page[0]["_native_text_used"] for page in fs.layout_results)
+    assert [(record.levelname, record.getMessage()) for record in logs] == [
+        (
+            "INFO",
+            "Invisible OCR-layer detection failed on 3 page(s) of scan.pdf; they keep "
+            "their text layer (RuntimeError: pdfium)",
+        )
+    ]
+
+
+async def test_missing_pdfium_api_is_reported_not_skipped(monkeypatch, caplog):
+    """A PDFium build without FPDFText_GetTextObject cannot tell invisible text
+    apart: the scan keeps its layer, and the run says why."""
+    import pypdfium2.raw as pdfium_c
+
+    monkeypatch.delattr(pdfium_c, "FPDFText_GetTextObject")
+    fs, logs = await _run_native_text_stage(monkeypatch, caplog, _cover_and_scan(), 2)
+
+    cover, scan = (page[0] for page in fs.layout_results)
+    assert cover["_native_text_used"] is True
+    assert scan["_native_text_used"] is True
+    # Only the scan got far enough to need the API: the cover's images do not
+    # cover the page.
+    assert set(fs.pdf_inspection.component_errors) == {"invisible_text_layer:1"}
+    assert len(logs) == 1
+    assert "failed on 1 page(s) of scan.pdf" in logs[0].getMessage()
+    assert "FPDFText_GetTextObject" in logs[0].getMessage()
+
+
+async def test_clean_detection_logs_nothing(monkeypatch, caplog):
+    _, logs = await _run_native_text_stage(monkeypatch, caplog, _cover_and_scan(), 2)
+    assert logs == []

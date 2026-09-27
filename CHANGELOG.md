@@ -270,6 +270,39 @@ released.
 
 ### Fixed
 
+- Native PDF text keeps the spaces between words at the edge of a layout
+  region, and a ligature no longer splits a word. pdfium gives a space a flat
+  box on the baseline, below the centre of the letters around it, so a region
+  whose bottom edge crossed a line between its baseline and the letters'
+  centres kept the words but dropped the spaces ("MODELANALYSIS"). A flat
+  space box now takes the vertical centre of the glyph before it when that
+  glyph stands on the same baseline. It is never lowered to a comma below the
+  baseline, and never raised to a closing quote. After a superscript
+  citation it usually stays at the height of the glyph that follows. A space
+  some fonts draw inside a ligature's box ("Traffi cking") is dropped when
+  the next glyph starts where the ligature ends; after a word-final ligature
+  it stays a word space. Only the spaces a region reads change.
+- Native PDF text is read through the page box pdfium renders. Layout regions
+  are found on the rendered page, the CropBox clipped to the MediaBox, either
+  of them inherited from the page tree, but native text mapped them back
+  through the page's own CropBox entry, which falls back to a US Letter
+  MediaBox when the page inherits its box. On such an A4 page every region
+  read the text some 45 pt lower and could lose the first letter of its
+  lines: the title region read the byline, and the paper exported an author's
+  name as its title.
+- A title the metadata LLM returns joined with its translation keeps only the
+  version printed first. The prompts ask for that version, but the model
+  still returns both at times: joined with " / " when each is printed on rows
+  of its own, or with the translation the title row prints in brackets after
+  it. Grounding accepted the join because each half is printed. When the two
+  halves read as one title in two languages or scripts (each at least three
+  words and, when function words tell the language, two of them on each
+  side), the version printed first in the selected record is kept and a
+  `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_parallel_versions_joined`. Both joined versions must be
+  printed as such. The title before the brackets must be printed, and not
+  only after its bracketed translation, which may be the model's own. Any
+  other title, including one with three or more versions, is left alone.
 - The reference locator keeps the paper's own list when the page layout hides
   or doubles it. Rows printed above the paper's title on its first page (the
   end of the previous article on a scanned journal page, under the same
@@ -293,7 +326,9 @@ released.
   byline with a dash, an entry run on after the previous one's pages or into
   the same segment on a new line ("… 24: 65-96. -1931b. The cytological
   theory …", "- and Dark, S. O. S. 1932. …") reaches the parser as an entry
-  of its own (`inline_dash_entries_split`).
+  of its own (`inline_dash_entries_split`); a dash and year followed by a
+  volume, issue or pages area ("– 1973. V. 39", the year area of a
+  transliterated GOST list) opens no entry.
 - A numbered reference list that prints several works under one number
   ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …", "[30] J.F.
   Plebanski, …, 2511; J. Samuel, …") gives the NER parser one entry per
@@ -302,13 +337,12 @@ released.
   above them when the next entry carries the following number and the entry
   above does not already close on a number and a period; a later work
   splits out only where an initials-first byline follows a page, year or
-  preprint number, and entries with a DOI or link stay whole. The receipt
+  preprint number, and entries with a DOI or link stay whole; nothing splits
+  where the later works would match or outnumber the numbered entries, which
+  would keep the list numbers in the parser's input. Each entry keeps its
+  place with its first work and the later works follow the list, without
+  a row of their own, so an in-text "[n]" still links to entry n. The receipt
   records `numbered_fragments_joined` and `numbered_works_split`.
-  receipt records `same_byline_works_split`. The reference line stream now
-  also replaces a confident geometry or LLM segmentation that ran "same
-  author" dash entries ("-1931. Chiasmas in …") into the entry above, in two
-  or more of its segments, when the stream's quality is at least the
-  cascade's (trigger `cascade_merged_repeat_author`).
 - Chinese, Japanese and Korean author names now ground against the byline
   however it is spaced. A byline printed one character per token
   (奥　山　正　司) or with the family and given names run together no longer
@@ -322,42 +356,35 @@ released.
   with no byline at all. Rows in that gap (it opens at the parser's detected
   title and needs a closing abstract, keywords or body section) are now
   admitted on name evidence: a byline-shaped heading that is no field label
-  ("Author Note", "Corresponding Author:"), a name over an e-mail address,
-  or a paragraph spanning several layout regions whose first region reads
-  as a byline (a byline row merged into a correspondence block).
+  ("Author Note", "Corresponding Author:") and has no colon, a name over an
+  e-mail address, or a paragraph spanning several layout regions whose
+  first region reads as a byline (a byline row merged into a correspondence
+  block). An editorial or metadata line there ("Edited by Jane Smith",
+  "Handling Editor: Jane Smith" over her e-mail address, "Received 12 March
+  2020", "Data Availability") is admitted on none of these grounds.
 - On a first page that prints no byline ahead of its abstract, an author's
   name set above the title that layout labels a page header ("Hubert
   Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
   the author call; the parser filed it with the running heads, and the
   front matter had no author text at all. The row joins the front matter as
-  plain text, using the parser's header string, only when it is a bare
-  person's name ending just above the title: no word in capitals, no
-  journal or article-type word ("Educational Review", "Case Report"), and
-  not the title's own words set as a short running head. It never becomes
-  the title, byline evidence or a record root. Byline-shaped rows after the
-  abstract (a German keyword line, a body heading that names a theorist)
-  no longer keep it out.
-- On a page that prints no byline, an author's name set above the title
-  that layout labels a page header ("Hubert Heinen" over "German-Texan
-  Attitudes toward the Civil War") now reaches the author call; the parser
-  filed it with the running heads, and the front matter had no author text
-  at all. The row joins the page-1 byline rescue as plain text, using the
-  parser's header string, only when it is a bare person's name ending just
-  above the title: no word in capitals, no journal or article-type word
-  ("Educational Review", "Case Report"), and not the title's own words set
-  as a short running head. It never becomes the title, byline evidence or a
-  record root.
-  parser's header string, only when it is a bare person's name (no word in
-  capitals) ending just above the title; it never becomes the title, byline
-  evidence or a record root.
+  plain text, as the first page prints it (a later page may repeat the head
+  in other casing), only when it is a bare person's name ending just above
+  the title: no word in capitals, no "&", no journal, article-type, section
+  or editor word in English or a Romance language ("Educational Review",
+  "Case Report", "Scientific Reports", "Revista de Psicología", "Special
+  Issue", "John Smith, Editor"), and not the title's own words set as a
+  short running head. Its shape alone never makes it the title or a record
+  root. Byline-shaped rows after the abstract (a German keyword line, a
+  body heading that names a theorist) no longer keep it out.
 - A scanned page that carries the invisible text layer an OCR engine adds to a
   scan (a page-sized image under text in an invisible render mode, as Acrobat
   Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
   that legacy layer, which misread titles and merged reference lines. No text
-  lines or font sizes are taken from such a page. Born-digital pages, including
-  pages on a background image, keep their text layer. Set
-  `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to trust these layers as
-  before.
+  lines or font sizes are taken from such a page. If OCR returns no text for
+  the page, as in an OCR outage, its regions fall back to the layer text.
+  Pages whose text is mostly visible, including pages on a background image,
+  keep their text layer. Set `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to
+  trust these layers as before.
 - The local paper and section classifiers no longer take the GPU memory a
   managed vLLM server needs. Free VRAM was measured once and each model was
   checked against it alone, so both could land on CUDA when only one fit; the
@@ -1891,6 +1918,28 @@ released.
 - Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
   a list numbered that way, as arabic ones already were. They were parsed into
   the first author ("V. Lal, S. K. L.").
+- The NER reference parser's field boundaries are repaired from the reference
+  text before the references are finalized. A web reference whose name was
+  tagged as its author, cut short or split in two takes that name as its title
+  ("AWS Wavelength. https://…. Accessed …"). A title that ran on is cut at the
+  closing quote of a quoted title, a URL or access date, a news dateline
+  ("Outlet, 18.11.2011"), a place-and-year imprint, a bracketed English
+  translation or GOST material mark, a language note ("(Hindi)"), a statement
+  of responsibility ("/ A. A. Yuldashev") or a year followed by notes
+  ("… aplicada. 2000. 264f. Tese …"); an author span that ran on through a dash into
+  the title is split ("LIPSZYC, Delia — Domínio Público"). A year read off an
+  access date gives way to the one publication year the reference prints, and
+  a reference with no tagged year takes the one year it prints as a date
+  outside its title, URLs and access dates, or else a year from a full numeric
+  date ("21-01-1983") that no article-history label ("Received:",
+  "Recebido:") introduces. A title ending in "retrieved", "accessed" or
+  "available online" with no URL or date after it stays whole, and a year
+  inside a title ("… Earthquake of June 16, 1964. Part 2. …") is not taken as
+  the reference's year when the reference prints another. Each repair needs
+  its own textual signal and fills other fields only when they are empty;
+  references parsed by the LLM are unchanged.
+- The NER decoder reads a YEAR span that holds a full date by its four-digit
+  year: "18.11.2011" was read as 1811 and "3 March 2011" as 3201.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
@@ -1899,20 +1948,32 @@ released.
 
 - References from footnote and endnote citations. Law, history and much of the
   humanities cite in notes and print no reference list, so bibr exported an
-  empty `bib` for them. When no reference list is found, or one of at most two
-  entries, and at least five notes cite works in full (fifteen times the
-  entries of a located list), the notes' citations become the reference list.
-  Each note is split into its citations; lead-ins ("See", "Cf.", "Voir",
-  "Véase") and commentary before a citation are dropped, repeats ("Ibid.",
-  "Id.", "op. cit.", "supra", "ref. 5") are skipped, and the rest goes through
-  the configured reference parser; a citation the parser finds nothing in keeps
-  the quoted title it opens on. A later short form of a work folds into its
+  empty `bib` for them. When no reference list is found, or the one found
+  parses to at most two references, and at least five notes cite works in full
+  (and at least fifteen times as many notes as the located list has
+  references), the notes' citations become the reference list. Each note is
+  split into its citations; lead-ins ("See", "Cf.", "Voir", "Véase") and
+  commentary before a citation are dropped, repeats ("Ibid.", "Id.",
+  "op. cit.", "supra", "ref. 5") are skipped, and the rest goes through the
+  configured reference parser. With the NER parser (the default), a citation
+  the tagger finds nothing in keeps the quoted title it opens on; the LLM
+  parsers have no such fallback. A later short form of a work folds into its
   first citation (never one dated to another year), so each cited work is one
-  reference, whose `text_id` is the note that first cites it. The export marks such a list with the
-  `REF_FOOTNOTE_CITATIONS` warning, `extraction.fields.bib.source` `footnotes`
-  and a selected `footnotes` attempt in `extraction.diagnostics.reference_yield`.
-  A paper with a reference list of three or more entries is never touched. The
-  new `REF_FOOTNOTE_CITATIONS` setting (default on) turns it off. The export
+  reference, whose `text_id` is the note that first cites it. With the LLM
+  parsers a reference takes the first note whose citation carries its title,
+  or the note at its position when the parser returned one reference per
+  citation, and its `text_id` is null otherwise. In-text numbers are not linked to such a list: the
+  numeric citation tiers are off for it, because a note mark is not a
+  reference number (the note marks keep their `foot` xrefs). The export marks
+  such a list with the `REF_FOOTNOTE_CITATIONS` warning,
+  `extraction.fields.bib.source` `footnotes` and a selected `footnotes`
+  attempt in `extraction.diagnostics.reference_yield`. When no list was
+  located, `REF_SECTION_NOT_FOUND` stays beside it ("…; the references were
+  read from the notes"): the paper may still print a list the locator missed.
+  A note longer than 8,000 characters is not read, and a failure reading the
+  notes leaves the references as the located list has them. A paper whose
+  located list parses to three or more references is never touched. The new
+  `REF_FOOTNOTE_CITATIONS` setting (default on) turns it off. The export
   schema's `bib[].text_id` description now names the note row (schema
   regenerated; no field changed).
 - New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
@@ -2021,6 +2082,10 @@ released.
 - The OCR cache format is version 11: a bundle also holds the page text lines
   and URI links the reference line stream reads. Older bundles are re-run
   rather than read without them.
+- The OCR cache format is version 12. A bundle stores its regions after the
+  native-text fill, and the cache key cannot see code changes, so a version 11
+  bundle would serve native text with the old word spacing and page box (see
+  Fixed); such bundles are re-run.
 - The identity stage is the only step that sets `metadata.doi`. The
   core-metadata extractor no longer looks for a DOI, and the no-LLM
   document-information fallback no longer fills one from a PDF's Subject or

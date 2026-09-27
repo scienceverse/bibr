@@ -35,6 +35,11 @@ MAX_LISTED_REFERENCES = 2
 # ... and only when the notes cite this many times more works than the list
 # holds: a two-entry "Legal acts" list beside five citing notes stays as it is.
 LISTED_DOMINANCE = 15
+# A note longer than this is not scanned for citations. The longest real note
+# seen runs to under 2,000 characters; the split scan grows faster than the
+# note (about 0.6 s for one note of 25,000 characters), and it runs on the
+# event loop.
+MAX_NOTE_CHARS = 8000
 
 _EXTENDED = [chr(code) for code in range(0x100, 0x250)]
 _UP = "A-ZÀ-ÖØ-Þ" + "".join(c for c in _EXTENDED if c.isupper())
@@ -147,13 +152,16 @@ _ENDS_ON_PLACE_RE = re.compile(rf"[{_UP}][{_LOW}]+(?:[\s-][{_UP}][{_LOW}]+)?\s*$
 # An ISO 690 byline, "BLANCHARD, Rae." or "COLLALTO, Marie Therese.".
 _ISO_BYLINE_RE = re.compile(rf"{_UPPER_SURNAME},\s{_NAME}(?:\s{_NAME})*\.\s")
 
-# Repeat citations: they point back at a work cited in full before.
+# Repeat citations: they point back at a work cited in full before. "supra"
+# and "infra" count as words of their own, never inside a hyphenated one
+# ("Supra-national Law ..." is a title).
 _REPEAT_START_RE = re.compile(
     r"^(?i:ibid|ibidem|ibíd|ibídem|id|idem|eadem|ead|ebd|ebenda|tamže|tamtéž|tamze)\b\.?"
 )
 _REPEAT_ANY_RE = re.compile(
     r"(?i:\bop\.?\s?cit\b|\bloc\.?\s?cit\b|\bart\.?\s?cit\b|\bob\.?\s?cit\b|\bopus\s+citatum\b"
-    r"|\ba\.\s?a\.\s?O\b|\bsupra\b|\binfra\b|\bpr[ée]cit[ée]e?s?\b|\bcit\.\s*(?:supra|n\.|note)"
+    r"|\ba\.\s?a\.\s?O\b|(?<![\w-])(?:supra|infra)(?![\w-])|\bpr[ée]cit[ée]e?s?\b"
+    r"|\bcit\.\s*(?:supra|n\.|note)"
     r"|\bcit[ée]e?s?,?\s+(?:à\s+la\s+)?note\s+\d|\bref\.\s?\d|\bcit\.\s?d\.|\bdz\.\s?cyt)"
 )
 
@@ -503,6 +511,8 @@ def note_citations(contents: PaperContents) -> NoteCitations:
             continue
         for note in _split_notes(row):
             notes += 1
+            if len(note) > MAX_NOTE_CHARS:
+                continue
             full_found = False
             for clause in _split_citations(note):
                 if is_repeat_citation(clause):

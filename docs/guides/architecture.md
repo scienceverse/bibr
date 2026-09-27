@@ -56,7 +56,8 @@ Acceptance uses character-count and printable-text checks
 (`OCR_NATIVE_TEXT_MIN_CHARS=20`, `OCR_NATIVE_TEXT_MIN_PRINTABLE_RATIO=0.85`)
 plus guards for corrupt text. A scanned page whose text layer is invisible
 text over a page-sized image (the layer an OCR engine adds to a scan) is read
-by OCR instead (`OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=true`, the default).
+by OCR instead (`OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=true`, the default);
+its layer text is used only when OCR returns no text for the page.
 Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 

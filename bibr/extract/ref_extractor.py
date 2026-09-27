@@ -1188,10 +1188,14 @@ def _resolve_repeated_authors(refs: list[PaperReference]) -> None:
 # the layout runs such an entry on after the previous one's pages ("… 24:
 # 65-96. -1931b. The …", "… 63: 368-71.- 1933. The …") or into the same
 # segment on a new line, neither the cascade nor the line stream starts an
-# entry there.
+# entry there. A transliterated GOST 7.1 list opens an entry's year area the
+# same way and can go on to the volume, issue or pages area without another
+# dash ("… // Plant Soil. – 1973. V. 39, No. 1."): a year followed by such an
+# area is no entry.
 _DASH_ENTRY_BODY = (
     r"[‒–—―-]+[ \t]*(?:\n[ \t]*)?"
-    r"(?:(?:1[6-9]|20)\d{2}[a-z]?\.\s+[A-Z\"'(«]|and\s|&\s)"
+    r"(?:(?:1[6-9]|20)\d{2}[a-z]?\.\s+(?!(?:Vol|No|Nr|Iss|Pp?|S|T|V|Bd|H)\.)[A-Z\"'(«]"
+    r"|and\s|&\s)"
 )
 _DASH_ENTRY_LINE_RE = re.compile(r"(?:^|\n)[ \t]*" + _DASH_ENTRY_BODY)
 _DASH_ENTRY_SPLIT_RE = re.compile(
@@ -1199,6 +1203,21 @@ _DASH_ENTRY_SPLIT_RE = re.compile(
 )
 _DASH_ENTRY_MIN_LINE_STARTS = 2
 _DASH_ENTRY_MIN_CHARS = 12
+
+
+def _segment_link_dois(
+    ref_strings: list[str], link_dois: list[str | None] | None
+) -> list[str | None] | None:
+    """*link_dois* when there is one per segment, else None.
+
+    The line stream's link DOIs are one per stream entry; when an entry read
+    twice is dropped they no longer line up with the segments. The parse
+    refuses such a list, so a transform must not rebuild it to its output's
+    length by position (a split could even bring the lengths back to equal).
+    """
+    if link_dois is not None and len(link_dois) != len(ref_strings):
+        return None
+    return link_dois
 
 
 def _split_inline_dash_entries(
@@ -1213,6 +1232,7 @@ def _split_inline_dash_entries(
     Returns the strings, the link DOIs aligned to them, and how many entries
     were added.
     """
+    link_dois = _segment_link_dois(ref_strings, link_dois)
     if len(ref_strings) < 3:
         return ref_strings, link_dois, 0
     line_starts = sum(len(_DASH_ENTRY_LINE_RE.findall(segment)) for segment in ref_strings)
@@ -1306,6 +1326,7 @@ def _split_same_byline_works(
     left whole. Returns the strings, the link DOIs aligned to them, and how many
     works were added.
     """
+    link_dois = _segment_link_dois(ref_strings, link_dois)
     if len(ref_strings) < 3:
         return ref_strings, link_dois, 0
     styled = sum(_old_style_byline(segment) is not None for segment in ref_strings)
@@ -1384,10 +1405,18 @@ def _split_numbered_entry_works(
     own. A numbered entry then splits before each later work that opens with
     an initials-first byline right after a digit and a period or semicolon; an
     entry with a DOI, URL or link DOI is left whole, as is one whose pieces
-    would be fragments or whose later pieces carry no number.
-    Returns the strings, the link DOIs aligned to them, and how many fragments
-    were joined and works added.
+    would be fragments or whose later pieces carry no number. No entry splits
+    when the later works would outnumber the list's numbered strings, which
+    turns the parser input's list-number stripping off.
+
+    The entry keeps its first work in its place and the later works follow the
+    whole list, so every entry keeps the position its printed number gives it
+    (the citation linker reads "[n]" as the n-th reference when the references
+    map to no printed number). Returns the strings, the link DOIs aligned to
+    them, how many fragments were joined, and how many works were added: the
+    last that many strings.
     """
+    link_dois = _segment_link_dois(ref_strings, link_dois)
     if len(ref_strings) < 3:
         return ref_strings, link_dois, 0, 0
     markers = [_list_marker(segment) for segment in ref_strings]
@@ -1419,7 +1448,7 @@ def _split_numbered_entry_works(
         entry_markers.append(markers[index])
     strings: list[str] = []
     dois: list[str | None] = []
-    added = 0
+    later_works: list[str] = []
     for segment, doi, marker in zip(entries, entry_dois, entry_markers, strict=True):
         pieces = []
         if marker is not None:
@@ -1435,10 +1464,21 @@ def _split_numbered_entry_works(
             strings.append(segment)
             dois.append(doi)
             continue
-        strings.extend(pieces)
-        dois.extend([None] * len(pieces))
-        added += len(pieces) - 1
-    return strings, (dois if link_dois is not None else None), joined, added
+        strings.append(pieces[0])
+        dois.append(None)
+        later_works.extend(pieces[1:])
+    if _list_numbers_stripped(entries) and not _list_numbers_stripped(strings + later_works):
+        # Split, the list would no longer read as numbered to the parser, which
+        # would then keep every entry's list number in front of its byline.
+        return entries, (entry_dois if link_dois is not None else None), joined, 0
+    strings.extend(later_works)
+    dois.extend([None] * len(later_works))
+    return strings, (dois if link_dois is not None else None), joined, len(later_works)
+
+
+def _list_numbers_stripped(ref_strings: list[str]) -> bool:
+    """Whether :func:`_strip_enum_markers` takes the list numbers off *ref_strings*."""
+    return 2 * sum(1 for s in ref_strings if _ENTRY_NUMBERING_RE.match(s)) > len(ref_strings)
 
 
 def _map_bib_text_ids(refs: list[PaperReference], contents: PaperContents) -> None:
@@ -1713,6 +1753,7 @@ class ReferenceExtractor:
             self._consider_line_stream, ref_df, ref_text, ref_strings, seg_strategy
         )
         link_dois: list[str | None] | None = None
+        later_works = 0
         if stream_choice is not None:
             link_dois = stream_choice.link_dois
             if stream_choice.selected:
@@ -1736,18 +1777,23 @@ class ReferenceExtractor:
             if added:
                 self._stream_reason_flags.add("same_byline_works_split")
                 logger.info("Split %d same-byline work(s) out of old-style entries", added)
-            ref_strings, link_dois, joined, works = _split_numbered_entry_works(
+            ref_strings, link_dois, joined, later_works = _split_numbered_entry_works(
                 ref_strings, link_dois
             )
             if joined:
                 self._stream_reason_flags.add("numbered_fragments_joined")
                 logger.info("Joined %d unnumbered fragment(s) to their numbered entry", joined)
-            if works:
+            if later_works:
                 self._stream_reason_flags.add("numbered_works_split")
-                logger.info("Split %d later work(s) out of numbered entries", works)
+                logger.info("Split %d later work(s) out of numbered entries", later_works)
 
         parser = REF_PARSE_STRATEGIES.get(parse_strategy, REF_PARSE_STRATEGIES["llm"])
-        if parse_strategy == "ner" and link_dois and any(link_dois):
+        later_refs: list[PaperReference] = []
+        if later_works:
+            all_refs, later_refs = await asyncio.to_thread(
+                self._parse_references_ner_with_later_works, ref_strings, link_dois, later_works
+            )
+        elif parse_strategy == "ner" and link_dois and any(link_dois):
             all_refs = await asyncio.to_thread(
                 self._parse_references_ner_with_links, ref_strings, link_dois
             )
@@ -1757,7 +1803,11 @@ class ReferenceExtractor:
         # Resolve the em-dash "same author as above" convention on the fully
         # ordered list — a cross-reference step every parse strategy shares.
         _resolve_repeated_authors(all_refs)
-        _map_bib_text_ids(all_refs, self.contents)
+        # A later work of a numbered entry gets no row: its entry's row opens
+        # with the entry's printed number, which the citation linker would
+        # then find on two references and link to neither.
+        later_ids = {id(ref) for ref in later_refs}
+        _map_bib_text_ids([ref for ref in all_refs if id(ref) not in later_ids], self.contents)
         self._record_yield_receipt(
             ref_text,
             selected_spans,
@@ -1779,11 +1829,16 @@ class ReferenceExtractor:
         *listed* is the number of references the located list yielded (0 when
         none was found). None when ``REF_FOOTNOTE_CITATIONS`` is off, the list
         is longer than :data:`MAX_LISTED_REFERENCES`, or the notes do not
-        carry enough full citations.
+        carry enough full citations. A failure reading the notes is logged
+        and leaves the references as the located list has them.
         """
         if not self._settings.REF_FOOTNOTE_CITATIONS or listed > MAX_LISTED_REFERENCES:
             return None
-        found = note_citations(self.contents)
+        try:
+            found = note_citations(self.contents)
+        except Exception:  # noqa: BLE001 — the notes are a fallback, never fatal
+            logger.warning("Reading citations from the notes failed; skipping them", exc_info=True)
+            return None
         return found if notes_replace_list(found, listed) else None
 
     async def extract_from_notes(
@@ -3243,11 +3298,32 @@ class ReferenceExtractor:
 
         return predict
 
+    def _parse_references_ner_with_later_works(
+        self, ref_strings: list[str], link_dois: list[str | None] | None, later_works: int
+    ) -> tuple[list[PaperReference], list[PaperReference]]:
+        """NER parse of a list whose last *later_works* strings are works split
+        out of numbered entries; returns all references and those works' ones.
+
+        One batch, so the list-numbering gate sees the whole list as before.
+        """
+        aligned = self._parse_references_ner_aligned(ref_strings)
+        if link_dois is not None:
+            self._fill_link_dois(aligned, link_dois)
+        later = [ref for ref in aligned[len(aligned) - later_works :] if ref is not None]
+        return _sequence_references([ref for ref in aligned if ref is not None]), later
+
     def _parse_references_ner_with_links(
         self, ref_strings: list[str], link_dois: list[str | None]
     ) -> list[PaperReference]:
         """NER parse, then fill a DOI from a link annotation where none was parsed."""
         aligned = self._parse_references_ner_aligned(ref_strings)
+        self._fill_link_dois(aligned, link_dois)
+        return _sequence_references([ref for ref in aligned if ref is not None])
+
+    def _fill_link_dois(
+        self, aligned: list[PaperReference | None], link_dois: list[str | None]
+    ) -> None:
+        """Fill a DOI from a link annotation where none was parsed (one per slot)."""
         if len(link_dois) == len(aligned):
             filled = 0
             for ref, doi in zip(aligned, link_dois, strict=True):
@@ -3257,4 +3333,3 @@ class ReferenceExtractor:
             if filled:
                 self._stream_reason_flags.add("doi_from_link_annotation")
                 logger.info("Filled %d reference DOI(s) from link annotations", filled)
-        return _sequence_references([ref for ref in aligned if ref is not None])

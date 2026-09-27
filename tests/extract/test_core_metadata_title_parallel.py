@@ -27,6 +27,13 @@ _PRINTED = (
 )
 _DUTCH = "PERCEPTUELE STRUKTUREN VAN SYNTHETISCHE EN NATUURLIJKE KLINKERS"
 _DUTCH_ENGLISH = "PERCEPTUAL STRUCTURES OF SYNTHETIC AND NATURAL VOWELS"
+# The Dutch report's selected record: the institute heading and the title row
+# with its bracketed English translation read as one row, then the byline.
+_DUTCH_PRINTED = (
+    "Katholieke Universiteit Leuven Centrum voor Mathematische Psychologie en "
+    f"Psychologische Methodologie {_DUTCH} [{_DUTCH_ENGLISH}]\n"
+    "GEORGES GOVAERTS The investigation which is reported here"
+)
 
 
 def test_joined_versions_keep_the_one_printed_first():
@@ -65,11 +72,37 @@ def test_a_half_carrying_words_the_page_does_not_print_is_left_alone():
     assert drop_parallel_title(joined, _PRINTED) == (joined, None)
 
 
-def test_translation_bracketed_after_the_title_row_is_dropped():
-    title, issue = drop_parallel_title(f"{_DUTCH} [{_DUTCH_ENGLISH}]", "")
+@pytest.mark.parametrize(
+    "printed",
+    [
+        _DUTCH_PRINTED,
+        # A translation of the model's own: the page prints the Dutch title alone.
+        f"{_DUTCH}\nGEORGES GOVAERTS The investigation which is reported here",
+    ],
+)
+def test_translation_bracketed_after_the_title_row_is_dropped(printed):
+    title, issue = drop_parallel_title(f"{_DUTCH} [{_DUTCH_ENGLISH}]", printed)
 
     assert title == _DUTCH
     assert issue is not None
+
+
+def test_a_bracketed_title_the_page_does_not_print_is_left_alone():
+    # The model put its own English translation first and the printed Spanish
+    # title in brackets: keeping the part before the brackets would export a
+    # title the page never prints.
+    joined = f"{_ENGLISH} [{_SPANISH}]"
+    printed = f"{_SPANISH}\nResumen\nEste trabajo estudia la regulación."
+
+    assert drop_parallel_title(joined, printed) == (joined, None)
+
+
+def test_a_bracketed_title_printed_after_its_translation_is_left_alone():
+    # The model swapped the halves of the printed "Dutch [English]" row: the
+    # part before its brackets is printed, but second.
+    joined = f"{_DUTCH_ENGLISH} [{_DUTCH}]"
+
+    assert drop_parallel_title(joined, _DUTCH_PRINTED) == (joined, None)
 
 
 def test_versions_in_two_scripts_keep_the_one_printed_first():

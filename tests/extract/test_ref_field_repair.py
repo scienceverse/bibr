@@ -107,6 +107,37 @@ def test_author_span_run_through_a_dash_is_split():
     assert fields["title"] == "Domínio Público"
 
 
+@pytest.mark.parametrize(
+    ("authors", "text"),
+    [
+        (
+            "EBEL, Petr – SCHMIDT, Ondřej",
+            "EBEL, Petr – SCHMIDT, Ondřej. Z Trevisa do Brtnice: Příběhy šlechtického rodu "
+            "Collalto ukryté v českých archívech (katalog výstavy)",
+        ),
+        (
+            "BRESCHI, Marco – FORNASIN, Alessio – MANFREDINI, Matteo – ZACCHIGNA, Marianna",
+            "BRESCHI, Marco – FORNASIN, Alessio – MANFREDINI, Matteo – ZACCHIGNA, Marianna. "
+            "Family Composition and Remarriage in Pre-Transitional Italy: A Comparative Study.",
+        ),
+        (
+            "Abernathy, W. J. – Clark, K. B",
+            "Abernathy, W. J. – Clark, K. B. (1985): Innovation: Mapping the winds of creative "
+            "destruction. Research Policy, (14): p. 3-22.",
+        ),
+    ],
+    ids=["two-names", "four-names", "initials"],
+)
+def test_dash_between_co_authors_is_not_a_title_split(authors, text):
+    # Czech, Slovak and Romanian lists join co-authors with a spaced dash; an
+    # untitled reference whose author span holds only such a list keeps it.
+    fields = {"authors": authors}
+    _, fired = _repair(fields, text)
+    assert fields["authors"] == authors
+    assert "title" not in fields
+    assert "author_dash_title" not in fired
+
+
 # --- title_url_tail ------------------------------------------------------------
 
 
@@ -138,6 +169,52 @@ def test_word_online_inside_a_title_is_not_a_url_tail():
     fields = {"authors": "Kuczerawy, A", "title": title, "year": 2018}
     _repair(fields, text)
     assert fields["title"] == title
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Episodic memories are reconstructed, not retrieved",
+        "How often is the mental lexicon accessed",
+        "Making trial data available online",
+    ],
+)
+def test_title_ending_in_a_web_word_without_a_locator_is_kept(title):
+    # "retrieved", "accessed" and "available online" also end ordinary
+    # titles: with no URL and no date after them they are title words.
+    text = f"Smith, J. (2019). {title}. Psychological Review, 126(4), 34-56."
+    fields = {"authors": "Smith, J", "title": title, "year": 2019}
+    _, fired = _repair(fields, text)
+    assert fields["title"] == title
+    assert "title_url_tail" not in fired
+
+
+def test_access_date_without_a_url_is_still_cut_from_the_title():
+    text = (
+        "Our World in Data. 2023. Excess mortality during the Coronavirus pandemic "
+        "(COVID-19).Accessed March 22, 2023. https://ourworldindata.org/excess-mortality-covid."
+    )
+    fields = {
+        "authors": "Our World in Data",
+        "title": "Excess mortality during the Coronavirus pandemic (COVID-19).Accessed March 22, "
+        "2023",
+        "year": 2023,
+    }
+    _, fired = _repair(fields, text)
+    assert fields["title"] == "Excess mortality during the Coronavirus pandemic (COVID-19)"
+    assert "title_url_tail" in fired
+
+
+def test_web_phrase_left_hanging_before_a_url_tagged_apart_is_cut():
+    head = (
+        "Convenção Internacional dos Direitos da Pessoa com Deficiência (CDPD). "
+        "13 de dezembro de 2006. Versão traduzida"
+    )
+    text = f"ONU. {head} disponível em:http://portal.mec.gov.br/index.php?option=com_docman"
+    fields = {"authors": "ONU", "title": f"{head} disponível em"}
+    _, fired = _repair(fields, text)
+    assert fields["title"] == head
+    assert "title_url_tail" in fired
 
 
 def test_parenthesised_url_inside_a_name_is_kept():
@@ -233,6 +310,28 @@ def test_news_dateline_and_translation_leave_the_original_title():
     assert fired[:2] == ["title_dateline_tail", "title_translation_bracket"]
 
 
+def test_place_and_month_closing_a_report_title_are_kept():
+    # Surveillance-report titles end in "— County, State, Month YYYY"; the
+    # comma before the state is no outlet's sentence break.
+    title = (
+        "High SARS-CoV-2 attack rate following exposure at a choir practice - Skagit County, "
+        "Washington, March 2020"
+    )
+    text = (
+        f"Hamner L, Dubbel P, Capron I, Ross A, Jordan A, Lee J, et al. {title}. MMWR Morb "
+        "Mortal Wkly Rep. (2020) 69:606– 10. doi: 10.15585/mmwr.mm6919e6"
+    )
+    fields = {
+        "authors": "Hamner L, Dubbel P, Capron I, Ross A, Jordan A, Lee J, et al",
+        "title": title,
+        "container": "MMWR Morb Mortal Wkly Rep",
+        "year": 2020,
+    }
+    _, fired = _repair(fields, text)
+    assert fields["title"] == title
+    assert "title_dateline_tail" not in fired
+
+
 def test_bracketed_english_translation_is_cut_from_a_transliterated_title():
     text = (
         "V Iuzhnoi Koree poiavitsia krupneishaia v mire voennaia baza SShA [South Korea will "
@@ -269,6 +368,16 @@ def test_language_note_ends_the_title():
     fields = {"title": "Netra Yog Chikitsa (Hindi). Yog Prakshikshan", "year": 1982}
     _repair(fields, text)
     assert fields["title"] == "Netra Yog Chikitsa"
+
+
+def test_language_note_before_a_subtitle_colon_is_kept():
+    # A colon after the note opens the subtitle: the note is inside the title.
+    title = "De humani corporis fabrica (Latin): On the fabric of the human body"
+    text = f"Vesalius, A. (1543). {title}. Basel: Oporinus."
+    fields = {"authors": "Vesalius, A", "title": title, "year": 1543}
+    _, fired = _repair(fields, text)
+    assert fields["title"] == title
+    assert "title_language_note" not in fired
 
 
 def test_statement_of_responsibility_is_cut():
@@ -308,6 +417,70 @@ def test_year_and_thesis_notes_are_cut_from_the_title():
         fields["title"] == "Chuvas e erosões no oeste paulista: uma análise climatológica aplicada"
     )
     assert fields["year"] == 2000
+
+
+def test_year_inside_the_title_yields_to_the_printed_publication_year():
+    # The tagger's year is left out: the case is the same reference with the
+    # year tag missed, which the year-tail rule used to answer with 1964.
+    title = (
+        "Generation and propagation of G waves from the Niigata Earthquake of June 16, 1964. "
+        "Part 2. Estimation of earthquake movement, released energy, and stress-strain drop "
+        "from the G wave spectrum"
+    )
+    text = f"Aki, K. {title}. Bull. Earthq. Res. Inst. 43, 237–239 (1965)."
+    fields = {
+        "authors": "Aki, K",
+        "title": title,
+        "container": "Bull. Earthq. Res. Inst.",
+        "volume": "43",
+    }
+    _, fired = _repair(fields, text)
+    assert fields["title"] == title
+    assert fields["year"] == 1965
+    assert "title_year_tail" not in fired
+    assert "year_from_text" in fired
+
+
+def test_year_tail_is_cut_when_the_reference_repeats_its_year():
+    # Report title run on into the publisher; the year after the publisher is
+    # the same one, so the year in the title is the reference's own.
+    text = (
+        "Wielgosz A, Jaffey J, Williams K, et al. Atlas of Cardiovascular Health in the "
+        "Champlain Region, 2011. The Champlain Cardiovascular Disease Prevention Network; "
+        "2011. Accessed September 25, 2024. https://haloresearch.ca/wp-content/uploads2/2011/"
+        "07/ccpn-atlas.pdf"
+    )
+    fields = {
+        "authors": "Wielgosz A, Jaffey J, Williams K, et al",
+        "title": "Atlas of Cardiovascular Health in the Champlain Region, 2011. The Champlain "
+        "Cardiovascular Disease Prevention Network",
+    }
+    _, fired = _repair(fields, text)
+    assert fields["title"] == "Atlas of Cardiovascular Health in the Champlain Region"
+    assert fields["year"] == 2011
+    assert "title_year_tail" in fired
+
+
+def test_year_tail_before_volume_and_page_is_cut_despite_a_later_year():
+    # Two works merged into one segment: the year right before "17, 386" is
+    # the first work's, the later 1952 belongs to the second.
+    text = (
+        "Engstrand. R. D., & Moeller. G. The relative legibility of ten simple geometric "
+        "figures. Amer. Psychologist, 1962. 17, 386. Garner. W. R. An equal discriminability "
+        "scale for loudness judgments. J. expo Psycho!.. 1952, 49. 232-238."
+    )
+    fields = {
+        "authors": "Engstrand. R. D., & Moeller. G",
+        "title": "The relative legibility of ten simple geometric figures. Amer. Psychologist, "
+        "1962. 17, 386. Garner. W. R. An equal discriminability scale for loudness judgments",
+        "container": "J. expo Psycho!..",
+    }
+    _, fired = _repair(fields, text)
+    assert fields["title"] == (
+        "The relative legibility of ten simple geometric figures. Amer. Psychologist"
+    )
+    assert fields["year"] == 1962
+    assert "title_year_tail" in fired
 
 
 def test_imprint_is_cut_from_the_title_and_gives_the_year():

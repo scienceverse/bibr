@@ -51,7 +51,7 @@ def _page_crop_box(page) -> tuple[float, float, float, float]:
     into: the CropBox clipped to the MediaBox, either inherited from the page
     tree. ``get_cropbox()`` reads the page dictionary alone and falls back to
     a US Letter MediaBox, so an A4 page whose MediaBox sits on the page tree
-    put the byline's text under the title region (audience_eval200/osf_cbu9e).
+    put the byline's text under the title region.
     Falls back to ``(0, 0, width, height)`` when the box is missing or
     degenerate so callers always get a usable box.
     """
@@ -162,6 +162,12 @@ _FLAT_WHITESPACE_HEIGHT_RATIO = 0.25
 # The preceding glyph stands on the flat box's baseline when its own box
 # starts at most this fraction of its height above it.
 _BASELINE_TOLERANCE_RATIO = 0.1
+# A flat box sits on a raised baseline (a superscript's) when it lies more
+# than this fraction of the next glyph's height above that glyph's bottom,
+# and no higher than its top (higher up, the next glyph opens the line
+# below). A descender reaches about a third of its glyph's height below the
+# line.
+_RAISED_BASELINE_RATIO = 0.5
 # A space lies inside the preceding ligature when its box starts within the
 # ligature's box and ends at most this fraction of its own width past it...
 _INNER_WHITESPACE_OVERSHOOT = 0.25
@@ -206,7 +212,9 @@ def _is_inner_whitespace(
         return False
     if next_index >= n_chars:
         return False
-    if chr(pdfium.raw.FPDFText_GetUnicode(textpage.raw, next_index)).isspace():
+    next_code = pdfium.raw.FPDFText_GetUnicode(textpage.raw, next_index)
+    # Past U+10FFFF chr() raises; the page records keep U+FFFD there, a glyph.
+    if next_code <= 0x10FFFF and chr(next_code).isspace():
         return False
     ligature_loose = _loose_charbox(textpage, ligature_index)
     next_loose = _loose_charbox(textpage, next_index)
@@ -233,7 +241,13 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
       glyph stands on the same baseline. A raised glyph (closing quote,
       superscript) is skipped, since a region's top edge can cut it off its
       line, and the space is never lowered to a comma hanging below the
-      baseline, which a region's bottom edge can cut off the same way.
+      baseline, which a region's bottom edge can cut off the same way. pdfium
+      sets the space after a LaTeX superscript on the superscript's own
+      baseline, which the baseline test cannot tell from the line's, so a
+      flat box that sits more than half the next glyph's height above that
+      glyph's bottom, and not above its top, is raised no higher than the
+      next glyph's centre: a top edge that cuts the superscript off would
+      take the space too.
     - A space drawn inside a ligature that adds no gap (some fonts follow
       "fi" with one) is dropped; keeping it split the word ("Traffi cking").
       See :func:`_is_inner_whitespace`. A ligature is a presentation-form
@@ -255,6 +269,21 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     records: list[tuple[str, float, float, bool]] = []
     # Index, box and ligature flag of the last non-whitespace glyph on the line.
     line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
+    # Raised spaces waiting for the glyph after them: (record index, the
+    # space's own centre, the centre of the glyph before it).
+    raised: list[tuple[int, float, float]] = []
+
+    def _settle(next_box: tuple[float, float, float, float] | None) -> None:
+        for index, own_y, glyph_y in raised:
+            ch, x, _y, is_newline = records[index]
+            limit = glyph_y
+            if next_box is not None:
+                _nl, nb, _nr, nt = next_box
+                if nb + _RAISED_BASELINE_RATIO * (nt - nb) < own_y <= nt:
+                    limit = min(glyph_y, (nb + nt) / 2.0)
+            records[index] = (ch, x, max(own_y, limit), is_newline)
+        raised.clear()
+
     i = 0
     while i < n_chars:
         code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
@@ -279,6 +308,7 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
             ch = chr(code_unit)
 
         if ch in ("\n", "\r"):
+            _settle(None)
             records.append((ch, 0.0, 0.0, True))
             line_glyph = None
             i += consumed
@@ -295,6 +325,7 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         box = (cl, cb, cr, ct)
         center_y = (cb + ct) / 2.0
         if not ch.isspace():
+            _settle(box)
             is_ligature = ch in _LIGATURE_CHARS or (line_glyph is not None and line_glyph[1] == box)
             line_glyph = (i, box, is_ligature)
         elif line_glyph is not None:
@@ -310,9 +341,10 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 and ct - cb < _FLAT_WHITESPACE_HEIGHT_RATIO * (gt - gb)
                 and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
             ):
-                center_y = max(center_y, (gb + gt) / 2.0)
+                raised.append((len(records), center_y, (gb + gt) / 2.0))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
+    _settle(None)
     return records
 
 
@@ -1069,14 +1101,15 @@ def _invisible_text_share(textpage) -> float | None:
     """Share of the page's characters drawn in an invisible text render mode.
 
     Whitespace and the characters PDFium generates (inferred spaces and line
-    breaks) are not counted. ``None`` when nothing is countable, or when this
-    PDFium build cannot map a character to its text object.
+    breaks) are not counted. ``None`` when nothing is countable. Raises when
+    this PDFium build cannot map a character to its text object, so the caller
+    keeps the text layer and reports the rule as unavailable.
     """
     import pypdfium2.raw as pdfium_c
 
     text_object_of = getattr(pdfium_c, "FPDFText_GetTextObject", None)
     if text_object_of is None:
-        return None
+        raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
     is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
     handle = textpage.raw
     counted = invisible = 0

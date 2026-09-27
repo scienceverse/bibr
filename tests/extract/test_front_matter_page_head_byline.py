@@ -1,7 +1,7 @@
 """A byline printed above the title that layout labelled a page header.
 
-scans_eval80/W4319033756 sets "Hubert Heinen" over "German-Texan Attitudes toward
-the Civil War"; scans_eval80/W4391777158 sets "Eva-Maria Biermann-Ratjen" over its
+W4319033756 sets "Hubert Heinen" over "German-Texan Attitudes toward
+the Civil War"; W4391777158 sets "Eva-Maria Biermann-Ratjen" over its
 chapter title, beside the journal's page head. Layout labels both name rows
 headers, the parser files them with the running heads, and neither front matter
 had the author's name ahead of the abstract. Geometry is from the papers; body
@@ -134,8 +134,8 @@ def test_only_the_name_row_of_a_two_part_page_head_is_admitted():
         ("Journal of Southern History", (65.0, 229.0, 270.0, 249.0)),  # not a name
         ("BMC Public Health", (65.0, 229.0, 270.0, 249.0)),  # a banner in capitals
         ("CASE REPORT", (65.0, 229.0, 270.0, 249.0)),
-        # Name-shaped journal and article-type heads (audience_eval200/W4248753238,
-        # audience_ci60/W4410919437).
+        # Name-shaped journal and article-type heads (W4248753238,
+        # W4410919437).
         ("Educational Review", (102.0, 229.0, 227.0, 244.0)),
         ("Original Manuscript", (102.0, 229.0, 280.0, 248.0)),
         ("Hubert Heinen", (65.0, 60.0, 270.0, 80.0)),  # far above the title
@@ -151,7 +151,7 @@ def test_other_page_heads_stay_out(text, bbox):
 
 
 def test_a_running_head_that_repeats_the_title_stays_out():
-    """audience_eval200/osf_7fvr9 sets its short title as the running head."""
+    """osf_7fvr9 sets its short title as the running head."""
 
     title = "Remythologising Satan: A New Version of The Fall of Lucifer."
     contents = _contents([("Remythologising Satan.", (116.0, 229.0, 315.0, 246.0))], title=title)
@@ -185,7 +185,7 @@ KEYWORDS = (
 
 
 def _chapter_contents() -> PaperContents:
-    """scans_eval80/W4391777158: name and journal page heads, title, abstract, keywords."""
+    """W4391777158: name and journal page heads, title, abstract, keywords."""
 
     title_box = (102.0, 122.0, 900.0, 177.0)
     abstract_box = (101.0, 315.0, 928.0, 376.0)
@@ -282,3 +282,81 @@ def test_a_page_head_joins_when_the_only_bylines_follow_the_abstract():
     assert "PERSON 1 (1998) 64-68" not in by_text
     context = render_author_context(resolution, full_text=render_block_context(resolution))
     assert context.startswith("Eva-Maria Biermann-Ratjen\n" + CHAPTER_TITLE)
+
+
+@pytest.mark.parametrize(
+    ("first_page", "later_page", "admitted"),
+    [
+        # A journal banner set in capitals on the first page and in title case
+        # in the running heads that follow.
+        ("PSYCHOLOGICAL SCIENCE", "Psychological Science", None),
+        # A name over the title that later pages repeat in capitals.
+        ("Hubert Heinen", "HUBERT HEINEN", "Hubert Heinen"),
+    ],
+)
+def test_the_page_head_is_tested_and_emitted_as_the_first_page_prints_it(
+    first_page, later_page, admitted
+):
+    """The parser keeps every page's running head; the same head can be set in
+    capitals on one page and in title case on another. The first page's own
+    row is what reads as a name or not, so another page's casing must neither
+    admit a banner nor keep a name out."""
+
+    contents = _contents([(first_page, (65.0, 229.0, 270.0, 249.0))])
+    contents.detected_headers.append(later_page)
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+    heads = [text for text in texts if text.casefold() == first_page.casefold()]
+
+    assert heads == ([admitted] if admitted else [])
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Psychological Science",
+        "Scientific Reports",  # a plural journal word
+        "Book Reviews",
+        "Memory & Cognition",
+        "Special Issue",
+        "Revista de Psicología",  # Romance forms, compared accent-folded
+        "Études Littéraires",
+        "John Smith, Editor",  # the volume editor's credit
+    ],
+)
+def test_name_shaped_journal_section_and_editor_heads_stay_out(text):
+    """Set where the name sits in the page-head case, on a first page with no
+    byline, these heads read as two or three capitalised words like a name."""
+
+    contents = _contents([(text, (65.0, 229.0, 270.0, 249.0))])
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert text not in texts
+
+
+def test_a_page_head_stays_out_when_the_rescue_finds_a_first_page_byline():
+    """The no-byline rescue admits a mistyped first-page byline heading (here
+    typed acknowledgment, with no abstract after it to close a front gap). The
+    page then prints a byline ahead of any abstract, so the name-shaped head
+    above the title is not the page's only byline and stays out, as it does
+    when the first pass finds the byline."""
+
+    contents = _contents([("Critical Inquiry", (65.0, 229.0, 270.0, 249.0))])
+    contents.sections.append(
+        PaperSection(
+            section_id=2,
+            header="Anna Berg and Carl Dahl",
+            level=1,
+            parent_section_id=0,
+            section_type=CanonicalSection.ACKNOWLEDGMENT,
+            provenance=[Provenance(page_no=1, bbox=(219.0, 330.0, 843.0, 345.0))],
+        )
+    )
+    contents.sections_text[2] = ""
+
+    candidates = collect_front_matter_candidates(contents)
+    by_text = {candidate.raw_text: candidate for candidate in candidates}
+
+    assert {"byline", BYLINE_PROBATION_ROLE} <= by_text["Anna Berg and Carl Dahl"].roles
+    assert "Critical Inquiry" not in by_text

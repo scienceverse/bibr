@@ -1,7 +1,7 @@
 """A reference list read from the citations in a paper's notes.
 
 The note texts are short excerpts of the dev-set papers that print no
-reference list (TRIAGE #20): a French endnote apparatus (W3012009431), a
+reference list: a French endnote apparatus (W3012009431), a
 Federal Reserve Bulletin article (W1511304478), a Spanish humanities paper
 citing classical works (W3093712194) and a Slovak history paper in ISO 690
 style (10.31577/histcaso.2021.69.5.4).
@@ -18,6 +18,7 @@ import pytest
 
 from bibr.config import GlobalSettings
 from bibr.extract import footnote_citations as fc
+from bibr.field_states import FieldScope, build_field_states
 from bibr.models import PaperMetadata, PaperReference
 from bibr.paper_contents import (
     CanonicalSection,
@@ -27,7 +28,7 @@ from bibr.paper_contents import (
     ReferenceSegmentationAttempt,
     ReferenceYieldReceipt,
 )
-from bibr.processing_warnings import WarningCode
+from bibr.processing_warnings import DESCRIPTIONS, WarningCode
 
 
 def _contents(notes: list[str]) -> PaperContents:
@@ -441,6 +442,20 @@ def test_a_full_citation_is_no_repeat():
     )
 
 
+def test_supra_inside_a_hyphenated_title_word_is_no_repeat():
+    """A title opening "Supra-national" is a work, not a pointer back; "supra"
+    and "infra" standing alone still are."""
+    note = "7 Supra-national Law and Its Discontents, Oxford: Clarendon Press, 2001."
+
+    assert [(c.text, c.full) for c in fc.note_citations(_contents([note])).citations] == [
+        ("Supra-national Law and Its Discontents, Oxford: Clarendon Press, 2001.", True)
+    ]
+    assert not fc.is_repeat_citation("Infra-red Astronomy in Practice, Paris: Seuil, 1988.")
+    assert fc.is_repeat_citation("L. McLeod, op. cit., supra, note 8, p. 3.")
+    assert fc.is_repeat_citation("Voir (supra) note 12.")
+    assert fc.is_repeat_citation("Smith, infra, p. 4.")
+
+
 @pytest.mark.parametrize(
     "clause",
     [
@@ -551,7 +566,7 @@ def test_listed_references_are_kept_and_their_note_citations_dropped():
 
 
 def test_a_title_opening_a_later_one_of_another_year_is_another_work():
-    # audience_eval200/W1511304478, notes 1 and 3: the 1994 survey article is
+    # W1511304478, notes 1 and 3: the 1994 survey article is
     # no short form of the 1989 article whose title opens its own.
     refs = fc.collapse_repeats(
         [
@@ -637,13 +652,16 @@ async def test_without_a_reference_section_the_notes_become_the_reference_list()
         (4, "Frederick Perls", 106),
         (5, "Olivier Putois", 107),
     ]
-    assert _codes(extractor.contents) == [WarningCode.REF_FOOTNOTE_CITATIONS]
+    assert _codes(extractor.contents) == [
+        WarningCode.REF_FOOTNOTE_CITATIONS,
+        WarningCode.REF_SECTION_NOT_FOUND,
+    ]
     receipt = extractor.contents.reference_yield_receipt
     assert [(a.strategy, a.selected) for a in receipt.attempts] == [("footnotes", True)]
     assert (receipt.parsed_count, receipt.valid_count) == (6, 5)
 
 
-# audience_eval200/W3012009431, notes 4 and 5: the tagger finds nothing in
+# W3012009431, notes 4 and 5: the tagger finds nothing in
 # either citation, whose titles only the quotes mark.
 _QUOTED_NOTES = [
     "4. « Au commencement était l’hypnose », Conférences et débats, septembre 2005.",
@@ -702,6 +720,90 @@ async def test_too_few_citing_notes_keep_the_missing_section_warning():
     assert _codes(extractor.contents) == [WarningCode.REF_SECTION_NOT_FOUND]
 
 
+# A Federal Reserve Bulletin article citing in its notes, where the locator
+# finds no reference list (excerpts of notes 1, 5, 6, 8 and 14).
+_BULLETIN_NOTES = [
+    "1. See Glenn B. Canner, James T. Fergus, and Charles A. Luckett, ‘‘Home Equity Lines of "
+    "Credit,’’ Federal Reserve Bulletin, vol. 74 (June 1988), pp. 361–73.",
+    "5. See Dean M. Maki, ‘‘Household Debt and the Tax Reform Act of 1986,’’ American Economic "
+    "Review (forthcoming), for an analysis of the substitution of mortgage for consumer debt.",
+    "6. U.S. Department of Housing and Urban Development, U.S. Housing Market Conditions, "
+    "table 29, ‘‘Homeownership Rates by Age of Householder: 1982–Present’’ (3rd quarter 1999).",
+    "8. For additional information, see Glenn B. Canner and Dolores S. Smith, ‘‘Expanded HMDA "
+    "Data on Residential Lending: One Year Later,’’ Federal Reserve Bulletin, vol. 78 "
+    "(November 1992), pp. 801–24.",
+    "14. Tax data for the calculations came from David Campbell and Michael Parisi, "
+    "‘‘Individual Income Tax Returns, 1997,’’ Statistics of Income Bulletin (Fall 1999), "
+    "pp. 8–45.",
+]
+
+
+async def test_notes_standing_in_for_a_missing_list_keep_the_missing_section_warning():
+    """The notes stand in, but no list was located: the paper may print one
+    the locator missed, so REF_SECTION_NOT_FOUND stays and says what happened."""
+    assert fc.note_citations(_contents(_BULLETIN_NOTES)).citing_notes == 5
+    extractor = _extractor(_BULLETIN_NOTES)
+
+    with mock.patch(
+        "bibr.extract.ref_extractor.ReferenceExtractor._parse_references_ner_aligned", _fake_ner
+    ):
+        metadata = await extractor.extract_all_metadata()
+
+    assert len(metadata.references) == 5
+    warnings = extractor.contents.processing_warnings
+    assert _codes(extractor.contents) == [
+        WarningCode.REF_FOOTNOTE_CITATIONS,
+        WarningCode.REF_SECTION_NOT_FOUND,
+    ]
+    assert warnings[1].message.endswith("; the references were read from the notes")
+    # The list is still extracted; both codes qualify it.
+    bib = build_field_states(
+        present={"bib": True},
+        sources={},
+        scope=FieldScope(references_source="footnotes"),
+        issues=[],
+        warnings=warnings,
+    )["bib"]
+    assert (bib.state, bib.source, bib.issues) == (
+        "extracted",
+        "footnotes",
+        ("REF_FOOTNOTE_CITATIONS", "REF_SECTION_NOT_FOUND"),
+    )
+
+
+async def test_a_failed_notes_parse_keeps_the_missing_section_warning():
+    extractor = _extractor(_BULLETIN_NOTES)
+
+    with mock.patch(
+        "bibr.extract.ref_extractor.ReferenceExtractor._parse_references_ner_aligned",
+        side_effect=RuntimeError("tagger crashed"),
+    ):
+        metadata = await extractor.extract_all_metadata()
+
+    assert metadata.references == []
+    missing = [
+        warning
+        for warning in extractor.contents.processing_warnings
+        if warning.code == WarningCode.REF_SECTION_NOT_FOUND
+    ]
+    assert [warning.message.rsplit("; ", 1)[-1] for warning in missing] == [
+        "the reference list is empty"
+    ]
+
+
+def test_the_notes_warning_does_not_say_the_paper_prints_no_list():
+    """A numbered list typed as notes, or one the locator missed, is exported
+    from the notes too: the description names the locator, not the paper."""
+    description = DESCRIPTIONS[WarningCode.REF_FOOTNOTE_CITATIONS]
+
+    assert description.startswith("No reference list was located, or ")
+    assert "prints no reference list" not in description
+    assert (
+        "unless the references were read from the notes"
+        in (DESCRIPTIONS[WarningCode.REF_SECTION_NOT_FOUND])
+    )
+
+
 async def test_native_metadata_without_a_reference_section_reads_the_notes():
     from bibr.pipeline.stages.post_parse import _resolve_preparsed_references
 
@@ -724,7 +826,13 @@ async def test_native_metadata_without_a_reference_section_reads_the_notes():
 
     assert [ref.text_id for ref in metadata.references] == [102, 103, 105, 106, 107]
     assert ready == [metadata.references]
-    assert _codes(contents) == [WarningCode.REF_FOOTNOTE_CITATIONS]
+    assert _codes(contents) == [
+        WarningCode.REF_FOOTNOTE_CITATIONS,
+        WarningCode.REF_SECTION_NOT_FOUND,
+    ]
+    assert contents.processing_warnings[-1].message.endswith(
+        "; the references were read from the notes"
+    )
 
 
 async def test_a_reference_list_of_three_entries_is_never_supplemented():
@@ -748,6 +856,89 @@ async def test_a_one_entry_list_is_supplemented_only_past_fifteen_citing_notes()
 
     # Five citing notes do not outweigh a located list fifteen times.
     assert refs is listed
+
+
+# ---------------------------------------------------------------------------
+# A failure or a runaway note never costs the paper
+# ---------------------------------------------------------------------------
+
+
+def _notes_fail(contents):
+    raise RuntimeError("note scan crashed")
+
+
+async def test_a_failure_reading_the_notes_leaves_the_missing_section_as_before():
+    extractor = _extractor(_BULLETIN_NOTES)
+
+    with mock.patch("bibr.extract.ref_extractor.note_citations", _notes_fail):
+        metadata = await extractor.extract_all_metadata()
+
+    assert metadata.references == []
+    assert _codes(extractor.contents) == [WarningCode.REF_SECTION_NOT_FOUND]
+    assert extractor.contents.processing_warnings[0].message.endswith(
+        "; the reference list is empty"
+    )
+
+
+async def test_a_failure_reading_the_notes_on_the_native_path_leaves_the_missing_section():
+    from bibr.pipeline.stages.post_parse import _resolve_preparsed_references
+
+    contents = _contents(_BULLETIN_NOTES)
+
+    with mock.patch("bibr.extract.ref_extractor.note_citations", _notes_fail):
+        metadata = await _resolve_preparsed_references(
+            contents,
+            PaperMetadata(doi="", title="T"),
+            "deadbeef",
+            mock.MagicMock(),
+            None,
+            "ner",
+            settings=GlobalSettings(),
+        )
+
+    assert metadata.references == []
+    assert _codes(contents) == [WarningCode.REF_SECTION_NOT_FOUND]
+
+
+async def test_a_failure_reading_the_notes_keeps_a_short_located_list():
+    extractor = _extractor(_BULLETIN_NOTES)
+    listed = [_ref("Legal acts", None)]
+    extractor.refs.extract = AsyncMock(return_value=listed)
+
+    with mock.patch("bibr.extract.ref_extractor.note_citations", _notes_fail):
+        refs = await extractor._extract_references(pd.DataFrame({"text": ["x"]}))
+
+    assert refs is listed
+
+
+# One note of commentary running to thousands of characters, citing as it
+# goes (the shape of a law-review note): the split scan grows faster than
+# the note, so a note this long is not scanned at all.
+_COMMENTARY = (
+    "The court held that the doctrine applies where the parties agreed, as discussed in the "
+    "literature more generally, see J. Kany-Turpin, “Notre passé”, in A. Moser (ed.), Oxford: "
+    "Clarendon Press, 2005, p. 7. "
+)
+
+
+def test_a_note_too_long_to_be_a_citation_apparatus_is_not_scanned():
+    long_note = "12. " + _COMMENTARY * 60
+    assert 8_000 < len(long_note) < 20_000
+    scanned: list[int] = []
+    split = fc._split_citations
+
+    def spy(note):
+        scanned.append(len(note))
+        return split(note)
+
+    with mock.patch.object(fc, "_split_citations", spy):
+        found = fc.note_citations(_contents([*_BULLETIN_NOTES, long_note]))
+
+    assert max(scanned) < 1_000
+    assert len(scanned) == len(_BULLETIN_NOTES)
+    # The other notes are read as before, and the long one still counts as read.
+    assert (found.citing_notes, found.notes) == (5, 6)
+    assert [citation.text_id for citation in found.citations] == [102, 103, 104, 105, 106]
 
 
 # ---------------------------------------------------------------------------

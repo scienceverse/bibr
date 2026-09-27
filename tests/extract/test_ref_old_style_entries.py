@@ -2,14 +2,14 @@
 
 From dev-set scans (texts shortened from the real entries):
 
-* scans_eval80 W2084009407 (1930s author-year list): "Ehrke, G., 1931, Arch.
+* W2084009407 (1930s author-year list): "Ehrke, G., 1931, Arch.
   wissensch. Bot., 13, 221; 1932, 17, 650." holds two works; the second has no
   byline of its own, so the parser needs the byline in front of it.
-* scans_eval80 W1981667543: entries that open with the "same author" dash
+* W1981667543: entries that open with the "same author" dash
   ("-1931b. The cytological theory …") run on after the entry above, on the
   same line or on a new line of the same segment, in both the cascade's and
   the line stream's segments.
-* scans_eval80 W1512170573 (numbered physics list): one number holds several
+* W1512170573 (numbered physics list): one number holds several
   works, each with its own initials-first byline after the previous work's
   pages ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …"; "[30] J.F.
   Plebanski, …, 2511; J. Samuel, …"), and entries reach the parser cut into a
@@ -161,6 +161,39 @@ def test_lists_without_dash_entry_lines_are_left_alone():
     assert _split_inline_dash_entries(gost, None) == (gost, None, 0)
 
 
+def test_gost_year_areas_are_not_dash_entries():
+    # A transliterated GOST 7.1 list opens an entry's year area with a dash, on
+    # a line of its own or after the source's period, and can go on to the
+    # volume, issue or pages area without another dash (entries shortened, in
+    # the shape of the dev set's GOST lists).
+    gost = [
+        "Ivanov I. I. Proline accumulation under stress // Plant Soil.\n"
+        "– 1973. V. 39, No. 1. – P. 205–209.",
+        "Petrov P. P. Nitrogen uptake in wheat // Fiziologiya rastenii.\n"
+        "– 2013. T. 45, No. 2. – P. 113–121.",
+        "Sidorov S. S. Problems of technology // Vestnik SNO. – 2014. No. 3. – P. 105–106.",
+        "Smirnov A. A. Soil salinity // Agrokhimiya. – 2015. Vol. 5. – P. 152–159.",
+        "Orlov O. O. Seed yield // Selektsiya. – 2016. P. 12–15.",
+    ]
+
+    assert _split_inline_dash_entries(gost, None) == (gost, None, 0)
+
+
+def test_a_dash_entry_title_may_open_with_an_area_word():
+    entry = (
+        "Sax, K. 1932. Crossing over. J. Arn. Arb. 13: 180-212. -1934. No interlocking in"
+        " Trillium. Am. Nat. 68: 113-56."
+    )
+
+    strings, _, added = _split_inline_dash_entries([*_DASH_SEGMENTS, entry], None)
+
+    assert strings[-2:] == [
+        "Sax, K. 1932. Crossing over. J. Arn. Arb. 13: 180-212.",
+        "-1934. No interlocking in Trillium. Am. Nat. 68: 113-56.",
+    ]
+    assert added == 6
+
+
 @pytest.mark.parametrize(
     "entry",
     [
@@ -293,20 +326,22 @@ _NUMBERED_SEGMENTS = [
 def test_numbered_entries_are_made_whole_then_split_into_their_works():
     strings, dois, joined, added = _split_numbered_entry_works(_NUMBERED_SEGMENTS, [None] * 9)
 
+    # Each entry keeps its place with its first work; the later works follow
+    # the list, so no entry moves.
     assert strings == [
         "[16] F. Barbero, From Euclidean to Lorentzian general relativity: the real way, Phys."
         " Rev., D54 (1996), 1492-1499",
-        "T. Thiemann, Reality conditions inducing transforms for quantum gauge theory and"
-        " quantum gravity, Class, and Quant. Grav., 13 (1996), 1383-1404.",
         _NUMBERED_SEGMENTS[2],
         "[18] J.D. Bekenstein, Black holes and entropy, Phys. Rev., D7 (1973), 2333-2346.",
-        "J.D. Bekenstein, Generalized second law of thermodynamics in black hole physics, Phys."
-        " Rev., D9 (1974), 3292-3300.",
         _NUMBERED_SEGMENTS[5],
         "[20] J.F. Plebanski, J. Math. Phys., 18 (1977), 2511",
+        _NUMBERED_SEGMENTS[8],
+        "T. Thiemann, Reality conditions inducing transforms for quantum gauge theory and"
+        " quantum gravity, Class, and Quant. Grav., 13 (1996), 1383-1404.",
+        "J.D. Bekenstein, Generalized second law of thermodynamics in black hole physics, Phys."
+        " Rev., D9 (1974), 3292-3300.",
         "J. Samuel, Pra-mana J. Phys., 28 (1987), L429",
         "T. Jacobson and L. Smolin, Phys. Lett., B196 (1987), 39.",
-        _NUMBERED_SEGMENTS[8],
     ]
     assert dois == [None] * 10
     assert (joined, added) == (3, 4)
@@ -362,7 +397,7 @@ _OPEN_ENTRY = (
             "Romano, J.D., Spatial infinity, Class. Quant. Grav., 9 (1992), 1069-1100.",
             "[5]",
         ),
-        # scans_ci20 W2133176560: the OCR read "[5]" as "[S]", and the list
+        # W2133176560: the OCR read "[5]" as "[S]", and the list
         # prints [5] before [4].
         (
             "[3] DEMUROV (D. G.), VENEVTSEV (Yu. N.), K~ist~lgraphiya, 1971, 16, 168.",
@@ -376,7 +411,7 @@ _OPEN_ENTRY = (
             " Compounds. Pergamon PressOxford, 1969.",
             "[4]",
         ),
-        # audience_eval200 W4379468209: the entry above is whole; the fragment
+        # W4379468209: the entry above is whole; the fragment
         # ends the entry before it, which the reading order put earlier.
         (
             "[66] Y. Li, X. Huang, and G. Zhao, \u201cMicro-expression action unit detection with"
@@ -411,6 +446,46 @@ def test_a_fragment_joins_an_open_entry():
     assert strings[0] == f"{_OPEN_ENTRY} Grav., 1 (1984), L39-L41."
     assert strings[1:] == segments[2:]
     assert (joined, added) == (1, 0)
+
+
+# Entries of the same list that print several works, with one that prints one:
+# split, the later works would outnumber the numbered entries.
+_MOSTLY_MULTI_WORK = [
+    "[1] A. Ashtekar, New variables for classical and quantum gravity, Phys. Rev. Lett., 57"
+    " (1986), 2244-2247. A. Ashtekar, New Hamiltonian formulation of general relativity,"
+    " Phys. Rev., D36 (1987), 1587-1602.",
+    "[16] F. Barbero, From Euclidean to Lorentzian general relativity: the real way, Phys."
+    " Rev., D54 (1996), 1492-1499; T. Thiemann, Reality conditions inducing transforms for"
+    " quantum gauge theory and quantum gravity, Class, and Quant. Grav., 13 (1996), 1383-1404.",
+    _NUMBERED_SEGMENTS[2],
+    "[18] J.D. Bekenstein, Black holes and entropy, Phys. Rev., D7 (1973), 2333-2346.\nJ.D."
+    " Bekenstein, Generalized second law of thermodynamics in black hole physics, Phys. Rev.,"
+    " D9 (1974), 3292-3300.",
+    "[24] G. Immirzi, Quantum Gravity and Regge Calculus, Nucl. Phys. Proc. Suppl., 57 (1997),"
+    " 65-72; C. Rovelli, T. Thiemann, The Immirzi parameter in quantum general relativity,"
+    " Phys. Rev., D57 (1998), 1009-1014.",
+    "[30] J.F. Plebanski, J. Math. Phys., 18 (1977), 2511; J. Samuel, Pra-mana J. Phys., 28"
+    " (1987), L429; T. Jacobson and L. Smolin, Phys. Lett., B196 (1987), 39.",
+]
+
+
+def test_no_split_that_would_leave_the_list_numbers_in_the_parser_input():
+    # The parser input loses its list numbers only when most strings carry one
+    # (_strip_enum_markers): six later works beside six entries would keep
+    # "[1]" … in front of every byline.
+    strings, _, joined, added = _split_numbered_entry_works(_MOSTLY_MULTI_WORK, None)
+
+    assert (strings, joined, added) == (_MOSTLY_MULTI_WORK, 0, 0)
+    assert not any(text.startswith("[") for text in _strip_enum_markers(strings))
+
+
+def test_a_split_that_keeps_the_list_numbered_is_made():
+    segments = [*_MOSTLY_MULTI_WORK, *_NUMBERED_FROM_ONE[9:]]
+
+    strings, _, _, added = _split_numbered_entry_works(segments, None)
+
+    assert added == 6
+    assert not any(text.startswith("[") for text in _strip_enum_markers(strings))
 
 
 def test_unnumbered_lists_are_left_alone():
@@ -491,10 +566,216 @@ async def test_parser_gets_the_works_of_numbered_entries():
     # The parser reads each entry without its list number.
     works = _split_numbered_entry_works(_NUMBERED_SEGMENTS, None)[0]
     assert parsed == _strip_enum_markers(works)
-    assert parsed[:2] == [
+    assert [parsed[0], parsed[6]] == [
         "F. Barbero, From Euclidean to Lorentzian general relativity: the real way, Phys. Rev.,"
         " D54 (1996), 1492-1499",
         "T. Thiemann, Reality conditions inducing transforms for quantum gauge theory and"
         " quantum gravity, Class, and Quant. Grav., 13 (1996), 1383-1404.",
     ]
     assert len(refs) == 10
+
+
+# The same entries numbered from [1], then six one-work entries of the same list
+# (a numbered list cited by position when its references map to no row).
+_NUMBERED_FROM_ONE = [
+    *(
+        segment.replace(f"[{number}]", f"[{number - 15}]")
+        for segment, number in zip(
+            _NUMBERED_SEGMENTS, [16, 0, 17, 18, 0, 19, 20, 0, 21], strict=True
+        )
+    ),
+    "[7] S.W. Hawking, Particle creation by black holes, Commun. Math. Phys., 43 (1975), 199-220.",
+    "[8] K. Krasnov, Quantum geometry and thermal radiation form black Holes, Class. Quantum."
+    " Grav., 16 (1999), 563.",
+    "[9] D. Marolf and J. Mourao, On the support of the Ashtekar-Lewandowski measure, Commun."
+    " Math. Phys., 170 (1995), 583-605.",
+    "[10] A. Momen, Edge dynamics for BF theories and gravity, Phys. Lett., B394 (1997), 269-274.",
+    "[11] L. Smolin, Linking topological quantum field theory and nonperturbative quantum"
+    " gravity, J. Math. Phys., 36 (1995), 6417-6455.",
+    "[12] V.O. Solovev, How canonical are Ashtekar variables?, Phys. Lett., B292 (1992), 30-34.",
+]
+
+
+def _numbered_list_contents() -> PaperContents:
+    body = [
+        PaperSentence(text_id=n, text=f"Result {n} holds [{n}].", section_id=1, paragraph_id=0)
+        for n in range(1, 13)
+    ]
+    rows, summaries = [], []
+    for index, text in enumerate(_NUMBERED_FROM_ONE):
+        bbox = (45.0, 100.0 + 100 * index, 560.0, 180.0 + 100 * index)
+        summaries.append(RegionSummary(page=1, index=index, label="reference_content", bbox=bbox))
+        rows.append(
+            PaperSentence(
+                text_id=100 + index,
+                text=text,
+                section_id=2,
+                paragraph_id=1 + index,
+                page_number=1,
+                provenance=[Provenance(page_no=1, bbox=bbox)],
+                region_meta={"region_type": "reference_content"},
+            )
+        )
+    contents = PaperContents(
+        sentences=[*body, *rows],
+        sections=[
+            PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
+            PaperSection(1, "Introduction", 1, 0, CanonicalSection.INTRODUCTION),
+            PaperSection(2, "References", 1, 0, CanonicalSection.REFERENCES),
+        ],
+        tables=[],
+        links=[],
+        sections_text={},
+        region_summaries=summaries,
+        ref_page_lines=[],
+    )
+    contents.ref_line_geometry = [{"text": "x"}]
+    return contents
+
+
+@pytest.mark.parametrize("titled", [True, False], ids=["titled", "untitled"])
+async def test_printed_numbers_still_cite_their_entries_after_the_split(titled):
+    """Each "[n]" in the text links to entry n's first work, however many works came before.
+
+    Titled: the references map to their rows, whose printed numbers the linker
+    reads, so a later work must not claim its entry's number too. Untitled: the
+    linker counts positions, so no later work may sit before a later entry.
+    """
+    from bibr.structure.citation_linker import detect_bib_xrefs_with_receipt
+
+    contents = _numbered_list_contents()
+    df = contents.sentences_df
+    ref_df = df[df["section_id"] == 2]
+    extractor = ReferenceExtractor(
+        contents, file_hash="h", llm_client=MagicMock(), seg_strategy="geom", parse_strategy="ner"
+    )
+
+    def row_spans(ref_text: str) -> list[tuple[int, int]]:
+        spans, position = [], 0
+        for row in _NUMBERED_FROM_ONE:
+            spans.append((position, position + len(row)))
+            position += len(row) + 1
+        return spans
+
+    segmenter = MagicMock()
+    segmenter.segment_spans.side_effect = lambda ref_text, _lines: (
+        row_spans(ref_text),
+        0.99,
+        15,
+        15,
+    )
+
+    def parse_batch(texts: list[str]) -> list[dict]:
+        # The byline as authors; the text up to the first comma after it as a
+        # title (found in the entry's row) only for a titled list.
+        out = []
+        for text in texts:
+            authors, _, rest = text.partition(", ")
+            out.append({"title": rest[:30] if titled else "", "authors": authors})
+        return out
+
+    parser = MagicMock()
+    parser.parse_batch.side_effect = parse_batch
+    with (
+        patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=segmenter),
+        patch("bibr.extract.ref_extractor._get_ner_parser", return_value=parser),
+        patch("bibr.extract.ref_extractor.build_line_stream", return_value=None),
+    ):
+        refs = await extractor.extract(ref_df)
+
+    assert len(refs) == 16
+    # The later works follow the list and map to no row.
+    assert [(ref.authors, ref.text_id) for ref in refs[12:]] == [
+        ("T. Thiemann", None),
+        ("J.D. Bekenstein", None),
+        ("J. Samuel", None),
+        ("T. Jacobson and L. Smolin", None),
+    ]
+    xrefs, _ = await detect_bib_xrefs_with_receipt(contents.sentences, contents.sections, refs)
+    cited = {xref.text_id: refs[xref.xref_id - 1].authors for xref in xrefs}
+    assert cited == {
+        1: "F. Barbero",
+        2: "J.W. Bardeen",
+        3: "J.D. Bekenstein",
+        4: "R. Gambini",
+        5: "J.F. Plebanski",
+        6: "T. Regge and C. Teitelboim",
+        7: "S.W. Hawking",
+        8: "K. Krasnov",
+        9: "D. Marolf and J. Mourao",
+        10: "A. Momen",
+        11: "L. Smolin",
+        12: "V.O. Solovev",
+    }
+
+
+async def test_link_dois_not_one_per_segment_are_not_placed_by_position():
+    """The line stream's link DOIs are one per stream entry; when an entry read
+    twice is dropped, they no longer line up with the segments, and the parse
+    must not attach them by position."""
+    from bibr.extract.ref_extractor import _StreamChoice
+
+    contents = _numbered_list_contents()
+    df = contents.sentences_df
+    ref_df = df[df["section_id"] == 2]
+    extractor = ReferenceExtractor(
+        contents, file_hash="h", llm_client=MagicMock(), seg_strategy="geom", parse_strategy="ner"
+    )
+    # [7] … [12], with [8] read twice; only [9] prints a link.
+    entries = [_NUMBERED_FROM_ONE[9], *_NUMBERED_FROM_ONE[10:11] * 2, *_NUMBERED_FROM_ONE[11:]]
+    link_dois = [None, None, None, "10.1000/marolf", None, None, None]
+    stream_text = "\n".join(entries)
+    spans = []
+    for entry in entries:
+        start = stream_text.find(entry)
+        spans.append((start, start + len(entry)))
+
+    def stream_choice(_ref_df, _ref_text, _ref_strings, _seg_strategy):
+        return _StreamChoice(
+            selected=True,
+            ref_text=stream_text,
+            ref_strings=list(entries),
+            spans=tuple(spans),
+            link_dois=list(link_dois),
+        )
+
+    def row_spans(ref_text: str) -> list[tuple[int, int]]:
+        out, offset = [], 0
+        for row in _NUMBERED_FROM_ONE:
+            out.append((offset, offset + len(row)))
+            offset += len(row) + 1
+        return out
+
+    segmenter = MagicMock()
+    segmenter.segment_spans.side_effect = lambda ref_text, _lines: (
+        row_spans(ref_text),
+        0.99,
+        15,
+        15,
+    )
+
+    def parse_batch(texts: list[str]) -> list[dict]:
+        out = []
+        for text in texts:
+            authors, _, rest = text.partition(", ")
+            out.append({"title": rest[:30], "authors": authors})
+        return out
+
+    parser = MagicMock()
+    parser.parse_batch.side_effect = parse_batch
+    with (
+        patch("bibr.extract.ref_extractor._get_geom_segmenter", return_value=segmenter),
+        patch("bibr.extract.ref_extractor._get_ner_parser", return_value=parser),
+        patch.object(ReferenceExtractor, "_consider_line_stream", side_effect=stream_choice),
+    ):
+        refs = await extractor.extract(ref_df)
+
+    assert [ref.authors for ref in refs] == [
+        "S.W. Hawking",
+        "K. Krasnov",
+        "D. Marolf and J. Mourao",
+        "A. Momen",
+        "L. Smolin",
+        "V.O. Solovev",
+    ]
+    assert [(ref.authors, ref.doi) for ref in refs if ref.doi] == []

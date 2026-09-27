@@ -475,7 +475,7 @@ async def _resolve_preparsed_references(
         _notify_references(on_references_ready, paper_metadata.references)
         return paper_metadata
 
-    from bibr.extract.extractor import MetadataExtractor
+    from bibr.extract.extractor import MetadataExtractor, reference_section_not_found
 
     extractor = MetadataExtractor(
         contents,
@@ -501,16 +501,16 @@ async def _resolve_preparsed_references(
                 from bibr.validation import mark_references_incomplete
 
                 mark_references_incomplete(paper_metadata, exc)
+                contents.processing_warnings.append(
+                    reference_section_not_found(e, from_notes=False)
+                )
                 return paper_metadata
             if paper_metadata.references:
+                contents.processing_warnings.append(reference_section_not_found(e, from_notes=True))
                 _notify_references(on_references_ready, paper_metadata.references)
                 return paper_metadata
         logger.warning(f"Reference section not found: {e}")
-        contents.processing_warnings.append(
-            ProcessingWarning(
-                WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
-            )
-        )
+        contents.processing_warnings.append(reference_section_not_found(e, from_notes=False))
         return paper_metadata
     except ProcessingError:
         raise

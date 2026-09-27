@@ -478,15 +478,21 @@ def drop_parallel_title(title: str, printed_text: str) -> tuple[str, ValidationI
     joined versions, the one that occurs first in *printed_text* (the selected
     record's text in reading order). A joined version the page does not print
     as such (a translation of the model's own, or a half carrying words it
-    added) leaves the whole title alone, as does anything else.
+    added) leaves the whole title alone, as does a title before its brackets
+    that is not printed, or is printed only after its bracketed translation,
+    and anything else. The bracketed translation may be the model's own.
     """
 
     stripped = title.strip()
     kept: str | None = None
     bracketed = _BRACKETED_VERSION_RE.fullmatch(stripped)
     if bracketed is not None:
-        if _are_language_versions(bracketed.group("first"), bracketed.group("other")):
-            kept = bracketed.group("first")
+        first, other = bracketed.group("first"), bracketed.group("other")
+        if _are_language_versions(first, other):
+            printed = f" {_normalize(printed_text)} "
+            first_at, other_at = (printed.find(f" {_normalize(part)} ") for part in (first, other))
+            if first_at >= 0 and not 0 <= other_at < first_at:
+                kept = first
     else:
         versions = _VERSION_JOIN_RE.split(stripped)
         if len(versions) == 2 and _are_language_versions(*versions):

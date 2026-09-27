@@ -39,7 +39,8 @@ class PdfPageInspection:
     crop_box: tuple[float, float, float, float]
     char_count: int
     # A scan whose text layer is a hidden OCR layer (see
-    # ``_is_invisible_text_layer_page``): no text-layer data is read from it.
+    # ``_is_invisible_text_layer_page``): no text-layer data is read from it,
+    # apart from the regions' OCR fallback text (``_invisible_layer_text``).
     invisible_text_layer: bool = False
 
 
@@ -82,7 +83,9 @@ def inspect_pdf(
 
     With *reject_invisible_text_layer*, a scanned page whose text layer is an
     invisible OCR layer is read like a page without one: no native fill, font
-    metadata or text lines come from it, so OCR reads its regions.
+    metadata or text lines come from it, so OCR reads its regions. The text
+    the fill would have taken stays on each region as the fallback OcrStage
+    uses when OCR returns nothing for the page.
     """
     import pypdfium2
 
@@ -153,6 +156,20 @@ def inspect_pdf(
                                         textpage, crop_box, char_count, regions, rotation
                                     )
                                     _fill_page_regions_from_textpage(
+                                        textpage,
+                                        crop_box,
+                                        regions,
+                                        min_chars=min_chars,
+                                        eligible_labels=eligible_labels,
+                                        min_printable_ratio=min_printable_ratio,
+                                        page_idx=page_index,
+                                        rotation=rotation,
+                                    )
+                                except Exception as exc:  # noqa: BLE001
+                                    component_errors[f"native_text:{page_index}"] = _error_text(exc)
+                            elif fill_native_text:
+                                try:
+                                    _keep_layer_text_as_ocr_fallback(
                                         textpage,
                                         crop_box,
                                         regions,
@@ -244,6 +261,22 @@ def inspect_pdf(
 
 def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"[:500]
+
+
+def _keep_layer_text_as_ocr_fallback(textpage, crop_box, regions: list[dict], **fill) -> None:
+    """Keep a flagged scan page's layer text as each region's OCR fallback.
+
+    The page is read by OCR, but its invisible layer is what the native fill
+    read before: the text the fill would take goes into
+    ``_invisible_layer_text``, and OcrStage uses it only when OCR returns
+    nothing for the page (an outage), so the page is never blanker than the
+    layer. The fill runs on copies, so the regions stay unfilled.
+    """
+    candidates = [dict(region) for region in regions]
+    _fill_page_regions_from_textpage(textpage, crop_box, candidates, **fill)
+    for region, candidate in zip(regions, candidates, strict=True):
+        if candidate.get("_native_text_used"):
+            region["_invisible_layer_text"] = candidate["content"]
 
 
 def _break_wrapped_lines(

@@ -105,6 +105,18 @@ def _notify_references_ready(
         logger.warning("on_references_ready callback failed", exc_info=True)
 
 
+def reference_section_not_found(error: ValueError, *, from_notes: bool) -> ProcessingWarning:
+    """``REF_SECTION_NOT_FOUND`` for a locator that found no reference list.
+
+    It stays when the notes' citations stand in (*from_notes*): the paper may
+    still print a list the locator missed.
+    """
+    outcome = (
+        "the references were read from the notes" if from_notes else "the reference list is empty"
+    )
+    return ProcessingWarning(WarningCode.REF_SECTION_NOT_FOUND, f"{error}; {outcome}")
+
+
 async def _cancel_and_await(*tasks: asyncio.Task) -> None:
     """Cancel unfinished sibling tasks and always retrieve their results."""
 
@@ -294,7 +306,7 @@ class MetadataExtractor:
         ref_collection_error: Exception | None = None
         # Without a reference section, the notes' citations may stand in for it.
         from_notes = None
-        missing_section = None
+        missing_section: ValueError | None = None
         if parse_strategy == "off":
             logger.info("Reference extraction disabled (refs=off)")
         else:
@@ -302,12 +314,10 @@ class MetadataExtractor:
                 ref_df = self._collect_reference_rows()
             except ValueError as e:
                 from_notes = self.refs.note_citations_for(0)
-                missing_section = ProcessingWarning(
-                    WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
-                )
+                missing_section = e
                 if from_notes is None:
                     logger.warning(f"Reference section not found: {e}")
-                    self._record_warning(missing_section)
+                    self._record_warning(reference_section_not_found(e, from_notes=False))
                 else:
                     logger.info(f"Reference section not found ({e}); reading the notes")
             except Exception as e:  # noqa: BLE001 — preserve core, mark incomplete below
@@ -343,6 +353,13 @@ class MetadataExtractor:
             ref_result = await _await_core_and_reference_tasks(core_task, ref_task)
             core_time = time.monotonic() - t0
             refs_time = core_time  # concurrent, so same wall clock
+            if from_notes is not None and missing_section is not None:
+                self._record_warning(
+                    reference_section_not_found(
+                        missing_section,
+                        from_notes=isinstance(ref_result, list) and bool(ref_result),
+                    )
+                )
 
             if isinstance(ref_result, ProcessingError):
                 raise ref_result
@@ -362,8 +379,6 @@ class MetadataExtractor:
                 )
             elif self.metadata is not None:
                 self.metadata.references = ref_result
-                if from_notes is not None and not ref_result and missing_section is not None:
-                    self._record_warning(missing_section)
             else:
                 logger.error(
                     f"Core metadata missing after extraction — "

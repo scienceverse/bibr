@@ -541,6 +541,7 @@ def ocr_page_regions(
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
     warning_sink: Callable[[ProcessingWarning], None] | None = None,
+    layer_fallback_sink: Callable[[int], None] | None = None,
 ) -> Coroutine[None, None, list[dict]]:
     """OCR all regions on a single page (shared between LitServe and local pipelines).
 
@@ -551,6 +552,11 @@ def ocr_page_regions(
     slots and filling them in after OCR completes.
     Regions pre-filled by ``fill_regions_from_native_text`` (flagged with
     ``_native_text_used=True``) are emitted directly without an OCR call.
+
+    On a scanned page whose invisible OCR layer was set aside (regions carry
+    ``_invisible_layer_text``), a page for which OCR returns no text at all
+    takes each region's layer text instead, and ``layer_fallback_sink`` gets
+    the page index.
 
     ``include_figures`` overrides ``Settings.FIGURE_IMAGES`` for this request
     when not None.
@@ -566,6 +572,7 @@ def ocr_page_regions(
         settings=settings,
         profile=profile,
         warning_sink=warning_sink,
+        layer_fallback_sink=layer_fallback_sink,
     )
 
 
@@ -581,6 +588,7 @@ async def _ocr_page_regions_impl(
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
     warning_sink: Callable[[ProcessingWarning], None] | None = None,
+    layer_fallback_sink: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Implementation of ocr_page_regions; see public wrapper for documentation.
 
@@ -796,6 +804,26 @@ async def _ocr_page_regions_impl(
                 raw_content=raw_content,
                 finish_reason=finish_reason,
             ).to_dict()
+
+        # A scanned page whose invisible OCR layer was set aside (see
+        # ``inspect_pdf``) was read from that layer before. When OCR returns no
+        # text for any of its regions (an outage: blank answers, or errors
+        # after the retries), each region takes the layer text as the native
+        # fill would have, rather than leaving the page blank. One region read
+        # by OCR means OCR works, so the layer stays out.
+        layer_tasks = [task for task in ocr_tasks if task[1].get("_invisible_layer_text")]
+        if layer_tasks and not any(
+            region_list[slot_map[task[0]]]["content"].strip() for task in ocr_tasks
+        ):
+            for orig_idx, region, *_ in layer_tasks:
+                slot_idx = slot_map[orig_idx]
+                region_list[slot_idx] = OcrRegionResult.from_layout_region(
+                    {**region, "_native_text_used": True},
+                    slot_idx=slot_idx,
+                    content=region["_invisible_layer_text"],
+                ).to_dict()
+            if layer_fallback_sink is not None:
+                layer_fallback_sink(page_idx)
 
     # All slots are filled by this point — `None` placeholders only exist
     # mid-loop while OCR is in flight.
@@ -1106,6 +1134,7 @@ class OcrStage:
         profile: OcrProfile = ctx.scratch["ocr_profile"]
         try:
             fs_t0 = time.monotonic()
+            layer_fallback_pages: list[int] = []
             page_coros = [
                 ocr_page_regions(
                     page_img,
@@ -1118,6 +1147,7 @@ class OcrStage:
                     settings=ctx.settings,
                     profile=profile,
                     warning_sink=fs.warnings.append,
+                    layer_fallback_sink=layer_fallback_pages.append,
                 )
                 for orig_idx, page_img, regions in zip(
                     fs.page_indices, fs.page_images, fs.layout_results, strict=True
@@ -1186,6 +1216,15 @@ class OcrStage:
                     exc=errors[0],
                 )
                 return
+
+            if layer_fallback_pages:
+                logger.warning(
+                    "OCR returned no text for %d scanned page(s) of %s (pages %s); "
+                    "read them from their invisible text layer instead",
+                    len(layer_fallback_pages),
+                    fs.path.name,
+                    ", ".join(str(index + 1) for index in sorted(layer_fallback_pages)),
+                )
 
             first_idx = fs.page_indices[0] if fs.page_indices else 0
             # Pure synchronous regex/text work over every region of the file.

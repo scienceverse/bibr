@@ -605,10 +605,14 @@ def _split_case_joins(value: str) -> str:
     return _LETTER_RUN_RE.sub(lambda match: " ".join(_case_join_words(match.group(0))), value)
 
 
-# Han, kana and Hangul. A name in these scripts prints as one unspaced token
-# ("奥山正司", "王伟") or letter-spaced, one character per token ("奥　山　正　司"),
-# while the extracted author splits it into family and given name.
-_CJK_NAME_RE = re.compile("[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+")
+# Han, kana and Hangul, plus the ideographic iteration and closing marks and
+# the ideographic zero (々 in "佐々木"). A name in these scripts prints as one
+# unspaced token ("奥山正司", "王伟") or letter-spaced, one character per token
+# ("奥　山　正　司"), while the extracted author splits it into family and given
+# name.
+_CJK_NAME_RE = re.compile(
+    "[\u3005-\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
+)
 
 
 def _name_tokens(value: str) -> tuple[str, ...]:

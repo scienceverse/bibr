@@ -2395,14 +2395,14 @@ class GlobalSettings(_BibrSettings):
         "(segmenter-agnostic, post-segmentation merged-reference splitter).",
     )
     # Law, history and much of the humanities cite in notes and print no
-    # reference list. With no list found, or one of at most two entries, and
-    # at least five notes citing works in full, the notes' citations become
-    # the reference list (bibr.extract.footnote_citations).
+    # reference list. With no list found, or one that parses to at most two
+    # references, and at least five notes citing works in full, the notes'
+    # citations become the reference list (bibr.extract.footnote_citations).
     REF_FOOTNOTE_CITATIONS: bool = Field(
         True,
         description="Read the reference list from the citations in the paper's footnotes and "
-        "endnotes when no reference list is found, or one of at most two entries, and at least "
-        "five notes cite works in full.",
+        "endnotes when no reference list is found, or one that parses to at most two references, "
+        "and at least five notes cite works in full.",
     )
     # Layout-region anchor segmentation, the zero-cost fallback tier between
     # LLM seg and the CRF last resort: reference_content region onsets are

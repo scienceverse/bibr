@@ -141,6 +141,23 @@ def _dated_years(text: str, shielded: list[tuple[int, int]]) -> set[int]:
     return years
 
 
+def _year_shields(fields: dict[str, Any], text: str) -> list[tuple[int, int]]:
+    """Spans of ``text`` whose years are not the reference's own.
+
+    Access dates, URLs and the tagged title: a year inside the title is the
+    title's ("… in China, 2016", "Cassiopea xamachana (Bigelow, 1892)
+    jellyfish").
+    """
+    shielded = [m.span() for m in _ACCESS_PHRASE_RE.finditer(text)]
+    shielded += [m.span() for m in _URL_RE.finditer(text)]
+    title = fields.get("title")
+    if isinstance(title, str) and title.strip():
+        at = text.find(title.strip())
+        if at >= 0:
+            shielded.append((at, at + len(title.strip())))
+    return shielded
+
+
 # Typographic double quotes that open a quoted title, with the characters that
 # close each. Single quotes are left alone (they double as apostrophes and as
 # the inner quotes of a title that starts with a quotation), and so are
@@ -272,6 +289,11 @@ _AUTHOR_DASH_TITLE_RE = re.compile(
     r"^(?P<author>[^\W\d_][\w'’.-]*(?:\s[\w'’.-]+)?,\s*[^\W\d_][\w'’.-]*(?:\s[\w'’.-]+){0,3})"
     r"\s+[—–]\s+(?P<title>\S.*)$"
 )
+# "SCHMIDT, Ondřej", "Clark, K. B", "FORNASIN, Alessio – MANFREDINI, Matteo":
+# a co-author list joined by spaced dashes (Czech, Slovak, Hungarian and
+# Romanian styles), not a title.
+_DASH_NAME = r"[^\W\d_][\w'’‟-]*(?:\s[^\W\d_][\w'’‟-]*)?,\s*[^\W\d_][\w'’.-]*(?:\s[\w'’.-]+){0,2}"
+_DASH_NAME_LIST_RE = re.compile(rf"{_DASH_NAME}(?:\s+[—–]\s+{_DASH_NAME})*\.?")
 
 
 def _rule_author_dash_title(fields: dict[str, Any], _text: str) -> bool:
@@ -282,7 +304,7 @@ def _rule_author_dash_title(fields: dict[str, Any], _text: str) -> bool:
     if not isinstance(authors, str):
         return False
     match = _AUTHOR_DASH_TITLE_RE.match(authors.strip())
-    if match is None:
+    if match is None or _DASH_NAME_LIST_RE.fullmatch(match.group("title").strip()):
         return False
     title = _clean_cut(match.group("title")).rstrip(".")
     if not _has_word(title, 3):
@@ -290,6 +312,11 @@ def _rule_author_dash_title(fields: dict[str, Any], _text: str) -> bool:
     fields["authors"] = match.group("author").strip()
     fields["title"] = title
     return True
+
+
+# A web phrase that still waits for its URL ("disponível em", "Retrieved
+# from", "Available at:"): no title ends in one.
+_DANGLING_LOCATOR_RE = re.compile(r"(?:\b(?:at|from|on|em)|:)\s*$", re.IGNORECASE)
 
 
 def _url_cut(title: str) -> int | None:
@@ -307,7 +334,14 @@ def _url_cut(title: str) -> int | None:
         close = title.find(")", cut)
         if close >= 0 and _LETTER_RE.search(title[close + 1 :]):
             return None
-    if not _web_only(title[cut:]):
+    tail = title[cut:]
+    if not _web_only(tail):
+        return None
+    if not (_URL_RE.search(tail) or re.search(r"\d", tail) or _DANGLING_LOCATOR_RE.search(tail)):
+        # "Episodic memories are reconstructed, not retrieved": a web phrase
+        # with neither a URL nor a date after it is the title's own last word,
+        # unless it is left hanging ("Versão traduzida disponível em", the URL
+        # tagged apart).
         return None
     return cut
 
@@ -318,8 +352,9 @@ def _rule_title_url_tail(fields: dict[str, Any], _text: str) -> bool:
     "Traditional, Complementary and Integrative Medicine https://www.who.int/…"
     and "Brexit: UK Leaves the European Union. Accessed March 20, 2020": the
     tagger ran the title into the web locator. Fires only when everything from
-    the URL or web phrase on is web locator and date (so "Terrorist Content
-    Online: Safeguards …" and "PAN retrieved from MIPAS …" keep their titles).
+    the URL or web phrase on is web locator and date, and that tail holds a URL
+    or a date (so "Terrorist Content Online: Safeguards …", "PAN retrieved from
+    MIPAS …" and "… reconstructed, not retrieved" keep their titles).
     """
     title = fields.get("title")
     if not isinstance(title, str):
@@ -389,8 +424,11 @@ _DATELINE_DATE = (
     rf"(?:\d{{1,2}}\.\d{{1,2}}\.(?:19|20)\d{{2}}"
     rf"|(?:{_EN_MONTHS})\.?(?:\s*/\s*(?:{_EN_MONTHS})\.?)?\s+(?:\d{{1,2}},\s+)?(?:19|20)\d{{2}})"
 )
+# The outlet opens a new sentence after the title: a comma there is the
+# title's own place-and-date ending ("… - Skagit County, Washington, March
+# 2020", "Progress report, Phase II, March 2019").
 _DATELINE_TAIL_RE = re.compile(
-    rf"(?P<sep>[.,])\s+(?P<container>[^.,\[\]]{{2,60}}?)[.,]\s+(?P<date>{_DATELINE_DATE})\.?\s*$",
+    rf"\.\s+(?P<container>[^.,\[\]]{{2,60}}?)[.,]\s+(?P<date>{_DATELINE_DATE})\.?\s*$",
     re.IGNORECASE,
 )
 _BARE_DATE_TAIL_RE = re.compile(
@@ -484,9 +522,12 @@ def _rule_title_translation_bracket(fields: dict[str, Any], _text: str) -> bool:
     return True
 
 
+# The note ends the title when a period, comma or semicolon (or nothing)
+# follows it; a colon after it opens the subtitle ("… fabrica (Latin): On the
+# fabric …"), so the note is inside the title.
 _LANGUAGE_NOTE_RE = re.compile(
     rf"\s*[(\[]\s*(?:in\s+)?(?:{_LANGUAGES})(?:\s+(?:language|text|version))?\s*[)\]]"
-    r"(?=\s*(?:[.,;:]|$))",
+    r"(?=\s*(?:[.,;]|$))",
     re.IGNORECASE,
 )
 
@@ -552,12 +593,16 @@ _YEAR_NOTES_TAIL_RE = re.compile(
 )
 
 
-def _rule_title_year_tail(fields: dict[str, Any], _text: str) -> bool:
+def _rule_title_year_tail(fields: dict[str, Any], text: str) -> bool:
     """ "Title, 2024. <notes>" when no year was tagged: the year ends the title.
 
     The tagger found no year, and the title carries ", YYYY." / ". YYYY."
     followed by more text (product notes, "488 f. Tese ..."): the year is the
-    reference's own and everything from it on is not title text.
+    reference's own and everything from it on is not title text. When a
+    capitalised phrase follows the year and the reference prints a different
+    year as a date outside the title ("… Niigata Earthquake of June 16, 1964.
+    Part 2. … Bull. Earthq. Res. Inst. 43, 237–239 (1965)."), the year is the
+    title's own and the rule leaves it to ``year_from_text``.
     """
     if fields.get("year"):
         return False
@@ -570,8 +615,16 @@ def _rule_title_year_tail(fields: dict[str, Any], _text: str) -> bool:
     head = _clean_cut(match.group("head"))
     if len(head.split()) < 2 or not _has_word(match.group("rest"), 2):
         return False
+    year = int(match.group("year"))
+    if match.group("rest")[:1].isupper():
+        # Volume, pages or thesis notes after the year ("17, 386", "264f.",
+        # "no 57") keep it the reference's even when a later year prints: a
+        # segment holding two works shows the second work's year there.
+        outside = _dated_years(text, _year_shields(fields, text))
+        if outside and year not in outside:
+            return False
     fields["title"] = head
-    fields["year"] = int(match.group("year"))
+    fields["year"] = year
     return True
 
 
@@ -656,16 +709,7 @@ def _rule_year_from_text(fields: dict[str, Any], text: str) -> bool:
         # In-press references carry no year; Vancouver "2024;171:54" tails are
         # filled more precisely by the finalize step's backfill.
         return False
-    shielded = [m.span() for m in _ACCESS_PHRASE_RE.finditer(text)]
-    shielded += [m.span() for m in _URL_RE.finditer(text)]
-    title = fields.get("title")
-    if isinstance(title, str) and title.strip():
-        # A year inside the title is the title's ("… in China, 2016",
-        # "Cassiopea xamachana (Bigelow, 1892) jellyfish").
-        at = text.find(title.strip())
-        if at >= 0:
-            shielded.append((at, at + len(title.strip())))
-    years = _dated_years(text, shielded)
+    years = _dated_years(text, _year_shields(fields, text))
     if len(years) != 1:
         return False
     fields["year"] = years.pop()

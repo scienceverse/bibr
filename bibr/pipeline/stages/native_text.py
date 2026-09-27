@@ -37,6 +37,25 @@ def _first_page_native_text(layout_results) -> str:
     return "\n".join(str(r.get("content") or "") for r in layout_results[0])
 
 
+def _log_invisible_layer_errors(name: str, component_errors: dict[str, str]) -> None:
+    """Report, once per document, pages whose invisible-layer check failed.
+
+    Such a page keeps its text layer, as before the check existed; without the
+    log an old PDFium build lacking the needed APIs disables the check unseen.
+    """
+    errors = [
+        error for key, error in component_errors.items() if key.startswith("invisible_text_layer:")
+    ]
+    if errors:
+        logger.info(
+            "Invisible OCR-layer detection failed on %d page(s) of %s; they keep their "
+            "text layer (%s)",
+            len(errors),
+            name,
+            errors[0],
+        )
+
+
 class NativeTextStage:
     name = "native_text"
     # FileState fields consumed / populated (see validate_stage_contracts).
@@ -108,6 +127,7 @@ class NativeTextStage:
             invisible_layer_pages += sum(
                 1 for page in inspection.pages if page.invisible_text_layer
             )
+            _log_invisible_layer_errors(fs.path.name, inspection.component_errors)
 
         if native_skip_total:
             logger.info(

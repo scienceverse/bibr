@@ -3,12 +3,12 @@
 Each case is a dev-set scan or native PDF whose list the locator took from the
 wrong place or missed (texts shortened from the real rows):
 
-* scans_ci20 W2122660901 / W2095946572: the scanned page opens with the end of
+* W2122660901 / W2095946572: the scanned page opens with the end of
   the previous article, whose list sits above this paper's title under the
   same "References" heading.
-* scans_eval80 W2037590930: "Bibliography.—1." is printed run-in inside the
+* W2037590930: "Bibliography.—1." is printed run-in inside the
   closing section, so no section is headed by it.
-* scans_eval80 W4312442100: the layout model read the hanging-indent list as
+* W4312442100: the layout model read the hanging-indent list as
   two tables, so the "References" heading heads no rows.
 """
 

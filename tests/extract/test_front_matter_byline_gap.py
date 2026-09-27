@@ -13,10 +13,13 @@ import pytest
 from bibr.extract.core_metadata import render_author_context, render_block_context
 from bibr.extract.front_matter import (
     BYLINE_PROBATION_ROLE,
+    FrontRolePolicy,
+    _front_gap_heading_is_byline,
     collect_front_matter_candidates,
     group_front_matter_blocks,
     resolve_front_matter,
 )
+from bibr.extract.front_role import FrontRolePredictions, RoleScores
 from bibr.paper_contents import (
     CanonicalSection,
     PaperContents,
@@ -95,7 +98,7 @@ GRID_TITLE = "AssertCoder: LLM-Based Assertion Generation via Multimodal Specifi
 
 
 def _grid_byline_contents(*, closing_type: CanonicalSection | None) -> PaperContents:
-    """audience_eval200/W4414739865: a 2x2 IEEE author grid, one heading per cell."""
+    """W4414739865: a 2x2 IEEE author grid, one heading per cell."""
 
     sections = [
         _section(0, "Root", CanonicalSection.UNKNOWN, top=0.0),
@@ -173,7 +176,7 @@ NULLING_TITLE = "Meta-Learner with Linear Nulling"
 
 
 def test_name_over_email_cells_join_the_front_matter():
-    """audience_eval200/W2807000842: three name-over-address columns.
+    """W2807000842: three name-over-address columns.
 
     The parser made the first and last cells headings and left the middle one
     as a paragraph under the first; the classifier typed the first an endnote.
@@ -223,7 +226,7 @@ ORIENTATION_TITLE = "Adaptation-induced sharpening of orientation tuning curves 
 
 
 def test_byline_merged_into_a_correspondence_paragraph_is_admitted_on_its_first_region():
-    """audience_eval200/W4390186873: reading order put the byline row after the
+    """W4390186873: reading order put the byline row after the
     "- Corresponding author:" heading, and the paragraph join merged it with the
     correspondence rows. The heading is typed acknowledgment; the abstract is on
     page 2."""
@@ -386,10 +389,10 @@ def _title_page_with_byline(gap_header: str, gap_text: str, *, regions: int = 0)
 @pytest.mark.parametrize(
     "gap_header",
     [
-        "Author Note",  # audience_ci60/osf_cv6px and six other APA manuscripts
-        "* Corresponding Author:",  # audience_eval200/W4315563590
-        "Credit Author Statement",  # audience_eval200/osf_ytws5
-        "THE DECISION TO REFINANCE",  # audience_eval200/W1511304478
+        "Author Note",  # osf_cv6px and six other APA manuscripts
+        "* Corresponding Author:",  # W4315563590
+        "Credit Author Statement",  # osf_ytws5
+        "THE DECISION TO REFINANCE",  # W1511304478
     ],
 )
 def test_field_label_headings_in_the_gap_stay_out_on_a_page_with_a_byline(gap_header):
@@ -402,7 +405,7 @@ def test_field_label_headings_in_the_gap_stay_out_on_a_page_with_a_byline(gap_he
 
 
 def test_a_one_region_publisher_line_in_the_gap_stays_out():
-    """audience_ci60/W2947837352: the publisher's line reads as a byline
+    """W2947837352: the publisher's line reads as a byline
     ("Wilson & Lafleur"), but on a page that prints one, a paragraph in the gap
     needs name evidence, and a one-region paragraph gets no preview pass."""
 
@@ -411,3 +414,152 @@ def test_a_one_region_publisher_line_in_the_gap_stays_out():
     texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
 
     assert "Éditions Wilson & Lafleur, inc." not in texts
+
+
+@pytest.mark.parametrize(
+    "gap_header",
+    [
+        "Data Availability",
+        "Handling Editor: Jane Smith",
+        "Edited by Jane Smith",
+        "Received 12 March 2020",
+        "Competing Interests",
+        "Specialty Section",
+        "Citation: Anna Berg",  # any labelled line
+    ],
+)
+def test_editorial_and_metadata_headings_in_the_gap_stay_out(gap_header):
+    """Editorial and article-metadata lines share the title-to-abstract gap with
+    the byline and pass its capital-ratio test; a name among them belongs to an
+    editor, so none of them may become byline evidence."""
+
+    contents = _title_page_with_byline(gap_header, "We thank the participants.")
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert "Anna Berg and Carl Dahl" in texts
+    assert gap_header not in texts
+
+
+def _byline_vote(page: int, index: int) -> FrontRolePredictions:
+    scores = RoleScores(probs={"byline": 0.97, "other": 0.03}, top="byline", confidence=0.97)
+    return FrontRolePredictions({(page, index): scores}, model_version="test")
+
+
+@pytest.mark.parametrize(
+    ("header", "admitted"),
+    [
+        ("Edited by Jane Smith", False),
+        ("Handling Editor: Jane Smith jane.smith@example.org", False),
+        ("Reviewed by: John Doe", False),
+        # A name over its author's e-mail address is still a byline cell, and a
+        # plain two-name cell still passes on its shape.
+        ("Sung Whan Yoon shyoon8@kaist.ac.kr", True),
+        ("Yiwei Ci, Qiusong Yang*", True),
+    ],
+)
+def test_gap_heading_rule_rejects_editorial_lines_before_any_byline_evidence(header, admitted):
+    """Neither the classifier's byline vote nor an e-mail address admits an
+    editorial line in the gap."""
+
+    summary = RegionSummary(
+        page=1, index=4, label="paragraph_title", bbox=(90.0, 300.0, 900.0, 315.0), section_id=2
+    )
+
+    verdict = _front_gap_heading_is_byline(header, summary, _byline_vote(1, 4), FrontRolePolicy())
+
+    assert verdict is admitted
+
+
+def test_an_editor_over_an_email_address_stays_out_of_the_no_byline_rescue():
+    """On a title page that prints no byline, the no-byline rescue admits a
+    name over an e-mail address in the gap. An editor's line there reads the
+    same way and must not become the page's only byline."""
+
+    title = "Trust in Science Across Cultures"
+    editor = "Handling Editor: Jane Smith jane.smith@example.org"
+    contents = _contents(
+        [
+            _section(0, "Root", CanonicalSection.UNKNOWN, top=0.0),
+            _section(1, title, CanonicalSection.TITLE, top=90.0),
+            _section(2, editor, CanonicalSection.ACKNOWLEDGMENT, top=300.0),
+            _section(3, "Abstract", CanonicalSection.ABSTRACT, top=100.0, page=2),
+        ],
+        [
+            _sentence(
+                1,
+                "Department of Psychology, University of Oslo",
+                section_id=1,
+                paragraph_id=1,
+                top=170.0,
+            ),
+            _sentence(2, "We thank the participants.", section_id=2, paragraph_id=2, top=320.0),
+            _sentence(
+                3,
+                "We surveyed trust in science.",
+                section_id=3,
+                paragraph_id=3,
+                top=120.0,
+                page=2,
+                label="abstract",
+            ),
+        ],
+        detected_title=title,
+    )
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert title in texts
+    assert editor not in texts
+
+
+def test_an_editor_over_an_email_address_in_a_gap_paragraph_stays_out():
+    """The gap admits a paragraph that is a name over an e-mail address; an
+    editor's line has the same shape."""
+
+    gap_text = "Handling Editor: Jane Smith jane.smith@example.org"
+    contents = _title_page_with_byline("Publisher", gap_text, regions=1)
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert "Anna Berg and Carl Dahl" in texts
+    assert gap_text not in texts
+
+
+def test_a_merged_paragraph_led_by_an_editorial_line_stays_out():
+    """The gap admits a paragraph over several regions whose first region
+    reads as a byline (the merged byline and correspondence block above); an
+    editorial credit leading a merged block reads as a byline too."""
+
+    first_row = "Edited by Jane Smith and John Doe"
+    merged = first_row + " Department of Psychology, University of Oslo, Norway"
+    first_box = (113.0, 320.0, 660.0, 339.0)
+    second_box = (107.0, 341.0, 504.0, 358.0)
+    contents = _title_page_with_byline("Publisher", "placeholder")
+    contents.sentences[2] = PaperSentence(
+        text_id=3,
+        text=merged,
+        section_id=2,
+        paragraph_id=3,
+        page_number=1,
+        provenance=[Provenance(page_no=1, bbox=first_box), Provenance(page_no=1, bbox=second_box)],
+        region_meta={"region_type": "text", "font_size": 6.7, "font_bold": False},
+    )
+    contents.region_summaries = [
+        RegionSummary(
+            page=1, index=5, label="text", bbox=first_box, section_id=2, content=first_row
+        ),
+        RegionSummary(
+            page=1,
+            index=6,
+            label="text",
+            bbox=second_box,
+            section_id=2,
+            content="Department of Psychology",
+        ),
+    ]
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert "Anna Berg and Carl Dahl" in texts
+    assert merged not in texts
