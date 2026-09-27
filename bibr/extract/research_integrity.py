@@ -73,9 +73,12 @@ def _text_for_type(
 def copy_integrity_statements(contents: PaperContents, metadata: PaperMetadata) -> None:
     """Copy FUNDING / COI / ETHICS / OPEN_DATA section bodies verbatim onto the
     corresponding ``PaperMetadata`` statement fields. Pure copy — no LLM."""
+    from bibr.extract.field_decisions import FieldCandidate, apply_decision, decide_value
+
     text_map = _build_section_text_map(contents)
     for field, section_type in _STATEMENT_SECTION_TYPES.items():
-        setattr(metadata, field, _text_for_type(contents, text_map, section_type))
+        text = _text_for_type(contents, text_map, section_type)
+        apply_decision(metadata, decide_value(field, FieldCandidate(field, "section_copy", text)))
 
 
 def _initials(name: str) -> str:
@@ -135,12 +138,16 @@ def _match_author(token: str, authors: list[PaperAuthor]) -> PaperAuthor | None:
 
 def _apply_contributions(
     authors: list[PaperAuthor], contributions: list[AuthorContributionLLM]
-) -> None:
+) -> bool:
     """Map contribution roles onto ``authors[*].role`` (verbatim). Unmatched or
     ambiguous entries are dropped; authors with no match keep ``role=[]``.
     Roles merge (order-preserving, deduplicated) — role-keyed statements
     ("Conceptualization: J.W.; Writing: J.W.") yield one entry per role for
-    the same author, and a later entry must not overwrite an earlier one."""
+    the same author, and a later entry must not overwrite an earlier one.
+
+    Returns whether any role was added, so the caller can note it on the
+    author receipt."""
+    added = False
     for entry in contributions:
         roles = [r.strip() for r in entry.roles if r and r.strip()]
         if not roles:
@@ -149,7 +156,10 @@ def _apply_contributions(
         if author is None:
             logger.debug("Dropping unmatched contribution entry for %r", entry.author)
             continue
+        before = len(author.role)
         author.role.extend(r for r in roles if r not in author.role)
+        added = added or len(author.role) > before
+    return added
 
 
 def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
@@ -223,6 +233,7 @@ async def extract_structured_integrity(
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:
+        _keep_unparsed(metadata, "nothing_to_parse")
         return
 
     author_names = [(a.given, a.family) for a in metadata.authors]
@@ -250,26 +261,58 @@ async def extract_structured_integrity(
                     "parts were not parsed",
                 )
             )
+        _keep_unparsed(metadata, "call_failed")
         return
 
+    from bibr.extract.field_decisions import (
+        FieldCandidate,
+        apply_decision,
+        decide_value,
+        record_transforms,
+    )
+
+    parsed_funding = [
+        FundingEntry(
+            funder=f.funder.strip(), award_ids=[a.strip() for a in f.award_ids if a.strip()]
+        )
+        for f in result.funding
+        if f.funder and f.funder.strip()
+    ]
     # Gate funding on the funding statement actually existing: when funding_text
     # is empty (only affiliations/contributions drove the call), NuExtract3 can
     # hallucinate placeholder funding entries — discard them wholesale.
-    metadata.funding = (
-        [
-            FundingEntry(
-                funder=f.funder.strip(), award_ids=[a.strip() for a in f.award_ids if a.strip()]
-            )
-            for f in result.funding
-            if f.funder and f.funder.strip()
-        ]
-        if funding_text
-        else []
+    funding = FieldCandidate(
+        "funding",
+        "llm",
+        parsed_funding if funding_text else [],
+        transforms=("discarded_without_statement",) if parsed_funding and not funding_text else (),
     )
-    _apply_contributions(metadata.authors, result.contributions)
-    metadata.affiliations = _build_affiliations(
-        unique_affils, affil_author_ids, result.affiliations
+    apply_decision(metadata, decide_value("funding", funding))
+    # The roles go onto the decided authors in place; the author receipt
+    # records it (the one-writer scan allows this call by name).
+    if _apply_contributions(metadata.authors, result.contributions):
+        record_transforms(metadata, "author", "contribution_roles")
+    apply_decision(
+        metadata,
+        decide_value(
+            "affiliations",
+            FieldCandidate(
+                "affiliations",
+                "llm",
+                _build_affiliations(unique_affils, affil_author_ids, result.affiliations),
+            ),
+        ),
     )
+
+
+def _keep_unparsed(metadata: PaperMetadata, rule: str) -> None:
+    """Record that the structured-integrity call left funding and affiliations as they were."""
+    from bibr.extract.field_decisions import FieldDecision, apply_decision
+
+    for name, attribute in (("funding", "funding"), ("affiliations", "affiliations")):
+        apply_decision(
+            metadata, FieldDecision(name, getattr(metadata, attribute), None, rule, producer="llm")
+        )
 
 
 def _clean_component(value: str | None) -> str | None:

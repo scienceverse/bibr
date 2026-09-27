@@ -34,8 +34,9 @@ _SCHEMA_VERSION = "12.1"
 #   - New ``extraction.fields``: for each tracked field (``title``, ``author``,
 #     ``abstract``, ``keywords``, ``doi``, ``published``, ``journal``,
 #     ``funding_statement``, ``funding``, ``paper_type``, ``bib``) a record
-#     ``{state, source, issues}``, where ``state`` is ``extracted``,
-#     ``absent``, ``abstained``, ``failed`` or ``not_attempted``. Omitted when
+#     ``{state, source, issues, rule}``, where ``state`` is ``extracted``,
+#     ``absent``, ``abstained``, ``failed`` or ``not_attempted`` and the
+#     optional ``rule`` names the field decision's rule. Omitted when
 #     the export was made outside the pipeline, so every 12.0 export is still
 #     a valid 12.1 reader input.
 #
@@ -1618,6 +1619,23 @@ class FieldRecordExport(BaseModel):
         description="Codes of the extraction.warnings or extraction.validation.issues entries "
         "that explain this state, such as VAL_METADATA_FIELD_FAILED or AUTHORS_TRUNCATED."
     )
+    rule: str | None = Field(
+        default=None,
+        description="The rule of the field's decision that chose the value or its absence, "
+        "e.g. 'extracted', 'selected_record_title', 'layout_title_fallback', "
+        "'abstract_section_fallback', 'correction_notice', 'abstained'. Omitted when the "
+        "field has no such decision (doi, bib), and in exports that predate it.",
+    )
+
+    # A reader of an earlier 12.1 export finds no ``rule``.
+    OMITTED_WHEN_ABSENT: ClassVar[tuple[str, ...]] = ("rule",)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_rule(self, handler):
+        data = handler(self)
+        if data.get("rule") is None:
+            data.pop("rule", None)
+        return data
 
 
 class FieldStatesExport(BaseModel):

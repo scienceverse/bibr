@@ -32,6 +32,7 @@ from bibr.processing_warnings import ProcessingWarning
 from bibr.validation import ValidationIssue, references_incomplete_issue
 
 if TYPE_CHECKING:
+    from bibr.extract.field_decisions import FieldCandidate, FieldDecisions
     from bibr.field_states import FieldScope
     from bibr.pipeline.identity import DoiSelection, ExpectedIdentity
 
@@ -225,59 +226,61 @@ def enforce_section_sanity(sections: list[PaperSection]) -> None:
 
 
 def _merge_ocr_metadata(metadata: PaperMetadata, ocr: dict) -> None:
-    """Merge OCR-extracted metadata as fallback into PaperMetadata.
+    """Fill an empty DOI from the OCR/doc-info metadata.
 
-    Only fills fields that are empty/missing in the LLM-extracted metadata.
-    Mutates *metadata* in-place.
+    The title, keywords and authors it carries are candidates of those fields'
+    decisions instead (:func:`doc_info_candidates`). Mutates *metadata* in-place.
     """
-    from bibr.field_states import set_field_source
-
     parsed = OcrFallbackMetadata.from_raw(ocr)
-
-    if not metadata.title and parsed.title:
-        metadata.title = parsed.title
-        set_field_source(metadata, "title", "doc_info")
-        logger.debug("OCR fallback: filled title")
 
     if not metadata.doi and parsed.doi and parsed.doi.startswith("10."):
         metadata.doi = parsed.doi
         logger.debug("OCR fallback: filled DOI")
 
-    if not metadata.keywords and parsed.keywords:
-        metadata.keywords = parsed.keywords
-        set_field_source(metadata, "keywords", "doc_info")
-        logger.debug("OCR fallback: filled keywords")
 
-    if not metadata.authors and parsed.authors:
-        author_id = 0
-        for name in parsed.authors:
-            if isinstance(name, str) and name.strip():
-                stripped = name.strip()
-                if "," in stripped:
-                    # "Family, Given" — PDF docinfo and BibTeX both use it.
-                    # Splitting on the last space instead produced
-                    # given="Smith," / family="John", inverting every name.
-                    family_part, _, given_part = stripped.partition(",")
-                    family = family_part.strip()
-                    given = given_part.strip()
-                else:
-                    parts = stripped.rsplit(" ", 1)
-                    given = parts[0] if len(parts) > 1 else ""
-                    family = parts[-1]
-                if not family.strip():
-                    continue
-                author_id += 1
-                metadata.authors.append(
-                    PaperAuthor(
-                        author_id=author_id,
-                        given=given,
-                        family=family,
-                        affiliation="",
-                    )
+def doc_info_candidates(ocr: dict) -> "dict[str, FieldCandidate]":
+    """The OCR/doc-info title, keywords and authors, as candidates for empty fields.
+
+    Keyed by field; a field the doc-info leaves empty has no candidate. The
+    decisions use them only to fill a field nothing else filled.
+    """
+    from bibr.extract.field_decisions import FieldCandidate
+
+    parsed = OcrFallbackMetadata.from_raw(ocr)
+    candidates: dict[str, FieldCandidate] = {}
+    if parsed.title:
+        candidates["title"] = FieldCandidate("title", "doc_info", parsed.title)
+    if parsed.keywords:
+        candidates["keywords"] = FieldCandidate("keywords", "doc_info", parsed.keywords)
+
+    authors: list[PaperAuthor] = []
+    for name in parsed.authors:
+        if isinstance(name, str) and name.strip():
+            stripped = name.strip()
+            if "," in stripped:
+                # "Family, Given" — PDF docinfo and BibTeX both use it.
+                # Splitting on the last space instead produced
+                # given="Smith," / family="John", inverting every name.
+                family_part, _, given_part = stripped.partition(",")
+                family = family_part.strip()
+                given = given_part.strip()
+            else:
+                parts = stripped.rsplit(" ", 1)
+                given = parts[0] if len(parts) > 1 else ""
+                family = parts[-1]
+            if not family.strip():
+                continue
+            authors.append(
+                PaperAuthor(
+                    author_id=len(authors) + 1,
+                    given=given,
+                    family=family,
+                    affiliation="",
                 )
-        if metadata.authors:
-            set_field_source(metadata, "author", "doc_info")
-            logger.debug("OCR fallback: filled %d authors", len(metadata.authors))
+            )
+    if authors:
+        candidates["author"] = FieldCandidate("author", "doc_info", authors)
+    return candidates
 
 
 @dataclass
@@ -328,6 +331,10 @@ class Paper:
     # the input), set by post_parse; with it the export builds
     # ``extraction.fields``. ``None`` for a Paper built outside the pipeline.
     field_scope: "FieldScope | None" = None
+    # Each decided metadata field's receipt: the candidates considered, the
+    # one used and the rule (``bibr.extract.field_decisions``), set by
+    # post_parse. ``None`` for a Paper built outside the pipeline.
+    field_decisions: "FieldDecisions | None" = None
     # Manifest caller evidence remains distinct from ``paper_id`` and the
     # source-selected scalar DOI. Both are serialized only in the additive
     # extraction receipt.
