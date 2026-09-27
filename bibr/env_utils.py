@@ -18,20 +18,6 @@ def read_dotenv(path: Path, *, encoding: str = "utf-8") -> dict[str, str | None]
 _NEEDS_QUOTING = set(" \t#\"'\\$\n\r")
 
 
-def _strip_surrounding_quotes(value: str) -> str:
-    """Strip a single matching pair of surrounding ``'`` or ``"`` from *value*.
-
-    For double-quoted values, also unescape ``\\\\`` and ``\\"`` so the result
-    round-trips with :func:`_format_env_value`.
-    """
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-        inner = value[1:-1]
-        if value[0] == '"':
-            inner = inner.replace('\\"', '"').replace("\\\\", "\\")
-        return inner
-    return value
-
-
 def _format_env_value(value: str) -> str:
     """Quote *value* for ``.env`` if it contains characters that would be
     misinterpreted by pydantic-settings / python-dotenv (``#``, whitespace,
@@ -65,26 +51,30 @@ def write_env_text(path: Path, text: str) -> None:
 
 
 def parse_env(path: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if "=" in stripped:
-            key, _, value = stripped.partition("=")
-            result[key.strip()] = _strip_surrounding_quotes(value.strip())
-    return result
+    """Read *path* with the same parser the runtime loads it with.
+
+    ``preset save``/``diff``/``show`` must see exactly what ``Settings`` will
+    read: python-dotenv drops inline ``# comments`` and the ``export`` prefix
+    and unescapes quotes, while the previous hand-rolled split kept them and
+    ``preset use`` then wrote the comment back into ``.env`` as the value.
+    """
+    return {k: v for k, v in read_dotenv(path).items() if v is not None}
 
 
 def merge_env(path: Path, new_vars: dict[str, str]) -> None:
     """Merge *new_vars* into an existing ``.env``, preserving unknown keys.
 
-    Comments and blank lines retain their original positions. Existing keys
-    have their values overwritten in place; new keys are appended at the
-    end. This keeps any "# Section header / KEY=val" structure intact across
-    re-runs of `bibr setup`.
+    Comments and blank lines retain their original positions. Every
+    occurrence of a merged key is rewritten in place and later duplicates
+    dropped, so the value the runtime reads (python-dotenv resolves
+    duplicates last-wins) is the new one. A merged key spelled with an
+    ``export `` prefix is rewritten to the canonical ``KEY=value`` form,
+    which dotenv reads identically. New keys are appended at the end. This
+    keeps any "# Section header / KEY=val" structure intact across re-runs
+    of `bibr setup`.
     """
     remaining = dict(new_vars)
+    written: set[str] = set()
     out_lines: list[str] = []
 
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -94,15 +84,26 @@ def merge_env(path: Path, new_vars: dict[str, str]) -> None:
             continue
         key, _, _ = stripped.partition("=")
         key = key.strip()
-        if key in remaining:
-            out_lines.append(f"{key}={_format_env_value(remaining.pop(key))}")
+        lookup = key
+        # Match a dotenv ``export KEY=...`` line to its bare key, the way the
+        # runtime parser does.
+        if lookup.startswith("export "):
+            lookup = lookup[len("export ") :].strip()
+        if lookup in remaining and lookup not in written:
+            out_lines.append(f"{lookup}={_format_env_value(remaining[lookup])}")
+            written.add(lookup)
+        elif lookup in written:
+            # A stale duplicate of a key already rewritten above: drop it so
+            # the old value cannot keep winning under last-wins resolution.
+            continue
         else:
             out_lines.append(line)
 
-    if remaining:
+    rest = {k: v for k, v in remaining.items() if k not in written}
+    if rest:
         if out_lines and out_lines[-1].strip():
             out_lines.append("")
-        for k, v in remaining.items():
+        for k, v in rest.items():
             out_lines.append(f"{k}={_format_env_value(v)}")
 
     out_lines.append("")
