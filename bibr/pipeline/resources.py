@@ -18,6 +18,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
 from bibr.utils.async_tasks import await_owned
 
 if TYPE_CHECKING:
@@ -297,10 +298,20 @@ class ResourceManager:
 
     def _resolve_ocr_candidates(self):
         """Resolve startup candidates, retaining explicit request overrides."""
-        from bibr.ocr.registry import resolve_backend_candidates
+        from bibr.ocr.registry import resolve_backend_candidates, resolve_url_backend, url_request
 
-        candidates = resolve_backend_candidates(self._requested_ocr_backend, self._settings)
-        if len(candidates) != 1 or self._requested_ocr_backend == "paddle":
+        requested = self._requested_ocr_backend
+        if self.ocr_url:
+            # A URL names one server: resolve the request (or the configured
+            # OCR_BACKEND unless it is a cloud provider, as the runtime
+            # identity does) to its HTTP backend before the ``paddle``
+            # selector can expand into local runtimes, so the recorded
+            # identity is the client that starts.
+            requested = resolve_url_backend(
+                url_request(requested, self._settings.ocr.backend), self.ocr_url
+            )
+        candidates = resolve_backend_candidates(requested, self._settings)
+        if len(candidates) != 1 or requested == "paddle":
             return candidates
         candidate = candidates[0]
         # A concrete backend is an explicit user choice: preserve its model
@@ -383,7 +394,12 @@ class ResourceManager:
         return kwargs
 
     def _resolve_ocr_backend_name(self, backend_name: str | None = None) -> str:
-        """Legacy shim: ``--ocr-url`` implicitly forces the HTTP backend."""
+        """Validate a backend name, then apply the shared ``ocr_url`` rule.
+
+        The rule (:func:`bibr.ocr.registry.resolve_url_backend`) is the one the
+        CLI, ``LocalPipeline`` and the runtime identity use, so the client that
+        starts is the backend the cache key and export provenance name.
+        """
         backend_name = backend_name or self._requested_ocr_backend
         if backend_name in self._VISION_BACKENDS:
             from bibr.local import ocr_cloud  # noqa: F401 — triggers @register
@@ -399,17 +415,18 @@ class ResourceManager:
             elif backend_name == "paddle-mlx-vlm":
                 importlib.import_module("bibr.local.mlx_vlm_ocr")
 
-        from bibr.ocr.registry import known_backends
+        from bibr.ocr.registry import known_backends, resolve_url_backend
 
         known = known_backends()
         if backend_name != "serve-http" and backend_name not in known:
             raise ValueError(f"Unknown OCR backend: {backend_name!r}. Known: {known}")
 
-        if self.ocr_url and backend_name not in ("glm-http", "paddle-http", "serve-http"):
-            return "glm-http"
-        return backend_name
+        # The validated name is an explicit request (or a startup candidate
+        # ``_resolve_ocr_candidates`` already resolved), so ``url_request``
+        # would return it unchanged.
+        return resolve_url_backend(backend_name, self.ocr_url)
 
-    _VISION_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
+    _VISION_BACKENDS = CLOUD_VISION_OCR_BACKENDS
 
     def _create_ocr_client(self, candidate=None):
         """Create an OCR client (blocking — run in thread executor)."""

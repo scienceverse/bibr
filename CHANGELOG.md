@@ -1553,6 +1553,31 @@ released.
   so a flag only one of them accepts made the other exit at startup and the
   `paddle` chain fall through to the next candidate. Migration: move a value
   tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). Given a
+  URL, the library used to start `glm-http` for every request except
+  `paddle-http` and `serve-http`: a bare `ocr_url`, the `paddle` selector,
+  every local Paddle runtime (`paddle-vllm`, `paddle-rapid-mlx`,
+  `paddle-mlx-vlm`) and the cloud vision backends. A Paddle server therefore
+  got GLM prompts and its tables came back as undecoded OTSL markup.
+  Without an explicit backend (`--ocr`, `ocr=`, `ocr_backend=`), the
+  configured `OCR_BACKEND` is the request, so `OCR_BACKEND=glm-http` keeps
+  GLM at every entry point; `bibr chew --ocr-url` used to ignore it. A
+  cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
+  tier of `bibr setup` writes `gemini`) never replaces a URL the caller
+  passes: the run uses that server as `paddle-http` and sends no page image
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  endpoint) and drops the URL, so it no longer splits the OCR cache; the
+  library used to start `glm-http` for it and the CLI `paddle-http`. A
+  `ResourceManager` built directly with a URL now starts the backend its
+  OCR cache identity names; it could record `gemini` or a local runtime and
+  start `glm-http`. Migration: library users who pass a bare `ocr_url` for
+  a GLM server must now pass `ocr_backend="glm"` (or `"glm-http"`;
+  `ocr="glm"` in `bibr.chew`).
 
 ### Security
 
