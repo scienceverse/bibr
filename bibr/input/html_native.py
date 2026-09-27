@@ -1019,7 +1019,14 @@ class HtmlParser:
                 return
             self._append_reference(text)
             return
-        deferred_index = self.assembler.append(text, None, self._current_section_id, True, False)
+        # Loose text is one text row, not sentence-split. The segmenter sizes
+        # its blocks from the longest text in each batch of neighbouring
+        # entries, so feeding it text main never read would shift how the
+        # page's unchanged paragraphs are split (an author-details item
+        # splitting differently let a competing-interests capture run into
+        # the next author's name). Kept out of the batch, the paragraphs
+        # segment exactly as before; a display equation keeps its label.
+        deferred_index = self.assembler.append(text, None, self._current_section_id, False, False)
         for url, link_text in pending:
             self._pending_url_links.append(
                 (url, link_text, self._current_section_id, deferred_index)

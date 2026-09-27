@@ -1683,3 +1683,48 @@ class TestStructuredPageDescription:
             .preparsed_metadata
         )
         assert meta.abstract == ""
+
+
+class TestLooseTextStaysOutOfSegmentation:
+    """Loose container text is one text row and never enters the segmenter.
+
+    The sentence segmenter sizes its blocks from the longest text in each
+    batch of neighbouring entries, so adding text main never read (display
+    equations, data-set lead-ins) to the batch changed how unchanged
+    paragraphs split; on an eLife page an author-details item then split
+    differently and the competing-interests capture ran into the next
+    author's name.
+    """
+
+    _METHODS = b"""<h2>Methods</h2><p>We fit the model. It converged.</p>"""
+    _AUTHORS = b"""<ol><li>Jane Doe Competing interests None declared.</li></ol>"""
+    _EQUATION = (
+        b"""<div class="math-block"> <span class="math-block__label">(7)</span> """
+        b"""<span class="math-block__math"><math><mi>x</mi><mo>=</mo><mn>1</mn></math>"""
+        b"""</span> </div>"""
+    )
+
+    @staticmethod
+    def _page(*parts: bytes) -> bytes:
+        return b"<html><body><article>" + b"".join(parts) + b"</article></body></html>"
+
+    def test_display_equation_leaves_the_segmented_paragraphs_unchanged(self):
+        plain = HtmlParser(self._page(self._METHODS, self._AUTHORS))
+        plain.parse()
+        with_equation = HtmlParser(self._page(self._METHODS, self._EQUATION, self._AUTHORS))
+        with_equation.parse()
+        assert plain.assembler.segmentable_texts == [
+            "We fit the model. It converged.",
+            "Jane Doe Competing interests None declared.",
+        ]
+        assert with_equation.assembler.segmentable_texts == plain.assembler.segmentable_texts
+
+    def test_display_equation_is_one_row_with_its_label(self):
+        parser = HtmlParser(self._page(self._METHODS, self._EQUATION))
+        contents = parser.parse()
+        parser.apply_segmentation(contents, [["We fit the model.", "It converged."]])
+        assert [sentence.text for sentence in contents.sentences] == [
+            "We fit the model.",
+            "It converged.",
+            "(7) x=1",
+        ]

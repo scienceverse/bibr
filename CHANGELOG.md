@@ -966,36 +966,39 @@ released.
 - The HTML and DOCX native parsers now walk inline markup recursively instead
   of reading a fixed tag list. In HTML, the direct text of `div`/`section`
   containers is kept instead of dropped (display equations in `div` wrappers,
-  for example), with the spaces between inline siblings preserved. Page chrome
-  is still left out, and more of it than before: buttons and other form
-  controls, `visuallyhidden`/`sr-only` spans and `aria-hidden` subtrees
-  outside paragraphs, list items and headings (inside those they are still
-  read, as before), links inside section headers, containers holding only
-  link text (download links), lists made only of button, download or
-  table-of-contents links, float labels
-  printed on their own outside a caption ("Figure 3", "Table 1", "Figure 2
-  with 2 supplements see all", "Author response image 1"), lone bracketed
-  years, and the article's own formatted "cite this article" block (a
-  `div.reference` or `div.citation` of author, year, title and source parts
-  outside the references), which no longer opens a References section of
-  author-name reference strings. Removing nested hidden or landmark elements
-  (a `role="search"` inside `role="navigation"`) no longer fails the parse. A
-  `<div>` reference that nests its parts in inner `div` elements parses as one
-  reference string rather than one per part, loose text in a references
-  section without any digit (a list lead-in) is not taken as a reference, and
-  an inline element that wraps block content (as an unclosed `<b>` nests whole
-  footer sections inside itself) is recursed into rather than flattened, so
-  its headings still section the page. A `<figure>` that only wraps a
-  `<table>` now parses as a table with the figure's caption, while a figure
-  with an image still parses as a figure; when the figure wraps several tables
-  only the first takes the `figcaption`, so captions and labels are not
-  duplicated. Spine documents' `<head>` contents (`title`, `meta`, `link`,
-  `base`) never become body paragraphs, and an inline image in loose container
-  text is a word boundary, as it is in paragraph text. HTML bytes are decoded
-  from the BOM, then as strict UTF-8, then from the declared label through the
-  WHATWG label table (so `iso-8859-1` reads as windows-1252 and a `utf-16`
-  label on 8-bit bytes reads as UTF-8), then from the XML declaration, falling
-  back to windows-1252 as before when nothing declares an encoding.
+  for example), with the spaces between inline siblings preserved. Such loose
+  text is one text row that the sentence segmenter does not split, so a
+  display equation keeps its number and reading it does not change how the
+  paragraphs read before are split into sentences. Page chrome is still left
+  out, and more of it than before: buttons and other form controls,
+  `visuallyhidden`/`sr-only` spans and `aria-hidden` subtrees outside
+  paragraphs, list items and headings (inside those they are still read, as
+  before), links inside section headers, containers holding only link text
+  (download links), lists made only of button, download or table-of-contents
+  links, float labels printed on their own outside a caption ("Figure 3",
+  "Table 1", "Figure 2 with 2 supplements see all", "Author response image
+  1"), lone bracketed years, and the article's own formatted "cite this
+  article" block (a `div.reference` or `div.citation` of author, year, title
+  and source parts outside the references), which no longer opens a References
+  section of author-name reference strings. Removing nested hidden or landmark
+  elements (a `role="search"` inside `role="navigation"`) no longer fails the
+  parse. A `<div>` reference that nests its parts in inner `div` elements
+  parses as one reference string rather than one per part, loose text in a
+  references section without any digit (a list lead-in) is not taken as a
+  reference, and an inline element that wraps block content (as an unclosed
+  `<b>` nests whole footer sections inside itself) is recursed into rather
+  than flattened, so its headings still section the page. A `<figure>` that
+  only wraps a `<table>` now parses as a table with the figure's caption,
+  while a figure with an image still parses as a figure; when the figure wraps
+  several tables only the first takes the `figcaption`, so captions and labels
+  are not duplicated. Spine documents' `<head>` contents (`title`, `meta`,
+  `link`, `base`) never become body paragraphs, and an inline image in loose
+  container text is a word boundary, as it is in paragraph text. HTML bytes
+  are decoded from the BOM, then as strict UTF-8, then from the declared label
+  through the WHATWG label table (so `iso-8859-1` reads as windows-1252 and a
+  `utf-16` label on 8-bit bytes reads as UTF-8), then from the XML
+  declaration, falling back to windows-1252 as before when nothing declares an
+  encoding.
 - HTML front-matter metadata is stricter about what it claims. Authors come
   from the first populated source instead of merging every scheme; a generic
   `<meta name="author">` list is split on every comma when each part reads as
