@@ -11,12 +11,19 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import ClassVar
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    LocalHttpError,
+    check_startup_stop,
+    guard_managed_server_port,
+    pause_startup_poll,
+    request_bytes,
+)
 from bibr.local.ocr import PaddleHttpOcrClient
 from bibr.ocr.registry import PADDLE_VLLM_GPU_MEMORY_UTILIZATION, register
 
@@ -28,12 +35,18 @@ _TERM_GRACE_S = 10
 class VllmOcrServer:
     """Own a PaddleOCR-VL vLLM process and wait for its exact served alias."""
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         model: str | None = None,
         port: int | None = None,
         settings: GlobalSettings | None = None,
+        *,
+        stop_event: threading.Event | None = None,
     ) -> None:
+        self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         self._model = model or self._settings.ocr.paddle_model
         self._served_model = self._settings.ocr.paddle_served_model
@@ -160,6 +173,7 @@ class VllmOcrServer:
         models_url = f"{self.base_url}/v1/models"
 
         while time.monotonic() < deadline:
+            check_startup_stop(self._stop_event, "PaddleOCR-VL vLLM")
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
@@ -187,7 +201,7 @@ class VllmOcrServer:
                         return
             except (LocalHttpError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
                 pass
-            time.sleep(2.0)
+            pause_startup_poll(2.0, self._stop_event, "PaddleOCR-VL vLLM")
 
         try:
             self.shutdown()
@@ -249,10 +263,11 @@ class PaddleVllmOcrClient:
         model: str | None = None,
         profile=None,
         settings: GlobalSettings | None = None,
+        stop_event: threading.Event | None = None,
         **_kw: object,
     ) -> None:
         effective = settings if settings is not None else snapshot_settings()
-        self._server = VllmOcrServer(model=model_path, settings=effective)
+        self._server = VllmOcrServer(model=model_path, settings=effective, stop_event=stop_event)
         try:
             self._http_client = PaddleHttpOcrClient(
                 base_url=self._server.base_url,

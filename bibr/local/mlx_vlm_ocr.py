@@ -11,12 +11,19 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import ClassVar
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    LocalHttpError,
+    check_startup_stop,
+    guard_managed_server_port,
+    pause_startup_poll,
+    request_bytes,
+)
 from bibr.local.ocr import PaddleHttpOcrClient
 from bibr.ocr.registry import register
 
@@ -29,12 +36,18 @@ _MLX_VLM_VERSION = "0.6.3"
 class MlxVlmOcrServer:
     """Own a PaddleOCR-VL MLX-VLM server and prove its image OCR capability."""
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         model: str | None = None,
         port: int | None = None,
         settings: GlobalSettings | None = None,
+        *,
+        stop_event: threading.Event | None = None,
     ) -> None:
+        self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         self._model = model or self._settings.ocr.paddle_mlx_model
         self._port = port if port is not None else self._settings.ocr.paddle_mlx_port
@@ -120,6 +133,7 @@ class MlxVlmOcrServer:
         deadline = time.monotonic() + self._settings.ocr.paddle_mlx_startup_timeout
         health_url = f"{self.base_url}/health"
         while time.monotonic() < deadline:
+            check_startup_stop(self._stop_event, "PaddleOCR-VL MLX-VLM")
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
@@ -138,7 +152,7 @@ class MlxVlmOcrServer:
                     return
             except LocalHttpError:
                 pass
-            time.sleep(2.0)
+            pause_startup_poll(2.0, self._stop_event, "PaddleOCR-VL MLX-VLM")
         raise TimeoutError(
             f"PaddleOCR-VL MLX-VLM server did not become ready within "
             f"{self._settings.ocr.paddle_mlx_startup_timeout}s"
@@ -233,6 +247,7 @@ class PaddleMlxVlmOcrClient:
         model: str | None = None,
         profile=None,
         settings: GlobalSettings | None = None,
+        stop_event: threading.Event | None = None,
         **_kw: object,
     ) -> None:
         effective = settings if settings is not None else snapshot_settings()
@@ -241,7 +256,9 @@ class PaddleMlxVlmOcrClient:
         # request wins, as on main; the candidate is the default when nothing
         # was requested.
         requested_model = model_path or model
-        self._server = MlxVlmOcrServer(model=requested_model, settings=effective)
+        self._server = MlxVlmOcrServer(
+            model=requested_model, settings=effective, stop_event=stop_event
+        )
         try:
             self._http_client = PaddleHttpOcrClient(
                 base_url=self._server.base_url,

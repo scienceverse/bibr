@@ -300,6 +300,29 @@ released.
   name the env var (alias spellings verbatim, so no more `OCR_OCR_LOCAL_GPUS`)
   and malformed mappings name the setting instead of printing a
   `SettingsError` traceback.
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written, and so is a closing tag with nothing left to close, such as
+  `[/tmp/x]` in an error message, which used to crash the command with a
+  `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that
@@ -597,6 +620,15 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -682,6 +714,24 @@ released.
   installed, because `uv run` reinstalls a missing one and its files would
   replace the GPU build's. When both packages are installed and the CPU build is
   the one loaded, bibr logs a warning once, with the command that fixes it.
+- `bibr doctor` now reports which ONNX Runtime build loads, CPU or GPU, and its
+  version. Before, it said nothing about it once torch was installed. When
+  `onnxruntime-gpu` is installed but the CPU build is the one loaded, the line
+  is a warning, and its hint gives the reinstall command.
+- After a GPU install, a `uv sync` without `--extra gpu` uninstalls
+  `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
+  `onnxruntime` stays installed, but its package is left empty or gone. An
+  empty package still imports, and the first ONNX model failed with an
+  `AttributeError`. A gone one raised an `ImportError` that suggested `pip
+  install onnxruntime`, which does nothing while the package counts as
+  installed. bibr now raises a `ConfigurationError` for an empty package, and
+  for an installed one that fails to import, an `ImportError` with the import
+  error. Both give the repair, `uv pip install --python <interpreter>
+  --reinstall-package onnxruntime onnxruntime==<version>` (a pinned pip
+  reinstall where pip manages the environment), and tell GPU users to repeat
+  the `onnxruntime-gpu` reinstall afterwards, since the repair writes the CPU
+  build. `bibr doctor` fails its ONNX Runtime line with the same command, and
+  names the import error when there is one.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
@@ -800,11 +850,10 @@ released.
 - The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
   `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
   harness that are not part of this repository. The evaluator here,
-  `evaluation/evaluate.py`, records `metrics_version: 4`, as it did in 0.5.0 and
-  0.5.1. No metric definition has changed since v4, so saved v4 evaluations need
-  no re-scoring. Full printed names (`authors_fullname_f1`) were already its
-  primary author metric in 0.5.0, with family-name-only `authors_f1` as a
-  diagnostic.
+  `evaluation/evaluate.py`, recorded `metrics_version: 4` in 0.5.0 and 0.5.1,
+  and no definition changed after that until version 5 (see Changed). Full
+  printed names (`authors_fullname_f1`) were already its primary author metric
+  in 0.5.0, with family-name-only `authors_f1` as a diagnostic.
 - Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
   exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
   `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
@@ -1379,6 +1428,29 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1461,6 +1533,26 @@ released.
   speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
   used to pin the serve result cache to an empty version, and now means the
   computed code hash, so a deploy invalidates cached results again.
+- Evaluator metric definitions changed, and `evaluation/evaluate.py` now
+  records `metrics_version: 5`. Scores with `metrics_version` 4 and 5 do not
+  compare; re-score saved predictions before comparing them. The
+  `run_info.json` that `bibr batch` writes into `--out` is no longer read as a
+  prediction: it added an unmatched paper with an empty id, was listed in
+  `prediction_ids`, and changed `predictions_tree_sha256` on every run. The
+  micro-averaged reference accuracies (`micro_mean` on the `ref_*_acc`
+  metrics) count a paper whose gold carries the field but whose matched pairs
+  do not, for example one whose bibliography was lost, as misses over its gold
+  references; they left it out, so a paper that lost every reference could
+  leave `micro_mean` at 1.0. Section-text tokens keep letters in every script:
+  only ASCII letters and digits survived, so a Cyrillic or Chinese section was
+  scored on its numbers and "Straße" split in two. Han, kana and Thai text
+  gives one token per character. Section-text results record
+  `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
 
 ### Security
 

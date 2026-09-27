@@ -14,6 +14,37 @@ class TestTokenize:
     def test_empty_string_is_empty_list(self):
         assert sm.tokenize("") == []
 
+    def test_keeps_letters_in_every_script(self):
+        assert sm.tokenize("Введение. Методы, 2020 г.") == ["введение", "методы", "2020", "г"]
+        assert sm.tokenize("Μέθοδοι") == ["μέθοδοι"]
+        assert sm.tokenize("العربية") == ["العربية"]
+        assert sm.tokenize("한국어 논문") == ["한국어", "논문"]
+
+    def test_sharp_s_does_not_split_a_word(self):
+        assert sm.tokenize("Straße") == ["strasse"]
+
+    def test_letters_without_a_decomposition_stay_in_their_word(self):
+        assert sm.tokenize("København Łódź") == ["københavn", "łodz"]
+
+    def test_strips_diacritics_on_latin_letters_only(self):
+        assert sm.tokenize("Crème brûlée") == ["creme", "brulee"]
+        # й is its own Russian letter, not и with an accent.
+        assert sm.tokenize("Йога") == ["йога"]
+        assert sm.tokenize("Йога") != sm.tokenize("Иога")
+
+    def test_combining_marks_stay_in_their_word(self):
+        """Python's \\W matches Devanagari vowel signs; they must not split words."""
+        assert sm.tokenize("हिंदी भाषा") == ["हिंदी", "भाषा"]
+
+    def test_spaceless_scripts_give_one_token_per_character(self):
+        assert sm.tokenize("日本語の論文 2020") == ["日", "本", "語", "の", "論", "文", "2020"]
+        assert sm.tokenize("COVID-19患者") == ["covid", "19", "患", "者"]
+        assert sm.tokenize("ภาษาไทย") == ["ภ", "า", "ษ", "า", "ไ", "ท", "ย"]
+
+    def test_width_and_compatibility_forms_fold(self):
+        assert sm.tokenize("ﾃﾞｰﾀ") == sm.tokenize("データ") == ["デ", "ー", "タ"]
+        assert sm.tokenize("ＡＢＣ ﬁnal") == ["abc", "final"]
+
 
 class TestUnigramRecall:
     def test_full_recall(self):
@@ -94,6 +125,22 @@ class TestScoreSection:
         out = sm.score_section(pred, ref)
         assert out["unigram_recall"] < 0.5
         assert out["present"] is False
+
+    def test_non_latin_text_is_not_recalled_from_its_digits(self):
+        """A prediction that kept the numbers but lost every Cyrillic word."""
+        ref = "Введение. Методы исследования 2020 г., n = 45, p < 0.05. " * 3
+        pred = "2020 45 0.05 " * 3
+        out = sm.score_section(pred, ref)
+        assert out["ref_tokens"] == 30
+        assert out["unigram_recall"] == 0.4
+        assert out["present"] is False
+
+    def test_dropped_spaceless_text_lowers_recall(self):
+        ref = "本研究では日本の大学生を対象に調査を行った。" * 2
+        pred = "本研究では日本の大学生を対象に調査を行った。"
+        out = sm.score_section(pred, ref)
+        assert out["ref_tokens"] == 42
+        assert out["unigram_recall"] == 0.5
 
     def test_empty_prediction(self):
         out = sm.score_section("", "alpha beta gamma delta epsilon")
