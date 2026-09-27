@@ -4,9 +4,10 @@ An empty exported field reads the same whether the paper has none, the
 extractor declined to choose, the call that produces it failed, or the run
 never tried. ``extraction.fields`` tells them apart for the fields consumers
 act on. The states are built at export time from facts the pipeline already
-records: the final values, the source each write site noted
-(:func:`set_field_source`), the run's scope (:class:`FieldScope`), and the
-codes of the validation issues and warnings that explain a missing value.
+records: the final values, each field's decision
+(:mod:`bibr.extract.field_decisions`: the source of the value used and the
+rule that chose it), the run's scope (:class:`FieldScope`), and the codes of
+the validation issues and warnings that explain a missing value.
 """
 
 from __future__ import annotations
@@ -85,6 +86,9 @@ class FieldScope:
     no_llm: bool = False
     native_metadata: bool = False  # front matter declared by the input (JATS, HTML)
     references_off: bool = False
+    # Where the reference list came from: "native" (the input's structured
+    # citations) or the configured parser.
+    references_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,21 +96,15 @@ class FieldRecord:
     state: FieldState
     source: str | None
     issues: tuple[str, ...] = ()
+    rule: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"state": str(self.state), "source": self.source, "issues": list(self.issues)}
-
-
-def set_field_source(metadata: Any, field: str, source: str) -> None:
-    """Note which write site produced *field*'s current value.
-
-    Called where a value is written; the last writer wins, so a fallback that
-    fills an empty field replaces the extractor's note. Ignores objects that
-    are not ``PaperMetadata`` (test doubles).
-    """
-    sources = getattr(metadata, "_field_sources", None)
-    if isinstance(sources, dict):
-        sources[field] = source
+        return {
+            "state": str(self.state),
+            "source": self.source,
+            "issues": list(self.issues),
+            "rule": self.rule,
+        }
 
 
 def _issue_fields(code: str, evidence_ids: Iterable[str]) -> frozenset[str]:
@@ -127,14 +125,17 @@ def build_field_states(
     issues: Iterable[Any],
     warnings: Iterable[Any],
     doi_selected: bool = False,
+    rules: Mapping[str, str] | None = None,
 ) -> dict[str, FieldRecord]:
     """One :class:`FieldRecord` per tracked field.
 
-    *present* says whether each field has an exported value; *issues* are the
+    *present* says whether each field has an exported value; *sources* and
+    *rules* come from the field decisions (the source of the value used, or of
+    the step that failed, and the rule that decided); *issues* are the
     validation issues (``code``, ``blocking``, ``evidence_ids``) and
-    *warnings* the processing warnings (``code``, ``message``). A present
-    value is always ``extracted``; otherwise a failure beats an abstention,
-    which beats a step the run did not attempt.
+    *warnings* the processing warnings (``code``). A present value is always
+    ``extracted``; otherwise a failure beats an abstention, which beats a step
+    the run did not attempt.
     """
     failed: dict[str, list[str]] = {field: [] for field in TRACKED_FIELDS}
     qualified: dict[str, list[str]] = {field: [] for field in TRACKED_FIELDS}
@@ -150,13 +151,8 @@ def build_field_states(
             target = failed if code == _FIELD_FAILED or code in _FAILURE_CODES else qualified
             if field in target:
                 target[field].append(code)
-    lexical_funding = False
     for warning in warnings:
         code = str(getattr(warning, "code", ""))
-        if code == "STATEMENT_LEXICAL_FALLBACK" and str(getattr(warning, "message", "")).startswith(
-            "funding_statement "
-        ):
-            lexical_funding = True
         for field in _issue_fields(code, ()):
             target = failed if code in _FAILURE_CODES else qualified
             target[field].append(code)
@@ -165,18 +161,20 @@ def build_field_states(
     if not present.get("funding_statement"):
         failed["funding"].clear()
 
+    sources = {**sources, **({"bib": scope.references_source} if scope.references_source else {})}
+    rules = rules or {}
     defaults = {
         "doi": "identity" if doi_selected else None,
-        "funding_statement": "lexical_anchor" if lexical_funding else "integrity_statement",
     }
     records: dict[str, FieldRecord] = {}
     for field in TRACKED_FIELDS:
         codes = tuple(dict.fromkeys([*failed[field], *qualified[field]]))
+        rule = rules.get(field)
         if present.get(field):
             source = sources.get(field) or defaults.get(field)
-            records[field] = FieldRecord(FieldState.EXTRACTED, source, codes)
+            records[field] = FieldRecord(FieldState.EXTRACTED, source, codes, rule)
         elif failed[field]:
-            records[field] = FieldRecord(FieldState.FAILED, sources.get(field), codes)
+            records[field] = FieldRecord(FieldState.FAILED, sources.get(field), codes, rule)
         elif (abstained_front_matter and field in _FRONT_MATTER_FIELDS) or (
             field == "doi" and doi_abstained
         ):
@@ -184,6 +182,7 @@ def build_field_states(
                 FieldState.ABSTAINED,
                 None,
                 tuple(dict.fromkeys([*codes, *([_ABSTENTION] if field != "doi" else [])])),
+                rule,
             )
         elif (
             field in _LLM_FIELDS
@@ -194,7 +193,7 @@ def build_field_states(
             field == "bib"
             and (scope.references_off or (scope.no_llm and sources.get("bib") != "native"))
         ):
-            records[field] = FieldRecord(FieldState.NOT_ATTEMPTED, None, codes)
+            records[field] = FieldRecord(FieldState.NOT_ATTEMPTED, None, codes, rule)
         else:
-            records[field] = FieldRecord(FieldState.ABSENT, None, codes)
+            records[field] = FieldRecord(FieldState.ABSENT, None, codes, rule)
     return records

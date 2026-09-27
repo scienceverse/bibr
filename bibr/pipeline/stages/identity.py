@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
 from bibr.extract.pdf_doi_evidence import is_pdf, read_pdf_doi_evidence
-from bibr.field_states import set_field_source
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -126,9 +125,6 @@ class IdentityValidationStage:
         if paper.metadata is not None:
             if selection.selected is not None:
                 paper.metadata.doi = selection.selected.normalized
-                set_field_source(
-                    paper.metadata, "doi", doi_field_source(selection.selected.source_kind)
-                )
             else:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""

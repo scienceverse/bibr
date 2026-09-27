@@ -439,7 +439,8 @@ def _print_plan(options: BatchOptions, plan: BatchPlan, ledger: Ledger) -> None:
             f"{len(discovery.manifests)} manifests {ui.SEP} "
             f"{len(discovery.directories)} directories {ui.SEP} "
             f"{len(discovery.missing)} missing {ui.SEP} "
-            f"{len(discovery.unsupported)} unsupported",
+            f"{len(discovery.unsupported)} unsupported {ui.SEP} "
+            f"{len(discovery.unreadable)} unreadable",
         )
     )
 
@@ -572,6 +573,8 @@ def run_batch(
         ui.warn(console, f"not found: {missing}")
     for unsupported in discovery.unsupported:
         ui.warn(console, f"unsupported file type, skipped: {unsupported}")
+    for unreadable in discovery.unreadable:
+        ui.warn(console, f"unreadable manifest, skipped: {unreadable}")
     for empty in discovery.empty_dirs:
         ui.warn(console, f"no supported files in: {empty}")
     if not discovery.files:

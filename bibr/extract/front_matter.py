@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import logging
 import math
 import re
 import unicodedata
@@ -31,6 +32,8 @@ if TYPE_CHECKING:
     from bibr.extract.front_role import FrontRolePredictions, RoleScores
     from bibr.paper_contents import PaperContents, PaperSentence, RegionSummary
     from bibr.pipeline.identity import ExpectedIdentity
+
+logger = logging.getLogger(__name__)
 
 _DOI_RE = DOI_CANDIDATE_RE
 _WORD_RE = re.compile(r"[^\W\d_]+(?:[-'][^\W\d_]+)*", re.UNICODE)
@@ -1705,6 +1708,657 @@ def _heuristic_role(candidates: tuple[FrontMatterCandidate, ...], role: str) -> 
     )
 
 
+# Record agreement: the fallback for pages coherent dominance abstains on.
+#
+# Dominance vetoes on any competing anatomy, so a page abstains whenever the
+# paper's own record is printed twice (a publisher cover page, a repository
+# landing page, a citation box, a translated title and abstract) or a
+# furniture row (an email list, a date line, "a r t i c l e i n f o", a
+# sidebar heading) roots a second block that then owns the abstract. This
+# fallback reads what each block prints about its paper — title, author
+# surnames, DOIs — and selects only when every record on the page agrees.
+# Two records that disagree still abstain: compiled abstract books and
+# proceedings pages print several complete records with different titles.
+
+_AGREE = "agree"
+_CONFLICT = "conflict"
+_UNVERIFIED = "unverified"
+
+# Funder-registry DOIs name a funder, not a paper.
+_FUNDER_DOI_PREFIX = "10.13039/"
+# Typeset hyphens (U+2010 and kin) stop the DOI pattern early, which cut two
+# different DOIs down to one shared prefix; read them as ASCII hyphens.
+_DOI_HYPHENS = str.maketrans(
+    {"\u00ad": None, **dict.fromkeys("\u2010\u2011\u2012\u2013\u2212\ufe63\uff0d", "-")}
+)
+# Anchored at the start of a token and possessive, so an unbroken CJK row is
+# scanned once instead of once per character.
+_URL_OR_EMAIL_RE = re.compile(r"(?<!\S)[^\s@]*+@\S*|https?://\S*|www\.\S*", re.IGNORECASE)
+# "1. Introduction", "2. MATERIALS AND METHODS", "IV. Results": numbered
+# body headings are never the article title.
+_NUMBERED_HEADING_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*[.)]?|[IVX]+[.)])\s+\S")
+# Rows that open a cover page, a repository landing page or a citation box.
+# Such a block repeats the article's identity; it ranks below the article's
+# own title page.
+_COVER_CUE_RE = re.compile(
+    r"^\W*(?:to cite this|cite this article|how to cite|please cite|"
+    r"(?:recommended|suggested|scholar commons) citation|citation\s*(?::|$)|"
+    r"citation for the published version|this article was downloaded|downloaded from|"
+    r"follow this and additional works|published in\s*:|document version|"
+    r"link to publication|terms and conditions of use|take-down policy|"
+    r"please scroll down for article|para citar|c[oó]mo citar|pour citer|zitierweise|"
+    r"цитування|для цитирования)",
+    re.IGNORECASE,
+)
+# Scripts written without spaces between words.
+_UNSPACED_SCRIPTS = frozenset({"CJK", "HIRAGANA", "KATAKANA", "THAI"})
+# Common function words per language. A title's language is the unique best
+# match; it only has to tell a translated title from a different paper's title.
+_TITLE_FUNCTION_WORDS: dict[str, frozenset[str]] = {
+    language: frozenset(words.split())
+    for language, words in {
+        "en": "the of and in for on with to from by an among between through using its their "
+        "how what why does is are",
+        "pt": "de da do das dos e em no na nos nas para com um uma os ao aos pela pelo pelas "
+        "pelos sobre entre sua seu não como",
+        "es": "de la el los las y en del para con un una por al sobre entre su sus como",
+        "fr": "de la le les des du et en un une pour dans sur par au aux entre d l leur leurs",
+        "de": "der die das und im von zur zum für mit bei ein eine einer eines des den dem auf "
+        "über als zwischen aus nach",
+        "it": "di del della delle dei degli e il lo gli per con nel nella nelle tra fra sul "
+        "sulla una",
+        "nl": "het een van en voor met op bij naar over door tussen uit",
+        "pl": "i w z na do dla o oraz od po przez we ze jako nie się",
+        "id": "dan yang di dari untuk pada dengan dalam terhadap sebagai ke oleh atau",
+    }.items()
+}
+# Surname comparison folds scripts to Latin so a transliterated byline
+# ("Ivanov I.I.") can match the original ("Иванов И.И.").
+_TRANSLITERATION = (
+    "а=a б=b в=v г=g ґ=g д=d е=e ё=e є=ie ж=zh з=z и=i і=i ї=i й=i к=k л=l м=m н=n о=o "
+    "п=p р=r с=s т=t у=u ў=u ф=f х=kh ц=ts ч=ch ш=sh щ=shch ъ= ы=y ь= э=e ю=yu я=ya ђ=dj "
+    "ј=j љ=lj њ=nj ћ=c џ=dz α=a β=b γ=g δ=d ε=e ζ=z η=i θ=th ι=i κ=k λ=l μ=m ν=n ξ=x ο=o "
+    "π=p ρ=r σ=s ς=s τ=t υ=y φ=f χ=ch ψ=ps ω=o ł=l ø=o đ=d ß=ss æ=ae œ=oe þ=th ı=i"
+)
+_SURNAME_TRANSLITERATION = str.maketrans({pair[0]: pair[2:] for pair in _TRANSLITERATION.split()})
+# Romanizations disagree on й, ю and я (y, i or j): compare those letters as one.
+_SURNAME_VARIANTS = str.maketrans("yj", "ii")
+_PERSON_CHUNK_SPLIT_RE = re.compile(
+    r"\s*(?:[,;·•&]|\band\b|\bund\b|\bet\b|\bи\b)\s*", re.IGNORECASE
+)
+_NAME_TOKEN_RE = re.compile(r"[^\W\d_]+(?:[-'’][^\W\d_]+)*(\.)?")
+_NON_SURNAME_TOKENS = frozenset(
+    {"by", "prof", "dr", "phd", "md", "msc", "author", "authors", "corresponding", "mail"}
+)
+# Longest title (in words) and citation row (in characters) worth comparing;
+# longer rows are prose, and bounding them keeps every comparison linear.
+_MAX_TITLE_WORDS = 60
+_MAX_CITATION_CHARS = 2_000
+
+
+@dataclass(frozen=True)
+class _RecordIdentity:
+    """What one block prints about the paper it describes.
+
+    Evidence comes from the block's opening rows only — up to the page after
+    the one its first title sits on — so body paragraphs a block swallowed,
+    and the references they cite, never speak for its identity.
+    """
+
+    block: FrontMatterBlock
+    order: int
+    titles: tuple[str, ...]
+    citations: tuple[str, ...]
+    language: str | None
+    surnames: frozenset[str]
+    dois: frozenset[str]
+    byline: bool
+    abstract: bool
+    anatomy: bool
+    doc_title: bool
+    # "exact" when a title row is the parser's detected title, "prefix" when
+    # one runs on past it, else None.
+    detected: str | None
+    cover: bool
+
+    @property
+    def is_record(self) -> bool:
+        """A title plus byline or layout-title evidence: something that can be a paper."""
+
+        return bool(self.titles) and (self.byline or self.doc_title or self.detected is not None)
+
+
+def _identity_key(text: str) -> str:
+    """Letters and digits only, casefolded and accent-free, in any script.
+
+    Dropping every space, hyphen and punctuation mark makes the key immune to
+    line wraps, hyphenation ("self-" / "reports"), letter spacing and a lost
+    space ("rightsand"), so a title compares equal however it was laid out.
+    """
+
+    folded = unicodedata.normalize("NFKC", text).casefold()
+    return "".join(char for char in unicodedata.normalize("NFKD", folded) if char.isalnum())
+
+
+def _detected_match(candidate: FrontMatterCandidate, detected_title: str | None) -> str | None:
+    """Whether a title row is the parser's detected title, or runs on past it."""
+
+    if "title" not in candidate.roles or not detected_title:
+        return None
+    key = _identity_key(detected_title)
+    if key and _identity_key(candidate.raw_text) == key:
+        return "exact"
+    detected = _normalize_text(detected_title)
+    actual = candidate.normalized_text
+    if actual.startswith(detected) and len(actual) <= max(len(detected) * 3, len(detected) + 120):
+        return "prefix"
+    return None
+
+
+def _title_word_count(text: str) -> int:
+    count = sum(len(word) > 1 for word in _WORD_RE.findall(text))
+    if _dominant_script(text) in _UNSPACED_SCRIPTS:
+        count = max(count, sum(char.isalpha() for char in text) // 2)
+    return count
+
+
+def _is_identity_title(candidate: FrontMatterCandidate, detected_title: str | None) -> bool:
+    """A title-role row that could be an article title rather than furniture.
+
+    Layout's own title and the parser's detected title always count, even
+    when they name a university, open with a number or run to two words.
+    """
+
+    roles = candidate.roles
+    if "title" not in roles or roles & {
+        "abstract",
+        "doi",
+        MODEL_NON_TITLE_SEED_ROLE,
+        CLASSIFIED_BYLINE_TITLE_ROLE,
+        BYLINE_PROBATION_ROLE,
+    }:
+        return False
+    text = candidate.raw_text.strip()
+    if _URL_OR_EMAIL_RE.search(text):
+        return False
+    if (candidate.region_label or "").casefold() == "doc_title" or (
+        _detected_match(candidate, detected_title) == "exact"
+    ):
+        return True
+    # An affiliation-bearing title is an institution line, unless it is the
+    # proceedings composite that also carries the byline.
+    if "affiliation" in roles and "byline" not in roles:
+        return False
+    return not _NUMBERED_HEADING_RE.match(text) and _title_word_count(text) >= 3
+
+
+def _dominant_script(text: str) -> str | None:
+    counts: dict[str, int] = {}
+    for char in text:
+        if char.isalpha():
+            script = unicodedata.name(char, "").split(" ", 1)[0]
+            counts[script] = counts.get(script, 0) + 1
+    if not counts:
+        return None
+    script, count = max(counts.items(), key=lambda item: item[1])
+    return script if count * 5 >= sum(counts.values()) * 3 else None
+
+
+def _title_language(text: str) -> str | None:
+    """The title's language where it can be told, else its script, else None.
+
+    Latin script is resolved by function words; Cyrillic by the letters only
+    Ukrainian (і ї є ґ) or only Russian (ы э ъ ё) prints.
+    """
+
+    script = _dominant_script(text)
+    if script == "CYRILLIC":
+        letters = set(text.casefold())
+        if letters & set("іїєґ"):
+            return "uk"
+        return "ru" if letters & set("ыэъё") else "cyrillic"
+    if script != "LATIN":
+        return script.casefold() if script else None
+    words = [part.casefold() for word in _WORD_RE.findall(text) for part in re.split(r"['’]", word)]
+    scores = sorted(
+        (
+            (sum(word in vocabulary for word in words), language)
+            for language, vocabulary in _TITLE_FUNCTION_WORDS.items()
+        ),
+        reverse=True,
+    )
+    (best, language), (runner_up, _) = scores[0], scores[1]
+    return language if best > runner_up else None
+
+
+def _person_surnames(text: str) -> frozenset[str]:
+    """Surnames of the name-shaped chunks printed before any affiliation.
+
+    A chunk is one to five capitalized words once initials ("Yu.", "F.",
+    "FH") and particles are skipped ("Sample, J. K." yields "Sample"); its
+    last word is the surname, transliterated and accent-folded.
+    """
+
+    bounded = _URL_OR_EMAIL_RE.sub(" ", text)
+    marker = AFFILIATION_MARKER_RE.search(bounded)
+    if marker is not None:
+        bounded = bounded[: marker.start()]
+    surnames: set[str] = set()
+    for chunk in _PERSON_CHUNK_SPLIT_RE.split(_BYLINE_MARKER_RE.sub(" ", bounded)):
+        words = []
+        for match in _NAME_TOKEN_RE.finditer(chunk):
+            word = match.group(0).rstrip(".")
+            initial = len(word) == 1 or (
+                len(word) <= 2 and (match.group(1) is not None or word.isupper())
+            )
+            if not initial and word.casefold() not in _NAME_PARTICLES:
+                words.append(word)
+        if not 1 <= len(words) <= 5 or not all(word[:1].isupper() for word in words):
+            continue
+        folded = unicodedata.normalize("NFKD", words[-1].casefold())
+        surname = "".join(
+            char for char in folded.translate(_SURNAME_TRANSLITERATION) if char.isalpha()
+        )
+        if 2 <= len(surname) <= 40 and surname not in _NON_SURNAME_TOKENS:
+            surnames.add(surname)
+    return frozenset(surnames)
+
+
+def _composite_name_tail(text: str) -> str | None:
+    """The mixed-case name list after an uppercase title in one proceedings row.
+
+    "COMMUNITY GARDENS AND SHARED SPACES Morgan Example, Mei Lin" prints title
+    and byline together; an all-uppercase title whose byline role came only
+    from its capitalization has no such tail.
+    """
+
+    words = list(re.finditer(r"\S+", text))
+    index = 0
+    while index < len(words) and not any(char.islower() for char in words[index].group(0)):
+        index += 1
+    if index == 0 or index == len(words):
+        return None
+    # The tail opens on a capitalized name ("Morgan", "Mei"), not OCR debris.
+    first = words[index].group(0)
+    if not (first[:1].isupper() and first[1:2].islower()):
+        return None
+    tail = text[words[index].start() :]
+    return tail if _person_surnames(tail) else None
+
+
+def _identity_byline_text(candidate: FrontMatterCandidate) -> str | None:
+    """Printed author text a row contributes to its block's identity."""
+
+    roles = candidate.roles
+    if "abstract" in roles:
+        return None
+    if "title" in roles and CLASSIFIED_BYLINE_TITLE_ROLE not in roles:
+        return _composite_name_tail(candidate.raw_text) if "byline" in roles else None
+    if "byline" in roles:
+        return candidate.raw_text
+    if "affiliation" in roles:
+        # "Ada K. Example, Ben L. Sample, Example University, Utrecht":
+        # an author list typed as an affiliation still names the authors.
+        names = _person_surnames(candidate.raw_text)
+        return candidate.raw_text if len(names) >= 2 else None
+    return None
+
+
+def _is_citation_row(candidate: FrontMatterCandidate) -> bool:
+    """A non-title row that could cite the paper: a year, a DOI or a cover cue."""
+
+    text = candidate.raw_text
+    return bool(
+        "title" not in candidate.roles
+        and len(text) <= _MAX_CITATION_CHARS
+        and (
+            _REFERENCE_YEAR_RE.search(text)
+            or _DOI_RE.search(text)
+            or _COVER_CUE_RE.match(text.strip())
+        )
+    )
+
+
+def _record_identity(
+    block: FrontMatterBlock,
+    order: int,
+    by_id: dict[str, FrontMatterCandidate],
+    *,
+    detected_title: str | None,
+) -> _RecordIdentity:
+    rows = _block_candidates(block, by_id)
+    anchor = next(
+        (
+            row.page
+            for row in rows
+            if row.page is not None and _is_identity_title(row, detected_title)
+        ),
+        next((row.page for row in rows if row.page is not None), None),
+    )
+    window = rows
+    if anchor is not None:
+        end = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if row.page is not None and row.page > anchor + 1
+            ),
+            len(rows),
+        )
+        window = rows[:end]
+    titles = tuple(row for row in window if _is_identity_title(row, detected_title))
+    byline_texts = [text for row in window if (text := _identity_byline_text(row)) is not None]
+    dois = frozenset(
+        doi.casefold()
+        for row in window
+        for match in _DOI_RE.finditer(row.raw_text.translate(_DOI_HYPHENS))
+        if (doi := normalize_doi(match.group(0))) is not None
+        and not doi.startswith(_FUNDER_DOI_PREFIX)
+    )
+    abstract = any(_is_abstract_content(row) for row in window)
+    matches = {_detected_match(row, detected_title) for row in window}
+    return _RecordIdentity(
+        block=block,
+        order=order,
+        titles=tuple(row.raw_text for row in titles),
+        citations=tuple(row.raw_text for row in window if _is_citation_row(row)),
+        language=_title_language(titles[0].raw_text) if titles else None,
+        surnames=frozenset(name for text in byline_texts for name in _person_surnames(text)),
+        dois=dois,
+        byline=bool(byline_texts),
+        abstract=abstract,
+        anatomy=abstract or bool(dois) or any("doi" in row.roles for row in window),
+        doc_title=any((row.region_label or "").casefold() == "doc_title" for row in titles),
+        detected="exact" if "exact" in matches else "prefix" if "prefix" in matches else None,
+        cover=any(_COVER_CUE_RE.match(row.raw_text.strip()) for row in window),
+    )
+
+
+def _title_words(title: str) -> list[str]:
+    return [key for word in re.findall(r"\w+", title) if (key := _identity_key(word))]
+
+
+def _one_letter_apart(left: str, right: str) -> bool:
+    """One misread, dropped or added letter in a word of five letters or more."""
+
+    if min(len(left), len(right)) < 5 or left.isdigit() or right.isdigit():
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right, strict=True)) == 1
+    shorter, longer = sorted((left, right), key=len)
+    return len(longer) - len(shorter) == 1 and any(
+        longer[:index] + longer[index + 1 :] == shorter for index in range(len(longer))
+    )
+
+
+def _same_title(left: str, right: str) -> bool:
+    """One printed title, however it was laid out or lightly misread.
+
+    The identity keys must be equal, or the words must be the same but for at
+    most one word in eight misread by a single letter. Printed numbers never
+    differ ("Study 1" is not "Study 2"), and a title plus words ("... with
+    autism") is a different title.
+    """
+
+    left_key, right_key = _identity_key(left), _identity_key(right)
+    if len(left_key) < 12 or len(right_key) < 12:
+        return False
+    if left_key == right_key:
+        return True
+    left_words, right_words = _title_words(left), _title_words(right)
+    if len(left_words) != len(right_words) or not 4 <= len(left_words) <= _MAX_TITLE_WORDS:
+        return False
+    misread = [(a, b) for a, b in zip(left_words, right_words, strict=True) if a != b]
+    return len(misread) <= max(1, len(left_words) // 8) and all(
+        _one_letter_apart(a, b) for a, b in misread
+    )
+
+
+def _main_title(title: str) -> str | None:
+    """The main title before a subtitle break, when it is long enough to stand alone.
+
+    A cover page prints "Title: Subtitle" on one line where the title page
+    sets the subtitle on its own row. Subtitles alone ("A Randomized
+    Controlled Trial") never stand for the title.
+    """
+
+    parts = re.split(r"\s*(?::|\s[-–—]\s)\s*", title, maxsplit=1)
+    return parts[0] if len(parts) == 2 and len(_WORD_RE.findall(parts[0])) >= 5 else None
+
+
+def _cites_title(title: str, text: str) -> bool:
+    """A citation line that prints *title* whole: all its words in order, closed
+    by punctuation rather than running on into a longer title."""
+
+    words = [re.escape(word) for word in re.findall(r"\w+", _fold_accents(title))]
+    if not 6 <= len(words) <= _MAX_TITLE_WORDS:
+        return False
+    pattern = r"(?<!\w)" + r"\W*".join(words) + r"(?=\s*(?:[^\w\s]|$))"
+    return re.search(pattern, _fold_accents(text)) is not None
+
+
+def _fold_accents(text: str) -> str:
+    folded = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", text).casefold())
+    return "".join(char for char in folded if not unicodedata.combining(char))
+
+
+def _titles_agree(left: _RecordIdentity, right: _RecordIdentity) -> bool:
+    """Same printed title, allowing a subtitle split, light OCR noise, or a
+    citation box that prints the other's title."""
+
+    for left_title in left.titles:
+        left_main = _main_title(left_title)
+        for right_title in right.titles:
+            right_main = _main_title(right_title)
+            if (
+                _same_title(left_title, right_title)
+                or (left_main is not None and _same_title(left_main, right_title))
+                or (right_main is not None and _same_title(left_title, right_main))
+            ):
+                return True
+    return any(
+        _cites_title(title, citation)
+        for titles, citations in ((left.titles, right.citations), (right.titles, left.citations))
+        for title in titles
+        for citation in citations
+    )
+
+
+def _same_surname(left: str, right: str) -> bool:
+    """One surname across romanizations: exact below six letters (Zhang is not
+    Zhong), a close spelling from six letters on."""
+
+    left, right = left.translate(_SURNAME_VARIANTS), right.translate(_SURNAME_VARIANTS)
+    if left == right:
+        return True
+    return min(len(left), len(right)) >= 6 and (
+        difflib.SequenceMatcher(None, left, right).ratio() >= 0.8
+    )
+
+
+def _surnames_agree(left: frozenset[str], right: frozenset[str]) -> bool:
+    """Every surname of the shorter byline, or at least two, found in the other."""
+
+    smaller, larger = sorted((left, right), key=len)
+    matched = sum(any(_same_surname(a, b) for b in larger) for a in smaller)
+    return bool(matched) and (matched == len(smaller) or matched >= 2)
+
+
+def _languages_differ(left: str | None, right: str | None) -> bool:
+    """Two titles known to be in different languages, so one may translate the other."""
+
+    if left is None or right is None or left == right:
+        return False
+    # A Cyrillic title without Ukrainian- or Russian-only letters may be either.
+    return not ({left, right} <= {"cyrillic", "uk", "ru"} and "cyrillic" in {left, right})
+
+
+def _record_relation(left: _RecordIdentity, right: _RecordIdentity) -> tuple[str, str]:
+    """Whether two records print the same paper, a different one, or cannot tell.
+
+    Different DOIs are different papers. A shared DOI or title joins them,
+    but a DOI never joins two different titles in one language: a proceedings
+    volume or a supplement lends its DOI to many papers. Different titles in
+    one language are different papers. A title in another language or script
+    is a translation only when the bylines name the same authors.
+    """
+
+    titles_agree = _titles_agree(left, right)
+    translated = _languages_differ(left.language, right.language)
+    if left.dois and right.dois:
+        if not left.dois & right.dois:
+            return _CONFLICT, "doi"
+        return (_AGREE, "doi") if titles_agree or translated else (_CONFLICT, "doi_title")
+    if titles_agree:
+        return _AGREE, "title"
+    if not translated:
+        return _CONFLICT, "title"
+    if not left.surnames or not right.surnames:
+        return _UNVERIFIED, "translation"
+    if _surnames_agree(left.surnames, right.surnames):
+        return _AGREE, "authors"
+    if any(_same_surname(a, b) for a in left.surnames for b in right.surnames):
+        return _UNVERIFIED, "authors"
+    return _CONFLICT, "authors"
+
+
+def _primary_rank(identity: _RecordIdentity) -> tuple[bool, bool, bool, bool, bool, bool, int]:
+    """The article's own title page first: the parser's detected title (exact
+    before a prefix), not a cover or citation box, a byline, abstract content,
+    a layout title, then the first printed."""
+
+    return (
+        identity.detected != "exact",
+        identity.detected is None,
+        identity.cover,
+        not identity.byline,
+        not identity.abstract,
+        not identity.doc_title,
+        identity.order,
+    )
+
+
+def _select_agreeing_record(
+    blocks: tuple[FrontMatterBlock, ...],
+    by_id: dict[str, FrontMatterCandidate],
+    *,
+    detected_title: str | None,
+) -> tuple[FrontMatterBlock | None, tuple[str, ...]]:
+    """Select the paper's own record when every record on the page agrees.
+
+    Records (a title with byline or layout-title evidence) are grouped by
+    agreement: the same DOI, the same title, or — for a title in another
+    language — the same author surnames. Any conflicting pair, or records
+    that cannot be linked, abstains. A block that is not a record attaches to
+    the group only if it prints no other DOI, a byline of its own names the
+    group's authors, title or DOI, and a title and abstract of its own match
+    a record or are in another language. The group must add up to a complete
+    record, the selected block must hold byline evidence, and the parser's
+    detected title must belong to the group or to a translation of it.
+    """
+
+    identities = [
+        _record_identity(block, order, by_id, detected_title=detected_title)
+        for order, block in enumerate(blocks)
+    ]
+    records = [identity for identity in identities if identity.is_record]
+    if not records:
+        return None, ("no_record_identity",)
+
+    parent = {identity.block.block_id: identity.block.block_id for identity in records}
+
+    def root(block_id: str) -> str:
+        while parent[block_id] != block_id:
+            block_id = parent[block_id]
+        return block_id
+
+    reasons: dict[str, str] = {}
+    for index, left in enumerate(records):
+        for right in records[index + 1 :]:
+            relation, reason = _record_relation(left, right)
+            if relation == _CONFLICT:
+                return None, (
+                    f"conflicting_records:{left.block.block_id}:{right.block.block_id}:{reason}",
+                )
+            if relation == _AGREE:
+                parent[root(right.block.block_id)] = root(left.block.block_id)
+                reasons.setdefault(right.block.block_id, reason)
+                reasons.setdefault(left.block.block_id, reason)
+    if len({root(identity.block.block_id) for identity in records}) > 1:
+        return None, ("unlinked_records",)
+
+    group_dois = frozenset(doi for identity in records for doi in identity.dois)
+    group_surnames = frozenset(name for identity in records for name in identity.surnames)
+    attached = [identity for identity in identities if not identity.is_record]
+    for identity in attached:
+        block_id = identity.block.block_id
+        if identity.dois and group_dois and not identity.dois & group_dois:
+            return None, (f"doi_conflict:{block_id}",)
+        # A byline with an abstract or DOI of its own is a record the title
+        # filter missed (a title naming a university, opening with a number):
+        # it must name the group's authors, title or DOI.
+        if (
+            identity.byline
+            and (identity.abstract or identity.dois)
+            and not (
+                any(_same_surname(a, b) for a in identity.surnames for b in group_surnames)
+                or any(_titles_agree(identity, record) for record in records)
+                or identity.dois & group_dois
+            )
+        ):
+            return None, (f"unlinked_block:{block_id}",)
+        # A title and abstract without a byline is the record translated, or
+        # another paper whose byline went unseen (an abstract book): only the
+        # same title or another language tells the two apart.
+        if (
+            identity.titles
+            and identity.abstract
+            and not any(_titles_agree(identity, record) for record in records)
+            and not all(_languages_differ(identity.language, record.language) for record in records)
+        ):
+            return None, (f"unmatched_presentation:{block_id}",)
+    if not any(identity.byline for identity in identities) or not any(
+        identity.anatomy for identity in identities
+    ):
+        return None, ("incomplete_record",)
+
+    # The metadata call reads only the selected block, so it must print a
+    # byline. A translation with a byline never stands in for an original
+    # title page without one.
+    best = min(records, key=_primary_rank)
+    eligible = [
+        identity
+        for identity in records
+        if identity.byline and not _languages_differ(identity.language, best.language)
+    ]
+    if not eligible:
+        return None, (f"record_without_byline:{best.block.block_id}",)
+    primary = min(eligible, key=_primary_rank)
+
+    # The parser's detected title must be the group's, or a translated
+    # presentation of it; otherwise a null metadata title would later be
+    # filled from another paper's printed title.
+    if detected_title:
+        matched = [identity for identity in identities if identity.detected == "exact"] or [
+            identity for identity in identities if identity.detected == "prefix"
+        ]
+        if matched and not any(identity.is_record for identity in matched):
+            detected_language = _title_language(detected_title)
+            for identity in matched:
+                if not _languages_differ(detected_language, primary.language) or (
+                    identity.byline and not _surnames_agree(identity.surnames, group_surnames)
+                ):
+                    return None, (f"detected_title_outside_record:{identity.block.block_id}",)
+
+    flags = [
+        f"agreeing_record:{identity.block.block_id}:{reasons[identity.block.block_id]}"
+        for identity in records
+        if identity is not primary
+    ]
+    flags.extend(f"attached_block:{identity.block.block_id}" for identity in attached)
+    return primary.block, tuple(flags)
+
+
 def _multi_item_issue(
     blocks: tuple[FrontMatterBlock, ...],
     expected_identity: ExpectedIdentity | None,
@@ -1775,7 +2429,26 @@ def resolve_front_matter(
             selected = dominant
             method = "coherent_dominance"
         else:
-            reason_flags.append("multiple_plausible_blocks")
+            # Only where dominance abstained, and never against a supplied
+            # expected identity: pick the paper's record if all records agree.
+            agreed: FrontMatterBlock | None = None
+            agreement_flags: tuple[str, ...] = ()
+            if not _has_expected_selectors(expected_identity):
+                try:
+                    agreed, agreement_flags = _select_agreeing_record(
+                        blocks, by_id, detected_title=contents.detected_title
+                    )
+                except Exception:  # noqa: BLE001 — a fallback must never fail an abstaining paper
+                    logger.warning(
+                        "Front-matter record agreement failed; abstaining", exc_info=True
+                    )
+                    agreed, agreement_flags = None, ("record_agreement_error",)
+            if agreed is not None:
+                selected = agreed
+                method = "record_agreement"
+            else:
+                reason_flags.append("multiple_plausible_blocks")
+            reason_flags.extend(agreement_flags)
     elif not blocks:
         reason_flags.append("no_candidates")
 

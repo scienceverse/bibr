@@ -74,12 +74,16 @@ def resolve_run_config(args) -> ResolvedRunConfig:
     Raises ``ValueError`` describing the offending option (``--pages``,
     ``--ocr-model``/``--ocr-profile``).
     """
-    # Determine OCR backend. ``--ocr-url`` follows the Paddle-first default;
-    # an explicit GLM selection deliberately retains the established GLM HTTP
-    # contract for existing private servers.
+    # Determine OCR backend. ``--ocr-url`` goes through the rule LocalPipeline
+    # and the OCR runtime identity share: Paddle unless ``--ocr`` (or a
+    # configured OCR_BACKEND) asks for GLM. An explicit ``--ocr`` cloud vision
+    # backend is kept; a configured cloud OCR_BACKEND never outranks the URL.
     ocr_backend = args.ocr
     if args.ocr_url:
-        ocr_backend = "glm-http" if (args.ocr or "").startswith("glm") else "paddle-http"
+        from bibr.config import Settings
+        from bibr.ocr.registry import resolve_url_backend, url_request
+
+        ocr_backend = resolve_url_backend(url_request(args.ocr, Settings.ocr.backend), args.ocr_url)
     elif ocr_backend == "paddle":
         # ``paddle`` is a startup selector, not a concrete backend. Keep it
         # intact for ResourceManager's transactional fallback chain.

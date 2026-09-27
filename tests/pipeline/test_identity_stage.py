@@ -338,6 +338,8 @@ def test_only_the_identity_stage_writes_the_paper_doi():
 
     The native JATS and HTML parsers record the DOI the input declares on their
     preparsed record, which the identity stage reads as structured evidence.
+    The reference extractor writes a reference entry's own DOI, never the
+    paper's.
     """
     import ast
 
@@ -347,6 +349,8 @@ def test_only_the_identity_stage_writes_the_paper_doi():
         return isinstance(node, ast.Constant) and node.value == "doi"
 
     evidence_writers = {"input/jats_native.py", "input/html_native.py"}
+    # The reference line stream fills a parsed entry's DOI from its link annotation.
+    reference_writers = {"extract/ref_extractor.py"}
     writers: set[tuple[str, int]] = set()
     root = Path(bibr.__file__).parent
     for path in root.rglob("*.py"):
@@ -382,6 +386,6 @@ def test_only_the_identity_stage_writes_the_paper_doi():
                     ):
                         writers.add((relative, node.lineno))
 
-    assert {module for module, _line in writers} - evidence_writers == {
+    assert {module for module, _line in writers} - evidence_writers - reference_writers == {
         "pipeline/stages/identity.py"
     }

@@ -24,10 +24,12 @@ from bibr.ocr.profiles import (
     resolve_ocr_runtime_identity,
 )
 from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
 from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.redact import describe_error, redact_urls
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
+from bibr.utils.semaphore import clamped_semaphore as _clamped_semaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
 from bibr.utils.transient import is_service_outage
 
@@ -42,14 +44,13 @@ logger = logging.getLogger(__name__)
 # network-bound, so files can be processed concurrently. Local engines
 # (GLM and generic local engines) run sequentially. ``cfg.ocr_url`` also forces the
 # remote path regardless of backend name.
-REMOTE_OCR_BACKENDS = frozenset(
-    {"glm-http", "paddle-http", "serve-http", "gemini", "openai", "anthropic"}
-)
-# Cloud vision-LLM OCR backends hold no local weights: the client is a thin
-# HTTPS handle, so per-chunk teardown only forces re-handshakes (and a fresh
-# key read) with no VRAM to reclaim. Kept separate from REMOTE_OCR_BACKENDS,
-# which also covers self-hosted HTTP proxies with their own lifecycle.
-CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
+#
+# The cloud vision-LLM OCR backends (CLOUD_VISION_OCR_BACKENDS, defined once in
+# bibr.ocr.registry) hold no local weights: the client is a thin HTTPS handle,
+# so per-chunk teardown only forces re-handshakes (and a fresh key read) with
+# no VRAM to reclaim. They are kept apart from the rest of REMOTE_OCR_BACKENDS,
+# the self-hosted HTTP proxies with their own lifecycle.
+REMOTE_OCR_BACKENDS = CLOUD_VISION_OCR_BACKENDS | {"glm-http", "paddle-http", "serve-http"}
 
 # Shared GPU execution is serialized by the runtime; keep this concurrency default aligned with
 # the settings model.
@@ -1233,7 +1234,9 @@ class OcrStage:
                 ),
             )
         )
-        file_sem = asyncio.Semaphore(ctx.settings.ocr.max_concurrent_files)
+        # Clamped: settings load rejects 0, but an injected settings object can
+        # still carry it, and Semaphore(0) would hang every task forever.
+        file_sem = _clamped_semaphore(ctx.settings.ocr.max_concurrent_files)
 
         async def _process(fs) -> None:
             async with file_sem:

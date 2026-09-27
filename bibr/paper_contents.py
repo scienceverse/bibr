@@ -595,6 +595,9 @@ class PaperTable:
     # ``create_content_sections`` reassigns ``section_id`` to the table's own
     # synthetic section). Exported as the table's ``section_id``.
     _body_section_id: int | None = field(default=None)
+    # True when the float was met inside a <p>: its caption used to merge into
+    # the paragraph sentence, so the caption sentence keeps the URL regex pass.
+    _in_paragraph: bool = field(default=False)
     parts: list[PaperTablePart] = field(default_factory=list)
     # Printed label without the word ("3", "3.1", "S2", "IV"), from the
     # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.
@@ -632,6 +635,8 @@ class PaperFigure:
     # ``create_content_sections`` reassigns ``section_id`` to the figure's own
     # synthetic section). Exported as the figure's ``section_id``.
     _body_section_id: int | None = field(default=None)
+    # True when the float was met inside a <p> (see PaperTable._in_paragraph).
+    _in_paragraph: bool = field(default=False)
     parts: list[PaperFigurePart] = field(default_factory=list)
     # Printed label without the word ("3", "3.1", "S2", "A1"), from the
     # caption (``bibr.structure.float_labels``); in-text mentions resolve by it.

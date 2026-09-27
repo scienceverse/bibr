@@ -11,7 +11,11 @@ Usage:
     # Programmatic
     from bibr.demo import create_local_demo
     demo = create_local_demo()
-    demo.launch()
+    demo.launch(max_file_size="10mb")
+
+Pass ``max_file_size`` so Gradio refuses an oversized upload while it arrives
+(HTTP 413). ``bibr demo`` sets it from ``DEMO_MAX_FILE_SIZE_MB``; without it the
+upload is stored in full before the demo's own size check rejects it.
 """
 
 

@@ -4,8 +4,8 @@ Born-digital PDFs often carry publisher-set document-info metadata (Title,
 Keywords, a DOI in Subject/Keywords). It is free to read and, when sane,
 a better backstop than nothing — but doc-info is also routinely junk
 ("Microsoft Word - draft3.docx", the submitting author's username), so
-every field passes a guard before being offered to the fill-empty merge
-(``_merge_ocr_metadata``).
+every field passes a guard before being offered as a fill-empty candidate
+(``doc_info_candidates``).
 """
 
 from bibr.input.pdf_metadata import harvest_docinfo, harvest_pdf_metadata

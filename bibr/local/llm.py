@@ -5,6 +5,7 @@ its owning pipeline settings to route requests to the local endpoint.
 """
 
 import logging
+import threading
 
 from bibr.config import snapshot_settings
 from bibr.local.http_runtime import MANAGED_LOCAL_LLM_RATE_LIMIT_RPM
@@ -26,6 +27,8 @@ class VllmMlxLlmServer:
         self,
         model: str | None = None,
         settings=None,
+        *,
+        stop_event: threading.Event | None = None,
     ):
         import shlex
 
@@ -50,6 +53,7 @@ class VllmMlxLlmServer:
             multimodal=False,
             extra_args=extra_args,
             settings=self._settings,
+            stop_event=stop_event,
         )
 
     def configure_llm_client(self):
