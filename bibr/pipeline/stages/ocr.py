@@ -28,6 +28,7 @@ from bibr.ocr.types import OcrRegionResult
 from bibr.processing_warnings import ProcessingWarning, WarningCode
 from bibr.utils.redact import describe_error, redact_urls
 from bibr.utils.semaphore import DualSemaphore as _DualSemaphore
+from bibr.utils.semaphore import clamped_semaphore as _clamped_semaphore
 from bibr.utils.text import OCR_CORRUPTION_MIN_CHARS, ocr_corruption_count
 from bibr.utils.transient import is_service_outage
 
@@ -1233,7 +1234,9 @@ class OcrStage:
                 ),
             )
         )
-        file_sem = asyncio.Semaphore(ctx.settings.ocr.max_concurrent_files)
+        # Clamped: settings load rejects 0, but an injected settings object can
+        # still carry it, and Semaphore(0) would hang every task forever.
+        file_sem = _clamped_semaphore(ctx.settings.ocr.max_concurrent_files)
 
         async def _process(fs) -> None:
             async with file_sem:

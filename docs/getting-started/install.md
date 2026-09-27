@@ -133,7 +133,8 @@ onnxruntime` fails until `uv sync --reinstall-package onnxruntime` restores the
 CPU build.
 
 When both packages are installed and the CPU build is the one loaded, bibr logs
-a warning that gives the command for your environment.
+a warning that gives the command for your environment. `bibr doctor` shows
+which build loads, CPU or GPU, and its version on its ONNX Runtime line.
 
 ## Installing from source (contributors)
 

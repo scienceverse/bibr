@@ -583,6 +583,26 @@ async def test_remote_ocr_records_stage_time():
     assert fs.stage_times["ocr"] >= 0.0
 
 
+@pytest.mark.asyncio
+async def test_zero_file_concurrency_still_finishes():
+    """_run_remote with injected zeros must finish (file semaphore clamped).
+
+    Settings load rejects 0, but the semaphore is built from the settings
+    object — a raw ``asyncio.Semaphore(0)`` here would hang every file, so
+    this runs under a timeout and fails if the clamp regresses.
+    """
+    fs = FileState(path=Path("a.pdf"))
+    ctx = _ctx([fs])
+    ctx.settings.ocr.max_concurrent_files = 0
+    ctx.settings.ocr.concurrent_regions_per_file = 0
+    ctx.settings.ocr.max_concurrent_regions = 0
+
+    with patch.object(OcrStage, "_ocr_one_file", AsyncMock(return_value=None)):
+        await asyncio.wait_for(OcrStage()._run_remote(ctx, MagicMock()), timeout=10)
+
+    assert fs.error is None
+
+
 # ---------------------------------------------------------------------------
 # OCR-mostly-failed detection (catches silent-engine-crash regressions)
 # ---------------------------------------------------------------------------
