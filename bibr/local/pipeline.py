@@ -242,12 +242,16 @@ class LocalPipeline(Pipeline):
         # Alias/platform resolution ("glm", None → OCR_BACKEND or
         # platform default) — same table as the CLI, so the library API
         # accepts everything `bibr chew --ocr` does.
-        from bibr.ocr.registry import resolve_backend_name, resolve_url_backend
+        from bibr.ocr.registry import (
+            CLOUD_VISION_OCR_BACKENDS,
+            resolve_backend_name,
+            resolve_url_backend,
+            url_request,
+        )
         from bibr.pipeline.context import RunConfig
         from bibr.pipeline.enricher import CrossrefEnricher, RorEnricher
         from bibr.pipeline.plans import build_stage_plan
         from bibr.pipeline.resources import ResourceManager
-        from bibr.pipeline.stages.ocr import CLOUD_VISION_OCR_BACKENDS
 
         settings_snapshot = snapshot_settings(settings)
 
@@ -259,20 +263,22 @@ class LocalPipeline(Pipeline):
         configured_backend = (
             configured_ocr.backend if "backend" in configured_ocr.model_fields_set else None
         )
-        requested_backend = ocr_backend or configured_backend
         if ocr_url:
             # A URL names one OCR server. The shared rule (as for
             # ``bibr chew --ocr-url``) picks its backend — Paddle unless GLM
             # was asked for — before the automatic selector can attach a
-            # local runtime's identity or cache provenance to the request. No
-            # request at all is the default ``paddle`` selector.
-            ocr_backend = resolve_url_backend(requested_backend or "paddle", ocr_url)
+            # local runtime's identity or cache provenance to the request.
+            # Only an explicit ``ocr_backend`` keeps a cloud vision backend: a
+            # configured cloud OCR_BACKEND never replaces the named server.
+            ocr_backend = resolve_url_backend(url_request(ocr_backend, configured_backend), ocr_url)
             if ocr_backend in CLOUD_VISION_OCR_BACKENDS:
                 logger.warning(
                     "ocr_url is ignored by the %s OCR backend, which calls its provider's "
                     "API; set OCR_VISION_BASE_URL to change that endpoint.",
                     ocr_backend,
                 )
+                # Unused, so it must not split the OCR cache key either.
+                ocr_url = None
         else:
             automatic_paddle = ocr_backend == "paddle" or (
                 ocr_backend is None

@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
 from bibr.utils.async_tasks import await_owned
 
 if TYPE_CHECKING:
@@ -286,15 +287,18 @@ class ResourceManager:
 
     def _resolve_ocr_candidates(self):
         """Resolve startup candidates, retaining explicit request overrides."""
-        from bibr.ocr.registry import resolve_backend_candidates, resolve_url_backend
+        from bibr.ocr.registry import resolve_backend_candidates, resolve_url_backend, url_request
 
         requested = self._requested_ocr_backend
         if self.ocr_url:
             # A URL names one server: resolve the request (or the configured
-            # OCR_BACKEND, as the runtime identity does) to its HTTP backend
-            # before the ``paddle`` selector can expand into local runtimes,
-            # so the recorded identity is the client that starts.
-            requested = resolve_url_backend(requested or self._settings.ocr.backend, self.ocr_url)
+            # OCR_BACKEND unless it is a cloud provider, as the runtime
+            # identity does) to its HTTP backend before the ``paddle``
+            # selector can expand into local runtimes, so the recorded
+            # identity is the client that starts.
+            requested = resolve_url_backend(
+                url_request(requested, self._settings.ocr.backend), self.ocr_url
+            )
         candidates = resolve_backend_candidates(requested, self._settings)
         if len(candidates) != 1 or requested == "paddle":
             return candidates
@@ -406,9 +410,12 @@ class ResourceManager:
         if backend_name != "serve-http" and backend_name not in known:
             raise ValueError(f"Unknown OCR backend: {backend_name!r}. Known: {known}")
 
+        # The validated name is an explicit request (or a startup candidate
+        # ``_resolve_ocr_candidates`` already resolved), so ``url_request``
+        # would return it unchanged.
         return resolve_url_backend(backend_name, self.ocr_url)
 
-    _VISION_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
+    _VISION_BACKENDS = CLOUD_VISION_OCR_BACKENDS
 
     def _create_ocr_client(self, candidate=None):
         """Create an OCR client (blocking — run in thread executor)."""

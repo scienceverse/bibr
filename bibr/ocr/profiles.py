@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Final, Literal
 
+from bibr.ocr.registry import CLOUD_VISION_OCR_BACKENDS
+
 if TYPE_CHECKING:
     from bibr.config import GlobalSettings
     from bibr.pipeline.context import RunConfig
@@ -204,11 +206,16 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
     cache must be able to distinguish model families without starting a local
     server merely to discover its identity. An ``ocr_url`` resolves the
     request through the shared rule the pipeline starts its client with
-    (:func:`bibr.ocr.registry.resolve_url_backend`).
+    (:func:`bibr.ocr.registry.url_request`, then
+    :func:`bibr.ocr.registry.resolve_url_backend`).
     """
-    from bibr.ocr.registry import resolve_url_backend
+    from bibr.ocr.registry import resolve_url_backend, url_request
 
     requested_backend = cfg.ocr_backend or settings.ocr.backend
+    if cfg.ocr_url:
+        # A configured cloud OCR_BACKEND is no request next to a server URL;
+        # no request at all is the default ``paddle`` selector.
+        requested_backend = url_request(cfg.ocr_backend, settings.ocr.backend) or "paddle"
     backend = resolve_url_backend(requested_backend, cfg.ocr_url)
     model = (
         settings.ocr.paddle_served_model
@@ -222,7 +229,7 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
         )
     )
     explicit_profile = cfg.ocr_profile or settings.ocr.profile
-    if (backend in {"gemini", "openai", "anthropic"} and explicit_profile is None) or (
+    if (backend in CLOUD_VISION_OCR_BACKENDS and explicit_profile is None) or (
         backend == "serve-http"
         and explicit_profile is None
         and _infer_profile_name(backend, model) is None
@@ -276,7 +283,7 @@ def resolve_served_model(
     ``ocr_url`` rewrite.
     """
     ocr = settings.ocr
-    if concrete_backend in {"gemini", "openai", "anthropic"}:
+    if concrete_backend in CLOUD_VISION_OCR_BACKENDS:
         return ocr.model or settings.ocr_vision.model
     if concrete_backend == "serve-http":
         if (

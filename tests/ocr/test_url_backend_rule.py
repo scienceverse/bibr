@@ -1,9 +1,11 @@
 """One ``ocr_url`` rule for the CLI, the library and the OCR runtime identity.
 
 An OCR URL means Paddle, bibr's default OCR: a GLM request (``glm``,
-``glm-*``) becomes ``glm-http``; ``paddle-http``, ``serve-http`` and the cloud
-vision backends are kept; everything else, including the ``paddle`` selector
-and no backend at all, becomes ``paddle-http``. Without a URL nothing changes.
+``glm-*``) becomes ``glm-http``; ``paddle-http``, ``serve-http`` and an
+explicitly requested cloud vision backend are kept; everything else, including
+the ``paddle`` selector and no backend at all, becomes ``paddle-http``. The
+request is the explicit backend, else a configured ``OCR_BACKEND`` unless it
+names a cloud vision provider. Without a URL nothing changes.
 
 ``bibr chew --ocr-url`` used to pick ``paddle-http`` while
 ``LocalPipeline(ocr_url=...)`` (and so ``bibr.chew``) picked ``glm-http`` for
@@ -164,7 +166,10 @@ async def test_library_cache_identity_is_the_backend_that_starts(requested, expe
     captured = await _start(rm, monkeypatch)
 
     _assert_identity_is_what_started(identity, rm, captured)
-    assert captured.kwargs["base_url"] == URL
+    # A cloud vision backend never reads the URL, so the pipeline drops it.
+    assert captured.kwargs["base_url"] == (
+        None if expected in registry.CLOUD_VISION_OCR_BACKENDS else URL
+    )
 
 
 @pytest.mark.parametrize(
@@ -198,6 +203,65 @@ def test_a_configured_backend_is_the_request_for_a_bare_url(monkeypatch):
     assert resolve_ocr_runtime_identity(raw, snapshot_settings()).backend == "glm-http"
 
 
+def test_url_request_prefers_the_explicit_backend_over_a_configured_cloud_default():
+    assert registry.url_request("glm", "gemini") == "glm"
+    assert registry.url_request("gemini", "paddle") == "gemini"
+    assert registry.url_request(None, "glm-http") == "glm-http"
+    assert registry.url_request(None, None) is None
+    for cloud in sorted(registry.CLOUD_VISION_OCR_BACKENDS):
+        assert registry.url_request(None, cloud) is None
+        assert registry.url_request(cloud, cloud) == cloud
+
+
+CLOUD = sorted(registry.CLOUD_VISION_OCR_BACKENDS)
+
+
+@pytest.mark.parametrize("cloud", CLOUD)
+async def test_a_configured_cloud_backend_never_replaces_an_explicit_url(cloud, monkeypatch):
+    # OCR_BACKEND=gemini (the cloud setup tier and preset) plus --ocr-url: the
+    # named server is used, and no page image goes to the cloud provider.
+    from bibr.pipeline.resources import ResourceManager
+
+    monkeypatch.setattr(Settings.ocr, "backend", cloud)
+    pipeline = _pipeline(None, URL)
+
+    assert _cli_backend(None, URL) == "paddle-http"
+    assert pipeline._config.ocr_backend == "paddle-http"
+    assert pipeline._config.ocr_url == URL
+    identity = resolve_ocr_runtime_identity(pipeline._config, pipeline._settings)
+    assert identity.backend == "paddle-http"
+    # ``ocr_backend=None`` is how an embedder's RunConfig or ResourceManager
+    # asks for the configured OCR_BACKEND (both default to ``paddle``).
+    raw = resolve_ocr_runtime_identity(
+        RunConfig(ocr_backend=None, ocr_url=URL), snapshot_settings()
+    )
+    assert raw.backend == "paddle-http"
+    assert raw.profile == "paddle"
+
+    captured = await _start(pipeline._resources, monkeypatch)
+    _assert_identity_is_what_started(identity, pipeline._resources, captured)
+    assert captured.kwargs["base_url"] == URL
+
+    rm = ResourceManager(ocr_backend=None, ocr_url=URL)
+    assert [c.backend for c in rm._resolve_ocr_candidates()] == ["paddle-http"]
+    captured = await _start(rm, monkeypatch)
+    _assert_identity_is_what_started(raw, rm, captured)
+
+
+@pytest.mark.parametrize("cloud", CLOUD)
+def test_an_explicit_cloud_backend_keeps_it_despite_the_url(cloud, monkeypatch):
+    from bibr.pipeline.resources import ResourceManager
+
+    monkeypatch.setattr(Settings.ocr, "backend", cloud)
+
+    assert _cli_backend(cloud, URL) == cloud
+    assert _pipeline(cloud, URL)._config.ocr_backend == cloud
+    raw = RunConfig(ocr_backend=cloud, ocr_url=URL)
+    assert resolve_ocr_runtime_identity(raw, snapshot_settings()).backend == cloud
+    rm = ResourceManager(ocr_backend=cloud, ocr_url=URL)
+    assert [c.backend for c in rm._resolve_ocr_candidates()] == [cloud]
+
+
 def test_a_vision_backend_warns_that_it_ignores_the_url(caplog):
     with caplog.at_level("WARNING", logger="bibr.local.pipeline"):
         pipeline = _pipeline("gemini", URL)
@@ -205,3 +269,8 @@ def test_a_vision_backend_warns_that_it_ignores_the_url(caplog):
     assert pipeline._config.ocr_backend == "gemini"
     assert "ignored" in caplog.text
     assert "OCR_VISION_BASE_URL" in caplog.text
+    # The unused URL is dropped, so it neither keys the OCR cache
+    # (``cfg.ocr_url`` is part of the key) nor reaches the client.
+    assert pipeline._config.ocr_url is None
+    assert pipeline._resources.ocr_url is None
+    assert pipeline.ocr_url is None

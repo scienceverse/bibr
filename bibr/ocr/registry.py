@@ -167,10 +167,37 @@ def resolve_backend_candidates(
     return tuple(_candidate(backend, settings) for backend in names)
 
 
+#: The cloud vision-LLM OCR backends. They call their provider's API (set
+#: ``OCR_VISION_BASE_URL`` to move it), never an OCR server, and hold no local
+#: weights. The one definition every OCR module imports.
+CLOUD_VISION_OCR_BACKENDS = frozenset({"gemini", "openai", "anthropic"})
+
 #: Requests an ``ocr_url`` leaves alone: the two HTTP clients already address
-#: the URL, and the cloud vision backends call their provider's API (set
-#: ``OCR_VISION_BASE_URL`` to move it), never an OCR server.
-_URL_KEEPS_BACKEND = frozenset({"paddle-http", "serve-http", "gemini", "openai", "anthropic"})
+#: the URL, and the cloud vision backends ignore it.
+_URL_KEEPS_BACKEND = CLOUD_VISION_OCR_BACKENDS | {"paddle-http", "serve-http"}
+
+
+def url_request(explicit: str | None, configured: str | None) -> str | None:
+    """Return the OCR backend request an ``ocr_url`` is resolved from.
+
+    ``explicit`` is the caller's backend (``--ocr``, ``ocr_backend=``,
+    ``RunConfig.ocr_backend``) and is the request whenever it is set.
+    Without it the configured ``OCR_BACKEND`` is the request, unless it names
+    a cloud vision provider: a server URL the caller named outranks a
+    configured cloud default, so page images never go to a cloud provider
+    because of a ``.env`` setting. ``None`` means no request (the default
+    ``paddle`` selector). Every entry point calls this before
+    :func:`resolve_url_backend`.
+    """
+    if explicit:
+        return explicit
+    if configured in CLOUD_VISION_OCR_BACKENDS:
+        return None
+    return configured
+
+
+@overload
+def resolve_url_backend(requested: str | None, ocr_url: str) -> str: ...
 
 
 @overload
@@ -186,12 +213,12 @@ def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | Non
 
     The one rule behind ``bibr chew --ocr-url``, ``LocalPipeline(ocr_url=...)``
     (and so ``bibr.chew``), ``ResourceManager`` and the OCR runtime identity,
-    so they all start, cache and report the same backend. An OCR URL means
-    Paddle, bibr's default OCR:
+    so they all start, cache and report the same backend. ``requested`` comes
+    from :func:`url_request`. An OCR URL means Paddle, bibr's default OCR:
 
     - without a URL the request is returned unchanged;
     - ``paddle-http``, ``serve-http`` and the cloud vision backends
-      (``gemini``, ``openai``, ``anthropic``) are kept;
+      (:data:`CLOUD_VISION_OCR_BACKENDS`) are kept;
     - a GLM request (``glm``, any ``glm-*`` name, or the legacy ``http``
       alias of ``glm-http``) becomes ``glm-http``;
     - anything else, including the ``paddle`` selector and no request at
