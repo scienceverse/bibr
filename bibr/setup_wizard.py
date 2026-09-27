@@ -484,7 +484,7 @@ def _connection_test_settings(env_vars: dict[str, str]) -> "GlobalSettings":
     answers = _with_llm_routing(env_vars)
     settings = snapshot_settings()
     llm = settings.llm
-    llm.provider = answers.get("LLM_PROVIDER", llm.provider)
+    llm.provider = answers.get("LLM_PROVIDER", llm.provider)  # type: ignore[assignment]
     llm.model = answers.get("LLM_MODEL", llm.model)
     if "LLM_API_KEY" in answers:
         llm.api_key = answers["LLM_API_KEY"] or None

@@ -246,6 +246,54 @@ released.
   `<ref>` — else the separated fields of an `<element-citation>`,
   `<nlm-citation>` or `<citation>`, with the label kept apart and sibling
   notes in document order; a note never replaces the citation.
+- Settings, presets and `config set` now go through one parser, so a preset
+  or written value behaves exactly like the same line in `.env`: comma and
+  JSON-array lists arrive parsed, `Literal`/case validators run, and the
+  Ollama RPM, OCR region and resolver-enrichment auto-tunes apply
+  (`BIBR_RESOLVER_URL` in a preset raises `enrich_concurrency` to 16, as in
+  `.env`). `bibr preset use` validates through the real settings model
+  before writing, and `chew --preset` / `batch --preset` and the demo
+  validate on apply; a preset that adds any failure beyond what the current
+  environment already reports — including model-level errors, alias
+  spellings and lowercase keys that never mention the preset's own key —
+  raises a `ConfigurationError` naming the preset file and the setting
+  instead of corrupting `.env` or crashing with a traceback (the error says
+  `Fix the preset file`), while a preset that is valid on its own still
+  applies when an unrelated setting is broken, and unknown preset keys
+  are still reported. `bibr preset show`/`diff`/`save`/`use`/`rm` with a bad
+  preset name (for example a name with a space or `..`) and `chew --preset`
+  with such a name now exit 1 with a message naming the preset instead of
+  printing a traceback.
+- `parse_env` (used by `preset save`/`diff`/`show`) now reads `.env` files
+  with the same dotenv parser the runtime uses, so inline comments, `export`
+  prefixes and quoted escapes no longer bake comment text or quote
+  characters into snapshot values. `merge_env` rewrites every duplicate
+  definition of a key (including `export KEY=` lines), so the runtime can no
+  longer read back an older duplicate. The `*_MAX_TOKENS` tuning knobs and
+  `JOBS_KEY_PREFIX` are no longer mistaken for secrets and excluded from
+  snapshots, while third-party secrets
+  (`AWS_SECRET_ACCESS_KEY`, `*_PASSWD`, `*_CREDENTIALS`, `*_KEY` and
+  friends) are still excluded and redacted.
+- `bibr config example --full` renders lists as comma values, `None`
+  defaults as `null`, and factory list defaults as their value, so every one
+  of its lines loads unchanged when uncommented. `BIBR_RESOLVER_SOURCES`
+  also accepts the JSON-array form the resolver itself parses. `bibr config
+  set` validates through the real settings model and attributes failures to
+  the key being set, so an unrelated invalid value no longer blocks the
+  write — including a value that is only valid together with `.env` context
+  (a private `OCR_BACKEND` with its `OCR_PROFILE` in `.env`); error messages
+  name the env var (alias spellings verbatim, so no more `OCR_OCR_LOCAL_GPUS`)
+  and malformed mappings name the setting instead of printing a
+  `SettingsError` traceback.
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written, and so is a closing tag with nothing left to close, such as
+  `[/tmp/x]` in an error message, which used to crash the command with a
+  `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
 - `bibr demo` kept every uploaded paper and every JSON download in the temp
   folder until something else cleaned it: Gradio's cache was never cleared,
   and each download was written twice, once outside that cache. It also
@@ -1383,6 +1431,44 @@ released.
   sentences with digit-bearing parentheticals are skipped, all
   citation/reference-only; no equation in the stored exports came from a
   skipped sentence.
+- Choice-like settings are validated at load: `LLM_PROVIDER`, `LLM_BACKEND`,
+  `LLM_INSTRUCTOR_MODE`, `LLM_STRUCTURED_BACKEND` and `RAPID_MLX_SPEC_DECODE`
+  only accept their documented choices. Values match case-insensitively (so
+  `OLLAMA` still works and now normalizes to `ollama` instead of skipping
+  the auto-tune), and the description's own `json_object` spelling of
+  `LLM_INSTRUCTOR_MODE` now means `json`. `OCR_BACKEND` stays free-form on
+  purpose: private OCR aliases with an explicit `OCR_PROFILE` still load.
+  Migration: a typo that used to load and misbehave now fails at startup
+  with an error listing the allowed values.
+- Semaphore/RPM settings reject `0`: `LLM_RATE_LIMIT_RPM`,
+  `OCR_VISION_RATE_LIMIT_RPM`, `CROSSREF_RATE_LIMIT_RPM`,
+  `OCR_MAX_CONCURRENT_FILES`, `OCR_MAX_CONCURRENT_REGIONS`,
+  `OCR_CONCURRENT_REGIONS_PER_FILE`, `CROSSREF_ENRICH_CONCURRENCY`,
+  `BIBR_RESOLVER_LIMIT` and `PIPELINE_MAX_CONCURRENT_POST_PARSE`, plus
+  `CROSSREF_REQUEST_TIMEOUT`, `ROR_REQUEST_TIMEOUT` and
+  `BIBR_RESOLVER_TIMEOUT`. (`BIBR_RESOLVER_SEARCH_CONCURRENCY` already had
+  its bound.) A zero RPM used to raise `ZeroDivisionError` on the first LLM
+  call and a zero concurrency deadlocked the counting semaphore, so `0`
+  never worked — set an explicit positive value instead. Probability-like
+  knobs (`LLM_LOCAL_MEM_FRACTION`, `OCR_MIN_SUCCESS_RATE`, the
+  `ML_*_MIN_CONFIDENCE` thresholds, `REF_GEOM_SEG_CASCADE_THRESHOLD`,
+  `REF_GEOM_MIN_ALIGN_YIELD`, `REF_SEG_MIN_SOURCE_RECALL`) reject values
+  outside `0`–`1`.
+- The literal `null` now sets `None` on nullable fields, so a section field
+  can be set to its documented null from the environment (top-level fields
+  already accepted it). Blank values keep the meaning they had: a blank
+  nullable string disables (`LLM_REASONING_EFFORT=`, `ML_*_MODEL_ID=`), a
+  blank per-call override (`LLM_REASONING_EFFORT_AUTHORS=`,
+  `LLM_REASONING_EFFORT_CITATIONS=`) omits the parameter for that call while
+  the global effort still applies elsewhere, `BIBR_RESOLVER_SOURCES=` still
+  means the resolver's own tier, and other blank lists stay empty. A blank
+  for a plain `str` field stays blank, as before, unless its default is
+  computed; a blank for any other field now loads as the default — or `None`
+  where the field is nullable — instead of failing. Two blanks change
+  meaning: `RAPID_MLX_SPEC_DECODE=` used to load as blank and disable
+  speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
+  used to pin the serve result cache to an empty version, and now means the
+  computed code hash, so a deploy invalidates cached results again.
 
 ### Security
 
