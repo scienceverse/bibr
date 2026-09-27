@@ -93,6 +93,7 @@ class ResourceManager:
         ocr_sem_global=None,
         ocr_breaker=None,
         managed_vllm_fraction: float = 0.0,
+        managed_gpu_fraction: float | None = None,
         settings: GlobalSettings | None = None,
         layout=None,
         segmenter=None,
@@ -147,10 +148,16 @@ class ResourceManager:
         if classifier_resources is None:
             from bibr.pipeline.classifier_resources import ClassifierResources
 
+            # ``managed_vllm_fraction`` is what the managed vLLM LLM server is
+            # launched with; ``managed_gpu_fraction`` is what all the managed
+            # vLLM servers this run may start claim (the Paddle OCR one too),
+            # which the classifiers must leave free.
             classifier_resources = ClassifierResources(
                 self._settings,
                 memory_mode=memory_mode,
-                managed_vllm_fraction=managed_vllm_fraction,
+                managed_vllm_fraction=(
+                    managed_vllm_fraction if managed_gpu_fraction is None else managed_gpu_fraction
+                ),
             )
         self._classifiers = classifier_resources
 
