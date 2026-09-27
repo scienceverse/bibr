@@ -72,16 +72,16 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         if not env_path.exists():
             ui.error(console, "No .env file found.", hint="Run [cyan]bibr setup[/cyan] first.")
             sys.exit(1)
-        if (
-            manager.exists(args.name)
-            and not args.force
-            and not Confirm.ask(
-                f"Preset [cyan]{args.name}[/cyan] already exists. Overwrite?", default=False
-            )
-        ):
-            console.print("[dim]Aborted.[/dim]")
-            sys.exit(1)
         try:
+            if (
+                manager.exists(args.name)
+                and not args.force
+                and not Confirm.ask(
+                    f"Preset [cyan]{args.name}[/cyan] already exists. Overwrite?", default=False
+                )
+            ):
+                console.print("[dim]Aborted.[/dim]")
+                sys.exit(1)
             data = manager.snapshot_from_env(env_path)
             manager.save(args.name, data)
             ui.ok(
@@ -109,6 +109,9 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         except FileNotFoundError:
             _suggest_available(args.name)
             sys.exit(1)
+        except InvalidPresetError as e:
+            ui.error(console, str(e))
+            sys.exit(1)
 
     elif cmd == "deactivate":
         removed = manager.deactivate(env_path)
@@ -133,6 +136,9 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
         except FileNotFoundError:
             _suggest_available(args.name)
             sys.exit(1)
+        except InvalidPresetError as e:
+            ui.error(console, str(e))
+            sys.exit(1)
 
     elif cmd == "show":
         try:
@@ -141,6 +147,9 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             _print_settings(data)
         except FileNotFoundError:
             _suggest_available(args.name)
+            sys.exit(1)
+        except InvalidPresetError as e:
+            ui.error(console, str(e))
             sys.exit(1)
 
     elif cmd == "diff":
@@ -152,6 +161,9 @@ def _run_preset(args, parser: argparse.ArgumentParser | None = None) -> None:
             changed, only_in_preset, only_in_env = manager.diff_against(args.name, env_dict)
         except FileNotFoundError:
             _suggest_available(args.name)
+            sys.exit(1)
+        except InvalidPresetError as e:
+            ui.error(console, str(e))
             sys.exit(1)
         if not changed and not only_in_preset and not only_in_env:
             ui.ok(console, f"Preset [cyan]{args.name}[/cyan] matches {env_path}")
