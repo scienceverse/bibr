@@ -1012,14 +1012,24 @@ class TestDocxSectionWordTitle:
         contents = DocxParser(_save(doc)).parse()
         assert contents.detected_title is None
 
-    def test_title_styled_paragraph_after_body_is_not_the_title(self):
-        # The _seen_content_block guard: a non-section Heading 1 only reads
-        # as the title when nothing preceded it.
+    def test_first_heading_after_hand_formatted_lines_keeps_mains_reading(self):
+        # An APA manuscript: hand-formatted title lines, then a Heading 1
+        # "Author Note" (a substring alias only) holding the article's DOI.
+        # Main typed that block TITLE, which keeps it in the front matter the
+        # DOI selection reads; refusing the title after any earlier content
+        # lost the DOI in the no-LLM export, so that guard is not applied.
         doc = Document()
-        doc.add_paragraph("Body text first.")
-        doc.add_heading("A follow-up discussion of results", level=1)
+        doc.add_paragraph("Attention and Memory in Older Adults")
+        doc.add_paragraph("Jane Doe and Alice Roe")
+        doc.add_heading("Author Note", level=1)
+        doc.add_paragraph(
+            "The final article is available, upon publication, at: "
+            "https://doi.org/10.1037/xge0001234"
+        )
+        doc.add_heading("Abstract", level=1)
+        doc.add_paragraph("We studied attention.")
         contents = DocxParser(_save(doc)).parse()
-        assert contents.detected_title is None
+        assert contents.detected_title == "Author Note"
 
 
 class TestDocxUnpairedCaptions:

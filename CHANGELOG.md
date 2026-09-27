@@ -1019,27 +1019,26 @@ released.
   and tracked-move destinations, symbol characters and non-breaking hyphens,
   while tracked deletions, field instructions and ruby readings are still
   skipped; content controls showing Word's placeholder prompt contribute no
-  text. Symbol-font characters read through the font's built-in encoding:
-  the Greek letters, `± ≤ ≥ × ° → ≠ ≈ ∫`, the angle brackets and the other
-  mathematical symbols, and the ASCII digits and punctuation the font
-  shares, while extensible bracket and arrow pieces are still skipped. Text
-  in drawing text boxes is read even when only the `mc:Choice` branch carries
-  it, and legacy VML text boxes read with the same per-paragraph joins.
-  Custom heading styles that derive from a Heading style count as headings,
-  while styles derived from Title (pandoc-style Author, Date, Subtitle) stay
-  body text; `w:outlineLvl` is honoured except that val 9 (ECMA-376 body
-  text) stays body text. Hand-formatted text and a lone exact section heading
-  such as "Introduction" do not promote themselves to the detected title,
-  which a longer first Heading 1 such as "Methods for measuring sleep in
-  older adults" still claims. Footnote and endnote references anchored in
-  headings, table cells (in any row) and captions are queued against the
-  nearest body text and emitted instead of dropped, with merged table cells
-  deduplicated so each note keeps its number; table cells read through the
-  same inline walker as headings, so content-control citations in cells
-  survive. Figure captions pair only with a picture that actually yields a
-  figure — a linked picture or a picture inside a heading leaves its caption
-  as body text — and a table sitting between a picture and its caption no
-  longer breaks the pairing.
+  text. Symbol-font characters read through the font's built-in encoding: the
+  Greek letters, `± ≤ ≥ × ° → ≠ ≈ ∫`, the angle brackets and the other
+  mathematical symbols, and the ASCII digits and punctuation the font shares,
+  while extensible bracket and arrow pieces are still skipped. Text in drawing
+  text boxes is read even when only the `mc:Choice` branch carries it, and
+  legacy VML text boxes read with the same per-paragraph joins. Custom heading
+  styles that derive from a Heading style count as headings, while styles
+  derived from Title (pandoc-style Author, Date, Subtitle) stay body text;
+  `w:outlineLvl` is honoured except that val 9 (ECMA-376 body text) stays body
+  text. A first Heading 1 that is exactly a section name, such as
+  "Introduction" or "Abstract", no longer becomes the detected title, while a
+  longer one such as "Methods for measuring sleep in older adults" still does.
+  Footnote and endnote references anchored in headings, table cells (in any
+  row) and captions are queued against the nearest body text and emitted
+  instead of dropped, with merged table cells deduplicated so each note keeps
+  its number; table cells read through the same inline walker as headings, so
+  content-control citations in cells survive. Figure captions pair only with a
+  picture that actually yields a figure — a linked picture or a picture inside
+  a heading leaves its caption as body text — and a table sitting between a
+  picture and its caption no longer breaks the pairing.
 
 ### Added
 

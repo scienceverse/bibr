@@ -679,11 +679,6 @@ class DocxParser:
         # Hyperlink captures awaiting text_id resolution at segmentation time.
         # Each entry: (url, link_text, section_id, deferred_text_index)
         self._pending_url_links: list[tuple[str, str, int, int]] = []
-        # Whether any non-empty block has been seen: a Heading 1 reads as the
-        # paper title only while it is still the first content block.
-        self._seen_content_block = False
-        # Whether the last _flush_inline_acc call appended an entry.
-        self._last_flush_appended = False
 
     # ------------------------------------------------------------------
     # Public API (mirrors PDFParser)
@@ -1008,7 +1003,6 @@ class DocxParser:
             if plain:
                 self._handle_heading(plain, level, style_name)
             self._enqueue_note_refs(inline.note_refs)
-            self._seen_content_block = True
             return
 
         # Walk the paragraph XML in document order with one recursive inline
@@ -1043,10 +1037,6 @@ class DocxParser:
                 self._figure_counter += 1
 
         self._flush_inline_acc(acc)
-        flushed = self._last_flush_appended
-        self._last_flush_appended = False
-        if acc.had_image or flushed or acc.note_refs:
-            self._seen_content_block = True
 
     def _paragraph_inline_text(self, paragraph) -> _InlineAccum:
         """Walk a paragraph's runs without emitting: heading/caption/cell text."""
@@ -1104,7 +1094,6 @@ class DocxParser:
                     (note_text, self._current_section_id, deferred_idx, kind)
                 )
         acc.note_refs.clear()
-        self._last_flush_appended = True
 
     def _enqueue_note_refs(self, refs: list[tuple[str, str]]) -> None:
         """Queue heading/cell note references against the nearest body text."""
@@ -1199,7 +1188,6 @@ class DocxParser:
                 return
             # Display math — flush any text so far, then emit math as own entry
             self._flush_inline_acc(acc)
-            self._seen_content_block = True
             self.assembler.append(
                 f"$${math_text}$$",
                 None,
@@ -1262,20 +1250,17 @@ class DocxParser:
                 self._walk_inline(child, acc, collect_only=collect_only)
 
     def _handle_heading(self, text: str, level: int, style_name: str | None) -> None:
-        # The Title style is the paper title. A first Heading 1 used to be
-        # taken too — but manuscripts often format the title by hand and use
-        # Heading 1 for section names, so an 'Introduction' heading became
-        # the detected title and post_parse typed that section TITLE. A
-        # Heading 1 still reads as the title when it is the first non-empty
-        # block and does not name a section ('Paper About X', not
-        # 'Introduction' or 'Abstract').
+        # The Title style is the paper title, and so is the first Heading 1 —
+        # unless it is exactly a section name: manuscripts often format the
+        # title by hand and use Heading 1 for sections, so an 'Introduction'
+        # heading became the detected title and post_parse typed that section
+        # TITLE. A first Heading 1 after hand-formatted lines still reads as
+        # the title, as on main: typing that block TITLE is what keeps the
+        # title page (an APA "Author Note" with the article's DOI) in the
+        # front matter the DOI selection reads.
         if self._detected_title is None and (
             style_name == "Title"
-            or (
-                style_name in ("Heading 1", "heading 1")
-                and not self._seen_content_block
-                and not _looks_like_section_header(text)
-            )
+            or (style_name in ("Heading 1", "heading 1") and not _looks_like_section_header(text))
         ):
             self._detected_title = text
 
@@ -1308,7 +1293,6 @@ class DocxParser:
         math_text = math_text.strip()
         if not math_text:
             return
-        self._seen_content_block = True
         self.assembler.append(
             f"$${math_text}$$",
             None,
@@ -1340,7 +1324,6 @@ class DocxParser:
                 seen_cells[id(tc)] = tc
                 for para in cell.paragraphs:
                     self._enqueue_note_refs(self._paragraph_inline_text(para).note_refs)
-        self._seen_content_block = True
 
         # Cell text comes from the same inline walker as headings and
         # captions — cell.text skips content controls, smart tags and simple
