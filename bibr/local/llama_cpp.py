@@ -11,13 +11,16 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 from bibr.exceptions import UpstreamServiceError
 from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
+    check_startup_stop,
     guard_managed_server_port,
+    pause_startup_poll,
     request_bytes,
 )
 
@@ -754,6 +757,9 @@ class LlamaCppServer:
     the previous model and CUDA context are returned to the OS.
     """
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         *,
@@ -767,7 +773,9 @@ class LlamaCppServer:
         # LlamaCppOcrClient — keep today's semantics; the "llm" role must be
         # opted into explicitly.
         role: str = "ocr",
+        stop_event: threading.Event | None = None,
     ) -> None:
+        self._stop_event = stop_event
         self._model = model
         self._port = port
         self._role = role
@@ -892,6 +900,7 @@ class LlamaCppServer:
         assert self._process is not None  # noqa: S101
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            check_startup_stop(self._stop_event, "llama.cpp")
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
@@ -922,7 +931,7 @@ class LlamaCppServer:
                     return
             except (LocalHttpError, json.JSONDecodeError):
                 pass
-            time.sleep(2)
+            pause_startup_poll(2, self._stop_event, "llama.cpp")
         raise TimeoutError(f"llama.cpp did not become ready within {timeout}s")
 
     def _read_stderr_tail(self, n: int = 4000) -> str:
@@ -964,7 +973,7 @@ class LlamaCppServer:
 class LlamaCppLlmServer:
     """Managed NuExtract GGUF server for Windows and small CUDA GPUs."""
 
-    def __init__(self, settings=None) -> None:
+    def __init__(self, settings=None, *, stop_event: threading.Event | None = None) -> None:
         from bibr.config import snapshot_settings
         from bibr.local.llm_models import default_local_model
 
@@ -976,6 +985,7 @@ class LlamaCppLlmServer:
             startup_timeout=self._settings.llm.llama_cpp_startup_timeout,
             extra_args=self._settings.llm.llama_cpp_extra_args,
             role="llm",
+            stop_event=stop_event,
         )
 
     @property

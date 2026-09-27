@@ -29,7 +29,7 @@ def _payload(*, promotable: bool = True) -> dict:
             }
         ]
     return {
-        "schema_version": "12.0",
+        "schema_version": "12.1",
         "metadata": {"title": "Core"},
         "bib": [],
         "bib_match": [],
@@ -160,7 +160,7 @@ async def test_checkpoint_interruption_keeps_quarantined_core_readable_and_retry
     from bibr.export.json_export import validate_export
 
     assert validate_export(core) == []
-    assert core["schema_version"] == "12.0"
+    assert core["schema_version"] == "12.1"
     assert core["extraction"]["validation"]["promotable"] is False
     receipt = json.loads(fs.artifact_sink.receipt_path(fs).read_text(encoding="utf-8"))
     assert receipt["events"][-1]["state"] == "cutoff_interrupted"

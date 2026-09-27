@@ -6,6 +6,63 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added — export schema 12.1 (additive)
+
+The export moves to schema `12.1`, which adds one optional block; every 12.0
+export is still valid input for the 12.x reader, `bibr.validation`'s
+`payload_validation()` and the evaluator.
+
+- `extraction.fields` gives the state of each tracked field, so a consumer can
+  tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
+  declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
+  `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
+  `bib` it records `{state, source, issues, rule}`. `state` is `extracted` (a value
+  was exported), `absent` (the extractor ran and found none), `abstained`
+  (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
+  `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
+  `not_attempted` (no LLM, references off). `source` names the step that
+  produced the value (`llm`, `title_grounding`, `front_matter_candidate`,
+  `layout_title`, `section_header`, `byline_adjacent`, `doc_info`,
+  `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
+  `classifier`, `llm_label`, `correction_notice`, `identity`,
+  `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
+  `issues` the codes of the warnings and validation issues that explain the
+  state, and `rule` the rule of the field's decision that chose the value or
+  its absence (`extracted`, `selected_record_title`, `layout_title_fallback`,
+  `abstract_section_fallback`, `correction_notice`, `abstained`, ...; null for
+  `doi` and `bib`). The block is built from facts the pipeline already records
+  and is omitted for a Paper exported outside the pipeline. The conformance
+  fixtures gain a 12.0 reader example and an invalid field record.
+
+### Changed — one decision point per metadata field
+
+- The title, authors, abstract, keywords, publication date, journal,
+  publisher, paper type (with the OECD fields), the four research-integrity
+  statements, structured funding and parsed affiliations are each decided
+  once, by one rule in `bibr.extract.field_decisions`, from the candidates their
+  producers propose: the model's answer and its grounding repairs, the
+  selected-record and layout title fallbacks, the unclassified-heading scan,
+  the Abstract and Keywords sections, the PDF doc-info, the empty-author
+  recovery and the CRediT statement, the paper classifier and its LLM relabel,
+  the correction-notice guard, and the integrity-statement resolution. Once the
+  record exists that module is their only writer, and a test fails when
+  another module assigns them. Not covered: the DOI, which the identity stage
+  decides; the fields a record is built with (volume, issue, pages, ISSN,
+  licence, language and the identifiers), which have one producer each; the
+  JATS and HTML readers, which build the record they hand over; structured
+  funding and affiliations in a run without an LLM, where nothing parses them;
+  and the contribution roles the structured-integrity call adds to the decided
+  authors in place, which the author receipt records as a `contribution_roles`
+  transform.
+  The rules keep the precedence of the write sites they replace, so exported
+  values are unchanged except one provenance case: when the author call fails
+  and the empty-author recovery returns only a translator credit,
+  `extraction.fields.author.source` now names the step that failed (`llm`)
+  instead of `llm_recovery`. Each field's receipt (the candidates considered,
+  the one used, the repairs applied to it and the rule) is kept on
+  `Paper.field_decisions`, and `extraction.fields` takes its `source` and
+  `rule` from it.
+
 ### Changed — export schema 12.0 (breaking)
 
 The JSON export moves to schema `12.0`. It separates what the paper says from
@@ -213,6 +270,21 @@ released.
 
 ### Fixed
 
+- The local paper and section classifiers no longer take the GPU memory a
+  managed vLLM server needs. Free VRAM was measured once and each model was
+  checked against it alone, so both could land on CUDA when only one fit; the
+  second model's check now subtracts what the first one took. The check also
+  left nothing for the managed PaddleOCR-VL vLLM server, which claims 92% of
+  the GPU and, with a cloud LLM, starts after the classifiers have loaded, so
+  on a 24 GB card the classifiers took its room and OCR could fail to start.
+  The picker now keeps free what the managed vLLM servers the run may start
+  claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
+  both when they fit on the GPU together, else the larger), and a classifier
+  that does not fit beside that and the safety reserve runs on CPU, with the
+  same results, only slower. With automatic OCR on x86 Linux, a 24 GB card now
+  runs both classifiers on CPU. `ML_PAPER_CLASSIFIER_DEVICE` and
+  `ML_SECTION_CLASSIFIER_DEVICE` still win, and a model pinned to `cuda` that
+  way comes off the other model's budget.
 - JATS input keeps the paper's structure instead of flattening it. References
   accumulate across every `<ref-list>` with one continuous counter: a later
   'Methods references' list extends the main bibliography instead of replacing
@@ -605,6 +677,15 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -644,6 +725,142 @@ released.
   is bit-identical to the serial loop. The OOM batch-halving retry restores
   torch.compile padding afterwards instead of leaving it disabled.
 
+- Front matter no longer abstains (`VAL_METADATA_MULTI_ITEM`, no title, authors
+  or abstract) on a paper whose first pages print its record twice or whose
+  furniture starts a second block. Any second block with a byline, a DOI or
+  abstract text used to block selection, even a publisher cover page, a
+  repository landing page, a citation box, a translated title and abstract, an
+  email list, a date line or an "article info" sidebar. Where that check
+  abstains, bibr now compares what each block prints about its paper: the DOI
+  (exactly), the title, and for a title in another language or script the
+  authors' surnames (all of them, or at least two). It selects the paper's own
+  record when all records agree and prefers the article's title page over a
+  cover page or citation box. The selected block must print a byline, and the
+  parser's detected title must belong to the selected paper or a translation of
+  it. Records that disagree still abstain, and so does a DOI shared by two
+  different titles, so compiled abstract books and proceedings pages still fail
+  closed. Pages the old check resolved are selected exactly as before.
+- A failed LLM call now says how it failed. Every LLM task raised a bare
+  `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
+  answered all of them with 502, so a response truncated at the token limit
+  or rejected by schema validation, which fails the same way on every retry,
+  looked like an outage and `bibr batch --remote` resubmitted the paper up to
+  four times. The call now raises an `LlmCallError` subclass
+  (`LlmTruncatedError`, `LlmInvalidOutputError`, `LlmTimeoutError`,
+  `LlmServiceError`, `LlmRejectedError`), still an `UpstreamServiceError`, with
+  an `error_code` (`llm_truncated`, `llm_invalid_output`, `llm_timeout`,
+  `llm_failed`) and a bounded cause in the message: the error class and HTTP
+  status, never the provider's error text, and for invalid output the error
+  locations only, never the model's text. Serve answers a
+  truncated or invalid response with 422 and its code, and keeps 502, now with
+  the code, for the others. A post-parse failure caused by an LLM error
+  records that code instead of `extraction_failed`. `LlmUnreachableError`, an
+  `LlmServiceError`, marks a service that could not be reached at all (a
+  refused, dropped or never-accepted connection, or an open circuit breaker),
+  the same failures the batch resume's service-outage rule names, and that
+  rule now counts it as an outage, so a resumed batch runs such a paper again.
+- A truncated or invalid title/keywords response no longer fails the paper.
+  That call is the anchor of the record, so its failure cancelled the
+  reference task and the file ended with no export, losing references,
+  authors and DOI that were already extracted. Its fields (title, abstract,
+  keywords and the journal, date and license fields) now stay empty, the
+  layout fallbacks fill title and abstract as they do for any null model
+  title, and the export carries a blocking `VAL_METADATA_FIELD_FAILED` error
+  naming the failed fields and the error code. Blocking, like
+  `VAL_REFERENCES_INCOMPLETE`: the record is written but not promotable, so a
+  checkpointed `bibr chew -o` run routes it to `_quarantine/blocked/` and
+  keeps it retryable. The same applies to the merged core call
+  (`LLM_MERGED_CORE_METADATA`), whose failure marks every core field. A
+  timeout, a 429/5xx, a transport failure, a rejected request, a blank or
+  aborted completion (`llm_failed`, even when the unconstrained recovery of a
+  decoder abort then fails validation) or an unrecognized error still fails
+  the paper, since a retry can complete it, and so does a truncated title
+  response when another core call failed for such a reason. After a failed title call the trained paper classifier is
+  skipped rather than run on empty input. Before giving up, the title/keywords
+  call now recovers a finished response that failed validation only for
+  invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
+  explanatory prose around one JSON fence; it never completes truncated JSON
+  or takes a nested value (from draft PR #8). A repaired response adds a
+  non-blocking `LLM_RESPONSE_REPAIRED` warning naming the call and the repair.
+- One bad file no longer kills its chunk or the rest of a batch. The stage
+  contract says a stage records a per-file error and never raises, but a
+  failing sentence-segmenter load, an exception in the identity stage or a
+  failed classifier startup escaped the stage, and the library's batch loop
+  (`bibr.chew(list)`, `bibr batch`) then abandoned every later chunk. The
+  segmenter failure now fails the chunk's files with `parse_failed`, an
+  identity failure fails only its file (`identity_failed`), and a classifier
+  startup failure is logged while papers fall back as they do when the
+  trained classifiers do not answer.
+- A page too large for the render budget no longer fails its paper. Layout
+  rendered every page at one DPI and refused a page above
+  `LAYOUT_MAX_RENDER_PIXELS` or `LAYOUT_MAX_RENDER_DIMENSION`, so a 2420×3205 pt
+  poster page (59.9 MP at 200 DPI) failed the whole paper as `layout_failed`.
+  That page now renders at the largest DPI that fits (129 DPI for the poster),
+  down to 24, and the export carries a `PAGE_DPI_REDUCED` warning naming the
+  page and DPI; other pages keep the configured DPI. The floor is low because
+  only a page that is huge in PDF points needs it, and its text is as large: a
+  scan stored at eight times its paper size needs 64 DPI, and the largest page
+  PDF allows fits the default budget at 25. Layout boxes, OCR and
+  figure crops, native-text lookups and exported coordinates are all
+  normalized by the rendered image's own size or measured in PDF points, so
+  they stay in place on a reduced page. A page that does not fit even at 24 DPI
+  is still refused.
+- Fallbacks that used to leave only a log line now leave a warning in
+  `extraction.warnings`, its message starting with the error code (for
+  example `llm_timeout: …`); the extracted values are unchanged:
+  `RESEARCH_INTEGRITY_LLM_FAILED` (structured funding, author roles and
+  affiliation parts missing), `SECTION_CLASSIFIER_LLM_FAILED`,
+  `IMPLICIT_SECTIONS_LLM_FAILED`, `CITATION_LLM_FAILED` (the unresolved
+  tier-3 candidates also carry `llm_failed:<code>` in the citation receipt's
+  rejection reasons), `AUTHORS_LLM_FAILED`, `PAPER_CLASSIFICATION_FAILED`,
+  `REF_SECTION_NOT_FOUND` (the reference list is empty because no reference
+  section was found), `REF_SECTION_INFERRED` (the last unclassified section
+  was taken as the reference list), and `ROR_MATCHING_FAILED` (a ROR HTTP error,
+  transport failure or rate-limit backoff, which read as "no match").
+  `EQUATION_LLM_FALLBACK_FAILED` could not fire for an LLM failure; it now
+  reports how many fallback batches failed and why. A salvaged author list
+  says so: `AUTHORS_TRUNCATED` when the response hit the token limit,
+  `AUTHORS_PARTIAL` when it failed validation and only the leading authors
+  validated (the salvage used to report both as a truncation, in the log
+  only). `PAPER_CLASSIFIER_DEGRADED` is recorded once the LLM fallback's
+  outcome is known, and no longer claims the LLM classified the paper when
+  that call failed too. `LLMClient.resolve_citations` and
+  `extract_equations` now raise the typed error instead of returning an empty
+  list; their callers degrade as before.
+- A wrong-typed value in an LLM response (an abstract sent as a list of
+  paragraphs, a reference `bib_type` or the keywords sent as a number) raised
+  an `AttributeError` or `TypeError` from a validator, which skipped
+  Instructor's re-ask and failed the call as an upstream error. The validators
+  now leave such a value to the schema's type check, so it is a
+  `ValidationError`: re-asked where validation re-asks are enabled (cloud
+  providers by default; a custom OpenAI-compatible endpoint makes one
+  attempt), and otherwise an `llm_invalid_output` failure. A falsy `bib_type`
+  (`false`, `0`, `[]`) still maps to `other`.
+- The NuExtract native backend's Instructor recovery request now takes its own
+  rate-limit slot, as the decoder-abort recovery already did; it was a further
+  physical request that the shared limiter never saw.
+- Cloud OCR (`--ocr gemini|openai|anthropic`) now sees the HTTP status of a
+  failed call. Instructor wraps the provider's error in its own exception,
+  which carries no status, so a bad key (401/403/404) returned blank regions
+  until the file failed as mostly-failed OCR instead of raising at once, and a
+  429 or 5xx was never retried by bibr. The status is now read from the
+  wrapped error, as the LLM client's failure classification does.
+- One network blip while loading the default front-role classifier no longer
+  turns it off for the rest of the process. The loader cached any load failure
+  as "unavailable" and the resource manager pinned it, so after a Hub timeout a
+  long-running `bibr serve` worker or `bibr batch` ran every later paper on
+  front-matter heuristics alone. A network failure is now retried by the next
+  paper; a missing or invalid bundle is still given up after one attempt.
+- Serve no longer caches a result shaped by a failure a retry could avoid. Every
+  successful response was cached for 24 hours, so one Crossref timeout, OCR
+  blip or failed LLM call was replayed to every later request for the same
+  PDF, including async jobs and `bibr batch --remote` re-runs. A response with
+  a blocking issue other than a front-matter abstention, incomplete
+  enrichment or a warning in `bibr.processing_warnings.NOT_FINAL_CODES` (OCR,
+  LLM-task, enrichment and resolver failures and timeouts) is returned but not
+  cached. This matters
+  more now that a failed title/keywords response exports a partial record
+  instead of failing.
 - `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
   preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
   but only the torch layout path imports cv2. A core install runs layout
@@ -711,6 +928,18 @@ released.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
+- A subtitle or a numbered series part printed on its own row under the title,
+  such as "Careers in garden design" followed by "4. Planting schemes", is now
+  part of the title. The metadata LLM sees both rows but often returned only the
+  first, and title grounding accepted that because the first row is printed
+  verbatim. When the model title is exactly the selected record's title row or
+  rows, the row printed directly under them is now appended, joined with ": "
+  (with a space when the title already ends in punctuation such as "?" or ":"),
+  and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_subtitle_row_dropped`. The row must be short and on the same
+  page. It is left out when it reads as a byline or an extracted author's name,
+  an affiliation, a date, citation or DOI line, an article-type label or section
+  heading, or a parallel title in another language or script.
 - A title that opens with a parenthetical, such as "(Rural) Clinics as layered
   civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
   the parenthetical as an annotation and return only the rest of the title. Title
@@ -721,6 +950,34 @@ released.
   `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
   "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
   still left out.
+- A paper that prints its title in two languages, the original and then a
+  translation, now gets the title printed first. The title prompts had no rule
+  for parallel titles, so the metadata LLM often returned the English
+  translation, or joined both versions into one title. The authors prompts had
+  no such rule either, so a byline printed in two scripts could come back
+  romanised, and the title and the authors could come from different language
+  versions of the same front matter. The title/keywords and merged
+  core-metadata prompts now ask for the version printed first, verbatim in the
+  language and script it is printed in, never translated and never joined to
+  the other version. A title quoted in a citation line or a running header does
+  not count. The authors prompts now copy the byline printed first when it is
+  printed in two scripts or languages, and never transliterate or romanise a
+  name. The abstract rule is unchanged: of parallel abstracts, the printed
+  English version is still preferred.
+- A title that opens with a printed label, such as "Research Report: …",
+  "Case report. …" or "Opinion: …", keeps it; so does a title whose label is
+  printed on a row of its own ending in a colon, such as "Review:" above the
+  rest of the title. The metadata LLM dropped such labels the same way it
+  dropped a leading parenthetical, and grounding accepted the rest because it is
+  still printed verbatim. Grounding now restores a label of up to five words
+  that is set off by a colon, full stop or dash in the selected record's title
+  row, and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_label_dropped`. Numbering ("1.", "IV."), field labels
+  ("Title:", "Running title:"), citation lines ("To cite this article:",
+  "Smith et al.:"), page furniture ("Open access") and an article-type kicker
+  printed above the title without a colon are still left out, and nothing is
+  restored when another title row of the record prints the title without the
+  label.
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
@@ -1357,6 +1614,40 @@ released.
   model with independent copies per caller, the recorded wire-shape check
   runs once at build, and hand-assembled contracts still pay the per-parse
   check. The built contract is unchanged.
+- The byline check that reports authors missing from the extracted list
+  (`VAL_AUTHOR_MISSING`) read a byline joined with French "et", Dutch "en",
+  German "und", Danish or Norwegian "og", Swedish "och" or Indonesian "dan"
+  as one fewer name than it prints. It split names only on ";", "&" and
+  "and". Spanish "y", Portuguese and Italian "e", and Catalan and Polish "i"
+  also separate two names now, but only in lower case and only when the words
+  on both sides are full names of two or more words, so one person's two
+  surnames, as in "Ramón y Cajal", stay together.
+- A translator credited under the byline, as in "Traducido del inglés por …",
+  "Translated by …" or "Übersetzt von …", was extracted as an author. A name
+  printed only right after such a credit in the front matter is now dropped
+  from the author list, with a `VAL_AUTHOR_TRANSLATOR_DROPPED` warning
+  (evidence `reason:translator_credit`). A translator who is also printed in
+  the byline stays.
+- When a PDF positions a word instead of printing a space before it, the text
+  layer glues the two together, and a byline such as "Kerem B.Yalcin, Selin
+  DenizAksoy" came back with family names "B.Yalcin" and "DenizAksoy". Initials
+  glued to the family name now move back to the given name. A family name
+  joined at a lower-to-upper case step is split, and its first part moved to
+  the given name, when the paper prints the spaced form elsewhere, for example
+  in its contribution statement. Both repairs add a
+  `VAL_AUTHOR_PARTITION_REPAIRED` warning with evidence
+  `reason:glued_family_name`. Author grounding also reads such a join as two
+  words, so a correctly spaced name still matches the glued byline, while
+  surname prefixes such as "McDonald" or "DeKay" stay one word.
+- The metadata LLM can romanise a byline printed in another script, returning
+  "N. O. Petrova" for a Cyrillic byline, even though it is asked for verbatim
+  names. When every extracted name is in a script the selected byline barely
+  uses (under a fifth of its letters, ignoring email addresses and URLs) and
+  none of them is printed in the extraction context, the list is now
+  discarded like a fabricated one: `VAL_AUTHOR_FABRICATED` with evidence
+  `reason:authors_script_mismatch`, then the empty-author recovery retries
+  against the byline alone. Papers that also print the romanised names keep
+  them.
 
 ### Added
 
@@ -1410,6 +1701,29 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1507,6 +1821,36 @@ released.
   scored on its numbers and "Straße" split in two. Han, kana and Thai text
   gives one token per character. Section-text results record
   `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). Given a
+  URL, the library used to start `glm-http` for every request except
+  `paddle-http` and `serve-http`: a bare `ocr_url`, the `paddle` selector,
+  every local Paddle runtime (`paddle-vllm`, `paddle-rapid-mlx`,
+  `paddle-mlx-vlm`) and the cloud vision backends. A Paddle server therefore
+  got GLM prompts and its tables came back as undecoded OTSL markup.
+  Without an explicit backend (`--ocr`, `ocr=`, `ocr_backend=`), the
+  configured `OCR_BACKEND` is the request, so `OCR_BACKEND=glm-http` keeps
+  GLM at every entry point; `bibr chew --ocr-url` used to ignore it. A
+  cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
+  tier of `bibr setup` writes `gemini`) never replaces a URL the caller
+  passes: the run uses that server as `paddle-http` and sends no page image
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  endpoint) and drops the URL, so it no longer splits the OCR cache; the
+  library used to start `glm-http` for it and the CLI `paddle-http`. A
+  `ResourceManager` built directly with a URL now starts the backend its
+  OCR cache identity names; it could record `gemini` or a local runtime and
+  start `glm-http`. Migration: library users who pass a bare `ocr_url` for
+  a GLM server must now pass `ocr_backend="glm"` (or `"glm-http"`;
+  `ocr="glm"` in `bibr.chew`).
 
 ### Security
 

@@ -218,8 +218,10 @@ class _CannedPaper:
 
 
 def _checkpoint_core() -> dict:
+    from bibr.pipeline.artifacts import CORE_SCHEMA_VERSION
+
     return {
-        "schema_version": "12.0",
+        "schema_version": CORE_SCHEMA_VERSION,
         "bib": [{"bib_id": 1, "doi": None}],
         "bib_match": [],
         "extraction": {

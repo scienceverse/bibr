@@ -1,6 +1,6 @@
 {
   "paper_id": "example",
-  "schema_version": "12.0",
+  "schema_version": "12.1",
   "source": {
     "file_name": "example.tei.xml",
     "sha256": "1381be58ff61c837f922512c19392ea90fd3caec38cd0ba4a2e4344fcfd48a71",

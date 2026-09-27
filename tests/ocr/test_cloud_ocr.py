@@ -432,6 +432,39 @@ async def test_recognize_raises_on_fatal_auth_error(mock_cloud_client, _mock_ima
     assert mock_instructor.create.await_count == 1
 
 
+def _instructor_wrapped(status: int) -> Exception:
+    """The shape Instructor raises: its own exception around the SDK's status error."""
+    from instructor.core.exceptions import InstructorRetryException
+
+    sdk_error = Exception(f"Error code: {status}")
+    sdk_error.status_code = status
+    try:
+        raise InstructorRetryException(str(sdk_error), n_attempts=1, total_usage=0) from sdk_error
+    except InstructorRetryException as wrapped:
+        return wrapped
+
+
+async def test_recognize_reads_the_status_under_instructors_wrapper(
+    mock_cloud_client, _mock_image_utils
+):
+    """local-runtimes-1: the wrapper has no status, so a bad key returned blank
+    regions and a 503 was never retried."""
+    from bibr.exceptions import UpstreamServiceError
+
+    mock_instructor = AsyncMock()
+    mock_instructor.create = AsyncMock(side_effect=_instructor_wrapped(401))
+    mock_cloud_client._client = mock_instructor
+    with pytest.raises(UpstreamServiceError):
+        await mock_cloud_client.recognize(MagicMock(), "Text Recognition:")
+
+    mock_instructor.create = AsyncMock(
+        side_effect=[_instructor_wrapped(503), OcrResult(text="recovered")]
+    )
+    mock_cloud_client._rate_limiter = AsyncMock()
+    with patch("bibr.local.ocr_cloud.asyncio.sleep", new_callable=AsyncMock):
+        assert await mock_cloud_client.recognize(MagicMock(), "Text Recognition:") == "recovered"
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------

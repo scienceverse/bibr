@@ -13,6 +13,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -20,7 +21,9 @@ from bibr.config import snapshot_settings
 from bibr.local.http_runtime import (
     MANAGED_LOCAL_LLM_RATE_LIMIT_RPM,
     LocalHttpError,
+    check_startup_stop,
     guard_managed_server_port,
+    pause_startup_poll,
     request_bytes,
 )
 
@@ -43,13 +46,19 @@ class VllmLlmServer:
     thread executor.
     """
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         model: str | None = None,
         port: int | None = None,
         mem_fraction: float | None = None,
         settings=None,
+        *,
+        stop_event: threading.Event | None = None,
     ):
+        self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         from bibr.local.llm_models import default_local_model
 
@@ -197,6 +206,7 @@ class VllmLlmServer:
         health_url = f"{self.base_url}/health"
 
         while time.monotonic() < deadline:
+            check_startup_stop(self._stop_event, "vLLM")
             if self._process.poll() is not None:
                 rc = self._process.returncode
                 tail = self._read_stderr_tail()
@@ -227,7 +237,7 @@ class VllmLlmServer:
                         return
             except (LocalHttpError, json.JSONDecodeError):
                 pass
-            time.sleep(2.0)
+            pause_startup_poll(2.0, self._stop_event, "vLLM")
 
         try:
             self.shutdown()

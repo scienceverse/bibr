@@ -94,7 +94,7 @@ async def test_renders_next_file_while_detecting_current():
     otherwise batch throughput serializes render and inference end to end."""
     events: list[tuple] = []
 
-    def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension):
+    def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension, **_kw):
         events.append(("render", pdf_bytes))
         return iter([(0, MagicMock(width=800, height=1000))])
 
@@ -137,7 +137,7 @@ class TestMaxPagesClamping:
         rm.layout = MagicMock(detect_batch=AsyncMock(return_value=[[]]))
         captured = {}
 
-        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension):
+        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension, **_kw):
             captured["start_page"] = start_page
             captured["end_page"] = end_page
             return iter([(0, MagicMock(width=800, height=1000))])
@@ -163,7 +163,7 @@ class TestMaxPagesClamping:
         rm.layout = MagicMock(detect_batch=AsyncMock(return_value=[[]]))
         captured = {}
 
-        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension):
+        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension, **_kw):
             captured["start_page"] = start_page
             captured["end_page"] = end_page
             return iter([(0, MagicMock(width=800, height=1000))])
@@ -189,7 +189,7 @@ class TestMaxPagesClamping:
         rm.layout = MagicMock(detect_batch=AsyncMock(return_value=[[]]))
         captured = {}
 
-        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension):
+        def fake_render(pdf_bytes, dpi, start_page, end_page, max_pixels, max_dimension, **_kw):
             captured["start_page"] = start_page
             captured["end_page"] = end_page
             return iter([(0, MagicMock(width=800, height=1000))])

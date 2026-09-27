@@ -676,6 +676,10 @@ class EquationExtractor:
 
     def __init__(self) -> None:
         self._grp_counter = 0
+        # Error code of each LLM fallback batch that failed in the last
+        # ``extract_with_llm_fallback`` call, and how many batches it sent.
+        self.llm_batch_failures: list[str] = []
+        self.llm_batch_count = 0
 
     def _next_grp_id(self) -> int:
         self._grp_counter += 1
@@ -779,6 +783,8 @@ class EquationExtractor:
         """
         from bibr.paper_contents import CanonicalSection
 
+        self.llm_batch_failures = []
+        self.llm_batch_count = 0
         # Step 1: regex extraction
         equations = (
             self.extract_from_sentences(sentences, sections)
@@ -848,6 +854,7 @@ class EquationExtractor:
         batch_size = 10
         existing_keys = {(eq.text_id, eq.lhs, eq.comp, eq.rhs) for eq in equations}
         batches = [candidates[i : i + batch_size] for i in range(0, len(candidates), batch_size)]
+        self.llm_batch_count = len(batches)
 
         async def _extract_batch(index, batch):
             try:
@@ -855,7 +862,13 @@ class EquationExtractor:
             except ProcessingError:
                 raise
             except Exception as e:
-                logger.warning(
+                from bibr.clients.llm import _is_blank_completion_error, llm_failure_code
+
+                self.llm_batch_failures.append(llm_failure_code(e))
+                # A blank completion is known local-model flakiness: log it
+                # quietly. The caller records every failed batch either way.
+                log = logger.info if _is_blank_completion_error(e) else logger.warning
+                log(
                     "LLM equation extraction failed for batch %d/%d (%d candidates): %s",
                     index + 1,
                     len(batches),

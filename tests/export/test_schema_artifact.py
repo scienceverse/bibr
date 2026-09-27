@@ -103,13 +103,13 @@ def test_reader_artifact_relaxes_only_unknown_keys_enum_values_and_the_minor_ver
     }
     assert reader["properties"].keys() == strict["properties"].keys()
     assert reader["required"] == strict["required"]
-    assert strict["properties"]["schema_version"]["const"] == "12.0"
+    assert strict["properties"]["schema_version"]["const"] == "12.1"
     assert reader["properties"]["schema_version"]["pattern"] == r"^12\.[0-9]+$"
 
 
 def _with_next_minor_fields(payload: dict) -> dict:
     """Mimic a later 12.x writer: next minor version, unknown keys at several depths."""
-    payload["schema_version"] = "12.1"
+    payload["schema_version"] = "12.2"
     payload["future_block"] = {"enabled": True}
     payload["metadata"]["subtitle"] = "A sequel"
     payload["section"][0]["numbering"] = "1."
@@ -129,7 +129,7 @@ def test_reader_artifact_and_model_accept_a_newer_minor_export(demo_paper):
     payload = _with_next_minor_fields(json.loads(json.dumps(export_paper_to_json(demo_paper))))
 
     assert not list(_validator(READER_ARTIFACT).iter_errors(payload))
-    assert PaperExportReader.model_validate(payload).schema_version == "12.1"
+    assert PaperExportReader.model_validate(payload).schema_version == "12.2"
 
     # The strict artifact and the producer model keep rejecting it.
     assert list(_validator(ARTIFACT).iter_errors(payload))
@@ -138,10 +138,10 @@ def test_reader_artifact_and_model_accept_a_newer_minor_export(demo_paper):
 
 
 def test_reader_accepts_enum_values_a_later_minor_adds(demo_paper):
-    """A 12.1 writer may add a value to a closed vocabulary; the strict model
+    """A 12.2 writer may add a value to a closed vocabulary; the strict model
     and artifact reject it, the reader model and artifact keep it."""
     payload = json.loads(json.dumps(export_paper_to_json(demo_paper)))
-    payload["schema_version"] = "12.1"
+    payload["schema_version"] = "12.2"
     payload["section"][0]["section_type"] = "preregistration"
     payload["bib"][0]["bib_type"] = "patent"
     payload["bib_match"][0]["service"] = "semantic-scholar"

@@ -104,15 +104,25 @@ class RorClient:
 
     async def match(self, text: str) -> OrganizationMatch | None:
         """ROR's chosen organization for *text*, or ``None``."""
+        result, _failure = await self.lookup(text)
+        return result
+
+    async def lookup(self, text: str) -> tuple[OrganizationMatch | None, str | None]:
+        """ROR's chosen organization for *text*, and why the lookup failed if it did.
+
+        The failure is ``None`` for an answered lookup, matched or not, and a
+        short reason ("HTTP 503", "rate limited", "ConnectError", "invalid
+        JSON") when ROR could not be asked or did not answer usefully.
+        """
         text = " ".join(text.split())
         if not _MIN_CHARS <= len(text) <= _MAX_CHARS:
-            return None
+            return None, None
         key = _cache_key(text)
         if key in self._cache:
             self._cache.move_to_end(key)
-            return self._cache[key]
+            return self._cache[key], None
         if self.blocked:
-            return None
+            return None, "rate limited"
         await self._limiter.acquire()
         try:
             response = await self._http().get(
@@ -122,23 +132,23 @@ class RorClient:
             )
         except httpx.HTTPError as exc:
             logger.debug("ROR request failed for %r: %s", text[:80], exc)
-            return None
+            return None, type(exc).__name__
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After", "")
             delay = float(retry_after) if retry_after.isdigit() else _WINDOW_SECONDS
             self._blocked_until = time.monotonic() + delay
             logger.warning("ROR rate limit reached; skipping ROR lookups for %.0fs", delay)
-            return None
+            return None, "rate limited"
         if response.status_code != 200:
             logger.debug("ROR returned HTTP %d for %r", response.status_code, text[:80])
-            return None
+            return None, f"HTTP {response.status_code}"
         try:
             result = chosen_organization(response.json())
         except ValueError:
             logger.debug("ROR returned unparseable JSON for %r", text[:80])
-            return None
+            return None, "invalid JSON"
         self._remember(key, result)
-        return result
+        return result, None
 
 
 def chosen_organization(payload: Any) -> OrganizationMatch | None:
