@@ -294,6 +294,20 @@ released.
   `[/tmp/x]` in an error message, which used to crash the command with a
   `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
   renders, and text a caller has already escaped shows no backslashes.
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that
