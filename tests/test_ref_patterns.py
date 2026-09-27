@@ -202,3 +202,79 @@ def test_missing_chars_widen_a_window_that_cuts_off_a_longer_copy():
     assert _missing_chars(needle, haystack, start, start + len(needle) - 12) < (
         _COVERED_MAX_MISSING
     )
+
+
+# A numbered list read two ways: the text layer of an aggregate box holds the
+# label column first, then every entry; each entry box starts with its own
+# label. The PDF text layer can itself carry misread labels ("[3", "[41").
+_LABELS = [f"[{i}]" for i in range(1, len(REFERENCE_LIST) + 1)]
+_LABELS[2], _LABELS[3] = "[3", "[41"
+
+
+def test_alnum_key_leaves_out_lines_holding_only_entry_labels():
+    assert alnum_key("[2] \r\n[3 \r\n[41 \r\n(5)\n6.\nSmith, J.") == "smithj"
+    assert alnum_key("[2] [3 [41 [51\nSmith, J.") == "smithj"
+    assert alnum_key("35)\r\n36)\r\n37)\nSmith, J.") == "smithj"
+    # a year, a page range or a label followed by text is kept
+    assert alnum_key("2021.\n209-249, 2021.\n[7] Smith") == "20212092492021" + "7smith"
+
+
+@pytest.mark.parametrize(
+    ("needle", "haystack", "covered"),
+    [
+        # label column first in the aggregate read, labels inline in the entry boxes
+        (
+            "\n".join(_LABELS) + "\n" + "\n".join(REFERENCE_LIST),
+            "".join(
+                f"{label} \n{entry}" for label, entry in zip(_LABELS, REFERENCE_LIST, strict=True)
+            ),
+            True,
+        ),
+        # the entry boxes sort two entries the other way round
+        (
+            "\n".join(REFERENCE_LIST),
+            "".join(
+                REFERENCE_LIST[:5] + [REFERENCE_LIST[6], REFERENCE_LIST[5]] + REFERENCE_LIST[7:]
+            ),
+            True,
+        ),
+        (
+            "\n".join(_NOISY_LIST),
+            "".join(
+                REFERENCE_LIST[:5] + [REFERENCE_LIST[6], REFERENCE_LIST[5]] + REFERENCE_LIST[7:]
+            ),
+            True,
+        ),
+        # moved entries do not hide an entry the entry boxes lack
+        (
+            "\n".join(REFERENCE_LIST),
+            "".join(
+                REFERENCE_LIST[:2]
+                + REFERENCE_LIST[3:5]
+                + [REFERENCE_LIST[6], REFERENCE_LIST[5]]
+                + REFERENCE_LIST[7:]
+            ),
+            False,
+        ),
+        (
+            "\n".join(_LABELS) + "\n" + "\n".join(REFERENCE_LIST),
+            "".join(
+                f"{label} \n{entry}"
+                for i, (label, entry) in enumerate(zip(_LABELS, REFERENCE_LIST, strict=True))
+                if i != 2
+            ),
+            False,
+        ),
+    ],
+    ids=[
+        "label-column",
+        "two-entries-swapped",
+        "two-entries-swapped-noisy",
+        "swapped-and-one-missing",
+        "label-column-and-one-missing",
+    ],
+)
+def test_alnum_text_covered_takes_entries_read_in_another_order_as_covered(
+    needle, haystack, covered
+):
+    assert alnum_text_covered(alnum_key(needle), alnum_key(haystack)) is covered
