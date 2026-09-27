@@ -1462,8 +1462,8 @@ released.
   cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
   tier of `bibr setup` writes `gemini`) never replaces a URL the caller
   passes: the run uses that server as `paddle-http` and sends no page image
-  to the cloud provider. An explicit cloud vision backend plus a URL keeps calling its
-  provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
   endpoint) and drops the URL, so it no longer splits the OCR cache; the
   library used to start `glm-http` for it and the CLI `paddle-http`. A
   `ResourceManager` built directly with a URL now starts the backend its
