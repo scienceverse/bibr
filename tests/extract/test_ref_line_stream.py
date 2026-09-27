@@ -214,6 +214,53 @@ def test_text_layer_lines_the_rows_do_not_hold_are_left_out():
     ]
 
 
+def test_line_whose_row_lost_its_last_letters_at_the_box_edge_is_kept():
+    # The first box ends inside "parental", so its row reads "... and parenta".
+    # In the second box, every long line lost letters that way: such lines do
+    # not count as text the rows hold, so that box is read from its row.
+    regions = [
+        (
+            1,
+            (45.0, 95.0, 445.0, 180.0),
+            "reference_content",
+            "Keller, M. 1975. Reading ability in twins.\r\nJournal of Tests 3, 1-9.\r\n"
+            "Adams P., Baker Q. 1977. Heritability and parenta\r\n"
+            "care in a songbird. Journal of Tests 5, 10-19.\r\n"
+            "Moser, K. 1982. Writing ability in twins.\r\nJournal of Tests 7, 20-29.",
+        ),
+        (
+            1,
+            (45.0, 195.0, 445.0, 230.0),
+            "reference_content",
+            "Dunn S., Evans T. 1980. Reading growth in tw\r\npairs. Journal of Tests 9, 30-39.",
+        ),
+    ]
+    lines = [
+        _line("Keller, M. 1975. Reading ability in twins.", 1, 50, 100),
+        _line("Journal of Tests 3, 1-9.", 1, 70, 115),
+        _line("Adams P., Baker Q. 1977. Heritability and parental", 1, 50, 130),
+        _line("care in a songbird. Journal of Tests 5, 10-19.", 1, 70, 145),
+        _line("Moser, K. 1982. Writing ability in twins.", 1, 50, 160),
+        _line("Journal of Tests 7, 20-29.", 1, 70, 175),
+        _line("Dunn S., Evans T. 1980. Reading growth in twin", 1, 50, 200),
+        _line("pairs. Journal of Tests 9, 30-39.", 1, 70, 215),
+    ]
+    contents = _contents(regions, lines)
+    stream = build_line_stream(contents, _ref_df(contents))
+
+    assert "Adams P., Baker Q. 1977. Heritability and parental" in [
+        line.text for line in stream.lines
+    ]
+    assert list(segment_line_stream(stream).entries)[:3] == [
+        "Keller, M. 1975. Reading ability in twins. Journal of Tests 3, 1-9.",
+        "Adams P., Baker Q. 1977. Heritability and parental care in a songbird. "
+        "Journal of Tests 5, 10-19.",
+        "Moser, K. 1982. Writing ability in twins. Journal of Tests 7, 20-29.",
+    ]
+    assert (stream.text_layer_regions, stream.region_text_regions) == (1, 1)
+    assert stream.lines[-2].text == "Dunn S., Evans T. 1980. Reading growth in tw"
+
+
 def test_manuscript_line_numbers_are_trimmed_from_text_layer_lines():
     regions = [(1, (100.0, 100.0, 900.0, 140.0), "text", "Evans, J. (2011). Eyewitness memory.")]
     number_first = _line("582 Evans, J. (2011). Eyewitness memory.", 1, 30, 105)
@@ -368,6 +415,91 @@ def test_numbered_list_takes_an_entry_out_of_order_and_ends_at_its_last_box():
     assert segmentation.text.endswith("the U.S. District Court entered a decree.")
 
 
+def _boxed_stream(boxes: list[list[str]], *, label: str = "reference") -> LineStream:
+    """A stream with one layout box of *label* per list of printed lines."""
+    lines: list[StreamLine] = []
+    for region, box in enumerate(boxes):
+        for position, text in enumerate(box):
+            top = float(len(lines))
+            lines.append(
+                StreamLine(
+                    text=text,
+                    page=1,
+                    bbox=(0.0, top, 10.0, top + 1),
+                    region=region,
+                    region_label=label,
+                    region_first=position == 0,
+                )
+            )
+    return LineStream(lines=lines)
+
+
+def test_second_work_under_one_number_in_its_own_box_opens_an_entry():
+    # [2] prints a second dated work on its own line, in a box of its own.
+    stream = _boxed_stream(
+        [
+            [
+                "[1] S.W. Hawking, Particle creation by black holes,",
+                "Commun. Math. Phys. 43 (1975), 199-220.",
+            ],
+            ["[2] J.D. Bekenstein, Black holes and entropy,", "Phys. Rev. D 7 (1973), 2333-2346."],
+            [
+                "J.D. Bekenstein, Generalized second law of thermodynamics",
+                "in black-hole physics, Phys. Rev. D 9 (1974), 3292-3300.",
+            ],
+            [
+                "[3] W.G. Unruh, Notes on black-hole evaporation,",
+                "Phys. Rev. D 14 (1976), 870-892.",
+            ],
+            ["[4] R.M. Wald, General Relativity, University of Chicago Press,", "Chicago, 1984."],
+            # Undated: stays in the entry numbered above it.
+            ["Chapter 14: Quantum fields in curved spacetime."],
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert segmentation.numbered_style
+    assert [entry.split(",")[0] for entry in segmentation.entries] == [
+        "[1] S.W. Hawking",
+        "[2] J.D. Bekenstein",
+        "J.D. Bekenstein",
+        "[3] W.G. Unruh",
+        "[4] R.M. Wald",
+    ]
+    assert segmentation.entries[1].endswith("(1973), 2333-2346.")
+    assert segmentation.entries[-1].endswith(
+        "Chicago, 1984. Chapter 14: Quantum fields in curved spacetime."
+    )
+    assert segmentation.numbered == (True, True, False, True, True)
+
+
+def test_received_line_after_a_numbered_list_stays_in_the_entry_before_it():
+    stream = _boxed_stream(
+        [
+            [
+                "1. L. Bers, F. John and M. Schechter, Partial Differential",
+                "Equations, Interscience, New York, 1964.",
+            ],
+            [
+                "2. R. Courant and D. Hilbert, Methods of Mathematical Physics,",
+                "Vol. II, Interscience, New York, 1962.",
+            ],
+            [
+                "3. C.B. Morrey, Multiple Integrals in the Calculus of",
+                "Variations, Springer, Berlin, 1966.",
+            ],
+            ["Received April 26, 1972."],
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert len(segmentation.entries) == 3
+    assert segmentation.entries[-1] == (
+        "3. C.B. Morrey, Multiple Integrals in the Calculus of Variations, Springer, "
+        "Berlin, 1966. Received April 26, 1972."
+    )
+
+
 def test_continuation_lines_opening_on_a_number_do_not_join_the_sequence():
     stream = _stream(
         [
@@ -443,6 +575,24 @@ def test_lowercase_continuation_without_a_date_rejoins_the_previous_entry():
 
     assert len(segmentation.entries) == 2
     assert segmentation.entries[0].endswith("Kindai Vol 18, Nomor 1.")
+
+
+def test_ocr_speck_glued_to_a_family_name_opens_an_entry():
+    # OCR misread "Lehrer" as ".lehrer": the line opens on a period, but it
+    # opens an author list rather than continuing one.
+    stream = _stream(
+        [
+            "Keller, M. (1978). Reading in twins. Journal of Tests, 3, 1-9.",
+            ".lehrer, H. R. (1980). Spelling in twins. Journal of Tests, 5, 10-19.",
+            "Moser, K. (1982). Writing in twins. Journal of Tests, 7, 20-29.",
+        ],
+        region_starts={0, 1, 2},
+        label="reference_content",
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert len(segmentation.entries) == 3
+    assert segmentation.entries[1].startswith(".lehrer, H. R. (1980).")
 
 
 def test_entry_holding_two_dois_is_split_after_the_first():

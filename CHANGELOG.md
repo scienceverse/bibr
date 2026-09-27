@@ -1249,7 +1249,8 @@ released.
   lines did not align, or a list of short entries came out merged, cut short or
   dropped. The stream reads the text-layer lines inside the located section's
   layout boxes, page after page (a box without usable text-layer lines, such as
-  an OCR'd or scanned page, contributes its text line by line), reads a box that
+  an OCR'd or scanned page, contributes its text line by line), keeps a line
+  the box edge cut short by a letter or two in the row text, reads a box that
   repeats an aggregate box's text once, drops manuscript line numbers and page
   furniture, and stops at a heading that ends the list (Acknowledgements,
   Funding, Appendix, Data availability and the like) when the line before it
@@ -1261,19 +1262,23 @@ released.
   by the geometry model's per-line probability, author/year, Vancouver, all-caps
   and corporate onsets, "same author" dashes, the first line of a layout box,
   hanging indent, a vertical gap and the previous line ending in a DOI, a URL or
-  a DOI link. A printed sequence counting up by one ("[n]", "n.", "(n)", roman
-  numerals, a second list numbered from 1 again included), bullets or bracketed
-  labels decide instead when the list has them. A sequence keeps one marker
-  style, and a line numbered 0, opening on an edition, supplement or month word
-  ("3. Aufl.", "10 Suppl") or standing off the list's marker column takes no
-  place in it. An entry printed out of order still opens, and a numbered list
-  ends with its last entry's box. A fragment that opens in lower case with no
-  date or DOI rejoins the entry before it, an entry holding two DOIs is split
-  after the first, and a numbered entry is never dropped as a short fragment
-  without a year. A reference list split into two sections, a non-English
-  heading ("Referencias") over the first page and a synthetic "References"
-  section for the reference boxes on the next, is read whole. Parsing is
-  unchanged.
+  a DOI link. A line opening on an OCR speck glued to a family name (".lehrer,
+  H. R.") is not voted down as a continuation. A printed sequence counting up by
+  one ("[n]", "n.", "(n)", roman numerals, a second list numbered from 1 again
+  included), bullets or bracketed labels decide instead when the list has them.
+  A sequence keeps one marker style, and a line numbered 0, opening on an
+  edition, supplement or month word ("3. Aufl.", "10 Suppl") or standing off the
+  list's marker column takes no place in it. An entry printed out of order still
+  opens, and a numbered list ends with its last entry's box. A second work
+  printed on its own line under the same number opens an entry when it starts a
+  reference box of its own and both works carry a date or DOI; a manuscript
+  history line after the list ("Received April 26, 1972.") never does. A
+  fragment that opens in lower case with no date or DOI rejoins the entry before
+  it, an entry holding two DOIs is split after the first, and a numbered entry
+  is never dropped as a short fragment without a year. A reference list split
+  into two sections, a non-English heading ("Referencias") over the first page
+  and a synthetic "References" section for the reference boxes on the next, is
+  read whole. Parsing is unchanged.
 - The cascade still runs, and its result stands unless it fell back (region
   recovery, CRF, marker split) or found nothing, most of its entries came from
   the merged-reference splitter, or it under-yielded against its credible entry

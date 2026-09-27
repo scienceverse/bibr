@@ -492,6 +492,14 @@ def _with_split_section(contents: PaperContents, ref_df: pd.DataFrame) -> pd.Dat
     return pd.concat([head[ref_df.columns.intersection(head.columns)], ref_df])
 
 
+# Characters a row may lose where a line runs past its layout box.
+_EDGE_TRIM = 2
+
+
+def _cut_at_box_edge(key: str, section_key: str) -> bool:
+    return len(key) >= _MIN_REPEAT_CHARS and key[:-_EDGE_TRIM] in section_key
+
+
 def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStream | None:
     """Read the located reference section back as one stream of printed lines.
 
@@ -542,6 +550,10 @@ def build_line_stream(contents: PaperContents, ref_df: pd.DataFrame) -> LineStre
                     repeated += len(key)
                 else:
                     kept.append((line, text))
+            elif id(line) not in assigned and _cut_at_box_edge(key, section_key):
+                # The row lost the line's last characters at the box edge
+                # ("... and parenta" for "... and parental").
+                kept.append((line, text))
         if total and repeated >= _TEXT_LAYER_MIN_SHARE * total:
             # An entry box inside an aggregate box already read: its lines
             # are in the stream once.
@@ -797,6 +809,9 @@ _PAREN_DATE_LEAD = re.compile(
 _DATE_FIRST = re.compile(r"^\((?:1[6-9]|20)\d\d[a-z]?(?:,[^)]{0,20})?\)|^\(n\.\s?d\.\)", re.I)
 _LOWER_START = re.compile(r"^[\"'“‘(\[]*[a-zß-öø-ÿ]")
 _PUNCT_START = re.compile(r"^[,;:.)\]}]")
+# An OCR speck glued to a family name ("\.lehrer, H. R." for "Lehrer, H. R."):
+# the line opens an author list, not a continuation.
+_OCR_SPECK_AUTHOR = re.compile(r"^[.,](?=[^\W\d_]{2,},\s*[A-ZÀ-ÖØ-Þ]\.)")
 # The previous line runs on: a word broken at a hyphen, an author list or a
 # locator cut mid-way.
 _CONTINUES_NEXT = re.compile(r"(?:[A-Za-zß-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bpp\.?|\bvol\.?)\s*$")
@@ -1114,7 +1129,7 @@ def _start_scores(
             # entry ("frendy rangkuti, ...", OCR's "yon Richter") than not.
             entry_box = line.region_first and line.region_label in _ENTRY_LABELS
             score += _W_LOWER_ENTRY_BOX if entry_box else _W_LOWER
-        elif _PUNCT_START.match(text):
+        elif _PUNCT_START.match(text) and not _OCR_SPECK_AUTHOR.match(text):
             score += _W_PUNCT
         elif _DATE_FIRST.match(text):
             score += _W_DATE_FIRST
@@ -1175,7 +1190,15 @@ def segment_line_stream(
     bulleted = max(marked.values(), key=len, default=[])
     if numbered_style:
         missing = _chain_missing_numbers(chain, candidates, texts)
-        starts = sorted({0, *chain, *missing, *_chain_gap_starts(chain, texts, scores, onsets)})
+        starts = sorted(
+            {
+                0,
+                *chain,
+                *missing,
+                *_chain_gap_starts(chain, texts, scores, onsets),
+                *_unnumbered_box_starts(sorted({*chain, *missing}), lines, texts, scores),
+            }
+        )
         protected = {*chain, *missing}
         reason_flags.append("numbering_sequence")
         cut = _numbered_list_end(chain, lines)
@@ -1287,6 +1310,42 @@ def _numbered_list_end(chain: list[int], lines: list[StreamLine]) -> int | None:
         if line.region != last_line.region:
             return None if line.region_label in _ENTRY_LABELS else index
     return None
+
+
+# Manuscript-history back matter printed after a list ("Received April 26,
+# 1972. ..."): never an unnumbered entry.
+_HISTORY_LINE = re.compile(r"^(?:Received|Accepted|Revised|Submitted)\b", re.I)
+
+
+def _unnumbered_box_starts(
+    chain: list[int], lines: list[StreamLine], texts: list[str], scores: list[float]
+) -> list[int]:
+    """Unnumbered entries a numbered list prints in their own reference box.
+
+    Physics lists print a second work under one number on its own line
+    ("[18] J.D. Bekenstein, ... (1973), 2333-2346." then "J.D. Bekenstein,
+    ... (1974), 3292-3300."). Such a line opens an entry when it is voted a
+    start, opens a reference-entry box, follows a line that closes an entry,
+    and both it and the text before it under the same number carry a date.
+    """
+    added: list[int] = []
+    bounds = [*chain, len(lines)]
+    for a, b in zip(bounds, bounds[1:], strict=False):
+        previous = a
+        for i in range(a + 1, b):
+            line = lines[i]
+            if (
+                scores[i] >= _START_THRESHOLD
+                and not _HISTORY_LINE.match(texts[i])
+                and line.region_first
+                and line.region_label in _ENTRY_LABELS
+                and _CLOSES_ENTRY.search(texts[i - 1])
+                and _entry_has_date_or_doi(" ".join(texts[previous:i]))
+                and _entry_has_date_or_doi(" ".join(texts[i:b]))
+            ):
+                added.append(i)
+                previous = i
+    return added
 
 
 def _chain_gap_starts(
