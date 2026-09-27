@@ -33,6 +33,20 @@ def test_uv_fallback_launches_exact_pinned_mlx_vlm_tool(monkeypatch):
     assert cmd[-4:] == ["--host", "127.0.0.1", "--port", "8775"]
 
 
+def test_mlx_vlm_ignores_the_rapid_mlx_extra_args(monkeypatch):
+    """Each Paddle Apple-Silicon runtime reads only its own extra args (local-runtimes-17)."""
+    from bibr.config import GlobalSettings
+
+    settings = GlobalSettings()
+    settings.ocr.paddle_mlx_extra_args = "--mlx-vlm-only-flag 1"
+    settings.ocr.paddle_rapid_mlx_extra_args = "--rapid-mlx-only-flag 2"
+    mod, _server = _mk_server(monkeypatch, settings=settings)
+
+    cmd = mod.subprocess.Popen.call_args.args[0]
+    assert cmd[-2:] == ["--mlx-vlm-only-flag", "1"]
+    assert "--rapid-mlx-only-flag" not in cmd
+
+
 def test_mlx_vlm_server_smoke_uses_paddle_client(monkeypatch):
     from bibr.config import GlobalSettings
     from bibr.local import mlx_vlm_ocr as mod

@@ -238,6 +238,21 @@ released.
 
 ### Fixed
 
+- The local paper and section classifiers no longer take the GPU memory a
+  managed vLLM server needs. Free VRAM was measured once and each model was
+  checked against it alone, so both could land on CUDA when only one fit; the
+  second model's check now subtracts what the first one took. The check also
+  left nothing for the managed PaddleOCR-VL vLLM server, which claims 92% of
+  the GPU and, with a cloud LLM, starts after the classifiers have loaded, so
+  on a 24 GB card the classifiers took its room and OCR could fail to start.
+  The picker now keeps free what the managed vLLM servers the run may start
+  claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
+  both when they fit on the GPU together, else the larger), and a classifier
+  that does not fit beside that and the safety reserve runs on CPU, with the
+  same results, only slower. With automatic OCR on x86 Linux, a 24 GB card now
+  runs both classifiers on CPU. `ML_PAPER_CLASSIFIER_DEVICE` and
+  `ML_SECTION_CLASSIFIER_DEVICE` still win, and a model pinned to `cuda` that
+  way comes off the other model's budget.
 - JATS input keeps the paper's structure instead of flattening it. References
   accumulate across every `<ref-list>` with one continuous counter: a later
   'Methods references' list extends the main bibliography instead of replacing
@@ -630,6 +645,15 @@ released.
 - vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
   the other managed servers; startup failures report the END of the stderr
   tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
 - Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
   server like the other local backends.
 - Rapid-MLX OCR: a failed engine restart no longer discards the region that
@@ -669,6 +693,21 @@ released.
   is bit-identical to the serial loop. The OOM batch-halving retry restores
   torch.compile padding afterwards instead of leaving it disabled.
 
+- Front matter no longer abstains (`VAL_METADATA_MULTI_ITEM`, no title, authors
+  or abstract) on a paper whose first pages print its record twice or whose
+  furniture starts a second block. Any second block with a byline, a DOI or
+  abstract text used to block selection, even a publisher cover page, a
+  repository landing page, a citation box, a translated title and abstract, an
+  email list, a date line or an "article info" sidebar. Where that check
+  abstains, bibr now compares what each block prints about its paper: the DOI
+  (exactly), the title, and for a title in another language or script the
+  authors' surnames (all of them, or at least two). It selects the paper's own
+  record when all records agree and prefers the article's title page over a
+  cover page or citation box. The selected block must print a byline, and the
+  parser's detected title must belong to the selected paper or a translation of
+  it. Records that disagree still abstain, and so does a DOI shared by two
+  different titles, so compiled abstract books and proceedings pages still fail
+  closed. Pages the old check resolved are selected exactly as before.
 - A failed LLM call now says how it failed. Every LLM task raised a bare
   `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
   answered all of them with 502, so a response truncated at the token limit
@@ -1550,6 +1589,29 @@ released.
   of it when built from a dict, and it remains a `PaperExport` subclass.
   `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
   alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
 
 ### Changed
 
@@ -1647,6 +1709,36 @@ released.
   scored on its numbers and "Straße" split in two. Han, kana and Thai text
   gives one token per character. Section-text results record
   `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). Given a
+  URL, the library used to start `glm-http` for every request except
+  `paddle-http` and `serve-http`: a bare `ocr_url`, the `paddle` selector,
+  every local Paddle runtime (`paddle-vllm`, `paddle-rapid-mlx`,
+  `paddle-mlx-vlm`) and the cloud vision backends. A Paddle server therefore
+  got GLM prompts and its tables came back as undecoded OTSL markup.
+  Without an explicit backend (`--ocr`, `ocr=`, `ocr_backend=`), the
+  configured `OCR_BACKEND` is the request, so `OCR_BACKEND=glm-http` keeps
+  GLM at every entry point; `bibr chew --ocr-url` used to ignore it. A
+  cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
+  tier of `bibr setup` writes `gemini`) never replaces a URL the caller
+  passes: the run uses that server as `paddle-http` and sends no page image
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  endpoint) and drops the URL, so it no longer splits the OCR cache; the
+  library used to start `glm-http` for it and the CLI `paddle-http`. A
+  `ResourceManager` built directly with a URL now starts the backend its
+  OCR cache identity names; it could record `gemini` or a local runtime and
+  start `glm-http`. Migration: library users who pass a bare `ocr_url` for
+  a GLM server must now pass `ocr_backend="glm"` (or `"glm-http"`;
+  `ocr="glm"` in `bibr.chew`).
 
 ### Security
 

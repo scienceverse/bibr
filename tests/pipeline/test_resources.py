@@ -1,8 +1,9 @@
 """ResourceManager lifecycle — layout + segmenter."""
 
 import asyncio
+import threading
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -565,7 +566,8 @@ async def test_start_llm_server_vllm_mlx():
     fake = MagicMock()
     with patch("bibr.local.llm.VllmMlxLlmServer", return_value=fake) as constructor:
         await rm.start_llm_server(backend="vllm-mlx")
-    constructor.assert_called_once_with(settings=rm._settings)
+    constructor.assert_called_once_with(settings=rm._settings, stop_event=ANY)
+    assert isinstance(constructor.call_args.kwargs["stop_event"], threading.Event)
     fake.configure_llm_client.assert_called_once()
     assert rm._llm_server is fake
 

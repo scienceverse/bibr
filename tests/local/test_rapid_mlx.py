@@ -1,6 +1,7 @@
 import os
 import subprocess
-from unittest.mock import MagicMock
+import threading
+from unittest.mock import ANY, MagicMock
 
 import pytest
 
@@ -180,6 +181,34 @@ def test_rapid_mlx_ocr_client_uses_glm_ocr_8bit(monkeypatch):
     assert captured["server"]["multimodal"] is True
     assert captured["server"]["max_tokens"] == 16384
     assert captured["http"]["model"] == "mlx-community/GLM-OCR-8bit"
+
+
+def test_paddle_rapid_mlx_reads_its_own_extra_args_and_the_shared_port(monkeypatch):
+    """OCR_PADDLE_MLX_EXTRA_ARGS is MLX-VLM's; Rapid-MLX has its own key (local-runtimes-17)."""
+    from bibr.config import GlobalSettings
+    from bibr.local import rapid_mlx as mod
+
+    captured: dict[str, object] = {}
+
+    class FakeServer:
+        base_url = "http://localhost:8775"
+        loaded = True
+
+    def fake_server(**kwargs):
+        captured["server"] = kwargs
+        return FakeServer()
+
+    settings = GlobalSettings()
+    settings.ocr.paddle_mlx_port = 8791
+    settings.ocr.paddle_mlx_extra_args = "--mlx-vlm-only-flag 1"
+    settings.ocr.paddle_rapid_mlx_extra_args = "--rapid-mlx-only-flag 2"
+    monkeypatch.setattr(mod, "RapidMlxServer", fake_server)
+    monkeypatch.setattr(mod, "PaddleHttpOcrClient", MagicMock())
+
+    mod.PaddleRapidMlxOcrClient(settings=settings)
+
+    assert captured["server"]["extra_args"] == ["--rapid-mlx-only-flag", "2"]
+    assert captured["server"]["port"] == 8791
 
 
 def test_paddle_rapid_mlx_runs_a_strict_image_smoke(monkeypatch):
@@ -886,7 +915,8 @@ async def test_resource_manager_starts_rapid_mlx_llm(monkeypatch):
     await resources.start_llm_server(backend="rapid-mlx")
 
     assert resources._llm_server is instance
-    factory.assert_called_once_with(settings=custom)
+    factory.assert_called_once_with(settings=custom, stop_event=ANY)
+    assert isinstance(factory.call_args.kwargs["stop_event"], threading.Event)
     instance.configure_llm_client.assert_called_once()
 
 

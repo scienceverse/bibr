@@ -38,6 +38,8 @@ def test_current_public_scorer_and_explicit_fixtures_are_allowed():
     names = [
         "evaluation/__init__.py",
         "evaluation/evaluate.py",
+        "evaluation/grobid_run.py",
+        "evaluation/grobid_tei.py",
         "evaluation/section_metrics.py",
         "evaluation/validation_metrics.py",
         "evaluation/README.md",
