@@ -27,17 +27,36 @@ def settings():
     "cfg",
     [
         RunConfig(ocr_backend="glm-http"),
-        # An ``ocr_url`` override rewrites any local GLM runtime to glm-http.
-        RunConfig(ocr_url="http://ocr.internal:8002"),
+        # An ``ocr_url`` override rewrites any GLM request to glm-http.
+        RunConfig(ocr_backend="glm", ocr_url="http://ocr.internal:8002"),
         RunConfig(ocr_backend="glm-rapid-mlx", ocr_url="http://ocr.internal:8002"),
     ],
-    ids=["explicit", "url-only", "url-overrides-local"],
+    ids=["explicit", "url-glm-alias", "url-overrides-local"],
 )
 def test_glm_http_identity_uses_the_served_alias(cfg, settings):
     identity = resolve_ocr_runtime_identity(cfg, settings)
     assert identity.backend == "glm-http"
     assert identity.model == GLM_SERVED_MODEL_ALIAS
     assert identity.profile == "glm"
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        # A bare URL means Paddle, bibr's default OCR.
+        RunConfig(ocr_url="http://ocr.internal:8002"),
+        # The URL rule turns local Paddle runtimes into paddle-http, which is
+        # asked for the served alias, not the local runtime's weights.
+        RunConfig(ocr_backend="paddle-rapid-mlx", ocr_url="http://ocr.internal:8002"),
+        RunConfig(ocr_backend="paddle-mlx-vlm", ocr_url="http://ocr.internal:8002"),
+    ],
+    ids=["url-only", "url-overrides-rapid-mlx", "url-overrides-mlx-vlm"],
+)
+def test_paddle_http_identity_uses_the_served_alias(cfg, settings):
+    identity = resolve_ocr_runtime_identity(cfg, settings)
+    assert identity.backend == "paddle-http"
+    assert identity.model == settings.ocr.paddle_served_model
+    assert identity.profile == "paddle"
 
 
 def test_glm_http_startup_candidate_uses_the_served_alias(settings):

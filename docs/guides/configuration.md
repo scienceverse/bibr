@@ -99,8 +99,9 @@ The fallback is **startup-only**: a candidate must construct and pass its
 readiness check before it is selected. Once one has started, bibr records its
 identity and does not silently send failed individual OCR requests to GLM.
 Choose a concrete backend with `--ocr <name>` (or `OCR_BACKEND` in `.env`).
-`--ocr-url` routes to an external Paddle endpoint by default; specify
-`--ocr glm-http` for a GLM endpoint. For example:
+`--ocr-url` (and the library's `ocr_url`) routes to an external Paddle
+endpoint by default; specify `--ocr glm-http` (or any `glm` backend) for a GLM
+endpoint. The cloud vision backends ignore the URL. For example:
 
 ```bash
 bibr chew paper.pdf --ocr paddle-http --ocr-url https://ocr.example.org

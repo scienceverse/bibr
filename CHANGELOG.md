@@ -1446,6 +1446,23 @@ released.
   speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
   used to pin the serve result cache to an empty version, and now means the
   computed code hash, so a deploy invalidates cached results again.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). The library
+  used to send a bare `ocr_url`, and the `paddle` selector, to `glm-http`, so
+  a Paddle server got GLM prompts and its tables came back as undecoded OTSL
+  markup. With a URL, a cloud vision backend (`gemini`, `openai`,
+  `anthropic`) now keeps calling its provider and logs that the URL is
+  ignored (`OCR_VISION_BASE_URL` moves its endpoint); the library used to
+  start `glm-http` for it and the CLI `paddle-http`. A `ResourceManager`
+  built directly with a URL now starts the backend its OCR cache identity
+  names; it could record `gemini` or a local runtime and start `glm-http`.
+  `bibr chew --ocr-url` without `--ocr` now honours `OCR_BACKEND` as the
+  library does, so `OCR_BACKEND=glm-http` keeps GLM. Migration: library
+  users who pass a bare `ocr_url` for a GLM server must now pass
+  `ocr_backend="glm"` (or `"glm-http"`; `ocr="glm"` in `bibr.chew`).
 
 ### Security
 

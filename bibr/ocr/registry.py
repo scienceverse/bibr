@@ -15,7 +15,7 @@ import logging
 import platform
 import sys
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 from bibr.ocr.backend import OcrBackend
 
@@ -165,6 +165,47 @@ def resolve_backend_candidates(
     else:
         names = ("glm-llama",)
     return tuple(_candidate(backend, settings) for backend in names)
+
+
+#: Requests an ``ocr_url`` leaves alone: the two HTTP clients already address
+#: the URL, and the cloud vision backends call their provider's API (set
+#: ``OCR_VISION_BASE_URL`` to move it), never an OCR server.
+_URL_KEEPS_BACKEND = frozenset({"paddle-http", "serve-http", "gemini", "openai", "anthropic"})
+
+
+@overload
+def resolve_url_backend(requested: str, ocr_url: str | None) -> str: ...
+
+
+@overload
+def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | None: ...
+
+
+def resolve_url_backend(requested: str | None, ocr_url: str | None) -> str | None:
+    """Apply an explicit OCR server URL to an OCR backend request.
+
+    The one rule behind ``bibr chew --ocr-url``, ``LocalPipeline(ocr_url=...)``
+    (and so ``bibr.chew``), ``ResourceManager`` and the OCR runtime identity,
+    so they all start, cache and report the same backend. An OCR URL means
+    Paddle, bibr's default OCR:
+
+    - without a URL the request is returned unchanged;
+    - ``paddle-http``, ``serve-http`` and the cloud vision backends
+      (``gemini``, ``openai``, ``anthropic``) are kept;
+    - a GLM request (``glm``, any ``glm-*`` name, or the legacy ``http``
+      alias of ``glm-http``) becomes ``glm-http``;
+    - anything else, including the ``paddle`` selector and no request at
+      all, becomes ``paddle-http``.
+
+    Idempotent: a resolved backend resolves to itself.
+    """
+    if not ocr_url:
+        return requested
+    if requested in _URL_KEEPS_BACKEND:
+        return requested
+    if requested is not None and (requested == "http" or requested.startswith("glm")):
+        return "glm-http"
+    return "paddle-http"
 
 
 def resolve_backend_name(name: str | None, settings: GlobalSettings | None = None) -> str:

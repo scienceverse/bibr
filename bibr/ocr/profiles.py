@@ -202,18 +202,17 @@ def resolve_ocr_runtime_identity(cfg: RunConfig, settings: GlobalSettings) -> Oc
 
     This is intentionally independent of a constructed backend client: the
     cache must be able to distinguish model families without starting a local
-    server merely to discover its identity.
+    server merely to discover its identity. An ``ocr_url`` resolves the
+    request through the shared rule the pipeline starts its client with
+    (:func:`bibr.ocr.registry.resolve_url_backend`).
     """
+    from bibr.ocr.registry import resolve_url_backend
+
     requested_backend = cfg.ocr_backend or settings.ocr.backend
-    backend = (
-        "glm-http"
-        if cfg.ocr_url
-        and requested_backend not in {"paddle-http", "serve-http", "gemini", "openai", "anthropic"}
-        else requested_backend
-    )
+    backend = resolve_url_backend(requested_backend, cfg.ocr_url)
     model = (
         settings.ocr.paddle_served_model
-        if requested_backend == "paddle-vllm"
+        if backend == "paddle-vllm"
         else cfg.ocr_model
         or _default_ocr_model(
             requested_backend=requested_backend,
@@ -293,7 +292,9 @@ def resolve_served_model(
         # rewrites any local GLM runtime to glm-http — asks for the served
         # alias rather than the local backend's HuggingFace repo id.
         return ocr.model or GLM_SERVED_MODEL_ALIAS
-    if requested_backend in {"paddle-http", "paddle-vllm"}:
+    if concrete_backend == "paddle-http" or requested_backend == "paddle-vllm":
+        # paddle-http likewise: the ``ocr_url`` rule turns the ``paddle``
+        # selector and every local Paddle runtime into it.
         return ocr.paddle_served_model
     if requested_backend == "paddle-mlx-vlm":
         return ocr.paddle_mlx_model

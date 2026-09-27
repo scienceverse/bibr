@@ -140,11 +140,26 @@ class TestResolveBackendName:
 
 
 class TestLocalPipelineResolvesAliases:
-    def test_pipeline_ocr_url_forces_glm_http_identity_before_automatic_selection(self):
+    def test_pipeline_bare_ocr_url_resolves_paddle_http_before_automatic_selection(self):
         from bibr.local.pipeline import LocalPipeline
         from bibr.ocr.profiles import resolve_ocr_runtime_identity
 
-        pipeline = LocalPipeline(ocr_url="http://ocr.example:8000", ocr_model="custom/glm")
+        pipeline = LocalPipeline(ocr_url="http://ocr.example:8000", ocr_model="custom/paddle")
+        identity = resolve_ocr_runtime_identity(pipeline._config, pipeline._settings)
+
+        assert pipeline._config.ocr_backend == "paddle-http"
+        assert pipeline._resources.ocr_backend == "paddle-http"
+        assert identity.backend == "paddle-http"
+        assert identity.model == "custom/paddle"
+        assert identity.profile == "paddle"
+
+    def test_pipeline_glm_ocr_url_resolves_glm_http_before_automatic_selection(self):
+        from bibr.local.pipeline import LocalPipeline
+        from bibr.ocr.profiles import resolve_ocr_runtime_identity
+
+        pipeline = LocalPipeline(
+            ocr_backend="glm", ocr_url="http://ocr.example:8000", ocr_model="custom/glm"
+        )
         identity = resolve_ocr_runtime_identity(pipeline._config, pipeline._settings)
 
         assert pipeline._config.ocr_backend == "glm-http"

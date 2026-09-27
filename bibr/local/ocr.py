@@ -432,8 +432,9 @@ class HttpOcrClient(BaseHttpOcrClient):
     OpenAI-compatible chat completions API.  Includes retry logic with
     exponential backoff and circuit breaker integration.
 
-    Used when ``--ocr-url`` is specified, and is the supported route to a
-    self-hosted SGLang server now that bibr does not depend on sglang.
+    Used for ``--ocr glm-http``, or any GLM backend with ``--ocr-url`` (a
+    bare ``--ocr-url`` selects ``paddle-http``), and is the supported route to
+    a self-hosted SGLang server now that bibr does not depend on sglang.
     """
 
     name: ClassVar[str] = "glm-http"

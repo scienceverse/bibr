@@ -134,7 +134,7 @@ chew` CLI flags:
 | `figure_images` | `--figure-images` | Include figure images in the output, as `data:` URIs |
 | `include_regions` | `--regions` | Include the `extraction.regions` debug payload (per-region bbox/font/content) |
 | `include_region_meta` | `--region-meta` | Include `extraction.text_regions`: per-sentence layout features (`bbox`, `font_size`, `region_type`, …) keyed by `text_id` (opt-in v4-training metadata, distinct from `extraction.regions`) |
-| `ocr_url` | `--ocr-url` | URL for an external OCR server |
+| `ocr_url` | `--ocr-url` | URL for an external OCR server: Paddle (`paddle-http`) unless `ocr` names a GLM backend, then `glm-http` |
 | `ocr_model` | `--ocr-model` | OCR model path or served model alias |
 | `ocr_profile` | `--ocr-profile` | `"paddle"` or `"glm"`; required when a custom model alias does not identify its family |
 | `start_page`, `end_page` | `--pages` | Lower-level zero-based, inclusive page indices; use these or `pages`, not both |
@@ -269,23 +269,12 @@ result = bibr.chew_file(
 )
 ```
 
-A bare `ocr_url` selects the GLM HTTP compatibility path, so specify
-`ocr="paddle-http"` when connecting to Paddle.
-
-The equivalent per-call configuration is:
-
-```python
-result = bibr.chew_file(
-    "paper.pdf",
-    ocr="paddle-http",
-    ocr_url="http://localhost:8080/v1",
-    ocr_model="my-paddle-model",
-    ocr_profile="paddle",
-)
-```
-
-A bare `ocr_url` selects the GLM HTTP compatibility path, so specify
-`ocr="paddle-http"` when connecting to Paddle.
+An `ocr_url` follows the same rule as `bibr chew --ocr-url`: a bare URL
+connects to a Paddle server (`paddle-http`), and `ocr="glm"` (or
+`"glm-http"`, or any `"glm-*"` backend) connects to a GLM server
+(`glm-http`) instead. The cloud vision backends (`"gemini"`, `"openai"`,
+`"anthropic"`) ignore `ocr_url` and log a warning; set
+`OCR_VISION_BASE_URL` to change their endpoint.
 
 ## Escape hatch: `LocalPipeline`
 
