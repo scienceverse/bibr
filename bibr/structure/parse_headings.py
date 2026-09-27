@@ -114,6 +114,52 @@ _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]
 # next doc_title region is not appended to it.
 _SPLIT_TITLE_MASTHEAD_RE = re.compile(r"\bjournal\b|https?://|www\.|\bISSN\b", re.IGNORECASE)
 
+# A byline the layout model labelled ``doc_title`` ("ADRIAN LARNER" under an
+# all-caps title on an old scan) is not a title continuation: joined into the
+# title, the name leaves the byline zone and the author call never sees it.
+# A byline row is one to eight comma/"and"-separated groups of two to four
+# name-shaped tokens with no title function word (marker digits and symbols
+# ignored).
+_BYLINE_GROUP_SPLIT_RE = re.compile(r"\s*(?:[,;&·]|\band\b)\s*", re.IGNORECASE)
+_BYLINE_MARKER_CHARS_RE = re.compile(r"[\d*∗†‡§¶]+")
+_BYLINE_NAME_TOKEN_RE = re.compile(r"^(?:[^\W\d_]\.)+$|^[^\W\d_]+(?:['’\-][^\W\d_]+)*\.?$")
+_BYLINE_NAME_PARTICLES = frozenset(
+    {"al", "bin", "da", "das", "de", "del", "della", "der", "di", "do", "dos", "du"}
+    | {"ibn", "la", "le", "van", "von", "y"}
+)
+_TITLE_FUNCTION_WORDS = frozenset(
+    {"a", "an", "are", "as", "at", "by", "for", "from", "in", "into", "is", "of", "on"}
+    | {"or", "the", "to", "towards", "versus", "via", "vs", "with", "without"}
+)
+
+
+def _looks_like_byline_row(text: str) -> bool:
+    """Whether a heading row reads as a personal-name byline, not title words."""
+    if any(mark in text for mark in ":?!"):
+        return False
+    groups = [
+        group.split()
+        for group in _BYLINE_GROUP_SPLIT_RE.split(_BYLINE_MARKER_CHARS_RE.sub(" ", text))
+        if group.strip()
+    ]
+    if not 1 <= len(groups) <= 8:
+        return False
+    for tokens in groups:
+        if not 2 <= len(tokens) <= 4:
+            return False
+        for token in tokens:
+            folded = token.casefold()
+            if folded in _BYLINE_NAME_PARTICLES:
+                continue
+            if (
+                folded in _TITLE_FUNCTION_WORDS
+                or not token[:1].isupper()
+                or not _BYLINE_NAME_TOKEN_RE.match(token)
+            ):
+                return False
+    return True
+
+
 # OCR badge-glyph artifacts that the layout model occasionally merges into the
 # trailing edge of a page-1 doc_title region (e.g. the Open-Practices "TC"
 # transparency badge in Psychological Science). An explicit allowlist keeps the
@@ -255,8 +301,9 @@ class HeadingHandlersMixin:
 
         # A front-page title split across doc_title regions continues the
         # title instead of opening a stray level-1 section: still on the
-        # title section, nothing emitted since, vertically adjacent, and the
-        # captured part is not a journal masthead.
+        # title section, nothing emitted since, vertically adjacent, the
+        # captured part is not a journal masthead, and the new region is not
+        # a byline.
         if (
             label == "doc_title"
             and self._is_front_page(page_number)
@@ -267,6 +314,7 @@ class HeadingHandlersMixin:
             and len(self.assembler) == self._title_assembler_len
             and self._title_bbox is not None
             and self._is_bbox_nearby(self._title_bbox, self._title_page, bbox, page_number)
+            and not self._is_byline_continuation(text)
         ):
             continuation = _TITLE_BADGE_GLYPH_RE.sub("", text)
             self._detected_title = f"{self._detected_title} {continuation}".strip()
@@ -349,6 +397,23 @@ class HeadingHandlersMixin:
             self._title_bbox = bbox_to_tuple(bbox)
             self._title_page = page_number
             self._title_assembler_len = len(self.assembler)
+
+    def _is_byline_continuation(self, text: str) -> bool:
+        """Whether a doc_title row after the title is a byline, not more title.
+
+        A title that stops on a function word or a hyphen ("... Replication
+        of") still continues whatever follows. Otherwise a name-shaped row is
+        a byline and keeps its own section, as before split titles were
+        joined; a Title-Case last line of bare nouns ("Interference Effect")
+        is lexically the same shape and also stays apart. Line geometry does
+        not separate the two: bylines sit as close to the title as wrapped
+        lines do.
+        """
+        if not _looks_like_byline_row(text):
+            return False
+        title = (self._detected_title or "").rstrip()
+        last_word = title.rsplit(None, 1)[-1].casefold() if title else ""
+        return not (title.endswith("-") or last_word in _TITLE_FUNCTION_WORDS | {"and"})
 
     def _classify_heading_disposition(self, label: str, text: str) -> HeadingDisposition:
         """Classify a heading region exactly once into its terminal treatment."""

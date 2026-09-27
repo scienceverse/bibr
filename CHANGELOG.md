@@ -1329,7 +1329,9 @@ released.
 - A title split across two `doc_title` regions is now joined into one title
   section instead of truncating `detected_title` and stranding a level-1
   section that later headings parent under; a first region that reads as a
-  journal masthead is not extended. Numbered study headings ("2 Study 1",
+  journal masthead is not extended, and a later region that reads as a
+  personal-name byline keeps its own section, so the authors stay in the
+  byline. Numbered study headings ("2 Study 1",
   "3. Experiment 2") now open scopes like unnumbered ones, so the second
   study's Method/Results no longer fold under the first study's. Reference
   and abstract hint regions reuse the adjacent printed heading when it spells
