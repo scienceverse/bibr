@@ -14,7 +14,7 @@ def _render(emit, **console_options) -> str:
 
 
 def _render_terminal(emit) -> str:
-    return _render(emit, force_terminal=True, color_system="standard")
+    return _render(emit, force_terminal=True, color_system="standard", no_color=False)
 
 
 def test_hint_keeps_a_package_extra_that_looks_like_a_markup_tag():
