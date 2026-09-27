@@ -10,12 +10,19 @@ import json
 import logging
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import ClassVar
 
 from bibr.config import GlobalSettings, snapshot_settings
-from bibr.local.http_runtime import LocalHttpError, guard_managed_server_port, request_bytes
+from bibr.local.http_runtime import (
+    LocalHttpError,
+    check_startup_stop,
+    guard_managed_server_port,
+    pause_startup_poll,
+    request_bytes,
+)
 from bibr.local.ocr_transport import BaseHttpOcrClient
 from bibr.ocr.image_utils import encode_region_for_ocr
 from bibr.ocr.profiles import PADDLE_TABLE_RECOVERY_MAX_TOKENS
@@ -37,6 +44,9 @@ class VllmMlxServer:
     during layout detection.
     """
 
+    # Set by the owner to stop the startup wait early (see ResourceManager).
+    _stop_event: threading.Event | None = None
+
     def __init__(
         self,
         model: str,
@@ -45,7 +55,10 @@ class VllmMlxServer:
         multimodal: bool = True,
         extra_args: list[str] | None = None,
         settings: GlobalSettings | None = None,
+        *,
+        stop_event: threading.Event | None = None,
     ):
+        self._stop_event = stop_event
         self._settings = settings if settings is not None else snapshot_settings()
         self._port = port
         self._model = model
@@ -139,6 +152,7 @@ class VllmMlxServer:
 
         try:
             while time.monotonic() < deadline:
+                check_startup_stop(self._stop_event, "vllm-mlx")
                 # Check process didn't die during startup
                 if self._process.poll() is not None:
                     rc = self._process.returncode
@@ -165,7 +179,7 @@ class VllmMlxServer:
                             return
                 except (LocalHttpError, json.JSONDecodeError):
                     pass
-                time.sleep(poll_interval)
+                pause_startup_poll(poll_interval, self._stop_event, "vllm-mlx")
         except BaseException:
             # BaseException, not Exception: the child never sees the
             # terminal's Ctrl-C, so a KeyboardInterrupt or task cancellation
@@ -363,6 +377,7 @@ class LlamaCppOcrClient:
         model_path: str | None = None,
         *,
         settings: GlobalSettings | None = None,
+        stop_event: threading.Event | None = None,
         **_kw: object,
     ):
         from bibr.local.llama_cpp import LlamaCppServer
@@ -376,6 +391,7 @@ class LlamaCppOcrClient:
             startup_timeout=effective.ocr.llama_cpp_startup_timeout,
             extra_args=effective.ocr.llama_cpp_extra_args,
             role="ocr",
+            stop_event=stop_event,
         )
 
         # The managed llama.cpp OCR server serves exactly one slot
@@ -432,8 +448,11 @@ class HttpOcrClient(BaseHttpOcrClient):
     OpenAI-compatible chat completions API.  Includes retry logic with
     exponential backoff and circuit breaker integration.
 
-    Used when ``--ocr-url`` is specified, and is the supported route to a
-    self-hosted SGLang server now that bibr does not depend on sglang.
+    Used for ``--ocr glm-http``, or a GLM request (``--ocr`` or
+    ``OCR_BACKEND``) with ``--ocr-url``; a bare ``--ocr-url`` otherwise
+    selects ``paddle-http`` (:func:`bibr.ocr.registry.resolve_url_backend`
+    holds the whole rule). It is the supported route to a self-hosted SGLang
+    server now that bibr does not depend on sglang.
     """
 
     name: ClassVar[str] = "glm-http"

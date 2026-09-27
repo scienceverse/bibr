@@ -4,7 +4,74 @@ gr = pytest.importorskip("gradio")  # demo is gated behind gradio
 if not hasattr(gr, "Blocks"):
     pytest.skip("gradio not fully installed", allow_module_level=True)
 
-from bibr.demo.local_app import _build_tables_html, _build_text_html
+from bibr.demo.local_app import _build_summary_md, _build_tables_html, _build_text_html
+
+
+def test_summary_md_shows_extracted_metadata_literally():
+    """A crafted title or keyword must not become an image, link or HTML in the summary."""
+    result = {
+        "metadata": {
+            "title": "Evil ![x](https://attacker.example/p.png) "
+            "<img src=https://attacker.example/q.png>\n# Heading",
+            "doi": "10.1234/a`b",
+            "paper_type": "<b>article</b>",
+            "oecd_l1": "Social [sciences](https://attacker.example)",
+            "oecd_l2": "Psychology ![y](https://attacker.example/r.png)",
+            "keywords": [
+                "*bold*",
+                "[k](https://attacker.example)",
+                "https://1249717198/x",
+                "someone@attacker.example",
+                "$$x$$",
+            ],
+        }
+    }
+    md = _build_summary_md(result)
+    assert "](" not in md  # no Markdown link or image syntax survives
+    assert "https://" not in md  # no GFM autolink of a bare URL
+    assert "someone@" not in md  # nor of an email address
+    assert "$$" not in md  # no LaTeX
+    assert "<img" not in md
+    assert "<b>" not in md
+    assert "\n# Heading" not in md
+    assert "`" not in md.replace("\\`", "")
+    assert "Evil" in md
+    assert "Heading" in md
+    assert " > Psychology" in md
+
+
+def test_summary_md_shows_apostrophes_and_quotes_as_typed():
+    """No HTML entity whose ``#`` then gets escaped and shows as ``&#x27;``."""
+    md = _build_summary_md(
+        {
+            "metadata": {
+                "title": "Children's memory",
+                "keywords": ['"quoted"', "Parkinson's disease"],
+            }
+        }
+    )
+    assert md.startswith("### Children's memory")
+    assert "Parkinson's disease" in md
+    assert '"quoted"' in md
+    assert "&#x27;" not in md
+    assert "&quot;" not in md
+    assert "&\\#" not in md
+
+
+def test_summary_md_keeps_plain_titles_readable():
+    md = _build_summary_md(
+        {
+            "metadata": {
+                "title": "Ageing and memory",
+                "doi": "10.1/x",
+                "oecd_l1": "Social sciences",
+                "oecd_l2": "Psychology",
+            }
+        }
+    )
+    assert md.startswith("### Ageing and memory")
+    assert "10\\.1/x" in md
+    assert "**OECD domain:** Social sciences > Psychology" in md
 
 
 def test_text_html_escapes_script_tags():

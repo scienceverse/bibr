@@ -55,6 +55,17 @@ def _type_repr(annotation) -> str:
 
 def _default_repr(finfo) -> str:
     if finfo.default_factory is not None:
+        # Render a factory list/dict default as its value so
+        # ``config example --full`` round-trips (``BIBR_RESOLVER_SOURCES``
+        # shows ``crossref``, not an empty that means the resolver tier).
+        # Anything else computed (``CACHE_VERSION``'s code hash, ...) stays
+        # symbolic — its value is not worth printing.
+        try:
+            produced = finfo.default_factory()
+        except Exception:  # noqa: BLE001
+            return "(computed)"
+        if isinstance(produced, (list, tuple, dict)):
+            return repr(list(produced) if isinstance(produced, tuple) else produced)
         return "(computed)"
     default = finfo.default
     if isinstance(default, str):
