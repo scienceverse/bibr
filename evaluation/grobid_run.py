@@ -12,14 +12,22 @@ retries. The output directory receives::
 
 A failed paper is never dropped: it stays in the manifest's ``ids``, which the
 evaluator's ``--expected-ids`` reads, so it scores 0 on the pass-rate floors
-like a bibr paper that crashed. Full run, from a server to scores::
+like a bibr paper that crashed. Whatever fails one paper (an HTTP error, a
+connection or decoding error, an unreadable PDF) is recorded for that paper,
+and the run goes on. Full run, from a server to scores::
 
     uv run python -m evaluation.grobid_run --grobid-url http://localhost:8070 \\
-        --pdf-dir papers/ --out grobid-tei/
+        --pdf-dir papers/ --ids-file cohort-ids.txt --out grobid-tei/
     uv run python -m evaluation.grobid_tei --tei-dir grobid-tei/ --out grobid-json/
     uv run python -m evaluation.evaluate --results-dir grobid-json/ \\
         --gold-dirs /path/to/gold --expected-ids grobid-tei/manifest.json \\
         --output grobid-eval.json
+
+``--ids-file`` lists the cohort bibr is scored on, so the manifest's ``ids``
+are the same ``--expected-ids`` list as bibr's. ``--resume`` continues an
+interrupted run, and refuses when the server's GROBID version, the
+``--grobid-image`` or the request parameters differ from the ones the
+manifest records.
 
 Wall times are measured under the chosen ``--workers`` concurrency; compare
 them with bibr timings taken at the same concurrency.
@@ -105,6 +113,59 @@ def discover(pdf_dir: Path, ids: set[str] | None = None) -> list[Job]:
     return [Job(paper_id, pdfs.get(paper_id)) for paper_id in wanted]
 
 
+def _send(
+    pdf: Path,
+    record: dict[str, Any],
+    tei_path: Path,
+    *,
+    client: httpx.Client,
+    attempts: int,
+    sleep: Callable[[float], None],
+) -> None:
+    """Post *pdf* until GROBID returns TEI or the failure is final; fill *record*."""
+    data = pdf.read_bytes()
+    record["bytes"] = len(data)
+    record["sha256"] = hashlib.sha256(data).hexdigest()
+    record["md5"] = hashlib.md5(data, usedforsecurity=False).hexdigest()
+    for attempt in range(1, attempts + 1):
+        record["attempts"] = attempt
+        retry = False
+        sent = time.monotonic()
+        try:
+            response = client.post(
+                ENDPOINT,
+                files={"input": (pdf.name, data, "application/pdf")},
+                data=GROBID_PARAMETERS,
+            )
+        except httpx.TransportError as error:
+            record["error"] = f"{type(error).__name__}: {error}"
+            retry = True
+        except httpx.HTTPError as error:
+            # A response httpx could not decode, a redirect loop: not transient.
+            record["error"] = f"{type(error).__name__}: {error}"
+        else:
+            record["http_status"] = response.status_code
+            body = response.content
+            if response.status_code == 200 and body.strip() and b"<TEI" in body[:4096]:
+                record["wall_seconds"] = round(time.monotonic() - sent, 3)
+                _write_atomic(tei_path, body)
+                record.update(status="ok", tei=tei_path.name, error=None)
+                return
+            if response.status_code == 200 and body.strip():
+                record["error"] = "the response is not TEI"
+                retry = True
+            elif response.status_code in (200, 204):
+                record["error"] = "GROBID returned no content"
+            else:
+                snippet = body[:200].decode("utf-8", "replace").strip()
+                record["error"] = f"HTTP {response.status_code}: {snippet}"
+                retry = response.status_code in _RETRY_STATUSES
+        record["wall_seconds"] = round(time.monotonic() - sent, 3)
+        if not retry or attempt == attempts:
+            return
+        sleep(min(60.0, 2.0**attempt))
+
+
 def process(
     job: Job,
     out: Path,
@@ -134,45 +195,14 @@ def process(
     if job.pdf is None:
         record["error"] = "no PDF for this paper id"
     else:
-        data = job.pdf.read_bytes()
-        record["bytes"] = len(data)
-        record["sha256"] = hashlib.sha256(data).hexdigest()
-        record["md5"] = hashlib.md5(data, usedforsecurity=False).hexdigest()
-        for attempt in range(1, attempts + 1):
-            record["attempts"] = attempt
-            retry = False
-            sent = time.monotonic()
-            try:
-                response = client.post(
-                    ENDPOINT,
-                    files={"input": (job.pdf.name, data, "application/pdf")},
-                    data=GROBID_PARAMETERS,
-                )
-            except httpx.TransportError as error:
-                record["error"] = f"{type(error).__name__}: {error}"
-                retry = True
-            else:
-                record["http_status"] = response.status_code
-                body = response.content
-                if response.status_code == 200 and body.strip() and b"<TEI" in body[:4096]:
-                    record["wall_seconds"] = round(time.monotonic() - sent, 3)
-                    _write_atomic(tei_path, body)
-                    failed_path.unlink(missing_ok=True)
-                    record.update(status="ok", tei=tei_path.name, error=None)
-                    break
-                if response.status_code == 200 and body.strip():
-                    record["error"] = "the response is not TEI"
-                    retry = True
-                elif response.status_code in (200, 204):
-                    record["error"] = "GROBID returned no content"
-                else:
-                    snippet = body[:200].decode("utf-8", "replace").strip()
-                    record["error"] = f"HTTP {response.status_code}: {snippet}"
-                    retry = response.status_code in _RETRY_STATUSES
-            record["wall_seconds"] = round(time.monotonic() - sent, 3)
-            if not retry or attempt == attempts:
-                break
-            sleep(min(60.0, 2.0**attempt))
+        try:
+            _send(job.pdf, record, tei_path, client=client, attempts=attempts, sleep=sleep)
+        except OSError as error:
+            # A PDF that cannot be read, or a TEI that cannot be written, fails
+            # this paper, not the run.
+            record.update(status="failed", tei=None, error=f"{type(error).__name__}: {error}")
+        if record["status"] == "ok":
+            failed_path.unlink(missing_ok=True)
     record["elapsed_seconds"] = round(time.monotonic() - started, 3)
     record["finished_at"] = _utc_now()
     if record["status"] != "ok":
@@ -256,6 +286,31 @@ def run(
     return manifest
 
 
+def resume_conflict(prior: dict[str, Any], version: str, image: str | None) -> str | None:
+    """Why the run a previous manifest records cannot be continued here, or None.
+
+    A resumed run must use the same GROBID build and request parameters, or
+    its papers would be scored as one run while two GROBIDs made them.
+    """
+    recorded = prior.get("grobid") or {}
+    if recorded.get("version") != version:
+        return (
+            f"its manifest records GROBID {recorded.get('version')}, "
+            f"but the server runs {version}; use a new --out directory"
+        )
+    if recorded.get("image") and image and recorded["image"] != image:
+        return (
+            f"its manifest records the image {recorded['image']}, not {image}; "
+            "use a new --out directory"
+        )
+    if prior.get("parameters") != GROBID_PARAMETERS:
+        return (
+            "its manifest records other GROBID parameters than this runner sends; "
+            "use a new --out directory"
+        )
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument(
@@ -266,8 +321,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--ids-file",
         type=Path,
-        help="Only these paper ids (PDF stems), one per line; an id without a PDF is "
-        "recorded as failed rather than skipped",
+        help="Only these paper ids (PDF stems), one per line, '#' starting a comment "
+        "line; an id without a PDF is recorded as failed rather than skipped",
     )
     parser.add_argument(
         "--workers",
@@ -289,25 +344,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--resume",
         action="store_true",
-        help="Continue an interrupted run in --out: keep papers already done, redo the rest",
+        help="Continue an interrupted run in --out: keep papers already done, redo the "
+        "rest. Refused when the server's GROBID version, the --grobid-image or the "
+        "request parameters differ from the ones the manifest records",
     )
     args = parser.parse_args(argv)
     if args.workers < 1 or args.attempts < 1 or args.timeout <= 0:
         parser.error("--workers, --attempts and --timeout must be positive")
 
+    prior: dict[str, Any] | None = None
     previous: dict[str, dict[str, Any]] = {}
     manifest_path = args.out / MANIFEST_NAME
     if args.resume and manifest_path.is_file():
-        papers = json.loads(manifest_path.read_text(encoding="utf-8")).get("papers") or []
-        previous = {str(p["paper_id"]): p for p in papers}
+        prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+        previous = {str(p["paper_id"]): p for p in prior.get("papers") or []}
     elif args.out.is_dir() and any(args.out.iterdir()) and not args.resume:
         parser.error(f"{args.out} is not empty; use an empty directory or --resume")
 
     ids = None
     if args.ids_file:
         lines = args.ids_file.read_text(encoding="utf-8").splitlines()
-        ids = {line.strip() for line in lines if line.strip() and not line.startswith("#")}
-    jobs = discover(args.pdf_dir, ids)
+        ids = {stripped for line in lines if (stripped := line.strip()) and stripped[0] != "#"}
+    try:
+        jobs = discover(args.pdf_dir, ids)
+    except ValueError as error:
+        parser.error(f"{args.pdf_dir}: {error}")
     if not jobs:
         parser.error(f"no PDFs to process in {args.pdf_dir}")
 
@@ -320,6 +381,17 @@ def main(argv: list[str] | None = None) -> int:
         except httpx.HTTPError as error:
             print(f"GROBID is not reachable at {args.grobid_url}: {error}", file=sys.stderr)
             return 2
+        image = args.grobid_image
+        started_at = _utc_now()
+        resumed: dict[str, Any] = {}
+        if prior is not None:
+            if conflict := resume_conflict(prior, version, image):
+                parser.error(f"cannot resume the run in {args.out}: {conflict}")
+            # The manifest describes the whole run, not only its last part.
+            recorded = prior.get("grobid") or {}
+            image = image or recorded.get("image")
+            resumed = {"resumed_at": [*(prior.get("resumed_at") or []), started_at]}
+            started_at = prior.get("started_at") or started_at
         print(f"GROBID {version}; {len(jobs)} paper(s); {args.workers} worker(s)")
         header = {
             "runner": {
@@ -327,14 +399,15 @@ def main(argv: list[str] | None = None) -> int:
                 "version": RUNNER_VERSION,
                 "bibr_commit": bibr_commit(),
             },
-            "grobid": {"version": version, "image": args.grobid_image, "endpoint": ENDPOINT},
+            "grobid": {"version": version, "image": image, "endpoint": ENDPOINT},
             "parameters": GROBID_PARAMETERS,
             "client": {
                 "workers": args.workers,
                 "timeout_seconds": args.timeout,
                 "attempts": args.attempts,
             },
-            "started_at": _utc_now(),
+            "started_at": started_at,
+            **resumed,
         }
         manifest = run(
             jobs,

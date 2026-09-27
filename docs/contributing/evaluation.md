@@ -196,7 +196,7 @@ parameters, and each PDF's SHA-256, wall time and attempts.
 
 ```bash
 uv run python -m evaluation.grobid_run --grobid-url http://localhost:8070 \
-    --pdf-dir papers/ --out grobid-tei/
+    --pdf-dir papers/ --ids-file cohort-ids.txt --out grobid-tei/
 uv run python -m evaluation.grobid_tei --tei-dir grobid-tei/ --out grobid-json/
 uv run python -m evaluation.evaluate \
     --results-dir grobid-json/ \
@@ -205,13 +205,37 @@ uv run python -m evaluation.evaluate \
     --output grobid-eval.json
 ```
 
-Pass the manifest to `--expected-ids`: a paper GROBID failed on has no
-prediction file, and the manifest keeps it in the denominator. The converter
-carries over every field the metrics credit when GROBID emits it, including
-reference DOIs at any level, editors kept apart from authors, and given names.
-GROBID does not classify body sections, so its body text is typed `unknown`.
-In the section-text benchmark only the label-independent `layout_recall` is
-comparable between the two tools.
+Score both tools against the same `--expected-ids` list. `cohort-ids.txt`
+holds the paper ids (PDF stems) of the cohort bibr is scored on, one per line,
+with `#` starting a comment line. The runner then processes exactly those
+papers, and the manifest's `ids` are the same ids as bibr's `--expected-ids`
+file. A paper GROBID failed on has no prediction file, and the manifest keeps
+it in the denominator as a failure. Without `--ids-file` every PDF in
+`--pdf-dir` enters the manifest, so a GROBID failure on a PDF outside the
+cohort would count against GROBID but not against bibr.
+
+A failure is recorded per paper, whatever its cause, and the run goes on. The
+converter does the same for a TEI file it cannot read or convert. `--resume`
+continues an interrupted run in the same `--out` directory. It refuses when the
+server's GROBID version, the `--grobid-image` or the request parameters differ
+from the ones the manifest records, so one manifest never covers two GROBID
+builds.
+
+For the headline comparison, read `pass_rate` in both runs, and compare
+bibr's `mean_incl_abstained` with GROBID's `mean` for the front-matter fields.
+`pass_rate` counts missing papers and abstentions as failures for both tools.
+bibr's per-field `mean` leaves out the papers where its front matter
+abstained, but converted GROBID output never abstains, so GROBID's `mean`
+covers every paper it returned. The evaluator writes `mean_incl_abstained`
+only for the fields an abstention suppresses, and only when bibr abstained on
+at least one paper. Where it is absent, bibr's `mean` already covers every
+paper.
+
+The converter carries over every field the metrics credit when GROBID emits
+it, including reference DOIs at any level, editors kept apart from authors,
+and given names. GROBID does not classify body sections, so its body text is
+typed `unknown`. In the section-text benchmark only the label-independent
+`layout_recall` is comparable between the two tools.
 
 ## Interpreting results
 

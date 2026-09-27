@@ -42,7 +42,9 @@ can credit survives the conversion. The mapping, element by element:
   does not classify body sections; back-matter divisions keep GROBID's
   acknowledgement, funding, availability, conflict, contribution and annex
   roles), each paragraph a text row; figure and table captions and footnotes
-  follow as rows of their own.
+  follow as rows of their own. A back-matter wrapper that holds only nested
+  divisions is not a section itself; one with a heading or text of its own
+  is, with the nested divisions as its subsections.
 
 Every DOI is written bare and lowercase, as the schema requires. A value GROBID
 typed as a DOI but wrapped in other text (``https://doi.org.10.1000/x``,
@@ -54,10 +56,12 @@ Not converted, because the evaluator reads none of them: the in-text citation
 and hyperlink tables (``xref``, ``url``), statistical expressions (``eq``),
 funders, and the paper's own imprint (journal, volume, dates).
 
-A TEI file that is empty, not XML or not TEI is a failed paper: no prediction is
-written, and the run summary lists it. Pass the runner's ``manifest.json`` (or
-this converter's ``--summary`` file) to the evaluator's ``--expected-ids`` so a
-failed paper stays in the denominator, as a crashed bibr paper does.
+A TEI file that is empty, not XML, not TEI or unreadable, or one whose export
+fails the schema, is a failed paper: no prediction is written, the run summary
+lists it with the reason, and the other papers still convert. Pass the
+runner's ``manifest.json`` (or this converter's ``--summary`` file) to the
+evaluator's ``--expected-ids`` so a failed paper stays in the denominator, as
+a crashed bibr paper does.
 """
 
 from __future__ import annotations
@@ -75,6 +79,7 @@ from typing import Any
 from urllib.parse import unquote
 
 from lxml import etree
+from pydantic import ValidationError
 
 from bibr.export.models import _SCHEMA_VERSION, DOI_PATTERN, ISO_DATE_PATTERN, PaperExport
 from bibr.input.xml_entities import parse_xml
@@ -635,8 +640,16 @@ def _document(root: Any, abstract: Any, references: list[Any]) -> tuple[_Documen
             continue
         doc.part_start = len(doc.section)
         section_type = _BACK_SECTION_TYPES.get(kind or "", "unknown")
-        for div in _findall(wrapper, "tei:div") or [wrapper]:
-            doc.add_division(div, section_type)
+        blocks = _blocks(wrapper)
+        if blocks and all(block[0] == "div" for block in blocks):
+            # GROBID's usual shape: a typed wrapper holding only the printed
+            # sections, each a section of its own.
+            for _, _, div in blocks:
+                doc.add_division(div, section_type)
+        else:
+            # The wrapper has a heading or text of its own: it is the section,
+            # and any nested division is its subsection.
+            doc.add_division(wrapper, section_type)
     doc.part_start = len(doc.section)
 
     reference_rows = []
@@ -887,8 +900,9 @@ def convert_directory(
 ) -> ConversionSummary:
     """Convert every TEI file in *tei_dir* into ``<out_dir>/<paper_id>.json``.
 
-    A paper the runner recorded as failed, or whose TEI is unusable, gets no
-    prediction file; the summary lists it with the reason.
+    A paper the runner recorded as failed, whose TEI or PDF cannot be read or
+    used, or whose export fails the schema gets no prediction file; the
+    summary lists it with the reason, and the rest of the directory converts.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     if any(out_dir.glob("*.json")):
@@ -920,17 +934,33 @@ def convert_directory(
     for paper_id, path in tei_files.items():
         if paper_id in summary.failed:
             continue
+        # One paper's problem fails that paper, never the directory: the JSON
+        # already written would otherwise block a rerun into the same --out.
+        target: Path | None = None
         try:
             root = read_tei(path.read_bytes())
             source, notes = _source(paper_id, records.get(paper_id), pdf_dirs, tei_md5(root))
             payload = tei_to_export(
                 root, source=source, converter_build_sha=converter_build_sha, warnings=notes
             )
+            target = out_dir / f"{payload['paper_id']}.json"
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
         except TeiError as error:
             summary.failed[paper_id] = str(error)
             continue
-        target = out_dir / f"{payload['paper_id']}.json"
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        except ValidationError as error:
+            first = error.errors(include_url=False)[0]
+            where = ".".join(str(part) for part in first["loc"]) or "the export"
+            summary.failed[paper_id] = (
+                f"the converted export fails the {_SCHEMA_VERSION} schema "
+                f"({error.error_count()} error(s); first at {where}: {first['msg']})"
+            )
+            continue
+        except OSError as error:
+            if target is not None:  # never leave a truncated prediction behind
+                target.unlink(missing_ok=True)
+            summary.failed[paper_id] = f"{type(error).__name__}: {error}"
+            continue
         producer = producer_of(root)
         summary.converted.append(payload["paper_id"])
         summary.producers[(producer.version, producer.parameters)] += 1

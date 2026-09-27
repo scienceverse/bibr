@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
 
 from bibr.export.models import PaperExport
+from evaluation import grobid_tei
 from evaluation.evaluate import extract_comparable_from_json, load_expected_ids, score_paper
 from evaluation.grobid_tei import (
     CONVERTER_NAME,
@@ -492,6 +494,24 @@ class TestBody:
         body_ids = [t["text_id"] for t in out["text"] if t["section_id"] is not None]
         assert max(body_ids) < texts[figure["caption"]]["text_id"]
 
+    def test_back_matter_wrapper_keeps_its_own_heading_and_text(self):
+        annex = """
+          <div type="annex"><head>Appendix A</head><p>Direct text</p>
+            <div><head>A.1 Materials</head><p>Nested text.</p></div></div>
+        """
+        out = convert(tei(back=annex + self.BACK))
+        sections = {s["header"]: s for s in out["section"]}
+        # A wrapper with nothing of its own adds no section of its own.
+        assert list(sections) == ["Appendix A", "A.1 Materials", "Acknowledgments", "Declaration"]
+        appendix, nested = sections["Appendix A"], sections["A.1 Materials"]
+        assert appendix["section_type"] == nested["section_type"] == "appendix"
+        assert (appendix["level"], appendix["parent_section_id"]) == (1, None)
+        assert (nested["level"], nested["parent_section_id"]) == (2, appendix["section_id"])
+        assert (sections["Acknowledgments"]["level"], sections["Declaration"]["level"]) == (1, 1)
+        texts = {t["text"]: t["section_id"] for t in out["text"]}
+        assert texts["Direct text"] == appendix["section_id"]
+        assert texts["Nested text."] == nested["section_id"]
+
     def test_section_benchmark_reads_the_text(self):
         from evaluation.evaluate import extract_sections_from_json
 
@@ -662,6 +682,43 @@ class TestConvertDirectory:
         }
         assert inferred["extraction"]["warnings"][0]["code"] == "BIBR_GROBID_TEI_SOURCE_INFERRED"
         assert set(summary.failed) == {"broken"}
+
+    def test_one_bad_paper_fails_alone(self, tmp_path, monkeypatch):
+        tei_dir, out = tmp_path / "tei", tmp_path / "json"
+        tei_dir.mkdir()
+        for name in ("good", "invalid", "unreadable", "full"):
+            (tei_dir / f"{name}{TEI_SUFFIX}").write_bytes(tei())
+
+        real_export = grobid_tei.tei_to_export
+
+        def export(root, *, source, **kwargs):
+            if source["file_name"] == "invalid.pdf":
+                PaperExport.model_validate({"paper_id": "invalid"})  # a schema failure
+            return real_export(root, source=source, **kwargs)
+
+        real_read, real_write = Path.read_bytes, Path.write_text
+
+        def read_bytes(path):
+            if path.name == f"unreadable{TEI_SUFFIX}":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_read(path)
+
+        def write_text(path, text, *args, **kwargs):
+            if path.name == "full.json":
+                real_write(path, text[:10], *args, **kwargs)
+                raise OSError(28, "No space left on device", str(path))
+            return real_write(path, text, *args, **kwargs)
+
+        monkeypatch.setattr(grobid_tei, "tei_to_export", export)
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        monkeypatch.setattr(Path, "write_text", write_text)
+        summary = convert_directory(tei_dir, out)
+        assert summary.converted == ["good"]
+        assert sorted(p.name for p in out.iterdir()) == ["good.json"]
+        assert summary.failed["invalid"].startswith("the converted export fails the 12.0 schema")
+        assert summary.failed["unreadable"].startswith("PermissionError")
+        assert summary.failed["full"].startswith("OSError")
+        assert summary.as_dict(None)["ids"] == ["full", "good", "invalid", "unreadable"]
 
     def test_refuses_to_mix_with_existing_predictions(self, tmp_path):
         (tmp_path / "json").mkdir()

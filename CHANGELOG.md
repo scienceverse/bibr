@@ -1337,7 +1337,11 @@ released.
   concurrency, timeouts and retries, and writes a manifest of the GROBID
   version, parameters, and every PDF's digest, wall time and outcome. A failed
   paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
-  denominator.
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run when the server's GROBID version, the
+  `--grobid-image` or the request parameters differ from the manifest's.
 
 ### Changed
 
