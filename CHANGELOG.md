@@ -285,6 +285,29 @@ released.
   name the env var (alias spellings verbatim, so no more `OCR_OCR_LOCAL_GPUS`)
   and malformed mappings name the setting instead of printing a
   `SettingsError` traceback.
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written, and so is a closing tag with nothing left to close, such as
+  `[/tmp/x]` in an error message, which used to crash the command with a
+  `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
 - `table[].contents` keeps the cell text the paper printed. The OCR engines
   return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
   too. That HTML was read with pandas type inference, so every column that
@@ -667,6 +690,24 @@ released.
   installed, because `uv run` reinstalls a missing one and its files would
   replace the GPU build's. When both packages are installed and the CPU build is
   the one loaded, bibr logs a warning once, with the command that fixes it.
+- `bibr doctor` now reports which ONNX Runtime build loads, CPU or GPU, and its
+  version. Before, it said nothing about it once torch was installed. When
+  `onnxruntime-gpu` is installed but the CPU build is the one loaded, the line
+  is a warning, and its hint gives the reinstall command.
+- After a GPU install, a `uv sync` without `--extra gpu` uninstalls
+  `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
+  `onnxruntime` stays installed, but its package is left empty or gone. An
+  empty package still imports, and the first ONNX model failed with an
+  `AttributeError`. A gone one raised an `ImportError` that suggested `pip
+  install onnxruntime`, which does nothing while the package counts as
+  installed. bibr now raises a `ConfigurationError` for an empty package, and
+  for an installed one that fails to import, an `ImportError` with the import
+  error. Both give the repair, `uv pip install --python <interpreter>
+  --reinstall-package onnxruntime onnxruntime==<version>` (a pinned pip
+  reinstall where pip manages the environment), and tell GPU users to repeat
+  the `onnxruntime-gpu` reinstall afterwards, since the repair writes the CPU
+  build. `bibr doctor` fails its ONNX Runtime line with the same command, and
+  names the import error when there is one.
 - The demo notebooks read each section's classification score from
   `extraction.diagnostics.section_classification`; since 12.0 moved it there,
   they showed 0% for every section.
