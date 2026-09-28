@@ -58,6 +58,10 @@ class FileState:
 
     # Populated during processing — nulled progressively
     pdf_bytes: bytes | None = None
+    # Input bytes the caller supplied (a serve upload has no file at ``path``).
+    # Unlike ``pdf_bytes`` they are kept past OCR: the identity stage rereads
+    # the PDF's text layer, links and metadata. The caller holds them anyway.
+    caller_bytes: bytes | None = None
     page_images: "list[PILImage] | None" = None
     page_indices: list[int] | None = None
     layout_results: list[list[dict[str, Any]]] | None = None
@@ -73,6 +77,11 @@ class FileState:
     ocr_pages_attempted: int = 0
     ocr_pages_failed: int = 0
     ref_line_geometry: list[dict[str, Any]] | None = None
+    # Every page's text-layer lines and URI link annotations, in the layout
+    # frame (``PdfInspection.page_lines`` / ``uri_links``); the extract stage's
+    # reference line stream reads them.
+    ref_page_lines: list[dict[str, Any]] | None = None
+    pdf_uri_links: list[dict[str, Any]] | None = None
     # PDF outline (bookmarks) harvested by NativeTextStage when
     # ``Settings.pipeline.outline_headings`` is on; handed to PDFParser as an
     # authoritative heading-hierarchy signal. Internal-only, never exported.
@@ -111,6 +120,8 @@ class FileState:
         """Free data consumed by parse stage."""
         self.ocr_regions = None
         self.ref_line_geometry = None
+        self.ref_page_lines = None
+        self.pdf_uri_links = None
         self.pdf_outline = None
         # page_indices is consumed in OCR; drop it now to reclaim memory
         # across large-chunk runs.
@@ -154,12 +165,15 @@ class FileState:
 
             cancel_prefetch(self.paper)
         self.pdf_bytes = None
+        self.caller_bytes = None
         self.page_images = None
         self.page_indices = None
         self.layout_results = None
         self.pdf_inspection = None
         self.ocr_regions = None
         self.ref_line_geometry = None
+        self.ref_page_lines = None
+        self.pdf_uri_links = None
         self.pdf_outline = None
         self.native_validation_artifact = None
         self.contents = None

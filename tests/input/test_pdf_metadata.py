@@ -4,8 +4,8 @@ Born-digital PDFs often carry publisher-set document-info metadata (Title,
 Keywords, a DOI in Subject/Keywords). It is free to read and, when sane,
 a better backstop than nothing — but doc-info is also routinely junk
 ("Microsoft Word - draft3.docx", the submitting author's username), so
-every field passes a guard before being offered to the fill-empty merge
-(``_merge_ocr_metadata``).
+every field passes a guard before being offered as a fill-empty candidate
+(``doc_info_candidates``).
 """
 
 from bibr.input.pdf_metadata import harvest_docinfo, harvest_pdf_metadata
@@ -64,6 +64,19 @@ class TestDoiAndKeywords:
     def test_doi_harvested_from_keywords_field(self):
         out = harvest_docinfo({"Keywords": "https://doi.org/10.5555/j.tacl.2026.7"}, PAGE_TEXT)
         assert out.get("doi") == "10.5555/j.tacl.2026.7"
+
+    def test_doi_keeps_its_parentheses(self):
+        out = harvest_docinfo(
+            {"Subject": "Rev Bras Ortop, 46 (2011) 730. doi:10.1016/S2255-4971(15)30333-5"},
+            PAGE_TEXT,
+        )
+        assert out.get("doi") == "10.1016/S2255-4971(15)30333-5"
+
+    def test_doi_ends_at_a_comma(self):
+        out = harvest_docinfo(
+            {"Keywords": "health,https://doi.org/10.5555/abc.7,public space"}, PAGE_TEXT
+        )
+        assert out.get("doi") == "10.5555/abc.7"
 
     def test_no_doi_no_key(self):
         out = harvest_docinfo({"Subject": "Machine Learning"}, PAGE_TEXT)

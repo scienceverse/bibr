@@ -5,9 +5,11 @@ a DOI in Subject/Keywords, a keyword list). Reading it is free — but
 doc-info is also routinely junk: word processors stamp the source filename
 as Title ("Microsoft Word - draft_v3.docx") and the submitting user as
 Author. Every harvested field therefore passes a guard, and the result is
-only ever offered to the fill-empty merge (``_merge_ocr_metadata`` via
-``post_parse``'s ``ocr_metadata`` parameter) — LLM/layout extraction always
-wins when it produced anything.
+only ever offered to the field decisions as a fill-empty candidate
+(``doc_info_candidates`` via ``post_parse``'s ``ocr_metadata`` parameter) —
+LLM/layout extraction always wins when it produced anything. The harvested
+DOI is no candidate: the identity stage alone chooses the DOI, and reads the
+PDF's document information itself, as agreement evidence only.
 
 Title guard: accepted only when it is verifiably PRINTED on the first page
 (token containment against the native first-page text, hyphenation- and
@@ -26,7 +28,10 @@ from bibr.utils.text import normalize_doi
 
 logger = logging.getLogger(__name__)
 
-_DOI_RE = re.compile(r"10\.\d{4,9}/[^\s<>()\[\]{}]+")
+# The DOI character set of ``doi_identity``: parentheses belong to Elsevier PII
+# DOIs ("10.1016/S2255-4971(15)30333-5"), and a comma ends the DOI in a
+# comma-separated Keywords field.
+_DOI_RE = re.compile(r"10\.\d{4,9}/[-._;()/:A-Za-z0-9]+")
 _JUNK_TITLE_RE = re.compile(
     r"(?i)(microsoft word|powerpoint|libreoffice|untitled"
     r"|\.docx?\b|\.tex\b|\.pdf\b|\.dvi\b|\.qxd\b|\.indd\b|\.fm\b)"
@@ -102,7 +107,7 @@ def harvest_docinfo(info: dict[str, Any], first_page_text: str) -> dict[str, Any
     """Harvest guarded metadata from a PDF document-info dict.
 
     Returns a dict with any of ``title``/``doi``/``keywords`` that passed
-    their guards (possibly empty). Shaped for ``_merge_ocr_metadata``.
+    their guards (possibly empty). Shaped for ``doc_info_candidates``.
     """
     out: dict[str, Any] = {}
     title = _harvest_title(info, first_page_text)

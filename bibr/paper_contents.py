@@ -146,6 +146,7 @@ CANONICAL_SECTION_ALIASES = {
         "literature cited",
         "citations",
         "cited literature",
+        "reference list",
     ],
     CanonicalSection.ACKNOWLEDGMENT: [
         "acknowledgments",
@@ -575,7 +576,8 @@ class PaperTablePart:
 
     @property
     def contents(self) -> list[list[str]]:
-        if self.df.empty:
+        # A header-only frame (columns, no rows) still exports its header row.
+        if len(self.df.columns) == 0:
             return []
         return [[str(c) for c in self.df.columns.tolist()]] + [
             [str(value) for value in row] for row in self.df.values.tolist()
@@ -605,8 +607,12 @@ class PaperTable:
 
     @property
     def contents(self) -> list[list[str]]:
-        """Convert DataFrame to ``[headers_row, *data_rows]`` with all values stringified."""
-        if self.df.empty:
+        """Convert DataFrame to ``[headers_row, *data_rows]`` with all values stringified.
+
+        A header-only frame (columns, no rows) yields just ``[headers_row]``;
+        only a column-less frame yields ``[]``.
+        """
+        if len(self.df.columns) == 0:
             return []
         headers = [str(c) for c in self.df.columns.tolist()]
         data = [[str(v) for v in row] for row in self.df.values.tolist()]
@@ -768,6 +774,13 @@ class PaperContents:
     # the OCR-stage native-text pass; consumed by the geom segmenter in extract.
     # None for DOCX / non-native / no-text-layer input (→ LLM cascade).
     ref_line_geometry: list[dict] | None = None
+    # Every page's text-layer lines (``bbox`` in the 0..1000 layout frame,
+    # ``page`` the 1-based layout page) and URI link annotations, captured
+    # with the geometry above. The reference line stream keeps the lines
+    # inside the located reference section's layout regions and maps DOI links
+    # onto them. None when not captured (no text layer, non-geom strategy).
+    ref_page_lines: list[dict] | None = None
+    pdf_uri_links: list[dict] | None = None
     # Front-matter metadata parsed natively from a structured input format
     # (JATS XML); when set, post-parse uses it as the PaperMetadata base and
     # skips the core LLM extraction. None for PDF/DOCX (→ LLM extraction).
