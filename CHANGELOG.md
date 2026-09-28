@@ -1759,6 +1759,28 @@ released.
 - Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
   a list numbered that way, as arabic ones already were. They were parsed into
   the first author ("V. Lal, S. K. L.").
+- The NER reference parser's field boundaries are repaired from the reference
+  text before the references are finalized. A web reference whose name was
+  tagged as its author, cut short or split in two takes that name as its title
+  ("AWS Wavelength. https://…. Accessed …"). A title that ran on is cut at the
+  closing quote of a quoted title, a URL or access date, a news dateline
+  ("Outlet, 18.11.2011"), a place-and-year imprint, a bracketed English
+  translation or GOST material mark, a language note ("(Hindi)"), a statement
+  of responsibility ("/ A. A. Yuldashev") or a year followed by notes
+  ("… aplicada. 2000. 264f. Tese …"); an author span that ran on through a dash into
+  the title is split ("LIPSZYC, Delia — Domínio Público"). A year read off an
+  access date gives way to the one publication year the reference prints, and
+  a reference with no tagged year takes the one year it prints as a date
+  outside its title, URLs and access dates, or else a year from a full numeric
+  date ("21-01-1983") that no article-history label ("Received:",
+  "Recebido:") introduces. A title ending in "retrieved", "accessed" or
+  "available online" with no URL or date after it stays whole, and a year
+  inside a title ("… Earthquake of June 16, 1964. Part 2. …") is not taken as
+  the reference's year when the reference prints another. Each repair needs
+  its own textual signal and fills other fields only when they are empty;
+  references parsed by the LLM are unchanged.
+- The NER decoder reads a YEAR span that holds a full date by its four-digit
+  year: "18.11.2011" was read as 1811 and "3 March 2011" as 3201.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
