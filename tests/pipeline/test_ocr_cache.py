@@ -439,6 +439,22 @@ def test_version_mismatch_is_miss(enabled_cache, monkeypatch):
     assert ocr_cache.load(fs, cfg, identity) is None
 
 
+@pytest.mark.parametrize("bundle", [False, True])
+def test_bundle_stored_before_the_native_text_spacing_and_page_box_fixes_is_a_miss(
+    enabled_cache, monkeypatch, bundle
+):
+    # Bundles hold the regions after the native-text fill, and the key cannot
+    # see code: a format-11 bundle carries the old spacing and page box.
+    fs, cfg, identity = _fs(), RunConfig(ocr_backend="glm-llama"), _identity()
+    loader = ocr_cache.load_bundle if bundle else ocr_cache.load
+    with monkeypatch.context() as m:
+        m.setattr(ocr_cache, "_CACHE_FORMAT_VERSION", 11)
+        ocr_cache.store(fs, cfg, identity, _regions())
+        assert loader(_fs(), cfg, identity)
+
+    assert not loader(_fs(), cfg, identity)
+
+
 def test_format_six_payload_is_rejected_after_layout_key_removal(enabled_cache):
     fs, cfg, identity = _fs(), RunConfig(ocr_backend="glm-llama"), _identity()
     path = ocr_cache._path(fs, cfg, identity)

@@ -13,6 +13,10 @@ block prints nearby: a byline or author name, an affiliation, an abstract, a
 DOI, a date or citation line, a label or kicker, a section heading, or a
 parallel title in another language or script. Anything uncertain is left
 alone.
+
+The opposite repair, :func:`drop_parallel_title`, takes a parallel title back
+out: a model that returns a title joined with its translation keeps only the
+version printed first, as the metadata prompt asks.
 """
 
 from __future__ import annotations
@@ -96,6 +100,14 @@ _DIGIT_GROUP_RE = re.compile(r"\d+")
 _LOCATOR_RE = re.compile(r"\d+\s*(?::\s*\d+|\(\s*\d+\s*\))")
 # A title footnote marker printed after the subtitle ("... Regions*").
 _TRAILING_NOTE_MARK_RE = re.compile(r"\s*[*†‡§¶]+$")
+# Two language versions of a title as a model joins them ("<one> / <other>"),
+# and a translation printed in brackets after the title on its row.
+_VERSION_JOIN_RE = re.compile(r"\s+/\s+")
+_BRACKETED_VERSION_RE = re.compile(r"(?P<first>.*\S)\s*\[(?P<other>[^\[\]]+)\]\s*\.?")
+# Each version is title-sized, and a language told by function words rests on
+# at least two of them.
+_MIN_VERSION_WORDS = 3
+_MIN_LANGUAGE_WORDS = 2
 # Rows printed on their own that label something rather than continue a title:
 # article-type kickers, author-box and citation-box headings, and the one-word
 # section headings of languages the shared alias table does not cover.
@@ -213,13 +225,19 @@ def _dominant_script(text: str) -> str | None:
     return script if count * 5 >= sum(counts.values()) * 3 else None
 
 
-def _function_word_languages(text: str) -> frozenset[str]:
-    """The languages whose function words the text uses most; empty when it uses none."""
+def _function_word_evidence(text: str) -> tuple[frozenset[str], int]:
+    """The languages whose function words the text uses most, and how many it uses."""
 
     words = {part.casefold() for word in _WORD_RE.findall(text) for part in re.split(r"['’]", word)}
     counts = {language: len(words & vocabulary) for language, vocabulary in _FUNCTION_WORDS.items()}
     best = max(counts.values())
-    return frozenset(language for language, count in counts.items() if best and count == best)
+    return frozenset(language for language, count in counts.items() if best and count == best), best
+
+
+def _function_word_languages(text: str) -> frozenset[str]:
+    """The languages whose function words the text uses most; empty when it uses none."""
+
+    return _function_word_evidence(text)[0]
 
 
 def _is_parallel_title(row: str, title: str) -> bool:
@@ -427,4 +445,75 @@ def fold_printed_subtitle(
     )
 
 
-__all__ = ["fold_printed_subtitle"]
+def _are_language_versions(first: str, other: str) -> bool:
+    """Whether two title-sized texts read as one title in two languages or scripts.
+
+    Stricter than :func:`_is_parallel_title`: both texts need a title's length,
+    and a language told by function words needs two of them on each side ("A
+    Scoping Review" uses no English function word and is still English).
+    """
+
+    if min(len(_WORD_RE.findall(first)), len(_WORD_RE.findall(other))) < _MIN_VERSION_WORDS:
+        return False
+    first_script, other_script = _dominant_script(first), _dominant_script(other)
+    if first_script and other_script and first_script != other_script:
+        return True
+    first_languages, first_count = _function_word_evidence(first)
+    other_languages, other_count = _function_word_evidence(other)
+    return (
+        min(first_count, other_count) >= _MIN_LANGUAGE_WORDS
+        and not first_languages & other_languages
+    )
+
+
+def drop_parallel_title(title: str, printed_text: str) -> tuple[str, ValidationIssue | None]:
+    """Keep only the version printed first of a title joined with its translation.
+
+    The metadata prompt asks for the version of a multi-language title that is
+    printed first, yet a model still returns both at times: joined as "<one> /
+    <other>" when each is printed on rows of its own, or with the translation
+    the title row prints in brackets after it ("<title> [<translation>]").
+    When the two halves read as one title in two languages or scripts, keep
+    the one printed first: the title before its bracketed translation; of two
+    joined versions, the one that occurs first in *printed_text* (the selected
+    record's text in reading order). A joined version the page does not print
+    as such (a translation of the model's own, or a half carrying words it
+    added) leaves the whole title alone, as does a title before its brackets
+    that is not printed, or is printed only after its bracketed translation,
+    and anything else. The bracketed translation may be the model's own.
+    """
+
+    stripped = title.strip()
+    kept: str | None = None
+    bracketed = _BRACKETED_VERSION_RE.fullmatch(stripped)
+    if bracketed is not None:
+        first, other = bracketed.group("first"), bracketed.group("other")
+        if _are_language_versions(first, other):
+            printed = f" {_normalize(printed_text)} "
+            first_at, other_at = (printed.find(f" {_normalize(part)} ") for part in (first, other))
+            if first_at >= 0 and not 0 <= other_at < first_at:
+                kept = first
+    else:
+        versions = _VERSION_JOIN_RE.split(stripped)
+        if len(versions) == 2 and _are_language_versions(*versions):
+            printed = f" {_normalize(printed_text)} "
+            # Both versions are title-sized, so neither normalizes to nothing.
+            offsets = [printed.find(f" {_normalize(version)} ") for version in versions]
+            if min(offsets) >= 0:
+                kept = versions[offsets.index(min(offsets))]
+    if kept is None:
+        return title, None
+    return kept.strip(), ValidationIssue(
+        code="VAL_TITLE_REGROUNDED",
+        severity=IssueSeverity.WARNING,
+        message=(
+            "Extracted title joined two language versions of the printed title; kept the "
+            "version printed first"
+        ),
+        origin_stage="extract",
+        evidence_ids=("reason:title_parallel_versions_joined",),
+        count=1,
+    )
+
+
+__all__ = ["drop_parallel_title", "fold_printed_subtitle"]

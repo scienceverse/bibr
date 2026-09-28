@@ -13,6 +13,7 @@ from bibr.ocr.native_text import (
     _is_native_text_usable,
     _normalized_bbox_to_pdf_points,
     _printable_ratio,
+    _reconstruct_text_from_records,
     fill_font_metadata,
     fill_regions_from_native_text,
     get_native_text_in_bbox,
@@ -61,6 +62,227 @@ def test_page_char_records_replace_unpaired_surrogate(monkeypatch, code_unit):
     records = _build_page_char_records(_FakeTextPage([(1.0, 2.0, 3.0, 4.0)]))
 
     assert records == [("\ufffd", 2.0, 3.0, False)]
+
+
+class _BoxTextPage:
+    """Fake textpage serving recorded ``(char, tight box, loose box)`` triples."""
+
+    raw = object()
+
+    def __init__(self, chars):
+        self._chars = chars
+
+    def count_chars(self):
+        return len(self._chars)
+
+    def get_charbox(self, index, loose=False):
+        return self._chars[index][2 if loose else 1]
+
+
+def _line_text(monkeypatch, chars, left, bottom, right, top):
+    monkeypatch.setattr(
+        pypdfium2.raw, "FPDFText_GetUnicode", lambda _raw, index: ord(chars[index][0])
+    )
+    records = _build_page_char_records(_BoxTextPage(chars))
+    return _reconstruct_text_from_records(records, left, bottom, right, top)
+
+
+# Char boxes recorded with pypdfium2 from the dev-set PDFs each comment describes.
+_SEX_TRAFFICKING = [  # a born-digital title: "ffi" ligature, then a space inside it
+    ("S", (43.64, 527.02, 58.56, 548.3), (42.52, 522.23, 59.52, 549.14)),
+    ("e", (60.64, 527.13, 73.8, 541.16), (59.74, 522.23, 74.36, 549.14)),
+    ("x", (74.33, 527.41, 89.64, 540.82), (74.08, 522.23, 89.78, 549.14)),
+    (" ", (89.78, 527.41, 97.06, 527.44), (89.78, 522.23, 97.06, 549.14)),
+    ("T", (97.23, 527.41, 117.14, 548.16), (97.06, 522.23, 117.31, 549.14)),
+    ("r", (116.47, 527.41, 128.28, 541.13), (115.77, 522.23, 128.42, 549.14)),
+    ("a", (129.24, 527.21, 143.71, 541.13), (128.14, 522.23, 143.71, 549.14)),
+    ("f", (144.3, 527.41, 168.52, 548.97), (143.6, 522.23, 169.22, 549.14)),
+    ("f", (144.3, 527.41, 168.52, 548.97), (143.6, 522.23, 169.22, 549.14)),
+    ("i", (144.3, 527.41, 168.52, 548.97), (143.6, 522.23, 169.22, 549.14)),
+    (" ", (152.14, 527.41, 159.42, 527.44), (152.14, 522.23, 159.42, 549.14)),
+    ("c", (170.12, 527.13, 183.16, 541.16), (169.22, 522.23, 183.44, 549.14)),
+    ("k", (183.78, 527.41, 199.82, 549.0), (183.22, 522.23, 200.1, 549.14)),
+    ("i", (200.92, 527.41, 208.45, 547.79), (200.08, 522.23, 209.15, 549.14)),
+    ("n", (209.82, 527.41, 225.72, 541.18), (209.12, 522.23, 226.28, 549.14)),
+    ("g", (226.68, 521.44, 242.44, 541.24), (226.26, 521.44, 242.44, 549.14)),
+]
+_SOFI_OKSANEN = [  # same PDF, page 3: the space after a word-final "fi" ligature is real
+    ("S", (88.91, 612.5, 94.1, 619.84), (88.41, 610.81, 94.63, 619.84)),
+    ("o", (95.19, 612.5, 99.53, 617.75), (94.63, 610.81, 100.09, 619.78)),
+    ("f", (100.36, 612.62, 105.28, 619.9), (100.04, 610.81, 106.24, 619.9)),
+    ("i", (100.36, 612.62, 105.28, 619.9), (100.04, 610.81, 106.24, 619.9)),
+    (" ", (103.14, 612.62, 105.29, 612.63), (103.14, 610.81, 105.29, 619.78)),
+    ("O", (108.97, 612.5, 114.39, 619.84), (108.39, 610.81, 114.97, 619.84)),
+    ("k", (115.96, 612.62, 120.15, 619.84), (114.97, 610.81, 120.33, 619.84)),
+]
+_OF_PERVASIVE = [  # a paper's abstract: an italic "f" hangs over the space
+    ("o", (461.81, 363.21, 465.7, 367.34), (461.55, 360.55, 466.05, 372.52)),
+    ("f", (464.49, 361.38, 470.28, 369.65), (464.49, 360.55, 470.28, 372.52)),
+    (" ", (468.55, 363.31, 470.8, 363.32), (468.55, 360.55, 470.8, 372.52)),
+    ("p", (469.59, 361.39, 474.83, 367.34), (469.59, 360.55, 475.08, 372.52)),
+    ("e", (475.35, 363.21, 478.95, 367.34), (475.08, 360.55, 479.07, 372.52)),
+]
+_MODEL_ANALYSIS = [  # same PDF, title, last line
+    ("M", (190.76, 626.86, 210.12, 643.09), (190.4, 619.74, 210.41, 648.49)),
+    ("O", (211.78, 626.65, 224.16, 643.33), (210.41, 619.74, 225.53, 648.49)),
+    ("D", (225.92, 626.86, 239.74, 643.09), (225.53, 619.74, 241.11, 648.49)),
+    ("E", (241.49, 626.86, 252.89, 643.09), (241.11, 619.74, 254.02, 648.49)),
+    ("L", (254.43, 626.86, 265.37, 643.09), (254.02, 619.74, 266.04, 648.49)),
+    (" ", (266.04, 626.86, 273.17, 626.89), (266.04, 619.74, 273.17, 648.49)),
+    ("A", (272.96, 626.86, 289.88, 643.33), (272.96, 619.74, 289.88, 648.49)),
+    ("N", (290.12, 626.86, 305.38, 643.09), (289.64, 619.74, 305.64, 648.49)),
+]
+_AFTER_A_COMMA = [  # another paper's byline: a comma hangs below the baseline
+    ("i", (111.25, 323.24, 113.49, 330.28), (110.96, 320.17, 113.74, 333.64)),
+    ("n", (114.02, 323.24, 118.92, 327.91), (113.96, 320.17, 118.96, 333.64)),
+    ("a", (119.42, 323.16, 123.48, 327.91), (119.06, 320.17, 123.5, 333.64)),
+    ("1", (123.82, 326.57, 125.34, 330.57), (123.14, 324.78, 126.05, 332.63)),
+    (",", (126.25, 325.6, 127.09, 327.15), (125.93, 324.78, 127.39, 332.63)),
+    ("2", (127.69, 326.57, 130.24, 330.57), (127.57, 324.78, 130.48, 332.63)),
+    (",", (131.2, 321.58, 132.65, 324.23), (130.66, 320.17, 133.16, 333.64)),
+    (" ", (133.16, 323.24, 135.66, 323.25), (133.16, 320.17, 135.66, 333.64)),
+    ("R", (135.83, 323.24, 142.42, 329.96), (135.66, 320.17, 142.42, 333.64)),
+    (".", (143.18, 323.11, 144.26, 324.2), (142.47, 320.17, 144.97, 333.64)),
+    ("I", (145.19, 323.24, 148.03, 329.96), (144.94, 320.17, 148.27, 333.64)),
+]
+_AFTER_A_QUOTE = [  # another paper's table title: a closing quote sits high
+    ("t", (416.37, 587.09, 420.06, 594.55), (416.16, 584.76, 420.7, 595.73)),
+    ("a", (421.22, 587.08, 426.48, 592.52), (420.7, 584.76, 426.55, 595.73)),
+    ("n", (426.93, 587.2, 432.78, 592.46), (426.55, 584.76, 433.04, 595.73)),
+    ("t", (432.93, 587.09, 436.61, 594.55), (432.72, 584.76, 437.26, 595.73)),
+    ("”", (437.39, 592.03, 441.19, 595.5), (437.26, 584.76, 441.19, 595.73)),
+    (" ", (446.03, 587.19, 446.03, 587.19), (446.03, 587.19, 446.03, 587.19)),
+    ("o", (446.38, 587.09, 451.52, 592.53), (446.03, 584.76, 451.88, 595.73)),
+    ("r", (452.22, 587.2, 456.1, 592.46), (451.88, 584.76, 456.42, 595.73)),
+    (" ", (460.32, 587.19, 460.32, 587.19), (460.32, 587.19, 460.32, 587.19)),
+    ("H", (460.81, 587.2, 468.59, 595.36), (460.32, 584.76, 469.08, 595.73)),
+]
+
+# A body line set with LaTeX (recorded from a dev-set PDF): a bracketed
+# superscript citation, then the space pdfium generates on the superscript's
+# own raised baseline.
+_SENSING_WHERE = [
+    ("i", (420.7, 548.37, 422.84, 554.53), (420.51, 546.07, 423.04, 555.09)),
+    ("n", (423.23, 548.37, 428.07, 552.54), (423.04, 546.07, 428.24, 555.09)),
+    ("g", (428.54, 546.08, 432.61, 552.54), (428.24, 546.07, 432.79, 555.09)),
+    (",", (433.29, 547.19, 434.49, 549.3), (432.79, 546.07, 435.03, 555.09)),
+    ("[", (435.44, 550.06, 436.35, 555.46), (435.03, 549.98, 436.52, 555.99)),
+    ("7", (437.36, 551.24, 439.81, 555.62), (437.03, 549.98, 440.02, 555.99)),
+    ("]", (440.69, 550.06, 441.6, 555.46), (440.52, 549.98, 442.01, 555.99)),
+    (" ", (440.77, 551.51, 440.77, 551.51), (440.77, 551.51, 440.77, 551.51)),
+    ("w", (444.98, 548.26, 451.31, 552.43), (444.98, 546.07, 451.31, 555.09)),
+    ("h", (451.38, 548.37, 456.22, 554.98), (451.31, 546.07, 456.4, 555.09)),
+    ("e", (456.69, 548.26, 460.25, 552.54), (456.4, 546.07, 460.53, 555.09)),
+]
+# A line of a scan's text layer (recorded from a dev-set PDF): the spaces sit
+# on the baseline, above the short descenders of "y" and "p".
+_OS_Y_DE_PUBLIC = [
+    ("o", (311.04, 362.9, 315.3, 367.49), (310.51, 360.58, 315.85, 371.09)),
+    ("s", (315.93, 362.95, 319.77, 367.47), (315.18, 360.58, 320.52, 371.09)),
+    (" ", (320.52, 363.06, 325.86, 363.07), (320.52, 360.58, 325.86, 371.09)),
+    ("y", (322.49, 361.5, 327.7, 367.32), (322.43, 360.58, 327.77, 371.09)),
+    (" ", (327.77, 363.06, 333.11, 363.07), (327.77, 360.58, 333.11, 371.09)),
+    ("d", (331.85, 362.92, 336.71, 369.35), (331.61, 360.58, 336.95, 371.09)),
+    ("e", (337.69, 362.95, 341.9, 367.53), (337.13, 360.58, 342.47, 371.09)),
+    (" ", (342.47, 363.06, 347.81, 363.07), (342.47, 360.58, 347.81, 371.09)),
+    ("p", (344.73, 361.5, 349.59, 367.4), (344.67, 360.58, 350.01, 371.09)),
+    ("u", (349.51, 362.92, 354.33, 367.32), (349.25, 360.58, 354.59, 371.09)),
+    ("b", (354.01, 362.92, 359.0, 369.35), (353.84, 360.58, 359.18, 371.09)),
+]
+# The end of a reference line in a scan's text layer (recorded from a dev-set
+# PDF): pdfium generates the space after "London." with no line break, so the
+# glyph after it opens the next line.
+_LONDON_THEN_MILES = [
+    ("n", (473.41, 692.34, 476.99, 696.54), (473.25, 689.98, 477.16, 699.97)),
+    (".", (478.66, 692.21, 479.58, 693.38), (477.16, 689.98, 481.08, 699.97)),
+    (" ", (482.86, 692.34, 482.86, 692.34), (482.86, 692.34, 482.86, 692.34)),
+    ("M", (308.28, 685.98, 311.37, 691.43), (308.16, 683.57, 311.49, 693.77)),
+    ("i", (312.02, 685.98, 314.29, 692.35), (311.49, 683.57, 314.82, 693.77)),
+]
+
+
+def test_space_drawn_inside_a_ligature_does_not_split_the_word(monkeypatch):
+    text = _line_text(monkeypatch, _SEX_TRAFFICKING, 0, 500, 400, 560)
+
+    assert text == "Sex Trafficking"
+
+
+def test_code_point_past_unicode_after_a_ligature_space_reads_as_a_replacement(monkeypatch):
+    # A broken ToUnicode map can hand pdfium a code point above U+10FFFF. The
+    # inner-space check reads the glyph after the space as well; it must see
+    # the replacement glyph the page records keep, not raise and send the page
+    # to OCR.
+    codes = [ord(ch) for ch, _tight, _loose in _SEX_TRAFFICKING]
+    codes[11] = 0x110000  # the "c" after the space inside the "ffi" ligature
+    monkeypatch.setattr(pypdfium2.raw, "FPDFText_GetUnicode", lambda _raw, index: codes[index])
+
+    records = _build_page_char_records(_BoxTextPage(_SEX_TRAFFICKING))
+
+    assert _reconstruct_text_from_records(records, 0, 500, 400, 560) == "Sex Traffi\ufffdking"
+
+
+def test_word_space_after_a_word_final_ligature_is_kept(monkeypatch):
+    text = _line_text(monkeypatch, _SOFI_OKSANEN, 0, 600, 400, 630)
+
+    assert text == "Sofi Ok"
+
+
+def test_space_under_an_italic_f_overhang_is_kept(monkeypatch):
+    text = _line_text(monkeypatch, _OF_PERVASIVE, 400, 350, 560, 380)
+
+    assert text == "of pe"
+
+
+def test_flat_space_box_stays_with_its_line(monkeypatch):
+    # The title region's bottom edge (626.91 pt) sits just above the
+    # baseline the space box is flat on, below the letters' centres.
+    text = _line_text(monkeypatch, _MODEL_ANALYSIS, 78.236, 626.91, 493.795, 728.702)
+
+    assert text == "MODEL AN"
+
+
+def test_flat_space_box_is_not_lowered_to_a_comma_below_the_baseline(monkeypatch):
+    # The byline region's bottom edge (323.15 pt) sits between the comma's
+    # centre and the baseline: the comma falls out, the space after it stays.
+    text = _line_text(monkeypatch, _AFTER_A_COMMA, 65.48, 323.15, 516.1, 346.96)
+
+    assert text == "ina1,2 R.I"
+
+
+def test_flat_space_box_is_not_raised_to_a_quote_above_the_baseline(monkeypatch):
+    # The table title region's top edge (591.62 pt) sits between the letters'
+    # centres and the closing quote's: the quote falls out, the space after it
+    # stays.
+    text = _line_text(monkeypatch, _AFTER_A_QUOTE, 110.77, 538.56, 497.56, 591.62)
+
+    assert text == "tant or H"
+
+
+def test_space_after_a_superscript_is_not_raised_above_the_letters_after_it(monkeypatch):
+    # A region top edge (552.0 pt) that cuts the superscript citation off the
+    # line, above the space's own centre and the letters': the citation falls
+    # out, the space between the words stays.
+    text = _line_text(monkeypatch, _SENSING_WHERE, 400.0, 540.0, 480.0, 552.0)
+
+    assert text == "ing, whe"
+
+
+def test_space_before_a_descender_stays_with_the_glyph_before_it(monkeypatch):
+    # The region's bottom edge (364.5 pt) cuts the descenders of "y" and "p"
+    # off the line, above the spaces' baseline. A space on the line's baseline
+    # still rises to the glyph before it, whatever the glyph after it.
+    text = _line_text(monkeypatch, _OS_Y_DE_PUBLIC, 290.0, 364.5, 380.0, 380.0)
+
+    assert text == "os de ub"
+
+
+def test_space_before_the_next_line_stays_with_the_glyph_before_it(monkeypatch):
+    # The glyph after the space is on the line below, so the space is not on
+    # a raised baseline: it still rises to the full stop, above the region's
+    # bottom edge (692.5 pt).
+    text = _line_text(monkeypatch, _LONDON_THEN_MILES, 460.0, 692.5, 490.0, 705.0)
+
+    assert text == "n. "
 
 
 def _encode_wide(text: str):
@@ -218,6 +440,49 @@ def test_nonzero_crop_origin_does_not_slice_columns():
     assert "OMEGA" not in left_half
 
 
+def _inherited_mediabox_pdf(lines: list[tuple[float, str]]) -> bytes:
+    """An A4 page whose MediaBox sits on the page tree, not the page dictionary.
+
+    *lines* are ``(baseline y in points, text)`` pairs set in 12 pt Helvetica.
+    """
+    stream = "".join(f"BT /F1 12 Tf 72 {y} Td ({text}) Tj ET\n" for y, text in lines).encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 595.28 841.89] >>",
+        b"<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (
+        len(objects) + 1,
+        xref,
+    )
+    return bytes(out)
+
+
+def test_inherited_mediabox_maps_regions_onto_the_rendered_page():
+    """``get_cropbox()`` reads the page dictionary alone and falls back to US
+    Letter; the page renders at its inherited A4 MediaBox. The Letter box put
+    the byline's text under the title region (a preprint
+    exported the byline "DanSnow1" as its title)."""
+    pdf_bytes = _inherited_mediabox_pdf([(742, "Biased Perceptions"), (698, "Dan Snow")])
+    page_height = 841.89
+    # The title line's band, 88-104 pt below the top of the rendered page.
+    title_band = [0, 88 / page_height * 1000, 1000, 104 / page_height * 1000]
+
+    text = get_native_text_in_bbox(pdf_bytes, page_idx=0, bbox_normalized=title_band)
+
+    assert text == "Biased Perceptions"
+
+
 _BLEED_FIXTURE = Path(__file__).parent / "fixtures" / "native_text_bbox_bleed_sample.pdf"
 
 
@@ -236,6 +501,20 @@ def test_bbox_intersection_does_not_leak_clipped_neighboring_line():
     pdf_bytes = _BLEED_FIXTURE.read_bytes()
     text = get_native_text_in_bbox(pdf_bytes, page_idx=0, bbox_normalized=[0, 117, 1000, 154])
     assert text == "Second line of body text content here"
+
+
+@pytest.mark.parametrize("bottom_pt", [420.0, 421.3, 423.0, 425.0])
+def test_region_edge_above_the_baseline_keeps_the_spaces(bottom_pt):
+    """pdfium's box for a space is flat on the baseline (no ink). A region
+    whose bottom edge crosses the line between the baseline (421 pt here) and
+    the letters' centres (~425 pt) kept the letters but dropped the space
+    ("MODELANALYSIS" in the title of the _MODEL_ANALYSIS paper)."""
+    pdf_bytes = _make_single_text_pdf("MODEL ANALYSIS")
+    bbox = [0, (842.0 - 440.0) / 842.0 * 1000, 1000, (842.0 - bottom_pt) / 842.0 * 1000]
+
+    text = get_native_text_in_bbox(pdf_bytes, page_idx=0, bbox_normalized=bbox)
+
+    assert text == "MODEL ANALYSIS"
 
 
 def test_fill_populates_text_regions_from_native_pdf():

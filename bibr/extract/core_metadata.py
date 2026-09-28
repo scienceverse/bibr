@@ -35,7 +35,7 @@ from bibr.extract.field_decisions import (
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
-from bibr.extract.title_subtitle import fold_printed_subtitle
+from bibr.extract.title_subtitle import drop_parallel_title, fold_printed_subtitle
 from bibr.input.consolidate_text import strip_affiliation_markers
 from bibr.models import ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
@@ -1921,6 +1921,11 @@ class CoreMetadataExtractor:
                 if title != model_title:
                     title_transforms.append("regrounded")
                     title_evidence.extend(title_issue.evidence_ids)
+            title, parallel_issue = drop_parallel_title(title, full_text)
+            if parallel_issue is not None:
+                self.validation_issues.append(parallel_issue)
+                title_transforms.append("parallel_version_dropped")
+                title_evidence.extend(parallel_issue.evidence_ids)
             title, subtitle_issue = fold_printed_subtitle(title, resolution, authors=usable)
             if subtitle_issue is not None:
                 self.validation_issues.append(subtitle_issue)

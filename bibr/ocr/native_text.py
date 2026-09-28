@@ -48,11 +48,15 @@ def _page_crop_box(page) -> tuple[float, float, float, float]:
     """Return the page CropBox ``(x0, y0, x1, y1)`` in PDF points.
 
     This is the region pypdfium2 renders to the image PP-DocLayoutV3 indexes
-    into. Falls back to ``(0, 0, width, height)`` when the CropBox is missing
-    or degenerate so callers always get a usable box.
+    into: the CropBox clipped to the MediaBox, either inherited from the page
+    tree. ``get_cropbox()`` reads the page dictionary alone and falls back to
+    a US Letter MediaBox, so an A4 page whose MediaBox sits on the page tree
+    put the byline's text under the title region.
+    Falls back to ``(0, 0, width, height)`` when the box is missing or
+    degenerate so callers always get a usable box.
     """
     try:
-        x0, y0, x1, y1 = page.get_cropbox()
+        x0, y0, x1, y1 = page.get_bbox()
         if x1 - x0 > 0 and y1 - y0 > 0:
             return (float(x0), float(y0), float(x1), float(y1))
     except Exception:  # noqa: BLE001, S110 - fall back to mediabox-origin page size
@@ -152,6 +156,73 @@ def _pdf_points_to_normalized_bbox(
     return (min(xs), min(ys), max(xs), max(ys))
 
 
+# Whitespace placement in _build_page_char_records. A whitespace box flatter
+# than this fraction of the preceding glyph's height is flat (no ink).
+_FLAT_WHITESPACE_HEIGHT_RATIO = 0.25
+# The preceding glyph stands on the flat box's baseline when its own box
+# starts at most this fraction of its height above it.
+_BASELINE_TOLERANCE_RATIO = 0.1
+# A flat box sits on a raised baseline (a superscript's) when it lies more
+# than this fraction of the next glyph's height above that glyph's bottom,
+# and no higher than its top (higher up, the next glyph opens the line
+# below). A descender reaches about a third of its glyph's height below the
+# line.
+_RAISED_BASELINE_RATIO = 0.5
+# A space lies inside the preceding ligature when its box starts within the
+# ligature's box and ends at most this fraction of its own width past it...
+_INNER_WHITESPACE_OVERSHOOT = 0.25
+# ...and it adds no gap when the next glyph's advance box then starts less
+# than this fraction of the space's width after the ligature's.
+_INNER_WHITESPACE_MAX_GAP = 0.25
+# Latin ligature presentation forms (ff, fi, fl, ffi, ffl, long st, st).
+_LIGATURE_CHARS = frozenset("\ufb00\ufb01\ufb02\ufb03\ufb04\ufb05\ufb06")
+
+
+def _loose_charbox(textpage, index: int) -> tuple[float, float, float, float] | None:
+    try:
+        return textpage.get_charbox(index, loose=True)
+    except Exception:  # noqa: BLE001 - pdfium per-char failures are noisy and benign here
+        return None
+
+
+def _is_inner_whitespace(
+    textpage,
+    n_chars: int,
+    ligature_index: int,
+    ligature_box: tuple[float, float, float, float],
+    space_box: tuple[float, float, float, float],
+    next_index: int,
+) -> bool:
+    """True for a space drawn inside the ligature before it that adds no gap.
+
+    Some fonts follow a ligature ("fi", "fl", "ff") with a space drawn inside
+    the ligature's box. Inside a word the next glyph then starts where the
+    ligature's advance ends ("Traffi cking" is one word); after a word-final
+    ligature the same space is a real word space and pushes the next glyph a
+    space-width further ("Sofi Oksanen"). Only the advance (loose) boxes tell
+    the two apart. Plain glyphs are never passed here: an italic "f" hangs
+    over the real space after it ("of pervasive").
+    """
+    import pypdfium2 as pdfium
+
+    gl, _gb, gr, _gt = ligature_box
+    sl, _sb, sr, _st = space_box
+    width = sr - sl
+    if not (width > 0 and gl <= sl and sr <= gr + _INNER_WHITESPACE_OVERSHOOT * width):
+        return False
+    if next_index >= n_chars:
+        return False
+    next_code = pdfium.raw.FPDFText_GetUnicode(textpage.raw, next_index)
+    # Past U+10FFFF chr() raises; the page records keep U+FFFD there, a glyph.
+    if next_code <= 0x10FFFF and chr(next_code).isspace():
+        return False
+    ligature_loose = _loose_charbox(textpage, ligature_index)
+    next_loose = _loose_charbox(textpage, next_index)
+    if ligature_loose is None or next_loose is None:
+        return False
+    return next_loose[0] - ligature_loose[2] < _INNER_WHITESPACE_MAX_GAP * width
+
+
 def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
@@ -159,6 +230,28 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     INTERSECTS the query rect, so a region bbox edge that slices through an
     adjacent line bleeds in that neighbor's partial glyphs as garbage. Using the
     glyph's CENTER instead assigns each char to exactly one region.
+
+    Whitespace is placed against the glyph before it on the same line:
+
+    - A space's tight box is flat on the baseline, below the centre of the
+      letters around it. A region whose bottom edge crosses the line between
+      the baseline and the letters' centres kept the words and dropped the
+      spaces between them ("MODEL ANALYSIS" became "MODELANALYSIS"), so a flat
+      whitespace box is raised to the vertical centre of that glyph when the
+      glyph stands on the same baseline. A raised glyph (closing quote,
+      superscript) is skipped, since a region's top edge can cut it off its
+      line, and the space is never lowered to a comma hanging below the
+      baseline, which a region's bottom edge can cut off the same way. pdfium
+      sets the space after a LaTeX superscript on the superscript's own
+      baseline, which the baseline test cannot tell from the line's, so a
+      flat box that sits more than half the next glyph's height above that
+      glyph's bottom, and not above its top, is raised no higher than the
+      next glyph's centre: a top edge that cuts the superscript off would
+      take the space too.
+    - A space drawn inside a ligature that adds no gap (some fonts follow
+      "fi" with one) is dropped; keeping it split the word ("Traffi cking").
+      See :func:`_is_inner_whitespace`. A ligature is a presentation-form
+      char or a glyph whose box pdfium shares across the chars it maps to.
 
     Computing this once per page (rather than once per region) avoids
     O(regions × chars) pdfium calls in :func:`_fill_page_regions_from_textpage`,
@@ -174,6 +267,23 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
     n_chars = textpage.count_chars()
     records: list[tuple[str, float, float, bool]] = []
+    # Index, box and ligature flag of the last non-whitespace glyph on the line.
+    line_glyph: tuple[int, tuple[float, float, float, float], bool] | None = None
+    # Raised spaces waiting for the glyph after them: (record index, the
+    # space's own centre, the centre of the glyph before it).
+    raised: list[tuple[int, float, float]] = []
+
+    def _settle(next_box: tuple[float, float, float, float] | None) -> None:
+        for index, own_y, glyph_y in raised:
+            ch, x, _y, is_newline = records[index]
+            limit = glyph_y
+            if next_box is not None:
+                _nl, nb, _nr, nt = next_box
+                if nb + _RAISED_BASELINE_RATIO * (nt - nb) < own_y <= nt:
+                    limit = min(glyph_y, (nb + nt) / 2.0)
+            records[index] = (ch, x, max(own_y, limit), is_newline)
+        raised.clear()
+
     i = 0
     while i < n_chars:
         code_unit = pdfium.raw.FPDFText_GetUnicode(textpage.raw, i)
@@ -198,7 +308,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
             ch = chr(code_unit)
 
         if ch in ("\n", "\r"):
+            _settle(None)
             records.append((ch, 0.0, 0.0, True))
+            line_glyph = None
             i += consumed
             continue
 
@@ -210,8 +322,29 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         cb = min(box[1] for box in valid_boxes)
         cr = max(box[2] for box in valid_boxes)
         ct = max(box[3] for box in valid_boxes)
-        records.append((ch, (cl + cr) / 2.0, (cb + ct) / 2.0, False))
+        box = (cl, cb, cr, ct)
+        center_y = (cb + ct) / 2.0
+        if not ch.isspace():
+            _settle(box)
+            is_ligature = ch in _LIGATURE_CHARS or (line_glyph is not None and line_glyph[1] == box)
+            line_glyph = (i, box, is_ligature)
+        elif line_glyph is not None:
+            glyph_index, glyph_box, glyph_is_ligature = line_glyph
+            if glyph_is_ligature and _is_inner_whitespace(
+                textpage, n_chars, glyph_index, glyph_box, box, i + consumed
+            ):
+                i += consumed
+                continue
+            gl, gb, _gr, gt = glyph_box
+            if (
+                gl <= cl
+                and ct - cb < _FLAT_WHITESPACE_HEIGHT_RATIO * (gt - gb)
+                and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
+            ):
+                raised.append((len(records), center_y, (gb + gt) / 2.0))
+        records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
+    _settle(None)
     return records
 
 
