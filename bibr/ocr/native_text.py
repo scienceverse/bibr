@@ -820,6 +820,198 @@ def _is_native_text_usable(text: str, min_printable_ratio: float) -> bool:
     return _printable_ratio(text) >= min_printable_ratio
 
 
+# A scanned page run through an OCR engine (Acrobat Paper Capture, ABBYY,
+# Tesseract's PDF renderer) keeps the scan as a page-sized image and lays the
+# recognised text over it in an invisible text render mode, so the page is
+# searchable. That layer is usually printable, so the corruption gate above
+# accepts it, but it is the legacy engine's reading of the scan: misread titles
+# and merged reference lines. Such a page counts as a scan and is read by OCR.
+# Only the render mode is checked, not paint order: visible text painted under
+# an opaque image is hidden too, but PDFium cannot tell whether an image has a
+# soft mask, so a watermark over real text would look the same.
+# On the dev PDFs (2026-09-27), every scanned page of the targets is >= 0.93
+# covered by images with >= 0.96 of its text invisible; no born-digital page
+# has more than 2% of its text invisible.
+_INVISIBLE_TEXT_RENDER_MODES = frozenset({3, 7})  # FPDF_TEXTRENDERMODE_INVISIBLE, _CLIP
+_SCAN_PAGE_MIN_IMAGE_COVERAGE = 0.85
+_SCAN_PAGE_MIN_INVISIBLE_SHARE = 0.5
+# Coverage is the union of the largest image boxes, so a cap can only
+# under-count it (and keep a page on the text layer).
+_SCAN_PAGE_MAX_IMAGE_BOXES = 64
+_SCAN_PAGE_MAX_FORM_DEPTH = 8
+_UNCOUNTED_CHAR_CODES = frozenset({0x00, 0x02, 0xFFFE})
+
+
+def _object_bounds(pdfium_c, obj) -> tuple[float, float, float, float] | None:
+    left, bottom, right, top = (ctypes.c_float() for _ in range(4))
+    if not pdfium_c.FPDFPageObj_GetBounds(
+        obj, ctypes.byref(left), ctypes.byref(bottom), ctypes.byref(right), ctypes.byref(top)
+    ):
+        return None
+    return (left.value, bottom.value, right.value, top.value)
+
+
+def _compose(
+    inner: tuple[float, ...], outer: tuple[float, ...] | None
+) -> tuple[float, float, float, float, float, float]:
+    """The affine matrix applying *inner*, then *outer* (``None`` = identity)."""
+    a1, b1, c1, d1, e1, f1 = inner
+    if outer is None:
+        return (a1, b1, c1, d1, e1, f1)
+    a2, b2, c2, d2, e2, f2 = outer
+    return (
+        a1 * a2 + b1 * c2,
+        a1 * b2 + b1 * d2,
+        c1 * a2 + d1 * c2,
+        c1 * b2 + d1 * d2,
+        e1 * a2 + f1 * c2 + e2,
+        e1 * b2 + f1 * d2 + f2,
+    )
+
+
+def _transform_box(
+    matrix: tuple[float, ...], box: tuple[float, float, float, float]
+) -> tuple[float, float, float, float]:
+    a, b, c, d, e, f = matrix
+    left, bottom, right, top = box
+    xs, ys = [], []
+    for x, y in ((left, bottom), (right, bottom), (left, top), (right, top)):
+        xs.append(a * x + c * y + e)
+        ys.append(b * x + d * y + f)
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _collect_image_boxes(pdfium_c, objects, matrix, depth: int, boxes: list) -> None:
+    """Append the page-space box of every image object, descending into forms.
+
+    PDFium reports an object inside a Form XObject in the form's own space, so
+    each level's box goes through the matrices of the forms that contain it.
+    """
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_IMAGE:
+            box = _object_bounds(pdfium_c, obj)
+            if box is not None:
+                boxes.append(box if matrix is None else _transform_box(matrix, box))
+        elif kind == pdfium_c.FPDF_PAGEOBJ_FORM and depth < _SCAN_PAGE_MAX_FORM_DEPTH:
+            form_matrix = pdfium_c.FS_MATRIX()
+            if not pdfium_c.FPDFPageObj_GetMatrix(obj, ctypes.byref(form_matrix)):
+                continue
+            inner = _compose(
+                (
+                    form_matrix.a,
+                    form_matrix.b,
+                    form_matrix.c,
+                    form_matrix.d,
+                    form_matrix.e,
+                    form_matrix.f,
+                ),
+                matrix,
+            )
+            children = (
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            )
+            _collect_image_boxes(pdfium_c, children, inner, depth + 1, boxes)
+
+
+def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
+    """Exact area of the union of axis-aligned boxes, by vertical slabs."""
+    xs = sorted({x for left, _, right, _ in boxes for x in (left, right)})
+    total = 0.0
+    for x0, x1 in zip(xs, xs[1:], strict=False):
+        spans = sorted(
+            (bottom, top) for left, bottom, right, top in boxes if left <= x0 and right >= x1
+        )
+        covered = 0.0
+        run_bottom = run_top = None
+        for bottom, top in spans:
+            if run_top is None or bottom > run_top:
+                if run_top is not None:
+                    covered += run_top - run_bottom
+                run_bottom, run_top = bottom, top
+            elif top > run_top:
+                run_top = top
+        if run_top is not None:
+            covered += run_top - run_bottom
+        total += covered * (x1 - x0)
+    return total
+
+
+def _page_image_coverage(page, crop_box: tuple[float, float, float, float]) -> float:
+    """Fraction of the CropBox covered by the page's image objects (0..1)."""
+    import pypdfium2.raw as pdfium_c
+
+    cx0, cy0, cx1, cy1 = crop_box
+    area = (cx1 - cx0) * (cy1 - cy0)
+    if area <= 0:
+        return 0.0
+    boxes: list[tuple[float, float, float, float]] = []
+    top_level = (
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    )
+    _collect_image_boxes(pdfium_c, top_level, None, 0, boxes)
+    clipped = []
+    for left, bottom, right, top in boxes:
+        left, bottom = max(left, cx0), max(bottom, cy0)
+        right, top = min(right, cx1), min(top, cy1)
+        if right > left and top > bottom:
+            clipped.append((left, bottom, right, top))
+    if not clipped:
+        return 0.0
+    clipped.sort(key=lambda box: (box[2] - box[0]) * (box[3] - box[1]), reverse=True)
+    return min(1.0, _union_area(clipped[:_SCAN_PAGE_MAX_IMAGE_BOXES]) / area)
+
+
+def _invisible_text_share(textpage) -> float | None:
+    """Share of the page's characters drawn in an invisible text render mode.
+
+    Whitespace and the characters PDFium generates (inferred spaces and line
+    breaks) are not counted. ``None`` when nothing is countable. Raises when
+    this PDFium build cannot map a character to its text object, so the caller
+    keeps the text layer and reports the rule as unavailable.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    text_object_of = getattr(pdfium_c, "FPDFText_GetTextObject", None)
+    if text_object_of is None:
+        raise RuntimeError("this PDFium build has no FPDFText_GetTextObject")
+    is_generated = getattr(pdfium_c, "FPDFText_IsGenerated", None)
+    handle = textpage.raw
+    counted = invisible = 0
+    for index in range(textpage.count_chars()):
+        code = pdfium_c.FPDFText_GetUnicode(handle, index)
+        if code in _UNCOUNTED_CHAR_CODES or (code <= 0x10FFFF and chr(code).isspace()):
+            continue
+        if is_generated is not None and is_generated(handle, index) == 1:
+            continue
+        obj = text_object_of(handle, index)
+        if not obj:
+            continue
+        counted += 1
+        if pdfium_c.FPDFTextObj_GetTextRenderMode(obj) in _INVISIBLE_TEXT_RENDER_MODES:
+            invisible += 1
+    return invisible / counted if counted else None
+
+
+def _is_invisible_text_layer_page(
+    page, textpage, crop_box: tuple[float, float, float, float]
+) -> bool:
+    """True when the page is a scan whose text layer is a hidden OCR layer.
+
+    Images cover at least :data:`_SCAN_PAGE_MIN_IMAGE_COVERAGE` of the CropBox
+    and at least :data:`_SCAN_PAGE_MIN_INVISIBLE_SHARE` of the characters are
+    invisible (render mode 3 or 7). A born-digital page with a background image
+    keeps its visible text, and a figure-sized image never qualifies. Operates
+    on a caller-provided (lock-held) page and textpage.
+    """
+    if _page_image_coverage(page, crop_box) < _SCAN_PAGE_MIN_IMAGE_COVERAGE:
+        return False
+    share = _invisible_text_share(textpage)
+    return share is not None and share >= _SCAN_PAGE_MIN_INVISIBLE_SHARE
+
+
 def fill_regions_from_native_text(
     pdf_bytes: bytes,
     pages_regions: list[list[dict]],

@@ -58,6 +58,7 @@ def _adapt_legacy_helper_mocks(monkeypatch):
         min_chars,
         min_printable_ratio,
         eligible_labels=None,
+        reject_invisible_text_layer=False,
     ):
         import bibr.input.pdf_metadata as metadata_mod
         import bibr.input.pdf_outline as outline_mod
@@ -171,6 +172,39 @@ async def test_stage_header_footer_setting_reaches_inspection(monkeypatch):
     assert "header" not in off and "footer" not in off
     on = await eligible_for(True)
     assert {"header", "footer"} <= set(on)
+
+
+@pytest.mark.asyncio
+async def test_stage_invisible_layer_setting_reaches_inspection(monkeypatch, caplog):
+    """The setting decides whether hidden OCR layers on scans are rejected, and
+    the stage reports how many pages it sent to OCR for that reason."""
+    import bibr.pipeline.stages.native_text as stage_mod
+    from bibr.ocr.pdf_inspection import PdfInspection, PdfPageInspection
+
+    async def run_with(flag):
+        monkeypatch.setattr(Settings.ocr, "native_text_reject_invisible_layer", flag)
+        captured = {}
+
+        def fake_inspect(pdf_bytes, layout_results, **kwargs):
+            captured.update(kwargs)
+            pages = (PdfPageInspection(0, 612.0, 792.0, (0.0, 0.0, 612.0, 792.0), 40, flag),)
+            return PdfInspection(pages, deepcopy(layout_results), {}, [], [])
+
+        monkeypatch.setattr(stage_mod, "inspect_pdf", fake_inspect)
+        fs = FileState(path=Path("scan.pdf"), pdf_bytes=b"%PDF")
+        fs.layout_results = [[{"label": "text", "content": ""}]]
+        caplog.clear()
+        with caplog.at_level("INFO", logger=stage_mod.__name__):
+            await NativeTextStage().run(_ctx([fs]))
+        return captured["reject_invisible_text_layer"], caplog.text
+
+    assert Settings.ocr.native_text_reject_invisible_layer is True
+    on, on_log = await run_with(True)
+    assert on is True
+    assert "invisible OCR text layer: 1" in on_log
+    off, off_log = await run_with(False)
+    assert off is False
+    assert "invisible OCR text layer" not in off_log
 
 
 @pytest.mark.asyncio
