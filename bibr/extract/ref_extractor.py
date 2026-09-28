@@ -13,6 +13,7 @@ capture in ``bibr.extract.training_capture``.
 """
 
 import asyncio
+import dataclasses
 import logging
 import re
 import threading
@@ -28,7 +29,18 @@ from bibr.clients.llm_protocol import LlmClient
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
-from bibr.extract.merge_split import split_merged_refs
+from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
+from bibr.extract.ref_line_stream import (
+    StreamSegmentation,
+    _match_key,
+    _roman_value,
+    build_line_stream,
+    link_dois_for_segments,
+    segment_line_stream,
+    segmentation_quality,
+    stream_probabilities,
+    typical_entry_length,
+)
 from bibr.extract.ref_locator import _ENTRY_NUMBERING_RE
 from bibr.extract.region_seg import (
     _CHUNK_TARGET_CHARS,
@@ -36,7 +48,7 @@ from bibr.extract.region_seg import (
     region_chunks,
     segment_by_region_anchors,
 )
-from bibr.extract.segment_filter import drop_non_reference_segments
+from bibr.extract.segment_filter import drop_non_reference_segments, is_non_reference_segment
 from bibr.extract.training_capture import save_ref_training_data, save_seg_training_data
 from bibr.paper import BibType, PaperReference, migrate_bib_type
 from bibr.paper_contents import (
@@ -94,6 +106,28 @@ _REF_REGION_NONEMPTY_MIN_CHARS = 200
 # zero-LLM last-resort splitter used when the whole cascade yields nothing.
 _MARKER_LINE_RE = re.compile(r"(?m)^\s*(?:\[\d{1,3}\]|\d{1,3}[.)])\s+")
 
+# Reference line stream selection (``bibr.extract.ref_line_stream``). Its
+# segmentation replaces the cascade's when the cascade fell back to region
+# recovery, the CRF or the marker split, found nothing, took most of its
+# segments from the merged-reference splitter, or under-yielded against its
+# credible starts, provided the stream's quality is at least the cascade's;
+# it replaces a selected geom or LLM-anchor result only when its quality is
+# higher by the override margin. It never replaces a non-empty result with
+# fewer entries than that result has distinct ones, nor on a paper with a
+# rotated reference page. Quality is ``segmentation_quality``: section
+# coverage times the share of entries that look like one complete reference,
+# scored alike for both. Module constants on purpose, like the geom gates
+# above.
+_STREAM_FALLBACK_TIERS = frozenset({"region", "crf", "marker_split"})
+_STREAM_OVERRIDE_MARGIN = 0.15
+# Pre-parse form of the receipt's credible-start check: segments below this
+# share of the section's credible entry starts.
+_STREAM_CREDIBLE_START_YIELD = 0.6
+_STREAM_MIN_EVIDENCE = 5
+# The cascade's segments outnumber its selected tier's spans by this factor
+# when the merged-reference splitter made most of them.
+_STREAM_SPLIT_REPAIR_RATIO = 1.5
+
 
 def _build_ref_text(row_texts: list[str]) -> str:
     """Join reference rows into segmenter input, collapsing intra-row whitespace.
@@ -146,8 +180,35 @@ def _strip_enum_markers(ref_strings: list[str]) -> list[str]:
     """
     marked = sum(1 for s in ref_strings if _ENTRY_NUMBERING_RE.match(s))
     if marked * 2 <= len(ref_strings):
-        return ref_strings
+        return _strip_roman_markers(ref_strings)
     return [_ENTRY_NUMBERING_RE.sub("", s, count=1) for s in ref_strings]
+
+
+# A roman list number opening a reference ("IV. Bergasa, L.M., ...").
+_ROMAN_ENTRY_RE = re.compile(r"^\s*([IVXLC]{1,7}|[ivxlc]{1,7})[.)]\s+")
+
+
+def _strip_roman_markers(ref_strings: list[str]) -> list[str]:
+    """Strip roman list numbering ("I.", "II.", ...) for NER parser input.
+
+    Only for a bibliography numbered that way: a majority of segments open
+    with a roman numeral and those numerals count up from I, so a lone author
+    initial ("V. Lal") in an unnumbered list stays.
+    """
+    values = []
+    for segment in ref_strings:
+        match = _ROMAN_ENTRY_RE.match(segment)
+        values.append(_roman_value(match.group(1)) if match else None)
+    numbered = [value for value in values if value is not None]
+    if len(numbered) * 2 <= len(ref_strings) or 1 not in numbered:
+        return ref_strings
+    steps = sum(1 for a, b in zip(numbered, numbered[1:], strict=False) if b == a + 1)
+    if steps * 5 < (len(numbered) - 1) * 4:
+        return ref_strings
+    return [
+        _ROMAN_ENTRY_RE.sub("", segment, count=1) if value is not None else segment
+        for segment, value in zip(ref_strings, values, strict=True)
+    ]
 
 
 def _normalized_reference_identity(text: str) -> str:
@@ -1239,6 +1300,49 @@ REF_PARSE_STRATEGIES: dict[str, Any] = {
 }
 
 
+# Two segments this alike (fuzzy ratio of their alphanumerics) and printing
+# the same years are one entry read twice, as when the layout returns an
+# aggregate box and the entry boxes inside it and one of the two reads went
+# through OCR. Two editions of one work differ in their year.
+_REPEAT_MIN_RATIO = 97
+_YEAR_TOKEN = re.compile(r"(?<!\d)(?:1[6-9]|20)\d\d(?!\d)")
+
+
+def _distinct_count(segments: list[str]) -> int:
+    """Segments that do not repeat an earlier one, exactly or nearly."""
+    from rapidfuzz import fuzz, process
+
+    keys: list[str] = []
+    years: list[frozenset[str]] = []
+    distinct = 0
+    for segment in segments:
+        key = _match_key(segment)
+        if not key:
+            continue
+        segment_years = frozenset(_YEAR_TOKEN.findall(segment))
+        hits = process.extract(
+            key, keys, scorer=fuzz.ratio, score_cutoff=_REPEAT_MIN_RATIO, limit=None
+        )
+        if not any(years[index] == segment_years for _choice, _score, index in hits):
+            distinct += 1
+        keys.append(key)
+        years.append(segment_years)
+    return distinct
+
+
+@dataclasses.dataclass(frozen=True)
+class _StreamChoice:
+    """The reference line stream's entries and whether they replace the cascade's."""
+
+    selected: bool
+    ref_text: str
+    ref_strings: list[str]
+    spans: tuple[tuple[int, int] | None, ...]
+    # One DOI from a link annotation per final segment (the stream's entries
+    # when selected, else the cascade's), None where none applies.
+    link_dois: list[str | None]
+
+
 class ReferenceExtractor:
     """Segments and parses a paper's reference list.
 
@@ -1265,6 +1369,8 @@ class ReferenceExtractor:
         self.llm_client = llm_client or LLMClient(settings=self._settings)
         self._ref_seg_strategy = seg_strategy
         self._ref_parse_strategy = parse_strategy
+        # Diagnostics the reference line stream adds to the yield receipt.
+        self._stream_reason_flags: set[str] = set()
         self.validation_issues: list[ValidationIssue] = []
         self._segmentation_attempts: list[ReferenceSegmentationAttempt] = []
         self._selected_segmentation_spans: tuple[tuple[int, int], ...] = ()
@@ -1287,6 +1393,7 @@ class ReferenceExtractor:
         """
         self.contents.reference_yield_receipt = None
         self.validation_issues.clear()
+        self._stream_reason_flags = set()
         self._segmentation_attempts.clear()
         self._selected_segmentation_spans = ()
         self._credible_source_starts = None
@@ -1320,10 +1427,28 @@ class ReferenceExtractor:
         ref_strings, selected_spans, duplicate_rate, duplicate_reasons = (
             _prepare_segment_candidates(ref_text, ref_strings, located_spans)
         )
+        stream_choice = await asyncio.to_thread(
+            self._consider_line_stream, ref_df, ref_text, ref_strings, seg_strategy
+        )
+        link_dois: list[str | None] | None = None
+        if stream_choice is not None:
+            link_dois = stream_choice.link_dois
+            if stream_choice.selected:
+                ref_text = stream_choice.ref_text
+                ref_strings, selected_spans, duplicate_rate, duplicate_reasons = (
+                    _prepare_segment_candidates(
+                        ref_text, stream_choice.ref_strings, stream_choice.spans
+                    )
+                )
         logger.info(f"Segmented {len(ref_strings)} references")
 
         parser = REF_PARSE_STRATEGIES.get(parse_strategy, REF_PARSE_STRATEGIES["llm"])
-        all_refs = await parser(self, ref_text, ref_strings)
+        if parse_strategy == "ner" and link_dois and any(link_dois):
+            all_refs = await asyncio.to_thread(
+                self._parse_references_ner_with_links, ref_strings, link_dois
+            )
+        else:
+            all_refs = await parser(self, ref_text, ref_strings)
 
         # Resolve the em-dash "same author as above" convention on the fully
         # ordered list — a cross-reference step every parse strategy shares.
@@ -1410,6 +1535,7 @@ class ReferenceExtractor:
         )
         reasons = set(duplicate_reasons)
         reasons.update(getattr(self.contents, "reference_boundary_reason_flags", None) or ())
+        reasons.update(self._stream_reason_flags)
         unavailable_offsets = {
             "source_offsets_unavailable",
             "source_offsets_partially_unavailable",
@@ -2491,3 +2617,236 @@ class ReferenceExtractor:
             aligned.append(PaperReference.model_validate(ref_fields))
             parsed_count += 1
         return aligned
+
+    # ------------------------------------------------------------------
+    # Reference line stream (bibr.extract.ref_line_stream)
+    # ------------------------------------------------------------------
+
+    def _consider_line_stream(
+        self,
+        ref_df: pd.DataFrame,
+        ref_text: str,
+        ref_strings: list[str],
+        seg_strategy: str,
+    ) -> _StreamChoice | None:
+        """Segment the section as one line stream; decide whether it replaces the cascade.
+
+        Runs for the ``geom`` strategy on inputs with layout regions (PDFs)
+        unless native reference strings were taken. The stream's attempt is
+        always recorded. When it is not selected the cascade's segments stand
+        exactly as they were; a DOI link annotation over a segment's own lines
+        can still fill a segment that prints no DOI. Any error keeps the
+        cascade's result.
+        """
+        if seg_strategy != "geom" or ref_df is None:
+            return None
+        if any(a.strategy == "native" and a.selected for a in self._segmentation_attempts):
+            return None
+        if not getattr(self.contents, "region_summaries", None):
+            # No layout regions: a DOCX, JATS or HTML input, whose paragraphs
+            # are the entries already.
+            return None
+        try:
+            return self._line_stream_choice(ref_df, ref_text, ref_strings)
+        except Exception as e:  # noqa: BLE001 — an alternative must never break extraction
+            logger.warning("Reference line stream failed: %r", e)
+            return None
+
+    def _line_stream_choice(
+        self, ref_df: pd.DataFrame, ref_text: str, ref_strings: list[str]
+    ) -> _StreamChoice | None:
+        stream = build_line_stream(self.contents, ref_df)
+        if stream is None:
+            return None
+        probabilities = stream_probabilities(stream, self._geom_line_predictor())
+        segmentation = segment_line_stream(stream, probabilities)
+        if segmentation is None:
+            return None
+        entries, _numbered, entry_dois, split_count = self._post_process_stream_entries(
+            segmentation
+        )
+        if not entries:
+            return None
+
+        typical = typical_entry_length(ref_strings, entries)
+        section_text = segmentation.section_key
+        cascade_quality = segmentation_quality(ref_strings, section_text, typical_length=typical)
+        stream_quality = segmentation_quality(entries, section_text, typical_length=typical)
+        tier, tier_spans = self._cascade_selected_tier()
+        if ref_strings and len(entries) < _distinct_count(ref_strings):
+            trigger, selected = "fewer_entries", False
+        elif ref_strings and stream.rotated:
+            trigger, selected = "rotated_page", False
+        elif tier is None or tier in _STREAM_FALLBACK_TIERS or not ref_strings:
+            trigger = "cascade_fallback"
+            selected = stream_quality >= cascade_quality and stream_quality > 0
+        elif len(ref_strings) > _STREAM_SPLIT_REPAIR_RATIO * tier_spans:
+            # Most of the cascade's segments came from the merged-reference
+            # splitter, not from the tier that was selected.
+            trigger = "cascade_split_repaired"
+            selected = stream_quality >= cascade_quality
+        elif self._cascade_under_yield(ref_text, len(ref_strings)):
+            trigger = "cascade_under_yield"
+            selected = stream_quality >= cascade_quality
+        else:
+            trigger = "quality_margin"
+            selected = stream_quality >= cascade_quality + _STREAM_OVERRIDE_MARGIN
+        logger.info(
+            "Reference line stream: %d entries, quality %.2f vs cascade %s %.2f (%s) -> %s",
+            len(entries),
+            stream_quality,
+            tier,
+            cascade_quality,
+            trigger,
+            "selected" if selected else "kept cascade",
+        )
+        spans = _locate_segment_spans(segmentation.text, entries)
+        flags = (
+            trigger,
+            f"stream_quality_{stream_quality:.2f}",
+            f"cascade_quality_{cascade_quality:.2f}",
+            "stream_text_offsets",
+            *segmentation.reason_flags,
+        )
+        if not selected:
+            link_dois = link_dois_for_segments(ref_strings, stream.lines)
+            self._record_segmentation_attempt(
+                "line_stream",
+                segmentation.text,
+                spans=tuple(span for span in spans if span is not None),
+                selected=False,
+                reason_flags=flags,
+            )
+            return _StreamChoice(
+                selected=False,
+                ref_text=ref_text,
+                ref_strings=ref_strings,
+                spans=(),
+                link_dois=link_dois,
+            )
+        superseded = [
+            dataclasses.replace(
+                attempt,
+                selected=False,
+                reason_flags=(*attempt.reason_flags, "superseded_by_line_stream"),
+            )
+            if attempt.selected
+            else attempt
+            for attempt in self._segmentation_attempts
+        ]
+        self._segmentation_attempts[:] = superseded
+        if split_count:
+            self._record_warning(
+                WarningCode.REF_SEG_MERGE_SPLIT,
+                f"split merged line-stream entries into {split_count} more segment(s)",
+            )
+        self._record_segmentation_attempt(
+            "line_stream",
+            segmentation.text,
+            spans=tuple(span for span in spans if span is not None),
+            credible_starts=len(entries),
+            selected=True,
+            reason_flags=flags,
+        )
+        return _StreamChoice(
+            selected=True,
+            ref_text=segmentation.text,
+            ref_strings=entries,
+            spans=spans,
+            link_dois=entry_dois,
+        )
+
+    def _post_process_stream_entries(
+        self, segmentation: StreamSegmentation
+    ) -> tuple[list[str], list[bool], list[str | None], int]:
+        """The junk filter and merge splitter the cascade's segments get.
+
+        Entries opened by a verified numbering sequence skip the junk filter:
+        a short numbered entry without a year ("[3] Inwent: Internationale
+        Weiterbildung und Entwicklung") is still an entry. A split entry's
+        link DOI is dropped, as no piece can claim it.
+        """
+        entries: list[str] = []
+        protected: list[bool] = []
+        dois: list[str | None] = []
+        for entry, numbered, doi in zip(
+            segmentation.entries, segmentation.numbered, segmentation.link_dois, strict=True
+        ):
+            if not numbered and is_non_reference_segment(entry):
+                continue
+            entries.append(entry)
+            protected.append(numbered)
+            dois.append(doi)
+        if not self._settings.REF_SPLIT_MERGED_REFS or not entries:
+            return entries, protected, dois, 0
+        find_onsets = _onset_finder_for_bibliography(entries)
+        split_entries: list[str] = []
+        split_protected: list[bool] = []
+        split_dois: list[str | None] = []
+        added = 0
+        for entry, numbered, doi in zip(entries, protected, dois, strict=True):
+            try:
+                offsets = find_onsets(entry)
+            except Exception:  # noqa: BLE001 — never fail extraction over a split
+                offsets = []
+            bounds = [0, *offsets, len(entry)]
+            pieces = [entry[a:b].strip() for a, b in zip(bounds, bounds[1:], strict=False)]
+            if len(pieces) > 1 and all(pieces):
+                split_entries.extend(pieces)
+                split_protected.extend([numbered] + [False] * (len(pieces) - 1))
+                split_dois.extend([None] * len(pieces))
+                added += len(pieces) - 1
+            else:
+                split_entries.append(entry)
+                split_protected.append(numbered)
+                split_dois.append(doi)
+        return split_entries, split_protected, split_dois, added
+
+    def _cascade_selected_tier(self) -> tuple[str | None, int]:
+        """Strategy and span count of the cascade's selected attempt (the last one)."""
+        selected = [attempt for attempt in self._segmentation_attempts if attempt.selected]
+        if not selected:
+            return None, 0
+        return selected[-1].strategy, len(selected[-1].spans)
+
+    def _cascade_under_yield(self, ref_text: str, segment_count: int) -> bool:
+        """Pre-parse form of the receipt's credible-start check.
+
+        Counts entry starts (aligned layout onsets, printed markers, the
+        tiers' own credible starts), not rows: a reference split into several
+        sentence rows is still one entry.
+        """
+        credible = self._estimate_credible_source_starts(ref_text)
+        return bool(
+            credible is not None
+            and credible >= _STREAM_MIN_EVIDENCE
+            and segment_count < _STREAM_CREDIBLE_START_YIELD * credible
+        )
+
+    def _geom_line_predictor(self):
+        """Lazy per-line start probabilities from the geom segmenter."""
+
+        def predict(records: list[dict]) -> list[float]:
+            with LOCAL_INFERENCE_LOCK:
+                segmenter = _get_geom_segmenter(self._settings)
+                if segmenter is None:
+                    return []
+                return list(segmenter.line_start_probabilities(records))
+
+        return predict
+
+    def _parse_references_ner_with_links(
+        self, ref_strings: list[str], link_dois: list[str | None]
+    ) -> list[PaperReference]:
+        """NER parse, then fill a DOI from a link annotation where none was parsed."""
+        aligned = self._parse_references_ner_aligned(ref_strings)
+        if len(link_dois) == len(aligned):
+            filled = 0
+            for ref, doi in zip(aligned, link_dois, strict=True):
+                if ref is not None and doi and not ref.doi:
+                    ref.doi = doi
+                    filled += 1
+            if filled:
+                self._stream_reason_flags.add("doi_from_link_annotation")
+                logger.info("Filled %d reference DOI(s) from link annotations", filled)
+        return _sequence_references([ref for ref in aligned if ref is not None])

@@ -1016,6 +1016,11 @@ released.
   regions. It stays `null` when no layout region is recorded for the sentence,
   or when the sentence is printed on a later page than the region that began its
   paragraph. The v11 export schema changes only by describing these fields.
+- A paper whose DOI is printed only in a citation line that opens with the
+  year ("2017. Proc Soc 2, 20:1-15. https://doi.org/…"), as some journals print
+  it above the title, was exported with no DOI: the year was read as the number
+  of a reference-list entry. Numbered entries ("12. …", "[3] …") are still
+  references.
 - `bibr.Result(data)` loads exports written by newer releases of the same
   major version, as the additive-only policy promises. It previously rejected
   any unknown key and any `schema_version` other than the exact one it writes.
@@ -1166,6 +1171,48 @@ released.
 - Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
   were cut at the `<` when read as the paper's DOI or matched against a
   manifest's expected DOI. They are kept whole.
+- A PDF whose DOI is printed only in a repository banner up the page margin
+  ("… first published as 10.…/… on 1 May 1999. Downloaded from …"), or in a
+  masthead line the layout did not turn into a region, was exported with no
+  DOI. The identity stage now also reads the text layer of pages 1 and 2, in
+  any orientation, where the parsed text does not reach, including the banner
+  a publisher stamped on a scan. Invisible text (a scan's hidden OCR layer)
+  is not read. A banner's "first published as" names the paper. A text-layer
+  DOI printed in a reference entry, table or figure is rejected like the
+  region's text.
+- A footer DOI with the journal's ISSN on the next line ("…04.006" over
+  "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
+  (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
+  line's end into the next printed field, or that ends in a slash, is now
+  rejected as `line_join_overrun`, and the text layer's reading stands. A
+  parsed DOI that lost its last characters gives way to the complete reading
+  of its printed line.
+- A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
+  figure note outranked the paper's own DOI printed as a doi.org link on page
+  1. Outside the front matter and the running headers and footers, a labelled
+  DOI now ranks below every front-matter candidate. It still names the paper
+  when it is the only candidate left, as in a preprint's "The present work has
+  been shared as a preprint on …, doi: …"; two different ones are reported as
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside an
+  author-led or numbered citation (a reference entry outside the located
+  reference list, or a figure's source note citing another work) no longer
+  names the paper, and neither does the tail of a reference entry split into
+  a line of its own that opens with a page range, a volume or the DOI label
+  ("131-138. doi: …"). A line holding nothing but the labelled DOI ("DOI: …")
+  is not such a tail, so a paper's own DOI line after cover pages still names
+  it. An eLife JATS or HTML file's labelled figure DOIs no longer raise
+  `VAL_DOI_AMBIGUOUS` against its article-id.
+- A correction notice printed "DOI of original article: …" on its first page
+  and exported the corrected article's DOI as its own. That DOI is now the
+  notice's parent, like a "parent article DOI".
+- A reference entry under a "References" (or "Bibliography") heading that the
+  section classifier left untyped counted as body text, so its labelled DOI
+  could name a paper that prints none of its own. From page 3 on, the section
+  header now marks the section as the reference list for the DOI choice,
+  whether the page prints it or the parser made it up from the layout's
+  reference label. On pages 1 and 2 the section keeps its own type: there the
+  parser can head a "Cite as" box that the layout labels as reference text
+  "References", and the paper's own DOI in it still names the paper.
 - Standard funding wording reached neither structured funding (`funding`, and
   so `funding_match`) in the default shadow integrity-statement mode nor
   `funding_statement` in active mode: "This project has received funding from
@@ -1642,6 +1689,73 @@ released.
   `reason:authors_script_mismatch`, then the empty-author recovery retries
   against the byline alone. Papers that also print the romanised names keep
   them.
+- Reference lists are also segmented as one stream of printed lines, with the
+  evidence for where each entry starts pooled instead of tried tier by tier. The
+  cascade reconciled two readings of the list (layout rows with their line
+  breaks flattened, and text-layer lines captured from the first "References"
+  heading to the end of the file) through exact text probes under one gate, and
+  a declined tier's evidence was thrown away, so a list crossing a page break
+  with a running head in it, a list the geometry model labelled well but whose
+  lines did not align, or a list of short entries came out merged, cut short or
+  dropped. The stream reads the text-layer lines inside the located section's
+  layout boxes, page after page (a box without usable text-layer lines, such as
+  an OCR'd or scanned page, contributes its text line by line), keeps a line
+  the box edge cut short by a letter or two in the row text, reads a box that
+  repeats an aggregate box's text once, drops manuscript line numbers and page
+  furniture, and stops at a heading that ends the list (Acknowledgements,
+  Funding, Appendix, Data availability and the like) when the line before it
+  closes an entry. Furniture is a line in a header, footer or page-number box,
+  or a line at a page edge that is a running head (its text, digits masked,
+  recurs at an edge of two or more pages and has six letters or more, and it
+  holds no DOI, URL, arXiv id or ISBN) or a page number (a lone number whose
+  offset from the page index recurs on another page). Each line's start is voted
+  by the geometry model's per-line probability, author/year, Vancouver, all-caps
+  and corporate onsets, "same author" dashes, the first line of a layout box,
+  hanging indent, a vertical gap and the previous line ending in a DOI, a URL or
+  a DOI link. A line opening on an OCR speck glued to a family name (".lehrer,
+  H. R.") is not voted down as a continuation. A printed sequence counting up by
+  one ("[n]", "n.", "(n)", roman numerals, a second list numbered from 1 again
+  included), bullets or bracketed labels decide instead when the list has them.
+  A sequence keeps one marker style, and a line numbered 0, opening on an
+  edition, supplement or month word ("3. Aufl.", "10 Suppl") or standing off the
+  list's marker column takes no place in it. An entry printed out of order still
+  opens, and a numbered list ends with its last entry's box. A second work
+  printed on its own line under the same number opens an entry when it starts a
+  reference box of its own and both works carry a date or DOI; a manuscript
+  history line after the list ("Received April 26, 1972.") never does. A
+  fragment that opens in lower case with no date or DOI rejoins the entry before
+  it, an entry holding two DOIs is split after the first, and a numbered entry
+  is never dropped as a short fragment without a year. A reference list split
+  into two sections, a non-English heading ("Referencias") over the first page
+  and a synthetic "References" section for the reference boxes on the next, is
+  read whole. Parsing is unchanged.
+- The cascade still runs, and its result stands unless it fell back (region
+  recovery, CRF, marker split) or found nothing, most of its entries came from
+  the merged-reference splitter, or it under-yielded against its credible entry
+  starts; then the line stream's result is used when its quality is at least the
+  cascade's. A selected geometry or LLM-anchor result gives way only to a stream
+  whose quality is higher by 0.15. The stream never replaces a result with fewer
+  entries than that result has distinct ones (a segment read twice, nearly alike
+  and with the same years, counts once), nor on a paper with a rotated reference
+  page, where its line geometry is unreliable. Quality is the share of the
+  section's full text the entries cover (so text the stream leaves out costs it)
+  times the share of entries that look like one complete reference: not a
+  fragment, and not a merge (two DOIs, two publication years once access and
+  first-publication dates are set aside, two author-date or Vancouver dates, a
+  second reference the merged-reference splitter can see, or an outlier length).
+  Both segmentations are scored the same way, a numbered entry counting as
+  complete in either. `extraction.diagnostics.reference_yield.attempts` records
+  the stream as a `line_stream` attempt with the reason for the decision and
+  both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
+  attempt is marked `superseded_by_line_stream`. The stream's spans index its
+  own text (flag `stream_text_offsets`); a joined split section is flagged
+  `split_section_joined`. Any error in the stream keeps the cascade's result.
+- Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
+  a list numbered that way, as arabic ones already were. They were parsed into
+  the first author ("V. Lal, S. K. L.").
+- PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
+  printed line. The page lines the reference line stream reads break there
+  again; the geometry segmenter's own line capture is unchanged.
 - PDF paragraphs that run across a page break no longer split in two when a
   footnote or a figure intervenes. A join across such a region (or a heading
   demoted to body text) needs a lowercase continuation on the same or the
@@ -1762,6 +1876,16 @@ released.
   `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
   share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
   the same time.
+- `bibr.ocr.pdf_links.read_uri_links()` reads a PDF's URI link annotations
+  (page, rectangle, target), and `doi_from_uri()` the DOI a doi.org or `doi:`
+  link targets, with HTML entities and percent-encoding undone; a target holding
+  a NUL or a replacement character, or not DOI-shaped once decoded, yields none.
+  The PDF inspection now captures every page's text-layer lines and its URI
+  links in the layout frame, numbered by PDF page. A reference whose text prints
+  no DOI takes the one targeted by the only DOI link over its own lines, as
+  MDPI, BMJ and IOP print it only behind a "[CrossRef]" label; the reference
+  yield receipt records `doi_from_link_annotation`. This applies with the NER
+  parser, the default.
 
 ### Changed
 
@@ -1782,6 +1906,20 @@ released.
   process rotating only its own file, so records are neither lost nor
   duplicated across rotation. Operators tallying token usage must read both
   files: `METER_LOG_PATH` alone holds no extraction records.
+- The identity stage is the only step that sets `metadata.doi`. The
+  core-metadata extractor no longer looks for a DOI, and the no-LLM
+  document-information fallback no longer fills one from a PDF's Subject or
+  Keywords: a DOI the paper does not print is never exported. A PDF's
+  document-information DOIs and its DOI link targets are recorded as
+  `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
+  `pdf_info`, `link_annotation`); they take no part in the selection.
+  `extraction.fields.doi.source` names the selected candidate's `source_kind`
+  (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
+  `native` for a JATS or HTML article-id) instead of `identity`. The export
+  schema changes only by describing the new receipt values.
+- The OCR cache format is version 11: a bundle also holds the page text lines
+  and URI links the reference line stream reads. Older bundles are re-run
+  rather than read without them.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
