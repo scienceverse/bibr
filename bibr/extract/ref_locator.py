@@ -108,6 +108,32 @@ def _looks_like_terminal_reference_start(text: str) -> bool:
     )
 
 
+# A four-digit year, compared entry by entry between two printings of a list.
+_LIST_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}\b")
+
+# A row holding only a list number ("2.", "[3]"): old journals print the
+# number on its own line before the entry.
+_BARE_ENTRY_NUMBER_RE = re.compile(r"^\s*(?:\[\d{1,3}\]|\(\d{1,3}\)|\d{1,3}\.?)\s*$")
+
+# A references heading printed run-in at the start of a row and closed by a
+# period, colon or dash: "Bibliography.—1.", "REFERENCES: 1. Abel, …".
+_RUN_IN_REF_HEADING_RE = re.compile(
+    r"^\s*(?:references|bibliography|literature cited|works cited)"
+    r"\s*(?:[.:]\s*(?:[-–—]|&[mn]dash;)?|[-–—]|&[mn]dash;)\s*",
+    re.IGNORECASE,
+)
+
+
+def _reads_as_list_row(text: str) -> bool:
+    """Whether a row continues a reference list: a list number, an entry onset or a year."""
+    return bool(
+        _BARE_ENTRY_NUMBER_RE.match(text)
+        or _ENTRY_NUMBERING_RE.match(text)
+        or _AUTHOR_BYLINE_ONSET_RE.match(text)
+        or _LIST_YEAR_RE.search(text)
+    )
+
+
 class RefLocator:
     """Finds the metadata/reference row ranges in a paper's sentence stream."""
 
@@ -304,13 +330,17 @@ class RefLocator:
                 mask = self.sentences_df["section_name"] == section_name
                 if not mask.any():
                     continue
+                header_df: pd.DataFrame = self._drop_preceding_article_rows(
+                    self.sentences_df[mask].copy()
+                )
+                if header_df.empty:
+                    continue
                 mapped = self._canonical_map.get(CanonicalSection.REFERENCES)
                 if mapped is not None and mapped != section_name:
                     logger.info(
                         f"Header-alias override: using section '{section_name}' over "
                         f"canonical-map REFERENCES section '{mapped}'"
                     )
-                header_df: pd.DataFrame = self.sentences_df[mask].copy()
                 self._demote_overridden_references(section_name)
                 self._reclassify_as_references(header_df)
                 reclaimed = self._reclaim_boundary_orphans(header_df, section_name)
@@ -325,13 +355,15 @@ class RefLocator:
             model_header = self._model_reference_header()
             if model_header is not None:
                 mask = self.sentences_df["section_name"] == model_header
-                if mask.any():
+                header_df: pd.DataFrame = self._drop_preceding_article_rows(
+                    self.sentences_df[mask].copy()
+                )
+                if not header_df.empty:
                     logger.info(
                         f"Front-role model header: using section '{model_header}' "
                         "as the reference section"
                     )
                     self.contents.reference_boundary_reason_flags.append("front_role_ref_header")
-                    header_df: pd.DataFrame = self.sentences_df[mask].copy()
                     self._demote_overridden_references(model_header)
                     self._reclassify_as_references(header_df)
                     reclaimed = self._reclaim_boundary_orphans(header_df, model_header)
@@ -343,8 +375,8 @@ class RefLocator:
             # Create a boolean mask for where this section appears
             mask = self.sentences_df["section_name"] == ref_section_name
 
-            if mask.any():
-                ref_df: pd.DataFrame = self.sentences_df[mask].copy()
+            ref_df: pd.DataFrame = self._drop_preceding_article_rows(self.sentences_df[mask].copy())
+            if not ref_df.empty:
                 ref_df = self._reclaim_boundary_orphans(ref_df, ref_section_name)
                 return self._trim_terminal_boundary(ref_df)
 
@@ -354,10 +386,13 @@ class RefLocator:
         if self.contents.layout_hints:
             hint_labels = {label for label, _ in self.contents.layout_hints}
             if "reference" in hint_labels or "reference_content" in hint_labels:
-                ref_df = self._collect_last_unknown_section_rows()
-                self._reclassify_as_references(ref_df)
-                self._record_inferred_section(len(ref_df))
-                return self._trim_terminal_boundary(ref_df)
+                ref_df = self._drop_preceding_article_rows(
+                    self._collect_last_unknown_section_rows()
+                )
+                if not ref_df.empty:
+                    self._reclassify_as_references(ref_df)
+                    self._record_inferred_section(len(ref_df))
+                    return self._trim_terminal_boundary(ref_df)
 
         # Fallback 2: a section whose whole heading reads as a references
         # heading (any listed language) that the classifier did not type
@@ -368,14 +403,28 @@ class RefLocator:
         for section_name in reversed(self.sentences_df["section_name"].dropna().unique()):
             if _is_reference_heading(str(section_name)):
                 mask = self.sentences_df["section_name"] == section_name
-                if mask.any():
-                    fallback_df: pd.DataFrame = self.sentences_df[mask].copy()
+                fallback_df: pd.DataFrame = self._drop_preceding_article_rows(
+                    self.sentences_df[mask].copy()
+                )
+                if not fallback_df.empty:
                     logger.info(
                         f"Header-text fallback: using section '{section_name}' "
                         f"as reference section ({len(fallback_df)} rows)"
                     )
                     self._reclassify_as_references(fallback_df)
                     return self._trim_terminal_boundary(fallback_df)
+
+        # Last resorts, reached only when no section holds the list: a heading
+        # printed run-in at the start of a body row (its section stays a body
+        # section), then a references heading whose list the layout read as
+        # tables.
+        run_in_df = self._drop_preceding_article_rows(self._collect_run_in_heading_rows())
+        if not run_in_df.empty:
+            return self._trim_terminal_boundary(run_in_df)
+        table_df = self._drop_preceding_article_rows(self._collect_reference_table_rows())
+        if not table_df.empty:
+            self._reclassify_as_references(table_df)
+            return self._trim_terminal_boundary(table_df)
 
         raise ValueError("No reference section found.")
 
@@ -390,6 +439,161 @@ class RefLocator:
         warnings = getattr(self.contents, "processing_warnings", None)
         if isinstance(warnings, list) and warning not in warnings:
             warnings.append(warning)
+
+    def _add_boundary_flag(self, flag: str) -> None:
+        flags = getattr(self.contents, "reference_boundary_reason_flags", None)
+        if not isinstance(flags, list):
+            flags = []
+            self.contents.reference_boundary_reason_flags = flags
+        if flag not in flags:
+            flags.append(flag)
+
+    def _article_opening(self) -> tuple[object, int] | None:
+        """Page and text id of the title section's first row, when it is on the first page."""
+        df = self.sentences_df
+        if df.empty or not {"section_id", "text_id", "page_number"}.issubset(df.columns):
+            return None
+        title_ids = {
+            section.section_id
+            for section in self.contents.sections
+            if section.section_type == CanonicalSection.TITLE
+        }
+        title_rows = df[df["section_id"].isin(title_ids) & df["page_number"].notna()]
+        if title_rows.empty:
+            return None
+        first = title_rows.loc[title_rows["text_id"].idxmin()]
+        if first["page_number"] != df["page_number"].dropna().min():
+            return None
+        return first["page_number"], int(first["text_id"])
+
+    def _drop_preceding_article_rows(self, ref_df: pd.DataFrame) -> pd.DataFrame:
+        """Drop rows printed above this paper's title on its first page.
+
+        A scanned journal page can open with the end of the previous article,
+        whose reference list then sits above this paper's title and gets the
+        same heading. Rows before the title section's first row on that page
+        belong to the other article. Nothing changes when the title section
+        does not start on the document's first page.
+        """
+        if ref_df.empty or not {"text_id", "page_number"}.issubset(ref_df.columns):
+            return ref_df
+        opening = self._article_opening()
+        if opening is None:
+            return ref_df
+        page, first_text_id = opening
+        before = (ref_df["page_number"] == page) & (ref_df["text_id"] < first_text_id)
+        if not before.any():
+            return ref_df
+        logger.info(
+            "Dropped %d reference row(s) printed above the title on page %s",
+            int(before.sum()),
+            page,
+        )
+        self._add_boundary_flag("preceding_article_rows_dropped")
+        return ref_df[~before].copy()
+
+    def _collect_run_in_heading_rows(self) -> pd.DataFrame:
+        """Rows opened by a references heading printed run-in at the start of a body row.
+
+        An old journal prints "Bibliography.—1." inside the closing section, so
+        no section is headed by it. The list is that row, without the heading,
+        and the rows after it in the same section while they read as list rows
+        (a list number, an entry onset or a year); the first row that does not
+        (the next item on the page) ends it. The last such heading with at
+        least three dated rows is taken.
+        """
+        df = self.sentences_df
+        if df.empty or not {"text", "section_id"}.issubset(df.columns):
+            return df.iloc[0:0]
+        texts = df["text"].astype(str).tolist()
+        sections = df["section_id"].tolist()
+        for position in range(len(texts) - 1, -1, -1):
+            text = texts[position]
+            match = _RUN_IN_REF_HEADING_RE.match(text)
+            if match is None or not text.lstrip()[:1].isupper():
+                continue
+            rest = text[match.end() :].strip()
+            if rest and not (
+                _BARE_ENTRY_NUMBER_RE.match(rest) or _looks_like_terminal_reference_start(rest)
+            ):
+                continue
+            rows = [position]
+            dated = int(bool(_LIST_YEAR_RE.search(rest)))
+            for later in range(position + 1, len(texts)):
+                if sections[later] != sections[position] or not _reads_as_list_row(texts[later]):
+                    break
+                rows.append(later)
+                dated += int(bool(_LIST_YEAR_RE.search(texts[later])))
+            if dated < 3:
+                continue
+            ref_df = df.iloc[rows].copy()
+            ref_df.iloc[0, ref_df.columns.get_loc("text")] = rest
+            if not rest:
+                ref_df = ref_df.iloc[1:]
+            logger.info(
+                "Run-in heading fallback: %d rows after %r",
+                len(ref_df),
+                text[: match.end()],
+            )
+            self._add_boundary_flag("run_in_reference_heading")
+            return ref_df
+        return df.iloc[0:0]
+
+    def _collect_reference_table_rows(self) -> pd.DataFrame:
+        """Rows rebuilt from tables declared under a references heading that heads no rows.
+
+        The layout model can read a hanging-indent list ("Abramson, A. S.
+        1962:" in one column, the rest of the entry in the next) as a table.
+        The heading then heads no sentence and the list lives only in those
+        tables. Each table row becomes one row, its cells joined by spaces,
+        when at least half of all rows carry a year.
+        """
+        df = self.sentences_df
+        tables = list(getattr(self.contents, "tables", None) or [])
+        if not tables or "section_id" not in df.columns:
+            return df.iloc[0:0]
+        headed = set(df["section_id"].dropna().unique())
+        ref_sections = {
+            section.section_id: section
+            for section in self.contents.sections
+            if section.section_id not in headed
+            and (
+                section.section_type == CanonicalSection.REFERENCES
+                or _is_reference_heading(str(section.header or ""))
+            )
+        }
+        next_id = int(df["text_id"].max()) + 1 if "text_id" in df.columns and len(df) else 1
+        records: list[dict] = []
+        for table in sorted(tables, key=lambda t: (t.page_number or 0, t.table_id)):
+            section = ref_sections.get(getattr(table, "_body_section_id", None))
+            if section is None:
+                continue
+            for cells in table.contents:
+                # ``contents`` stringifies an empty pandas cell as "nan".
+                text = " ".join(
+                    " ".join(str(cell).split())
+                    for cell in cells
+                    if str(cell).strip() and str(cell) not in {"nan", "None"}
+                )
+                if not text:
+                    continue
+                records.append(
+                    {
+                        "text_id": next_id + len(records),
+                        "section_id": section.section_id,
+                        "paragraph_id": -1,
+                        "text": text,
+                        "section_name": section.header,
+                        "section_type": section.section_type,
+                        "page_number": table.page_number,
+                    }
+                )
+        dated = sum(bool(_LIST_YEAR_RE.search(record["text"])) for record in records)
+        if len(records) < 3 or 2 * dated < len(records):
+            return df.iloc[0:0]
+        logger.info("Reference-table fallback: %d rows from tables", len(records))
+        self._add_boundary_flag("reference_table_rows")
+        return pd.DataFrame(records, columns=list(df.columns) or None)
 
     def _trim_terminal_boundary(self, ref_df: pd.DataFrame) -> pd.DataFrame:
         """Trim only a strong terminal transition after genuine ref rows.
