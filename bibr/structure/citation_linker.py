@@ -1434,13 +1434,25 @@ def _dedupe_candidates(candidates: list[CitationCandidate]) -> list[CitationCand
     return out
 
 
-def _detect_candidates(sentences, sections, references):
-    """Run every non-LLM citation tier. Synchronous; see the caller's note."""
+def _detect_candidates(sentences, sections, references, references_from_notes=False):
+    """Run every non-LLM citation tier. Synchronous; see the caller's note.
+
+    With *references_from_notes* (the list was read from the paper's notes) a
+    number in the text is a note mark, not a reference number, so the numeric
+    tiers resolve none; the notes are linked by their footnote xrefs.
+    """
     body_sents = _get_body_sentences(sentences, sections)
     valid_bib_ids = {reference.bib_id for reference in references}
-    citation_to_bib = _citation_number_to_bib_id(sentences, references)
-    valid_citation_numbers = set(citation_to_bib) or valid_bib_ids
-    reference_sources = _printed_reference_sources(sentences, sections, references, citation_to_bib)
+    if references_from_notes:
+        citation_to_bib: dict[int, int] = {}
+        valid_citation_numbers: set[int] = set()
+        reference_sources: dict[int, str] = {}
+    else:
+        citation_to_bib = _citation_number_to_bib_id(sentences, references)
+        valid_citation_numbers = set(citation_to_bib) or valid_bib_ids
+        reference_sources = _printed_reference_sources(
+            sentences, sections, references, citation_to_bib
+        )
     printed_numeric_ids = set(reference_sources)
 
     numeric = _numeric_candidates(body_sents, valid_citation_numbers)
@@ -1496,8 +1508,14 @@ async def detect_bib_xrefs_with_receipt(
     references,
     llm_client=None,
     file_hash="unknown",
+    *,
+    references_from_notes: bool = False,
 ) -> tuple[list[PaperXref], CitationLinkingReceipt]:
-    """Detect bib xrefs and return the full evidence/rejection receipt."""
+    """Detect bib xrefs and return the full evidence/rejection receipt.
+
+    *references_from_notes*: the references were read from the paper's notes
+    (``REF_FOOTNOTE_CITATIONS``), so only author-year citations link to them.
+    """
 
     # Every tier below the LLM one is synchronous regex work over the whole
     # body — median 23 ms, p99 120 ms, max 438 ms on 479 real PMC exports.
@@ -1511,7 +1529,9 @@ async def detect_bib_xrefs_with_receipt(
         parenthetical_score,
         flattened_score,
         candidates,
-    ) = await asyncio.to_thread(_detect_candidates, sentences, sections, references)
+    ) = await asyncio.to_thread(
+        _detect_candidates, sentences, sections, references, references_from_notes
+    )
 
     all_xrefs: list[PaperXref] = []
     seen: set[tuple[int, int]] = set()
@@ -1802,6 +1822,7 @@ async def detect_bib_xrefs(
     file_hash="unknown",
     *,
     receipt_sink: list[CitationLinkingReceipt] | None = None,
+    references_from_notes: bool = False,
 ) -> list[PaperXref]:
     """Compatibility wrapper preserving the public list-return contract."""
 
@@ -1811,6 +1832,7 @@ async def detect_bib_xrefs(
         references,
         llm_client=llm_client,
         file_hash=file_hash,
+        references_from_notes=references_from_notes,
     )
     if receipt_sink is not None:
         receipt_sink.append(receipt)

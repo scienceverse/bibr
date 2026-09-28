@@ -57,6 +57,7 @@ class WarningCode(StrEnum):
     # Reference section
     REF_SECTION_NOT_FOUND = "REF_SECTION_NOT_FOUND"
     REF_SECTION_INFERRED = "REF_SECTION_INFERRED"
+    REF_FOOTNOTE_CITATIONS = "REF_FOOTNOTE_CITATIONS"
     # Reference segmentation
     REF_SEG_GEOM_CASCADE = "REF_SEG_GEOM_CASCADE"
     REF_SEG_REGION_CASCADE = "REF_SEG_REGION_CASCADE"
@@ -146,10 +147,14 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     WarningCode.CITATION_LLM_FAILED: "The LLM citation-resolution call failed; the ambiguous "
     "in-text citations it was asked about stay unlinked.",
     WarningCode.REF_SECTION_NOT_FOUND: "No reference section was found; the reference list is "
-    "empty.",
+    "empty unless the references were read from the notes (REF_FOOTNOTE_CITATIONS).",
     WarningCode.REF_SECTION_INFERRED: "No heading was classified as the reference section; "
     "layout found reference regions, so the last unclassified section was taken as the "
     "reference list.",
+    WarningCode.REF_FOOTNOTE_CITATIONS: "No reference list was located, or the one located "
+    "yielded at most two references; the references were read from the citations in the "
+    "paper's footnotes and endnotes, one per cited work. The paper may still print a list the "
+    "locator missed.",
     WarningCode.REF_SEG_GEOM_CASCADE: "Geometry reference segmentation declined; the next tier "
     "segmented the references.",
     WarningCode.REF_SEG_REGION_CASCADE: "Region-anchor reference segmentation declined or found "

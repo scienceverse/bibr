@@ -712,8 +712,9 @@ class BibExport(BaseModel):
     bib_id: Id = Field(description="Primary key; 1-based position in the reference list.")
     text_id: Id | None = Field(
         default=None,
-        description="text[].text_id of the reference-section sentence holding this entry; null "
-        "when it could not be matched.",
+        description="text[].text_id of the sentence holding this entry: its row in the reference "
+        "section, or the note that first cites the work when the references were read from the "
+        "notes; null when it could not be matched.",
     )
     bib_type: BibTypeLiteral | None = Field(
         default=None, description="Reference type; null when not determined."
