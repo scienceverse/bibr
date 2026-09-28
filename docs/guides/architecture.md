@@ -73,7 +73,7 @@ Post-parse pipeline runs after structure parsing:
 
 - **Section classification** -- three-tier cascade maps headers to canonical IMRaD categories: alias lookup table, then a trained classifier model, then LLM fallback (`section_classifier.py`; see [Classifiers](classifiers.md))
 - **Study hierarchy** -- regex markers such as Study 1 and Experiment A establish separate section scopes before classification (`section_tree.py`)
-- **Metadata extraction** -- selected front-matter rows ground title, authors, abstract, DOI, and publication fields. JATS and HTML/ePub can supply preparsed metadata, avoiding the core metadata LLM call
+- **Metadata extraction** -- selected front-matter rows ground title, authors, abstract, and publication fields. JATS and HTML/ePub can supply preparsed metadata, avoiding the core metadata LLM call
 - **Paper classification** -- the default MiniLM multitask model predicts paper type and OECD domains from title/abstract; confidence gates and LLM fallback are described in [Classifiers](classifiers.md)
 - **Reference extraction** -- segmentation (default `geom`, a local geometry model, cascading through region anchors -> LLM -> CRF when geometry is absent or unconfident, then checked against a segmentation of the section's printed lines that pools the geometry model's line votes with numbering, author/year onsets, hanging indent, layout boxes and DOI links, and replaces a fallback, under-yielding or clearly weaker result) locates each reference; parsing (default `ner`, a local ModernBERT-CRF model, with `llm` for opt-in batched LLM parsing) extracts structured fields
 - **Citation linking** -- 3-tier hybrid approach: numeric bracket/superscript citations, author-year citations, then LLM fallback (`citation_linker.py`)
@@ -82,7 +82,13 @@ Post-parse pipeline runs after structure parsing:
 - **Source ownership** -- abstract spans, author grounding, and integrity-statement evidence are resolved against the selected article block. Ambiguous front matter can yield validation issues instead of metadata taken from another article in the file
 - **Field decisions** -- the title, authors, abstract, keywords, publication date, journal, publisher, paper type, integrity statements, structured funding and affiliations are each decided once, by one rule in `bibr/extract/field_decisions.py`, from the candidates their producers propose: the model's answer and its grounding repairs, the printed-row title fallbacks (`title_candidates.py`), the Abstract and Keywords sections, the PDF doc-info, the empty-author recovery and CRediT statement, the paper classifier, the integrity-statement resolver. The rule is the field's only writer; its receipt (the candidates considered, the one used, the rule) stays on `Paper.field_decisions` and gives `extraction.fields` its `source` and `rule`. The DOI is the identity stage's; the fields a record is built with (volume, issue, pages, ISSN, licence, language, identifiers) have one producer each; the JATS and HTML readers build the record they hand over; a run without an LLM decides no structured funding or affiliations. The structured-integrity call adds contribution roles to the decided authors afterwards, in place; the author receipt records it as a `contribution_roles` transform
 
-Identity validation and a core checkpoint run before enrichment. Extraction
+Identity validation and a core checkpoint run before enrichment. The identity
+stage alone sets the paper's DOI: it chooses among the DOIs the paper prints
+(sentences, page furniture, the input's structured metadata and, for a PDF,
+the text layer of pages 1 and 2) and records every candidate in
+`extraction.identity.receipt`. A DOI only the PDF's metadata or a link target
+carries is recorded in the receipt as an agreement-only row: it takes no part
+in the selection and is never exported. Extraction
 and enrichment have separate completion evidence, so a failed or delayed
 external lookup need not force OCR and extraction to run again. The
 integrity-statement resolver defaults to `PIPELINE_INTEGRITY_STATEMENT_MODE=shadow`:

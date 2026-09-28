@@ -601,16 +601,23 @@ def _field_states(paper: Paper, *, present: dict[str, bool], warnings: list) -> 
     export's merged warning rows.
     """
     from bibr.field_states import FieldScope, build_field_states
+    from bibr.pipeline.stages.identity import doi_field_source
 
     decisions = getattr(paper, "field_decisions", None)
+    sources = decisions.sources() if decisions is not None else {}
     selection = paper.doi_selection
+    selected = selection.selected if selection is not None else None
+    if selected is not None:
+        # The DOI is the identity stage's, not a field decision: its source is
+        # the kind of evidence the selected candidate was read from.
+        sources = {**sources, "doi": doi_field_source(selected.source_kind)}
     records = build_field_states(
         present=present,
-        sources=decisions.sources() if decisions is not None else {},
+        sources=sources,
         scope=paper.field_scope or FieldScope(),
         issues=paper.validation_issues,
         warnings=[ProcessingWarning.from_dict(row) for row in warnings],
-        doi_selected=selection is not None and selection.selected is not None,
+        doi_selected=selected is not None,
         rules=decisions.rules() if decisions is not None else None,
     )
     return FieldStatesExport.model_validate(

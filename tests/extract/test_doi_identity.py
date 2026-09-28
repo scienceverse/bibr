@@ -582,6 +582,36 @@ def test_www_doi_org_label_separates_journal_and_article_dois():
     assert selection.issues == ()
 
 
+def test_year_led_citation_header_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [("Title", CanonicalSection.TITLE, "A paper title", 1)],
+        headers=["2017. Proc Example Soc 2, 20:1-15. https://doi.org/10.1234/pes.v2i0.4064."],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/pes.v2i0.4064"
+    assert selection.selected.source_kind == "header"
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["12. Smith J. Earlier work. https://doi.org/10.1234/ref", "[3] https://doi.org/10.1234/ref"],
+)
+def test_numbered_reference_line_in_furniture_is_still_rejected(line):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents([("Title", CanonicalSection.TITLE, "A paper title", 1)], footers=[line])
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [c.rejection_reason for c in selection.candidates] == ["reference_candidate"]
+
+
 def test_marker_gated_registrant_wrap_is_bridged():
     """Live text of ``10.1016/j.lanwpc.2023.100933`` wraps between ``10.`` and ``1016``."""
 
@@ -742,11 +772,7 @@ def test_plos_figure_doi_on_page_one_is_still_a_component():
     ],
 )
 def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
-    from bibr.extract.doi_identity import (
-        collect_doi_candidates,
-        select_doi_candidates,
-        select_doi_from_text,
-    )
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     contents = _contents([("Title", CanonicalSection.TITLE, text, 1)])
     candidates = collect_doi_candidates(contents)
@@ -756,7 +782,6 @@ def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
         candidates,
         ExpectedIdentity(queue_record_id="record-1", expected_doi=doi, doi_required=True),
     )
-    from_text = select_doi_from_text(text)
 
     assert selection.selected is not None
     assert selection.selected.normalized == doi
@@ -764,8 +789,6 @@ def test_osf_hosted_preprint_doi_is_the_paper_doi(text, doi):
     assert expected.selected is not None
     assert expected.selected.normalized == doi
     assert expected.issues == ()
-    assert from_text.selected is not None
-    assert from_text.selected.normalized == doi
 
 
 @pytest.mark.parametrize(
@@ -931,29 +954,25 @@ def test_structured_article_doi_wins_over_component_dois_in_body_text():
     assert selection.selected is not None
     assert selection.selected.normalized == "10.7554/elife.00013"
     assert selection.selected.source_kind == "structured_metadata"
-    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+    # A DOI label in the body, outside the front matter, marks a cited or
+    # component DOI: it no longer ties with the article's own.
+    assert {c.selection_tier for c in selection.candidates if c.source_kind == "sentence"} == {1}
+    assert selection.issues == ()
 
 
 _SICI_DOI = "10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K"
 
 
 def test_sici_doi_is_selected_whole():
-    from bibr.extract.doi_identity import (
-        collect_doi_candidates,
-        select_doi_candidates,
-        select_doi_from_text,
-    )
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
     contents = _contents([("Title", CanonicalSection.TITLE, f"doi: {_SICI_DOI}", 1)])
 
     selection = select_doi_candidates(collect_doi_candidates(contents))
-    from_text = select_doi_from_text(f"doi: {_SICI_DOI}")
 
     assert selection.selected is not None
     assert selection.selected.raw == _SICI_DOI
     assert selection.selected.normalized == _SICI_DOI.casefold()
-    assert from_text.selected is not None
-    assert from_text.selected.normalized == _SICI_DOI.casefold()
 
 
 @pytest.mark.parametrize(
@@ -1103,3 +1122,305 @@ def test_doi_candidate_regex_does_not_backtrack_on_an_unclosed_bracket():
     for text in ("doi: 10.1234/<" + ":" * 100_000, "doi: 10.1234/<" + "a::" * 33_000):
         assert DOI_CANDIDATE_RE.search(text) is None
     assert time.perf_counter() - started < 2.0
+
+
+def test_a_doi_ending_in_a_slash_ran_on_into_the_next_field():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [], footers=["https://doi.org/10.1234/jex.2026.04.0061234-5678/\u00a9 2026 The Authors."]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    [candidate] = selection.candidates
+    assert candidate.normalized == "10.1234/jex.2026.04.0061234-5678/"
+    assert candidate.rejection_reason == "line_join_overrun"
+
+
+@pytest.mark.parametrize(
+    ("section_type", "page", "tier"),
+    [
+        (CanonicalSection.INTRODUCTION, 7, 1),
+        (CanonicalSection.INTRODUCTION, 2, 3),
+        (CanonicalSection.ABSTRACT, 3, 3),
+    ],
+)
+def test_a_doi_label_outranks_other_candidates_only_in_the_front_matter(section_type, page, tier):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    contents = _contents(
+        [("Section", section_type, "As shown before (doi: 10.1234/cited.1).", page)]
+    )
+
+    [candidate] = collect_doi_candidates(contents)
+
+    assert candidate.marker_kind == "explicit_doi"
+    assert candidate.selection_tier == tier
+
+
+def test_a_doi_label_in_the_running_footer_still_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [("Introduction", CanonicalSection.INTRODUCTION, "Body text (doi: 10.1234/cited.1).", 7)],
+        footers=["doi: 10.1234/own.9"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert (selection.selected.normalized, selection.selected.source_kind) == (
+        "10.1234/own.9",
+        "footer",
+    )
+    assert selection.selected.selection_tier == 3
+    assert selection.issues == ()
+
+
+def test_a_labelled_doi_outside_the_front_matter_names_the_paper_when_alone():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = (
+        "The present work has been shared as a preprint on an example server, "
+        "https://example.org/abc/, doi: 10.1234/own.9."
+    )
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                "References",
+                CanonicalSection.REFERENCES,
+                "Doe J (2020). Prior work. doi: 10.1234/x.1",
+                12,
+            ),
+            ("Acknowledgments", CanonicalSection.ACKNOWLEDGMENT, own, 15),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.9"
+    assert (selection.selected.selection_tier, selection.selected.semantic_context) == (
+        1,
+        "labelled_body",
+    )
+    assert selection.issues == ()
+
+
+def test_a_labelled_doi_outside_the_front_matter_never_beats_the_front_matter():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "https://doi.org/10.1234/own.1", 1),
+            (
+                "Discussion",
+                CanonicalSection.DISCUSSION,
+                "As shown before (doi: 10.1234/cited.2).",
+                7,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.1"
+    assert selection.issues == ()
+
+
+def test_two_labelled_dois_outside_the_front_matter_are_ambiguous():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                "Discussion",
+                CanonicalSection.DISCUSSION,
+                "As shown before (doi: 10.1234/cited.2).",
+                7,
+            ),
+            (
+                "Acknowledgments",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "Preprint doi: 10.1234/own.9.",
+                15,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
+@pytest.mark.parametrize(
+    ("text", "selected"),
+    [
+        # A figure's source note cites another work.
+        (
+            "From: Doe J, Roe R, The Example Group (2009). Reporting items. "
+            "Example Med 6(7): e1000097. doi:10.1234/cited.3",
+            None,
+        ),
+        # The article citing itself is still its own DOI.
+        (
+            "Cite this article: Doe J, Roe R (2020). A study of examples. "
+            "Example J 1: 2. doi: 10.1234/own.9",
+            "10.1234/own.9",
+        ),
+    ],
+)
+def test_a_labelled_doi_in_a_citation_is_a_cited_work(text, selected):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("Summary", CanonicalSection.UNKNOWN, text, 24),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert (selection.selected.normalized if selection.selected else None) == selected
+
+
+def test_a_correction_notice_names_the_original_article_as_its_parent():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            (
+                "Correction",
+                CanonicalSection.TITLE,
+                "DOI of original article: 10.1234/original.1",
+                1,
+            ),
+        ],
+        footers=["https://doi.org/10.1234/notice.2"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    parent = next(c for c in selection.candidates if c.normalized == "10.1234/original.1")
+    assert (parent.marker_kind, parent.rejection_reason) == ("parent_doi", "component_candidate")
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/notice.2"
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        "131-138. Doi: 10.1234/cited.5",
+        "prevalence and predictors. Example J. (2018) 18:38-44. doi: 10.1234/cited.5",
+        "DOI: 10.1234/cited.5, https://example.org/stable/5.",
+    ],
+)
+def test_the_tail_of_a_reference_entry_is_a_cited_work(tail):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("Works", CanonicalSection.UNKNOWN, tail, 12),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.semantic_context == "cited_work"
+    assert selection.selected is None
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["DOI: 10.1234/own.5", "doi:10.1234/own.5.", "DOI: https://doi.org/10.1234/own.5"],
+)
+def test_a_lone_doi_line_after_cover_pages_names_the_paper(line):
+    # Two cover pages push the article's first page to page 3, where its DOI
+    # line sits in an untyped section. A line holding only the labelled DOI is
+    # not the tail of a reference entry.
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Root", CanonicalSection.UNKNOWN, "Downloaded from the repository on 1 May 2026.", 1),
+            ("Article", CanonicalSection.UNKNOWN, "A study of examples", 3),
+            ("Article", CanonicalSection.UNKNOWN, line, 3),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.semantic_context == "labelled_body"
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.5"
+
+
+@pytest.mark.parametrize("page", [3, 5, 30])
+@pytest.mark.parametrize("header", ["References", "4. References", "Bibliography"])
+def test_a_doi_under_a_references_heading_is_a_reference_even_untyped(header, page):
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            (
+                header,
+                CanonicalSection.UNKNOWN,
+                "Journal of Examples, 88(1), 189-202. doi:10.1234/cited.6",
+                page,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    [candidate] = selection.candidates
+    assert candidate.rejection_reason == "reference_candidate"
+    assert selection.selected is None
+
+
+@pytest.mark.parametrize(
+    "cite_box",
+    [
+        "Doe, J., & Roe, R. (2022). A study of examples. Journal of Examples, 11(1),"
+        " 175-209. https://doi.org/10.1234/own.7",
+        "Citation: Doe J and Roe R (2022) A study of examples. J. Examples 13:812345."
+        " doi: 10.1234/own.7",
+    ],
+)
+def test_a_page_one_cite_box_under_a_made_up_references_heading_names_the_paper(cite_box):
+    # The layout labels a first-page "Cite as" box as reference text, and the
+    # parser heads its section "References" although the page prints no such
+    # heading. The paper's own DOI in the box still names it.
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            ("Title", CanonicalSection.TITLE, "A study of examples", 1),
+            ("References", CanonicalSection.UNKNOWN, cite_box, 1),
+            (
+                "References",
+                CanonicalSection.UNKNOWN,
+                "Smith, J. (2019). Examples. Journal of Cases, 70, 1-10."
+                " https://doi.org/10.1234/cited.8",
+                27,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1234/own.7"
+    cited = next(c for c in selection.candidates if c.normalized == "10.1234/cited.8")
+    assert cited.rejection_reason == "reference_candidate"
