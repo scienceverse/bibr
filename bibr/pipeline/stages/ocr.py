@@ -541,6 +541,7 @@ def ocr_page_regions(
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
     warning_sink: Callable[[ProcessingWarning], None] | None = None,
+    layer_fallback_sink: Callable[[int], None] | None = None,
 ) -> Coroutine[None, None, list[dict]]:
     """OCR all regions on a single page (shared between LitServe and local pipelines).
 
@@ -551,6 +552,11 @@ def ocr_page_regions(
     slots and filling them in after OCR completes.
     Regions pre-filled by ``fill_regions_from_native_text`` (flagged with
     ``_native_text_used=True``) are emitted directly without an OCR call.
+
+    On a scanned page whose invisible OCR layer was set aside (regions carry
+    ``_invisible_layer_text``), a region whose OCR request failed takes its
+    layer text instead, as does every region of a page for which OCR returns
+    no text at all, and ``layer_fallback_sink`` gets the page index.
 
     ``include_figures`` overrides ``Settings.FIGURE_IMAGES`` for this request
     when not None.
@@ -566,6 +572,7 @@ def ocr_page_regions(
         settings=settings,
         profile=profile,
         warning_sink=warning_sink,
+        layer_fallback_sink=layer_fallback_sink,
     )
 
 
@@ -581,6 +588,7 @@ async def _ocr_page_regions_impl(
     settings: GlobalSettings | None = None,
     profile: OcrProfile = GLM_PROFILE,
     warning_sink: Callable[[ProcessingWarning], None] | None = None,
+    layer_fallback_sink: Callable[[int], None] | None = None,
 ) -> list[dict]:
     """Implementation of ocr_page_regions; see public wrapper for documentation.
 
@@ -712,6 +720,7 @@ async def _ocr_page_regions_impl(
         # Fill pre-allocated slots in their original positions
         from bibr.exceptions import BibrError
 
+        failed_regions: dict[int, BaseException] = {}
         for (orig_idx, region, _, task_type, _), result in zip(ocr_tasks, ocr_results, strict=True):
             content: str = ""
             raw_content: str | None = None
@@ -728,10 +737,13 @@ async def _ocr_page_regions_impl(
                 # (429/502/503) is not one of them: see _ocr_server_gone.
                 raise result
             if isinstance(result, BaseException):
+                failed_regions[orig_idx] = result
                 # The region ships blank. Without an export-visible warning
                 # three failed regions in a 40-page paper look like missing
                 # paragraphs behind a clean receipt. The export names the
                 # error but not the OCR endpoint; the log keeps the raw text.
+                # A region with layer text is not blank: it is read from the
+                # layer below, and the page's OCR_TEXT_LAYER_FALLBACK names it.
                 where = f"page {page_idx + 1}, region {orig_idx}, task {task_type}"
                 warning = ProcessingWarning(
                     WarningCode.OCR_REGION_FAILED,
@@ -741,7 +753,7 @@ async def _ocr_page_regions_impl(
                 logger.warning(
                     "OCR failed for a region (%s): %s: %s", where, type(result).__name__, result
                 )
-                if warning_sink is not None:
+                if warning_sink is not None and not region.get("_invisible_layer_text"):
                     warning_sink(warning)
             else:
                 provider_finish_reason = getattr(result, "finish_reason", None)
@@ -796,6 +808,45 @@ async def _ocr_page_regions_impl(
                 raw_content=raw_content,
                 finish_reason=finish_reason,
             ).to_dict()
+
+        # A scanned page whose invisible OCR layer was set aside (see
+        # ``inspect_pdf``) was read from that layer before. A region whose OCR
+        # request failed (an error after the retries) takes its layer text as
+        # the native fill would have, whatever the other regions got. When OCR
+        # returns no text for any region of the page (an outage answering
+        # blank), every region takes its layer text. A blank answer on a page
+        # OCR read elsewhere means OCR works, so that region stays blank.
+        layer_tasks = [task for task in ocr_tasks if task[1].get("_invisible_layer_text")]
+        if layer_tasks:
+            page_blank = not any(
+                region_list[slot_map[task[0]]]["content"].strip() for task in ocr_tasks
+            )
+            refilled = [task for task in layer_tasks if page_blank or task[0] in failed_regions]
+            for orig_idx, region, *_ in refilled:
+                slot_idx = slot_map[orig_idx]
+                region_list[slot_idx] = OcrRegionResult.from_layout_region(
+                    {**region, "_native_text_used": True},
+                    slot_idx=slot_idx,
+                    content=region["_invisible_layer_text"],
+                ).to_dict()
+            if refilled:
+                # Export-visible and not final (NOT_FINAL_CODES): the text
+                # comes from the layer OCR replaced, so a later run with OCR
+                # answering should read the page again.
+                regions_text = ", ".join(str(task[0]) for task in refilled)
+                error = next(
+                    (failed_regions[t[0]] for t in refilled if t[0] in failed_regions), None
+                )
+                message = (
+                    "OCR returned no text for regions of a scanned page; read them from its "
+                    f"invisible text layer (page {page_idx + 1}, regions {regions_text})"
+                )
+                if error is not None:
+                    message += f": {describe_error(error)}"
+                if warning_sink is not None:
+                    warning_sink(ProcessingWarning(WarningCode.OCR_TEXT_LAYER_FALLBACK, message))
+                if layer_fallback_sink is not None:
+                    layer_fallback_sink(page_idx)
 
     # All slots are filled by this point — `None` placeholders only exist
     # mid-loop while OCR is in flight.
@@ -1002,7 +1053,13 @@ class OcrStage:
             # identity that no later probe looks up; storing it would be waste.
             if cache_on and (engine_needed or not automatic_backend):
                 for fs in pending:
-                    if fs.error is None and fs.ocr_regions is not None:
+                    # A page read from its text layer while OCR returned
+                    # nothing is OCR'd again by the next run, not replayed.
+                    layer_read = any(
+                        warning.code == WarningCode.OCR_TEXT_LAYER_FALLBACK
+                        for warning in fs.warnings
+                    )
+                    if fs.error is None and fs.ocr_regions is not None and not layer_read:
                         ocr_cache.store(fs, cfg, identity, fs.ocr_regions, settings)
         finally:
             # Always close the Rich Live progress so a CancelledError or
@@ -1106,6 +1163,7 @@ class OcrStage:
         profile: OcrProfile = ctx.scratch["ocr_profile"]
         try:
             fs_t0 = time.monotonic()
+            layer_fallback_pages: list[int] = []
             page_coros = [
                 ocr_page_regions(
                     page_img,
@@ -1118,6 +1176,7 @@ class OcrStage:
                     settings=ctx.settings,
                     profile=profile,
                     warning_sink=fs.warnings.append,
+                    layer_fallback_sink=layer_fallback_pages.append,
                 )
                 for orig_idx, page_img, regions in zip(
                     fs.page_indices, fs.page_images, fs.layout_results, strict=True
@@ -1186,6 +1245,15 @@ class OcrStage:
                     exc=errors[0],
                 )
                 return
+
+            if layer_fallback_pages:
+                logger.warning(
+                    "OCR returned no text for regions of %d scanned page(s) of %s (pages %s); "
+                    "read those regions from their invisible text layer instead",
+                    len(layer_fallback_pages),
+                    fs.path.name,
+                    ", ".join(str(index + 1) for index in sorted(layer_fallback_pages)),
+                )
 
             first_idx = fs.page_indices[0] if fs.page_indices else 0
             # Pure synchronous regex/text work over every region of the file.

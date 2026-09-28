@@ -918,6 +918,13 @@ class OcrOptions(_BibrSettings):
         "Off by default pending an eval of DOI furniture and front-matter effects; "
         "enable to A/B. Short running heads use the short-text allowance.",
     )
+    native_text_reject_invisible_layer: bool = Field(
+        True,
+        description="Read a scanned page with OCR even when it carries a text layer, if "
+        "the page is a page-sized image under invisible text (the searchable layer an "
+        "OCR engine adds to a scan). The legacy layer is often worse than OCR; disable "
+        "to trust it as before.",
+    )
     local_gpus: int = Field(
         1,
         description="Number of GPUs dedicated to the local OCR server (tensor parallelism). Also "

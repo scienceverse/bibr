@@ -270,6 +270,19 @@ released.
 
 ### Fixed
 
+- A scanned page that carries the invisible text layer an OCR engine adds to a
+  scan (a page-sized image under text in an invisible render mode, as Acrobat
+  Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
+  that legacy layer, which misread titles and garbled reference lists. No text
+  lines or font sizes are taken from such a page. If OCR returns no text for
+  the page, as in an OCR outage, its regions fall back to the layer text, and
+  so does any region of the page whose OCR request failed. The page then
+  carries an `OCR_TEXT_LAYER_FALLBACK` warning in place of `OCR_REGION_FAILED`
+  for those regions; serve does not cache such a result and the OCR cache does
+  not store it, so the next run reads the page with OCR again.
+  Pages whose text is mostly visible, including pages on a background image,
+  keep their text layer. Set `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to
+  trust these layers as before.
 - The local paper and section classifiers no longer take the GPU memory a
   managed vLLM server needs. Free VRAM was measured once and each model was
   checked against it alone, so both could land on CUDA when only one fit; the

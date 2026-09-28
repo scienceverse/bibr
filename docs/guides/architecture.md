@@ -54,7 +54,13 @@ under one PDFium walk. With `OCR_NATIVE_TEXT_ENABLED=true` (the default),
 qualifying text regions are filled from the PDF text layer and bypass OCR.
 Acceptance uses character-count and printable-text checks
 (`OCR_NATIVE_TEXT_MIN_CHARS=20`, `OCR_NATIVE_TEXT_MIN_PRINTABLE_RATIO=0.85`)
-plus guards for corrupt text. Remaining regions use the selected OCR runtime.
+plus guards for corrupt text. A scanned page whose text layer is invisible
+text over a page-sized image (the layer an OCR engine adds to a scan) is read
+by OCR instead (`OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=true`, the default);
+its layer text is used only when OCR returns no text for the page, or for a
+region whose OCR request failed; the page then carries an
+`OCR_TEXT_LAYER_FALLBACK` warning, and the OCR cache does not store the file.
+Remaining regions use the selected OCR runtime.
 Disabling the bypass leaves metadata, outline, and geometry inspection available.
 
 ### 3. Structure (`bibr/structure/pdf_parser.py`)
