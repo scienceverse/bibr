@@ -320,8 +320,8 @@ def test_heading_between_title_regions_blocks_continuation():
 def test_byline_doc_title_below_the_title_opens_its_own_section():
     """A byline labelled doc_title (old scan) is not joined into the title.
 
-    Regression: scans_ci20 W1977303185 lost its only author in the int1
-    preview when "ADRIAN LARNER" became part of the title section and the
+    Regression: an old scan lost its only author in an earlier
+    build when "ADRIAN LARNER" became part of the title section and the
     author call's narrowed context started after the title.
     """
     from bibr.structure.pdf_parser import PDFParser

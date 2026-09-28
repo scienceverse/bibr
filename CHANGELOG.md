@@ -270,6 +270,52 @@ released.
 
 ### Fixed
 
+- A court decision cited in a note is now a reference when the notes stand in
+  for the reference list. The reference parser read "Civ. 1re, 16 juill. 1998,
+  D. 1999. 306" as no work at all, kept the commentary before a decision ("…
+  en chocolat : TGI Laval, 16 févr. 2009, …") as its title, and exported each
+  second reporter after a semicolon ("; RLDI 2009, n° 50, p. 8") as a work of
+  its own. A decision (a court, chamber or parties, then a day-month-year
+  date) is now cut out of the note as one citation, titled by its court, date,
+  case number and parties ("Cass. 1re civ., 16 mai 2018, n° 15-14.023") and
+  dated by the year of its date, with the `ner` parse; its second reporters
+  are dropped. A dated newspaper ("Le Figaro, 18 déc. 2014") is no decision.
+  A decision cited by long party names keeps all of them ("CJEU, Bashar
+  Ibrahim and Others v. Bundesrepublik Deutschland and Bundesrepublik
+  Deutschland v. Taus Magamadov, …"), and a lead-in before the court ("See
+  CJEU, …") is dropped.
+- A surname the PDF text layer spaces out, as it does small capitals
+  ("Christine Ze l le r , Des enfants maltraités au Québec ?", "J.F. Bo u l a
+  is"), is joined again in a note citation when the notes stand in for the
+  reference list. Left spaced out it read as no name: the commentary before
+  it stayed in the citation, and the parser took byline and title for one
+  title. The repair needs a first name or initials before the surname and at
+  least two single-letter pieces in it, so "Y. Wu et al." stays as it is.
+- An undated note citation of a classical work by book and chapter ("Plinio,
+  Historia Natural, V, 45", "Diodoro de Sicilia, Biblioteca histórica, III,
+  32, 4.") keeps its author and work when the notes stand in for the
+  reference list. With the `ner` parse the tagger read the author, or
+  nothing, and no title, so the reference matched no work; a citation the
+  tagger gives no title now takes the work as its title.
+- A note citation whose title opens on a year ("Thomas A. Durkin and Gregory
+  E. Elliehausen, 1977 Consumer Credit Survey (Board of Governors of the
+  Federal Reserve System, 1978), p. 72") keeps its title when the notes stand
+  in for the reference list. With the `ner` parse the tagger read the title's
+  year as the work's year and the rest of the title as the container, so the
+  reference had no title and the wrong year. When the tagger gives no title
+  and its year is the one the title opens on, the title is kept whole and the
+  year comes from the bracketed imprint.
+- Initials joined by a hyphen after a period ("J.-M. Bruguière", "P.-B.
+  Hugenholtz") now read as a name in note citations, as "J-M." already did.
+  A citation opening on such a name after commentary ("… cité par P.-B.
+  Hugenholtz, « Chronique des Pays-Bas », …", "… (J.-M. Bruguière, Droit des
+  propriétés intellectuelles, Ellipses, 2018, p. 17)") was not found: the
+  commentary stayed its title, or the work was lost.
+- A note citation led in by "lire" ("À ce sujet, lire Jean Pineau, La
+  famille, …") or by an author's title after "par" ("… notamment par le
+  professeur Hélène Dumont, Le contrôle judiciaire …") now starts at the
+  author's name. The commentary before it had stayed in the citation, so the
+  parser took it for the title.
 - Native PDF text keeps the spaces between words at the edge of a layout
   region, and a ligature no longer splits a word. pdfium gives a space a flat
   box on the baseline, below the centre of the letters around it, so a region
@@ -1101,6 +1147,28 @@ released.
   printed above the title without a colon are still left out, and nothing is
   restored when another title row of the record prints the title without the
   label.
+- A paper deposited in HAL keeps the article's own spelling of its title when
+  the archive's cover page retyped it with a line-break hyphen lost
+  ("CADMIUMAND THALLIUM-CONTAINING" for the article's "CADMIUM-" over "AND
+  THALLIUM-CONTAINING"). The metadata LLM copies the cover, and grounding
+  accepted the copy because the cover prints it; the article's own title is
+  filed with the running heads as a repeat of the cover's. When the title is
+  printed on a page that carries HAL's archive notice, the next page's layout
+  title is the same text once spaces and hyphens are removed, and each word
+  the cover joined is one the article never prints, the article's word breaks
+  are taken and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_retyped_on_archive_cover`. A title whose letters differ from
+  the article's print (a misread legacy text layer, for example) keeps the
+  cover's text.
+- An anonymised manuscript that prints its title as a plain text row in the
+  body font gets that title. No layout label, capitals or heading marks the
+  row, and the front-role classifier can score it as abstract text, so the
+  front matter had no title candidate at all and the paper exported none.
+  When no candidate is a title, the first row of the first page now seeds
+  the title if it is 4 to 30 words on at most three rows, does not end like a
+  sentence or a field label, carries no evidence of anything else (only the
+  classifier's abstract guess), and an "Abstract" heading follows it; the
+  selected-record fallback then recovers it (`VAL_TITLE_RECOVERED`).
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
@@ -1818,6 +1886,50 @@ released.
   `reason:authors_script_mismatch`, then the empty-author recovery retries
   against the byline alone. Papers that also print the romanised names keep
   them.
+- PDF paragraphs that run across a page break no longer split in two when a
+  footnote or a figure intervenes. A join across such a region (or a heading
+  demoted to body text) needs a lowercase continuation on the same or the
+  next page, from a body-width row that does not end in a URL, so
+  front-matter rows and list items are not glued to what follows. A
+  footnote's xref anchors to the joined sentence printed on the note's page,
+  never to text printed after the note, such as a caption replayed from the
+  next page.
+  A paragraph ending in a closing quote or a footnote superscript, or in a
+  bare URL followed by a capitalised row, is no longer glued to the next
+  one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted
+  as a running header: only a repeated line in the margin band, or a block of
+  repeated rows such as a reprinted chart legend, is. On a sliced front page
+  (`pages=`), affiliation markers are stripped only from short, unterminated,
+  byline-shaped rows, so body citation superscripts there survive.
+- A title split across two `doc_title` regions is now joined into one title
+  section instead of truncating `detected_title` and stranding a level-1
+  section that later headings parent under; a first region that reads as a
+  journal masthead is not extended, and a later region that reads as a
+  personal-name byline keeps its own section, so the authors stay in the
+  byline. Numbered study headings ("2 Study 1",
+  "3. Experiment 2") now open scopes like unnumbered ones, so the second
+  study's Method/Results no longer fold under the first study's. Reference
+  and abstract hint regions reuse the adjacent printed heading when it spells
+  the hint's name differently ("Literature Cited", "5 References",
+  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
+  a front-page abstract) instead of leaving an empty printed section beside
+  a synthetic one; "Author summary", a later "Summary" or "Supplementary
+  references" stay separate sections. A "Reference List" heading now
+  classifies as References.
+- PDF float accounting no longer duplicates caption text that de-duplication
+  already consumed, and unowned captions replay where they were printed
+  instead of after all body text. Uppercase or unmarked panel titles with a
+  description ("(A) Congruent trials", "A Congruent trials") now reach the
+  figure caption instead of disappearing from the export. Dotted table
+  labels ("Table 3.1") no longer reserve a printed id, continuation pages
+  sharing one printed label no longer raise a false id-conflict warning, and
+  floats keep document order instead of being resorted by id. Header-only
+  tables (a `<th>` header with no rows, or a markdown header plus separator)
+  are kept instead of dropped and export their header row in `contents`; a
+  one-row region without `<th>` still drops, since that shape is usually a
+  publisher label or masthead box. A bare panel marker joins the vertically
+  nearest same-page figure group when one is near, and otherwise the next
+  labelled figure as before.
 - Reference lists are also segmented as one stream of printed lines, with the
   evidence for where each entry starts pooled instead of tried tier by tier. The
   cascade reconciled two readings of the list (layout rows with their line
@@ -1907,50 +2019,22 @@ released.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
-- PDF paragraphs that run across a page break no longer split in two when a
-  footnote or a figure intervenes. A join across such a region (or a heading
-  demoted to body text) needs a lowercase continuation on the same or the
-  next page, from a body-width row that does not end in a URL, so
-  front-matter rows and list items are not glued to what follows. A
-  footnote's xref anchors to the joined sentence printed on the note's page,
-  never to text printed after the note, such as a caption replayed from the
-  next page.
-  A paragraph ending in a closing quote or a footnote superscript, or in a
-  bare URL followed by a capitalised row, is no longer glued to the next
-  one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted
-  as a running header: only a repeated line in the margin band, or a block of
-  repeated rows such as a reprinted chart legend, is. On a sliced front page
-  (`pages=`), affiliation markers are stripped only from short, unterminated,
-  byline-shaped rows, so body citation superscripts there survive.
-- A title split across two `doc_title` regions is now joined into one title
-  section instead of truncating `detected_title` and stranding a level-1
-  section that later headings parent under; a first region that reads as a
-  journal masthead is not extended, and a later region that reads as a
-  personal-name byline keeps its own section, so the authors stay in the
-  byline. Numbered study headings ("2 Study 1",
-  "3. Experiment 2") now open scopes like unnumbered ones, so the second
-  study's Method/Results no longer fold under the first study's. Reference
-  and abstract hint regions reuse the adjacent printed heading when it spells
-  the hint's name differently ("Literature Cited", "5 References",
-  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
-  a front-page abstract) instead of leaving an empty printed section beside
-  a synthetic one; "Author summary", a later "Summary" or "Supplementary
-  references" stay separate sections. A "Reference List" heading now
-  classifies as References.
-- PDF float accounting no longer duplicates caption text that de-duplication
-  already consumed, and unowned captions replay where they were printed
-  instead of after all body text. Uppercase or unmarked panel titles with a
-  description ("(A) Congruent trials", "A Congruent trials") now reach the
-  figure caption instead of disappearing from the export. Dotted table
-  labels ("Table 3.1") no longer reserve a printed id, continuation pages
-  sharing one printed label no longer raise a false id-conflict warning, and
-  floats keep document order instead of being resorted by id. Header-only
-  tables (a `<th>` header with no rows, or a markdown header plus separator)
-  are kept instead of dropped and export their header row in `contents`; a
-  one-row region without `<th>` still drops, since that shape is usually a
-  publisher label or masthead box. A bare panel marker joins the vertically
-  nearest same-page figure group when one is near, and otherwise the next
-  labelled figure as before.
+- A reference printed as "SURNAME, Given — Title, Place, Publisher Year" gets
+  its byline and title from the text when the NER tagger tagged neither (the
+  reference was dropped), only the surname, or the given names as the start of
+  the title. The dash ends the byline; a title the tagger missed runs to its
+  first comma, and one it started on the given names keeps its end.
+  Dash-joined co-author lists and titles the tagger started after the dash are
+  left as they are.
+- A thesis title that opens on a quotation keeps its subtitle: the NER field
+  repair no longer cuts "“Somos as pessoas …”. Infância e cenários de
+  participação pública: … . 2014. 524 f. Tese …" at the closing quote, since a
+  thesis has no container for the title to run into. A thesis note run into
+  the title ("…,” Ph.D. dissertation, …") is still cut.
+- An editorial note printed as an entry of the reference list ("(This is a
+  series of short articles by … .)") is no longer exported as a reference: the
+  NER field repair clears an entry that is one parenthesised sentence of four
+  or more words with no digit in it.
 
 ### Added
 
@@ -2087,6 +2171,13 @@ released.
   process rotating only its own file, so records are neither lost nor
   duplicated across rotation. Operators tallying token usage must read both
   files: `METER_LOG_PATH` alone holds no extraction records.
+- The OCR cache format is version 11: a bundle also holds the page text lines
+  and URI links the reference line stream reads. Older bundles are re-run
+  rather than read without them.
+- The OCR cache format is version 12. A bundle stores its regions after the
+  native-text fill, and the cache key cannot see code changes, so a version 11
+  bundle would serve native text with the old word spacing and page box (see
+  Fixed); such bundles are re-run.
 - The identity stage is the only step that sets `metadata.doi`. The
   core-metadata extractor no longer looks for a DOI, and the no-LLM
   document-information fallback no longer fills one from a PDF's Subject or
@@ -2098,13 +2189,6 @@ released.
   (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
   `native` for a JATS or HTML article-id) instead of `identity`. The export
   schema changes only by describing the new receipt values.
-- The OCR cache format is version 11: a bundle also holds the page text lines
-  and URI links the reference line stream reads. Older bundles are re-run
-  rather than read without them.
-- The OCR cache format is version 12. A bundle stores its regions after the
-  native-text fill, and the cache key cannot see code changes, so a version 11
-  bundle would serve native text with the old word spacing and page box (see
-  Fixed); such bundles are re-run.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

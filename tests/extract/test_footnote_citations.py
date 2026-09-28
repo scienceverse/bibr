@@ -161,7 +161,7 @@ def test_a_lead_in_after_a_repeat_opens_the_next_work_whatever_its_byline():
         "Rapport fédéral-provincial territorial sur les femmes battues, présenté à la réunion des "
         "ministres responsables de la Condition féminine, Niagara-on-the-Lake, les 28-30 mai "
         "1984, ministère des Approvisionnements et Services Canada, 1984",
-        "Linda M c Le o d , La femme battue au Canada : un cercle vicieux, Ottawa, Conseil "
+        "Linda McLeod, La femme battue au Canada : un cercle vicieux, Ottawa, Conseil "
         "consultatif canadien de la situation de la femme, ministre des Approvisionnements et "
         "Services, 1980, p. 29.",
     ]
