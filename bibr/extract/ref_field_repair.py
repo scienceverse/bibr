@@ -14,10 +14,14 @@ text itself, without retraining:
   ("(Hindi)"), an ISBD statement of responsibility ("/ A. A. Yuldashev"), or a
   ", 2024. <notes>" year-and-notes tail;
 * an author span that swallowed the title after a dash ("LIPSZYC, Delia —
-  Domínio Público");
+  Domínio Público"), or a "SURNAME, Given — Title" byline the tagger left
+  untagged or cut at the surname ("CHAVES, Antônio — Direito Autoral de
+  Radiodifusão, S. Paulo, …");
 * a year taken from an access date ("Acesso em: 14 abr. 2022") although the
   reference prints its own publication year, or no year at all although the
-  reference prints exactly one.
+  reference prints exactly one;
+* an editorial note printed as a list entry of its own ("(This is a series of
+  short articles by …)"), which is no reference at all.
 
 Each rule fires only on a clear textual signal and leaves fields that look well
 formed alone: a cut keeps the part of the title before the signal, sibling
@@ -369,6 +373,30 @@ def _rule_title_url_tail(fields: dict[str, Any], _text: str) -> bool:
     return True
 
 
+# A thesis or dissertation note ("524 f. Tese (Doutoramento em …)", "PhD
+# thesis", "Dissertação (Mestrado …)", "Tesis doctoral", "Thèse"). The French
+# word needs its accent: unaccented it is the English "these" ("in these
+# proceedings").
+_THESIS_NOTE_RE = re.compile(
+    r"\b(?:tese|disserta[çc][ãa]o|tesis|thèse|thesis|dissertation)\b", re.IGNORECASE
+)
+
+
+def _thesis_subtitle(runon: str, title: str, text: str) -> bool:
+    """True when ``runon`` (the title past its closing quote) is a thesis subtitle.
+
+    A thesis has no container for the title to run into, so what follows the
+    quotation is the title's own subtitle ("“Somos as pessoas que temos de
+    escolher …”. Infância e cenários de participação pública: …. 2014. 524 f.
+    Tese …"). Holds when the reference prints a thesis note after the tagged
+    title and the run-on part is a phrase of at least three words without one.
+    """
+    if len(runon.split()) < 3 or _THESIS_NOTE_RE.search(runon):
+        return False
+    at = text.find(title)
+    return at >= 0 and _THESIS_NOTE_RE.search(text, at + len(title)) is not None
+
+
 def _rule_title_quote_runon(fields: dict[str, Any], text: str) -> bool:
     """A quoted title ends at its closing quote: cut what the tagger ran on into.
 
@@ -378,9 +406,10 @@ def _rule_title_quote_runon(fields: dict[str, Any], text: str) -> bool:
     the title or right before it in the reference), its first closing quote
     sits next to a comma or period (",”", ".”", "”.", "”,"), and more text
     follows. A quotation that merely starts the title ("“I spy with my little
-    eye!”: Breadth of attention …") is not cut, and titles the tagger already
-    ended at the quote are left as they are. The kept title is the text
-    between the quotes.
+    eye!”: Breadth of attention …") is not cut, nor is the subtitle that
+    follows the quotation in a thesis title (:func:`_thesis_subtitle`), and
+    titles the tagger already ended at the quote are left as they are. The
+    kept title is the text between the quotes.
     """
     title = fields.get("title")
     if not isinstance(title, str) or not title.strip():
@@ -409,6 +438,8 @@ def _rule_title_quote_runon(fields: dict[str, Any], text: str) -> bool:
     if not (head.rstrip("’'").endswith((",", ".")) or after.startswith((",", "."))):
         return False
     if not _has_word(after, 2):
+        return False
+    if _thesis_subtitle(after, stripped, text):
         return False
     head = _clean_cut(head).strip()
     if head.endswith(".") and not head.endswith(".."):
@@ -716,9 +747,123 @@ def _rule_year_from_text(fields: dict[str, Any], text: str) -> bool:
     return True
 
 
+# "CHAVES, Antônio — Direito Autoral de Radiodifusão, S. Paulo, Ed. …": a
+# byline of a surname in capitals and the given names (words, or initials
+# such as "V." and "J.-P."), a spaced dash, then the title up to the comma
+# before the imprint or source. A period after a given name ends the byline
+# ("BAY, József. Lengyel – Kastélypark" is a title with a dash).
+_GIVEN_NAME = r"(?:[^\W\d_]\.(?:-?[^\W\d_]\.)*|[^\W\d_][\w'’-]*)"
+_DASH_BYLINE_RE = re.compile(
+    r"(?P<byline>(?P<surname>[^\W\d_][\w'’-]*(?:\s[^\W\d_][\w'’-]*)?),\s*"
+    rf"{_GIVEN_NAME}(?:\s{_GIVEN_NAME}){{0,3}})\s+[—–]\s+(?=\S)"
+)
+# What follows the dash is another "Surname, Given" byline (a co-author list
+# joined by dashes, "EBEL, Petr – SCHMIDT, Ondřej. Z Trevisa …"): not a title.
+_BYLINE_AFTER_DASH_RE = re.compile(
+    r"[^\W\d_][\w'’‟-]*(?:\s[^\W\d_][\w'’‟-]*)?,\s*[^\W\d_][\w'’.-]*(?:\s[^\W\d_][\w'’.-]*){0,3}?"
+    r"\s*(?:[—–(:;\[]|\.(?:\s|$)|$)"
+)
+# Where the title after a dash byline ends: at its first comma, or at a period
+# closing a word ("… Colombiana. RIDI").
+_DASH_TITLE_END_RE = re.compile(r",\s|(?<=[^\W\d_]{3})\.(?:\s|$)")
+
+
+def _rule_dash_byline(fields: dict[str, Any], text: str) -> bool:
+    """ "SURNAME, Given — Title, Place, Publisher Year": the dash ends the byline.
+
+    The tagger misreads this style's byline: it tags nothing but the source
+    ("CHAVES, Antônio — Direito Autoral de Radiodifusão, S. Paulo, Ed. Rev. dos
+    Tribunais 1952"), only the surname ("HAMMES"), or the surname with the
+    given names starting the title ("FIGUEIREDO" + "Guilherme — Defesa de
+    alguns pontos …"). Fires only when the text opens with a surname in
+    capitals, a comma, one to four given names and a spaced dash; the tagged
+    author, if any, lies inside that byline; no title was tagged, or the tagged
+    one starts before the dash; and what follows the dash is neither another
+    byline nor a word in capitals ("KRÁL Pavel."). The byline becomes the
+    author. A tagged title keeps its end and loses only what precedes the
+    dash; an untagged one runs from the dash to its first comma, a period
+    closing a word, or the first span tagged as another field, whichever comes
+    first. A title the tagger started after the dash is left as it is.
+    """
+    lead = len(text) - len(text.lstrip())
+    match = _DASH_BYLINE_RE.match(text, lead)
+    if match is None:
+        return False
+    surname = match.group("surname")
+    if surname != surname.upper():
+        return False
+    body = match.end()
+    rest = text[body:]
+    first_word = rest.split(maxsplit=1)[0].strip(".,;:")
+    if _BYLINE_AFTER_DASH_RE.match(rest) or (
+        len(first_word) >= 3 and first_word.isalpha() and first_word.isupper()
+    ):
+        return False
+    byline = match.group("byline").strip()
+    authors = fields.get("authors")
+    authors = authors.strip() if isinstance(authors, str) else ""
+    if authors and not byline.startswith(authors.rstrip(".").rstrip()):
+        return False
+    title = fields.get("title")
+    title = title.strip() if isinstance(title, str) else ""
+    end = len(text)
+    tagged_end = None
+    if title:
+        at = text.find(title, lead)
+        if at < 0 or at >= body:
+            return False
+        if at + len(title) > body:
+            tagged_end = at + len(title)
+    if tagged_end is not None:
+        end = tagged_end
+    else:
+        stop = _DASH_TITLE_END_RE.search(text, body)
+        if stop is not None:
+            end = stop.start()
+    for name in (*_OTHER_SPAN_FIELDS, "year"):
+        value = fields.get(name)
+        if value is None or value == "":
+            continue
+        at = text.find(str(value).strip(" ,.;:"), body)
+        if at >= 0:
+            end = min(end, at)
+    new_title = _clean_cut(text[body:end]).rstrip(".").strip()
+    if len(new_title.split()) < 2 or not _has_word(new_title, 3):
+        return False
+    fields["authors"] = byline
+    fields["title"] = new_title
+    return True
+
+
+# One parenthesised sentence and nothing else, with no number in it.
+_EDITORIAL_NOTE_RE = re.compile(r"\((?P<body>[^()\d]+[.!?])\s*\)\.?")
+
+
+def _rule_editorial_note(fields: dict[str, Any], text: str) -> bool:
+    """A list entry that is one sentence in parentheses is a note, not a reference.
+
+    "(This is a series of short articles by Adler and various pupils which
+    show in more detail the general theory.)" annotates the entry above it;
+    the tagger reads it as a title and the reference list gains an entry that
+    matches nothing. Fires when the whole text is a parenthesised sentence of
+    at least four words with no digit (so no year, volume or page) and a field
+    was tagged; every field is cleared, so the entry is dropped.
+    """
+    match = _EDITORIAL_NOTE_RE.fullmatch(text.strip())
+    if match is None or len(match.group("body").split()) < 4:
+        return False
+    tagged = [name for name, value in fields.items() if value not in (None, "", [], False)]
+    if not tagged:
+        return False
+    for name in tagged:
+        fields[name] = None
+    return True
+
+
 _RULES: tuple[tuple[str, Callable[[dict[str, Any], str], bool]], ...] = (
     ("web_lead_title", _rule_web_lead_title),
     ("author_dash_title", _rule_author_dash_title),
+    ("dash_byline", _rule_dash_byline),
     ("title_url_tail", _rule_title_url_tail),
     ("title_quote_runon", _rule_title_quote_runon),
     ("title_dateline_tail", _rule_title_dateline_tail),
@@ -729,6 +874,7 @@ _RULES: tuple[tuple[str, Callable[[dict[str, Any], str], bool]], ...] = (
     ("title_imprint_tail", _rule_title_imprint_tail),
     ("year_not_access_date", _rule_year_not_access_date),
     ("year_from_text", _rule_year_from_text),
+    ("editorial_note", _rule_editorial_note),
 )
 
 

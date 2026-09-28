@@ -1,8 +1,8 @@
 """A byline printed above the title that layout labelled a page header.
 
-W4319033756 sets "Hubert Heinen" over "German-Texan Attitudes toward
-the Civil War"; W4391777158 sets "Eva-Maria Biermann-Ratjen" over its
-chapter title, beside the journal's page head. Layout labels both name rows
+A history paper sets "Hubert Heinen" over "German-Texan Attitudes toward
+the Civil War"; a German psychotherapy chapter sets "Eva-Maria Biermann-Ratjen"
+over its chapter title, beside the journal's page head. Layout labels both name rows
 headers, the parser files them with the running heads, and neither front matter
 had the author's name ahead of the abstract. Geometry is from the papers; body
 text is placeholder.
@@ -134,8 +134,7 @@ def test_only_the_name_row_of_a_two_part_page_head_is_admitted():
         ("Journal of Southern History", (65.0, 229.0, 270.0, 249.0)),  # not a name
         ("BMC Public Health", (65.0, 229.0, 270.0, 249.0)),  # a banner in capitals
         ("CASE REPORT", (65.0, 229.0, 270.0, 249.0)),
-        # Name-shaped journal and article-type heads (W4248753238,
-        # W4410919437).
+        # Name-shaped journal and article-type heads, as two papers print them.
         ("Educational Review", (102.0, 229.0, 227.0, 244.0)),
         ("Original Manuscript", (102.0, 229.0, 280.0, 248.0)),
         ("Hubert Heinen", (65.0, 60.0, 270.0, 80.0)),  # far above the title
@@ -151,7 +150,7 @@ def test_other_page_heads_stay_out(text, bbox):
 
 
 def test_a_running_head_that_repeats_the_title_stays_out():
-    """osf_7fvr9 sets its short title as the running head."""
+    """A preprint sets its short title as the running head."""
 
     title = "Remythologising Satan: A New Version of The Fall of Lucifer."
     contents = _contents([("Remythologising Satan.", (116.0, 229.0, 315.0, 246.0))], title=title)
@@ -185,7 +184,7 @@ KEYWORDS = (
 
 
 def _chapter_contents() -> PaperContents:
-    """W4391777158: name and journal page heads, title, abstract, keywords."""
+    """The German chapter: name and journal page heads, title, abstract, keywords."""
 
     title_box = (102.0, 122.0, 900.0, 177.0)
     abstract_box = (101.0, 315.0, 928.0, 376.0)

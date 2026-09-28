@@ -2,14 +2,14 @@
 
 From dev-set scans (texts shortened from the real entries):
 
-* W2084009407 (1930s author-year list): "Ehrke, G., 1931, Arch.
+* A 1930s botany paper's author-year list: "Ehrke, G., 1931, Arch.
   wissensch. Bot., 13, 221; 1932, 17, 650." holds two works; the second has no
   byline of its own, so the parser needs the byline in front of it.
-* W1981667543: entries that open with the "same author" dash
+* An early cytology list: entries that open with the "same author" dash
   ("-1931b. The cytological theory …") run on after the entry above, on the
   same line or on a new line of the same segment, in both the cascade's and
   the line stream's segments.
-* W1512170573 (numbered physics list): one number holds several
+* A numbered physics list: one number holds several
   works, each with its own initials-first byline after the previous work's
   pages ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …"; "[30] J.F.
   Plebanski, …, 2511; J. Samuel, …"), and entries reach the parser cut into a
@@ -177,6 +177,58 @@ def test_gost_year_areas_are_not_dash_entries():
     ]
 
     assert _split_inline_dash_entries(gost, None) == (gost, None, 0)
+
+
+@pytest.mark.parametrize(
+    "area",
+    [
+        "N 5. S. 12–15.",  # issue number
+        "Vyp. 5. S. 20–31.",  # issue (vypusk)
+        "Ch. 2. S. 1–9.",  # part (chast')
+        "Kn. 3. S. 40–48.",  # book (kniga)
+        "Vol 7. P. 1–9.",  # volume without its period
+        "Vol XII. P. 1–9.",
+    ],
+)
+def test_gost_issue_part_and_book_areas_are_not_dash_entries(area):
+    # The year area of a transliterated GOST 7.1 list can go on to the issue
+    # ("N 5", "Vyp. 5"), part ("Ch. 2") or book ("Kn. 3") area, and a volume
+    # can lose its period (entries in the shape of the GOST test above).
+    gost = [
+        f"Ivanov I. I. Teoriya igr // Voprosy ekonomiki.\n– 2001. {area}",
+        f"Petrov P. P. Rynok truda // Ekonomist.\n– 2003. {area}",
+        f"Sidorov S. S. Institutsii // Mir Rossii. – 2005. {area}",
+    ]
+
+    assert _split_inline_dash_entries(gost, None) == (gost, None, 0)
+
+
+def test_cyrillic_gost_year_areas_are_not_dash_entries():
+    # The Cyrillic forms (Т., Вып., Ч., Кн., С., №) open with no Latin
+    # capital, so the dash split never reads them as an entry's title.
+    gost = [
+        "Иванов И. И. Теория игр // Вопросы экономики.\n– 2001. Т. 5, № 3. С. 12–15.",
+        "Петров П. П. Рынок труда // Экономист.\n– 2003. Вып. 4. С. 20–31.",
+        "Сидоров С. С. Институции // Мир России.\n– 2005. Ч. 2, Кн. 1. С. 1–9.",
+    ]
+
+    assert _split_inline_dash_entries(gost, None) == (gost, None, 0)
+
+
+@pytest.mark.parametrize(
+    "title",
+    ["N uptake by wheat roots.", "Vol de nuit des oiseaux.", "Volatile oils of Mentha."],
+)
+def test_a_dash_entry_title_may_open_with_n_or_vol(title):
+    entry = (
+        "Sax, K. 1932. Crossing over. J. Arn. Arb. 13: 180-212."
+        f" -1934. {title} Am. Nat. 68: 113-56."
+    )
+
+    strings, _, added = _split_inline_dash_entries([*_DASH_SEGMENTS, entry], None)
+
+    assert strings[-1] == f"-1934. {title} Am. Nat. 68: 113-56."
+    assert added == 6
 
 
 def test_a_dash_entry_title_may_open_with_an_area_word():
@@ -397,7 +449,7 @@ _OPEN_ENTRY = (
             "Romano, J.D., Spatial infinity, Class. Quant. Grav., 9 (1992), 1069-1100.",
             "[5]",
         ),
-        # W2133176560: the OCR read "[5]" as "[S]", and the list
+        # A scanned materials-science list: the OCR read "[5]" as "[S]", and the list
         # prints [5] before [4].
         (
             "[3] DEMUROV (D. G.), VENEVTSEV (Yu. N.), K~ist~lgraphiya, 1971, 16, 168.",
@@ -411,7 +463,7 @@ _OPEN_ENTRY = (
             " Compounds. Pergamon PressOxford, 1969.",
             "[4]",
         ),
-        # W4379468209: the entry above is whole; the fragment
+        # An IEEE-style list: the entry above is whole; the fragment
         # ends the entry before it, which the reading order put earlier.
         (
             "[66] Y. Li, X. Huang, and G. Zhao, \u201cMicro-expression action unit detection with"

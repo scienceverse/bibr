@@ -59,6 +59,8 @@ async def test_degraded_result_is_not_cached_and_the_next_request_reruns(tmp_pat
         ({"paper_id": "p"}, True),
         (_payload(warnings=[{"code": "LOW_TEXT_QUALITY", "message": "m"}]), True),
         (_payload(warnings=[{"code": "OCR_REGION_FAILED", "message": "m"}]), False),
+        # Text read from a scan's layer during an OCR outage; OCR may answer next time.
+        (_payload(warnings=[{"code": "OCR_TEXT_LAYER_FALLBACK", "message": "m"}]), False),
         (_payload(warnings=[{"code": "CITATION_LLM_FAILED", "message": "m"}]), False),
         (
             _payload(

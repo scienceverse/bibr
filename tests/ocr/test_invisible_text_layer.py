@@ -12,9 +12,9 @@ from __future__ import annotations
 import pytest
 
 # Front matter of the dev targets (gold titles, a stamp, an author line).
-_TITLE = "Ultrahigh Carbon Steels, Damascus Steels and Ancient Blacksmiths"  # W1968665195
+_TITLE = "Ultrahigh Carbon Steels, Damascus Steels and Ancient Blacksmiths"  # a metallurgy scan
 _AUTHORS = "Oleg D. Sherby and Jeffrey Wadsworth"
-_STAMP = "Downloaded by [Northwestern University] at 02:34 05 June 2016"  # W2061615921
+_STAMP = "Downloaded by [Northwestern University] at 02:34 05 June 2016"  # a publisher-archive scan
 _BODY = [
     "The history of ultrahigh carbon steels is traced from ancient times.",
     "Damascus swords were forged from cakes of steel made in India.",
@@ -169,19 +169,19 @@ _LAYER = [_TITLE, _AUTHORS, *_BODY]
 
 
 def test_page_image_under_invisible_text_is_a_scan():
-    """W1968665195: the scan is painted first, then 795 mode-3 text objects."""
+    """The metallurgy scan: the image is painted first, then 795 mode-3 text objects."""
     pdf = _pdf([{"media": (0, 0, 592, 836), "content": _image(592, 836) + _text(_LAYER, mode=3)}])
     assert _page_verdicts(pdf) == [True]
 
 
 def test_invisible_text_painted_before_the_image_is_a_scan():
-    """W2020826466 / W2056096589 paint the hidden layer first, the scan last."""
+    """Two scanned papers paint the hidden layer first, the scan last."""
     pdf = _pdf([{"media": (0, 0, 516, 728), "content": _text(_LAYER, mode=3) + _image(516, 728)}])
     assert _page_verdicts(pdf) == [True]
 
 
 def test_scan_slightly_smaller_than_the_page_is_a_scan():
-    """W2928210665: the scan covers 0.94 of the page."""
+    """In one scanned paper the scan covers 0.94 of the page."""
     pdf = _pdf(
         [
             {
@@ -194,7 +194,7 @@ def test_scan_slightly_smaller_than_the_page_is_a_scan():
 
 
 def test_scan_inside_a_scaled_form_covers_the_page():
-    """W2094242498 draws the scan inside a Form XObject: the form's matrix
+    """A publisher-archive PDF draws the scan inside a Form XObject: the form's matrix
     maps the image box, reported in form space, onto the page."""
     pdf = _pdf(
         [
@@ -210,7 +210,7 @@ def test_scan_inside_a_scaled_form_covers_the_page():
 
 
 def test_scan_on_an_offset_page_box_is_a_scan():
-    """W2042044793: MediaBox and CropBox start at y = 6.72."""
+    """A scanned paper whose MediaBox and CropBox start at y = 6.72."""
     pdf = _pdf(
         [
             {
@@ -223,7 +223,7 @@ def test_scan_on_an_offset_page_box_is_a_scan():
 
 
 def test_visible_stamp_over_the_hidden_layer_is_still_a_scan():
-    """W2061615921: every scanned page carries one visible download stamp."""
+    """A publisher-archive scan: every scanned page carries one visible download stamp."""
     pdf = _pdf(
         [
             {
@@ -243,7 +243,7 @@ def test_clip_only_text_counts_as_invisible():
 
 
 def test_born_digital_page_on_a_background_image_keeps_its_text():
-    """W4308442706: a page-sized template image under real visible text."""
+    """A born-digital paper: a page-sized template image under real visible text."""
     pdf = _pdf([{"content": _image(612, 792) + _text(_LAYER)}])
     assert _page_verdicts(pdf) == [False]
 
@@ -260,7 +260,7 @@ def test_figure_sized_image_with_invisible_text_is_not_a_scan():
 
 
 def test_a_little_invisible_text_does_not_make_a_scan():
-    """10.17951_kw p4: 29 invisible of 1613 characters on a born-digital page."""
+    """Page 4 of a born-digital paper: 29 invisible of 1613 characters."""
     pdf = _pdf(
         [
             {
@@ -291,7 +291,7 @@ _REFERENCES = ["References", "1. Wadsworth J, Sherby OD. Progress in Materials S
 
 
 def _cover_and_scan() -> bytes:
-    """W2061615921 / W2094242498: a born-digital cover page, then scans."""
+    """Publisher-archive scans: a born-digital cover page, then scans."""
     return _pdf(
         [
             {"content": _text(["Full Terms & Conditions of access and use", _TITLE])},
@@ -457,7 +457,7 @@ def _scan_regions() -> list[dict]:
     ]
 
 
-async def _ocr_scan_page(ocr_fn):
+async def _ocr_scan_page(ocr_fn, warnings: list | None = None):
     from PIL import Image
 
     from bibr.pipeline.stages.ocr import ocr_page_regions
@@ -469,9 +469,35 @@ async def _ocr_scan_page(ocr_fn):
         1,
         "scan.pdf",
         ocr_fn,
+        warning_sink=None if warnings is None else warnings.append,
         layer_fallback_sink=fallback_pages.append,
     )
     return result, fallback_pages
+
+
+_BUSY = "RuntimeError: 503 Service Unavailable"
+
+
+def _warning(code: str, message: str):
+    from bibr.processing_warnings import ProcessingWarning
+
+    return ProcessingWarning(code, message)
+
+
+def _layer_warning(regions: str, error: str | None = None, *, page: int = 2):
+    message = (
+        "OCR returned no text for regions of a scanned page; read them from its "
+        f"invisible text layer (page {page}, regions {regions})"
+    )
+    return _warning("OCR_TEXT_LAYER_FALLBACK", message + (f": {error}" if error else ""))
+
+
+def _region_failed(region: int, task: str):
+    return _warning(
+        "OCR_REGION_FAILED",
+        f"OCR failed for a region; its text is missing (page 2, region {region}, task {task}): "
+        + _BUSY,
+    )
 
 
 @pytest.mark.parametrize("failure", ["empty", "raises"])
@@ -484,7 +510,8 @@ async def test_scanned_page_falls_back_to_its_layer_when_ocr_returns_nothing(fai
             raise RuntimeError("503 Service Unavailable")
         return ""
 
-    result, fallback_pages = await _ocr_scan_page(broken_ocr)
+    warnings: list = []
+    result, fallback_pages = await _ocr_scan_page(broken_ocr, warnings)
 
     assert [region["content"] for region in result] == [_TITLE, "\n".join(_BODY), ""]
     # Restored exactly as the fill would have filled them, so the OCR success
@@ -492,6 +519,12 @@ async def test_scanned_page_falls_back_to_its_layer_when_ocr_returns_nothing(fai
     assert [region.get("_native_text_used") for region in result] == [True, True, None]
     assert fallback_pages == [1]
     assert not any("_invisible_layer_text" in region for region in result)
+    # The export says where the text came from, and only the table, which had
+    # no layer text, is reported missing.
+    if failure == "raises":
+        assert warnings == [_region_failed(2, "table"), _layer_warning("0, 1", _BUSY)]
+    else:
+        assert warnings == [_layer_warning("0, 1")]
 
 
 async def test_ocr_text_wins_over_the_layer():
@@ -519,6 +552,104 @@ async def test_one_region_read_by_ocr_keeps_the_layer_out():
     assert fallback_pages == []
 
 
+def _partly_read_regions() -> list[dict]:
+    body = [
+        {"label": "text", "bbox_2d": [100, 200 + 150 * i, 900, 330 + 150 * i], "content": ""}
+        for i in range(3)
+    ]
+    for region, line in zip(body, _BODY, strict=True):
+        region["_invisible_layer_text"] = line
+    return [_scan_regions()[0], *body, _scan_regions()[2]]
+
+
+async def test_failed_regions_fall_back_on_a_page_ocr_read_elsewhere():
+    """OCR reads the title, two body regions fail after the retries, one body
+    region and the table (no layer text) fail or answer blank: each failed
+    region with layer text takes it, a blank answer stays blank."""
+    from PIL import Image
+
+    from bibr.pipeline.stages.ocr import ocr_page_regions
+
+    answers = iter(
+        [
+            "Ultrahigh Carbon Steels",
+            RuntimeError("503 Service Unavailable"),
+            RuntimeError("503 Service Unavailable"),
+            "",
+            RuntimeError("503 Service Unavailable"),
+        ]
+    )
+
+    async def ocr(image, prompt):
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    fallback_pages: list[int] = []
+    warnings: list = []
+    result = await ocr_page_regions(
+        Image.new("RGB", (612, 792), "white"),
+        _partly_read_regions(),
+        1,
+        "scan.pdf",
+        ocr,
+        warning_sink=warnings.append,
+        layer_fallback_sink=fallback_pages.append,
+    )
+
+    assert [region["content"] for region in result] == [
+        "Ultrahigh Carbon Steels",
+        _BODY[0],
+        _BODY[1],
+        "",
+        "",
+    ]
+    assert [region.get("_native_text_used") for region in result] == [
+        None,
+        True,
+        True,
+        None,
+        None,
+    ]
+    assert fallback_pages == [1]
+    # Refilled regions are not reported missing; the table is.
+    assert warnings == [_region_failed(4, "table"), _layer_warning("1, 2", _BUSY)]
+
+
+async def test_healthy_ocr_on_a_scanned_page_ignores_the_layer_entirely():
+    """With OCR answering, a flagged page's output and warnings are those of
+    the same page without layer text: the fallback leaves no trace."""
+    from PIL import Image
+
+    from bibr.pipeline.stages.ocr import ocr_page_regions
+
+    async def ocr(image, prompt):
+        return f"OCR text {image.size}"
+
+    async def run(regions):
+        warnings: list = []
+        fallback_pages: list[int] = []
+        result = await ocr_page_regions(
+            Image.new("RGB", (612, 792), "white"),
+            regions,
+            1,
+            "scan.pdf",
+            ocr,
+            warning_sink=warnings.append,
+            layer_fallback_sink=fallback_pages.append,
+        )
+        return result, warnings, fallback_pages
+
+    flagged = await run(_partly_read_regions())
+    plain = [
+        {key: value for key, value in region.items() if key != "_invisible_layer_text"}
+        for region in _partly_read_regions()
+    ]
+    assert flagged == await run(plain)
+    assert flagged[1:] == ([], [])
+
+
 def _cover_and_two_scans() -> bytes:
     scan = {"content": _image(612, 792) + _text([*_LAYER, *_REFERENCES], mode=3)}
     return _pdf(
@@ -529,10 +660,12 @@ def _cover_and_two_scans() -> bytes:
 @pytest.mark.parametrize(
     "answer", ["", RuntimeError("503 Service Unavailable"), "An OCR reading of the page"]
 )
-async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(monkeypatch, caplog, answer):
+async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(
+    monkeypatch, caplog, tmp_path, answer
+):
     """NativeTextStage and OcrStage on a cover and two scanned pages: blank OCR
     answers or failed requests fall back to each scan's layer, logged once for
-    the document."""
+    the document, flagged in the export and kept out of the OCR cache."""
     from pathlib import Path
     from unittest.mock import AsyncMock, MagicMock
 
@@ -547,8 +680,11 @@ async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(monkeypat
 
     monkeypatch.setattr(Settings.ocr, "native_text_enabled", True)
     monkeypatch.setattr(Settings.ocr, "native_text_reject_invisible_layer", True)
+    monkeypatch.setattr(Settings.cache, "ocr", True)
+    monkeypatch.setattr(Settings.cache, "ocr_dir", str(tmp_path))
     fs = FileState(path=Path("scan.pdf"))
     fs.pdf_bytes = _cover_and_two_scans()
+    fs.file_hash = "0" * 64
     fs.layout_results = _full_page_layout(3)
     fs.page_indices = [0, 1, 2]
     fs.page_images = [Image.new("RGB", (612, 792), "white") for _ in range(3)]
@@ -579,14 +715,29 @@ async def test_ocr_stage_reads_the_layer_only_when_ocr_returns_nothing(monkeypat
     cover, *scans = (page[0].content for page in fs.ocr_regions)
     assert _TITLE in cover
     fallback_logs = [r for r in caplog.records if "invisible text layer" in r.getMessage()]
+    cached = list(tmp_path.glob("*.json"))
     if isinstance(answer, str) and answer:
         assert scans == [answer, answer]
         assert fallback_logs == []
+        assert fs.warnings == []
+        assert len(cached) == 1
     else:
         assert all(_TITLE in scan and "Wadsworth J, Sherby OD" in scan for scan in scans)
+        error = None if isinstance(answer, str) else _BUSY
+        assert fs.warnings == [
+            _layer_warning("0", error, page=2),
+            _layer_warning("0", error, page=3),
+        ]
+        # Not a final answer: serve does not cache the export, and the OCR
+        # cache does not keep the layer text for the next, healthy run.
+        from bibr.serve.deployments.pipeline import _is_final_result
+
+        payload = {"extraction": {"warnings": [w.to_dict() for w in fs.warnings]}}
+        assert _is_final_result(payload) is False
+        assert cached == []
         assert [r.getMessage() for r in fallback_logs] == [
-            "OCR returned no text for 2 scanned page(s) of scan.pdf (pages 2, 3); "
-            "read them from their invisible text layer instead"
+            "OCR returned no text for regions of 2 scanned page(s) of scan.pdf (pages 2, 3); "
+            "read those regions from their invisible text layer instead"
         ]
 
 

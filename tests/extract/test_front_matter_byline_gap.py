@@ -15,6 +15,7 @@ from bibr.extract.front_matter import (
     BYLINE_PROBATION_ROLE,
     FrontRolePolicy,
     _front_gap_heading_is_byline,
+    _is_front_gap_editorial_line,
     collect_front_matter_candidates,
     group_front_matter_blocks,
     resolve_front_matter,
@@ -98,7 +99,7 @@ GRID_TITLE = "AssertCoder: LLM-Based Assertion Generation via Multimodal Specifi
 
 
 def _grid_byline_contents(*, closing_type: CanonicalSection | None) -> PaperContents:
-    """W4414739865: a 2x2 IEEE author grid, one heading per cell."""
+    """An IEEE paper's 2x2 author grid, one heading per cell."""
 
     sections = [
         _section(0, "Root", CanonicalSection.UNKNOWN, top=0.0),
@@ -176,7 +177,7 @@ NULLING_TITLE = "Meta-Learner with Linear Nulling"
 
 
 def test_name_over_email_cells_join_the_front_matter():
-    """W2807000842: three name-over-address columns.
+    """A conference paper's three name-over-address columns.
 
     The parser made the first and last cells headings and left the middle one
     as a paragraph under the first; the classifier typed the first an endnote.
@@ -226,7 +227,7 @@ ORIENTATION_TITLE = "Adaptation-induced sharpening of orientation tuning curves 
 
 
 def test_byline_merged_into_a_correspondence_paragraph_is_admitted_on_its_first_region():
-    """W4390186873: reading order put the byline row after the
+    """In a vision-science paper, reading order put the byline row after the
     "- Corresponding author:" heading, and the paragraph join merged it with the
     correspondence rows. The heading is typed acknowledgment; the abstract is on
     page 2."""
@@ -299,7 +300,7 @@ def test_byline_merged_into_a_correspondence_paragraph_is_admitted_on_its_first_
 
 
 def test_a_title_typed_body_heading_opens_no_front_gap():
-    """10.30574/wjarr.2022.14.3.0574: the classifier typed a numbered body heading
+    """In a short engineering paper, the classifier typed a numbered body heading
     TITLE. Only the parser's detected title opens the gap, so the byline-shaped
     related-works citation after it stays out, even with a body section below."""
 
@@ -389,10 +390,10 @@ def _title_page_with_byline(gap_header: str, gap_text: str, *, regions: int = 0)
 @pytest.mark.parametrize(
     "gap_header",
     [
-        "Author Note",  # osf_cv6px and six other APA manuscripts
-        "* Corresponding Author:",  # W4315563590
-        "Credit Author Statement",  # osf_ytws5
-        "THE DECISION TO REFINANCE",  # W1511304478
+        "Author Note",  # seven APA manuscripts
+        "* Corresponding Author:",  # a journal article's correspondence label
+        "Credit Author Statement",  # an APA manuscript
+        "THE DECISION TO REFINANCE",  # a Federal Reserve Bulletin section head
     ],
 )
 def test_field_label_headings_in_the_gap_stay_out_on_a_page_with_a_byline(gap_header):
@@ -405,7 +406,7 @@ def test_field_label_headings_in_the_gap_stay_out_on_a_page_with_a_byline(gap_he
 
 
 def test_a_one_region_publisher_line_in_the_gap_stays_out():
-    """W2947837352: the publisher's line reads as a byline
+    """In a Québec paper on conjugal violence, the publisher's line reads as a byline
     ("Wilson & Lafleur"), but on a page that prints one, a paragraph in the gap
     needs name evidence, and a one-region paragraph gets no preview pass."""
 
@@ -563,3 +564,87 @@ def test_a_merged_paragraph_led_by_an_editorial_line_stays_out():
 
     assert "Anna Berg and Carl Dahl" in texts
     assert merged not in texts
+
+
+# An author's address can carry an editorial word in its domain: a history
+# department, an ethics centre, a university section.
+AUTHOR_CELLS_WITH_EDITORIAL_DOMAINS = [
+    "Jane Smith jane.smith@history.ox.ac.uk",
+    "Jane Smith jane.smith@ethics.example.org",
+    "Jane Smith jane.smith@section.example.org",
+]
+
+
+@pytest.mark.parametrize("cell", AUTHOR_CELLS_WITH_EDITORIAL_DOMAINS)
+def test_the_editorial_word_test_skips_e_mail_addresses(cell):
+    """Only the words printed outside the address make a line editorial."""
+
+    assert _is_front_gap_editorial_line(cell) is False
+    assert _is_front_gap_editorial_line("Handling Editor: " + cell) is True
+
+
+@pytest.mark.parametrize("cell", AUTHOR_CELLS_WITH_EDITORIAL_DOMAINS)
+def test_a_name_over_an_address_with_an_editorial_domain_is_a_gap_byline_heading(cell):
+    summary = RegionSummary(
+        page=1, index=4, label="paragraph_title", bbox=(90.0, 300.0, 900.0, 315.0), section_id=2
+    )
+
+    assert _front_gap_heading_is_byline(cell, summary, None, FrontRolePolicy()) is True
+
+    contents = _title_page_with_byline(cell, "We thank the participants.")
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert "Anna Berg and Carl Dahl" in texts
+    assert cell in texts
+
+
+@pytest.mark.parametrize("cell", AUTHOR_CELLS_WITH_EDITORIAL_DOMAINS)
+def test_a_gap_paragraph_name_over_an_address_with_an_editorial_domain_is_admitted(cell):
+    contents = _title_page_with_byline("Publisher", cell, regions=1)
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert "Anna Berg and Carl Dahl" in texts
+    assert cell in texts
+
+
+@pytest.mark.parametrize("cell", AUTHOR_CELLS_WITH_EDITORIAL_DOMAINS)
+def test_the_no_byline_rescue_admits_a_name_over_an_address_with_an_editorial_domain(cell):
+    """The same title page as the editor's-line rescue case above, with the
+    author's own name over her address in the gap."""
+
+    title = "Trust in Science Across Cultures"
+    contents = _contents(
+        [
+            _section(0, "Root", CanonicalSection.UNKNOWN, top=0.0),
+            _section(1, title, CanonicalSection.TITLE, top=90.0),
+            _section(2, cell, CanonicalSection.ACKNOWLEDGMENT, top=300.0),
+            _section(3, "Abstract", CanonicalSection.ABSTRACT, top=100.0, page=2),
+        ],
+        [
+            _sentence(
+                1,
+                "Department of Psychology, University of Oslo",
+                section_id=1,
+                paragraph_id=1,
+                top=170.0,
+            ),
+            _sentence(2, "We thank the participants.", section_id=2, paragraph_id=2, top=320.0),
+            _sentence(
+                3,
+                "We surveyed trust in science.",
+                section_id=3,
+                paragraph_id=3,
+                top=120.0,
+                page=2,
+                label="abstract",
+            ),
+        ],
+        detected_title=title,
+    )
+
+    texts = [candidate.raw_text for candidate in collect_front_matter_candidates(contents)]
+
+    assert title in texts
+    assert cell in texts
+    assert "Jane Smith" in _author_context(contents)

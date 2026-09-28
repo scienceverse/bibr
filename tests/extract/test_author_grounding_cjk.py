@@ -1,6 +1,6 @@
 """Grounding CJK author names against bylines printed unspaced or letter-spaced.
 
-10.4234_jjoffamilysociology.28.109 prints its byline as 奥　山　正　司 (one
+A Japanese family-sociology paper prints its byline as 奥　山　正　司 (one
 kanji per token). The extracted author 奥山 正司 never matched it, so the answer
 was discarded as fabricated and the paper shipped without authors.
 """

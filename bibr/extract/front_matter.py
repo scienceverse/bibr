@@ -503,7 +503,10 @@ _FRONT_GAP_EDITORIAL_WORDS = frozenset(
 
 
 def _is_front_gap_editorial_line(text: str) -> bool:
-    return any(word.casefold() in _FRONT_GAP_EDITORIAL_WORDS for word in _WORD_RE.findall(text))
+    # An author's address can carry one of the words in its domain
+    # (jane.smith@history.ox.ac.uk), so only the words outside it count.
+    words = _WORD_RE.findall(_EMAIL_ADDRESS_RE.sub(" ", text))
+    return any(word.casefold() in _FRONT_GAP_EDITORIAL_WORDS for word in words)
 
 
 def _front_gap_heading_is_byline(
@@ -1403,7 +1406,62 @@ def collect_front_matter_candidates(
         heuristic_only = _with_byline_probation(contents, policy, use_model=False)
         if any("title" in candidate.roles for candidate in heuristic_only):
             return heuristic_only
+    if not any("title" in candidate.roles for candidate in candidates):
+        return _with_manuscript_title_seed(candidates, _first_page(contents))
     return candidates
+
+
+# A manuscript title row: a few words on at most three printed rows, not
+# closed like a sentence of prose or a field label.
+_MANUSCRIPT_TITLE_MAX_ROWS = 3
+_MANUSCRIPT_TITLE_WORDS = (4, 30)
+
+
+def _with_manuscript_title_seed(
+    candidates: tuple[FrontMatterCandidate, ...], first_page: int | None
+) -> tuple[FrontMatterCandidate, ...]:
+    """Seed the title of a manuscript set entirely in body font, as a last resort.
+
+    An anonymised submission prints its title as a plain text row at the top of
+    the first page, in the body font and size, with the abstract under its own
+    heading further on. No layout label, capitals or heading marks it, and the
+    front-role classifier can score the row as abstract text, so neither pass
+    above finds a title and the record has none. When no candidate has the
+    title role, the first row of the first page becomes the title seed if it is
+    title-shaped, carries no role but the classifier's abstract guess, and an
+    ``Abstract`` heading follows it: the printed heading places the abstract
+    elsewhere. Anything else leaves the candidates as they are.
+    """
+
+    first = next((candidate for candidate in candidates if candidate.page == first_page), None)
+    if first is None or first_page is None:
+        return candidates
+    text = first.raw_text.strip()
+    words = _WORD_RE.findall(text)
+    low, high = _MANUSCRIPT_TITLE_WORDS
+    if (
+        first.source_kind != "paragraph"
+        or (first.region_label or "").casefold() != "text"
+        or not first.roles <= (first.model_roles & {"abstract"})
+        or not low <= len(words) <= high
+        or text.count("\n") >= _MANUSCRIPT_TITLE_MAX_ROWS
+        or text.endswith((".", ":", ";", ","))
+        or _DOI_RE.search(text)
+        or _looks_like_affiliation(text)
+        or _looks_like_masthead(text, "text")
+        or is_exact_front_matter_furniture(text)
+        or first.normalized_text in _ORDINARY_HEADING_TEXT
+    ):
+        return candidates
+    if not any(
+        candidate.reading_order > first.reading_order
+        and candidate.raw_text.strip().rstrip(":.").casefold() == "abstract"
+        for candidate in candidates
+    ):
+        return candidates
+    logger.info("Seeding the manuscript title from the first-page row %s", first.candidate_id)
+    seeded = replace(first, roles=frozenset({"title"}), model_roles=frozenset())
+    return tuple(seeded if candidate is first else candidate for candidate in candidates)
 
 
 def _with_byline_probation(

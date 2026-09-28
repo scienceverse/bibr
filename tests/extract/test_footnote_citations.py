@@ -1,10 +1,9 @@
 """A reference list read from the citations in a paper's notes.
 
 The note texts are short excerpts of the dev-set papers that print no
-reference list: a French endnote apparatus (W3012009431), a
-Federal Reserve Bulletin article (W1511304478), a Spanish humanities paper
-citing classical works (W3093712194) and a Slovak history paper in ISO 690
-style (10.31577/histcaso.2021.69.5.4).
+reference list: a French endnote apparatus, a Federal Reserve Bulletin
+article, a Spanish humanities paper citing classical works and a Slovak
+history paper in ISO 690 style.
 """
 
 from __future__ import annotations
@@ -116,8 +115,8 @@ def test_citations_separated_by_semicolons_split_but_an_imprint_does_not():
 
 
 def test_a_citation_after_a_locator_is_no_imprint_of_the_one_before():
-    # W2947837352 note 9: "Rapport : Colloques ..." reads like "Place:
-    # Publisher", but it follows a repeat's page, not a place.
+    # Note 9 of a Québec paper on conjugal violence: "Rapport : Colloques ..."
+    # reads like "Place: Publisher", but it follows a repeat's page, not a place.
     assert _texts(
         [
             "9. Voir : L. M c Le o d , op. cit., supra, note 8, p. 7; Rapport : Colloques "
@@ -132,7 +131,7 @@ def test_a_citation_after_a_locator_is_no_imprint_of_the_one_before():
         "Politique d'intervention en matière de violence conjugale, Québec, ministère de la "
         "Justice, ministère du Solliciteur général, 1986, p. 9.",
     ]
-    # histcaso note 12: after a place, the next clause is its imprint.
+    # The Slovak paper's note 12: after a place, the next clause is its imprint.
     [text] = _texts(
         [
             "12 BRADBURY, Bettina. Wife to Widow. Lives, Laws, and Politics in Nineteenth-Century "
@@ -143,8 +142,8 @@ def test_a_citation_after_a_locator_is_no_imprint_of_the_one_before():
 
 
 def test_a_lead_in_after_a_repeat_opens_the_next_work_whatever_its_byline():
-    # W2947837352 notes 10 and 23: "Voir aussi" after a repeat opens a work
-    # that starts with its title, or with a letter-spaced name.
+    # The Québec paper's notes 10 and 23: "Voir aussi" after a repeat opens a
+    # work that starts with its title, or with a letter-spaced name.
     assert _texts(
         [
             "10. Voir pour le Canada en général : L. M c Le o d , op. cit., supra, note 8, p. 3. "
@@ -162,7 +161,7 @@ def test_a_lead_in_after_a_repeat_opens_the_next_work_whatever_its_byline():
         "Rapport fédéral-provincial territorial sur les femmes battues, présenté à la réunion des "
         "ministres responsables de la Condition féminine, Niagara-on-the-Lake, les 28-30 mai "
         "1984, ministère des Approvisionnements et Services Canada, 1984",
-        "Linda M c Le o d , La femme battue au Canada : un cercle vicieux, Ottawa, Conseil "
+        "Linda McLeod, La femme battue au Canada : un cercle vicieux, Ottawa, Conseil "
         "consultatif canadien de la situation de la femme, ministre des Approvisionnements et "
         "Services, 1980, p. 29.",
     ]
@@ -230,7 +229,7 @@ def test_sentence_breaks_split_citations_but_not_abbreviations():
 
 
 def test_a_conjunction_before_an_iso_690_byline_opens_a_new_work():
-    # 10.31577/histcaso.2021.69.5.4, note 13: the second work's byline is a
+    # The Slovak paper's note 13: the second work's byline is a
     # sentence of its own, and the repeat after the last "or" is cut off.
     assert _texts(
         [
@@ -248,7 +247,7 @@ def test_a_conjunction_before_an_iso_690_byline_opens_a_new_work():
 
 
 def test_commentary_after_a_repeat_hands_over_at_a_colon():
-    # histcaso note 12: "ABRAMS, ref. 6." is a repeat, and the next sentence
+    # The Slovak paper's note 12: "ABRAMS, ref. 6." is a repeat, and the next sentence
     # names the next work after a colon.
     assert _texts(
         [
@@ -266,11 +265,11 @@ def test_commentary_after_a_repeat_hands_over_at_a_colon():
 def test_commentary_hands_over_at_a_colon_and_at_segun():
     assert _texts(
         [
-            # histcaso note 15
+            # The Slovak paper's note 15
             "15 There are several works which must be mentioned in connection with this research "
             "made \r\nin the Czech Republic: KAZLEPKA, Zdeněk. Ostrov italského vkusu. Brno: "
             "Barrister Principal, 2011.",
-            # W3093712194 note 22
+            # The Spanish paper's note 22
             "22 Homero, Himnos, XX, 5. Se criaban como fieras en grutas o en bosques, según "
             "Vitruvio, Arquitectura, II, 1, 1-2.",
         ]
@@ -282,7 +281,7 @@ def test_commentary_hands_over_at_a_colon_and_at_segun():
 
 
 def test_a_period_inside_a_quoted_title_is_no_sentence_break():
-    # W3093712194 note 32: the third work's title holds a period ("museums.
+    # The Spanish paper's note 32: the third work's title holds a period ("museums.
     # Exhibiting"), so the second work ends before its byline, not inside it.
     assert _texts(
         [
@@ -314,7 +313,7 @@ def _paged_contents(notes: list[tuple[str | None, int, str]]) -> PaperContents:
 
 
 def test_a_note_carried_over_to_the_next_page_is_read_as_one():
-    # histcaso note 14 breaks off inside a bracketed translation; the parser
+    # The Slovak paper's note 14 breaks off inside a bracketed translation; the parser
     # makes its rest on the next page a note without a mark.
     found = fc.note_citations(
         _paged_contents(
@@ -351,7 +350,7 @@ def test_a_note_carried_over_to_the_next_page_is_read_as_one():
 
 
 def test_a_note_breaking_off_in_commentary_stays_apart_from_the_next_page():
-    # W3093712194 note 34 breaks off in commentary ("... este « mundo hostil »
+    # The Spanish paper's note 34 breaks off in commentary ("... este « mundo hostil »
     # de"); read as one, the commentary would hide the citation on page 18.
     found = fc.note_citations(
         _paged_contents(
@@ -385,7 +384,7 @@ def test_an_undated_iso_690_byline_with_a_locator_is_a_short_citation():
     found = fc.note_citations(
         _contents(
             [
-                # histcaso notes 2 and 95: "year 26" is a volume, not a date.
+                # The Slovak paper's notes 2 and 95: "year 26" is a volume, not a date.
                 "2 BLANCHARD, Rae. Richard Steele and the Status of Women. In Studies in "
                 "Philology, year \r\n26, no. 3, p. 322–355. ISSN 0039-3738.",
                 "95 MZA, G 169, c. 308, i. n. 233; COLLALTO, Marie Therese. Erlebtes und "
@@ -566,7 +565,7 @@ def test_listed_references_are_kept_and_their_note_citations_dropped():
 
 
 def test_a_title_opening_a_later_one_of_another_year_is_another_work():
-    # W1511304478, notes 1 and 3: the 1994 survey article is
+    # The Federal Reserve Bulletin article's notes 1 and 3: the 1994 survey article is
     # no short form of the 1989 article whose title opens its own.
     refs = fc.collapse_repeats(
         [
@@ -661,7 +660,7 @@ async def test_without_a_reference_section_the_notes_become_the_reference_list()
     assert (receipt.parsed_count, receipt.valid_count) == (6, 5)
 
 
-# W3012009431, notes 4 and 5: the tagger finds nothing in
+# The French endnote apparatus, notes 4 and 5: the tagger finds nothing in
 # either citation, whose titles only the quotes mark.
 _QUOTED_NOTES = [
     "4. « Au commencement était l’hypnose », Conférences et débats, septembre 2005.",
@@ -946,7 +945,7 @@ def test_a_note_too_long_to_be_a_citation_apparatus_is_not_scanned():
 # ---------------------------------------------------------------------------
 
 # A note that first cites two works leaves its number ambiguous, and most
-# notes of W3093712194 do: the numbering of the notes-derived list then falls
+# notes of the Spanish paper do: the numbering of the notes-derived list then falls
 # back to positions, where the note mark ^{3} would name the third work.
 _LINKED_NOTES = [
     (

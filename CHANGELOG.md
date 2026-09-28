@@ -270,6 +270,52 @@ released.
 
 ### Fixed
 
+- A court decision cited in a note is now a reference when the notes stand in
+  for the reference list. The reference parser read "Civ. 1re, 16 juill. 1998,
+  D. 1999. 306" as no work at all, kept the commentary before a decision ("…
+  en chocolat : TGI Laval, 16 févr. 2009, …") as its title, and exported each
+  second reporter after a semicolon ("; RLDI 2009, n° 50, p. 8") as a work of
+  its own. A decision (a court, chamber or parties, then a day-month-year
+  date) is now cut out of the note as one citation, titled by its court, date,
+  case number and parties ("Cass. 1re civ., 16 mai 2018, n° 15-14.023") and
+  dated by the year of its date, with the `ner` parse; its second reporters
+  are dropped. A dated newspaper ("Le Figaro, 18 déc. 2014") is no decision.
+  A decision cited by long party names keeps all of them ("CJEU, Bashar
+  Ibrahim and Others v. Bundesrepublik Deutschland and Bundesrepublik
+  Deutschland v. Taus Magamadov, …"), and a lead-in before the court ("See
+  CJEU, …") is dropped.
+- A surname the PDF text layer spaces out, as it does small capitals
+  ("Christine Ze l le r , Des enfants maltraités au Québec ?", "J.F. Bo u l a
+  is"), is joined again in a note citation when the notes stand in for the
+  reference list. Left spaced out it read as no name: the commentary before
+  it stayed in the citation, and the parser took byline and title for one
+  title. The repair needs a first name or initials before the surname and at
+  least two single-letter pieces in it, so "Y. Wu et al." stays as it is.
+- An undated note citation of a classical work by book and chapter ("Plinio,
+  Historia Natural, V, 45", "Diodoro de Sicilia, Biblioteca histórica, III,
+  32, 4.") keeps its author and work when the notes stand in for the
+  reference list. With the `ner` parse the tagger read the author, or
+  nothing, and no title, so the reference matched no work; a citation the
+  tagger gives no title now takes the work as its title.
+- A note citation whose title opens on a year ("Thomas A. Durkin and Gregory
+  E. Elliehausen, 1977 Consumer Credit Survey (Board of Governors of the
+  Federal Reserve System, 1978), p. 72") keeps its title when the notes stand
+  in for the reference list. With the `ner` parse the tagger read the title's
+  year as the work's year and the rest of the title as the container, so the
+  reference had no title and the wrong year. When the tagger gives no title
+  and its year is the one the title opens on, the title is kept whole and the
+  year comes from the bracketed imprint.
+- Initials joined by a hyphen after a period ("J.-M. Bruguière", "P.-B.
+  Hugenholtz") now read as a name in note citations, as "J-M." already did.
+  A citation opening on such a name after commentary ("… cité par P.-B.
+  Hugenholtz, « Chronique des Pays-Bas », …", "… (J.-M. Bruguière, Droit des
+  propriétés intellectuelles, Ellipses, 2018, p. 17)") was not found: the
+  commentary stayed its title, or the work was lost.
+- A note citation led in by "lire" ("À ce sujet, lire Jean Pineau, La
+  famille, …") or by an author's title after "par" ("… notamment par le
+  professeur Hélène Dumont, Le contrôle judiciaire …") now starts at the
+  author's name. The commentary before it had stayed in the citation, so the
+  parser took it for the title.
 - Native PDF text keeps the spaces between words at the edge of a layout
   region, and a ligature no longer splits a word. pdfium gives a space a flat
   box on the baseline, below the centre of the letters around it, so a region
@@ -327,8 +373,9 @@ released.
   the same segment on a new line ("… 24: 65-96. -1931b. The cytological
   theory …", "- and Dark, S. O. S. 1932. …") reaches the parser as an entry
   of its own (`inline_dash_entries_split`); a dash and year followed by a
-  volume, issue or pages area ("– 1973. V. 39", the year area of a
-  transliterated GOST list) opens no entry.
+  volume, issue, part, book or pages area ("– 1973. V. 39", "– 2001. N 5",
+  "– 2001. Vyp. 5", the year area of a transliterated GOST list) opens no
+  entry.
 - A numbered reference list that prints several works under one number
   ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …", "[30] J.F.
   Plebanski, …, 2511; J. Samuel, …") gives the NER parser one entry per
@@ -361,7 +408,10 @@ released.
   first region reads as a byline (a byline row merged into a correspondence
   block). An editorial or metadata line there ("Edited by Jane Smith",
   "Handling Editor: Jane Smith" over her e-mail address, "Received 12 March
-  2020", "Data Availability") is admitted on none of these grounds.
+  2020", "Data Availability") is admitted on none of these grounds. Only
+  the words outside an e-mail address make a line editorial, so an author
+  whose address names a history department or an ethics centre
+  (jane.smith@history.ox.ac.uk) still counts as a name over her address.
 - On a first page that prints no byline ahead of its abstract, an author's
   name set above the title that layout labels a page header ("Hubert
   Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
@@ -379,9 +429,13 @@ released.
 - A scanned page that carries the invisible text layer an OCR engine adds to a
   scan (a page-sized image under text in an invisible render mode, as Acrobat
   Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
-  that legacy layer, which misread titles and merged reference lines. No text
+  that legacy layer, which misread titles and garbled reference lists. No text
   lines or font sizes are taken from such a page. If OCR returns no text for
-  the page, as in an OCR outage, its regions fall back to the layer text.
+  the page, as in an OCR outage, its regions fall back to the layer text, and
+  so does any region of the page whose OCR request failed. The page then
+  carries an `OCR_TEXT_LAYER_FALLBACK` warning in place of `OCR_REGION_FAILED`
+  for those regions; serve does not cache such a result and the OCR cache does
+  not store it, so the next run reads the page with OCR again.
   Pages whose text is mostly visible, including pages on a background image,
   keep their text layer. Set `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to
   trust these layers as before.
@@ -1093,6 +1147,28 @@ released.
   printed above the title without a colon are still left out, and nothing is
   restored when another title row of the record prints the title without the
   label.
+- A paper deposited in HAL keeps the article's own spelling of its title when
+  the archive's cover page retyped it with a line-break hyphen lost
+  ("CADMIUMAND THALLIUM-CONTAINING" for the article's "CADMIUM-" over "AND
+  THALLIUM-CONTAINING"). The metadata LLM copies the cover, and grounding
+  accepted the copy because the cover prints it; the article's own title is
+  filed with the running heads as a repeat of the cover's. When the title is
+  printed on a page that carries HAL's archive notice, the next page's layout
+  title is the same text once spaces and hyphens are removed, and each word
+  the cover joined is one the article never prints, the article's word breaks
+  are taken and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_retyped_on_archive_cover`. A title whose letters differ from
+  the article's print (a misread legacy text layer, for example) keeps the
+  cover's text.
+- An anonymised manuscript that prints its title as a plain text row in the
+  body font gets that title. No layout label, capitals or heading marks the
+  row, and the front-role classifier can score it as abstract text, so the
+  front matter had no title candidate at all and the paper exported none.
+  When no candidate is a title, the first row of the first page now seeds
+  the title if it is 4 to 30 words on at most three rows, does not end like a
+  sentence or a field label, carries no evidence of anything else (only the
+  classifier's abstract guess), and an "Abstract" heading follows it; the
+  selected-record fallback then recovers it (`VAL_TITLE_RECOVERED`).
 - The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
   `extraction.warnings`) now also covers numeric citation styles. It previously
   counted only author-year citations, so a numbered paper whose reference
@@ -1943,6 +2019,22 @@ released.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
+- A reference printed as "SURNAME, Given — Title, Place, Publisher Year" gets
+  its byline and title from the text when the NER tagger tagged neither (the
+  reference was dropped), only the surname, or the given names as the start of
+  the title. The dash ends the byline; a title the tagger missed runs to its
+  first comma, and one it started on the given names keeps its end.
+  Dash-joined co-author lists and titles the tagger started after the dash are
+  left as they are.
+- A thesis title that opens on a quotation keeps its subtitle: the NER field
+  repair no longer cuts "“Somos as pessoas …”. Infância e cenários de
+  participação pública: … . 2014. 524 f. Tese …" at the closing quote, since a
+  thesis has no container for the title to run into. A thesis note run into
+  the title ("…,” Ph.D. dissertation, …") is still cut.
+- An editorial note printed as an entry of the reference list ("(This is a
+  series of short articles by … .)") is no longer exported as a reference: the
+  NER field repair clears an entry that is one parenthesised sentence of four
+  or more words with no digit in it.
 
 ### Added
 

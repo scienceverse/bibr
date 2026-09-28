@@ -33,11 +33,14 @@ from bibr.extract.footnote_citations import (
     MAX_LISTED_REFERENCES,
     NoteCitations,
     assign_note_text_ids,
+    classical_work,
     collapse_repeats,
+    legal_decision,
     note_citations,
     notes_replace_list,
     quoted_title,
     usable_reference,
+    year_led_title,
 )
 from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
 from bibr.extract.ref_field_repair import repair_ner_reference_fields
@@ -1118,6 +1121,50 @@ def _quoted_title_reference(citation: str) -> PaperReference | None:
     return PaperReference.model_validate(_finalize_reference_fields(fields, citation))
 
 
+def _decision_reference(citation: str) -> PaperReference | None:
+    """The reference for a note citation that opens on a court decision: the
+    decision as title and the year of its date. The tagger reads a decision
+    ("Civ. 1re, 16 juill. 1998, D. 1999. 306") as no work at all."""
+    found = legal_decision(citation)
+    if found is None:
+        return None
+    title, year = found
+    fields = {"bib_id": 1, "title": title, "year": year}
+    fields |= dict.fromkeys(("authors", "container", "volume", "first_page"))
+    return PaperReference.model_validate(_finalize_reference_fields(fields, title))
+
+
+def _classical_reference(citation: str) -> PaperReference | None:
+    """The reference for an undated note citation of a classical work by book
+    and chapter ("Plinio, Historia Natural, V, 45"): its author and work."""
+    found = classical_work(citation)
+    if found is None:
+        return None
+    authors, title = found
+    fields = {"bib_id": 1, "title": title, "authors": authors, "year": None}
+    fields |= dict.fromkeys(("container", "volume", "first_page"))
+    return PaperReference.model_validate(_finalize_reference_fields(fields, title))
+
+
+def _year_led_title_reference(ref: PaperReference, citation: str) -> PaperReference | None:
+    """*ref* with the title the tagger lost to the year it opens on: of
+    "…, 1977 Consumer Credit Survey (Board of Governors …, 1978)" it reads
+    1977 as the year and the rest of the title as the container."""
+    found = year_led_title(citation)
+    if found is None or ref.year is None:
+        return None
+    title, year = found
+    lead, _, rest = title.partition(" ")
+    if lead != str(ref.year):
+        return None
+    fields = ref.model_dump()
+    if (fields.get("container") or "").startswith(rest):
+        fields["container"] = None
+        fields["bib_type"] = None
+    fields |= {"title": title, "year": year}
+    return PaperReference.model_validate(_finalize_reference_fields(fields, title))
+
+
 def _is_stub_reference(ref: PaperReference) -> bool:
     """A reference carrying neither a title nor authors — nothing to match on."""
     return not (ref.title or "").strip() and not (ref.authors or "").strip()
@@ -1189,12 +1236,18 @@ def _resolve_repeated_authors(refs: list[PaperReference]) -> None:
 # 65-96. -1931b. The …", "… 63: 368-71.- 1933. The …") or into the same
 # segment on a new line, neither the cascade nor the line stream starts an
 # entry there. A transliterated GOST 7.1 list opens an entry's year area the
-# same way and can go on to the volume, issue or pages area without another
-# dash ("… // Plant Soil. – 1973. V. 39, No. 1."): a year followed by such an
-# area is no entry.
+# same way and can go on to the volume, issue, part, book or pages area
+# without another dash ("… // Plant Soil. – 1973. V. 39, No. 1.", "– 2001.
+# N 5. S. 12–15.", "– 2001. Vyp. 5."): a year followed by such an area is no
+# entry. An abbreviation carries its period; "N" and "Vol" without one count
+# only before a number, so a title may still open with "N uptake" or "Vol de".
+# A Cyrillic area word (Т., Вып., Ч., Кн., С., №) never matches the Latin
+# capital a title opens with here, so it needs no guard.
 _DASH_ENTRY_BODY = (
     r"[‒–—―-]+[ \t]*(?:\n[ \t]*)?"
-    r"(?:(?:1[6-9]|20)\d{2}[a-z]?\.\s+(?!(?:Vol|No|Nr|Iss|Pp?|S|T|V|Bd|H)\.)[A-Z\"'(«]"
+    r"(?:(?:1[6-9]|20)\d{2}[a-z]?\.\s+"
+    r"(?!(?:Vol|No|Nr|Iss|Pp?|S|T|V|Bd|H|Vyp|Ch|Kn)\.|Vol\s*\d|Vol\s+[IVXLC]+\b|N\s+\d)"
+    r"[A-Z\"'(«]"
     r"|and\s|&\s)"
 )
 _DASH_ENTRY_LINE_RE = re.compile(r"(?:^|\n)[ \t]*" + _DASH_ENTRY_BODY)
@@ -1850,7 +1903,12 @@ class ReferenceExtractor:
         entries of a printed list; repeats and short forms fold into the
         work's first citation, whose note row becomes the reference's
         ``text_id``. A citation the tagger finds nothing in keeps the quoted
-        title it opens on, if any.
+        title it opens on, if any. With the ``ner`` parse, a citation of a
+        court decision becomes the decision and its year, whatever the
+        tagger reads, an undated classical work whose title the tagger
+        misses becomes its author and work, and a title that opens on a year,
+        which the tagger reads as the work's year, is kept whole and dated by
+        its imprint.
         """
         _, parse_strategy = _resolve_ref_strategies(
             self._ref_seg_strategy,
@@ -1868,8 +1926,15 @@ class ReferenceExtractor:
             aligned = await asyncio.to_thread(self._parse_references_ner_aligned, strings)
             parsed: list[PaperReference] = []
             for citation, ref in zip(found.citations, aligned, strict=True):
-                if ref is None:
+                decision = _decision_reference(citation.text)
+                if decision is not None:
+                    ref = decision
+                elif ref is None:
                     ref = _quoted_title_reference(citation.text)
+                if ref is None or not (ref.title or "").strip():
+                    ref = _classical_reference(citation.text) or ref
+                if ref is not None and not (ref.title or "").strip():
+                    ref = _year_led_title_reference(ref, citation.text) or ref
                 if ref is not None:
                     ref.text_id = citation.text_id
                     parsed.append(ref)

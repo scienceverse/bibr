@@ -3,12 +3,12 @@
 Each case is a dev-set scan or native PDF whose list the locator took from the
 wrong place or missed (texts shortened from the real rows):
 
-* W2122660901 / W2095946572: the scanned page opens with the end of
+* Two scanned papers: the first page opens with the end of
   the previous article, whose list sits above this paper's title under the
   same "References" heading.
-* W2037590930: "Bibliography.—1." is printed run-in inside the
+* A scanned journal note: "Bibliography.—1." is printed run-in inside the
   closing section, so no section is headed by it.
-* W4312442100: the layout model read the hanging-indent list as
+* A native PDF: the layout model read the hanging-indent list as
   two tables, so the "References" heading heads no rows.
 """
 
@@ -60,7 +60,7 @@ def _texts(ref_df: pd.DataFrame) -> list[str]:
 
 
 def test_previous_articles_list_above_the_title_is_dropped():
-    """W2122660901: the page-1 rows under "References" belong to the article before."""
+    """The first scan: the page-1 rows under "References" belong to the article before."""
     contents = _contents(
         [
             ("References", CanonicalSection.REFERENCES),
@@ -94,7 +94,7 @@ def test_previous_articles_list_above_the_title_is_dropped():
 
 
 def test_list_only_above_the_title_gives_way_to_the_papers_own_list():
-    """W2095946572: the paper's single entry sits under a singular "Reference" heading."""
+    """The second scan: the paper's single entry sits under a singular "Reference" heading."""
     contents = _contents(
         [
             ("References", CanonicalSection.REFERENCES),
@@ -154,7 +154,7 @@ _RUN_IN_ROWS = [
 
 
 def test_run_in_bibliography_heading_opens_the_list():
-    """W2037590930: the list starts after the heading and ends at the next news item."""
+    """The journal note: the list starts after the heading and ends at the next news item."""
     contents = _contents([("Conclusions.", CanonicalSection.DISCUSSION)], _RUN_IN_ROWS)
 
     ref_df = RefLocator(contents).collect_reference_rows()
@@ -202,7 +202,7 @@ def _table(table_id: int, rows: list[list[str]], *, body_section_id: int, page: 
 
 
 def test_reference_list_read_as_tables_becomes_rows():
-    """W4312442100: the "References" heading heads no rows; its tables hold the entries."""
+    """The native PDF: the "References" heading heads no rows; its tables hold the entries."""
     tables = [
         _table(
             4,

@@ -87,8 +87,8 @@ def _line_text(monkeypatch, chars, left, bottom, right, top):
     return _reconstruct_text_from_records(records, left, bottom, right, top)
 
 
-# Char boxes recorded with pypdfium2 from the dev-set PDFs named in each test.
-_SEX_TRAFFICKING = [  # W1580847155 title: "ffi" ligature, then a space inside it
+# Char boxes recorded with pypdfium2 from the dev-set PDFs each comment describes.
+_SEX_TRAFFICKING = [  # a born-digital title: "ffi" ligature, then a space inside it
     ("S", (43.64, 527.02, 58.56, 548.3), (42.52, 522.23, 59.52, 549.14)),
     ("e", (60.64, 527.13, 73.8, 541.16), (59.74, 522.23, 74.36, 549.14)),
     ("x", (74.33, 527.41, 89.64, 540.82), (74.08, 522.23, 89.78, 549.14)),
@@ -115,14 +115,14 @@ _SOFI_OKSANEN = [  # same PDF, page 3: the space after a word-final "fi" ligatur
     ("O", (108.97, 612.5, 114.39, 619.84), (108.39, 610.81, 114.97, 619.84)),
     ("k", (115.96, 612.62, 120.15, 619.84), (114.97, 610.81, 120.33, 619.84)),
 ]
-_OF_PERVASIVE = [  # W7166310734 abstract: an italic "f" hangs over the space
+_OF_PERVASIVE = [  # a paper's abstract: an italic "f" hangs over the space
     ("o", (461.81, 363.21, 465.7, 367.34), (461.55, 360.55, 466.05, 372.52)),
     ("f", (464.49, 361.38, 470.28, 369.65), (464.49, 360.55, 470.28, 372.52)),
     (" ", (468.55, 363.31, 470.8, 363.32), (468.55, 360.55, 470.8, 372.52)),
     ("p", (469.59, 361.39, 474.83, 367.34), (469.59, 360.55, 475.08, 372.52)),
     ("e", (475.35, 363.21, 478.95, 367.34), (475.08, 360.55, 479.07, 372.52)),
 ]
-_MODEL_ANALYSIS = [  # W7166310734 title, last line
+_MODEL_ANALYSIS = [  # same PDF, title, last line
     ("M", (190.76, 626.86, 210.12, 643.09), (190.4, 619.74, 210.41, 648.49)),
     ("O", (211.78, 626.65, 224.16, 643.33), (210.41, 619.74, 225.53, 648.49)),
     ("D", (225.92, 626.86, 239.74, 643.09), (225.53, 619.74, 241.11, 648.49)),
@@ -132,7 +132,7 @@ _MODEL_ANALYSIS = [  # W7166310734 title, last line
     ("A", (272.96, 626.86, 289.88, 643.33), (272.96, 619.74, 289.88, 648.49)),
     ("N", (290.12, 626.86, 305.38, 643.09), (289.64, 619.74, 305.64, 648.49)),
 ]
-_AFTER_A_COMMA = [  # W3048778462 byline: a comma hangs below the baseline
+_AFTER_A_COMMA = [  # another paper's byline: a comma hangs below the baseline
     ("i", (111.25, 323.24, 113.49, 330.28), (110.96, 320.17, 113.74, 333.64)),
     ("n", (114.02, 323.24, 118.92, 327.91), (113.96, 320.17, 118.96, 333.64)),
     ("a", (119.42, 323.16, 123.48, 327.91), (119.06, 320.17, 123.5, 333.64)),
@@ -145,7 +145,7 @@ _AFTER_A_COMMA = [  # W3048778462 byline: a comma hangs below the baseline
     (".", (143.18, 323.11, 144.26, 324.2), (142.47, 320.17, 144.97, 333.64)),
     ("I", (145.19, 323.24, 148.03, 329.96), (144.94, 320.17, 148.27, 333.64)),
 ]
-_AFTER_A_QUOTE = [  # W7129773591 table title: a closing quote sits high
+_AFTER_A_QUOTE = [  # another paper's table title: a closing quote sits high
     ("t", (416.37, 587.09, 420.06, 594.55), (416.16, 584.76, 420.7, 595.73)),
     ("a", (421.22, 587.08, 426.48, 592.52), (420.7, 584.76, 426.55, 595.73)),
     ("n", (426.93, 587.2, 432.78, 592.46), (426.55, 584.76, 433.04, 595.73)),
@@ -471,7 +471,7 @@ def _inherited_mediabox_pdf(lines: list[tuple[float, str]]) -> bytes:
 def test_inherited_mediabox_maps_regions_onto_the_rendered_page():
     """``get_cropbox()`` reads the page dictionary alone and falls back to US
     Letter; the page renders at its inherited A4 MediaBox. The Letter box put
-    the byline's text under the title region (osf_cbu9e
+    the byline's text under the title region (a preprint
     exported the byline "DanSnow1" as its title)."""
     pdf_bytes = _inherited_mediabox_pdf([(742, "Biased Perceptions"), (698, "Dan Snow")])
     page_height = 841.89
@@ -508,7 +508,7 @@ def test_region_edge_above_the_baseline_keeps_the_spaces(bottom_pt):
     """pdfium's box for a space is flat on the baseline (no ink). A region
     whose bottom edge crosses the line between the baseline (421 pt here) and
     the letters' centres (~425 pt) kept the letters but dropped the space
-    ("MODELANALYSIS", W7166310734)."""
+    ("MODELANALYSIS" in the title of the _MODEL_ANALYSIS paper)."""
     pdf_bytes = _make_single_text_pdf("MODEL ANALYSIS")
     bbox = [0, (842.0 - 440.0) / 842.0 * 1000, 1000, (842.0 - bottom_pt) / 842.0 * 1000]
 

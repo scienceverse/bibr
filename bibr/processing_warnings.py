@@ -32,6 +32,7 @@ class WarningCode(StrEnum):
     OCR_TABLE_DROPPED = "OCR_TABLE_DROPPED"
     OCR_CONTROL_CHARS = "OCR_CONTROL_CHARS"
     OCR_NATIVE_TEXT_PUA_FALLBACK = "OCR_NATIVE_TEXT_PUA_FALLBACK"
+    OCR_TEXT_LAYER_FALLBACK = "OCR_TEXT_LAYER_FALLBACK"
     LOW_TEXT_QUALITY = "LOW_TEXT_QUALITY"
     PAGE_DPI_REDUCED = "PAGE_DPI_REDUCED"
     # Classifiers
@@ -104,6 +105,9 @@ DESCRIPTIONS: dict[WarningCode, str] = {
     "and references may be unreliable.",
     WarningCode.OCR_NATIVE_TEXT_PUA_FALLBACK: "Embedded PDF text used private-use characters; "
     "those regions were read with OCR instead.",
+    WarningCode.OCR_TEXT_LAYER_FALLBACK: "OCR returned no text for regions of a scanned page "
+    "(blank answers or failed requests); they were read from the page's invisible text layer "
+    "instead.",
     WarningCode.LOW_TEXT_QUALITY: "The text-quality score is below the warning threshold.",
     WarningCode.PAGE_DPI_REDUCED: "A page too large for the render budget at the configured "
     "DPI was rendered at a lower DPI for layout and OCR.",
@@ -208,6 +212,7 @@ NOT_FINAL_CODES: frozenset[WarningCode] = frozenset(
     {
         WarningCode.OCR_REGION_FAILED,
         WarningCode.OCR_PAGE_FAILED,
+        WarningCode.OCR_TEXT_LAYER_FALLBACK,
         WarningCode.SECTION_CLASSIFIER_LLM_FAILED,
         WarningCode.IMPLICIT_SECTIONS_LLM_FAILED,
         WarningCode.PAPER_CLASSIFICATION_FAILED,
