@@ -4,6 +4,8 @@ No model/weights required: ``decode_bio_spans`` is a pure function over
 (tags, offsets, text).
 """
 
+import pytest
+
 from bibr.models import PaperReference
 from bibr.ner.decode import _FIELD_TO_PAPER_REF, decode_bio_spans, map_fields_to_paper_ref
 from bibr.ner.tags import BIO_TAGS
@@ -81,6 +83,14 @@ def test_year_is_parsed_to_int():
 
 def test_year_strips_surrounding_punctuation():
     assert map_fields_to_paper_ref({"YEAR": "(2019)."}) == {"year": 2019}
+
+
+@pytest.mark.parametrize(
+    ("span", "year"),
+    [("18.11.2011", 2011), ("3 March 2011", 2011), ("2011a", 2011), ("2010-2011", 2010)],
+)
+def test_year_reads_the_standalone_year_of_a_date_span(span, year):
+    assert map_fields_to_paper_ref({"YEAR": span}) == {"year": year}
 
 
 def test_non_numeric_year_is_dropped():

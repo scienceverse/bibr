@@ -21,6 +21,10 @@ _PAGE_SPAN_RE = re.compile(
     r"^([A-Za-z]{0,2}\d{1,6}[A-Za-z]?)\s*[-–—]{1,2}\s*([A-Za-z]{0,2}\d{1,6}[A-Za-z]?)$"
 )
 
+# A publication year printed as its own token inside a YEAR span
+# ("18.11.2011", "March 3, 2011", "2011a").
+_YEAR_IN_SPAN_RE = re.compile(r"(?<!\d)(1[5-9]\d\d|20\d\d)(?!\d)")
+
 # BIO field name -> PaperReference field name. Every field type in the tag
 # scheme has a target: the five that used to be dropped here (ARXIV, PMID,
 # SERIES, ACCESS_DATE, NOTE) were trained -- PMID reaches 0.947 F1 on the
@@ -134,6 +138,12 @@ def map_fields_to_paper_ref(raw: dict[str, str]) -> dict[str, str | int]:
             )
             continue
         if field == "YEAR":
+            # A plausible year standing alone in the span wins: joining every
+            # digit first read "18.11.2011" or "3 March 2011" as 1811 / 3201.
+            standalone = _YEAR_IN_SPAN_RE.search(value)
+            if standalone is not None:
+                out["year"] = int(standalone.group(1))
+                continue
             digits = "".join(c for c in value if c.isdigit())
             if digits:
                 try:

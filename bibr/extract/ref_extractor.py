@@ -30,6 +30,7 @@ from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
 from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
+from bibr.extract.ref_field_repair import repair_ner_reference_fields
 from bibr.extract.ref_line_stream import (
     StreamSegmentation,
     _match_key,
@@ -2566,10 +2567,15 @@ class ReferenceExtractor:
         # segfaulted the process on MPS (see bibr.utils.locks).
         with LOCAL_INFERENCE_LOCK:
             ref_parser = _get_ner_parser(self._settings, self._memory_mode)
-            parsed = ref_parser.parse_batch(_strip_enum_markers(ref_strings))
+            parser_inputs = _strip_enum_markers(ref_strings)
+            parsed = ref_parser.parse_batch(parser_inputs)
         aligned: list[PaperReference | None] = []
         parsed_count = 0
-        for ref_text, fields in zip(ref_strings, parsed, strict=True):
+        for ref_text, parser_text, fields in zip(ref_strings, parser_inputs, parsed, strict=True):
+            # Deterministic field-boundary repairs over the tagger's output
+            # (untitled web refs, run-on titles, access-date years); see
+            # bibr.extract.ref_field_repair.
+            repair_ner_reference_fields(fields, parser_text)
             title = fields.get("title") or ""
             authors = fields.get("authors")
             if not title and not authors:
