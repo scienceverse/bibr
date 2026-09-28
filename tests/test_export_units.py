@@ -1,6 +1,6 @@
 """Unit tests for JSON export pipeline components.
 
-Covers: canonicalize_orcid, _compute_paper_id, _merge_ocr_metadata,
+Covers: canonicalize_orcid, _compute_paper_id, doc_info_candidates,
 section remapping, xref resolution, match serialization.
 """
 
@@ -20,7 +20,7 @@ from bibr.models import (
     PaperReference,
     canonicalize_orcid,
 )
-from bibr.paper import Paper, _merge_ocr_metadata
+from bibr.paper import Paper
 from bibr.paper_contents import (
     CanonicalSection,
     CitationCandidate,
@@ -428,7 +428,7 @@ class TestComputePaperId:
         assert paper._compute_paper_id() == "test"
 
 
-# ── _merge_ocr_metadata ───────────────────────────────────────────────
+# ── doc_info_candidates ───────────────────────────────────────────────
 
 
 class TestOcrMetadataSchema:
@@ -471,11 +471,11 @@ class TestOcrMetadataSchema:
         assert m.authors == []
 
 
-# ── _merge_ocr_metadata ───────────────────────────────────────────────
+# ── doc_info_candidates ───────────────────────────────────────────────
 
 
 def _fill_from_doc_info(meta, ocr):
-    """Unscoped doc-info fills: the title, keyword and author decisions, then the DOI."""
+    """Unscoped doc-info fills: the title, keyword and author decisions."""
     from bibr.extract.field_decisions import (
         apply_decision,
         decide_authors,
@@ -514,7 +514,6 @@ def _fill_from_doc_info(meta, ocr):
             abstained=False,
         ),
     )
-    _merge_ocr_metadata(meta, ocr)
 
 
 class TestMergeOcrMetadata:
@@ -528,20 +527,14 @@ class TestMergeOcrMetadata:
         _fill_from_doc_info(meta, {"title": "OCR Title"})
         assert meta.title == "LLM Title"
 
-    def test_fills_empty_doi(self):
-        meta = PaperMetadata(doi="", title="T")
-        _fill_from_doc_info(meta, {"doi": "10.1234/ocr"})
-        assert meta.doi == "10.1234/ocr"
-
-    def test_rejects_invalid_doi(self):
-        meta = PaperMetadata(doi="", title="T")
-        _fill_from_doc_info(meta, {"doi": "not-a-doi"})
-        assert meta.doi == ""
-
-    def test_does_not_overwrite_existing_doi(self):
-        meta = PaperMetadata(doi="10.1/existing", title="T")
-        _fill_from_doc_info(meta, {"doi": "10.1/ocr"})
-        assert meta.doi == "10.1/existing"
+    def test_never_writes_the_doi(self):
+        # The identity stage alone writes the DOI; a doc-info DOI only agrees.
+        empty = PaperMetadata(doi="", title="T")
+        _fill_from_doc_info(empty, {"doi": "10.1234/ocr"})
+        assert empty.doi == ""
+        existing = PaperMetadata(doi="10.1/existing", title="T")
+        _fill_from_doc_info(existing, {"doi": "10.1/ocr"})
+        assert existing.doi == "10.1/existing"
 
     def test_fills_keywords(self):
         meta = PaperMetadata(doi="10.1/x", title="T")

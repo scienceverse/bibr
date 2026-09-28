@@ -56,7 +56,7 @@ async def test_identity_failure_is_confined_to_its_file():
     good.paper, bad.paper = paper("good"), paper("bad")
     selection = SimpleNamespace(selected=None, issues=())
 
-    def collect(contents):
+    def collect(contents, pdf_evidence=None):
         if contents == "bad":
             raise KeyError("text_id")
         return ()

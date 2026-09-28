@@ -1142,7 +1142,7 @@ async def post_parse(
         incumbent_candidate,
     )
     from bibr.extract.ref_extractor import _resolve_ref_strategies
-    from bibr.paper import _merge_ocr_metadata, doc_info_candidates
+    from bibr.paper import doc_info_candidates
 
     # Single LLMClient for the entire post-parse pipeline — shared across
     # section classification, implicit section detection, and metadata extraction
@@ -1282,10 +1282,6 @@ async def post_parse(
             )
             apply_decision(paper_metadata, title_decision)
             metadata_issues.extend(title_decision.issues)
-
-            # The OCR/doc-info DOI fills an empty DOI outside ownership scope.
-            if ocr_metadata and not metadata_ownership_scoped:
-                _merge_ocr_metadata(paper_metadata, ocr_metadata)
 
             # Build statement candidates while section labels and source IDs
             # are stable, but delay materialization until after late cleaning.
