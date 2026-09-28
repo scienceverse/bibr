@@ -303,6 +303,47 @@ released.
   printed as such. The title before the brackets must be printed, and not
   only after its bracketed translation, which may be the model's own. Any
   other title, including one with three or more versions, is left alone.
+- The reference locator keeps the paper's own list when the page layout hides
+  or doubles it. Rows printed above the paper's title on its first page (the
+  end of the previous article on a scanned journal page, under the same
+  "References" heading) are no longer taken as its references; when nothing
+  else is left the next candidate is tried. When no section holds the list,
+  a references heading printed run-in at the start of a body row
+  ("Bibliography.—1. Dreyer, …") opens it, up to the first row that reads as
+  neither a list number, an entry onset nor a dated row, and a references
+  heading that heads no rows takes the tables declared under it when the
+  layout model read the list as tables (one row per table row, at least half
+  of them dated), instead of `REF_SECTION_NOT_FOUND`.
+  `reference_boundary_reason_flags` records each case
+  (`preceding_article_rows_dropped`, `run_in_reference_heading`,
+  `reference_table_rows`).
+- Old-style author-year bibliographies are parsed one work per reference.
+  An entry that prints several works under one byline ("Ehrke, G., 1931,
+  Arch. wissensch. Bot., 13, 221; 1932, 17, 650.") gives the NER parser each
+  later work with the byline in front, in a list written in that style and
+  only when the years do not decrease and the entry has no DOI or link; the
+  receipt records `same_byline_works_split`. In a list that marks a repeated
+  byline with a dash, an entry run on after the previous one's pages or into
+  the same segment on a new line ("… 24: 65-96. -1931b. The cytological
+  theory …", "- and Dark, S. O. S. 1932. …") reaches the parser as an entry
+  of its own (`inline_dash_entries_split`); a dash and year followed by a
+  volume, issue, part, book or pages area ("– 1973. V. 39", "– 2001. N 5",
+  "– 2001. Vyp. 5", the year area of a transliterated GOST list) opens no
+  entry.
+- A numbered reference list that prints several works under one number
+  ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …", "[30] J.F.
+  Plebanski, …, 2511; J. Samuel, …") gives the NER parser one entry per
+  work. Unnumbered fragments of an entry ("Phys. Rev., D9 (1974),
+  3292-3300.", which parsed as no reference) first rejoin the numbered entry
+  above them when the next entry carries the following number and the entry
+  above does not already close on a number and a period; a later work
+  splits out only where an initials-first byline follows a page, year or
+  preprint number, and entries with a DOI or link stay whole; nothing splits
+  where the later works would match or outnumber the numbered entries, which
+  would keep the list numbers in the parser's input. Each entry keeps its
+  place with its first work and the later works follow the list, without
+  a row of their own, so an in-text "[n]" still links to entry n. The receipt
+  records `numbered_fragments_joined` and `numbered_works_split`.
 - Chinese, Japanese and Korean author names now ground against the byline
   however it is spaced. A byline printed one character per token
   (奥　山　正　司) or with the family and given names run together no longer
