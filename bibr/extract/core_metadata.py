@@ -605,6 +605,16 @@ def _split_case_joins(value: str) -> str:
     return _LETTER_RUN_RE.sub(lambda match: " ".join(_case_join_words(match.group(0))), value)
 
 
+# Han, kana and Hangul, plus the ideographic iteration and closing marks and
+# the ideographic zero (々 in "佐々木"). A name in these scripts prints as one
+# unspaced token ("奥山正司", "王伟") or letter-spaced, one character per token
+# ("奥　山　正　司"), while the extracted author splits it into family and given
+# name.
+_CJK_NAME_RE = re.compile(
+    "[\u3005-\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
+)
+
+
 def _name_tokens(value: str) -> tuple[str, ...]:
     # Marker stripping happens here, before casefolding, so that every name
     # comparison in this module is symmetric: printed byline text and extracted
@@ -675,6 +685,12 @@ def _author_token_variants(author: PaperAuthor) -> tuple[tuple[str, ...], ...]:
     values = []
     if given and family:
         values.extend((f"{given} {family}", f"{family} {given}"))
+        joined_given, joined_family = "".join(given.split()), "".join(family.split())
+        if _CJK_NAME_RE.fullmatch(joined_given) and _CJK_NAME_RE.fullmatch(joined_family):
+            # Printed unspaced, the name is one token; letter-spaced, one token
+            # per character.
+            for name in (joined_family + joined_given, joined_given + joined_family):
+                values.extend((name, " ".join(name)))
     elif given:
         values.append(given)
     elif family and "organization" in (author.role or []):

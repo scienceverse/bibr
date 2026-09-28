@@ -303,6 +303,42 @@ released.
   printed as such. The title before the brackets must be printed, and not
   only after its bracketed translation, which may be the model's own. Any
   other title, including one with three or more versions, is left alone.
+- Chinese, Japanese and Korean author names now ground against the byline
+  however it is spaced. A byline printed one character per token
+  (奥　山　正　司) or with the family and given names run together no longer
+  makes the extracted author (奥山 正司) read as fabricated
+  (`VAL_AUTHOR_FABRICATED`), which left the paper without authors.
+- Byline rows printed between the first-page title and the abstract reach
+  the author call even when the section classifier types them as endnotes
+  or acknowledgments. When the parser promotes the cells of a grid or
+  column byline to headings, the mistyped cells dropped out, and their
+  authors with them, because the page-1 byline rescue runs only for a paper
+  with no byline at all. Rows in that gap (it opens at the parser's detected
+  title and needs a closing abstract, keywords or body section) are now
+  admitted on name evidence: a byline-shaped heading that is no field label
+  ("Author Note", "Corresponding Author:") and has no colon, a name over an
+  e-mail address, or a paragraph spanning several layout regions whose
+  first region reads as a byline (a byline row merged into a correspondence
+  block). An editorial or metadata line there ("Edited by Jane Smith",
+  "Handling Editor: Jane Smith" over her e-mail address, "Received 12 March
+  2020", "Data Availability") is admitted on none of these grounds. Only
+  the words outside an e-mail address make a line editorial, so an author
+  whose address names a history department or an ethics centre
+  (jane.smith@history.ox.ac.uk) still counts as a name over her address.
+- On a first page that prints no byline ahead of its abstract, an author's
+  name set above the title that layout labels a page header ("Hubert
+  Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
+  the author call; the parser filed it with the running heads, and the
+  front matter had no author text at all. The row joins the front matter as
+  plain text, as the first page prints it (a later page may repeat the head
+  in other casing), only when it is a bare person's name ending just above
+  the title: no word in capitals, no "&", no journal, article-type, section
+  or editor word in English or a Romance language ("Educational Review",
+  "Case Report", "Scientific Reports", "Revista de Psicología", "Special
+  Issue", "John Smith, Editor"), and not the title's own words set as a
+  short running head. Its shape alone never makes it the title or a record
+  root. Byline-shaped rows after the abstract (a German keyword line, a
+  body heading that names a theorist) no longer keep it out.
 - A scanned page that carries the invisible text layer an OCR engine adds to a
   scan (a page-sized image under text in an invisible render mode, as Acrobat
   Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
