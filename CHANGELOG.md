@@ -1844,6 +1844,36 @@ released.
 
 ### Added
 
+- References from footnote and endnote citations. Law, history and much of the
+  humanities cite in notes and print no reference list, so bibr exported an
+  empty `bib` for them. When no reference list is found, or the one found
+  parses to at most two references, and at least five notes cite works in full
+  (and at least fifteen times as many notes as the located list has
+  references), the notes' citations become the reference list. Each note is
+  split into its citations; lead-ins ("See", "Cf.", "Voir", "Véase") and
+  commentary before a citation are dropped, repeats ("Ibid.", "Id.",
+  "op. cit.", "supra", "ref. 5") are skipped, and the rest goes through the
+  configured reference parser. With the NER parser (the default), a citation
+  the tagger finds nothing in keeps the quoted title it opens on; the LLM
+  parsers have no such fallback. A later short form of a work folds into its
+  first citation (never one dated to another year), so each cited work is one
+  reference, whose `text_id` is the note that first cites it. With the LLM
+  parsers a reference takes the first note whose citation carries its title,
+  or the note at its position when the parser returned one reference per
+  citation, and its `text_id` is null otherwise. In-text numbers are not linked to such a list: the
+  numeric citation tiers are off for it, because a note mark is not a
+  reference number (the note marks keep their `foot` xrefs). The export marks
+  such a list with the `REF_FOOTNOTE_CITATIONS` warning,
+  `extraction.fields.bib.source` `footnotes` and a selected `footnotes`
+  attempt in `extraction.diagnostics.reference_yield`. When no list was
+  located, `REF_SECTION_NOT_FOUND` stays beside it ("…; the references were
+  read from the notes"): the paper may still print a list the locator missed.
+  A note longer than 8,000 characters is not read, and a failure reading the
+  notes leaves the references as the located list has them. A paper whose
+  located list parses to three or more references is never touched. The new
+  `REF_FOOTNOTE_CITATIONS` setting (default on) turns it off. The export
+  schema's `bib[].text_id` description now names the note row (schema
+  regenerated; no field changed).
 - New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
   footer regions from the PDF text layer instead of OCR on born-digital PDFs,
   under the same printable-ratio gate as body text. Default output is

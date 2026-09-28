@@ -29,6 +29,16 @@ from bibr.clients.llm_protocol import LlmClient
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
 from bibr.extract.anchor_snap import find_anchor_starts, segment_by_anchors
+from bibr.extract.footnote_citations import (
+    MAX_LISTED_REFERENCES,
+    NoteCitations,
+    assign_note_text_ids,
+    collapse_repeats,
+    note_citations,
+    notes_replace_list,
+    quoted_title,
+    usable_reference,
+)
 from bibr.extract.merge_split import _onset_finder_for_bibliography, split_merged_refs
 from bibr.extract.ref_field_repair import repair_ner_reference_fields
 from bibr.extract.ref_line_stream import (
@@ -1096,6 +1106,18 @@ def _finalize_reference_fields(fields: dict[str, Any], segment: str | None) -> d
     return fields
 
 
+def _quoted_title_reference(citation: str) -> PaperReference | None:
+    """The reference for a note citation the tagger found nothing in, when
+    the citation opens on a quoted title: that title and its year."""
+    found = quoted_title(citation)
+    if found is None:
+        return None
+    title, year = found
+    fields = {"bib_id": 1, "title": title, "year": year}
+    fields |= dict.fromkeys(("authors", "container", "volume", "first_page"))
+    return PaperReference.model_validate(_finalize_reference_fields(fields, citation))
+
+
 def _is_stub_reference(ref: PaperReference) -> bool:
     """A reference carrying neither a title nor authors — nothing to match on."""
     return not (ref.title or "").strip() and not (ref.authors or "").strip()
@@ -1465,6 +1487,110 @@ class ReferenceExtractor:
         )
         logger.info(f"Extracted {len(all_refs)} references")
         return all_refs
+
+    # ------------------------------------------------------------------
+    # References from the paper's notes (bibr.extract.footnote_citations)
+    # ------------------------------------------------------------------
+
+    def note_citations_for(self, listed: int) -> NoteCitations | None:
+        """The notes' citations when they should stand in for the reference list.
+
+        *listed* is the number of references the located list yielded (0 when
+        none was found). None when ``REF_FOOTNOTE_CITATIONS`` is off, the list
+        is longer than :data:`MAX_LISTED_REFERENCES`, or the notes do not
+        carry enough full citations. A failure reading the notes is logged
+        and leaves the references as the located list has them.
+        """
+        if not self._settings.REF_FOOTNOTE_CITATIONS or listed > MAX_LISTED_REFERENCES:
+            return None
+        try:
+            found = note_citations(self.contents)
+        except Exception:  # noqa: BLE001 — the notes are a fallback, never fatal
+            logger.warning("Reading citations from the notes failed; skipping them", exc_info=True)
+            return None
+        return found if notes_replace_list(found, listed) else None
+
+    async def extract_from_notes(
+        self, found: NoteCitations, listed: list[PaperReference]
+    ) -> list[PaperReference]:
+        """*listed* followed by one reference per further work the notes cite.
+
+        The citations go through the configured parse strategy like the
+        entries of a printed list; repeats and short forms fold into the
+        work's first citation, whose note row becomes the reference's
+        ``text_id``. A citation the tagger finds nothing in keeps the quoted
+        title it opens on, if any.
+        """
+        _, parse_strategy = _resolve_ref_strategies(
+            self._ref_seg_strategy,
+            self._ref_parse_strategy,
+            settings=self._settings,
+        )
+        strings = [citation.text for citation in found.citations]
+        logger.info(
+            "Reading references from %d citations in %d notes (parse=%s)",
+            len(strings),
+            found.citing_notes,
+            parse_strategy,
+        )
+        if parse_strategy == "ner":
+            aligned = await asyncio.to_thread(self._parse_references_ner_aligned, strings)
+            parsed: list[PaperReference] = []
+            for citation, ref in zip(found.citations, aligned, strict=True):
+                if ref is None:
+                    ref = _quoted_title_reference(citation.text)
+                if ref is not None:
+                    ref.text_id = citation.text_id
+                    parsed.append(ref)
+        else:
+            parser = REF_PARSE_STRATEGIES.get(parse_strategy, REF_PARSE_STRATEGIES["llm"])
+            parsed = await parser(self, "\n".join(strings), strings)
+            assign_note_text_ids(parsed, found.citations)
+        added = collapse_repeats([ref for ref in parsed if usable_reference(ref)], listed)
+        self._record_note_receipt(found, parsed_count=len(parsed), added=len(added))
+        if added:
+            listed_note = f" beside the {len(listed)} listed" if listed else ""
+            self._record_warning(
+                WarningCode.REF_FOOTNOTE_CITATIONS,
+                f"{len(added)} references read from {len(found.citations)} citations in "
+                f"{found.citing_notes} citing notes{listed_note}",
+            )
+        return _sequence_references([*listed, *added])
+
+    def _record_note_receipt(self, found: NoteCitations, *, parsed_count: int, added: int) -> None:
+        """Add the notes as an attempt to the reference yield receipt, selected
+        when they added references."""
+        flag = "notes_as_reference_list" if added else "notes_parse_empty"
+        attempt = ReferenceSegmentationAttempt(
+            strategy="footnotes",
+            spans=(),
+            credible_starts=found.citing_notes,
+            selected=added > 0,
+            reason_flags=(flag,),
+        )
+        # Share of the notes' citations that repeat an earlier one.
+        total = len(found.citations) + found.repeats
+        folded = found.repeats + parsed_count - added
+        prior = self.contents.reference_yield_receipt
+        if prior is None:
+            self.contents.reference_yield_receipt = ReferenceYieldReceipt(
+                credible_source_starts=None,
+                attempts=(attempt,),
+                selected_spans=(),
+                source_character_coverage=None,
+                parsed_count=parsed_count,
+                valid_count=added,
+                duplicate_rate=folded / total if total else 0.0,
+                reason_flags=(flag,),
+            )
+            return
+        self.contents.reference_yield_receipt = dataclasses.replace(
+            prior,
+            attempts=(*prior.attempts, attempt),
+            parsed_count=prior.parsed_count + parsed_count,
+            valid_count=prior.valid_count + added,
+            reason_flags=tuple(sorted({*prior.reason_flags, flag})),
+        )
 
     def _record_segmentation_attempt(
         self,

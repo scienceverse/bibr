@@ -422,7 +422,7 @@
         },
         "text_id": {
           "default": null,
-          "description": "text[].text_id of the reference-section sentence holding this entry; null when it could not be matched.",
+          "description": "text[].text_id of the sentence holding this entry: its row in the reference section, or the note that first cites the work when the references were read from the notes; null when it could not be matched.",
           "minimum": 1,
           "title": "Text Id",
           "type": [

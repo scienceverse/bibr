@@ -105,6 +105,18 @@ def _notify_references_ready(
         logger.warning("on_references_ready callback failed", exc_info=True)
 
 
+def reference_section_not_found(error: ValueError, *, from_notes: bool) -> ProcessingWarning:
+    """``REF_SECTION_NOT_FOUND`` for a locator that found no reference list.
+
+    It stays when the notes' citations stand in (*from_notes*): the paper may
+    still print a list the locator missed.
+    """
+    outcome = (
+        "the references were read from the notes" if from_notes else "the reference list is empty"
+    )
+    return ProcessingWarning(WarningCode.REF_SECTION_NOT_FOUND, f"{error}; {outcome}")
+
+
 async def _cancel_and_await(*tasks: asyncio.Task) -> None:
     """Cancel unfinished sibling tasks and always retrieve their results."""
 
@@ -292,18 +304,22 @@ class MetadataExtractor:
         )
         ref_df = None
         ref_collection_error: Exception | None = None
+        # Without a reference section, the notes' citations may stand in for it.
+        from_notes = None
+        missing_section: ValueError | None = None
         if parse_strategy == "off":
             logger.info("Reference extraction disabled (refs=off)")
         else:
             try:
                 ref_df = self._collect_reference_rows()
             except ValueError as e:
-                logger.warning(f"Reference section not found: {e}")
-                self._record_warning(
-                    ProcessingWarning(
-                        WarningCode.REF_SECTION_NOT_FOUND, f"{e}; the reference list is empty"
-                    )
-                )
+                from_notes = self.refs.note_citations_for(0)
+                missing_section = e
+                if from_notes is None:
+                    logger.warning(f"Reference section not found: {e}")
+                    self._record_warning(reference_section_not_found(e, from_notes=False))
+                else:
+                    logger.info(f"Reference section not found ({e}); reading the notes")
             except Exception as e:  # noqa: BLE001 — preserve core, mark incomplete below
                 ref_collection_error = e
 
@@ -321,11 +337,15 @@ class MetadataExtractor:
                 "Reference row collection failed after core metadata succeeded: %s",
                 self.metadata._references_incomplete_diagnostic,
             )
-        elif ref_df is not None and not ref_df.empty:
+        elif (ref_df is not None and not ref_df.empty) or from_notes is not None:
             # Run core metadata + LLM references concurrently
             t0 = time.monotonic()
             core_task = asyncio.create_task(self.extract_core_metadata())
-            ref_task = asyncio.create_task(self._extract_references(ref_df))
+            ref_task = asyncio.create_task(
+                self._extract_references(ref_df)
+                if from_notes is None
+                else self.refs.extract_from_notes(from_notes, [])
+            )
             if on_references_ready is not None:
                 ref_task.add_done_callback(
                     functools.partial(_notify_references_ready, on_references_ready)
@@ -333,6 +353,13 @@ class MetadataExtractor:
             ref_result = await _await_core_and_reference_tasks(core_task, ref_task)
             core_time = time.monotonic() - t0
             refs_time = core_time  # concurrent, so same wall clock
+            if from_notes is not None and missing_section is not None:
+                self._record_warning(
+                    reference_section_not_found(
+                        missing_section,
+                        from_notes=isinstance(ref_result, list) and bool(ref_result),
+                    )
+                )
 
             if isinstance(ref_result, ProcessingError):
                 raise ref_result
@@ -392,7 +419,13 @@ class MetadataExtractor:
         return self.locator.collect_reference_rows()
 
     async def _extract_references(self, ref_df) -> list[PaperReference]:
-        return await self.refs.extract(ref_df)
+        refs = await self.refs.extract(ref_df)
+        # A list of one or two entries beside notes full of citations is not
+        # the paper's reference list; the notes supplement it.
+        from_notes = self.refs.note_citations_for(len(refs))
+        if from_notes is None:
+            return refs
+        return await self.refs.extract_from_notes(from_notes, refs)
 
     def _record_warning(self, warning: ProcessingWarning) -> None:
         # Real PaperContents carries a list; be defensive against test doubles /

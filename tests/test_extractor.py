@@ -1353,7 +1353,10 @@ class TestRefExtractionStrategy:
         extractor.locator.collect_reference_rows = mock.Mock(
             side_effect=ValueError("No reference section found")
         )
-        extractor.refs = mock.Mock(spec=[])
+        # Without a reference section the facade asks whether the notes stand
+        # in for it; the double answers no and has no issue sink.
+        extractor.refs = mock.Mock(spec=["note_citations_for"])
+        extractor.refs.note_citations_for.return_value = None
 
         result = await extractor.extract_all_metadata()
 

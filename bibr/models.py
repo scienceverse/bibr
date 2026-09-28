@@ -239,7 +239,9 @@ class PaperReference(_Base):
     year_suffix: str | None = None  # disambiguator, e.g. "a" in "2005a"
     doi: str | None = None
     bib_type: str | None = None  # BibType value (journal_article, book, …)
-    text_id: int | None = None  # sentence text_id in the references section
+    # sentence text_id in the references section, or of the note citing the
+    # work when the list was read from the notes
+    text_id: int | None = None
     last_page: str | None = None
     issue: str | None = None  # issue number
     editors: str | None = None  # editor string as written in the reference
