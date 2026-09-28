@@ -1291,7 +1291,13 @@ released.
   so its entries were emitted twice, and it emptied a region holding a line
   that no text region had, such as the end of a reference continued from the
   previous page, when that line was a small share of the region's text. The
-  first is now emptied and the second kept.
+  first is now emptied and the second kept. The comparison also takes the
+  same text read in another order as the same text: a PDF text layer can list
+  a numbered list's labels as one column before the entries, or two entries
+  the other way round from the entry boxes, and the aggregate box then stayed
+  next to the entry boxes, so every entry was exported twice and the label
+  column became a reference of its own. Lines holding only entry labels
+  ("[12]", "(3)", "7.") are left out of the comparison.
 - The page-furniture filter on the reference lines the geometry segmenter
   reads removes only lines at the top or bottom edge of a page, as it was
   documented to. It removed every line whose text, with digits masked, matched

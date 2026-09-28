@@ -1015,6 +1015,36 @@ def test_dedup_keeps_a_long_reference_region_whose_entry_boxes_miss_one_entry():
     ]
 
 
+def test_dedup_removes_reference_region_holding_its_entries_labels_as_one_column():
+    from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
+    from tests.reference_fixtures import REFERENCE_LIST
+
+    # The PDF text layer of the aggregate box lists every label, then every
+    # entry (W4386875853); each entry box starts with its own label. The labels
+    # are no text the entry boxes lack, so the aggregate box goes. Kept, its
+    # label column was glued into the previous page's entry title.
+    labels = [f"[{i}]" for i in range(2, len(REFERENCE_LIST) + 2)]
+    envelope = {
+        "native_label": "reference",
+        "label": "text",
+        "content": " \r\n".join(labels + REFERENCE_LIST),
+        "bbox_2d": [100, 100, 900, 100 + 45 * len(REFERENCE_LIST)],
+    }
+    children = [
+        {
+            "native_label": "reference_content",
+            "label": "text",
+            "content": f"{label} \r\n{entry}",
+            "bbox_2d": [100, 100 + 45 * i, 900, 140 + 45 * i],
+        }
+        for i, (label, entry) in enumerate(zip(labels, REFERENCE_LIST, strict=True))
+    ]
+
+    result = _deduplicate_reference_regions([[envelope, *children]])
+
+    assert [r["native_label"] for r in result[0]] == ["reference_content"] * len(children)
+
+
 def test_dedup_keeps_reference_region_text_that_no_text_region_has():
     from bibr.pipeline.stages.ocr import _deduplicate_reference_regions
     from tests.reference_fixtures import BODY_TEXT, REFERENCE_LIST
