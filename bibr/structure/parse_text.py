@@ -1,14 +1,14 @@
 """Body-text / formula / footnote region handlers for :class:`PDFParser`.
 
-Extracted from :mod:`bibr.structure.pdf_parser` as :class:`TextHandlersMixin`.
-Methods move verbatim (only ``text_repair.bbox_to_tuple`` is spelled with its
-public name, and the static ``_should_join`` now references
-``TextHandlersMixin._has_terminal_punct`` rather than ``PDFParser`` to avoid a
-circular import); shared state (``self.assembler``, carry-over, counters) lives
-on :class:`PDFParser` and is reached through ``self``.
+:class:`TextHandlersMixin` accumulates body text with cross-page continuity
+(carry-over joins, URL-wrap bridges), buffers footnotes for relocation to
+footnote sections, and emits display formulas. Shared state
+(``self.assembler``, carry-over, counters) lives on :class:`PDFParser` and
+is reached through ``self``.
 """
 
 import logging
+import re
 from collections.abc import Set as AbstractSet
 
 from bibr.input.consolidate_text import (
@@ -32,9 +32,53 @@ from bibr.utils.text import clean_extracted_url, normalize_text
 
 logger = logging.getLogger(__name__)
 
+# Trailing closers that can follow sentence-terminal punctuation: a paragraph
+# ending in a quotation ("...study.\"") is finished, not continued.
+_TRAILING_CLOSERS = "\"'\u201c\u201d\u2018\u2019\u00ab\u00bb"
+# A footnote marker after the period ("samples.$^{1}$", "samples.\u00b9") is
+# not a sentence continuation either. LaTeX ``$^{...}$``/``^{...}`` tails and
+# literal Unicode superscript runs are stripped before the terminal check.
+_TRAILING_SUPERSCRIPT_RE = re.compile(
+    r"(?:\$\s*\^\s*\{[^}]*\}\s*\$|\^\{[^}]*\}|[\u2070\u00b9\u00b2\u00b3\u2074-\u2079]+)\s*$"
+)
+# Only this many trailing characters are searched for a superscript tail:
+# an end-anchored search over the whole string retries from every position
+# of a long superscript run and goes quadratic. Real markers ("$^{1,2,3}$")
+# are far shorter; a longer tail is simply left in place (not terminal).
+_TRAILING_SUPERSCRIPT_WINDOW = 80
+# Minimum width (layout space, 0-1000) of the region a carry-over ends in
+# for a join across a barrier: body columns are 280+ wide even in
+# three-column layouts; narrower rows are sidebar boxes or figure labels.
+_BARRIER_MIN_REGION_WIDTH = 200
+# A byline-shaped row is short and unterminated ("Jane Doe^{1,2} and John
+# Roe^{3}"); body prose usually ends in terminal punctuation. Only rows of
+# this shape are stripped on a sliced front page before its first heading.
+_BYLINE_SHAPED_MAX_CHARS = 200
+
 
 class TextHandlersMixin:
     """Content, formula, footnote, URL, and continuity handlers for ``PDFParser``."""
+
+    def _is_byline_zone(self, page_number: int, text: str = "") -> bool:
+        """True when affiliation-marker stripping applies to *text*.
+
+        Stripping runs on front-page text before any heading, as it always
+        has: on the absolute first page that is the byline zone of a paper
+        whose title was not detected. A sliced front page (``pages=5-12``)
+        is usually mid-paper prose whose numeric superscripts are citations,
+        so there only a short, unterminated, byline-shaped row is stripped.
+        Once the title section opens, bylines keep their markers — the
+        marker-to-affiliation link feeds author extraction, and citation
+        linking already skips the title section.
+        """
+        if self._current_section_id != 0 or not self._is_front_page(page_number):
+            return False
+        if page_number == 1:
+            return True
+        stripped = text.strip()
+        return bool(stripped) and (
+            len(stripped) <= _BYLINE_SHAPED_MAX_CHARS and not self._has_terminal_punct(stripped)
+        )
 
     def _handle_content(
         self,
@@ -55,9 +99,10 @@ class TextHandlersMixin:
             return
 
         # Strip affiliation markers (e.g. "Author ^{1,2}") from pre-section
-        # content on page 1 (the author byline zone).  These are NOT citation
-        # superscripts and would otherwise produce spurious bib xrefs.
-        if self._is_front_page(page_number) and self._current_section_id == 0:
+        # content on the front page (the author byline zone). These are NOT
+        # citation superscripts and would otherwise produce spurious bib
+        # xrefs.
+        if self._is_byline_zone(page_number, text):
             text = strip_affiliation_markers(text)
 
         self._start_publisher_note_back_matter(text, page_number, bbox)
@@ -74,7 +119,10 @@ class TextHandlersMixin:
 
         heading = self._promotable_content_heading(text, region_meta)
         if heading is not None:
-            self._flush_carry_over()
+            # No flush here: _handle_heading flushes only for a real
+            # SECTION_HEADING, so a row demoted back to body/caption can
+            # still join the carry-over, across a barrier.
+            self._mark_carry_over_barrier()
             self._handle_heading("paragraph_title", heading, page_number, bbox, from_ocr=from_ocr)
             return
 
@@ -144,24 +192,26 @@ class TextHandlersMixin:
         if not text:
             return
 
-        if self._is_front_page(page_number) and self._current_section_id == 0:
-            text = strip_affiliation_markers(text)
-
         prov = Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))
 
         if self._carry_over.text:
             # Check if this continues the previous text (no terminal punct + lowercase start).
             same_page = self._carry_over.last_page == page_number
             same_section = self._carry_over.section_id == self._current_section_id
+            crosses_barrier_ok = not self._carry_over.barrier or self._can_cross_barrier(
+                text, page_number
+            )
             cross_page_continuation = (
                 not same_page
                 and same_section
                 and self._starts_with_lowercase(text)
                 and self._should_join(self._carry_over.text, text)
+                and crosses_barrier_ok
             )
-            if (same_page and self._should_join(self._carry_over.text, text)) or (
-                cross_page_continuation
-            ):
+            same_page_join = (
+                same_page and self._should_join(self._carry_over.text, text) and crosses_barrier_ok
+            )
+            if same_page_join or cross_page_continuation:
                 joiner = "" if self._is_url_wrap_join(self._carry_over.text, text) else " "
                 if not same_page and isinstance(self._carry_over.page, int):
                     # Record where this page's text starts so the flushed
@@ -183,6 +233,7 @@ class TextHandlersMixin:
                 # apart mid-sentence. ``page`` itself stays on the start page:
                 # it stamps the flushed entry and seeds ``page_spans[0]``.
                 self._carry_over.last_page = page_number
+                self._carry_over.barrier = False
                 return
             else:
                 # Flush the carry-over as complete
@@ -260,9 +311,13 @@ class TextHandlersMixin:
         if not text:
             return
 
-        # Flush carry-over so deferred text position is accurate
-        self._flush_carry_over()
-
+        self._mark_carry_over_barrier()
+        # Do not flush the carry-over here: a footnote at the bottom of page
+        # N (or any non-text region) may sit between the two halves of a
+        # paragraph that crosses the page break, and flushing would split it
+        # in two. The recorded index accounts for the pending entry, which
+        # is appended next, so the xref anchor still lands on the paragraph
+        # that will be flushed next.
         # Record (text, page, body_section_id, deferred_text_index).
         # The deferred_text_index lets us find the nearest preceding sentence
         # after segmentation populates real text_ids.
@@ -270,7 +325,7 @@ class TextHandlersMixin:
             text=text,
             page_number=page_number,
             body_section_id=self._current_section_id,
-            deferred_text_index=len(self.assembler),
+            deferred_text_index=len(self.assembler) + (1 if self._carry_over.has_pending() else 0),
             from_ocr=from_ocr,
         )
 
@@ -315,6 +370,33 @@ class TextHandlersMixin:
                 )
             )
 
+    def _can_cross_barrier(self, text: str, page_number: int) -> bool:
+        """Whether *text* may join a carry-over across a barrier region.
+
+        A figure, footnote or heading-labelled region between the two rows
+        used to end the paragraph outright. Joining across one is only
+        trusted for a lowercase continuation (front-matter rows and list
+        items end unterminated, and what follows the region is usually a new
+        block) of body text on the same or the next page (past a full page
+        of figures, the first text is often a continued figure legend): not
+        after a bare trailing URL (a reference or masthead DOI), and not from
+        a narrow region (a sidebar box or text inside a figure, not a body
+        column).
+        """
+        carry = self._carry_over
+        if not self._starts_with_lowercase(text) or self._ends_with_bare_url(carry.text):
+            return False
+        last_page = carry.last_page
+        if isinstance(last_page, int) and page_number - last_page > 1:
+            return False
+        last_bbox = carry.provenance[-1].bbox if carry.provenance else None
+        return last_bbox is None or last_bbox[2] - last_bbox[0] >= _BARRIER_MIN_REGION_WIDTH
+
+    def _mark_carry_over_barrier(self) -> None:
+        """Record that a non-text region interrupted the pending carry-over."""
+        if self._carry_over.has_pending():
+            self._carry_over.barrier = True
+
     def _flush_carry_over(self) -> None:
         """Emit any accumulated carry-over text as sentences.
 
@@ -352,11 +434,44 @@ class TextHandlersMixin:
 
     @staticmethod
     def _has_terminal_punct(text: str) -> bool:
-        """Return True if text ends with sentence-terminal punctuation."""
+        """Return True if text ends with sentence-terminal punctuation.
+
+        Trailing closing quotes/brackets and footnote-superscript tails
+        (``$^{1}$``, ``¹``) are stripped first: a paragraph ending
+        ``...study."`` or ``...samples.¹`` is finished, not continued.
+        """
         stripped = text.rstrip()
         if not stripped:
             return True
-        return stripped[-1] in ".!?:;)]"
+        core = stripped
+        for _ in range(4):
+            tail = _TRAILING_SUPERSCRIPT_RE.search(
+                core, max(0, len(core) - _TRAILING_SUPERSCRIPT_WINDOW)
+            )
+            reduced = (core[: tail.start()] if tail else core).rstrip()
+            reduced = reduced.rstrip(_TRAILING_CLOSERS)
+            if reduced == core:
+                break
+            core = reduced
+        if not core:
+            return True
+        return core[-1] in ".!?:;)]"
+
+    @staticmethod
+    def _ends_with_bare_url(text: str) -> bool:
+        """True when the final token is a complete URL/DOI, not a wrap.
+
+        A region ending ``...at https://osf.io/abc12`` ends its paragraph;
+        the next region starts a new one. A hyphenated wrap (``.../Lak-``)
+        never matches: the trailing hyphen is not a URL character the
+        joiner treats as complete.
+        """
+        token = text.rstrip().rsplit(None, 1)[-1] if text.strip() else ""
+        if not token or token.endswith("-"):
+            return False
+        if URL_RE.fullmatch(token):
+            return True
+        return bool(DOI_URL_CONTEXT_RE.search(token))
 
     @staticmethod
     def _should_join(prev_text: str, next_text: str) -> bool:
@@ -365,11 +480,20 @@ class TextHandlersMixin:
         Both lowercase continuations (hyphenation) and capitalized
         continuations (cross-column breaks where the next column starts a
         new clause within the same sentence) are valid joins. The caller
-        The caller separately applies stricter guards to cross-page joins.
+        separately applies stricter guards to cross-page joins.
         """
         if not prev_text or not next_text:
             return False
-        return not TextHandlersMixin._has_terminal_punct(prev_text)
+        if TextHandlersMixin._is_url_wrap_join(prev_text, next_text):
+            return True
+        if TextHandlersMixin._has_terminal_punct(prev_text):
+            return False
+        # A bare trailing URL/DOI ends the paragraph unless the next region
+        # continues in lowercase: without this, the next paragraph (often in
+        # the other column) is glued onto the URL.
+        if TextHandlersMixin._ends_with_bare_url(prev_text):
+            return TextHandlersMixin._starts_with_lowercase(next_text)
+        return True
 
     @staticmethod
     def _starts_with_lowercase(text: str) -> bool:
@@ -524,7 +648,10 @@ class TextHandlersMixin:
         )
 
     def _find_nearest_text_id(
-        self, deferred_idx: int, skip_text_ids: AbstractSet[int] = frozenset()
+        self,
+        deferred_idx: int,
+        skip_text_ids: AbstractSet[int] = frozenset(),
+        page_limit: int | None = None,
     ) -> int:
         """Find the text_id of the last sentence before a given deferred text position.
 
@@ -532,17 +659,37 @@ class TextHandlersMixin:
         favor of the nearest earlier sentence; the nearest skipped one is
         still returned when nothing else precedes the position — closer
         than the document-start fallback.
+
+        With *page_limit* (the footnote's page), an entry joined across a
+        page break resolves to its last sentence printed on or before that
+        page, not to a sentence that continues on the next one. An entry
+        that starts after that page is passed over, and one without a page
+        is used only when no entry printed on or before the page precedes
+        the position.
         """
+        entries = self.assembler.entries
         skipped_fallback: int | None = None
+        pageless_fallback: int | None = None
         for i in range(min(max(0, deferred_idx - 1), len(self._deferred_last_text_id) - 1), -1, -1):
             tid = self._deferred_last_text_id[i]
             if tid is None:
+                continue
+            page = entries[i].page_number if i < len(entries) else None
+            if page_limit is not None and page is not None and page > page_limit:
                 continue
             if tid in skip_text_ids:
                 if skipped_fallback is None:
                     skipped_fallback = tid
                 continue
+            if page_limit is not None:
+                if page is None:
+                    if pageless_fallback is None:
+                        pageless_fallback = tid
+                    continue
+                return self._last_text_id_through_page(i, tid, page_limit, skip_text_ids)
             return tid
+        if pageless_fallback is not None:
+            return pageless_fallback
         if skipped_fallback is not None:
             return skipped_fallback
         # Fallback: first sentence or 1
@@ -553,3 +700,35 @@ class TextHandlersMixin:
             fallback,
         )
         return fallback
+
+    def _last_text_id_through_page(
+        self,
+        entry_index: int,
+        last_text_id: int,
+        page_limit: int,
+        skip_text_ids: AbstractSet[int],
+    ) -> int:
+        """Last text_id of deferred entry *entry_index* printed on or before *page_limit*.
+
+        Only a cross-page entry (one with ``page_spans``) can hold sentences
+        on a later page; any other entry resolves to *last_text_id*. Falls
+        back to *last_text_id* when no sentence of the entry qualifies.
+        """
+        entries = self.assembler.entries
+        if entry_index >= len(entries) or not entries[entry_index].page_spans:
+            return last_text_id
+        first_text_id = 1 + next(
+            (tid for tid in reversed(self._deferred_last_text_id[:entry_index]) if tid is not None),
+            0,
+        )
+        best: int | None = None
+        for sentence in self.sentences:
+            if (
+                first_text_id <= sentence.text_id <= last_text_id
+                and sentence.text_id not in skip_text_ids
+                and sentence.page_number is not None
+                and sentence.page_number <= page_limit
+                and (best is None or sentence.text_id > best)
+            ):
+                best = sentence.text_id
+        return best if best is not None else last_text_id

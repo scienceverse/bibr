@@ -146,6 +146,7 @@ CANONICAL_SECTION_ALIASES = {
         "literature cited",
         "citations",
         "cited literature",
+        "reference list",
     ],
     CanonicalSection.ACKNOWLEDGMENT: [
         "acknowledgments",
@@ -575,7 +576,8 @@ class PaperTablePart:
 
     @property
     def contents(self) -> list[list[str]]:
-        if self.df.empty:
+        # A header-only frame (columns, no rows) still exports its header row.
+        if len(self.df.columns) == 0:
             return []
         return [[str(c) for c in self.df.columns.tolist()]] + [
             [str(value) for value in row] for row in self.df.values.tolist()
@@ -605,8 +607,12 @@ class PaperTable:
 
     @property
     def contents(self) -> list[list[str]]:
-        """Convert DataFrame to ``[headers_row, *data_rows]`` with all values stringified."""
-        if self.df.empty:
+        """Convert DataFrame to ``[headers_row, *data_rows]`` with all values stringified.
+
+        A header-only frame (columns, no rows) yields just ``[headers_row]``;
+        only a column-less frame yields ``[]``.
+        """
+        if len(self.df.columns) == 0:
             return []
         headers = [str(c) for c in self.df.columns.tolist()]
         data = [[str(v) for v in row] for row in self.df.values.tolist()]

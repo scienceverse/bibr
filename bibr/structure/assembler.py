@@ -144,6 +144,51 @@ class DocumentAssembler:
         )
         return len(self.entries) - 1
 
+    def insert(
+        self,
+        position: int,
+        text: str,
+        page_number: int | None,
+        section_id: int,
+        needs_segmentation: bool,
+        is_formula: bool = False,
+        *,
+        provenance: list[Provenance] | None = None,
+        region_meta: dict | None = None,
+        page_spans: list[tuple[int, int]] | None = None,
+        from_ocr: bool = True,
+        inline_math: tuple[str, ...] = (),
+    ) -> int:
+        """Insert a deferred entry at *position* and return its index.
+
+        Same normalization as :meth:`append`; used to replay an unowned
+        caption where it was printed instead of at the end of the buffer,
+        so ``text_id`` order keeps matching reading order. Runs during
+        parsing, before :meth:`emit` builds ``last_text_id``.
+        """
+        normalized = normalize_unicode(text)
+        if page_spans and normalized != text:
+            page_spans = [
+                (len(normalize_unicode(text[:offset])), page) for offset, page in page_spans
+            ]
+        position = max(0, min(position, len(self.entries)))
+        self.entries.insert(
+            position,
+            DeferredText(
+                text=normalized,
+                page_number=page_number,
+                section_id=section_id,
+                needs_segmentation=needs_segmentation,
+                is_formula=is_formula,
+                provenance=list(provenance) if provenance else [],
+                region_meta=region_meta,
+                page_spans=list(page_spans) if page_spans else [],
+                from_ocr=from_ocr,
+                inline_math=tuple(normalize_unicode(span) for span in inline_math),
+            ),
+        )
+        return position
+
     def __len__(self) -> int:
         return len(self.entries)
 

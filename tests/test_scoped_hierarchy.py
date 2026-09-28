@@ -654,3 +654,31 @@ class TestClassifySectionsEndToEnd:
         from bibr.structure.implicit_sections import _BODY_TYPES
 
         assert CanonicalSection.UNKNOWN not in _BODY_TYPES
+
+
+class TestNumberedStudyMarkers:
+    """Numbered headings ("2 Study 1", "3. Experiment 2") are study markers."""
+
+    def test_numbered_prefix_markers_detected(self):
+        secs = _sections("2 Study 1", "3. Experiment 2", "2.0 Study 1")
+        markers = detect_study_markers(secs)
+        assert [markers[i].base for i in (1, 2, 3)] == ["1", "2", "1"]
+
+    def test_numbered_prefix_does_not_match_plain_numbered_headers(self):
+        secs = _sections("1 Introduction", "2 methods", "10 study habits")
+        assert detect_study_markers(secs) == {}
+
+    def test_numbered_multistudy_scopes(self):
+        secs = _sections(
+            "1 Introduction",
+            "2 Study 1",
+            "Method",
+            "Results",
+            "3 Study 2",
+            "Method",
+            "Results",
+        )
+        markers = detect_study_markers(secs)
+        assert set(markers) == {2, 5}
+        scopes = assign_provisional_scopes(secs, markers)
+        assert scopes == {1: 0, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 2}

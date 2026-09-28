@@ -51,6 +51,12 @@ class CarryOverState:
         # Whether any contributing region was OCR output (not the PDF text
         # layer); a join keeps True once one region sets it.
         self.from_ocr: bool = True
+        # Set when a figure, footnote or heading-labelled region arrives
+        # while text is buffered. Those used to flush the buffer; a join
+        # across one now passes the stricter guards of
+        # ``TextHandlersMixin._can_cross_barrier``, so an unfinished
+        # front-matter row is not glued to whatever follows the region.
+        self.barrier: bool = False
 
     def has_pending(self) -> bool:
         """True iff there is non-empty buffered text awaiting flush."""
@@ -66,3 +72,4 @@ class CarryOverState:
         self.region_meta = None
         self.page_spans = []
         self.from_ocr = True
+        self.barrier = False

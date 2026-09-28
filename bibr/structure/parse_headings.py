@@ -1,9 +1,11 @@
 """Heading / section-hint region handlers for :class:`PDFParser`.
 
-Extracted from :mod:`bibr.structure.pdf_parser` as :class:`HeadingHandlersMixin`.
-Methods move verbatim (only ``text_repair`` helper calls are spelled with their
-public names); shared state (``self.sections``, counters, caption/hint trackers)
-lives on :class:`PDFParser` and is reached through ``self``.
+:class:`HeadingHandlersMixin` classifies heading regions (section boundary,
+caption, body-text demotion, publisher-noise drop), opens sections with
+numbering-aware levels, reuses hint-created Abstract/References sections,
+and joins split front-page titles. Shared state (``self.sections``,
+counters, caption/hint trackers) lives on :class:`PDFParser` and is reached
+through ``self``.
 """
 
 import logging
@@ -43,10 +45,120 @@ _SECTION_HINT_NAMES: dict[str, str] = {
     "reference_content": "References",
 }
 
+# Printed spellings of each hint-created section that reuse it beyond the
+# literal name ("5 References", "Literature Cited", "Abstract:"), keyed by
+# the hint section's lowercase name and compared on ``_hint_alias_key``.
+# Deliberately a closed list, not the classifier's whole ABSTRACT/REFERENCES
+# class: "Summary", "Author summary", "Resumo" or "Supplementary references"
+# are separate printed sections and must not fold into the hint's.
+_HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
+    "abstract": frozenset({"abstract"}),
+    "references": frozenset(
+        {
+            "references",
+            "reference list",
+            "list of references",
+            "references and notes",
+            "references cited",
+            "literature cited",
+            "cited literature",
+            "works cited",
+            "bibliography",
+        }
+    ),
+}
+# A printed heading directly before a front-page abstract region may also
+# read "Summary" (Lancet style); a "Summary" after the abstract region (a
+# discussion subsection, a lay summary box) is its own section.
+_FRONT_ABSTRACT_HEADING_ALIASES = frozenset({"abstract", "summary"})
+_HINT_ALIAS_PUNCT_RE = re.compile(r"[^\w\s]")
+
+
+_HINT_CANONICAL: dict[str, CanonicalSection] = {
+    "abstract": CanonicalSection.ABSTRACT,
+    "references": CanonicalSection.REFERENCES,
+}
+
+
+def _hint_alias_key(header: str) -> str:
+    """Normalize *header* for ``_HINT_REUSE_ALIASES`` matching.
+
+    Drops numbering and punctuation ("5. References:" → "references").
+    """
+    return " ".join(_HINT_ALIAS_PUNCT_RE.sub(" ", normalize_text(header)).split())
+
+
+def _is_hint_alias(header: str, hint_key: str, aliases: frozenset[str]) -> bool:
+    """True when *header* is a printed alias of the ``hint_key`` section.
+
+    Besides the alias list, the section classifier must put the header in
+    the hint's class, so the reused section keeps the type the synthetic
+    one would have had ("Reference" alone classifies as nothing and would
+    turn the reference list into untyped body text).
+    """
+    if _hint_alias_key(header) not in aliases:
+        return False
+    from bibr.structure.section_classifier import _classify_lookup
+
+    section_type, _score = _classify_lookup(normalize_text(header))
+    return section_type == _HINT_CANONICAL.get(hint_key)
+
+
 # A reference-list lead-in that OCR occasionally promotes to a heading, e.g.
 # "Breiman [2001]:" or "Smith (1999)." — a capitalised surname immediately
 # followed by a bracketed/parenthesised 4-digit year and a colon/period.
 _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]")
+
+# A captured first doc_title that reads as a journal masthead ("INTERNATIONAL
+# JOURNAL OF ...", a URL, an ISSN) is not the start of a split title, so the
+# next doc_title region is not appended to it.
+_SPLIT_TITLE_MASTHEAD_RE = re.compile(r"\bjournal\b|https?://|www\.|\bISSN\b", re.IGNORECASE)
+
+# A byline the layout model labelled ``doc_title`` ("ADRIAN LARNER" under an
+# all-caps title on an old scan) is not a title continuation: joined into the
+# title, the name leaves the byline zone and the author call never sees it.
+# A byline row is one to eight comma/"and"-separated groups of two to four
+# name-shaped tokens with no title function word (marker digits and symbols
+# ignored).
+_BYLINE_GROUP_SPLIT_RE = re.compile(r"\s*(?:[,;&·]|\band\b)\s*", re.IGNORECASE)
+_BYLINE_MARKER_CHARS_RE = re.compile(r"[\d*∗†‡§¶]+")
+_BYLINE_NAME_TOKEN_RE = re.compile(r"^(?:[^\W\d_]\.)+$|^[^\W\d_]+(?:['’\-][^\W\d_]+)*\.?$")
+_BYLINE_NAME_PARTICLES = frozenset(
+    {"al", "bin", "da", "das", "de", "del", "della", "der", "di", "do", "dos", "du"}
+    | {"ibn", "la", "le", "van", "von", "y"}
+)
+_TITLE_FUNCTION_WORDS = frozenset(
+    {"a", "an", "are", "as", "at", "by", "for", "from", "in", "into", "is", "of", "on"}
+    | {"or", "the", "to", "towards", "versus", "via", "vs", "with", "without"}
+)
+
+
+def _looks_like_byline_row(text: str) -> bool:
+    """Whether a heading row reads as a personal-name byline, not title words."""
+    if any(mark in text for mark in ":?!"):
+        return False
+    groups = [
+        group.split()
+        for group in _BYLINE_GROUP_SPLIT_RE.split(_BYLINE_MARKER_CHARS_RE.sub(" ", text))
+        if group.strip()
+    ]
+    if not 1 <= len(groups) <= 8:
+        return False
+    for tokens in groups:
+        if not 2 <= len(tokens) <= 4:
+            return False
+        for token in tokens:
+            folded = token.casefold()
+            if folded in _BYLINE_NAME_PARTICLES:
+                continue
+            if (
+                folded in _TITLE_FUNCTION_WORDS
+                or not token[:1].isupper()
+                or not _BYLINE_NAME_TOKEN_RE.match(token)
+            ):
+                return False
+    return True
+
 
 # OCR badge-glyph artifacts that the layout model occasionally merges into the
 # trailing edge of a page-1 doc_title region (e.g. the Open-Practices "TC"
@@ -93,6 +205,13 @@ class HeadingDisposition(StrEnum):
 
 class HeadingHandlersMixin:
     """Heading, section-hint, and outline-hierarchy handlers for ``PDFParser``."""
+
+    # Parser state, initialised in ``PDFParser.__init__``.
+    _current_section_id: int
+    _title_section_id: int | None
+    _title_bbox: list | tuple | None
+    _title_page: int | None
+    _title_assembler_len: int
 
     def _handle_structural(self, label: str, content: str) -> None:
         """Record headers/footers as metadata."""
@@ -151,6 +270,10 @@ class HeadingHandlersMixin:
             self._emit_content_without_promotion(text, page_number, bbox, from_ocr=from_ocr)
             return
 
+        # Only a real section boundary flushes a pending cross-page
+        # carry-over. Headings dropped as publisher noise or rerouted to
+        # captions/body above must not split a paragraph in flight.
+        self._flush_carry_over()
         # Only a real section boundary invalidates stale caption tracking.
         self._caption_barriers.append(self._source_region_index)
         self._terminal_reference_tail_section_id = None
@@ -158,6 +281,7 @@ class HeadingHandlersMixin:
         # Capture doc_title on page 1 as the detected paper title.
         # Skip text that looks like a copyright/permission/license notice
         # (these sometimes precede the actual title on page 1).
+        captured_title = False
         if (
             label == "doc_title"
             and self._is_front_page(page_number)
@@ -173,12 +297,54 @@ class HeadingHandlersMixin:
             text = _TITLE_BADGE_GLYPH_RE.sub("", text)
             self._detected_title = text
             logger.debug("Detected doc_title on page 1: %s", self._detected_title[:80])
+            captured_title = True
+
+        # A front-page title split across doc_title regions continues the
+        # title instead of opening a stray level-1 section: still on the
+        # title section, nothing emitted since, vertically adjacent, the
+        # captured part is not a journal masthead, and the new region is not
+        # a byline.
+        if (
+            label == "doc_title"
+            and self._is_front_page(page_number)
+            and self._detected_title is not None
+            and not _SPLIT_TITLE_MASTHEAD_RE.search(self._detected_title)
+            and self._title_section_id is not None
+            and self._current_section_id == self._title_section_id
+            and len(self.assembler) == self._title_assembler_len
+            and self._title_bbox is not None
+            and self._is_bbox_nearby(self._title_bbox, self._title_page, bbox, page_number)
+            and not self._is_byline_continuation(text)
+        ):
+            continuation = _TITLE_BADGE_GLYPH_RE.sub("", text)
+            self._detected_title = f"{self._detected_title} {continuation}".strip()
+            for section in self.sections:
+                if section.section_id == self._title_section_id:
+                    section.header = self._detected_title
+                    section.provenance.append(
+                        Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))
+                    )
+                    break
+            self._title_bbox = self._merge_bboxes(self._title_bbox, bbox_to_tuple(bbox))
+            logger.debug("Extended split doc_title on page 1: %s", self._detected_title[:80])
+            return
 
         # If a section hint already created a section with the same name,
         # reuse it instead of creating a duplicate (e.g., "reference" hint
         # creates "References" section, then a "References" heading appears).
+        # A printed alias ("5 References", "Literature Cited") reuses it too,
+        # but only while the hint section is still current: the heading then
+        # belongs to the hint region just before it. Anywhere else it is a
+        # separate printed section.
         text_lower = text.lower().strip()
         hint_section_id = self._hint_section_lookup.get(text_lower)
+        if hint_section_id is None and self._current_section_id in self._hint_section_ids:
+            for hint_key, section_id in self._hint_section_lookup.items():
+                if section_id == self._current_section_id and _is_hint_alias(
+                    text, hint_key, _HINT_REUSE_ALIASES.get(hint_key, frozenset())
+                ):
+                    hint_section_id = section_id
+                    break
         if hint_section_id is not None:
             self._current_section_id = hint_section_id
             for section in self.sections:
@@ -226,6 +392,28 @@ class HeadingHandlersMixin:
         )
         self.sections.append(section)
         self._current_section_id = self._section_counter
+        if captured_title:
+            self._title_section_id = section.section_id
+            self._title_bbox = bbox_to_tuple(bbox)
+            self._title_page = page_number
+            self._title_assembler_len = len(self.assembler)
+
+    def _is_byline_continuation(self, text: str) -> bool:
+        """Whether a doc_title row after the title is a byline, not more title.
+
+        A title that stops on a function word or a hyphen ("... Replication
+        of") still continues whatever follows. Otherwise a name-shaped row is
+        a byline and keeps its own section, as before split titles were
+        joined; a Title-Case last line of bare nouns ("Interference Effect")
+        is lexically the same shape and also stays apart. Line geometry does
+        not separate the two: bylines sit as close to the title as wrapped
+        lines do.
+        """
+        if not _looks_like_byline_row(text):
+            return False
+        title = (self._detected_title or "").rstrip()
+        last_word = title.rsplit(None, 1)[-1].casefold() if title else ""
+        return not (title.endswith("-") or last_word in _TITLE_FUNCTION_WORDS | {"and"})
 
     def _classify_heading_disposition(self, label: str, text: str) -> HeadingDisposition:
         """Classify a heading region exactly once into its terminal treatment."""
@@ -381,13 +569,36 @@ class HeadingHandlersMixin:
         elif hint_name:
             # Check if a heading-created section with the same name already
             # exists (heading came before the hint region).  If so, reuse it
-            # instead of creating a duplicate.
+            # instead of creating a duplicate. A printed alias of the hint
+            # name ("Literature Cited", "5 References", "Abstract:") owns the
+            # hint's entries too, instead of standing empty beside a
+            # synthetic section, but only when it is the current section:
+            # the heading immediately precedes the hint region.
             hint_lower = hint_name.lower()
             existing = None
-            for sec in self.sections:
-                if sec.header.lower() == hint_lower and sec.level > 0:
-                    existing = sec
-                    break
+            aliases = _HINT_REUSE_ALIASES.get(hint_lower, frozenset())
+            if hint_lower == "abstract" and self._is_front_page(page_number):
+                aliases = _FRONT_ABSTRACT_HEADING_ALIASES
+            current_section = next(
+                (
+                    sec
+                    for sec in reversed(self.sections)
+                    if sec.section_id == self._current_section_id
+                ),
+                None,
+            )
+            if (
+                current_section is not None
+                and current_section.level > 0
+                and current_section.section_id not in self._hint_section_ids
+                and _is_hint_alias(current_section.header, hint_lower, aliases)
+            ):
+                existing = current_section
+            if existing is None:
+                for sec in self.sections:
+                    if sec.header.lower() == hint_lower and sec.level > 0:
+                        existing = sec
+                        break
 
             if existing is not None:
                 self._current_section_id = existing.section_id

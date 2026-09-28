@@ -134,3 +134,60 @@ class TestTableCellsKeepPrintedText:
             ["Nord", "1,5", "0,25"],
             ["Süd", "", "1,0"],
         ]
+
+
+class TestHeaderOnlyTables:
+    """A table with columns but zero rows is kept, not dropped."""
+
+    def test_html_one_row_without_th_still_drops(self):
+        """Boundary (deferred): a one-row region without <th> is usually a
+        publisher label or masthead box, and downstream DOI evidence relies
+        on the drop — so it still drops (see
+        test_single_cell_label_is_not_promoted_to_a_data_table and
+        test_dropped_publisher_box_retains_complete_source_identity_evidence).
+        """
+        from bibr.structure.pdf_parser import PDFParser
+
+        parser = PDFParser(
+            [
+                [
+                    _region(
+                        0,
+                        "table",
+                        "<table><tr><td>Model</td><td>AIC</td><td>BIC</td></tr></table>",
+                    )
+                ]
+            ]
+        )
+        contents = parser.parse()
+        assert len(contents.tables) == 0
+        assert parser._dropped_table_count == 1
+
+    def test_html_header_only_with_th_is_a_table(self):
+        contents = _parse(
+            [[_region(0, "table", "<table><tr><th>Model</th><th>AIC</th></tr></table>")]]
+        )
+        assert len(contents.tables) == 1
+        assert list(contents.tables[0].df.columns) == ["Model", "AIC"]
+
+    def test_header_only_table_exports_its_header_row(self):
+        """The header text reaches ``contents``, not just the HTML."""
+        contents = _parse(
+            [[_region(0, "table", "<table><tr><th>Model</th><th>AIC</th></tr></table>")]]
+        )
+        assert contents.tables[0].contents == [["Model", "AIC"]]
+        assert contents.tables[0].parts[0].contents == [["Model", "AIC"]]
+
+    def test_markdown_header_and_separator_only_is_a_table(self):
+        contents = _parse([[_region(0, "table", "| Model | AIC | BIC |\n|---|---|---|")]])
+        assert len(contents.tables) == 1
+        assert list(contents.tables[0].df.columns) == ["Model", "AIC", "BIC"]
+
+    def test_unparseable_table_region_still_drops(self):
+        """Guard: a region with no parseable frame at all still warns and drops."""
+        from bibr.structure.pdf_parser import PDFParser
+
+        parser = PDFParser([[_region(0, "table", "<table></table>")]])
+        contents = parser.parse()
+        assert len(contents.tables) == 0
+        assert parser._dropped_table_count == 1

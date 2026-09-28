@@ -1756,6 +1756,50 @@ released.
 - PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
   printed line. The page lines the reference line stream reads break there
   again; the geometry segmenter's own line capture is unchanged.
+- PDF paragraphs that run across a page break no longer split in two when a
+  footnote or a figure intervenes. A join across such a region (or a heading
+  demoted to body text) needs a lowercase continuation on the same or the
+  next page, from a body-width row that does not end in a URL, so
+  front-matter rows and list items are not glued to what follows. A
+  footnote's xref anchors to the joined sentence printed on the note's page,
+  never to text printed after the note, such as a caption replayed from the
+  next page.
+  A paragraph ending in a closing quote or a footnote superscript, or in a
+  bare URL followed by a capitalised row, is no longer glued to the next
+  one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted
+  as a running header: only a repeated line in the margin band, or a block of
+  repeated rows such as a reprinted chart legend, is. On a sliced front page
+  (`pages=`), affiliation markers are stripped only from short, unterminated,
+  byline-shaped rows, so body citation superscripts there survive.
+- A title split across two `doc_title` regions is now joined into one title
+  section instead of truncating `detected_title` and stranding a level-1
+  section that later headings parent under; a first region that reads as a
+  journal masthead is not extended, and a later region that reads as a
+  personal-name byline keeps its own section, so the authors stay in the
+  byline. Numbered study headings ("2 Study 1",
+  "3. Experiment 2") now open scopes like unnumbered ones, so the second
+  study's Method/Results no longer fold under the first study's. Reference
+  and abstract hint regions reuse the adjacent printed heading when it spells
+  the hint's name differently ("Literature Cited", "5 References",
+  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
+  a front-page abstract) instead of leaving an empty printed section beside
+  a synthetic one; "Author summary", a later "Summary" or "Supplementary
+  references" stay separate sections. A "Reference List" heading now
+  classifies as References.
+- PDF float accounting no longer duplicates caption text that de-duplication
+  already consumed, and unowned captions replay where they were printed
+  instead of after all body text. Uppercase or unmarked panel titles with a
+  description ("(A) Congruent trials", "A Congruent trials") now reach the
+  figure caption instead of disappearing from the export. Dotted table
+  labels ("Table 3.1") no longer reserve a printed id, continuation pages
+  sharing one printed label no longer raise a false id-conflict warning, and
+  floats keep document order instead of being resorted by id. Header-only
+  tables (a `<th>` header with no rows, or a markdown header plus separator)
+  are kept instead of dropped and export their header row in `contents`; a
+  one-row region without `<th>` still drops, since that shape is usually a
+  publisher label or masthead box. A bare panel marker joins the vertically
+  nearest same-page figure group when one is near, and otherwise the next
+  labelled figure as before.
 
 ### Added
 

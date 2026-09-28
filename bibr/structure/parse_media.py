@@ -1,13 +1,16 @@
 """Table / figure / caption region handlers for :class:`PDFParser`.
 
-Extracted from :mod:`bibr.structure.pdf_parser` as :class:`MediaHandlersMixin`.
-Methods move verbatim (only the ``text_repair.bbox_to_tuple`` helper is spelled
-with its public name); shared state (``self.tables``, ``self.figures``, caption
-trackers, counters) lives on :class:`PDFParser` and is reached through ``self``.
+:class:`MediaHandlersMixin` owns caption accounting end to end: collecting
+candidates, de-duplicating overlaps, grouping panel evidence and
+continuation tables, assigning captions to floats globally, reserving
+printed ids, and replaying unowned captions as body text. Shared state
+(``self.tables``, ``self.figures``, caption trackers, counters) lives on
+:class:`PDFParser` and is reached through ``self``.
 """
 
 import logging
 import re
+from typing import Literal
 
 import pandas as pd
 
@@ -38,11 +41,20 @@ _UNESCAPED_PIPE_RE = re.compile(r"(?<!\\)\|")
 class MediaHandlersMixin:
     """Table, figure, and caption handlers for ``PDFParser``."""
 
-    # Panel/sub-figure markers: "(a)", "a)", "(b) Without BN", "(c) With BN".
-    # A single letter followed by ")" and an optional short description.  The
-    # length cap in _is_panel_label prevents swallowing real captions that
-    # happen to start with a lowercase letter.
-    _PANEL_LABEL_RE = re.compile(r"^\(?[a-z]\)\s*(.*)$", re.DOTALL)
+    # Caption-fragment ownership, initialised in ``PDFParser.__init__`` and
+    # re-keyed to canonical caption ids in ``_finalize_media``.
+    _table_caption_fragments: dict[str, str]
+    _confirmed_table_caption_owners: dict[str, int]
+    # Footnotes recorded before each caption candidate, initialised in
+    # ``PDFParser.__init__`` (tie-break for ``replay_unowned_captions``).
+    _caption_candidate_footnote_counts: dict[str, int]
+
+    # Panel/sub-figure markers: "(a)", "(A)", "A", "A.", "b)", "(c) With BN".
+    # A single letter (either case) with an optional paren/dot marker and an
+    # optional short description. The marker must be one letter — a longer
+    # word ("Methods") is body text, not a panel label — and a bare marker
+    # with no tail ("(A)", "A") yields no description.
+    _PANEL_LABEL_RE = re.compile(r"^\(?[a-z](?:\)\s*|[\s.]+)(.*)$", re.IGNORECASE | re.DOTALL)
 
     _MARKDOWN_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*[-:]+[-|:\s]*$")
 
@@ -66,6 +78,10 @@ class MediaHandlersMixin:
     )
     _ROMAN_LABEL_RE = re.compile(r"[IVXLCDM]+")
     _DOTTED_NUMBER_RE = re.compile(r"(?P<major>\d+)(?:\.\d+)*")
+    # Parenthesized continuation marker, mirroring
+    # ``floats_normalize._CONTINUED_RE`` (whose merger resolves exactly the
+    # claims suppressed below — keep the two in step).
+    _CONTINUED_MARKER_RE = re.compile(r"[(\[]\s*continued\s*[)\]]", re.IGNORECASE)
     _DOI_URL_RE = re.compile(r"https?://doi\.org/[^\s]+", re.IGNORECASE)
     _TRAILING_DOI_URL_RE = re.compile(
         r"(?:\s*https?://doi\.org/[^\s]+)+\s*$",
@@ -112,6 +128,16 @@ class MediaHandlersMixin:
         # internal side map instead of widening that schema. Used to replay an
         # unowned candidate as body text (see ``replay_unowned_captions``).
         self._caption_candidate_sections[caption_id] = self._current_section_id
+        # Likewise the buffer position at capture time, so a replay lands
+        # where the caption was printed instead of at the end of the buffer.
+        # A pending carry-over was printed before the caption and becomes the
+        # next entry when it flushes, so the replay goes after it.
+        self._caption_candidate_positions[caption_id] = len(self.assembler) + (
+            1 if self._carry_over.has_pending() else 0
+        )
+        # A footnote recorded before this point was printed before the
+        # caption, even when both recorded the same buffer position.
+        self._caption_candidate_footnote_counts[caption_id] = len(self._footnotes)
         # Likewise whether OCR produced the text (``PaperSentence.from_ocr``).
         self._caption_candidate_from_ocr[caption_id] = from_ocr
         self._caption_candidates.append(
@@ -144,14 +170,18 @@ class MediaHandlersMixin:
         if text.lstrip().startswith("<table") or text.lstrip().startswith("<TABLE"):
             df = self._parse_html_table(text)
             source_html = text
-            if df is None or df.empty:
+            if df is None or len(df.columns) == 0:
                 salvaged = self._TABLE_TAG_RE.sub(r"<\1\2>", text)
                 if salvaged != text:
                     df = self._parse_html_table(salvaged)
                     source_html = salvaged
         else:
             df = self._parse_markdown_table(text)
-        if df is None or df.empty:
+        # A frame with columns but zero rows is a header-only table (a split
+        # whose first page holds just the header row, or a small key-value
+        # table): keep it so its text is not lost. Only a column-less frame
+        # is unparseable.
+        if df is None or len(df.columns) == 0:
             self._rollback_pending_table_caption_fragment()
             self._expire_pending_table_label_fragment()
             self._dropped_table_count += 1
@@ -419,16 +449,6 @@ class MediaHandlersMixin:
             self._handle_figure_caption(content, bbox, page_number, from_ocr=from_ocr)
 
     @classmethod
-    def _is_panel_label(cls, text: str) -> bool:
-        """True for short sub-figure markers like "(a)", "b)", "(c) With BN"."""
-        text = text.strip()
-        # Cap length so a real caption starting with a lowercase letter (e.g.
-        # "a) The full description of …") is not mistaken for a panel marker.
-        if not text or len(text) > 60:
-            return False
-        return bool(cls._PANEL_LABEL_RE.match(text))
-
-    @classmethod
     def _panel_description(cls, text: str) -> str:
         """Return the descriptive tail of a panel label ("" for a bare marker)."""
         m = cls._PANEL_LABEL_RE.match(text.strip())
@@ -491,8 +511,10 @@ class MediaHandlersMixin:
 
         Replaying keeps the text in the document. Candidates deliberately
         rejected as non-captions (publisher noise, DOI-only fragments, table
-        notes) stay dropped, and a candidate whose text was already assigned
-        elsewhere is skipped so nothing is duplicated.
+        notes) stay dropped, de-duplication duplicates stay dropped (their
+        canonical copy replays once when it is itself unowned), and a
+        candidate whose text — or caption meaning ignoring a trailing DOI —
+        was already assigned elsewhere is skipped so nothing is duplicated.
 
         Returns the number of replayed candidates.
         """
@@ -501,17 +523,55 @@ class MediaHandlersMixin:
             for candidate, assignment in zip(receipt.candidates, receipt.assignments, strict=True)
             if assignment.object_id is not None
         }
+        assigned_keys = {
+            self._caption_semantic_key(candidate.text)
+            for candidate, assignment in zip(receipt.candidates, receipt.assignments, strict=True)
+            if assignment.object_id is not None
+        }
+        assigned_keys.discard("")
         replayed = 0
+        pending: list[tuple[int, CaptionCandidate, CaptionAssignment]] = []
         for candidate, assignment in zip(receipt.candidates, receipt.assignments, strict=True):
             text = candidate.text.strip()
+            # A de-duplication duplicate is never replayed: its canonical
+            # copy either replays once (when unowned) or already owns the
+            # text (when owned, possibly with a slightly different tail such
+            # as a trailing period or DOI URL the exact-text check misses).
+            canonical_id = self._caption_canonical_by_id.get(
+                candidate.caption_id, candidate.caption_id
+            )
+            semantic_key = self._caption_semantic_key(text)
             if (
                 assignment.object_id is not None
                 or not text
                 or text in assigned_text
+                or (bool(semantic_key) and semantic_key in assigned_keys)
+                or canonical_id != candidate.caption_id
                 or candidate.caption_id in self._non_caption_candidate_reasons
             ):
                 continue
-            self.assembler.append(
+            pending.append(
+                (
+                    self._caption_candidate_positions.get(
+                        candidate.caption_id, len(self.assembler)
+                    ),
+                    candidate,
+                    assignment,
+                )
+            )
+        # Replays go back where the caption was printed, in capture order,
+        # so text_id order keeps matching reading order. Each insert shifts
+        # the buffer, so later positions are adjusted and footnote anchors
+        # after the insert follow their entry. A footnote at exactly the
+        # insert position follows it only when it was captured after the
+        # caption: a page-bottom note captured first was printed first, and
+        # shifting it would anchor it to a caption on the next page.
+        pending.sort(key=lambda item: item[0])
+        for inserted, (position, candidate, _assignment) in enumerate(pending):
+            text = candidate.text.strip()
+            insert_at = min(position + inserted, len(self.assembler))
+            self.assembler.insert(
+                insert_at,
                 text,
                 candidate.page_number,
                 self._caption_candidate_sections.get(
@@ -524,6 +584,10 @@ class MediaHandlersMixin:
                     else None
                 ),
                 from_ocr=self._caption_candidate_from_ocr.get(candidate.caption_id, True),
+            )
+            self._footnotes.shift_deferred_indices(
+                insert_at,
+                ties_from=self._caption_candidate_footnote_counts.get(candidate.caption_id, 0),
             )
             replayed += 1
         if replayed:
@@ -697,9 +761,11 @@ class MediaHandlersMixin:
     @classmethod
     def _caption_explicit_label(cls, text: str) -> int | None:
         """The number an explicit caption prints, as the printed-id reservation
-        in :meth:`_reconcile_object_ids` reads it: "Table 3.1" → 3, "TABLE IV"
-        → 4. ``None`` for a label that is not a number ("S2", "A1", "2a") or a
-        supplementary caption; mentions resolve by the whole printed label
+        in :meth:`_reconcile_object_ids` reads it: "TABLE IV" → 4. ``None``
+        for a label that is not a number ("S2", "A1", "2a"), a hierarchical
+        sub-number ("Table 3.1" — every sibling would claim the same major
+        number and warn falsely), or a supplementary caption; mentions
+        resolve by the whole printed label
         (``PaperTable.label``/``PaperFigure.label``) instead.
         """
         figure_match = cls._EXPLICIT_FIGURE_RE.match(text.strip())
@@ -707,6 +773,8 @@ class MediaHandlersMixin:
         if match is None or match.group("supplement"):
             return None
         label = match.group("label")
+        if "." in label:
+            return None
         if number := cls._DOTTED_NUMBER_RE.fullmatch(label):
             return int(number.group("major"))
         # Only a table's roman numeral reserves an id, as before labels.
@@ -730,6 +798,34 @@ class MediaHandlersMixin:
         if shorter == longer or not longer.startswith(shorter):
             return False
         return longer[len(shorter)] in " \t\n:;,.–—-|()"
+
+    @classmethod
+    def _is_continuation_claim(
+        cls,
+        object_type: str,
+        printed_id: int,
+        claim_records: list[tuple[str, str, int]],
+        candidate_by_id: dict[str, CaptionCandidate],
+    ) -> bool:
+        """True when every claim on *printed_id* is one multi-page float.
+
+        All claiming captions must print the same whole label ("Table 2",
+        not just "Table 2" vs "Table 3") with at least one carrying a
+        parenthesized continuation marker — the shape the continuation
+        merger collapses back into a single float.
+        """
+        kind: Literal["figure", "table"] = "table" if object_type == "table" else "figure"
+        labels: set[str | None] = set()
+        continued = False
+        for caption_id, _object_id, claim_id in claim_records:
+            if claim_id != printed_id:
+                continue
+            text = candidate_by_id[caption_id].text
+            label = caption_label(text, kind)
+            labels.add(normalize_label(label) if label is not None else None)
+            if cls._CONTINUED_MARKER_RE.search(text):
+                continued = True
+        return len(labels) == 1 and continued
 
     def _reconcile_object_ids(
         self,
@@ -767,6 +863,16 @@ class MediaHandlersMixin:
             for object_id, printed_ids in claims_by_object_id.items()
             if len(printed_ids) > 1
         }
+        # A multi-page table claims one printed id from two objects that the
+        # continuation merger collapses back into one ("Table 2 ..." plus
+        # "Table 2 ... (continued)"): not a conflict. The marker shape must
+        # match the merger's (parenthesized), which always resolves them.
+        suppressed_printed_ids = {
+            printed_id
+            for printed_id in conflicting_printed_ids
+            if self._is_continuation_claim(object_type, printed_id, claim_records, candidate_by_id)
+        }
+        conflicting_printed_ids -= suppressed_printed_ids
         conflict_caption_ids = [
             caption_id
             for caption_id, object_id, printed_id in claim_records
@@ -777,6 +883,14 @@ class MediaHandlersMixin:
             for printed_id, object_ids in claims_by_printed_id.items()
             if len(object_ids) == 1 and next(iter(object_ids)) not in conflicting_object_ids
         }
+        # A suppressed continuation group still needs one owner for the id:
+        # the first claimant in document order keeps it (the merger folds the
+        # rest into it), the others take unclaimed ids without a warning.
+        document_order = {old_id: index for index, old_id in enumerate(old_object_ids)}
+        for printed_id in sorted(suppressed_printed_ids):
+            claimants = sorted(claims_by_printed_id[printed_id], key=document_order.__getitem__)
+            if claimants[0] not in conflicting_object_ids:
+                reserved_by_object_id[claimants[0]] = printed_id
 
         used_ids = set(reserved_by_object_id.values())
         next_unclaimed_id = max(claims_by_printed_id, default=0) + 1
@@ -791,7 +905,9 @@ class MediaHandlersMixin:
             used_ids.add(final_id)
             setattr(item, id_attribute, final_id)
             remapped_ids[old_object_id] = f"{object_type}:{final_id}"
-        objects.sort(key=lambda item: getattr(item, id_attribute))
+        # Document order, not id order: a reservation above the maximum (or a
+        # continuation page taking an unclaimed id) must not move its float
+        # ahead of floats printed before it.
         return remapped_ids, conflict_caption_ids
 
     def _reconcile_media_ids(
@@ -1317,6 +1433,19 @@ class MediaHandlersMixin:
         """Group explicit multipart media, assign captions globally, and retain abstentions."""
 
         active_candidates, duplicate_assignments = self._deduplicate_caption_candidates()
+        # Ownership of a bare-label/fragment composition is recorded at parse
+        # time, but de-duplication may since have elected a different cluster
+        # member as canonical while later lookups use the canonical id. Re-key
+        # once so every lookup below sees canonical ids (a duplicated bare
+        # label is always non-canonical: ties go to the lower source_index).
+        self._table_caption_fragments = {
+            self._caption_canonical_by_id.get(label_id, label_id): fragment_id
+            for label_id, fragment_id in self._table_caption_fragments.items()
+        }
+        self._confirmed_table_caption_owners = {
+            self._caption_canonical_by_id.get(label_id, label_id): owner_id
+            for label_id, owner_id in self._confirmed_table_caption_owners.items()
+        }
         (
             panel_descriptions,
             panel_owner_ids,
@@ -1477,8 +1606,8 @@ class MediaHandlersMixin:
                     )
             elif assignment.object_id in table_by_id:
                 text = self._caption_display_text_by_id.get(candidate.caption_id, candidate.text)
-                if fragment_id := self._table_caption_fragments.get(candidate.caption_id):
-                    text = f"{text} {candidate_by_id[fragment_id].text}".strip()
+                if table_fragment_id := self._table_caption_fragments.get(candidate.caption_id):
+                    text = f"{text} {candidate_by_id[table_fragment_id].text}".strip()
                 table_by_id[assignment.object_id].caption = text
             finalized.append(assignment)
 
@@ -1543,10 +1672,18 @@ class MediaHandlersMixin:
             df = html_table_frame(html)
             if df is not None:
                 # When OCR HTML lacks <th> tags, the columns are numbered
-                # (0, 1, 2, …).  Promote the first data row to headers.
+                # (0, 1, 2, …).  Promote the first data row to headers — even
+                # when it is the only row. A one-row region without <th> is
+                # usually a publisher label or masthead box ("Supplementary
+                # material"), not a data table, and downstream evidence
+                # (notably DOI source-identity) relies on it dropping rather
+                # than surviving as a one-row table — so a promotion that
+                # leaves zero rows is unparseable, not header-only.
                 if len(df) > 0 and all(isinstance(c, (int, float)) for c in df.columns):
                     df.columns = [str(v) for v in df.iloc[0]]
                     df = df.iloc[1:].reset_index(drop=True)
+                    if len(df) == 0:
+                        return None
                 return df
         except Exception:
             logger.debug("HTML table parse failed, falling back to markdown parser")
