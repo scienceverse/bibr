@@ -270,6 +270,39 @@ released.
 
 ### Fixed
 
+- Native PDF text keeps the spaces between words at the edge of a layout
+  region, and a ligature no longer splits a word. pdfium gives a space a flat
+  box on the baseline, below the centre of the letters around it, so a region
+  whose bottom edge crossed a line between its baseline and the letters'
+  centres kept the words but dropped the spaces ("MODELANALYSIS"). A flat
+  space box now takes the vertical centre of the glyph before it when that
+  glyph stands on the same baseline. It is never lowered to a comma below the
+  baseline, and never raised to a closing quote. After a superscript
+  citation it usually stays at the height of the glyph that follows. A space
+  some fonts draw inside a ligature's box ("Traffi cking") is dropped when
+  the next glyph starts where the ligature ends; after a word-final ligature
+  it stays a word space. Only the spaces a region reads change.
+- Native PDF text is read through the page box pdfium renders. Layout regions
+  are found on the rendered page, the CropBox clipped to the MediaBox, either
+  of them inherited from the page tree, but native text mapped them back
+  through the page's own CropBox entry, which falls back to a US Letter
+  MediaBox when the page inherits its box. On such an A4 page every region
+  read the text some 45 pt lower and could lose the first letter of its
+  lines: the title region read the byline, and the paper exported an author's
+  name as its title.
+- A title the metadata LLM returns joined with its translation keeps only the
+  version printed first. The prompts ask for that version, but the model
+  still returns both at times: joined with " / " when each is printed on rows
+  of its own, or with the translation the title row prints in brackets after
+  it. Grounding accepted the join because each half is printed. When the two
+  halves read as one title in two languages or scripts (each at least three
+  words and, when function words tell the language, two of them on each
+  side), the version printed first in the selected record is kept and a
+  `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_parallel_versions_joined`. Both joined versions must be
+  printed as such. The title before the brackets must be printed, and not
+  only after its bracketed translation, which may be the model's own. Any
+  other title, including one with three or more versions, is left alone.
 - A scanned page that carries the invisible text layer an OCR engine adds to a
   scan (a page-sized image under text in an invisible render mode, as Acrobat
   Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
@@ -1991,6 +2024,10 @@ released.
 - The OCR cache format is version 11: a bundle also holds the page text lines
   and URI links the reference line stream reads. Older bundles are re-run
   rather than read without them.
+- The OCR cache format is version 12. A bundle stores its regions after the
+  native-text fill, and the cache key cannot see code changes, so a version 11
+  bundle would serve native text with the old word spacing and page box (see
+  Fixed); such bundles are re-run.
 - Enrichment looks up the paper's own DOI alongside the reference lookups
   instead of before them, so a DOI-bearing paper's references no longer wait
   one Crossref round-trip. If the self-DOI lookup fails, the reference lookups

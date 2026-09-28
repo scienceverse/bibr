@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 # Version 10 stores the warnings as ``{code, message}`` objects.
 # Version 11 adds the page text lines and URI links the reference line stream
 # reads; an older bundle would silently run the stream without them.
-_CACHE_FORMAT_VERSION = 11
+# Version 12: native-text spacing + page box. Bundles store the regions after
+# the native-text fill, which now places spaces against the glyph before them
+# and maps regions through the page box pdfium renders.
+_CACHE_FORMAT_VERSION = 12
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
