@@ -123,6 +123,17 @@ class GeomSegmenter:
         )
         return starts_to_spans(ref_text, starts), self._confidence(probs), labeled, len(starts)
 
+    def line_start_probabilities(self, line_dicts: list[dict]) -> list[float]:
+        """Per-line probability that each line opens a reference, unaligned.
+
+        The reference line stream reads the model's line evidence directly,
+        with no alignment onto row text and no per-paper gate.
+        """
+        lines = records_from_dicts(line_dicts)
+        if not lines:
+            return []
+        return self._predict(lines)[1]
+
     def segment(self, ref_text: str, line_dicts: list[dict]) -> tuple[list[str], float]:
         spans, confidence, _labeled, _aligned = self.segment_spans(ref_text, line_dicts)
         return [ref_text[s:e] for s, e in spans], confidence
