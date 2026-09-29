@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
@@ -124,7 +125,7 @@ def test_reads_json_files_and_skips_other_json(payload, tmp_path):
     report = write_tables(sorted(exports.glob("*.json")), tmp_path / "tables")
 
     assert report.papers == 1
-    assert {source.rsplit("/", 1)[-1] for source, _ in report.skipped} == {
+    assert {Path(source).name for source, _ in report.skipped} == {
         "run_info.json",
         "broken.json",
     }

@@ -110,6 +110,9 @@ async def test_run_process_reports_actual_ocr_identity_and_fallback(tmp_path, mo
 
     monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _Pipeline)
     monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    # The pipeline is stubbed, so the host's OCR runtime is irrelevant; without
+    # this pin the preflight exits 1 where no automatic runtime can start.
+    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
     pdf = tmp_path / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
 

@@ -354,7 +354,7 @@ def test_only_the_identity_stage_writes_the_paper_doi():
     writers: set[tuple[str, int]] = set()
     root = Path(bibr.__file__).parent
     for path in root.rglob("*.py"):
-        tree = ast.parse(path.read_text(), filename=str(path))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         relative = path.relative_to(root).as_posix()
         for node in ast.walk(tree):
             targets = []

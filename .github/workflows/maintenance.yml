@@ -41,6 +41,12 @@ jobs:
       - name: Install core development environment
         run: uv sync --locked
 
+      - name: Install macOS input validation prerequisite
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install libmagic
+
       - name: Run core-compatible tests
         run: uv run --locked pytest -m "not slow" -q
 

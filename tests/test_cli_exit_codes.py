@@ -37,6 +37,9 @@ class _FakePipeline:
 
 def _disable_ocr_runtime_preflight(monkeypatch):
     monkeypatch.setattr("bibr.local.cli._opencv_unavailable_reason", lambda: None)
+    # The OCR runtime preflight fails where no automatic runtime can start
+    # (Windows CI: llama.cpp only, no llama-server); the pipeline is a fake.
+    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
 
 
 async def test_run_process_single_corrupt_file_exits_1(tmp_path, monkeypatch):

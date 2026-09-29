@@ -328,12 +328,14 @@ class TestLlmBackendResolution:
         the server later launches rapid-mlx.
         """
         import platform
+        import sys
 
         from bibr.config import GlobalSettings
         from bibr.local import rapid_mlx
 
         pipeline_settings = GlobalSettings()
-        pipeline_settings.rapid_mlx.executable = "python3"  # resolvable on PATH
+        # Resolvable on every OS; a bare "python3" need not be on PATH on Windows.
+        pipeline_settings.rapid_mlx.executable = sys.executable
         global_settings = GlobalSettings()
         global_settings.rapid_mlx.executable = "definitely-not-on-path-bibr"
 
