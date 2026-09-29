@@ -10,6 +10,10 @@ wrong place or missed (texts shortened from the real rows):
   closing section, so no section is headed by it.
 * A native PDF: the layout model read the hanging-indent list as
   two tables, so the "References" heading heads no rows.
+* A scanned French report: "BIBLIOGRAPHIE." is printed on a line of its own
+  inside the closing section, and the OCR misread it.
+* A scanned newsletter: the next item is printed right below a numbered list,
+  under the same "References" heading.
 """
 
 from __future__ import annotations
@@ -270,3 +274,217 @@ def test_data_table_under_an_empty_references_heading_is_not_a_list():
 
     with pytest.raises(ValueError, match="No reference section found"):
         RefLocator(contents).collect_reference_rows()
+
+
+# --- a heading row the OCR misread --------------------------------------------
+
+_MISREAD_ROWS = [
+    (1, 15, "La P.S. est hostile à la nationalisation du secteur, dans sa sphère."),
+    (1, 15, "BIBLIOGRfU'HIE."),
+    (1, 15, "Rapport sur les Assurances, présenté au gouvernement, Bruxelles 1940."),
+    (1, 15, "L'Assurance en Belgique, quelques problèmes actuels, Jacques Basyn, 1947."),
+    (1, 15, "Rapport de la Commission des Assurances Privées, Bruxelles 1958."),
+    (1, 15, "Le Recueil Financier, 65ème année, tome II, Edition E. Bruylant, Bruxelles 1958."),
+    (1, 16, "Les bénéfices des compagnies d'assurance sur la Vie en Belgique."),
+    (1, 16, "D'intéressantes considérations sur les bénéfices ont paru, en mars 1955."),
+]
+
+
+def _misread_contents(heading: str) -> PaperContents:
+    rows = [_MISREAD_ROWS[0], (1, 15, heading), *_MISREAD_ROWS[2:]]
+    return _contents([("En résumé", CanonicalSection.UNKNOWN)], rows)
+
+
+@pytest.mark.parametrize("heading", ["BIBLIOGRfU'HIE.", "BIBLIOGRAPHI€.", "BIBLIOGRAPHIE."])
+def test_misread_bibliography_heading_row_opens_the_list(heading):
+    """The French report: the list starts after the heading and ends at the next annex title."""
+    contents = _misread_contents(heading)
+
+    ref_df = RefLocator(contents).collect_reference_rows()
+
+    assert _texts(ref_df) == [text for _, _, text in _MISREAD_ROWS[2:6]]
+    assert contents.reference_boundary_reason_flags == ["misread_reference_heading"]
+    assert contents.sections[1].section_type == CanonicalSection.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "heading",
+    [
+        "BIOGRAPHIE.",  # three edits from BIBLIOGRAPHIE
+        "PREFERENCES",  # one edit from REFERENCES, but another first letter
+        "BIBLIOGRAPHIQUE.",  # two edits from BIBLIOGRAPHIE, but two letters longer
+        "Bibliogrfu'hie.",  # not set in capitals
+        "BIBLIOGRfU'HIE ET SOURCES.",  # not a word on its own
+    ],
+)
+def test_other_heading_rows_do_not_open_a_list(heading):
+    contents = _misread_contents(heading)
+
+    with pytest.raises(ValueError, match="No reference section found"):
+        RefLocator(contents).collect_reference_rows()
+
+
+def test_misread_heading_needs_three_dated_rows_after_it():
+    rows = _MISREAD_ROWS[:4] + _MISREAD_ROWS[6:]
+    contents = _contents([("En résumé", CanonicalSection.UNKNOWN)], rows)
+
+    with pytest.raises(ValueError, match="No reference section found"):
+        RefLocator(contents).collect_reference_rows()
+
+
+def test_last_misread_heading_with_a_list_opens_it():
+    """An earlier annex under a misread heading of its own: the list closest to the end is taken."""
+    annex = [
+        (1, 12, "BIBLIOGRAPHI€."),
+        (1, 12, "Statistiques des assurances, Bruxelles 1950."),
+        (1, 12, "Annuaire des assurances, Bruxelles 1951."),
+        (1, 12, "Rapport annuel de l'Office de Contrôle, Bruxelles 1952."),
+        (1, 13, "La seconde partie traite des compagnies étrangères."),
+    ]
+    contents = _contents([("En résumé", CanonicalSection.UNKNOWN)], annex + _MISREAD_ROWS)
+
+    ref_df = RefLocator(contents).collect_reference_rows()
+
+    assert _texts(ref_df) == [text for _, _, text in _MISREAD_ROWS[2:6]]
+
+
+# --- the next item below a numbered list ---------------------------------------
+
+_NEWSLETTER_LIST = [
+    "1. Baars AJ et al (1992) Lead intoxication in cattle: a case report.",
+    "2. Lund LJ and Brown JRH (1989) Lead Poisoning from contaminated feed Vet Rec 125;536.",
+    "3. Report of the Chief Veterinary Officer Annual Report 1989 HMSO.",
+    "5. Sharma RP, Street JC, Shupe JL and Bourcier DR (1982) J Dairy Sci 65;972.",
+    "4. MAFF News Releases November 1989 - February 1990 MAFF London.",
+    "6. In Mineral Tolerance of Domestic Animals 1990 Lead Nat Acad of Sciences.",
+    "7. Hathaway SC (1993) Risk Assessment procedures used by the Codex. Food Control 4;189-201.",
+]
+_NEWS_ITEM = [
+    "November 13, 1998 Consent Decree Entered in Animal Drug GMP Case",
+    "On October 20, 1998, the U.S. District Court incorporated into an order a Consent Decree.",
+    "Under the Consent Decree, the firm and its president are permanently restrained.",
+]
+
+
+def _regioned_contents(rows: list[tuple]) -> PaperContents:
+    """A "References" section of ``(text, region label, region index[, page])`` rows.
+
+    A row is on page 4 unless it names its page; a row labelled None has no layout region.
+    """
+    pages = [row[3] if len(row) > 3 else 4 for row in rows]
+    contents = _contents(
+        [("References", CanonicalSection.REFERENCES)],
+        [(1, page, row[0]) for row, page in zip(rows, pages, strict=True)],
+    )
+    for sentence, row, page in zip(contents.sentences, rows, pages, strict=True):
+        if row[1] is not None:
+            sentence.region_meta = {
+                "region_type": row[1],
+                "region_page": page,
+                "region_index": row[2],
+            }
+    return contents
+
+
+def _newsletter_rows(
+    news_item: list[str],
+    news_label: str | None = "text",
+    *,
+    news_index: int = 10,
+    list_label: str | None = "reference_content",
+    last_label: str | None = None,
+) -> list[tuple]:
+    """The numbered list (entry 7 in region 7) and the news item below it (in *news_index*)."""
+    rows: list[tuple] = [
+        (text, list_label, index) for index, text in enumerate(_NEWSLETTER_LIST, 1)
+    ]
+    if last_label is not None:
+        rows[-1] = (rows[-1][0], last_label, rows[-1][2])
+    return rows + [(text, news_label, news_index) for text in news_item]
+
+
+def test_next_item_below_a_complete_numbered_list_is_cut():
+    """The newsletter: the list prints 1 to 7 (4 and 5 swapped) and ends where the news item starts."""
+    contents = _regioned_contents(_newsletter_rows(_NEWS_ITEM))
+
+    ref_df = RefLocator(contents).collect_reference_rows()
+
+    assert _texts(ref_df) == _NEWSLETTER_LIST
+    assert contents.reference_boundary_reason_flags == ["numbered_list_end_trimmed"]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # The last entry's tail after a column break starts in lower case.
+        _newsletter_rows(["and advisory bodies. Food Control 4;189-201.", "Received 2 May 1998."]),
+        # One row after the list: it may still be the last entry's tail.
+        _newsletter_rows(_NEWS_ITEM[:1]),
+        # The layout read the rows below as part of the list.
+        _newsletter_rows(_NEWS_ITEM, news_label="reference_content"),
+        # The printed numbers skip one: the list may go on.
+        [row for row in _newsletter_rows(_NEWS_ITEM) if not row[0].startswith("6.")],
+        # Two numbered entries are too few to call the list complete.
+        [row for row in _newsletter_rows(_NEWS_ITEM) if row[0][:2] in {"1.", "2."} or row[2] == 10],
+        # The layout did not read the last entry as part of the list.
+        _newsletter_rows(_NEWS_ITEM, last_label="text"),
+        # The rows below sit in the last entry's own region.
+        _newsletter_rows(_NEWS_ITEM, news_index=7),
+        # No layout region is known for the rows below.
+        _newsletter_rows(_NEWS_ITEM, news_label=None),
+        # No layout region is known for the list.
+        _newsletter_rows(_NEWS_ITEM, list_label=None),
+    ],
+)
+def test_rows_below_a_numbered_list_are_kept_without_a_clear_end(rows):
+    contents = _regioned_contents(rows)
+
+    ref_df = RefLocator(contents).collect_reference_rows()
+
+    assert _texts(ref_df) == [row[0] for row in rows]
+    assert "numbered_list_end_trimmed" not in contents.reference_boundary_reason_flags
+
+
+def _broken_last_entry_rows(head: str, tail: str, *, tail_page: int) -> list[tuple]:
+    """Entries 1 to 6, then entry 7 whose tail and a copyright line sit in regions read as text."""
+    rows: list[tuple] = [
+        (text, "reference_content", index) for index, text in enumerate(_NEWSLETTER_LIST[:6], 1)
+    ]
+    return rows + [
+        (head, "reference_content", 7),
+        (tail, "text", 10, tail_page),
+        ("Copyright 1998 by the Association. All rights reserved.", "text", 11, tail_page),
+    ]
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # The last entry breaks off mid-title and its tail goes on over the page in a capital.
+        _broken_last_entry_rows(
+            "7. Hathaway SC (1993) Risk Assessment procedures used by the Codex",
+            "Alimentarius Commission and its advisory bodies. Food Control 4;189-201.",
+            tail_page=5,
+        ),
+        # The same break at a column on the same page.
+        _broken_last_entry_rows(
+            "7. Hathaway SC (1993) Risk Assessment procedures used by the Codex",
+            "Alimentarius Commission and its advisory bodies. Food Control 4;189-201.",
+            tail_page=4,
+        ),
+        # The title ends on a full stop and the journal is printed over the page.
+        _broken_last_entry_rows(
+            "7. Hathaway SC (1993) Risk Assessment procedures used by the Codex Commission.",
+            "Food Control 4;189-201.",
+            tail_page=5,
+        ),
+    ],
+)
+def test_last_entrys_tail_opening_in_a_capital_is_kept(rows):
+    """A Title Case title or a journal name after the break is the entry's own tail, not what follows."""
+    contents = _regioned_contents(rows)
+
+    ref_df = RefLocator(contents).collect_reference_rows()
+
+    assert _texts(ref_df) == [row[0] for row in rows]
+    assert "numbered_list_end_trimmed" not in contents.reference_boundary_reason_flags

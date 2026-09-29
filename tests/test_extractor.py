@@ -422,19 +422,18 @@ class TestReclaimBoundaryOrphans:
         "attention. Science, 344(6182), 424-427."
     )
 
-    def _reclaimed(self, orphan_text, first_ref_text):
+    SECOND_REF = (
+        "Capilla, A., & Gross, J. (2011). Steady-state "
+        "visual evoked potentials. NeuroImage, 54(2), 836-851."
+    )
+
+    def _reclaimed(self, orphan_text, first_ref_text, second_ref_text=SECOND_REF):
         ext, ref_df = _make_reclaim_extractor(
             [
                 (132, 17, "Discussion", "Some unrelated discussion sentence."),
                 (133, 17, "Acknowledgments", orphan_text),
                 (134, 17, "References", first_ref_text),
-                (
-                    135,
-                    17,
-                    "References",
-                    "Capilla, A., & Gross, J. (2011). Steady-state "
-                    "visual evoked potentials. NeuroImage, 54(2), 836-851.",
-                ),
+                (135, 17, "References", second_ref_text),
             ]
         )
         out = ext.locator._reclaim_boundary_orphans(ref_df, "References")
@@ -477,6 +476,62 @@ class TestReclaimBoundaryOrphans:
     def test_numbered_first_ref_is_complete_no_reclaim(self):
         first = "[3] Wuensch, K. L. (2009). Standardized effect sizes. Journal, 14, 1-9."
         assert self._reclaimed(self.ACK_PROSE, first) == [134, 135]
+
+    # --- a list that starts on its first row although that row has no year ---
+
+    @pytest.mark.parametrize(
+        "first",
+        [
+            # A scanned nursing journal: entry 1 is printed over three lines,
+            # its year on the last one.
+            "1. Schyver Grace. A History of Illinois.",
+            "[1]. Bakwai, B., & Yusuf, A. School-based management committee strategies",
+        ],
+    )
+    def test_first_numbered_entry_without_a_year_keeps_the_closing_sentence_out(self, first):
+        closing = (
+            "Let us meet the challenge by offering opportunities to our members to keep up "
+            "their knowledge, skill and expertise in their area of work."
+        )
+        second = "Training School for Nurses 1880-1929."
+        assert self._reclaimed(closing, first, second) == [134, 135]
+
+    def test_name_line_before_its_year_keeps_the_acknowledgements_out(self):
+        """A scanned working paper: the hanging-indent entry prints the name, then "1974:"."""
+        acknowledgement = (
+            "My research on Greenlandic Eskimo is supported financially by grants from the "
+            "Danish Research Council for the Humanities and the Ministry of Greenland."
+        )
+        assert self._reclaimed(acknowledgement, "Rischel, Jørgen", "1974:") == [134, 135]
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            # A list number that an issue continuation begins with is no entry start.
+            ("(1), 35-43.", SECOND_REF),
+            # A later entry number: the row above may still hold the list's start.
+            ("2. Schyver Grace. A History of Illinois.", SECOND_REF),
+            # A name with no year after it may still end an author list.
+            ("Rischel, Jørgen", "Topics in West Greenlandic Phonology."),
+            # A name that goes on into a title is no bare name, whatever follows it.
+            ("Rischel, Jørgen. Topics in West Greenlandic", "1974:"),
+        ],
+    )
+    def test_other_yearless_first_rows_still_reclaim_the_head(self, first, second):
+        head = "Hixon, J. G., & Swann, W. B. (1993). When does introspection bear fruit?"
+        assert self._reclaimed(head, first, second) == [133, 134, 135]
+
+    @pytest.mark.parametrize(
+        ("head", "first", "second"),
+        [
+            # The first author line of a two-author entry, then the second author and the year.
+            ("Fortescue, Michael, and", "Rischel, Jørgen", "1974: Topics in West Greenlandic."),
+            # Author and title above the heading, then the place and publisher, then the year.
+            ("Jespersen, Otto. The Philosophy of Grammar.", "London, George Allen", "1924."),
+        ],
+    )
+    def test_name_line_before_its_year_still_reclaims_a_name_led_head(self, head, first, second):
+        assert self._reclaimed(head, first, second) == [133, 134, 135]
 
 
 class TestGetCutoffIndex:

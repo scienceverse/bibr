@@ -10,13 +10,14 @@ belong to ``bibr.extract.core_metadata`` and ``bibr.extract.ref_extractor``.
 
 import logging
 import re
+import unicodedata
 
 import pandas as pd
 
 from bibr.config import GlobalSettings, snapshot_settings
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE
+from bibr.ocr.ref_patterns import _AUTHOR_DATE_COMMA_LEAD, _looks_like_author_date_start
 from bibr.ocr.ref_patterns import _REF_HEADER_RE as _WHOLE_REF_HEADER_RE
-from bibr.ocr.ref_patterns import _looks_like_author_date_start
 from bibr.paper_contents import CanonicalSection, PaperContents
 from bibr.structure.reference_boundaries import TERMINAL_REFERENCE_BOUNDARY_RE
 from bibr.utils.text import YEARISH_RE, normalize_text
@@ -98,6 +99,30 @@ def _looks_like_complete_entry_start(text: str) -> bool:
     return bool(s) and s[0].isupper() and bool(YEARISH_RE.search(text))
 
 
+def _opens_first_numbered_entry(text: str) -> bool:
+    """Whether *text* opens entry 1 of a numbered list: "1. Schyver Grace. A History …".
+
+    The number must be 1 and the entry must go on in a capital or a quote, so a
+    continuation such as "(1), 35-43." is not taken for an entry start.
+    """
+    match = _ENTRY_NUMBERING_RE.match(text)
+    if match is None or _printed_entry_number(text) != 1:
+        return False
+    rest = text[match.end() :].lstrip(" .)\t\r\n")
+    return bool(rest) and (rest[0].isupper() or rest[0] in "\"'“‘«")
+
+
+# A row that opens on a year: "1974:", "(1974)". A hanging-indent author-year
+# list can print the name on one line and the year on the next.
+_YEAR_LEAD_RE = re.compile(r"^\s*\(?(?:1[5-9]|20)\d{2}[a-z]?\b")
+
+
+def _is_name_only_row(text: str) -> bool:
+    """Whether *text* is a bare "Family, Given" name, as in "Rischel, Jørgen"."""
+    match = _AUTHOR_DATE_COMMA_LEAD.fullmatch(text.strip())
+    return match is not None and not match.group("tail").strip(" .,;:")
+
+
 def _looks_like_terminal_reference_start(text: str) -> bool:
     """High-precision onset evidence used only for terminal spill trimming."""
     if _ENTRY_NUMBERING_RE.match(text):
@@ -107,6 +132,14 @@ def _looks_like_terminal_reference_start(text: str) -> bool:
         or _looks_like_author_date_start(text)
     )
 
+
+# Layout labels of a region the layout model read as part of a reference list.
+_REFERENCE_REGION_LABELS = frozenset({"reference", "reference_content"})
+
+# How a finished reference entry ends: a full stop, a page, year or identifier
+# digit, or a closing bracket ("… Food Control 4;189-201.", "… [cited 2024].").
+# An entry that breaks off mid-title ("… used by the Codex") does not.
+_FINISHED_ENTRY_END_RE = re.compile(r"[.\d)\]]\s*$")
 
 # A four-digit year, compared entry by entry between two printings of a list.
 _LIST_YEAR_RE = re.compile(r"\b(?:1[6-9]|20)\d{2}\b")
@@ -122,6 +155,52 @@ _RUN_IN_REF_HEADING_RE = re.compile(
     r"\s*(?:[.:]\s*(?:[-–—]|&[mn]dash;)?|[-–—]|&[mn]dash;)\s*",
     re.IGNORECASE,
 )
+
+
+# Reference-list headings in Latin script, as lowercase letters without
+# accents, that a heading row the OCR misread is compared against.
+_REF_HEADING_SPELLINGS = (
+    "bibliography",
+    "bibliographie",
+    "bibliografia",
+    "references",
+    "referencias",
+    "referenzen",
+    "literaturverzeichnis",
+)
+
+
+def _reads_as_misread_reference_heading(text: str) -> bool:
+    """Whether a row on its own is a references heading the OCR misread.
+
+    "BIBLIOGRfU'HIE." and "BIBLIOGRAPHI€." for "BIBLIOGRAPHIE.": one word of at
+    least eight letters, at most two other characters, at least three in four
+    letters capitals, and its letters (accents dropped) within two edits of a
+    known heading that begins with the same letter and is at most one letter
+    longer or shorter. "BIOGRAPHIE" (three edits), "PREFERENCES" (another
+    first letter) and "BIBLIOGRAPHIQUE" (two letters longer) do not qualify.
+    """
+    word = text.strip().rstrip(".:;,")
+    if not word or any(char.isspace() for char in word):
+        return False
+    letters = [char for char in word if char.isalpha()]
+    if len(letters) < 8 or len(word) - len(letters) > 2:
+        return False
+    if 4 * sum(char.isupper() for char in letters) < 3 * len(letters):
+        return False
+    folded = "".join(
+        char
+        for char in unicodedata.normalize("NFKD", "".join(letters).lower())
+        if not unicodedata.combining(char)
+    )
+    from rapidfuzz.distance import Levenshtein
+
+    return any(
+        folded[0] == heading[0]
+        and abs(len(folded) - len(heading)) <= 1
+        and Levenshtein.distance(folded, heading, score_cutoff=2) <= 2
+        for heading in _REF_HEADING_SPELLINGS
+    )
 
 
 def _reads_as_list_row(text: str) -> bool:
@@ -417,7 +496,7 @@ class RefLocator:
         # Last resorts, reached only when no section holds the list: a heading
         # printed run-in at the start of a body row (its section stays a body
         # section), then a references heading whose list the layout read as
-        # tables.
+        # tables, then a heading row the OCR misread.
         run_in_df = self._drop_preceding_article_rows(self._collect_run_in_heading_rows())
         if not run_in_df.empty:
             return self._trim_terminal_boundary(run_in_df)
@@ -425,6 +504,9 @@ class RefLocator:
         if not table_df.empty:
             self._reclassify_as_references(table_df)
             return self._trim_terminal_boundary(table_df)
+        misread_df = self._drop_preceding_article_rows(self._collect_misread_heading_rows())
+        if not misread_df.empty:
+            return self._trim_terminal_boundary(misread_df)
 
         raise ValueError("No reference section found.")
 
@@ -539,6 +621,39 @@ class RefLocator:
             return ref_df
         return df.iloc[0:0]
 
+    def _collect_misread_heading_rows(self) -> pd.DataFrame:
+        """Rows after a body row that is a references heading the OCR misread.
+
+        A scan prints "BIBLIOGRAPHIE." on a line of its own inside the closing
+        section and the OCR reads it as "BIBLIOGRfU'HIE.", so no heading
+        pattern finds the list. The list is the rows after that heading row in
+        the same section while they read as list rows (a list number, an entry
+        onset or a year); the first row that does not (the next item on the
+        page) ends it. The last such heading followed by at least three dated
+        rows is taken.
+        """
+        df = self.sentences_df
+        if df.empty or not {"text", "section_id"}.issubset(df.columns):
+            return df.iloc[0:0]
+        texts = df["text"].astype(str).tolist()
+        sections = df["section_id"].tolist()
+        for position in range(len(texts) - 1, -1, -1):
+            if not _reads_as_misread_reference_heading(texts[position]):
+                continue
+            rows: list[int] = []
+            for later in range(position + 1, len(texts)):
+                if sections[later] != sections[position] or not _reads_as_list_row(texts[later]):
+                    break
+                rows.append(later)
+            if sum(bool(_LIST_YEAR_RE.search(texts[row])) for row in rows) < 3:
+                continue
+            logger.info(
+                "Misread heading fallback: %d rows after %r", len(rows), texts[position][:40]
+            )
+            self._add_boundary_flag("misread_reference_heading")
+            return df.iloc[rows].copy()
+        return df.iloc[0:0]
+
     def _collect_reference_table_rows(self) -> pd.DataFrame:
         """Rows rebuilt from tables declared under a references heading that heads no rows.
 
@@ -622,7 +737,82 @@ class RefLocator:
             if "terminal_boundary_trimmed" not in flags:
                 flags.append("terminal_boundary_trimmed")
             return ref_df.iloc[:position].copy()
-        return ref_df
+        return self._trim_after_complete_numbered_list(ref_df)
+
+    def _row_regions(self, ref_df: pd.DataFrame) -> list[tuple[object, object, object] | None]:
+        """The layout region (page, index, label) each row was read from, when known."""
+        if "text_id" not in ref_df.columns:
+            return [None] * len(ref_df)
+        by_id = {
+            sentence.text_id: sentence.region_meta
+            for sentence in getattr(self.contents, "sentences", None) or ()
+            if isinstance(getattr(sentence, "region_meta", None), dict)
+        }
+        regions: list[tuple[object, object, object] | None] = []
+        for text_id in ref_df["text_id"]:
+            meta = by_id.get(text_id)
+            if meta is None or meta.get("region_index") is None:
+                regions.append(None)
+            else:
+                regions.append(
+                    (meta.get("region_page"), meta.get("region_index"), meta.get("region_type"))
+                )
+        return regions
+
+    def _trim_after_complete_numbered_list(self, ref_df: pd.DataFrame) -> pd.DataFrame:
+        """Drop what follows the last entry of a complete numbered list.
+
+        A scanned newsletter prints the next item ("November 13, 1998 Consent
+        Decree Entered in …") right below the list, under the same heading,
+        and born-digital papers print author biographies, addresses or a
+        licence there; the reference section runs into them. The rows after
+        the last numbered entry are cut when the printed numbers are exactly
+        1 to n, the layout model read the last entry as a reference region,
+        the last entry reads as finished (it ends on a full stop, a digit or a
+        closing bracket), and the rest is at least two unnumbered rows, all
+        from other regions it did not read as references, the first opening in
+        a capital on the last entry's page. Those checks keep the last entry's
+        own tail: a lowercase row after a column break, the rest of a title
+        that broke off ("… used by the Codex" / "Alimentarius Commission …"),
+        or a journal name printed over the page. Any numbered or
+        reference-region row keeps the rows too.
+        """
+        if len(ref_df) < 5 or "text" not in ref_df.columns:
+            return ref_df
+        texts = ref_df["text"].astype(str).tolist()
+        numbered = [
+            (position, number)
+            for position, number in enumerate(_printed_entry_number(text) for text in texts)
+            if number is not None
+        ]
+        if len(numbered) < 3:
+            return ref_df
+        if sorted(number for _, number in numbered) != list(range(1, len(numbered) + 1)):
+            return ref_df
+        last = max(position for position, _ in numbered)
+        if len(texts) - last - 1 < 2 or not texts[last + 1].lstrip()[:1].isupper():
+            return ref_df
+        if not _FINISHED_ENTRY_END_RE.search(texts[last]):
+            return ref_df
+        regions = self._row_regions(ref_df)
+        last_region = regions[last]
+        if last_region is None or last_region[2] not in _REFERENCE_REGION_LABELS:
+            return ref_df
+        first_after = regions[last + 1]
+        if first_after is not None and first_after[0] != last_region[0]:
+            return ref_df
+        for region in regions[last + 1 :]:
+            if region is None or region[2] in _REFERENCE_REGION_LABELS:
+                return ref_df
+            if region[:2] == last_region[:2]:
+                return ref_df
+        logger.info(
+            "Trimmed %d row(s) after the last numbered entry: %s",
+            len(texts) - last - 1,
+            texts[last + 1][:80],
+        )
+        self._add_boundary_flag("numbered_list_end_trimmed")
+        return ref_df.iloc[: last + 1].copy()
 
     def _reclaim_boundary_orphans(
         self, ref_df: pd.DataFrame, ref_section_name: str
@@ -639,12 +829,28 @@ class RefLocator:
         sentences, numbered footnotes, and the paper's own byline into
         ref_text, where the segmenter emitted them as phantom bib stubs
         (exp #2 / B″ re-gate judged failures).
+
+        A first row that opens entry 1 of a numbered list ("1. Schyver Grace.
+        A History of Illinois.", its year on a later line), or a bare "Family,
+        Given" name whose year opens the next row, starts the list too: the row
+        above it ends the previous section (a closing sentence, the
+        acknowledgements) and is never the head of an entry. Above a bare
+        name, a row that itself opens on a "Family, Given" name is still taken
+        as the head of the first entry: "Fortescue, Michael, and" above
+        "Rischel, Jørgen" / "1974:", or "Jespersen, Otto. The Philosophy of
+        Grammar." above "London, George Allen" / "1924.".
         """
         if ref_df.empty or "page_number" not in self.sentences_df.columns:
             return ref_df
 
-        if _looks_like_complete_entry_start(str(ref_df.iloc[0]["text"])):
+        first_text = str(ref_df.iloc[0]["text"])
+        if _looks_like_complete_entry_start(first_text) or _opens_first_numbered_entry(first_text):
             return ref_df
+        opens_on_a_bare_name = (
+            len(ref_df) > 1
+            and _is_name_only_row(first_text)
+            and bool(_YEAR_LEAD_RE.match(str(ref_df.iloc[1]["text"])))
+        )
 
         first_ref_page = ref_df.iloc[0]["page_number"]
         first_ref_text_id = ref_df.iloc[0]["text_id"]
@@ -659,6 +865,10 @@ class RefLocator:
 
         # Take only the last row — the one immediately preceding references.
         orphan = preceding.iloc[[-1]]
+        if opens_on_a_bare_name and not _AUTHOR_DATE_COMMA_LEAD.match(
+            str(orphan.iloc[0]["text"]).strip()
+        ):
+            return ref_df
         logger.info(
             "Reclaimed orphaned reference fragment: %s",
             orphan.iloc[0]["text"][:80],

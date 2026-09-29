@@ -269,6 +269,9 @@ class _CandidateDraft:
     raw_text: str
     section_type: CanonicalSection
     byline_probation: bool = False
+    # The region (page, index) of the title a reprinted title block's byline
+    # sits under; the draft is placed right after that title's draft.
+    follows_region: tuple[int, int] | None = None
 
 
 def _normalize_text(value: str) -> str:
@@ -631,6 +634,182 @@ def _looks_like_person_name_row(text: str) -> bool:
     )
 
 
+# What separates the names of a byline row: commas, semicolons, "&", and the
+# word that joins the last two names ("and", French "et", Dutch "en", German
+# "und", Danish/Norwegian "og", Swedish "och"), in lower case.
+_NAME_ROW_SEPARATOR_RE = re.compile(r"\s*(?:[,;&]|\b(?:and|et|en|und|og|och)\b)\s*")
+# Words that name an institution in the languages of European bylines
+# ("Universiteit", "Universidad", "Institut", "Departamento", "Faculteit",
+# "Laboratoire", "Hôpital"), beyond the English markers of an affiliation.
+_INSTITUTION_WORD_RE = re.compile(
+    r"\b(?:univers|uniwers|institu|istitu|instytu|departam|departem|départem|facult|fakult|"
+    r"laborat|hospit|hôpit)",
+    re.IGNORECASE,
+)
+# A token of an e-mail address or a link ("jan.peeters[at]example.org",
+# "https://…", "www.…", "example.org"): its lower-case words are names and
+# hosts, not the paper's prose.
+_ADDRESS_TOKEN_RE = re.compile(
+    r"\S*(?:@|\[at\]|\(at\)|://|www\.|[^\W\d_]\.[^\W\d_])\S*", re.IGNORECASE
+)
+
+
+def _name_list_chunks(text: str) -> list[str]:
+    return [chunk for chunk in _NAME_ROW_SEPARATOR_RE.split(text) if chunk.strip()]
+
+
+def _looks_like_person_name_list(text: str) -> bool:
+    """A row that is nothing but two or more people's names.
+
+    "Marie Dubois, Pieter Janssens, Anne-Sophie Martin et Luc Van Damme":
+    every chunk between the separators reads as one person's name, and no
+    chunk names an institution ("Vrije Universiteit Zuid").
+    """
+
+    if AFFILIATION_MARKER_RE.search(text) or _INSTITUTION_WORD_RE.search(text):
+        return False
+    chunks = _name_list_chunks(text)
+    return len(chunks) >= 2 and all(_looks_like_person_name_row(chunk) for chunk in chunks)
+
+
+def _lowercase_vocabulary(contents: PaperContents) -> frozenset[str]:
+    """The words the paper prints in lower case, outside addresses and links."""
+
+    texts = [sentence.text or "" for sentence in contents.sentences]
+    texts += [summary.content or "" for summary in contents.region_summaries or []]
+    return frozenset(
+        word.casefold()
+        for text in texts
+        for word in _WORD_RE.findall(_ADDRESS_TOKEN_RE.sub(" ", text))
+        if word.islower()
+    )
+
+
+def _reads_as_common_words(chunk: str, vocabulary: frozenset[str]) -> bool:
+    """Whether every word of *chunk* is one the paper prints in lower case.
+
+    A title set in title case ("Urban Parks and Public Life") splits into
+    capitalised chunks as a byline does, but a paper that writes of urban
+    parks and public life prints those words in lower case too, and people's
+    names seldom. Initials and surname particles count neither way.
+    """
+
+    words = [
+        word.casefold()
+        for word in _WORD_RE.findall(chunk)
+        if len(word) > 1 and word.casefold() not in _NAME_PARTICLES
+    ]
+    return bool(words) and all(word in vocabulary for word in words)
+
+
+def _reprinted_title_block_bylines(
+    contents: PaperContents, rows: list[RegionSummary], running_heads: set[str]
+) -> list[tuple[RegionSummary, RegionSummary]]:
+    """The byline rows of a title block that a cover page reprints, each with its title.
+
+    A repository cover page prints the article's title, its translated titles
+    and its byline, and the article's first page prints them again. Repeated
+    on both pages as a block of body rows, the rows under the title read as
+    float furniture reprinted with each figure, and the parser files every
+    copy with the running heads, so neither page keeps a byline. A row of that
+    block is a byline when layout labelled it body text, it sits under the
+    first page's title, the text of every row between the title and it is a
+    running head too, and it is nothing but a list of people's names. The
+    block also holds the translated titles, so a name list is not made of the
+    title's own words, and none of its names is a run of words the paper
+    prints in lower case: a translated title set in title case has a byline's
+    shape. A row whose text is a running head can still have been kept on
+    this page; the candidate collection leaves such a row to its own draft.
+    """
+
+    found: list[tuple[RegionSummary, RegionSummary]] = []
+    title: RegionSummary | None = None
+    title_words = {word.casefold() for word in _WORD_RE.findall(contents.detected_title or "")}
+    vocabulary: frozenset[str] | None = None
+    for summary in sorted(rows, key=lambda row: row.index):
+        label = (summary.label or "").casefold()
+        if label == "doc_title":
+            title = summary
+            continue
+        text = (summary.content or "").strip()
+        if title is None or not text or _normalize_text(text) not in running_heads:
+            # The block ends at the first row whose text is not a running head.
+            title = None
+            continue
+        if (
+            label != "text"
+            or summary.bbox is None
+            or title.bbox is None
+            or summary.bbox[1] < title.bbox[3]
+            or not _looks_like_person_name_list(text)
+        ):
+            continue
+        chunks = _name_list_chunks(text)
+        words = {word.casefold() for chunk in chunks for word in _WORD_RE.findall(chunk)}
+        if words <= title_words | {
+            word.casefold() for word in _WORD_RE.findall(title.content or "")
+        }:
+            continue
+        if vocabulary is None:
+            vocabulary = _lowercase_vocabulary(contents)
+        if any(_reads_as_common_words(chunk, vocabulary) for chunk in chunks):
+            continue
+        found.append((title, summary))
+    return found
+
+
+def _page_head_draft(
+    summary: RegionSummary, text: str, *, follows_region: tuple[int, int] | None = None
+) -> _CandidateDraft:
+    return _CandidateDraft(
+        source_kind="paragraph",
+        source_order=-1,
+        region_order=(summary.page, summary.index),
+        page=summary.page,
+        bbox=summary.bbox,
+        # Not "header": a structural label reads as a leading masthead, and a
+        # masthead-led page without an abstract is taken for a table of
+        # contents.
+        region_label=None,
+        font_size=summary.font_size,
+        font_bold=summary.font_bold,
+        section_id=None,
+        text_ids=(),
+        paragraph_id=None,
+        raw_text=text,
+        section_type=CanonicalSection.UNKNOWN,
+        byline_probation=True,
+        follows_region=follows_region,
+    )
+
+
+def _place_after_their_titles(
+    drafts: list[_CandidateDraft], followers: list[_CandidateDraft]
+) -> list[_CandidateDraft]:
+    """Put each reprinted title block's byline right after its title's draft.
+
+    Source order has no slot for a row the parser filed with the running
+    heads, and region order places it only when it covers every draft. Either
+    way the byline belongs under its title, ahead of the heading the page sets
+    next ("Édition électronique" on a repository cover, which would otherwise
+    read as the title's subtitle). A byline whose title has no draft, or whose
+    row the parser kept after all and so already has a draft, is left out.
+    """
+
+    placed = list(drafts)
+    for follower in sorted(followers, key=lambda draft: draft.region_order or (0, 0)):
+        if any(draft.region_order == follower.region_order for draft in placed):
+            continue
+        slots = [
+            position
+            for position, draft in enumerate(placed)
+            if follower.follows_region in (draft.region_order, draft.follows_region)
+        ]
+        if slots:
+            placed.insert(slots[-1] + 1, follower)
+    return placed
+
+
 def _page_head_byline_drafts(
     contents: PaperContents, first_page: int | None
 ) -> list[_CandidateDraft]:
@@ -647,7 +826,9 @@ def _page_head_byline_drafts(
     emitted as this page prints it; the parser's running heads only confirm it
     was filed with them, since a later page can set the same head in other
     casing ("HUBERT HEINEN", or "Psychological Science" under a first-page
-    "PSYCHOLOGICAL SCIENCE").
+    "PSYCHOLOGICAL SCIENCE"). The byline of a title block that a cover page
+    reprints is filed with the running heads too, and is admitted the same
+    way (see ``_reprinted_title_block_bylines``).
     """
 
     if first_page is None:
@@ -684,27 +865,13 @@ def _page_head_byline_drafts(
         gap = title_top - summary.bbox[3]
         if not 0.0 <= gap <= _PAGE_HEAD_BYLINE_MAX_GAP:
             continue
-        drafts.append(
-            _CandidateDraft(
-                source_kind="paragraph",
-                source_order=-1,
-                region_order=(summary.page, summary.index),
-                page=summary.page,
-                bbox=summary.bbox,
-                # Not "header": a structural label reads as a leading masthead,
-                # and a masthead-led page without an abstract is taken for a
-                # table of contents.
-                region_label=None,
-                font_size=summary.font_size,
-                font_bold=summary.font_bold,
-                section_id=None,
-                text_ids=(),
-                paragraph_id=None,
-                raw_text=text,
-                section_type=CanonicalSection.UNKNOWN,
-                byline_probation=True,
-            )
+        drafts.append(_page_head_draft(summary, text))
+    drafts.extend(
+        _page_head_draft(
+            byline, (byline.content or "").strip(), follows_region=(title.page, title.index)
         )
+        for title, byline in _reprinted_title_block_bylines(contents, rows, running_heads)
+    )
     return drafts
 
 
@@ -1406,9 +1573,83 @@ def collect_front_matter_candidates(
         heuristic_only = _with_byline_probation(contents, policy, use_model=False)
         if any("title" in candidate.roles for candidate in heuristic_only):
             return heuristic_only
+    if not candidates:
+        opening = _opening_section_as_front_matter(contents)
+        if opening is not None:
+            return collect_front_matter_candidates(opening, policy=policy)
     if not any("title" in candidate.roles for candidate in candidates):
         return _with_manuscript_title_seed(candidates, _first_page(contents))
     return candidates
+
+
+# The longest first row of an opening section still read as its byline.
+_OPENING_BYLINE_MAX_CHARS = 300
+
+
+def _opening_section_as_front_matter(contents: PaperContents) -> PaperContents | None:
+    """Read a body-typed opening section as front matter, when nothing else is.
+
+    A short paper can print its title as the header of its only section, with
+    the byline as that section's first row and the whole text under it. When
+    the section classifier types that section as body text (an introduction),
+    no row reaches front matter and the paper abstains with no candidate at
+    all. Only then, and only when the first page opens with that section, its
+    header is title-shaped (two to thirty words, not numbered, not an ordinary
+    body heading) and its first row, on the first page and at most
+    :data:`_OPENING_BYLINE_MAX_CHARS` long, prints a capitalized name and an
+    initial, an affiliation superscript or an affiliation anywhere in the row,
+    is the section read as untyped front matter. The row is not parsed as a
+    byline: a short sentence naming a person with an initial also passes.
+    Anything else leaves the page without candidates.
+    """
+
+    first_page = _first_page(contents)
+    opening = next(
+        (
+            section
+            for section in contents.sections
+            if section.level > 0 and not section.header_is_synthetic
+        ),
+        None,
+    )
+    if (
+        first_page is None
+        or opening is None
+        or opening.section_type in _FRONT_MATTER_SECTION_TYPES
+        or not any(item.page_no == first_page for item in opening.provenance)
+    ):
+        return None
+    header = opening.header.strip()
+    if (
+        not 2 <= len(_WORD_RE.findall(header)) <= 30
+        or _NUMBERED_HEADING_RE.match(header)
+        or _normalize_text(header) in _ORDINARY_HEADING_TEXT
+    ):
+        return None
+    first_row = next(
+        (sentence for sentence in contents.sentences if sentence.text.strip()),
+        None,
+    )
+    if first_row is None or first_row.section_id != opening.section_id:
+        return None
+    text = first_row.text.strip()
+    if (
+        first_page not in _sentence_pages(first_row)
+        or len(text) > _OPENING_BYLINE_MAX_CHARS
+        or not _person_surnames(text)
+        or not (_has_person_name_evidence(text) or _looks_like_affiliation(text))
+    ):
+        return None
+    logger.info("Reading the opening section %s as front matter", opening.section_id)
+    return replace(
+        contents,
+        sections=[
+            replace(section, section_type=CanonicalSection.UNKNOWN)
+            if section is opening
+            else section
+            for section in contents.sections
+        ],
+    )
 
 
 # A manuscript title row: a few words on at most three printed rows, not
@@ -1540,6 +1781,8 @@ def _collect_candidates(
         # no byline ahead of its abstract (see ``_with_byline_probation``).
         drafts += _page_head_byline_drafts(contents, first_page)
     overloaded_abstract_sections = _overloaded_abstract_section_ids(drafts)
+    followers = [draft for draft in drafts if draft.follows_region is not None]
+    drafts = [draft for draft in drafts if draft.follows_region is None]
     # Region order is authoritative only when it covers the whole candidate
     # sequence.  A partial match must not bucket matched rows ahead of unmatched
     # source rows; in that case preserve parser/source order for every draft.
@@ -1547,6 +1790,8 @@ def _collect_candidates(
         drafts.sort(key=lambda draft: (*draft.region_order, draft.source_order))  # type: ignore[misc]
     else:
         drafts.sort(key=_source_sort_key)
+    if followers:
+        drafts = _place_after_their_titles(drafts, followers)
     candidates: list[FrontMatterCandidate] = []
     for reading_order, draft in enumerate(drafts):
         normalized = _normalize_text(draft.raw_text)
@@ -1640,6 +1885,26 @@ def _is_toc_listing(candidates: tuple[FrontMatterCandidate, ...]) -> bool:
     return has_leading_masthead and not has_local_article_anatomy
 
 
+def _is_parallel_title_above(title: FrontMatterCandidate, following: FrontMatterCandidate) -> bool:
+    """A name-less uppercase title printed right above its translation.
+
+    Both rows are article titles on one page, in two languages, and the upper
+    one holds a byline role with no names after its title: the punctuation
+    rule for proceedings rows ("TITLE Name, Name") gave it that role.
+    """
+
+    return bool(
+        title.page is not None
+        and following.page == title.page
+        and "byline" in title.roles
+        and not title.roles & {"abstract", "affiliation", "doi"}
+        and _composite_name_tail(title.raw_text) is None
+        and _is_identity_title(title, None)
+        and _is_identity_title(following, None)
+        and _languages_differ(_title_language(title.raw_text), _title_language(following.raw_text))
+    )
+
+
 def _record_title_indices(
     candidates: tuple[FrontMatterCandidate, ...],
     *,
@@ -1662,6 +1927,16 @@ def _record_title_indices(
             title_indices[position + 1] if position + 1 < len(title_indices) else len(candidates)
         )
         window = candidates[index:next_index]
+        # An uppercase title set directly above its parallel title in another
+        # language, on the same page, owns no row but itself. When it prints no
+        # names after the title, its byline role came from its capitals and
+        # punctuation alone, and it develops no record of its own.
+        if (
+            len(window) == 1
+            and next_index < len(candidates)
+            and _is_parallel_title_above(candidates[index], candidates[next_index])
+        ):
+            continue
         # A probation row was admitted purely because it is byline-shaped and
         # sits on page 1 — it carries no evidence that a *record* starts here.
         # Letting its roles count as anatomy promotes any body heading above it
@@ -2278,6 +2553,18 @@ _NON_SURNAME_TOKENS = frozenset(
 # longer rows are prose, and bounding them keeps every comparison linear.
 _MAX_TITLE_WORDS = 60
 _MAX_CITATION_CHARS = 2_000
+# A figure an abstract prints ("2016", "20.5%", "0,05"), not a digit glued to a
+# word ("Example1", "e2099") or hyphenated to one ("COVID-19").
+_FIGURE_RE = re.compile(r"(?<![\w.,])(?<![^\W\d_]-)\d+(?:[.,]\d+)*(?!\w)")
+# Whole numbers up to ten number a list ("(1)", "2)") or count what another
+# language may spell out; they are no figures.
+_MAX_LIST_NUMBER = 10
+# A year: two years alone ("2019 and 2020") are shared by many papers.
+_YEAR_RE = re.compile(r"(?:1[5-9]|20)\d\d")
+# Abstracts in this many languages printing the same two years are one paper's.
+_ECHO_LANGUAGES = 3
+# "© O. Example, 2024": the holder a copyright line names, up to its comma.
+_COPYRIGHT_HOLDER_RE = re.compile(r"©\s*(?:\d{4}\s+)?([^,\r\n]+)")
 
 
 @dataclass(frozen=True)
@@ -2304,12 +2591,25 @@ class _RecordIdentity:
     # one runs on past it, else None.
     detected: str | None
     cover: bool
+    # The figures its abstract rows print, with decimal commas read as points.
+    figures: frozenset[str] = frozenset()
 
     @property
     def is_record(self) -> bool:
         """A title plus byline or layout-title evidence: something that can be a paper."""
 
         return bool(self.titles) and (self.byline or self.doc_title or self.detected is not None)
+
+    @property
+    def is_bare(self) -> bool:
+        """No record, and nothing a record prints: no byline, abstract, DOI or cover cue.
+
+        Such a block is a heading the grouping split on because the heading's
+        own capitals or punctuation read as a byline (the heading of a
+        committee's member list, an outline, a body heading), not a second item.
+        """
+
+        return not (self.is_record or self.byline or self.anatomy or self.cover)
 
 
 def _identity_key(text: str) -> str:
@@ -2503,6 +2803,42 @@ def _is_citation_row(candidate: FrontMatterCandidate) -> bool:
     )
 
 
+def _copyright_named_row(rows: tuple[FrontMatterCandidate, ...]) -> str | None:
+    """A bare name row whose surnames the page's copyright line prints.
+
+    "Oleh Example" on a row of its own, with no role, above a title whose
+    copyright line reads "© O. Example, 2024": the name is the byline, even
+    though a lone given name and surname carry no byline shape of their own.
+    """
+
+    # The holder must be a person, printed with an initial: a publisher
+    # ("Taylor & Francis Group", "Springer Nature Switzerland AG") is not.
+    holders = frozenset(
+        surname
+        for row in rows
+        for match in _COPYRIGHT_HOLDER_RE.finditer(row.raw_text)
+        if _has_person_name_evidence(match.group(1))
+        for surname in _person_surnames(match.group(1))
+    )
+    if not holders:
+        return None
+    for row in rows:
+        text = row.raw_text.strip()
+        words = text.split()
+        if (
+            row.roles
+            or "©" in text
+            or any(char.isdigit() for char in text)
+            or not 2 <= len(words) <= 4
+            or not all(word[:1].isupper() for word in words)
+        ):
+            continue
+        surnames = _person_surnames(text)
+        if surnames and surnames <= holders:
+            return text
+    return None
+
+
 def _record_identity(
     block: FrontMatterBlock,
     order: int,
@@ -2532,6 +2868,10 @@ def _record_identity(
         window = rows[:end]
     titles = tuple(row for row in window if _is_identity_title(row, detected_title))
     byline_texts = [text for row in window if (text := _identity_byline_text(row)) is not None]
+    if not byline_texts and anchor is not None:
+        name_row = _copyright_named_row(tuple(row for row in window if row.page == anchor))
+        if name_row is not None:
+            byline_texts = [name_row]
     dois = frozenset(
         doi.casefold()
         for row in window
@@ -2555,6 +2895,13 @@ def _record_identity(
         doc_title=any((row.region_label or "").casefold() == "doc_title" for row in titles),
         detected="exact" if "exact" in matches else "prefix" if "prefix" in matches else None,
         cover=any(_COVER_CUE_RE.match(row.raw_text.strip()) for row in window),
+        figures=frozenset(
+            figure
+            for row in window
+            if _is_abstract_content(row) and "doi" not in row.roles
+            for match in _FIGURE_RE.finditer(row.raw_text)
+            if not _is_list_number(figure := match.group(0).replace(",", "."))
+        ),
     )
 
 
@@ -2677,14 +3024,84 @@ def _languages_differ(left: str | None, right: str | None) -> bool:
     return not ({left, right} <= {"cyrillic", "uk", "ru"} and "cyrillic" in {left, right})
 
 
-def _record_relation(left: _RecordIdentity, right: _RecordIdentity) -> tuple[str, str]:
+def _is_list_number(figure: str) -> bool:
+    return figure.isdigit() and int(figure) <= _MAX_LIST_NUMBER
+
+
+def _distinctive_figures(figures: frozenset[str], *, echoed: bool) -> bool:
+    """Whether the figures two abstracts share tie them to one paper.
+
+    Three figures do, and so do two with a count or a measure among them. Two
+    years alone ("2019 and 2020") are common to the papers of one period: they
+    count only when *echoed*, printed by abstracts in three languages.
+    """
+
+    if len(figures) >= 3:
+        return True
+    if len(figures) < 2:
+        return False
+    return echoed or not all(_YEAR_RE.fullmatch(figure) for figure in figures)
+
+
+def _echoed_figures(identities: list[_RecordIdentity]) -> frozenset[frozenset[str]]:
+    """The figure sets that abstracts in three or more languages print alike."""
+
+    echoed = set()
+    for figures in {identity.figures for identity in identities if identity.figures}:
+        languages: list[str] = []
+        for identity in identities:
+            if (
+                identity.figures == figures
+                and identity.language is not None
+                and all(_languages_differ(identity.language, seen) for seen in languages)
+            ):
+                languages.append(identity.language)
+        if len(languages) >= _ECHO_LANGUAGES:
+            echoed.add(figures)
+    return frozenset(echoed)
+
+
+def _translates_abstract(
+    presentation: _RecordIdentity,
+    record: _RecordIdentity,
+    *,
+    echoed_figures: frozenset[frozenset[str]],
+) -> bool:
+    """A byline-less title and abstract whose abstract prints the record's figures.
+
+    A multilingual journal sets the translated title and abstract under a
+    layout title of their own, with no byline or DOI; the figures of a
+    translated abstract (years, counts, percentages) are the original's. They
+    must be the same figures and distinctive (see :func:`_distinctive_figures`).
+    """
+
+    return (
+        not presentation.byline
+        and not presentation.dois
+        and record.byline
+        and presentation.figures == record.figures
+        and _distinctive_figures(
+            presentation.figures, echoed=presentation.figures in echoed_figures
+        )
+    )
+
+
+def _record_relation(
+    left: _RecordIdentity,
+    right: _RecordIdentity,
+    *,
+    echoed_figures: frozenset[frozenset[str]] = frozenset(),
+) -> tuple[str, str]:
     """Whether two records print the same paper, a different one, or cannot tell.
 
     Different DOIs are different papers. A shared DOI or title joins them,
     but a DOI never joins two different titles in one language: a proceedings
     volume or a supplement lends its DOI to many papers. Different titles in
     one language are different papers. A title in another language or script
-    is a translation only when the bylines name the same authors.
+    is a translation only when the bylines name the same authors, or when it
+    has no byline and its abstract prints exactly the other's figures, and
+    distinctive ones; *echoed_figures* are the page's figure sets that
+    abstracts in three languages print.
     """
 
     titles_agree = _titles_agree(left, right)
@@ -2698,6 +3115,11 @@ def _record_relation(left: _RecordIdentity, right: _RecordIdentity) -> tuple[str
     if not translated:
         return _CONFLICT, "title"
     if not left.surnames or not right.surnames:
+        if any(
+            _translates_abstract(presentation, record, echoed_figures=echoed_figures)
+            for presentation, record in ((left, right), (right, left))
+        ):
+            return _AGREE, "abstract_figures"
         return _UNVERIFIED, "translation"
     if _surnames_agree(left.surnames, right.surnames):
         return _AGREE, "authors"
@@ -2722,6 +3144,53 @@ def _primary_rank(identity: _RecordIdentity) -> tuple[bool, bool, bool, bool, bo
     )
 
 
+def _without_cover_pages(
+    block: FrontMatterBlock,
+    by_id: dict[str, FrontMatterCandidate],
+    *,
+    detected_title: str | None,
+) -> tuple[FrontMatterBlock, tuple[int, ...]]:
+    """The block without the cover pages printed ahead of its title page.
+
+    A download cover ("This article was downloaded by", "PLEASE SCROLL DOWN
+    FOR ARTICLE") can head the block of the scanned article behind it; its
+    download stamp, disclaimer and the publisher's registered office would
+    read as the article's date, abstract and affiliation. Pages before the
+    record's first title that print a cover cue are dropped, and returned; a
+    page with a title of the record's own never is. A cue set as a heading
+    ("PLEASE SCROLL DOWN FOR ARTICLE") is no title of the record's.
+    """
+
+    rows = _block_candidates(block, by_id)
+    title_page = next(
+        (
+            row.page
+            for row in rows
+            if row.page is not None
+            and _is_identity_title(row, detected_title)
+            and not _COVER_CUE_RE.match(row.raw_text.strip())
+        ),
+        None,
+    )
+    if title_page is None:
+        return block, ()
+    cover_pages = tuple(
+        sorted(
+            {
+                row.page
+                for row in rows
+                if row.page is not None
+                and row.page < title_page
+                and _COVER_CUE_RE.match(row.raw_text.strip())
+            }
+        )
+    )
+    if not cover_pages:
+        return block, ()
+    kept = [row for row in rows if row.page not in cover_pages]
+    return replace(_make_block(0, kept), block_id=block.block_id), cover_pages
+
+
 def _select_agreeing_record(
     blocks: tuple[FrontMatterBlock, ...],
     by_id: dict[str, FrontMatterCandidate],
@@ -2738,7 +3207,10 @@ def _select_agreeing_record(
     group's authors, title or DOI, and a title and abstract of its own match
     a record or are in another language. The group must add up to a complete
     record, the selected block must hold byline evidence, and the parser's
-    detected title must belong to the group or to a translation of it.
+    detected title must belong to the group or to a translation of it. The one
+    exception is a single record whose every other block is bare (see
+    :attr:`_RecordIdentity.is_bare`): it is selected as a unique block would be,
+    without a cover page ahead of its title page (see :func:`_without_cover_pages`).
     """
 
     identities = [
@@ -2757,9 +3229,10 @@ def _select_agreeing_record(
         return block_id
 
     reasons: dict[str, str] = {}
+    echoed_figures = _echoed_figures(identities)
     for index, left in enumerate(records):
         for right in records[index + 1 :]:
-            relation, reason = _record_relation(left, right)
+            relation, reason = _record_relation(left, right, echoed_figures=echoed_figures)
             if relation == _CONFLICT:
                 return None, (
                     f"conflicting_records:{left.block.block_id}:{right.block.block_id}:{reason}",
@@ -2804,6 +3277,18 @@ def _select_agreeing_record(
     if not any(identity.byline for identity in identities) or not any(
         identity.anatomy for identity in identities
     ):
+        # One record beside bare headings only is the page a unique block
+        # would be had the grouping not split on those headings, and it is
+        # selected as that block would be, with or without a byline or DOI.
+        if len(records) == 1 and all(identity.is_bare for identity in attached):
+            selected, cover_pages = _without_cover_pages(
+                records[0].block, by_id, detected_title=detected_title
+            )
+            return selected, (
+                f"lone_record:{records[0].block.block_id}",
+                *(f"attached_block:{identity.block.block_id}" for identity in attached),
+                *(f"cover_page_dropped:{page}" for page in cover_pages),
+            )
         return None, ("incomplete_record",)
 
     # The metadata call reads only the selected block, so it must print a
@@ -2930,6 +3415,10 @@ def resolve_front_matter(
             if agreed is not None:
                 selected = agreed
                 method = "record_agreement"
+                # The selected record may have been trimmed of a cover page.
+                blocks = tuple(
+                    agreed if block.block_id == agreed.block_id else block for block in blocks
+                )
             else:
                 reason_flags.append("multiple_plausible_blocks")
             reason_flags.extend(agreement_flags)
