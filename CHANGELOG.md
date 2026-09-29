@@ -1333,6 +1333,18 @@ released.
   documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
   the model has no `corrigendum` paper-type class and predicts 32 of the 36 OECD
   subdomains.
+- The documentation now describes what the release does. The README links
+  GLM-OCR at `zai-org/GLM-OCR`; the `THUDM/GLM-OCR` page does not exist. The
+  tester guide replaces the hosted demo, which has no address, with a link from
+  whoever runs `bibr demo --share`, clones the public repository without the
+  GitHub CLI or an account, and notes that Metacheck must read export schema 12
+  (paper fields under `metadata`, not `info`). The Quickstart names the files
+  `-o` writes next to the result and the `_quarantine/<disposition>/` folder a
+  non-promotable export goes to while the command still exits 0. The
+  Architecture guide says that pages past `PIPELINE_MAX_PAGES` are dropped
+  without a warning, the Deployment guide no longer pins the Docker source to
+  the 0.5.1 tag, and the MCP guide adds `uv add 'bibr[mcp]'` for an install
+  from PyPI.
 - Sentence DOI candidates in `extraction.identity.receipt` now record the layout
   region they were read from; `region_index` was previously always `null`. With
   `page`, it matches the `page` and `index` of an `extraction.regions` row: the

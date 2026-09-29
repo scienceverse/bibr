@@ -18,7 +18,7 @@ pipeline with a short PDF, then add fully local inference once that works.
 |---|---|---|
 | **Windows hybrid (recommended first)** | A Windows laptop with a 6 GB NVIDIA GPU | Local OCR and reference ML; a cloud LLM handles metadata |
 | **Windows fully local** | Local inference after the hybrid test passes | Quantized OCR and LLM models, loaded one at a time; disable Crossref for offline runs after model downloads |
-| **Hosted Gradio demo** | The quickest evaluation, with no installation | Only the browser; the host processes the paper |
+| **Shared demo link** | The quickest evaluation, with no installation | Only the browser; whoever runs `bibr demo --share` (see [Gradio demo](#gradio-demo)) processes the paper |
 
 ### Status of the 6 GB Windows path
 
@@ -34,7 +34,7 @@ The code and automated tests explicitly cover the 6 GB selection, but this is a
 new hardware path and has not yet been field-tested on every laptop/driver
 combination. Start with **local OCR + a cloud LLM**. If fully local inference is
 slow or runs out of memory, that hybrid setup is still a good local installation;
-use the hosted demo only if installation itself is the problem.
+ask the person running the test for a demo link only if installation itself is the problem.
 
 Allow roughly 15 GB of free disk space for Python packages, model downloads,
 and caches. A current NVIDIA driver and at least 16 GB of system RAM are
@@ -47,11 +47,10 @@ by `winget`, but bibr itself does not need to run as Administrator.
 
 ### 1. Install the tools
 
-Install Git and the GitHub CLI if they are not already present:
+Install Git if it is not already present:
 
 ```powershell
 winget install --id Git.Git -e
-winget install --id GitHub.cli -e
 ```
 
 Install `uv`:
@@ -102,8 +101,7 @@ CUDA folder ahead of it in `PATH`, then re-run `llama-server --version` and
 
 ### 2. Get bibr and install its dependencies
 
-Clone the source repository. If GitHub requests authentication, use the account
-with repository access (`gh auth login`):
+Clone the source repository (it is public; no GitHub account is needed):
 
 ```powershell
 git clone https://github.com/scienceverse/bibr.git
@@ -447,6 +445,10 @@ at jakub@jakubwerner.com. To help me reproduce it, include:
 into. Follow its [installation and usage guide](https://www.scienceverse.org/metacheck/articles/metacheck.html)
 for the current package version and use a version supporting bibr's exported
 schema. Compatibility depends on both projects' versions.
+
+bibr writes export schema 12.x, whose paper fields live under `metadata` (schemas
+before 11.0 used `info`). Check that your Metacheck version reads schema 12 before relying
+on this step; a reader written for the older layout finds no title, abstract or DOI.
 
 Extract a paper with bibr, then read the JSON in R:
 

@@ -64,6 +64,18 @@ You get schema-versioned JSON (currently v{{ schema_version }}) with title,
 authors, affiliations, DOI, sections, sentences, tables, figure metadata, and
 parsed references. Add `--figure-images` to embed figure images.
 
+`-o` also writes two files next to the result: `paper.core.json`, the core
+extraction before any enrichment (it matches `paper.json` when Crossref is off,
+the default), and `paper.json.receipt.json`, the run's status. With `--crossref`,
+`paper.json.enrichment.json` holds the enrichment as well.
+
+An export that is not promotable goes to `_quarantine/<disposition>/` beside the
+requested path instead. For example, a blocking validation error such as
+`VAL_METADATA_MULTI_ITEM` writes `_quarantine/blocked/paper.json` (and its
+`paper.core.json`). The receipt stays next to the requested path and records the
+`"disposition"`, the console prints where the export went, and the command still
+exits 0.
+
 The same command accepts DOCX, JATS XML (`.xml`), HTML (`.html`/`.htm`), and ePub
 files. These formats are parsed natively without OCR. PDF text layers also supply
 usable text directly; regions needing recognition still use the OCR backend.

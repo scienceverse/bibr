@@ -45,8 +45,11 @@ Checks MIME type, file corruption, and encryption. Refuses unsupported formats (
 - `OCR_BACKEND=paddle` selects one Paddle-first OCR runtime transactionally at startup; explicit `paddle-*`, `glm-*`, and cloud backends remain available through `OcrOptions`
 
 **PDF limits.** `PIPELINE_MAX_PAGES` limits the processed page count
-(default 200). Render-pixel and dimension limits reject oversized pages before
-rasterization. Size memory for the processed pages and concurrent files.
+(default 200). Pages beyond the cap are dropped without a warning in the
+console or the export; for a long document, compare the length of the export's
+`extraction.pages` list with the PDF's page count. Render-pixel and dimension
+limits reject oversized pages before rasterization. Size memory for the
+processed pages and concurrent files.
 
 **Native text bypass and recognition.** `bibr/ocr/pdf_inspection.py` inspects
 embedded PDF text, metadata, outline headings, and reference-line geometry
