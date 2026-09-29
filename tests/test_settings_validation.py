@@ -492,14 +492,19 @@ def test_empty_value_falls_back_to_default_and_null_sets_none(monkeypatch):
     assert GlobalSettings().pipeline.memory_mode is None
 
 
-def test_full_example_every_line_loads_and_matches_default():
+def test_full_example_every_line_loads_and_matches_default(monkeypatch):
     """Uncommenting any `bibr config example --full` line must load unchanged."""
     import os
+    import platform
     import re
 
     from bibr.config import GlobalSettings
     from bibr.config_cli import render_env_example
 
+    # The example renders the static OCR concurrency defaults (16 regions, 6
+    # per file); Apple Silicon auto-tunes both to 1, so those two lines do
+    # change behavior there. Check the invariant on a non-Apple host.
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     pairs: list[tuple[str, str]] = []
     for line in render_env_example(full=True).splitlines():
         match = re.match(r"^# ([A-Z][A-Z0-9_]*)=(.*)$", line)
