@@ -17,6 +17,17 @@ import re
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _no_ocr_runtime_blocker(monkeypatch):
+    """Keep the plan tests independent of the host's OCR runtimes.
+
+    The dry-run blocker list includes the OCR runtime preflight, which fails
+    where no automatic runtime can start (the Windows chain is llama.cpp
+    only, and CI has no llama-server). No test here is about that blocker.
+    """
+    monkeypatch.setattr("bibr.local.cli.dry_run._preflight_ocr_runtime", lambda config: None)
+
+
 def _pdf_bytes() -> bytes:
     return b"%PDF-1.4\n%dry-run fixture\n"
 

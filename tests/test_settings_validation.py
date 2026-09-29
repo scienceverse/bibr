@@ -87,10 +87,14 @@ def test_preset_applies_lists_dicts_and_literals(manager, clean_env):
     assert settings.crossref.consolidate == "fill"
 
 
-def test_preset_reruns_auto_tune_validators(manager, clean_env):
+def test_preset_reruns_auto_tune_validators(manager, clean_env, monkeypatch):
     """LLM_PROVIDER=ollama must auto-lower RPM; OCR_LOCAL_GPUS must scale regions."""
+    import platform
+
     from bibr.config import GlobalSettings
 
+    # 16 x OCR_LOCAL_GPUS is the non-Apple-Silicon rule; Apple Silicon pins 1.
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     manager.save("tuned", {"LLM_PROVIDER": "ollama", "OCR_LOCAL_GPUS": "4"})
     settings = GlobalSettings()
     assert settings.llm.rate_limit_rpm == 60

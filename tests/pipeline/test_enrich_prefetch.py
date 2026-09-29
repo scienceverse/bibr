@@ -91,7 +91,10 @@ async def test_handle_runs_prefetch_and_records_timing():
         assert handle.seconds is None
         assert await handle.result() == "done"
     assert handle.done()
-    assert handle.seconds is not None and handle.seconds >= 0.01
+    # asyncio may wake a sleep up to one clock tick early, and monotonic ticks
+    # every 15.6 ms on Windows (Python 3.12), where the 0.01 s sleep can read 0.0.
+    tick = time.get_clock_info("monotonic").resolution
+    assert handle.seconds is not None and handle.seconds >= 0.01 - 2 * tick
     # ``prefetch_enrichment`` is not a Mock here; the fake was called through the patch.
     assert fake is not None
     assert _pending_tasks() == []

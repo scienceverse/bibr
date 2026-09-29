@@ -476,7 +476,10 @@ async def test_strict_interval_enforces_spacing():
     await limiter.acquire()
     await limiter.acquire()
     elapsed = time.monotonic() - t0
-    assert elapsed >= 0.19
+    # Slack for clock granularity: monotonic ticks every 15.6 ms on Windows
+    # (Python 3.12), and asyncio may wake a sleep up to one tick early.
+    tick = time.get_clock_info("monotonic").resolution
+    assert elapsed >= 0.19 - 2 * tick
 
 
 @pytest.mark.asyncio

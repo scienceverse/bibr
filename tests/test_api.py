@@ -1083,8 +1083,10 @@ def test_ctrl_c_cancels_the_chew_before_close_runs(stub_pipeline, tmp_path, monk
     """Ctrl-C must not leave the chew pending on the Chewer's loop, where
     close() would resume it alongside the teardown (and let it start an OCR
     server after shutdown_ocr ran)."""
+    import _thread
     import os
     import signal
+    import sys
     import threading
 
     events: list[str] = []
@@ -1106,7 +1108,14 @@ def test_ctrl_c_cancels_the_chew_before_close_runs(stub_pipeline, tmp_path, monk
     monkeypatch.setattr(stub_pipeline, "aclose", aclose)
     chewer = bibr.Chewer()
     (paper,) = _touch_pdfs(tmp_path, "one.pdf")
-    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    if sys.platform == "win32":
+        # os.kill(pid, SIGINT) is TerminateProcess on Windows and would kill
+        # the whole pytest process. interrupt_main trips SIGINT the way the
+        # console Ctrl-C handler does, and the trip wakes the Proactor loop
+        # through its signal wakeup fd.
+        timer = threading.Timer(0.3, _thread.interrupt_main, (signal.SIGINT,))
+    else:
+        timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):

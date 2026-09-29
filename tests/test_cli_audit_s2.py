@@ -380,6 +380,8 @@ async def test_chunk_results_report_hints_through_entry_function(tmp_path, monke
                     fs.error_code = "ocr_failed"
 
     monkeypatch.setattr("bibr.local.pipeline.LocalPipeline", _FailingPipeline)
+    # The pipeline is a fake: keep the host's OCR runtime preflight out of it.
+    monkeypatch.setattr("bibr.local.cli.process._preflight_ocr_runtime", lambda config: None)
 
     (tmp_path / "locked.pdf").write_bytes(b"%PDF-1.4\n")
     (tmp_path / "scan.pdf").write_bytes(b"%PDF-1.4\n")
@@ -417,6 +419,11 @@ async def test_dry_run_automatic_paddle_checks_weight_repo_not_served_alias(
     from bibr.local.cli import _build_parser, _run_process
 
     monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+    # Pin the Linux/CUDA chain itself: on macOS arm64 and Windows the
+    # automatic chain has no paddle-vllm candidate at all.
+    monkeypatch.setattr(
+        "bibr.ocr.registry.automatic_backend_names", lambda: ("paddle-vllm", "glm-llama")
+    )
 
     class _FakeRepo:
         def __init__(self, repo_id):
@@ -448,6 +455,11 @@ def test_dry_run_ocr_model_separates_served_identity_from_weights(monkeypatch):
     from bibr.local.cli.run_config import resolve_run_config
 
     monkeypatch.setattr("bibr.ocr.registry._cuda_vram_gb", lambda: 24.0)
+    # Pin the Linux/CUDA chain itself: on macOS arm64 and Windows the
+    # automatic chain has no paddle-vllm candidate at all.
+    monkeypatch.setattr(
+        "bibr.ocr.registry.automatic_backend_names", lambda: ("paddle-vllm", "glm-llama")
+    )
     args = _build_parser().parse_args(["chew", "paper.pdf", "--no-llm"])
     config = resolve_run_config(args)
     assert config.ocr_backend == "paddle"

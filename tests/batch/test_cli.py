@@ -75,6 +75,9 @@ def test_dry_run_prints_the_plan_without_running(tmp_path, capsys, monkeypatch):
         raise AssertionError("dry-run must not open a pipeline")
 
     monkeypatch.setattr("bibr.batch.runner.open_chew_many", boom)
+    # The plan check runs the OCR runtime preflight, which fails on hosts with
+    # no startable automatic runtime (Windows CI); this test is about the plan.
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
     pdf = _pdf(tmp_path)
     out = tmp_path / "out"
     args = _build_parser().parse_args(
@@ -124,6 +127,7 @@ def test_dry_run_sources_line_counts_unreadable(tmp_path, capsys, monkeypatch):
         raise AssertionError("dry-run must not open a pipeline")
 
     monkeypatch.setattr("bibr.batch.runner.open_chew_many", boom)
+    monkeypatch.setattr("bibr.local.cli.run_config._preflight_ocr_runtime", lambda config: None)
     pdf = _pdf(tmp_path)
     binary = tmp_path / "list.txt"
     binary.write_bytes(bytes([0xD0, 0xCF, 0x11, 0xE0, 0x80, 0x41]) * 30)
