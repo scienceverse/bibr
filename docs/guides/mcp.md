@@ -15,6 +15,7 @@ The server uses the MCP Python SDK v2 (minimum 2.2.0) and needs the `mcp` extra:
 
 ```bash
 uv sync --extra mcp        # add MCP to a source checkout
+uv add 'bibr[mcp]'         # add MCP to a project that installed bibr from PyPI
 ```
 
 Keep the extras required by your selected OCR/runtime as well; for example,

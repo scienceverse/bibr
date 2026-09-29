@@ -330,12 +330,15 @@ fallback for a configured Paddle endpoint.
 
 ## Docker deployment
 
-The 0.5.1 public release provides Dockerfiles and Compose configuration for
-building locally. Prebuilt GHCR images are not part of this release.
-Start from the public release source:
+The public release provides Dockerfiles and Compose configuration for
+building locally. Prebuilt GHCR images are not part of the release.
+Start from the source of the release you want: replace `<VERSION>` with a
+version number such as `0.6.0`, without the `v` that the tags in the
+[release list](https://github.com/scienceverse/bibr/releases) carry
+(`bibr --version` prints the one you have installed):
 
 ```bash
-git clone --branch v0.5.1 --depth 1 https://github.com/scienceverse/bibr.git
+git clone --branch v<VERSION> --depth 1 https://github.com/scienceverse/bibr.git
 cd bibr
 ```
 
