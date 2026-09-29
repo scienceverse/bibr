@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-30
+
 ### Added — export schema 12.1 (additive)
 
 The export moves to schema `12.1`, which adds one optional block; every 12.0
