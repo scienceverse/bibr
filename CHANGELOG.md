@@ -363,6 +363,38 @@ released.
   `reference_boundary_reason_flags` records each case
   (`preceding_article_rows_dropped`, `run_in_reference_heading`,
   `reference_table_rows`).
+- The row printed just above a reference list (the acknowledgements, a data
+  availability statement, a closing sentence) is no longer taken into the
+  list, and exported as a reference of its own, when the list's first row
+  has no year but opens entry 1 of a numbered list ("1. Schyver Grace. A
+  History of Illinois.", its year on a later line) or is a bare "Family,
+  Given" name whose year opens the next row ("Rischel, Jørgen" / "1974:").
+  The row above is still taken as the head of the first entry when the
+  list's first row reads as the middle of an entry, or when the list opens
+  on a bare name and the row above itself opens on a "Family, Given" name
+  ("Fortescue, Michael, and" above "Rischel, Jørgen" / "1974:").
+- A references heading that the OCR misread ("BIBLIOGRfU'HIE." or
+  "BIBLIOGRAPHI€." for "BIBLIOGRAPHIE.", printed on a line of its own inside
+  the closing section) now opens the reference list instead of
+  `REF_SECTION_NOT_FOUND`, when no other heading was found. The row must be
+  one word in capitals within two letter edits of a references heading
+  ("bibliography", "bibliographie", "bibliografia", "references",
+  "referencias", "referenzen", "literaturverzeichnis") with the same first
+  letter and a length at most one letter apart, and the list is the rows
+  after it that read as list rows, as for a run-in heading, with at least
+  three dated rows.
+  `reference_boundary_reason_flags` records `misread_reference_heading`.
+- A reference list no longer runs on into what is printed below it (the next
+  item on a newsletter page, author biographies and addresses, a licence or
+  a publisher's note), which could come out as extra references. The rows
+  after the last entry of a numbered list are cut when the printed numbers
+  are exactly 1 to n, the layout model read the last entry as a reference
+  region, the last entry ends on a full stop, a digit or a closing bracket,
+  and at least two unnumbered rows follow, all from other regions it did not
+  read as references, the first opening in a capital on the last entry's
+  page. An entry that breaks off mid-title, or goes on over the page, keeps
+  its tail even when the tail opens in a capital.
+  `reference_boundary_reason_flags` records `numbered_list_end_trimmed`.
 - Old-style author-year bibliographies are parsed one work per reference.
   An entry that prints several works under one byline ("Ehrke, G., 1931,
   Arch. wissensch. Bot., 13, 221; 1932, 17, 650.") gives the NER parser each
@@ -426,6 +458,23 @@ released.
   short running head. Its shape alone never makes it the title or a record
   root. Byline-shaped rows after the abstract (a German keyword line, a
   body heading that names a theorist) no longer keep it out.
+- A paper with a repository cover page that reprints its title block (the
+  title, the translated titles and the byline, printed again on the
+  article's first page) was exported with only its first author. The rows
+  under the title repeat on both pages as a block, the parser filed every
+  copy with the running heads, and the author call read only the closing
+  author biographies. On a first page that prints no byline ahead of its
+  abstract, a row of that block now reaches the author call, on the same
+  terms as a name set above the title: layout labelled it body text, it sits
+  under the title, the text of every row between the title and it is a
+  running head too, and it is nothing but two or more people's names,
+  separated by commas, semicolons, "&" or the word joining the last two
+  ("and", "et", "en", "und", "og", "och"). A row that names an institution,
+  repeats the title's own words, or has a name made only of words the paper
+  prints in lower case elsewhere (a translated title set in title case) is
+  not taken for names. The byline is read right after the title, and the
+  title no longer takes the cover's next heading ("Édition électronique") as
+  its subtitle.
 - A scanned page that carries the invisible text layer an OCR engine adds to a
   scan (a page-sized image under text in an invisible render mode, as Acrobat
   Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
@@ -909,6 +958,55 @@ released.
   it. Records that disagree still abstain, and so does a DOI shared by two
   different titles, so compiled abstract books and proceedings pages still fail
   closed. Pages the old check resolved are selected exactly as before.
+- Front matter no longer abstains on a paper whose only record sits beside
+  headings that print nothing a record prints: the heading of a committee's
+  member list pages after the title, a numbered outline, or the first body
+  heading of an old article. Their capitals or punctuation read as a byline, so
+  each started a second block, and the record-agreement check then abstained
+  because the page's one record printed no typed byline or no abstract or DOI.
+  A record whose every other block has no byline, abstract, DOI or cover line
+  is now selected as the page's only block would be. A second block with any
+  of these still competes, so multi-item pages keep abstaining. Such a record
+  is read without a download cover page printed ahead of its title page
+  ("This article was downloaded by", "PLEASE SCROLL DOWN FOR ARTICLE"), whose
+  stamp, disclaimer and publisher address would otherwise be read as the
+  article's date, abstract and affiliation.
+- Front matter no longer abstains on a multilingual article whose translated
+  title and abstract sit under a layout title of their own, with no byline or
+  DOI, after the complete original record. A record in another language
+  needed a byline naming the same authors to be linked, so the article and its
+  translation stayed unlinked. A byline-less translation is now linked when its
+  abstract prints exactly the figures of the record's abstract (years, counts,
+  percentages; not list numbers or the digits of a name such as COVID-19) and
+  they are distinctive: three figures, two with a count or measure among them,
+  or two years that abstracts in three languages print. Other figures, fewer,
+  or two years in only two languages keep the page abstaining, as does a
+  translation without figures.
+- Front matter no longer abstains with no candidate at all on a short paper
+  whose title is the header of its only body section and whose byline is that
+  section's first row, when the section classifier types the section as body
+  text (an introduction). Where no row reaches front matter, the first page
+  opens with that section, its header is title-shaped and its first row (on
+  the first page, at most 300 characters) prints a capitalized name and an
+  initial, an affiliation superscript or an affiliation, the section is now
+  read as untyped front matter. Pages with any candidate are unaffected.
+- Front matter no longer abstains on a bilingual article whose title page
+  prints the title in capitals twice, in the original language directly above
+  its translation, with the byline below. The commas in the upper title read
+  as a proceedings row (title followed by authors), so it started a block of
+  its own, cut away from the byline, and the article's records stayed
+  unlinked. An uppercase title that prints no names after it, directly above
+  a title in another language on the same page, now joins the record below.
+  Stacked titles in one language, and proceedings rows that print names after
+  the title, keep their own block.
+- Front matter no longer abstains on an article that prints its author's name
+  alone on a row above the title, with no initial or affiliation mark, when
+  its translated record elsewhere shares the DOI. The name had no byline
+  shape, so the article's own record counted as having no byline and was not
+  selected. A bare name row of two to four capitalized words now counts as the
+  byline when the same page's copyright line ("© O. Example, 2024") names a
+  person, with an initial, of the same surname. A row the copyright line does
+  not name, or a publisher's copyright line, keeps the page abstaining.
 - A failed LLM call now says how it failed. Every LLM task raised a bare
   `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
   answered all of them with 502, so a response truncated at the token limit
@@ -1160,6 +1258,41 @@ released.
   `reason:title_retyped_on_archive_cover`. A title whose letters differ from
   the article's print (a misread legacy text layer, for example) keeps the
   cover's text.
+- The same repair now covers a Cairn.info distribution cover, whose text
+  layer can lose one of the hyphens the article prints in a compound
+  ("transférocontre-transférentielles" for the article's
+  "transféro-contre-transférentielles"). A cover page is recognised by
+  Cairn's "Distribution électronique Cairn.info" notice as well as HAL's, the
+  article's printing may be any text block of the next page (Cairn's article
+  page gives the layout title label to its rubric), and a cover word that
+  keeps a hyphen of its own counts as a lost break when the article prints it
+  as one word with more hyphens, each of the cover's pieces a run of the
+  article's; a word the article breaks at a row end still keeps the cover's
+  form.
+- A title no longer ends in the marker of a note about the article ("… solid
+  waste management1" over a note "1 Paper extracted from a doctoral
+  dissertation", "… en el vivero¹") or in an open-review platform's status tag
+  ("… [version 1; peer review: 1 approved, 2 approved with reservations]").
+  The metadata LLM copies either from the title row, and grounding accepted
+  the copy because the row prints it. A digit is dropped only when the
+  selected record's title row prints it glued to the last word, the byline
+  and affiliations do not use that number (on the title page a marker counts
+  after any name or star, glued or spaced: "Li1", "Chen 1 |", "Doe a,1"), and
+  the title page numbers it as a note: the first numbered note on the page
+  starts with it and is not about an author (a corresponding author, an
+  e-mail address, an equal contribution, an affiliation), or, for a raised
+  digit only, the title page's byline markers continue right after it (title
+  ¹, authors 2, 3, …); "12" can stand for notes 1 and 2. An asterisk, dagger
+  or double dagger is dropped when a note on the title page starts with it,
+  that note is not about an author, and the byline does not use the symbol;
+  the status tag is dropped when the record prints it. Each drop adds a
+  `VAL_TITLE_REGROUNDED` warning with evidence `reason:title_note_marker` or
+  `reason:title_review_status_tag`. Digits that are title text stay:
+  "COVID-19", "CO2", "Study 1", a digit after a word with a capital inside it
+  in a title not set in capitals ("BRCA1", "TiO2", "TMPRSS2"), and a plain
+  digit after a word of fewer than six letters ("Keap1"). So does a star or
+  superscript after a token of fewer than three letters ("A*", "R²"), and a
+  star after a word with a capital inside it ("IDA*", "SPARQL*").
 - An anonymised manuscript that prints its title as a plain text row in the
   body font gets that title. No layout label, capitals or heading marks the
   row, and the front-role classifier can score it as abstract text, so the

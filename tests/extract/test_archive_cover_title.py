@@ -135,3 +135,100 @@ async def test_extracted_cover_title_takes_the_article_word_breaks():
     assert "reason:title_retyped_on_archive_cover" in [
         evidence for issue in ext.validation_issues for evidence in issue.evidence_ids
     ]
+
+
+# A psychoanalysis journal article distributed by Cairn.info. The cover's text
+# layer lost one of the two hyphens the article prints in a compound, and the
+# article page's layout title label went to its rubric, so its title is a
+# text block. The byline and body text are invented.
+_CAIRN_COVER_TITLE = (
+    "Aux prises avec la destructivité : modalités transférocontre-transférentielles "
+    "et aménagements du cadre"
+)
+_CAIRN_ARTICLE_TITLE = (
+    "Aux prises avec la destructivité : modalités transféro-contre-transférentielles "
+    "et aménagements du cadre"
+)
+_CAIRN_NOTICE = (
+    "Distribution électronique Cairn.info pour Le Carnet Psy.\n"
+    "Vous avez l'autorisation de reproduire cet article dans les limites des conditions."
+)
+
+
+def _cairn_paper(article_block=_CAIRN_ARTICLE_TITLE, *, notice=_CAIRN_NOTICE):
+    contents = _contents()
+    contents.region_summaries = [
+        RegionSummary(page=1, index=0, label="doc_title", bbox=None, content=_CAIRN_COVER_TITLE),
+        RegionSummary(page=1, index=1, label="text", bbox=None, content="Nadia Haddad"),
+        RegionSummary(page=1, index=10, label="footer", bbox=None, content=notice),
+        RegionSummary(page=2, index=0, label="doc_title", bbox=None, content="Recherche"),
+        RegionSummary(page=2, index=1, label="text", bbox=None, content=article_block),
+    ]
+    contents.sentences = [
+        PaperSentence(
+            text_id=1,
+            text="Les analysants interrogent continuellement le cadre.",
+            section_id=3,
+            paragraph_id=2,
+            page_number=2,
+        ),
+    ]
+    return contents
+
+
+def _cairn_resolution():
+    return _resolution(
+        _candidate(
+            "c1", _CAIRN_COVER_TITLE, roles=frozenset({"title", "heading"}), source_kind="heading"
+        ),
+        _candidate("c2", "Nadia Haddad", roles=frozenset({"byline"})),
+    )
+
+
+def test_a_distributor_cover_title_takes_the_article_hyphens():
+    title, issue = reground_title_off_archive_cover(
+        _CAIRN_COVER_TITLE, _cairn_resolution(), _cairn_paper()
+    )
+
+    assert title == _CAIRN_ARTICLE_TITLE
+    assert issue is not None
+    assert issue.evidence_ids == ("reason:title_retyped_on_archive_cover",)
+
+
+def test_a_distributor_cover_without_its_notice_keeps_its_title():
+    contents = _cairn_paper(notice="Date de mise en ligne : 01/02/2016")
+
+    assert reground_title_off_archive_cover(_CAIRN_COVER_TITLE, _cairn_resolution(), contents) == (
+        _CAIRN_COVER_TITLE,
+        None,
+    )
+
+
+def test_a_hyphenated_cover_word_the_article_breaks_at_a_line_end_stays():
+    # The article's hyphen after "transféro" ends a row, so it may be a
+    # line-end break rather than a printed hyphen: the cover's form stays.
+    broken = _CAIRN_ARTICLE_TITLE.replace("transféro-contre", "transféro-\r\ncontre")
+
+    assert reground_title_off_archive_cover(
+        _CAIRN_COVER_TITLE, _cairn_resolution(), _cairn_paper(broken)
+    ) == (_CAIRN_COVER_TITLE, None)
+
+
+def test_two_article_blocks_that_print_the_title_differently_keep_the_cover_text():
+    # Two blocks of the article page match the cover's letters with other
+    # hyphens: there is no single printing to take the breaks from.
+    contents = _cairn_paper()
+    contents.region_summaries.append(
+        RegionSummary(
+            page=2,
+            index=2,
+            label="text",
+            bbox=None,
+            content=_CAIRN_ARTICLE_TITLE.replace("transférentielles", "transfé-rentielles"),
+        )
+    )
+
+    assert reground_title_off_archive_cover(_CAIRN_COVER_TITLE, _cairn_resolution(), contents) == (
+        _CAIRN_COVER_TITLE,
+        None,
+    )

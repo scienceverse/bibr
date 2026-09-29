@@ -9,6 +9,7 @@ multi-record page that must keep abstaining.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -1222,3 +1223,765 @@ def test_pathological_rows_stay_fast():
 
     # Quadratic, these took seconds; bounded, they are instant.
     assert time.perf_counter() - started < 1.0
+
+
+# One record beside bare headings: the grouping split on a heading whose own
+# capitals or punctuation read as a byline, so the page abstained where the
+# same page with the heading folded in selects its only block.
+
+COMMITTEE_TITLE = (
+    "ETHICS AND EPIDEMIOLOGY Which Ethical Questions Do Cohort Researchers Meet? "
+    "Results of a Questionnaire for Members of a National Cohort Committee"
+)
+# The heading of the committee's member list, printed pages after the title.
+MEMBER_LIST_HEADING = (
+    "*NATIONAL COHORT COMMITTEE ON EVALUATION OF LIFESTYLE FACTORS FOR DISEASE "
+    "LARGE-SCALE COHORT STUDY AS OF 1993"
+)
+
+
+def _group_authored_record(*, second_abstract: bool = False) -> PaperContents:
+    """A title with a group byline no row types as one, and a member list later on."""
+
+    rows = [
+        _row(1, "Working Group on Ethical Questions", y=150.0, section_id=1),
+        _row(
+            2,
+            "In 1993 a questionnaire on ethical questions was mailed to the committee members.",
+            y=200.0,
+            label="abstract",
+            section_id=2,
+        ),
+        _row(3, "Members of the committee are listed below.", y=120.0, section_id=3, page=5),
+    ]
+    if second_abstract:
+        rows.append(
+            _row(
+                4,
+                "Members answered a second questionnaire on consent for blood samples.",
+                y=160.0,
+                label="abstract",
+                section_id=3,
+                page=5,
+            )
+        )
+    return _contents(
+        rows,
+        sections=[
+            _section(0, "Root"),
+            _section(
+                1,
+                COMMITTEE_TITLE,
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 60.0, 460.0, 120.0),
+            ),
+            _section(
+                2,
+                "Abstract",
+                section_type=CanonicalSection.ABSTRACT,
+                bbox=(60.0, 180.0, 460.0, 195.0),
+            ),
+            _section(
+                3,
+                MEMBER_LIST_HEADING,
+                section_type=CanonicalSection.TITLE,
+                bbox=(60.0, 60.0, 460.0, 90.0),
+                page=5,
+            ),
+        ],
+        detected_title=COMMITTEE_TITLE + "*",
+    )
+
+
+def test_a_member_list_heading_does_not_compete_with_the_only_record():
+    # The record holds the parser's title and the abstract but no typed
+    # byline; the member-list heading holds nothing a record prints.
+    contents = _group_authored_record()
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selection_method == "record_agreement"
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "lone_record:front-matter-block-1" in resolution.reason_flags
+    assert "attached_block:front-matter-block-2" in resolution.reason_flags
+    assert "Working Group on Ethical Questions" in _selected_text(resolution)
+    assert issues == ()
+
+
+def test_a_body_heading_does_not_compete_with_a_record_without_abstract():
+    # An old article: title, author line, then the first body heading, whose
+    # capitals and "AND" read as a byline. No abstract or DOI is printed.
+    contents = _contents(
+        [
+            _row(1, "A STUDY OF THE COLIFORM GROUP OF BACILLI", y=60.0, label="doc_title"),
+            _row(2, "By Alma J. Example and Bruno Sample.", y=100.0),
+            _row(
+                3,
+                "INTRODUCTORY DISCUSSION: THE CLASSIFICATION OF COLIFORM BACILLI AND THEIR "
+                "RELATIONS TO OTHER GRAM-NEGATIVE AEROBIC BACILLI",
+                y=160.0,
+            ),
+            _row(4, "In 1885 a Gram-negative intestinal bacillus was first isolated.", y=220.0),
+        ]
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "lone_record:front-matter-block-1" in resolution.reason_flags
+    assert issues == ()
+
+
+def _old_article(*, page: int, text_id: int = 11, y: float = 60.0) -> list[PaperSentence]:
+    """An old article's title, author line and first body heading, without an abstract."""
+
+    return [
+        _row(
+            text_id, "A STUDY OF THE COLIFORM GROUP OF BACILLI", y=y, label="doc_title", page=page
+        ),
+        _row(text_id + 1, "By Alma J. Example and Bruno Sample.", y=y + 40.0, page=page),
+        _row(
+            text_id + 2,
+            "INTRODUCTORY DISCUSSION: THE CLASSIFICATION OF COLIFORM BACILLI AND THEIR "
+            "RELATIONS TO OTHER GRAM-NEGATIVE AEROBIC BACILLI",
+            y=y + 100.0,
+            page=page,
+        ),
+        _row(
+            text_id + 3,
+            "In 1885 a Gram-negative intestinal bacillus was first isolated.",
+            y=y + 160.0,
+            page=page,
+        ),
+    ]
+
+
+# A publisher's download cover ahead of a scanned article's title page.
+DOWNLOAD_COVER = [
+    _row(1, "This article was downloaded by: [Example University Library]", y=40.0),
+    _row(
+        2,
+        "On: 05 January 2015, At: 15:38 Publisher: Example & Sons Ltd Registered office: "
+        "1 Example Street, London W1 3JH, UK",
+        y=80.0,
+    ),
+    _row(3, "PLEASE SCROLL DOWN FOR ARTICLE", y=140.0, label="paragraph_title"),
+    _row(
+        4,
+        "Example & Sons makes every effort to ensure the accuracy of all the information "
+        "contained in the publications on our platform.",
+        y=200.0,
+    ),
+]
+
+
+def test_a_lone_record_is_read_without_the_download_cover_ahead_of_it():
+    # The cover's stamp, disclaimer and registered office would read as the
+    # article's date, abstract and affiliation.
+    contents = _contents([*DOWNLOAD_COVER, *_old_article(page=2)])
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "lone_record:front-matter-block-1" in resolution.reason_flags
+    assert "cover_page_dropped:1" in resolution.reason_flags
+    assert resolution.allowed_text_ids == frozenset({11, 12})
+    selected = _selected_text(resolution)
+    assert "A STUDY OF THE COLIFORM GROUP" in selected and "By Alma J. Example" in selected
+    assert "Example & Sons" not in selected and "downloaded" not in selected
+    assert issues == ()
+
+
+def test_a_lone_record_keeps_a_cover_cue_printed_on_its_own_title_page():
+    contents = _contents(
+        [
+            _row(1, "Downloaded from https://archive.example.org/item/1921", y=20.0),
+            *_old_article(page=1),
+        ]
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "lone_record:front-matter-block-1" in resolution.reason_flags
+    assert not any(flag.startswith("cover_page_dropped:") for flag in resolution.reason_flags)
+    assert resolution.allowed_text_ids == frozenset({1, 11, 12})
+    assert issues == ()
+
+
+def test_a_second_block_with_an_abstract_of_its_own_still_competes():
+    # The later block prints a title and abstract in the record's language, so
+    # it may be another item whose byline went unseen: the page keeps abstaining.
+    _assert_abstains(
+        _group_authored_record(second_abstract=True),
+        "unmatched_presentation:front-matter-block-2",
+    )
+
+
+@pytest.mark.parametrize(
+    "second_block",
+    [
+        # A later heading with a byline under it: a second item's byline.
+        [
+            _row(13, "3. ANTIGENIC ANALYSIS OF THE STRAINS", y=160.0),
+            _row(14, "By Carl D. Other and Dana E. Sample.", y=200.0),
+            _row(15, "The agglutination tests were read after two hours.", y=240.0),
+        ],
+        # A later heading with a cover line under it: a repository's landing page.
+        [
+            _row(
+                13,
+                "INTRODUCTORY DISCUSSION: THE CLASSIFICATION OF COLIFORM BACILLI AND THEIR "
+                "RELATIONS TO OTHER GRAM-NEGATIVE AEROBIC BACILLI",
+                y=160.0,
+            ),
+            _row(14, "Downloaded from https://archive.example.org/item/1921", y=200.0),
+        ],
+    ],
+    ids=["byline", "cover-line"],
+)
+def test_a_second_block_printing_a_byline_or_a_cover_line_is_not_bare(second_block):
+    contents = _contents([*_old_article(page=1)[:2], *second_block])
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id is None
+    assert "incomplete_record" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+def test_two_linked_records_without_a_byline_are_no_lone_record():
+    # A title and its translation share a DOI, and neither prints a byline.
+    _assert_abstains(
+        _contents(
+            [
+                _row(
+                    1,
+                    "Delayed recall of household losses after regional flooding",
+                    y=60.0,
+                    label="doc_title",
+                ),
+                _row(2, "DOI: 10.1000/recall.1991.0410", y=100.0),
+                _row(
+                    3,
+                    "Recordação tardia das perdas das famílias após as inundações em uma região",
+                    y=60.0,
+                    label="doc_title",
+                    page=2,
+                ),
+                _row(4, "DOI: 10.1000/recall.1991.0410", y=100.0, page=2),
+            ]
+        ),
+        "incomplete_record",
+    )
+
+
+def test_four_complete_records_on_one_page_keep_abstaining():
+    """A compiled abstract book page: each title carries its own names and abstract."""
+
+    records = [
+        (
+            "I HAVE TO COPE WITH IT: THE VOICES OF OLDER MIGRANTS EXPERIENCING ISOLATION",
+            "Dana Example1, and Gil Sample2",
+        ),
+        (
+            "A NEW NORMAL: EXAMINING THE LINKS BETWEEN SOCIAL TECHNOLOGY AND LONELINESS",
+            "Yun Reader1, and Nora Writer1",
+        ),
+        (
+            "COMMUNITY OUTCOMES FROM A PSYCHOSOCIAL INTERVENTION FOR LONELY OLDER ADULTS",
+            "Max Author, and Mia Editor",
+        ),
+        (
+            "COMPARING DATA-DRIVEN AND THEORY-DRIVEN WAYS TO CLASSIFY SOCIAL RELATIONSHIPS",
+            "Eli Coder1, and Kim Tester2",
+        ),
+    ]
+    rows = []
+    for index, (title, names) in enumerate(records):
+        rows += [
+            _row(10 * index + 1, f"{title} {names}, 1. Example University", y=60.0 + 150 * index),
+            _row(
+                10 * index + 2,
+                f"Participants in study {index + 1} reported their social contacts.",
+                y=110.0 + 150 * index,
+                label="abstract",
+            ),
+        ]
+    contents = _contents(rows)
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id is None
+    assert not any(flag.startswith("lone_record:") for flag in resolution.reason_flags)
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+# A translated title and abstract under a layout title of their own, with no
+# byline or DOI: the figures of a translated abstract are the original's.
+
+SIGN_TITLE = "Cross-cultural adaptation of an occupational self-assessment for sign language"
+SIGN_ABSTRACT = (
+    "Objective: to adapt the instrument for sign language. Method: translation and "
+    "back-translation from August 2016 to October 2017 with 24 deaf adults. Results: "
+    "3 items were changed."
+)
+# The same abstract with only its two years for figures.
+SIGN_YEARS_ABSTRACT = (
+    "Objective: to adapt the instrument for sign language. Method: translation and "
+    "back-translation from August 2016 to October 2017."
+)
+SIGN_YEARS_PT = (
+    "Objetivo: adaptar o instrumento para língua de sinais. Método: tradução e "
+    "retrotradução de agosto de 2016 a outubro de 2017."
+)
+SIGN_YEARS_ES = (
+    "ADAPTACIÓN TRANSCULTURAL DE UNA AUTOEVALUACIÓN OCUPACIONAL PARA LA LENGUA DE SEÑAS",
+    "Objetivo: adaptar el instrumento para la lengua de señas. Método: traducción y "
+    "retrotraducción de agosto de 2016 a octubre de 2017.",
+)
+
+
+def _record_with_translated_abstract(
+    translated_abstract: str,
+    *,
+    record_abstract: str = SIGN_ABSTRACT,
+    record_doi: str | None = "DOI: 10.1000/sign.2019.0160",
+    record_doi_label: str = "text",
+    third: tuple[str, str] | None = None,
+    translated_doi: str | None = None,
+) -> PaperContents:
+    rows = [
+        _row(1, SIGN_TITLE, y=60.0, label="doc_title"),
+        _row(2, "Luisa F. Example, Fabio E. Sample", y=100.0),
+        _row(3, record_abstract, y=140.0, label="abstract"),
+    ]
+    if record_doi is not None:
+        rows.append(_row(4, record_doi, y=260.0, label=record_doi_label))
+    rows += [
+        _row(
+            5,
+            "Adaptação transcultural de uma autoavaliação ocupacional para língua de sinais",
+            y=60.0,
+            label="doc_title",
+            page=2,
+        ),
+        _row(6, translated_abstract, y=100.0, label="abstract", page=2),
+    ]
+    if translated_doi is not None:
+        rows.append(_row(9, translated_doi, y=200.0, page=2))
+    if third is not None:
+        rows += [
+            _row(7, third[0], y=300.0, label="paragraph_title", page=2),
+            _row(8, third[1], y=340.0, label="abstract", page=2),
+        ]
+    return _contents(rows)
+
+
+def test_a_translated_abstract_printing_the_records_figures_attaches():
+    contents = _record_with_translated_abstract(
+        "Objetivo: adaptar o instrumento para língua de sinais. Método: tradução e "
+        "retrotradução de agosto de 2016 a outubro de 2017 com 24 adultos surdos. "
+        "Resultados: 3 itens foram alterados."
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selection_method == "record_agreement"
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "agreeing_record:front-matter-block-2:abstract_figures" in resolution.reason_flags
+    assert issues == ()
+
+
+def test_two_years_link_translations_only_when_a_third_language_prints_them():
+    # A trilingual article: English, Portuguese and Spanish abstracts all print
+    # the study's two years and nothing else. The record's citation line, with
+    # its year, volume and DOI, is no abstract figure.
+    contents = _record_with_translated_abstract(
+        SIGN_YEARS_PT,
+        record_abstract=SIGN_YEARS_ABSTRACT,
+        record_doi=(
+            "HOW CITED: Example LF, Sample FE. Cross-cultural adaptation of an occupational "
+            "self-assessment. Example Nursing [Internet]. 2019; 28: e20990001. "
+            "Available from: https://doi.org/10.1000/sign.2019.0160"
+        ),
+        record_doi_label="abstract",
+        third=SIGN_YEARS_ES,
+    )
+    assert _dominance_abstains(contents)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "agreeing_record:front-matter-block-2:abstract_figures" in resolution.reason_flags
+    assert issues == ()
+
+
+@pytest.mark.parametrize(
+    "third",
+    [
+        # A third abstract in the translation's language is no third language.
+        (
+            "ADAPTAÇÃO DE UM INSTRUMENTO DE AUTOAVALIAÇÃO OCUPACIONAL PARA SURDOS",
+            "Objetivo: adaptar o instrumento para surdos. Método: estudo de agosto de 2016 "
+            "a outubro de 2017.",
+        ),
+        # A third language printing other years echoes nothing.
+        (
+            SIGN_YEARS_ES[0],
+            "Objetivo: adaptar el instrumento para la lengua de señas. Método: traducción de "
+            "2014 a 2015.",
+        ),
+    ],
+    ids=["same-language", "other-years"],
+)
+def test_two_years_stay_unlinked_without_a_third_language_printing_them(third):
+    _assert_abstains(
+        _record_with_translated_abstract(
+            SIGN_YEARS_PT, record_abstract=SIGN_YEARS_ABSTRACT, third=third
+        ),
+        "unlinked_records",
+    )
+
+
+@pytest.mark.parametrize(
+    ("translated_abstract", "record_abstract"),
+    [
+        # Other figures: another paper whose byline went unseen.
+        (
+            "Objetivo: avaliar a adesão ao tratamento. Método: estudo de 2018 a 2019 com 40 "
+            "pacientes. Resultados: 12 abandonaram.",
+            SIGN_ABSTRACT,
+        ),
+        # One figure the record prints among others.
+        ("Objetivo: adaptar o instrumento. Método: estudo iniciado em 2016.", SIGN_ABSTRACT),
+        # Some of the record's figures, not all of them.
+        (SIGN_YEARS_PT, SIGN_ABSTRACT),
+        # One figure, and the record's only one.
+        (
+            "Objetivo: adaptar o instrumento com 24 adultos surdos.",
+            "Objective: to adapt the instrument with 24 deaf adults.",
+        ),
+        # Some of the record's figures, even three of them.
+        (
+            "Objetivo: adaptar o instrumento. Método: de agosto de 2016 a outubro de 2017 "
+            "com 24 adultos surdos.",
+            SIGN_ABSTRACT.replace("3 items were changed", "312 answers were read"),
+        ),
+        # Two years alone, in two languages: many papers of one period print them.
+        (SIGN_YEARS_PT, SIGN_YEARS_ABSTRACT),
+        # A year and a disease name: "19" is part of a name, not a figure.
+        (
+            "Objetivo: descrever a adesão durante a COVID-19. Método: estudo de 2020.",
+            "Objective: to describe burnout during COVID-19. Method: a survey in 2020.",
+        ),
+        # List numbers are no figures.
+        (
+            "Objetivos: (1) descrever o programa; (2) comparar escolas; (3) testar uma escala.",
+            "Aims: (1) to describe burnout; (2) to compare schools; (3) to test a scale.",
+        ),
+    ],
+    ids=[
+        "other-figures",
+        "one-of-several",
+        "some-not-all",
+        "one-figure",
+        "three-of-four",
+        "two-years-two-languages",
+        "name-digits",
+        "list-numbers",
+    ],
+)
+def test_a_translated_abstract_without_the_records_distinctive_figures_stays_unlinked(
+    translated_abstract, record_abstract
+):
+    _assert_abstains(
+        _record_with_translated_abstract(translated_abstract, record_abstract=record_abstract),
+        "unlinked_records",
+    )
+
+
+def test_a_translation_printing_a_doi_of_its_own_is_not_linked_by_figures():
+    # The record prints no DOI; the other item does, so it is another paper.
+    _assert_abstains(
+        _record_with_translated_abstract(
+            "Objetivo: adaptar o instrumento para língua de sinais. Método: tradução e "
+            "retrotradução de agosto de 2016 a outubro de 2017 com 24 adultos surdos.",
+            record_doi=None,
+            translated_doi="DOI: 10.1000/sign.2019.0161",
+        ),
+        "unlinked_records",
+    )
+
+
+def test_only_a_byline_less_doi_less_translation_links_to_a_record_with_a_byline():
+    figures = frozenset({"2016", "2017", "24"})
+    record = replace(
+        _identity(SIGN_TITLE, language="en", surnames=frozenset({"example"})), figures=figures
+    )
+    translation = replace(
+        _identity("Adaptação transcultural", language="pt"), byline=False, figures=figures
+    )
+    links = front_matter._translates_abstract
+    assert links(translation, record, echoed_figures=frozenset())
+
+    # A byline or a DOI of its own makes it an item of its own.
+    assert not links(replace(translation, byline=True), record, echoed_figures=frozenset())
+    assert not links(
+        replace(translation, dois=frozenset({"10.1000/other"})), record, echoed_figures=frozenset()
+    )
+    # A record without a byline is no complete record to translate.
+    assert not links(translation, replace(record, byline=False), echoed_figures=frozenset())
+
+
+def test_figures_ignore_list_numbers_and_digits_glued_to_words_and_read_decimal_commas():
+    identity = front_matter._record_identity(
+        front_matter.FrontMatterBlock(block_id="b", candidate_ids=("c1",), title_candidate_ids=()),
+        0,
+        {
+            "c1": _candidate(
+                "Example1,2 reported 20,5% of 39 COVID-19 cases in 1993 (e20990001): "
+                "(1) mild, 2) severe, 7 fatal.",
+                {"abstract"},
+                label="abstract",
+            )
+        },
+        detected_title=None,
+    )
+
+    assert identity.figures == frozenset({"20.5", "39", "1993"})
+
+
+# An uppercase title stacked above its translation: the punctuation rule for
+# proceedings rows ("TITLE Name, Name") gave the upper title a byline role, so
+# it rooted a block of its own and split the page's record in two.
+
+PARALLEL_PT = (
+    "PLANEJAMENTO COLABORATIVO DO VERDE URBANO NA CIDADE CONECTADA: ESTUDO DAS "
+    "POSSIBILIDADES EM SOROCABA, SÃO PAULO"
+)
+PARALLEL_EN = (
+    "COLLABORATIVE PLANNING OF URBAN GREEN IN THE CONNECTED CITY: A STUDY OF THE "
+    "POSSIBILITIES IN SOROCABA, SÃO PAULO"
+)
+
+
+def _stacked_titles(upper: str, lower: str = PARALLEL_EN) -> PaperContents:
+    """Page 1: two stacked titles and a byline; page 2: the title again and an abstract."""
+
+    return _contents(
+        [
+            _row(1, upper, y=60.0, label="paragraph_title"),
+            _row(2, lower, y=110.0, label="paragraph_title"),
+            _row(3, "Regina Maria Exemplo", y=160.0, label="paragraph_title"),
+            _row(4, "Doutoranda em Gestão Urbana, Universidade Exemplo (Brasil).", y=200.0),
+            _row(5, PARALLEL_PT, y=60.0, label="doc_title", page=2),
+            _row(6, "RESUMO", y=110.0, label="paragraph_title", page=2),
+            _row(
+                7,
+                "As tecnologias digitais oferecem alternativas de inclusão dos cidadãos.",
+                y=140.0,
+                label="abstract",
+                page=2,
+            ),
+        ]
+    )
+
+
+def _blocks(contents: PaperContents):
+    return front_matter.group_front_matter_blocks(
+        front_matter.collect_front_matter_candidates(contents)
+    )
+
+
+def test_a_title_stacked_above_its_translation_joins_the_record_below():
+    contents = _stacked_titles(PARALLEL_PT)
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert len(_blocks(contents)) == 2
+    assert resolution.selection_method == "record_agreement"
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "agreeing_record:front-matter-block-2:title" in resolution.reason_flags
+    selected = _selected_text(resolution)
+    assert PARALLEL_PT in selected and PARALLEL_EN in selected
+    assert issues == ()
+
+
+@pytest.mark.parametrize(
+    "upper",
+    [
+        # Two titles in one language are two titles, not a translation.
+        (
+            "URBAN LANDSCAPE PLANNING IN THE DIGITAL CITY: A REVIEW OF PARTICIPATORY TOOLS "
+            "FOR CITIZEN INCLUSION, PARTICIPATION AND DESIGN"
+        ),
+        # A proceedings row prints its names after the title.
+        (
+            "PLANEJAMENTO COLABORATIVO DO VERDE URBANO NA CIDADE CONECTADA: ESTUDO DAS "
+            "POSSIBILIDADES Regina Exemplo, Ana Amostra"
+        ),
+    ],
+)
+def test_an_upper_title_keeps_its_own_block_unless_it_is_a_nameless_translation(upper):
+    assert len(_blocks(_stacked_titles(upper))) == 3
+
+
+def _repaged(row: PaperSentence, page: int) -> PaperSentence:
+    return replace(
+        row,
+        page_number=page,
+        provenance=[replace(item, page_no=page) for item in row.provenance],
+    )
+
+
+def test_an_upper_title_keeps_its_own_block_on_another_page_or_over_a_row():
+    rows = list(_stacked_titles(PARALLEL_PT).sentences)
+    # The translation and byline start the next page.
+    other_page = [rows[0], *(_repaged(row, 2) for row in rows[1:4]), *rows[4:]]
+    # A row set between the upper title and its translation.
+    between = [
+        rows[0],
+        _row(9, "Recebido em 12 de março de 2020 e aceito em 5 de junho de 2020", y=85.0),
+        *rows[1:],
+    ]
+
+    assert len(_blocks(_contents(other_page))) == 3
+    assert len(_blocks(_contents(between))) == 3
+
+
+def test_a_parallel_title_holds_a_byline_role_and_no_other_record_role():
+    upper = _candidate(PARALLEL_PT, {"title", "byline", "heading"})
+    lower = _candidate(PARALLEL_EN, {"title", "byline", "heading"})
+    assert front_matter._is_parallel_title_above(upper, lower)
+
+    assert not front_matter._is_parallel_title_above(
+        replace(upper, roles=frozenset({"title", "heading"})), lower
+    )
+    for role in ("abstract", "affiliation", "doi"):
+        assert not front_matter._is_parallel_title_above(
+            replace(upper, roles=upper.roles | {role}), lower
+        )
+    assert not front_matter._is_parallel_title_above(upper, replace(lower, page=2))
+
+
+# The author's name alone on a row above the title: no initial, no affiliation
+# mark, so no byline shape. The page's copyright line names the same person.
+
+NAMED_TITLE = "ПЕРШІ НАРАДИ ДОСЛІДНИКІВ І ПРИКЛАДНА НАУКА (до ювілею Першої Міжнародної Наради)"
+NAMED_DOI = "10.1000/example.2099.0001"
+
+
+def _record_under_a_bare_name(name: str, *, holder: str = "О. Приклад") -> PaperContents:
+    return _contents(
+        [
+            _row(1, name, y=60.0),
+            _row(2, NAMED_TITLE, y=100.0, label="doc_title"),
+            _row(3, f"DOI: {NAMED_DOI}\r\n© {holder}, 2024. CC BY 4.0", y=160.0),
+            _row(
+                4,
+                "Останній конгрес перед війною відбувся в Римі, і українські делегати "
+                "представили на ньому свої доповіді.",
+                y=200.0,
+                label="abstract",
+            ),
+            _row(
+                5,
+                "FIRST MEETINGS OF RESEARCHERS AND APPLIED SCIENCE (TO THE JUBILEE OF THE "
+                "FIRST INTERNATIONAL MEETING)",
+                y=60.0,
+                label="paragraph_title",
+                page=4,
+            ),
+            _row(
+                6,
+                "Key words: international meetings, applied science, Ivan Sample, Petro Example",
+                y=120.0,
+                page=4,
+            ),
+            _row(
+                7,
+                "Pryklad, O. (2024). Pershi narady doslidnykiv i prykladna nauka. "
+                f"https://doi.org/{NAMED_DOI}",
+                y=160.0,
+                page=4,
+            ),
+        ],
+        detected_title=NAMED_TITLE,
+    )
+
+
+def test_a_bare_name_row_the_copyright_line_confirms_is_the_byline():
+    contents = _record_under_a_bare_name("Олена Приклад")
+
+    resolution, issues = resolve_front_matter(contents, target_required=True)
+
+    assert resolution.selection_method == "record_agreement"
+    assert resolution.selected_block_id == "front-matter-block-1"
+    assert "agreeing_record:front-matter-block-2:doi" in resolution.reason_flags
+    assert "Олена Приклад" in _selected_text(resolution)
+    assert issues == ()
+
+
+@pytest.mark.parametrize(
+    ("name", "holder"),
+    [
+        # The copyright line names someone else: the row is no byline.
+        ("Олена Приклад", "О. Зразок"),
+        # A publisher holds the copyright, not a person.
+        ("Robert Francis", "Taylor & Francis"),
+        # One capitalized word is no name.
+        ("Приклад", "О. Приклад"),
+        # A row of lowercase words is prose, not a name.
+        ("Олена приклад", "О. Приклад"),
+    ],
+)
+def test_a_bare_row_the_copyright_line_does_not_name_stays_out(name, holder):
+    resolution, issues = resolve_front_matter(
+        _record_under_a_bare_name(name, holder=holder), target_required=True
+    )
+
+    assert resolution.selected_block_id is None
+    assert "record_without_byline:front-matter-block-1" in resolution.reason_flags
+    assert [issue.code for issue in issues] == ["VAL_METADATA_MULTI_ITEM"]
+
+
+def test_a_bare_name_on_another_page_than_the_title_stays_out():
+    rows = list(_record_under_a_bare_name("Олена Приклад").sentences)
+    # The name row moves under the abstract, onto the next page.
+    moved = [*rows[1:4], _repaged(replace(rows[0], text_id=8), 2), *rows[4:]]
+
+    resolution, issues = resolve_front_matter(
+        _contents(moved, detected_title=NAMED_TITLE), target_required=True
+    )
+
+    assert resolution.selected_block_id is None
+    assert "record_without_byline:front-matter-block-1" in resolution.reason_flags
+
+
+@pytest.mark.parametrize(
+    "name_row",
+    [
+        # A row that already holds a role is not a bare name.
+        replace(_candidate("Олена Приклад", set()), roles=frozenset({"heading"})),
+        # A digit marks a date, a page or an affiliation, not a bare name.
+        _candidate("Олена Приклад2", set()),
+        # Every surname must be the holder's, not one of them.
+        _candidate("Олена Приклад, Іван Зразок", set()),
+        # A lowercase word makes the row prose, not a list of names.
+        _candidate("Олена Приклад, та інші", set()),
+    ],
+    ids=["role", "digit", "extra-surname", "lowercase-word"],
+)
+def test_a_copyright_line_confirms_only_a_bare_row_of_its_holders_names(name_row):
+    copyright_row = _candidate(f"DOI: {NAMED_DOI}\r\n© О. Приклад, 2024. CC BY 4.0", set())
+
+    assert front_matter._copyright_named_row((_candidate("Олена Приклад", set()), copyright_row))
+    assert front_matter._copyright_named_row((name_row, copyright_row)) is None
