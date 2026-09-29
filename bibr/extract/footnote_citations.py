@@ -57,10 +57,10 @@ _NOTE_MARK_RE = re.compile(r"^\s*\(?\s*\d{1,3}\s*\)?(?:[.)](?=\s)|(?=\s))\s*")
 # A later note run into the same text row: a mark at the start of a line.
 _INNER_NOTE_RE = re.compile(r"\n\s*(?=\d{1,3}[.)]\s+\S)")
 
-# Words that introduce a citation ("See", "Cf.", "Voir aussi", "Véase").
+# Words that introduce a citation ("See", "Cf.", "Voir aussi", "Lire", "Véase").
 _LEAD_WORDS = (
     r"see\s+also|see\s+e\.\s?g\.|see|cf\.|compare|for\s+example|for\s+instance|e\.\s?g\.|"
-    r"voir\s+aussi|voir\s+notamment|voir|notamment|par\s+exemple|"
+    r"voir\s+aussi|voir\s+notamment|voir|lire\s+aussi|lire|notamment|par\s+exemple|"
     r"véase\s+también|véase|vease|vid\.|por\s+ejemplo|también|según|selon|"
     r"vgl\.|siehe|z\.\s?b\.|zob\.|also|aussi"
 )
@@ -74,8 +74,10 @@ _LEAD_IN_RE = re.compile(
 
 # The name that opens a citation: "W. Stoczkowski", "Glenn B. Canner",
 # "LIEVEN, Dominic", "CURRAN Cynthia", "Angelo PASSOLUNGHI", "Smith, J.".
+# Initials may join with a hyphen, with or without a period before it:
+# "J-M. Martin", "J.-M. Bruguière", "P.-B. Hugenholtz".
 _NAME = rf"(?:Mc|Mac|O['’])?[{_UP}][{_LOW}'’]+(?:-[{_UP}][{_LOW}'’]+)?"
-_INITIALS = rf"(?:[{_UP}][{_LOW}]?(?:-[{_UP}])?\.\s?)+"
+_INITIALS = rf"(?:[{_UP}][{_LOW}]?(?:\.?-[{_UP}][{_LOW}]?)?\.\s?)+"
 _UPPER_SURNAME = rf"[{_UP}]{{2,}}(?:[-\s][{_UP}]{{2,}})*"
 # Two capitalised words that are not a name: "The Book", "La nature".
 _NOT_FIRST_NAME = (
@@ -115,13 +117,27 @@ _CLASSICAL = (
     r"(?:[IVXLCDM]{1,6}|\d{1,3})\b(?![.]\d)"
 )
 _CLASSICAL_RE = re.compile(_CLASSICAL)
+# The same with its author and work: the tagger reads the author of
+# "Estrabón, Geografía, XVI, 17" and takes the work for no title.
+_CLASSICAL_WORK_RE = re.compile(
+    rf"(?P<author>{_NAME}(?:\s(?:de|of|von|d['’])\s?{_NAME})?),\s(?P<work>[^,;]{{3,80}}),\s"
+    r"(?:[IVXLCDM]{1,6}|\d{1,3})\b(?![.]\d)"
+)
+# A title that opens on a year, before the bracketed imprint whose year dates
+# the work: "…, 1977 Consumer Credit Survey (Board of Governors …, 1978)".
+_YEAR_LED_TITLE_RE = re.compile(
+    rf",\s(?P<title>{_YEAR}\s[{_UP}][^,;:()«»“”‘’\"]{{2,120}}?)\s"
+    rf"\((?:[^()]*?,\s)?(?P<year>{_YEAR})\)"
+)
 # Where commentary hands over to a citation: a lead-in word, a preposition
-# naming the author ("by", "par", "por", "de", "von") or an opening bracket
-# before a name, or a comma or a plain word before initials and a surname
-# ("... como bien ha demostrado J. Kany-Turpin, “Notre passé ...").
+# naming the author ("by", "par", "por", "de", "von"), with the author's title
+# if any ("par le professeur"), or an opening bracket before a name, or a
+# comma or a plain word before initials and a surname ("... como bien ha
+# demostrado J. Kany-Turpin, “Notre passé ...").
 _HANDOVER_RE = re.compile(
     rf"(?:(?<![\w.])(?P<lead>(?i:{_LEAD_WORDS}))\.?(?:\s*[,:]\s*|\s+)"
     rf"|(?<![\w.])(?i:by|par|por|de|von|chez|bei|przez)\s+"
+    rf"(?:(?:(?:le|la)\s+)?(?i:professeure?|professor|prof\.|dr\.?)\s+)?"
     rf"|\(\s*)"
     rf"(?=(?:{_ONSET}|{_CLASSICAL}))"
     rf"|(?:[,:]\s*|(?<=[{_LOW}])\s+)"
@@ -191,6 +207,70 @@ _CONTAINER_RE = re.compile(
 # "Title, Publisher, 1995." closes on its year.
 _TRAILING_YEAR_RE = re.compile(rf",\s*{_YEAR}[a-z]?\s*[.;]?\s*$")
 _WORD_RE = re.compile(r"\w+")
+
+# Court decisions. A decision is cited by its court, a chamber, the date and
+# at times a case number or the parties, then the reporters that print it:
+# "Civ. 1re, 16 juill. 1998, D. 1999. 306, note Dreyer", "CA Paris, Pôle 5,
+# ch. 2, 12 janvier 2018, RG n° 16/19375, SAS Les Éditions du net c/ Victima
+# H.", "R. c. Deschamps, C.A. Québec, n° 500-10-000003-887, 11 mars 1988".
+# The date of the decision, day, month and year.
+_MONTH = (
+    r"(?:janv(?:ier|\.)|f[ée]vr(?:ier|\.)|f[ée]v\.|mars|avr(?:il|\.)|mai|juin|"
+    r"juil(?:let|l?\.)|ao[ûu]t|sept(?:embre|\.)|oct(?:obre|\.)|nov(?:embre|\.)|"
+    r"d[ée]c(?:embre|\.)|January|February|March|April|May|June|July|August|"
+    r"September|October|November|December|(?:Jan|Feb|Mar|Apr|Aug|Sept?|Oct|Nov|Dec)\.)"
+)
+_DECISION_DATE_RE = re.compile(rf"(?<![\w.–-])(?:1er|[1-3]?\d)\s{_MONTH}\s({_YEAR})(?!\d)")
+# A court, a chamber or two parties in what precedes the date: "CA Paris",
+# "TGI Laval", "Cass. 1re civ.", "4e ch.", "Hoge Raad", "R. c. Deschamps".
+# A newspaper ("Le Figaro, 18 déc. 2014") has none of them.
+_COURT_RE = re.compile(
+    rf"(?<![\w.])(?:CA|CAA|TGI|TJ|TI|TA|T\.G\.I\.|C\.A\.)\s[{_UP}]"
+    r"|(?<![\w.])(?:CE|CJUE|CJCE|CEDH|C\.E\.|C\.S\.|C\.S\.C\.|Cass\.|Civ\.|Crim\.|Com\.|"
+    r"Soc\.|Req\.|Cons\.\s?const\.|Trib\.|T\.\s?com\.|BGH|BVerfG|OLG|Hoge\s+Raad|Cour|Court|"
+    r"Tribunal)(?!\w)"
+    r"|\b\d{1,2}(?:re|er|e|ème)\s(?:ch\.|civ\.|chambre)|\bch\.\s?\d|\bP[ôo]le\s\d"
+    rf"|\s(?:c\.|c/|v\.|vs\.?)\s[{_UP}]"
+)
+# A reporter printing the decision right after its date, "DH 1934. 385":
+# the court is then the city alone ("Paris, 27 avr. 1934, DH 1934. 385.").
+_DATED_REPORTER_RE = re.compile(rf",\s*[{_UP}][\w.]*(?:\s[\w.]+){{0,2}}\s{_YEAR}\.\s?\d")
+# What may stand between the court and the date: capitalised words, a chamber,
+# a case number ("n° 500-10-000003-887"), never a prose word ("Voir par
+# exemple CA Paris" starts at "CA").
+_DESIGNATION_RE = re.compile(rf"(?:[{_UP}\d]|n[°º]\s|no\s|ch\.)[^;:()«»“”\"]*")
+_DESIGNATION_WORDS = frozenset(
+    ("chambre", "civile", "criminelle", "commerciale", "sociale", "réunies", "mixte")
+)
+_LONG_LOWER_RE = re.compile(rf"(?<![\w{_UP}])[{_LOW}]{{5,}}\b")
+_DESIGNATION_BREAK_RE = re.compile(r"[,;:()«»“”\"]|\s[–—]\s")
+# After the date, the decision goes on through a case number, the parties or
+# a one- or two-word case name ("CE, 19 nov. 2001, Titanic").
+_CASE_NUMBER_RE = re.compile(r"(?:(?:RG|pourvoi|req\.|aff\.)\s)?n[°º]\s?\d[\w./-]*")
+_PARTIES_RE = re.compile(rf"\s(?:c/|c\.|v\.|vs\.?|contre)\s[{_UP}]")
+# A comma-separated segment naming the parties holds at most this many words.
+_MAX_PARTIES_WORDS = 16
+_CASE_NAME_RE = re.compile(rf"[{_UP}][{_LOW}]+(?:\s[{_UP}][{_LOW}]+)?")
+# A second reporter of the decision a note cites, after a semicolon: "RLDI
+# 2009, n° 50, p. 8, obs. Fontaine", "JCP E 2000, p. 77", "RTD com. 1999.
+# 394", "JurisData no 1996-000044". It is no work of its own.
+_REPORTER_WORD = rf"(?:[{_UP}]{{1,6}}|[{_UP}][{_LOW}]{{0,8}}\.|[{_LOW}]{{1,6}}\.|JurisData)"
+_PARALLEL_REPORT_RE = re.compile(
+    rf"\s*{_REPORTER_WORD}(?:\s{_REPORTER_WORD}){{0,3}}(?:\sn[°oº])?\s{_YEAR}(?![\d/])"
+)
+
+# A surname the text layer spaces out, as it does small capitals: "Christine
+# Ze l le r ,", "J.F. Bo u l a is,", "L. M c Le o d ,". After a first name or
+# initials: a capital and up to two lowercase letters, then lowercase pieces
+# (a capital only after the "c" of Mc), up to a comma, a period or a second
+# author. :func:`_join_spaced_surnames` joins it when two pieces or more are
+# single letters, which no run of words has ("Y. Wu et al.").
+_SPACED_PIECE = rf"(?:c\s[{_UP}][{_LOW}]{{0,2}}|[{_LOW}][{_LOW}{_UP}]*)"
+_SPACED_SURNAME_RE = re.compile(
+    rf"(?<![\w.])(?P<given>{_INITIALS}|{_NAME}\s)"
+    rf"(?P<run>[{_UP}][{_LOW}]{{0,2}}(?:\s{_SPACED_PIECE}){{2,}})"
+    rf"(?:\s(?=[,.;:])|(?=[,.;:]|\s(?:et|and|y|e|&)\s))"
+)
 
 
 @dataclass(frozen=True)
@@ -429,9 +509,25 @@ def _soft_split(clause: str) -> list[str]:
     return pieces
 
 
+def _join_spaced_surnames(text: str) -> str:
+    """*text* with its spaced-out surnames joined: "Christine Ze l le r , Des
+    enfants" → "Christine Zeller, Des enfants". A surname left spaced out
+    reads as no name, so the tagger took byline and title for one title."""
+
+    def join(match: re.Match[str]) -> str:
+        pieces = match.group("run").split()
+        joined = "".join(pieces)
+        if sum(len(piece) == 1 for piece in pieces[1:]) < 2 or len(joined) < 4:
+            return match.group()
+        return f"{match.group('given')}{joined}"
+
+    return _SPACED_SURNAME_RE.sub(join, text)
+
+
 def _split_citations(note: str) -> list[str]:
     """The citation clauses of one note, lead-ins and commentary removed."""
     text = collapse_ws(_NOTE_MARK_RE.sub("", note, count=1))
+    text = _join_spaced_surnames(text)
     clauses: list[str] = []
     for piece in re.split(r"\s*;\s*", text):
         # "London; New York: Routledge" is one imprint, not two citations; a
@@ -446,12 +542,152 @@ def _split_citations(note: str) -> list[str]:
             continue
         clauses.append(piece)
     out: list[str] = []
+    after_decision = False
     for clause in clauses:
-        for piece in _soft_split(clause):
-            piece = _clean(piece)
-            if piece:
-                out.append(piece)
+        # A court decision is a citation of its own, whatever surrounds it;
+        # the reporters printing it follow it and are no works of their own.
+        start = 0
+        for decision in _decisions(clause):
+            before = clause[start : decision.start]
+            if not (after_decision and _PARALLEL_REPORT_RE.match(before)):
+                out.extend(_clause_citations(before))
+            out.append(_strip_lead_in(clause[decision.start : decision.end]).strip(" ,;"))
+            start = decision.end
+            after_decision = True
+        rest = clause[start:]
+        if start == 0 and after_decision and _PARALLEL_REPORT_RE.match(rest):
+            continue
+        after_decision = after_decision and start > 0
+        out.extend(_clause_citations(rest))
     return out
+
+
+def _clause_citations(clause: str) -> list[str]:
+    """The citations of one clause, split where a new one starts and cleaned."""
+    return [piece for piece in map(_clean, _soft_split(clause)) if piece]
+
+
+@dataclass(frozen=True)
+class _Decision:
+    """Where a court decision stands in a clause."""
+
+    start: int  # the court
+    title_end: int  # past the date, case number and parties
+    end: int  # past the reporters printing it
+    year: int
+
+
+def _is_designation(text: str, *, whole: bool = False) -> bool:
+    """Whether *text* can stand between the court and the date of a decision.
+
+    A *whole* comma-separated segment naming the parties may run longer
+    ("Bashar Ibrahim and Others v. Bundesrepublik Deutschland and ... v. Taus
+    Magamadov") than a tail cut out of running text.
+    """
+    parties = whole and _PARTIES_RE.search(f" {text}") is not None
+    return (
+        0 < len(text.split()) <= (_MAX_PARTIES_WORDS if parties else 8)
+        and _DESIGNATION_RE.fullmatch(text) is not None
+        and all(word in _DESIGNATION_WORDS for word in _LONG_LOWER_RE.findall(text))
+    )
+
+
+def _designation_start(clause: str, date_start: int) -> int | None:
+    """Where the court of the decision dated at *date_start* is named.
+
+    Walks back from the date over comma-separated designations ("CA Paris,
+    4e ch.,"), and in the first text that is none keeps its longest
+    capitalised tail ("Voir par exemple CA Paris" → "CA Paris").
+    """
+    end = len(clause[:date_start].rstrip(" ,"))
+    start = None
+    while end > 0:
+        head = clause[:end]
+        breaks = list(_DESIGNATION_BREAK_RE.finditer(head))
+        cut = breaks[-1] if breaks else None
+        segment = head[cut.end() if cut else 0 :]
+        offset = end - len(segment.lstrip())
+        segment = segment.strip()
+        if not segment:
+            break
+        if _is_designation(segment, whole=True):
+            start = offset
+            if cut is None or cut.group() != ",":
+                break
+            end = cut.start()
+            continue
+        for word in re.finditer(rf"(?<!\S)[{_UP}]", segment):
+            if _is_designation(segment[word.start() :]):
+                start = offset + word.start()
+                break
+        break
+    return start
+
+
+def _decision_title_end(clause: str, date_end: int) -> int:
+    """Past the case number, the parties or the case name after the date."""
+    end = date_end
+    while (segment := re.match(r",\s*([^,;]+)", clause[end:])) is not None:
+        text = segment.group(1).strip()
+        bare = text.rstrip(".")
+        if not (
+            _CASE_NUMBER_RE.fullmatch(bare)
+            or _PARTIES_RE.search(f" {text}")
+            or _CASE_NAME_RE.fullmatch(bare)
+        ):
+            break
+        end += segment.end()
+    return end
+
+
+def _decisions(clause: str) -> list[_Decision]:
+    """The court decisions *clause* cites, in order.
+
+    A decision is a date ("16 juill. 1998") after a designation that names a
+    court, a chamber or two parties, or one a dated reporter follows ("Paris,
+    27 avr. 1934, DH 1934. 385."). What follows it after a comma, up to the
+    end of the sentence, is its reporters ("D. 1999. 306, note Dreyer").
+    """
+    found: list[_Decision] = []
+    for date in _DECISION_DATE_RE.finditer(clause):
+        start = _designation_start(clause, date.start())
+        if start is None or (found and start < found[-1].end):
+            continue
+        designation = clause[start : date.start()]
+        if not (
+            _COURT_RE.search(f" {designation}") or _DATED_REPORTER_RE.match(clause, date.end())
+        ):
+            continue
+        title_end = _decision_title_end(clause, date.end())
+        end = title_end
+        rest = clause[title_end:]
+        if rest.lstrip().startswith(","):
+            breaks = [
+                found
+                for found in _sentence_breaks(rest)
+                if not _ABBREVIATION_END_RE.search(rest[: found.start()])
+            ]
+            end += breaks[0].start() + 1 if breaks else len(rest)
+        found.append(_Decision(start, title_end, end, int(date.group(1))))
+    return found
+
+
+def legal_decision(citation: str) -> tuple[str, int] | None:
+    """Title and year of a citation that opens on a court decision, else None.
+
+    The title is the decision as cited, court to case name ("Cass. 1re civ.,
+    16 mai 2018, n° 15-14.023"), and the year that of its date. The
+    reference tagger reads neither: a decision has no author, and its date
+    no year the tagger knows.
+    """
+    text = collapse_ws(citation).strip()
+    found = _decisions(text)
+    if not found or found[0].start != 0:
+        return None
+    title = text[: found[0].title_end].rstrip(" ,;")
+    if title.endswith(".") and title[-2:-1].isdigit():
+        title = title[:-1]
+    return title, found[0].year
 
 
 def is_repeat_citation(clause: str) -> bool:
@@ -469,10 +705,13 @@ def _citation_kind(clause: str) -> str | None:
     "ISBN"), a publisher word, or the year closing the clause. An undated
     citation needs three of those cues, the book-and-chapter shape of a
     classical work ("Estrabón, Geografía, XVI, 17"), or an ISO 690 byline
-    ("COLLALTO, Marie Therese.") and a container or locator.
+    ("COLLALTO, Marie Therese.") and a container or locator. A court
+    decision ("Civ. 1re, 16 juill. 1998, D. 1999. 306") is a full citation.
     """
     if len(_WORD_RE.findall(clause)) < 4 or _TABLE_NOTE_RE.match(clause):
         return None
+    if legal_decision(clause) is not None:
+        return "full"
     probe = _DATE_STAMP_RE.sub(" ", _LIFESPAN_RE.sub(" ", clause))
     cues = sum(
         bool(found)
@@ -638,6 +877,26 @@ def quoted_title(citation: str) -> tuple[str, int | None] | None:
         return None
     years = _YEAR_RE.findall(text[closed + 1 :])
     return title, int(years[-1]) if years else None
+
+
+def classical_work(citation: str) -> tuple[str, str] | None:
+    """Author and work of an undated citation of a classical work by book and
+    chapter ("Diodoro de Sicilia, Biblioteca histórica, III, 32, 4."), else None."""
+    text = collapse_ws(citation).strip()
+    match = _CLASSICAL_WORK_RE.match(text)
+    if match is None or _YEAR_RE.search(_DATE_STAMP_RE.sub(" ", _LIFESPAN_RE.sub(" ", text))):
+        return None
+    return match.group("author"), match.group("work").strip()
+
+
+def year_led_title(citation: str) -> tuple[str, int] | None:
+    """Title and year of a citation whose title opens on a year and whose
+    bracketed imprint dates the work ("…, 1977 Consumer Credit Survey (Board
+    of Governors of the Federal Reserve System, 1978), p. 72."), else None."""
+    match = _YEAR_LED_TITLE_RE.search(collapse_ws(citation))
+    if match is None:
+        return None
+    return match.group("title").strip(), int(match.group("year"))
 
 
 def usable_reference(ref) -> bool:

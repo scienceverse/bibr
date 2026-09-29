@@ -21,6 +21,7 @@ import pandas as pd
 
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
+from bibr.extract.archive_cover import reground_title_off_archive_cover
 from bibr.extract.author_email_harvester import _CORRESPONDING_MARKER_RE, AuthorEmailHarvester
 from bibr.extract.field_decisions import (
     Classification,
@@ -1937,6 +1938,11 @@ class CoreMetadataExtractor:
                 if title != model_title:
                     title_transforms.append("regrounded")
                     title_evidence.extend(title_issue.evidence_ids)
+            title, cover_issue = reground_title_off_archive_cover(title, resolution, self.contents)
+            if cover_issue is not None:
+                self.validation_issues.append(cover_issue)
+                title_transforms.append("regrounded")
+                title_evidence.extend(cover_issue.evidence_ids)
             title, parallel_issue = drop_parallel_title(title, full_text)
             if parallel_issue is not None:
                 self.validation_issues.append(parallel_issue)
