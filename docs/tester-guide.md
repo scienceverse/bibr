@@ -9,7 +9,7 @@ pipeline with a short PDF, then add fully local inference once that works.
 > missing or incorrect fields; a completed run is not an accuracy guarantee.
 >
 > Hit a bug or something confusing? Please
-> [open an issue](https://github.com/scienceverse/bibr/issues) or email me
+> [open an issue](https://github.com/scienceverse/bibr/issues/new/choose) or email me
 > directly at jakub@jakubwerner.com.
 
 ## Which setup should I use?
@@ -430,8 +430,10 @@ installed, for example `uv sync --extra all --extra vllm` on Linux/CUDA. With
 ## Reporting issues
 
 Found a bug, or something that looks wrong? Please
-[open an issue](https://github.com/scienceverse/bibr/issues) or email me directly
-at jakub@jakubwerner.com. To help me reproduce it, include:
+[open an issue](https://github.com/scienceverse/bibr/issues/new/choose) or email me directly
+at jakub@jakubwerner.com. Pick "Wrong extraction" when bibr ran but a field is
+missing or wrong, and "Crash or install problem" when it failed. Issues are
+public, so only attach papers that may be shared. To help me reproduce it, include:
 
 1. The exact command and full error output.
 2. `uv run bibr doctor` and `uv run bibr --version` output.
