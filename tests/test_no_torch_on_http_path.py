@@ -17,6 +17,7 @@ the default runtime.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,11 @@ from pathlib import Path
 import onnxruntime  # noqa: F401  # core dependency; must be importable here.
 
 BUNDLES = Path(__file__).parent / "fixtures" / "onnx"
+
+# Windows cannot start networking (``import _overlapped`` fails with WinError
+# 10106) in a child whose environment lacks these, so the stripped environment
+# keeps them.
+_WINDOWS_ENV_KEYS = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "TEMP", "TMP")
 
 CHILD = r"""
 import json, os, sys
@@ -106,12 +112,15 @@ def test_http_path_with_onnx_bundles_never_imports_torch(tmp_path):
         "ner": str(BUNDLES / "ner"),
     }
     root = Path(__file__).resolve().parents[1]
+    env = {**cfg["env"], "PATH": "", "PYTHONPATH": str(root), "HOME": str(tmp_path)}
+    if sys.platform == "win32":
+        env.update({key: os.environ[key] for key in _WINDOWS_ENV_KEYS if key in os.environ})
     proc = subprocess.run(
         [sys.executable, "-c", CHILD, json.dumps(cfg)],
         capture_output=True,
         text=True,
         cwd=str(root),
-        env={**cfg["env"], "PATH": "", "PYTHONPATH": str(root), "HOME": str(tmp_path)},
+        env=env,
         timeout=300,
         check=False,
     )
