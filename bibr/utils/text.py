@@ -146,12 +146,19 @@ _DOI_TRAILING_JUNK_RE = re.compile(r"[.,;:)\]}>]+$")
 # the DOI and the following URL on the page).  Truncate at the first match.
 _DOI_EMBEDDED_URL_RE = re.compile(r"(https?://|www\.)", re.IGNORECASE)
 
+# HighWire-hosted journals (PNAS, Genetics, J Neurosci, ...) link supplementary
+# material as ``…/lookup/suppl/doi:10.1073/pnas.2501823122/-/DCSupplemental``
+# (or ``/-/DC1``); the candidate regex reads the path tail as DOI suffix. No DOI
+# has a ``/-/`` segment, so truncate there.
+_DOI_SUPPLEMENT_PATH_RE = re.compile(r"/-/DC(?:Supplemental|\d+)\b.*$", re.IGNORECASE)
+
 
 def normalize_doi(doi: str | None) -> str | None:
     """Normalize a DOI string to its bare form (e.g. ``10.1016/j.foo.2024``).
 
     Strips URL prefixes (https://doi.org/..., doi:, etc.), trailing punctuation,
-    embedded URL suffixes (from OCR concatenation), and validates the result looks
+    embedded URL suffixes (from OCR concatenation), HighWire supplement paths
+    (``/-/DCSupplemental``), and validates the result looks
     like a real DOI (starts with ``10.NNNN/``).
 
     Returns None if the input is empty or not a valid DOI after cleanup.
@@ -180,6 +187,8 @@ def normalize_doi(doi: str | None) -> str | None:
         m = _DOI_EMBEDDED_URL_RE.search(suffix)
         if m:
             cleaned = cleaned[: slash_pos + 1 + m.start()]
+
+    cleaned = _DOI_SUPPLEMENT_PATH_RE.sub("", cleaned)
 
     # Strip trailing punctuation again (embedded URL removal may expose new junk)
     cleaned = _DOI_TRAILING_JUNK_RE.sub("", cleaned)

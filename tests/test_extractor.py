@@ -1111,6 +1111,17 @@ class TestNormalizeDoi:
             == "10.1016/j.compppsych.2017.04.004"
         )
 
+    def test_strips_highwire_supplement_path(self):
+        # PNAS prints "…/lookup/suppl/doi:10.1073/pnas.2501823122/-/DCSupplemental."
+        assert (
+            normalize_doi("10.1073/pnas.2501823122/-/DCSupplemental.") == "10.1073/pnas.2501823122"
+        )
+        assert normalize_doi("10.1534/genetics.112.141473/-/DC1") == "10.1534/genetics.112.141473"
+        assert (
+            normalize_doi("10.1073/pnas.1003982107/-/DCSupplemental/pnas.201003982SI.pdf")
+            == "10.1073/pnas.1003982107"
+        )
+
     def test_strips_partial_url_prefix(self):
         # Exact error from logs: NER subword artifact strips "https" leaving "://"
         assert (
