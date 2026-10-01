@@ -1,0 +1,91 @@
+name: Wrong extraction
+description: bibr ran, but a field in the output is missing or wrong.
+title: "[Extraction] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues are public. Only link or attach a paper, or its extracted JSON,
+        if it may be shared. For a private paper, describe the problem here and
+        email jakub@jakubwerner.com if we need the file.
+
+  - type: input
+    id: paper
+    attributes:
+      label: Paper
+      description: A DOI, arXiv ID or public link. Write "private" if it can't be shared.
+      placeholder: "10.1234/abcd or arXiv:2609.04010"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Where did you run bibr?
+      options:
+        - The online demo (try.bibr.org)
+        - bibr on my own computer
+        - The bibr API, Pytacheck or Metacheck
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: bibr version
+      description: >-
+        `extraction.producer` in the JSON (version and build_sha), or the output
+        of `bibr --version`.
+      placeholder: "0.6.0, build 206ba9f"
+    validations:
+      required: true
+
+  - type: input
+    id: paper_id
+    attributes:
+      label: paper_id
+      description: The `paper_id` at the top of the JSON, if you have it.
+
+  - type: dropdown
+    id: fields
+    attributes:
+      label: Which parts are wrong?
+      multiple: true
+      options:
+        - Title
+        - Authors
+        - Affiliations
+        - Abstract or keywords
+        - Journal, DOI, dates or other metadata
+        - Sections
+        - References
+        - In-text citations
+        - Figures, tables or captions
+        - Funding, ethics or other statements
+        - Something else
+    validations:
+      required: true
+
+  - type: textarea
+    id: got
+    attributes:
+      label: What bibr produced
+      description: Paste the relevant part of the JSON or describe what you saw.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the paper says
+      description: What the correct output would be.
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Anything else
+      description: Page numbers, screenshots, or other papers with the same problem.
