@@ -1424,3 +1424,26 @@ def test_a_page_one_cite_box_under_a_made_up_references_heading_names_the_paper(
     assert selection.selected.normalized == "10.1234/own.7"
     cited = next(c for c in selection.candidates if c.normalized == "10.1234/cited.8")
     assert cited.rejection_reason == "reference_candidate"
+
+
+def test_a_pnas_supplement_link_names_the_paper_without_its_supplement_path():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _contents(
+        [
+            (
+                "Abstract",
+                CanonicalSection.ABSTRACT,
+                "This article contains supporting information online at "
+                "https://www.pnas.org/lookup/suppl/doi:10.1073/pnas.2501823122/-/DCSupplemental.",
+                1,
+            ),
+        ]
+    )
+
+    candidates = collect_doi_candidates(contents)
+    selection = select_doi_candidates(candidates, None)
+
+    assert {c.normalized for c in candidates} == {"10.1073/pnas.2501823122"}
+    assert selection.selected is not None
+    assert selection.selected.normalized == "10.1073/pnas.2501823122"
