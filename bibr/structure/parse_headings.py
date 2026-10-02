@@ -20,6 +20,7 @@ from bibr.structure.text_repair import (
     bbox_to_tuple,
     collapse_numbered_prefix_spaces,
     repair_heading_artifacts,
+    strip_heading_watermark_text,
     strip_markdown_emphasis,
 )
 from bibr.utils.text import normalize_text
@@ -242,6 +243,9 @@ class HeadingHandlersMixin:
         # Normalize Markdown-wrapped headings emitted by OCR (e.g.
         # "**References**" → "References") before hint-section deduplication.
         text = strip_markdown_emphasis(text)
+        # Watermark letters, gutter line numbers, letter spacing and
+        # overprinted repeats caught inside the heading box (see text_repair).
+        text = strip_heading_watermark_text(text)
         text = repair_heading_artifacts(text)
         if not text:
             return
