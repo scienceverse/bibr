@@ -186,6 +186,104 @@ def _loose_charbox(textpage, index: int) -> tuple[float, float, float, float] | 
         return None
 
 
+# Word-boundary repair. Two glyphs are on one line when their loose
+# (font ascent/descent) boxes start and end within this fraction of the line
+# height of each other: same font size, same baseline. Superscript markers and
+# subscripts never qualify.
+_SAME_LINE_TOLERANCE = 0.15
+# Between two such glyphs, a gap of at least this fraction of the line height
+# is a word gap when pdfium put nothing there...
+_WORD_GAP_MIN = 0.12
+# ...and it is this many times the in-word gaps next to it (a letter-spaced
+# heading has no in-word gap smaller than its spacing, so it is never split).
+_WORD_GAP_RATIO = 3.0
+_WORD_GAP_FLOOR = 0.02
+# Gaps outside this range (in line heights) are not neighbours on one line.
+_LINE_GAP_RANGE = (-0.3, 1.5)
+
+
+def _printable_glyph(ch: str) -> bool:
+    return ch != "\ufffd" and unicodedata.category(ch)[0] in "LNPS"
+
+
+def _same_line_gap(
+    a: tuple[float, float, float, float] | None, b: tuple[float, float, float, float] | None
+) -> float | None:
+    """The gap from glyph *a* to glyph *b* in line heights, or None when not on one line."""
+    if a is None or b is None:
+        return None
+    height = max(a[3] - a[1], b[3] - b[1])
+    if height <= 0:
+        return None
+    tolerance = _SAME_LINE_TOLERANCE * height
+    if abs(a[1] - b[1]) > tolerance or abs(a[3] - b[3]) > tolerance:
+        return None
+    gap = (b[0] - a[2]) / height
+    return gap if _LINE_GAP_RANGE[0] <= gap <= _LINE_GAP_RANGE[1] else None
+
+
+def _repair_word_boundaries(
+    records: list[tuple[str, float, float, bool]],
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
+    generated_breaks: set[int],
+) -> list[tuple[str, float, float, bool]]:
+    """Fix pdfium's whitespace between consecutive glyphs of one line.
+
+    pdfium decides spaces and line breaks per text object. A PDF that draws
+    each glyph (or each punctuation mark) as its own object can come out with
+    no space at a word gap ("arterialand") or with a generated line break in
+    the middle of a line ("projects\\r\\n, are"). Between two glyphs of the
+    same size on the same baseline, a generated break is dropped (replaced by
+    a space when the gap is word-sized), and a missing space is inserted when
+    the gap is at least ``_WORD_GAP_MIN`` of the line height and
+    ``_WORD_GAP_RATIO`` times an in-word gap next to it. Printed whitespace
+    and printed line breaks are never touched. *glyphs* holds the record
+    index, char and loose box of every non-whitespace glyph, in order.
+    """
+    pairs: list[tuple[str | None, float]] = []
+    for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
+        gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
+        kind = None
+        if gap is not None:
+            if rb == ra + 1:
+                kind = "adjacent"
+            elif all(index in generated_breaks for index in range(ra + 1, rb)):
+                kind = "break"
+        pairs.append((kind, gap if gap is not None else 0.0))
+    drop: set[int] = set()
+    insert: dict[int, tuple[float, float]] = {}
+    for k, (kind, gap) in enumerate(pairs):
+        if kind is None:
+            continue
+        (ra, _ca, la), (rb, _cb, lb) = glyphs[k], glyphs[k + 1]
+        if la is None or lb is None:  # kind is only set for two boxed glyphs
+            continue
+        at = ((la[2] + lb[0]) / 2.0, (max(la[1], lb[1]) + min(la[3], lb[3])) / 2.0)
+        if kind == "break":
+            drop.update(range(ra + 1, rb))
+            if gap >= _WORD_GAP_MIN:
+                insert[ra] = at
+        elif gap >= _WORD_GAP_MIN:
+            in_word = [
+                pairs[j][1]
+                for j in (k - 1, k + 1)
+                if 0 <= j < len(pairs) and pairs[j][0] == "adjacent" and pairs[j][1] < _WORD_GAP_MIN
+            ]
+            if in_word and gap >= _WORD_GAP_RATIO * max(max(in_word), _WORD_GAP_FLOOR):
+                insert[ra] = at
+    if not drop and not insert:
+        return records
+    repaired: list[tuple[str, float, float, bool]] = []
+    for index, record in enumerate(records):
+        if index in drop:
+            continue
+        repaired.append(record)
+        if index in insert:
+            x, y = insert[index]
+            repaired.append((" ", x, y, False))
+    return repaired
+
+
 def _is_inner_whitespace(
     textpage,
     n_chars: int,
@@ -273,6 +371,11 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     # Raised spaces waiting for the glyph after them: (record index, the
     # space's own centre, the centre of the glyph before it).
     raised: list[tuple[int, float, float]] = []
+    # Every non-whitespace glyph (record index, char, loose box) and the
+    # record indexes of pdfium's generated line breaks, for the word-boundary
+    # repair after the loop.
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]] = []
+    generated_breaks: set[int] = set()
 
     def _settle(next_box: tuple[float, float, float, float] | None) -> None:
         for index, own_y, glyph_y in raised:
@@ -310,6 +413,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
 
         if ch in ("\n", "\r"):
             _settle(None)
+            if pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+                generated_breaks.add(len(records))
             records.append((ch, 0.0, 0.0, True))
             line_glyph = None
             i += consumed
@@ -343,10 +448,12 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 and gb <= cb + _BASELINE_TOLERANCE_RATIO * (gt - gb)
             ):
                 raised.append((len(records), center_y, (gb + gt) / 2.0))
+        if not ch.isspace():
+            glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
     _settle(None)
-    return records
+    return _repair_word_boundaries(records, glyphs, generated_breaks)
 
 
 def _reconstruct_text_from_records(

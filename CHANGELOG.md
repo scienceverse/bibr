@@ -14,6 +14,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   sizes, and no longer make the text layer break lines inside words
   ("Buyer -Supplier"). Large off-axis text is removed before the PDF's text
   layer is read; the removed strings are kept in the page inspection (#111).
+- Word spaces that went missing ("arterialand", "SeeOnline/Comment") and line
+  breaks inserted in the middle of a line ("Buyer -Supplier", a break before
+  ", are") when a PDF draws each glyph or word group as its own object are
+  repaired from the glyph positions. Printed spaces and line breaks,
+  superscripts and letter-spaced headings are left as they are (#142).
 
 ## [0.6.0] - 2026-09-30
 

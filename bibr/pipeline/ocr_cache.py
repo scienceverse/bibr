@@ -51,7 +51,9 @@ logger = logging.getLogger(__name__)
 # and maps regions through the page box pdfium renders.
 # Version 13: diagonal watermark text is removed before the native-text fill
 # (the regions change), and the page inspection records the removed strings.
-_CACHE_FORMAT_VERSION = 13
+# Version 14: the native-text fill repairs missing word spaces and generated
+# mid-line breaks from the glyph positions.
+_CACHE_FORMAT_VERSION = 14
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
