@@ -21,6 +21,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   after the authors is kept as the title, "Surname, I. et al." tagged as a
   title becomes the authors, and a list number before a name particle
   ("11 van Nieuwenhuizen D") stays out of the authors (#138).
+- A bibliography entry no longer carries the paper's own DOI, which a
+  repeated preprint banner or a "cite this article" line inside the
+  reference list used to attach to it (#139).
 
 ## [0.6.0] - 2026-09-30
 
