@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Diagonal watermarks ("For Review Only", review disclaimers, "RETRACTED",
+  "ARTICLE IN PRESS") no longer leak stray letters into abstracts, headings,
+  statements, author lines and references, no longer inflate region font
+  sizes, and no longer make the text layer break lines inside words
+  ("Buyer -Supplier"). Large off-axis text is removed before the PDF's text
+  layer is read; the removed strings are kept in the page inspection (#111).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)

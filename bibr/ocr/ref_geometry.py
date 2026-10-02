@@ -89,6 +89,8 @@ def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:
     layer or no References header."""
     import pypdfium2
 
+    from bibr.ocr.native_text import open_text_page
+
     page_lines: dict[int, list[LineRecord]] = {}
     header_page: int | None = None
     with pdfium_lock:
@@ -97,7 +99,7 @@ def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:
             for pi in range(len(doc)):
                 page = doc[pi]
                 try:
-                    tp = page.get_textpage()
+                    tp = open_text_page(page)
                     try:
                         full = tp.get_text_range() or ""
                         if header_page is None and _REF_HEADER_RE.search(full):

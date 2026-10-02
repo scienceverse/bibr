@@ -49,7 +49,9 @@ logger = logging.getLogger(__name__)
 # Version 12: native-text spacing + page box. Bundles store the regions after
 # the native-text fill, which now places spaces against the glyph before them
 # and maps regions through the page box pdfium renders.
-_CACHE_FORMAT_VERSION = 12
+# Version 13: diagonal watermark text is removed before the native-text fill
+# (the regions change), and the page inspection records the removed strings.
+_CACHE_FORMAT_VERSION = 13
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:

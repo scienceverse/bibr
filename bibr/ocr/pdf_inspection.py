@@ -18,6 +18,7 @@ from bibr.ocr.native_text import (
     _page_rotation,
     _pdf_points_to_normalized_bbox,
     _sample_page_font_metadata,
+    open_text_page,
 )
 from bibr.ocr.pdf_links import PdfUriLink, page_uri_links
 from bibr.ocr.ref_geometry import (
@@ -42,6 +43,9 @@ class PdfPageInspection:
     # ``_is_invisible_text_layer_page``): no text-layer data is read from it,
     # apart from the regions' OCR fallback text (``_invisible_layer_text``).
     invisible_text_layer: bool = False
+    # Diagonal watermark strings removed before the text layer was read
+    # ("For Review Only", "RETRACTED"; see ``strip_watermark_objects``).
+    watermarks: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,8 +141,9 @@ def inspect_pdf(
                     needs_text = fill_native_text or include_ref_geometry
                     char_count = 0
                     invisible_text_layer = False
+                    watermarks: list[str] = []
                     if needs_text:
-                        textpage = page.get_textpage()
+                        textpage = open_text_page(page, watermarks)
                         try:
                             char_count = textpage.count_chars()
                             if reject_invisible_text_layer and char_count:
@@ -227,6 +232,7 @@ def inspect_pdf(
                             crop_box=crop_box,
                             char_count=char_count,
                             invisible_text_layer=invisible_text_layer,
+                            watermarks=tuple(watermarks),
                         )
                     )
                 finally:
@@ -370,7 +376,13 @@ def inspection_from_dict(
         return None
     return PdfInspection(
         pages=tuple(
-            PdfPageInspection(**{**page, "crop_box": tuple(page["crop_box"])})
+            PdfPageInspection(
+                **{
+                    **page,
+                    "crop_box": tuple(page["crop_box"]),
+                    "watermarks": tuple(page.get("watermarks", ())),
+                }
+            )
             for page in data.get("pages", [])
         ),
         layout_results=[],

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import math
 import re
 import unicodedata
 
@@ -458,7 +459,7 @@ def get_native_text_in_bbox(
             try:
                 crop_box = _page_crop_box(page)
                 rotation = _page_rotation(page)
-                textpage = page.get_textpage()
+                textpage = open_text_page(page)
                 try:
                     if textpage.count_chars() == 0:
                         return ""
@@ -845,7 +846,7 @@ def fill_font_metadata(
                     crop_box = _page_crop_box(page)
                     rotation = _page_rotation(page)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         n_chars = textpage.count_chars()
                         if n_chars == 0:
@@ -1048,6 +1049,143 @@ def _collect_image_boxes(pdfium_c, objects, matrix, depth: int, boxes: list) -> 
             _collect_image_boxes(pdfium_c, children, inner, depth + 1, boxes)
 
 
+# --- Diagonal watermarks ------------------------------------------------
+#
+# Review copies and stamped PDFs draw a large diagonal string over every page
+# ("For Review Only", a review disclaimer, "RETRACTED", "ARTICLE IN PRESS").
+# PP-DocLayoutV3 has no watermark class, so its glyphs land in whatever region
+# box their centres fall in: a few stray letters at the start (drawn first) or
+# end (drawn last) of abstracts, headings and statements, and skewed region font
+# sizes. Drawn first, the object also skews pdfium's line breaking, which then
+# breaks the line before every one-glyph text object ("Buyer -Supplier").
+# Dropping the chars afterwards cannot undo that, so such text objects are
+# removed from the in-memory page before its text page is built.
+#
+# A watermark is a text object whose baseline, composed through the forms that
+# hold it, is more than _WATERMARK_MIN_SKEW_DEG off a multiple of 90 degrees,
+# at an effective size (Tf size times the matrix scale) of at least
+# _WATERMARK_MIN_SIZE_PT. Colour, alpha and /Artifact tags do not separate
+# them (red, grey or light blue; opaque or not; mostly untagged). On the dev
+# PDFs (2026-10-02) watermarks are 24-100 pt and the only other off-axis text,
+# rotated chart tick labels, is 5-9 pt; 90/270 degree text (side stamps,
+# landscape tables) is on-axis and kept. FPDFText_GetCharAngle is not used:
+# it reports the shear of synthetic italics as rotation.
+_WATERMARK_MIN_SKEW_DEG = 3.0
+_WATERMARK_MIN_SIZE_PT = 16.0
+
+
+def _object_matrix(pdfium_c, obj) -> tuple[float, float, float, float, float, float] | None:
+    matrix = pdfium_c.FS_MATRIX()
+    if not pdfium_c.FPDFPageObj_GetMatrix(obj, ctypes.byref(matrix)):
+        return None
+    return (matrix.a, matrix.b, matrix.c, matrix.d, matrix.e, matrix.f)
+
+
+def _is_watermark_text(pdfium_c, obj, matrix: tuple[float, ...]) -> bool:
+    """True for a large text object set on an off-axis baseline (see above)."""
+    a, b, c, d, _e, _f = matrix
+    skew = math.degrees(math.atan2(b, a)) % 90.0
+    if min(skew, 90.0 - skew) <= _WATERMARK_MIN_SKEW_DEG:
+        return False
+    size = ctypes.c_float(0.0)
+    if not pdfium_c.FPDFTextObj_GetFontSize(obj, ctypes.byref(size)):
+        return False
+    return size.value * math.sqrt(abs(a * d - b * c)) >= _WATERMARK_MIN_SIZE_PT
+
+
+def _collect_watermark_objects(pdfium_c, objects, parent, matrix, depth: int, found: list) -> None:
+    """Append ``(parent form or None, text object)`` for every watermark text object.
+
+    Like :func:`_collect_image_boxes`, an object inside a Form XObject is
+    judged in page space, through the matrices of the forms that contain it:
+    a stamp can be upright text inside a rotated form.
+    """
+    for obj in objects:
+        kind = pdfium_c.FPDFPageObj_GetType(obj)
+        if kind == pdfium_c.FPDF_PAGEOBJ_TEXT:
+            own = _object_matrix(pdfium_c, obj)
+            if own is not None and _is_watermark_text(pdfium_c, obj, _compose(own, matrix)):
+                found.append((parent, obj))
+        elif kind == pdfium_c.FPDF_PAGEOBJ_FORM and depth < _SCAN_PAGE_MAX_FORM_DEPTH:
+            own = _object_matrix(pdfium_c, obj)
+            if own is None:
+                continue
+            children = [
+                pdfium_c.FPDFFormObj_GetObject(obj, index)
+                for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
+            ]
+            _collect_watermark_objects(
+                pdfium_c, children, obj, _compose(own, matrix), depth + 1, found
+            )
+
+
+def _text_object_text(pdfium_c, obj, textpage) -> str:
+    length = pdfium_c.FPDFTextObj_GetText(obj, textpage.raw, None, 0)
+    if length <= 2:
+        return ""
+    buffer = ctypes.create_string_buffer(length)
+    pdfium_c.FPDFTextObj_GetText(
+        obj, textpage.raw, ctypes.cast(buffer, ctypes.POINTER(pdfium_c.FPDF_WCHAR)), length
+    )
+    return buffer.raw[: length - 2].decode("utf-16-le", "replace")
+
+
+def strip_watermark_objects(page) -> list[str]:
+    """Remove diagonal watermark text objects from *page* in memory.
+
+    Returns the removed strings (whitespace-normalised, one per object that
+    had text). Only the loaded page changes: nothing is written back, and the
+    callers open the document from bytes for their own pass. Operates on a
+    caller-provided (lock-held) page.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    found: list = []
+    top_level = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_watermark_objects(pdfium_c, top_level, None, None, 0, found)
+    if not found:
+        return []
+    texts: list[str] = []
+    # The strings need a text page of the unstripped page; only pages that
+    # carry a watermark pay for it.
+    textpage = page.get_textpage()
+    try:
+        for _parent, obj in found:
+            text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
+            if text:
+                texts.append(text)
+    finally:
+        textpage.close()
+    remove_from_form = getattr(pdfium_c, "FPDFFormObj_RemoveObject", None)
+    for parent, obj in found:
+        if parent is None:
+            removed = pdfium_c.FPDFPage_RemoveObject(page.raw, obj)
+        elif remove_from_form is not None:
+            removed = remove_from_form(parent, obj)
+        else:
+            removed = False
+        if removed:
+            # Removal hands the object to the caller.
+            pdfium_c.FPDFPageObj_Destroy(obj)
+    return texts
+
+
+def open_text_page(page, watermarks: list[str] | None = None):
+    """Build *page*'s pdfium text page without its diagonal watermark text.
+
+    Every native-text reader goes through this, so region text, font
+    metadata, reference geometry and DOI evidence see the same characters.
+    The removed strings are appended to *watermarks* when it is given.
+    """
+    removed = strip_watermark_objects(page)
+    if watermarks is not None:
+        watermarks.extend(removed)
+    return page.get_textpage()
+
+
 def _union_area(boxes: list[tuple[float, float, float, float]]) -> float:
     """Exact area of the union of axis-aligned boxes, by vertical slabs."""
     xs = sorted({x for left, _, right, _ in boxes for x in (left, right)})
@@ -1213,7 +1351,7 @@ def fill_regions_from_native_text(
                     crop_box = _page_crop_box(page)
                     rotation = _page_rotation(page)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         if textpage.count_chars() == 0:
                             continue
@@ -1279,7 +1417,7 @@ def fill_native_text_and_fonts(
                     # the char-count gate.
                     _attach_page_dimensions(page, regions)
                     _attach_bbox_pdf_pts(crop_box, regions, rotation)
-                    textpage = page.get_textpage()
+                    textpage = open_text_page(page)
                     try:
                         n_chars = textpage.count_chars()
                         if n_chars == 0:
