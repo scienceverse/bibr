@@ -19,6 +19,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ", are") when a PDF draws each glyph or word group as its own object are
   repaired from the glyph positions. Printed spaces and line breaks,
   superscripts and letter-spaced headings are left as they are (#142).
+- A heading in the middle of a later page that the layout model labels as a
+  document title, such as a sidebar or box heading ("When No Default Is Your
+  Best Option"), is no longer dropped as a running head, so the sidebar no
+  longer merges into the section around it. A later-page title in the top or
+  bottom margin, one repeated on other pages, a copyright line and the title
+  printed again behind a cover sheet are still dropped (part of #122).
 
 ## [0.6.0] - 2026-09-30
 

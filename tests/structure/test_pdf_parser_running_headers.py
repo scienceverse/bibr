@@ -353,3 +353,95 @@ def test_repeated_legend_rows_printed_together_stay_demoted():
 
     assert {(0, 1), (0, 2), (1, 1), (1, 2)} <= parser._running_header_regions
     assert not any("com interface" in t[0] for t in parser._deferred_texts)
+
+
+def _sidebar_pages(sidebar_heading: str) -> list[list[dict]]:
+    """A magazine article: a boxed sidebar headed by a mid-page ``doc_title`` on page 3."""
+    return [
+        [
+            _heading("doc_title", "Nudge Your Customers Toward Better Choices", y=80),
+            _text("Defaults are the options a customer gets without acting.", y=200),
+        ],
+        [
+            _heading("paragraph_title", "Mass Defaults", y=300),
+            _text("Mass defaults apply to every customer alike.", y=350),
+        ],
+        [
+            _text("Most firms set them once and never revisit them.", y=300),
+            _heading("doc_title", sidebar_heading, y=538),
+            _text("Sometimes the best default is no default at all.", y=600),
+        ],
+    ]
+
+
+def test_mid_page_doc_title_on_a_later_page_is_a_sidebar_heading():
+    """Every later-page doc_title used to be demoted, which dropped the sidebar
+    heading and merged the sidebar into the section around it."""
+    sidebar = "When No Default Is Your Best Option"
+    parser = PDFParser(json_result=_sidebar_pages(sidebar))
+    parser._mark_running_headers()
+
+    assert (2, 1) not in parser._running_header_regions
+
+    full = PDFParser(json_result=_sidebar_pages(sidebar))
+    contents = full.parse()
+    sidebar_section = next(s for s in contents.sections if s.header == sidebar)
+    by_section = {text: section_id for text, _page, section_id, *_ in full._deferred_texts}
+    assert by_section["Sometimes the best default is no default at all."] == (
+        sidebar_section.section_id
+    )
+    assert by_section["Most firms set them once and never revisit them."] != (
+        sidebar_section.section_id
+    )
+
+
+def test_later_page_doc_title_in_the_margin_band_stays_demoted():
+    pages = _sidebar_pages("Harvard Business Review")
+    pages[2][1] = _heading("doc_title", "Harvard Business Review", y=20)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) in parser._running_header_regions
+
+
+def test_title_behind_a_cover_sheet_stays_demoted_mid_page():
+    """A submission cover sheet prints the title; the article page repeats it mid-page."""
+    pages = [
+        [
+            _heading("doc_title", "Supplier Opportunism in Buyer-Supplier NPD", y=150),
+            _text("Manuscript ID DS-2026-0001. Manuscript type: Original Article.", y=300),
+        ],
+        [
+            _heading("doc_title", "SUPPLIER OPPORTUNISM IN BUYER-SUPPLIER NPD:", y=420),
+            _text("Collaborating with a supplier exposes the buyer to opportunism.", y=520),
+        ],
+    ]
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (1, 0) in parser._running_header_regions
+
+
+def test_mid_page_doc_title_repeated_on_later_pages_stays_demoted():
+    pages = _sidebar_pages("Author A, Author B, Author C")
+    pages.append(
+        [
+            _heading("doc_title", "Author A, Author B, Author C", y=450),
+            _text("Page 4 body.", y=520),
+        ]
+    )
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert {(2, 1), (3, 0)} <= parser._running_header_regions
+
+
+def test_mid_page_copyright_doc_title_on_a_later_page_stays_demoted():
+    pages = _sidebar_pages(
+        "Copyright 2026 Harvard Business School Publishing. All rights reserved."
+    )
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (2, 1) in parser._running_header_regions
+

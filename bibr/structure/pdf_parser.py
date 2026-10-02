@@ -744,10 +744,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
            headers (Methods, References, Discussion) appear exactly once.
 
         2. **Extra ``doc_title`` regions** — academic papers have exactly
-           one ``doc_title`` (the paper title, on page 1). Any subsequent
-           ``doc_title`` region is the layout model misclassifying a
-           running-header (page-2+ author line, banner, journal name).
-           Demoting these prevents later author-line regions from splitting the body.
+           one ``doc_title`` (the paper title, on page 1). A ``doc_title`` on
+           a later page is usually the layout model misclassifying a
+           running-header (page-2+ author line, banner, journal name), and
+           is demoted when it has furniture's geometry or text (see
+           :meth:`_is_later_doc_title_furniture`); a mid-page one is a
+           sidebar heading and stays.
         """
         # Heuristic 1: multi-page repeats (any heading label).
         seen: dict[str, list[tuple[int, int]]] = {}
@@ -874,7 +876,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # to its first region.
             anchor_page = doc_title_occurrences[anchor][0]
             self._running_header_regions.update(
-                (pi, ri) for pi, ri, _ in doc_title_occurrences[anchor + 1 :] if pi != anchor_page
+                (pi, ri)
+                for pi, ri, text in doc_title_occurrences[anchor + 1 :]
+                if pi != anchor_page
+                and self._is_later_doc_title_furniture(
+                    pi, ri, text, anchor_page, doc_title_occurrences, seen
+                )
             )
 
         if self._running_header_regions:
@@ -882,6 +889,36 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "Demoted %d heading regions detected as running headers",
                 len(self._running_header_regions),
             )
+
+    def _is_later_doc_title_furniture(
+        self,
+        page_idx: int,
+        region_idx: int,
+        text: str,
+        anchor_page: int,
+        doc_title_occurrences: list[tuple[int, int, str]],
+        seen: dict[str, list[tuple[int, int]]],
+    ) -> bool:
+        """Whether a ``doc_title`` on a page after the title's is page furniture.
+
+        A running head, a journal banner or a copyright line sits in the
+        margin band, repeats on other pages, or is the title again (the
+        article page behind a cover sheet). A ``doc_title`` in the middle of
+        a later page that is none of these is a sidebar or box heading ("When
+        No Default Is Your Best Option") and stays a heading; demoting it
+        dropped the heading and merged the sidebar into the section around it.
+        """
+        if self._is_in_margin_band(page_idx, region_idx) or self._is_copyright_notice(text):
+            return True
+        if len({pi for pi, _ in seen.get(text, ())}) >= 2:
+            return True
+        key = alnum_key(text)
+        title_key = alnum_key(
+            " ".join(t for pi, _, t in doc_title_occurrences if pi == anchor_page)
+        )
+        return bool(key and title_key) and (
+            alnum_text_covered(key, title_key) or alnum_text_covered(title_key, key)
+        )
 
     def _mark_reference_envelopes(self) -> None:
         """Shadow whichever of an aggregate reference box and its entries is redundant.
