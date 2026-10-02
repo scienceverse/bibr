@@ -365,7 +365,52 @@ async def test_structured_funding_preserves_prepopulated_native_statement():
     )
 
 
-async def test_shadow_structured_funding_uses_bounded_selection_not_legacy_scalar():
+async def test_shadow_structured_funding_reads_the_exported_lexical_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Acknowledgments",
+                CanonicalSection.ACKNOWLEDGMENT,
+                [
+                    "The article is based on research funded by the German Research"
+                    " Foundation (DFG) (AB 1234/5-6).",
+                ],
+            )
+        ]
+    )
+    integrity = importlib.import_module("bibr.extract.integrity_statements")
+    resolution = integrity.resolve_integrity_statements(contents, mode="shadow")
+    metadata = PaperMetadata(doi="", title="T")
+    integrity.apply_integrity_resolution(contents, metadata, resolution)
+    assert metadata.funding_statement == (
+        "The article is based on research funded by the German Research Foundation (DFG)"
+        " (AB 1234/5-6)."
+    )
+    assert not integrity.render_selected_integrity_statement(
+        contents, resolution, "funding_statement"
+    )
+
+    result = ResearchIntegrityLLM.model_validate(
+        {"funding": [{"funder": "German Research Foundation", "award_ids": ["AB 1234/5-6"]}]}
+    )
+    client = AsyncMock()
+    client.extract_research_integrity = AsyncMock(return_value=result)
+    await extract_structured_integrity(
+        contents,
+        metadata,
+        client,
+        "hash",
+        integrity_resolution=resolution,
+    )
+
+    assert client.extract_research_integrity.await_args.kwargs["funding_text"] == (
+        metadata.funding_statement
+    )
+    assert [entry.funder for entry in metadata.funding] == ["German Research Foundation"]
+
+
+async def test_shadow_structured_funding_falls_back_to_the_bounded_selection():
     contents = _contents(
         [
             (
@@ -386,7 +431,7 @@ async def test_shadow_structured_funding_uses_bounded_selection_not_legacy_scala
     resolution = integrity.resolve_integrity_statements(contents, mode="shadow")
     metadata = PaperMetadata(doi="", title="T")
     integrity.apply_integrity_resolution(contents, metadata, resolution)
-    assert metadata.funding_statement == "Funding can affect institutional priorities."
+    metadata.funding_statement = None
 
     result = ResearchIntegrityLLM.model_validate(
         {"funding": [{"funder": "NSF", "award_ids": ["123"]}]}
@@ -451,7 +496,7 @@ async def test_shadow_section_copy_ends_at_next_label_and_matches_structured_fun
     )
 
 
-async def test_legacy_structured_funding_uses_the_compatibility_section_copy():
+async def test_legacy_structured_funding_reads_the_exported_section_copy():
     contents = _contents(
         [
             (
@@ -487,7 +532,7 @@ async def test_legacy_structured_funding_uses_the_compatibility_section_copy():
     )
 
     assert client.extract_research_integrity.await_args.kwargs["funding_text"] == (
-        "This work was supported by NSF grant $^{123}$ ."
+        "This work was supported by NSF grant 123 ."
     )
 
 

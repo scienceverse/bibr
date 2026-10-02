@@ -26,6 +26,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   section, an essay section titled like ethics ("Time Discounting: An Ethical
   Problem") or an AI-tool disclosure is no longer copied into the funding or
   ethics statement. (#128)
+- The structured funder list (`funding[]`) is now parsed from the exported
+  funding statement. It was parsed from different text, so it was often empty
+  while the statement named a funder, or listed funders from another
+  paragraph. (#130)
 - Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
   two internal statement resolvers, said nothing about the paper, and fired on
   many papers; it is now a debug log message. (#146)
