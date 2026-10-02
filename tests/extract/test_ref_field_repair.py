@@ -643,7 +643,184 @@ def test_well_formed_reference_is_untouched():
     assert fields == before
 
 
+# --- Vancouver bylines and quoted titles ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("authors", "text", "expected"),
+    [
+        (
+            "Loo J, Spittle DA, Newnham",
+            "Loo J, Spittle DA, Newnham M. COVID-19, immunothrombosis and venous "
+            "thromboembolism: biological mechanisms. Thorax. 2021; 76(4): 412-420.",
+            "Loo J, Spittle DA, Newnham M",
+        ),
+        (
+            "Simpson",
+            "Simpson D. The recurrence of memory complaints. Lancet. 2020; 395: 1-2.",
+            "Simpson D",
+        ),
+        (
+            "Moreau",
+            "Moreau A: Party change: The causes and consequences. Oxford University Press; 2017.",
+            "Moreau A",
+        ),
+    ],
+)
+def test_last_author_gets_back_a_dropped_single_initial(authors, text, expected):
+    fields, fired = _repair({"authors": authors, "title": "x"}, text)
+    assert fields["authors"] == expected
+    assert "author_final_initial" in fired
+
+
+@pytest.mark.parametrize(
+    ("fields", "text"),
+    [
+        # two initials survive the tagger: nothing to restore
+        (
+            {"authors": "Smith JK", "title": "A study"},
+            "Smith JK. A study. J Tests. 2019; 1: 1-2.",
+        ),
+        # the byline ends in an initial
+        (
+            {"authors": "Brown T", "title": "M. tuberculosis in cattle"},
+            "Brown T. M. tuberculosis in cattle. Vet Rec. 2018; 2: 3-4.",
+        ),
+        # the capital opens the title
+        (
+            {"authors": "World Health Organization", "title": "M. tuberculosis report"},
+            "World Health Organization M. tuberculosis report. Geneva: WHO; 2019.",
+        ),
+        # "et al" is no family name
+        (
+            {"authors": "Smith J, Brown K, et al", "title": "A study"},
+            "Smith J, Brown K, et al. A study. J Tests. 2019.",
+        ),
+        # author-date byline: the initial follows a comma
+        (
+            {"authors": "Smith, J., & Brown", "title": "A study"},
+            "Smith, J., & Brown, K. (2019). A study. Journal of Tests, 1, 1-2.",
+        ),
+    ],
+)
+def test_final_initial_rule_leaves_complete_bylines_alone(fields, text):
+    before = dict(fields)
+    _, fired = _repair(fields, text)
+    assert "author_final_initial" not in fired
+    assert fields["authors"] == before["authors"]
+
+
+def test_colon_closing_a_byline_is_dropped():
+    text = (
+        "Kling CC, Kunegis J, Hartmann H, et al.: Voting behaviour and power in online "
+        "democracy. Proceedings of ICWSM. 2015; 9(1): 208-217."
+    )
+    fields, fired = _repair(
+        {"authors": "Kling CC, Kunegis J, Hartmann H, et al.:", "title": "Voting behaviour"}, text
+    )
+    assert fields["authors"] == "Kling CC, Kunegis J, Hartmann H, et al."
+    assert "author_trailing_colon" in fired
+
+
+def test_byline_tagged_as_title_moves_to_the_authors():
+    fields, fired = _repair(
+        {"title": "Deppe, U. et al."}, "Deppe, U. et al. Nature 326, 1-2 (1987)."
+    )
+    assert fields["authors"] == "Deppe, U. et al."
+    assert fields["title"] is None
+    assert "title_et_al_byline" in fired
+
+
+def test_title_naming_et_al_is_not_a_byline():
+    text = "Brown, K. Smith, J. et al. revisited. J. Tests 3, 4-5 (1990)."
+    fields, fired = _repair({"title": "Smith, J. et al. revisited"}, text)
+    assert fields["title"] == "Smith, J. et al. revisited"
+    assert "title_et_al_byline" not in fired
+
+
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        (
+            "Assessment of the effect of haze on visibility in Sumatra,”",
+            "Assessment of the effect of haze on visibility in Sumatra",
+        ),
+        ('Single image haze removal",', "Single image haze removal"),
+    ],
+)
+def test_closing_quote_left_on_a_title_is_dropped(title, expected):
+    fields, fired = _repair({"authors": "A. Author", "title": title}, f"A. Author, “{title} 2020.")
+    assert fields["title"] == expected
+    assert "title_closing_quote" in fired
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "“Mini-Mental State”",
+        'The "hot hand" in basketball',
+        "Why “nudge” works",
+    ],
+)
+def test_balanced_quotes_in_a_title_are_kept(title):
+    fields, fired = _repair({"authors": "A. Author", "title": title}, f"A. Author. {title}. 2020.")
+    assert fields["title"] == title
+    assert "title_closing_quote" not in fired
+
+
+@pytest.mark.parametrize(
+    ("authors", "text", "expected"),
+    [
+        (
+            "USA",
+            "USA, “AirForceTimes,” https://www.example.org/news/2019/02/13/a-crash-due-to-signal-"
+            "loss [Accessed on 2023-01-01].",
+            "AirForceTimes",
+        ),
+        (
+            "P. Ekman",
+            "P. Ekman, “Microexpression training tool (METT),” Stanford Univ., Stanford, CA, USA, "
+            "Tech. Rep., 2002.",
+            "Microexpression training tool (METT)",
+        ),
+    ],
+)
+def test_untagged_quoted_title_after_the_byline_becomes_the_title(authors, text, expected):
+    fields, fired = _repair({"authors": authors}, text)
+    assert fields["title"] == expected
+    assert "title_quoted_after_byline" in fired
+
+
+def test_quotation_later_in_an_untitled_reference_is_not_its_title():
+    text = "A. Author, Report on safety, Agency, 2019, see “Annex B,” p. 4."
+    fields, fired = _repair({"authors": "A. Author"}, text)
+    assert "title_quoted_after_byline" not in fired
+    assert not fields.get("title") or fields["title"] != "Annex B"
+
+
 # --- wiring --------------------------------------------------------------------
+
+
+def test_list_number_before_a_name_particle_is_stripped_for_the_parser():
+    refs = [
+        "10 Smith J, Brown K. A study. Lancet. 2019; 1: 1-2.",
+        "11 van Nieuwenhuizen D, Ambachtsheer N. Another study. BMJ. 2020; 2: 3-4.",
+        "12 Jones K. A third study. JAMA. 2021; 3: 5-6.",
+    ]
+    assert ex._strip_enum_markers(refs) == [
+        "Smith J, Brown K. A study. Lancet. 2019; 1: 1-2.",
+        "van Nieuwenhuizen D, Ambachtsheer N. Another study. BMJ. 2020; 2: 3-4.",
+        "Jones K. A third study. JAMA. 2021; 3: 5-6.",
+    ]
+
+
+def test_particle_after_a_number_stays_in_an_unnumbered_list():
+    refs = [
+        "Smith J. A study. Lancet. 2019.",
+        "3 de mayo de 2020. Boletín oficial.",
+        "Jones K. A third study. JAMA. 2021.",
+    ]
+    assert ex._strip_enum_markers(refs) == refs
 
 
 def test_ner_parse_path_applies_the_repairs(monkeypatch):

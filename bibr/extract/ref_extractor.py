@@ -195,7 +195,22 @@ def _strip_enum_markers(ref_strings: list[str]) -> list[str]:
     marked = sum(1 for s in ref_strings if _ENTRY_NUMBERING_RE.match(s))
     if marked * 2 <= len(ref_strings):
         return _strip_roman_markers(ref_strings)
-    return [_ENTRY_NUMBERING_RE.sub("", s, count=1) for s in ref_strings]
+    return [
+        _ENTRY_NUMBERING_RE.sub("", s, count=1)
+        if _ENTRY_NUMBERING_RE.match(s)
+        else _PARTICLE_NUMBERING_RE.sub("", s, count=1)
+        for s in ref_strings
+    ]
+
+
+# A space-separated list number before a family name that opens on a lowercase
+# particle ("11 van Nieuwenhuizen D, …", "4 de la Cruz M, …"). The shared
+# numbering pattern takes "N " off only before a capital, so in a numbered
+# bibliography the number would stay in front of the byline.
+_PARTICLE_NUMBERING_RE = re.compile(
+    r"^\s*\d{1,3}\s+(?=(?:(?:van|von|de|der|den|del|della|di|da|das|dos|du|la|le|ten|ter|al|el)"
+    r"\s+)+[A-ZÀ-ÖØ-Þ])"
+)
 
 
 # A roman list number opening a reference ("IV. Bergasa, L.M., ...").

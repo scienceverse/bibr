@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - An IEEE-style "[n]" entry glued to the one before it is split off again,
   and splitting a merged reference no longer creates a second copy of an
   entry that was already extracted on its own (#137).
+- Reference fields are cleaner: the last author keeps a single initial
+  ("Newnham M", not "Newnham"), a colon closing the author list is dropped,
+  a title no longer ends in its closing quote, a short quoted title right
+  after the authors is kept as the title, "Surname, I. et al." tagged as a
+  title becomes the authors, and a list number before a name particle
+  ("11 van Nieuwenhuizen D") stays out of the authors (#138).
 
 ## [0.6.0] - 2026-09-30
 
