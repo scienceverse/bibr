@@ -25,6 +25,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   longer merges into the section around it. A later-page title in the top or
   bottom margin, one repeated on other pages, a copyright line and the title
   printed again behind a cover sheet are still dropped (part of #122).
+- A preprint banner longer than 200 characters that repeats in the top or
+  bottom margin of several pages, such as the medRxiv rights, licence and DOI
+  lines, is now dropped as page furniture. Copies the layout model labelled
+  as text used to land in the body, the figure legends and the references
+  (#112).
 
 ## [0.6.0] - 2026-09-30
 

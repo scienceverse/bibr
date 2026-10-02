@@ -445,3 +445,84 @@ def test_mid_page_copyright_doc_title_on_a_later_page_stays_demoted():
 
     assert (2, 1) in parser._running_header_regions
 
+
+# A preprint server banner: the rights line plus the licence and DOI lines, one
+# region of about 340 characters at the top of every page.
+_PREPRINT_BANNER = (
+    "Example preprint doi: https://doi.org/10.0000/2026.01.01.000001; this version posted "
+    "January 1, 2026. The copyright holder for this preprint (which was not certified by "
+    "peer review) is the author/funder, who has granted the server a license to display "
+    "the preprint in perpetuity. It is made available under a CC-BY 4.0 International license."
+)
+
+
+def _banner(y1: int = 0, y2: int = 36) -> dict:
+    return {"label": "text", "content": _PREPRINT_BANNER, "bbox_2d": [50, y1, 950, y2]}
+
+
+def _banner_pages(banner_pages: set[int], *, y1: int = 0, y2: int = 36) -> list[list[dict]]:
+    pages = [
+        [_heading("doc_title", "A Cohort Study of Venous Disease", y=120)],
+        [_heading("paragraph_title", "Data availability", y=300)],
+        [_heading("paragraph_title", "References", y=300)],
+    ]
+    bodies = [
+        "Participants were recruited from three hospitals.",
+        "Data are available from the authors on request.",
+        "Smith, J. (2020). A real reference. Journal of Examples, 1, 1-9.",
+    ]
+    for page_idx, page in enumerate(pages):
+        if page_idx in banner_pages:
+            page.insert(0, _banner(y1, y2))
+        page.append(_text(bodies[page_idx], y=400))
+    return pages
+
+
+def test_long_preprint_banner_in_the_margin_band_is_demoted():
+    """The banner is longer than the 200-character furniture cap, so it was
+    never counted and its ``text``-labelled copies landed in the body."""
+    assert len(_PREPRINT_BANNER) > 300
+    parser = PDFParser(json_result=_banner_pages({1, 2}))
+    parser._mark_running_headers()
+
+    assert {(1, 0), (2, 0)} <= parser._running_header_regions
+
+    full = PDFParser(json_result=_banner_pages({1, 2}))
+    full.parse()
+    deferred = " ".join(t[0] for t in full._deferred_texts)
+    assert "copyright holder" not in deferred
+    assert "Data are available from the authors on request." in deferred
+
+
+def test_long_repeated_region_in_mid_page_is_kept():
+    parser = PDFParser(json_result=_banner_pages({1, 2}, y1=400, y2=436))
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions
+
+
+def test_long_repeated_paragraph_reaching_into_the_band_is_kept():
+    """A manuscript that prints its body twice: the same paragraph starts at the
+    top of two pages, inside the band, and runs down the page."""
+    parser = PDFParser(json_result=_banner_pages({1, 2}, y1=91, y2=437))
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions
+
+
+def test_long_band_region_on_one_page_only_is_kept():
+    parser = PDFParser(json_result=_banner_pages({1}))
+    parser._mark_running_headers()
+
+    assert (1, 0) not in parser._running_header_regions
+
+
+def test_long_repeated_region_without_geometry_is_kept():
+    """A missing bbox falls back to demotion only for short rows."""
+    pages = _banner_pages({1, 2})
+    for page in (pages[1], pages[2]):
+        page[0] = {"label": "text", "content": _PREPRINT_BANNER}
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert not {(1, 0), (2, 0)} & parser._running_header_regions

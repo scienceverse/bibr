@@ -733,6 +733,18 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         _, y1, _, y2 = bbox
         return y1 <= _RUNNING_HEADER_TOP_Y or y2 >= _RUNNING_HEADER_BOTTOM_Y
 
+    def _is_inside_margin_band(self, page_idx: int, region_idx: int) -> bool:
+        """True if the whole region lies in a page's top or bottom margin band.
+
+        Stricter than :meth:`_is_in_margin_band`: a paragraph that starts
+        near the top of a page touches the band, a banner sits inside it.
+        """
+        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
+        if bbox is None:
+            return False
+        _, y1, _, y2 = bbox
+        return y2 <= _RUNNING_HEADER_TOP_Y or y1 >= _RUNNING_HEADER_BOTTOM_Y
+
     def _mark_running_headers(self) -> None:
         """Detect heading regions that are actually per-page running headers.
 
@@ -758,7 +770,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # banner) bypasses the heading-only heuristics and leaks into whatever
         # section is active at the page break — corrupting the References
         # block. Page furniture is short; the length cap keeps a genuine
-        # paragraph that happens to repeat from being demoted.
+        # paragraph that happens to repeat from being demoted. A longer
+        # region counts only when it lies wholly inside the margin band: a
+        # preprint banner (the medRxiv rights, licence and DOI lines run to
+        # about 340 chars) that the layout model labels ``text`` on some
+        # pages. A manuscript that prints its body twice repeats long
+        # paragraphs that start or end in the band.
         seen_body: dict[str, list[tuple[int, int]]] = {}
         # Heuristic 2: track doc_title occurrences so all but the first
         # can be demoted regardless of repetition. Content is kept so
@@ -777,7 +794,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     continue
                 if effective in _BODY_TEXT_LABELS:
                     normalized = re.sub(r"\s+", " ", content).lower().strip()
-                    if normalized and len(normalized) <= _RUNNING_HEADER_MAX_LEN:
+                    if normalized and (
+                        len(normalized) <= _RUNNING_HEADER_MAX_LEN
+                        or self._is_inside_margin_band(page_idx, region_idx)
+                    ):
                         seen_body.setdefault(normalized, []).append((page_idx, region_idx))
                     continue
                 if effective not in ("doc_title", "paragraph_title"):
@@ -823,8 +843,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
         repeated_body = {
             occurrence
-            for occurrences in seen_body.values()
-            if len({pi for pi, _ in occurrences}) >= 2
+            for normalized, occurrences in seen_body.items()
+            if len(normalized) <= _RUNNING_HEADER_MAX_LEN
+            and len({pi for pi, _ in occurrences}) >= 2
             for occurrence in occurrences
         }
 
