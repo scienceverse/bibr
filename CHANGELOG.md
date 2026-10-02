@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Affiliations no longer gain fake rows from a ";" printed inside one affiliation
+  ("..., Cambridge, MA, USA; Basel, Switzerland" stays one affiliation, and a
+  list's "; and" no longer becomes an affiliation called "and"). Affiliation
+  text loses line breaks, printed markers, e-mail and telephone tails, the
+  "Full list of author information is available ..." pointer and trailing
+  punctuation, and one institution no longer appears twice because of spacing,
+  punctuation, accent or "&"/"and" differences (#114).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)

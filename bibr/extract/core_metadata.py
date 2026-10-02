@@ -36,6 +36,7 @@ from bibr.extract.field_decisions import (
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
+from bibr.extract.research_integrity import affiliation_key
 from bibr.extract.title_marks import drop_title_note_marker
 from bibr.extract.title_subtitle import drop_parallel_title, fold_printed_subtitle
 from bibr.input.consolidate_text import strip_affiliation_markers
@@ -1684,6 +1685,64 @@ def _normalize_affiliation_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", translated).strip()
 
 
+# Affiliation value hygiene. A reconciler copies the printed definition and the
+# LLM copies what it reads, so both carry what the page prints around the
+# institution: line breaks, the list's own marker, a contact line, the list's
+# connectives and trailing punctuation.
+#
+# A contact field needs its colon or period ("Tel Aviv" is a city); a bare
+# address cuts from the address on.
+_AFFILIATION_CONTACT_TAIL_RE = re.compile(
+    r"[\s,;.]*(?:"
+    r"\b(?:e-?mail(?:\s+address(?:es)?)?|tel(?:ephone)?|phone|fax|mob(?:ile)?)\s*[:.]+(?:\s|$)"
+    r"|\be-?mail\s+(?=\S+@)"
+    r"|\S+@\S+\.\w"
+    r").*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# BMC and Springer print a pointer to the end-of-article list after the last
+# page-1 definition, and it is captured with it.
+_AFFILIATION_BOILERPLATE_TAIL_RE = re.compile(
+    r"[\s,;.]*\b(?:full\s+list\s+of\s+author\s+information\s+is\s+available"
+    r"|extended\s+author\s+information\s+(?:is\s+)?available)\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# The connective a numbered list prints between two definitions ("...,
+# Houston, Texas; and 2Department of ..."), at either edge of a value.
+_AFFILIATION_EDGE_CONNECTIVE_RE = re.compile(
+    r"^(?:and|&|und|et|y|e)$|^(?:(?:and|&)\s+)+|(?:[\s,;]+(?:and|&|und|et|y|e))+$"
+)
+# A printed marker the LLM kept at the start of a value: "1 Department",
+# "2. NIHR", "1Department", "a School", "* Institute". "3M Company" survives:
+# a glued digit is a marker only before a capitalised word.
+_AFFILIATION_LEADING_MARKER_RE = re.compile(
+    r"^(?:\d{1,2}(?:\s*[.)]\s*|\s+)|\d{1,2}(?=[A-Z\u00c0-\u00de][a-z])|[a-h]\s+(?=[A-Z])"
+    r"|[*\u2217\u2020\u2021\u00a7\u00b6#%]+\s*(?=[A-Z]))"
+)
+# Trailing punctuation, marker symbols and the "|" some publishers print
+# between affiliations. A final "." after a single capital ("U.S.A.") stays.
+_AFFILIATION_TRAILING_RE = re.compile(
+    r"(?:[\s,;:|*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]|(?<!\b[A-Z])\.)+$"
+)
+# Two letters in a row: a part without them is a bare marker ("1", "2; 3").
+_AFFILIATION_ALPHA_RUN_RE = re.compile(r"[^\W\d_]{2}")
+
+
+def _clean_affiliation_value(value: str) -> str:
+    """One affiliation without line breaks, its printed marker, a contact or
+    end-of-article pointer tail, edge connectives and trailing punctuation."""
+    text = _normalize_affiliation_match_text(value or "")
+    text = _AFFILIATION_LEADING_MARKER_RE.sub("", text, count=1)
+    text = _AFFILIATION_BOILERPLATE_TAIL_RE.sub("", text)
+    text = _AFFILIATION_CONTACT_TAIL_RE.sub("", text)
+    previous = None
+    while previous != text:
+        previous = text
+        text = _AFFILIATION_TRAILING_RE.sub("", text)
+        text = _AFFILIATION_EDGE_CONNECTIVE_RE.sub("", text).strip()
+    return text
+
+
 @dataclass
 class _AuthorProposal:
     """An author list the extractor produced, with what it did to it."""
@@ -1921,6 +1980,10 @@ class CoreMetadataExtractor:
             self._reconcile_repeated_name_affiliations(usable, self.sentences_df)
             if [author.affiliation for author in usable] != affiliations_before:
                 author_trail[-1].transforms.append("affiliations_reconciled")
+            affiliations_reconciled = [author.affiliation for author in usable]
+            self._normalize_author_affiliations(usable, self.sentences_df)
+            if [author.affiliation for author in usable] != affiliations_reconciled:
+                author_trail[-1].transforms.append("affiliations_cleaned")
             self._email_harvester.demote_implausible_flags(usable)
 
             # Title/abstract must resolve BEFORE classification: the trained
@@ -2760,7 +2823,7 @@ class CoreMetadataExtractor:
                     if number not in wanted:
                         continue
                     end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-                    value = line[match.end() : end].strip(" ,;")
+                    value = _clean_affiliation_value(line[match.end() : end])
                     value = _CORRESPONDENCE_SUFFIX_RE.split(value, maxsplit=1)[0].strip(" ,;")
                     # "<digit> <Capital>" is also the shape of a figure or
                     # table caption and of a publication-history line, so the
@@ -2851,6 +2914,55 @@ class CoreMetadataExtractor:
             for author, affiliation in resolved.values():
                 author.affiliation = affiliation
             return
+
+    @staticmethod
+    def _normalize_author_affiliations(authors: list[PaperAuthor], meta_df: pd.DataFrame) -> None:
+        """Clean every author's "; "-joined affiliations, whatever produced them.
+
+        Runs after both reconcilers, so LLM values and printed definitions get
+        the same treatment. Each part loses what the page prints around the
+        institution (``_clean_affiliation_value``); a part with no two letters
+        in a row ("1", "2; 3") is dropped. "; " is both the join and a printed
+        character, so one printed affiliation with an inner ";" ("...,
+        Cambridge, MA, USA; Basel, Switzerland") arrives as two parts: a part
+        that is not an institution on its own is glued back to the previous one
+        with ", ", but only when the two were printed as one run ("prev; part"
+        occurs in the paper's text). Two affiliations printed separately never
+        occur that way, so an author's second institution stays separate.
+        Duplicates collapse on the folded key.
+        """
+        if not authors or not any(author.affiliation for author in authors):
+            return
+        printed = ""
+        if "text" in meta_df.columns:
+            printed = _normalize_affiliation_match_text(
+                " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
+            ).casefold()
+        for author in authors:
+            parts: list[str] = []
+            previous: str | None = None
+            for raw in (author.affiliation or "").split("; "):
+                part = _clean_affiliation_value(raw)
+                if not _AFFILIATION_ALPHA_RUN_RE.search(part):
+                    previous = None
+                    continue
+                if (
+                    previous is not None
+                    and not _looks_like_affiliation(part)
+                    and f"{previous}; {part}".casefold() in printed
+                ):
+                    parts[-1] = f"{parts[-1]}, {part}"
+                else:
+                    parts.append(part)
+                previous = part
+            seen: set[str] = set()
+            kept: list[str] = []
+            for part in parts:
+                key = affiliation_key(part)
+                if key not in seen:
+                    seen.add(key)
+                    kept.append(part)
+            author.affiliation = "; ".join(kept)
 
     async def _classify_paper(
         self, title: str, abstract: str, llm_metadata, classification_text: str
