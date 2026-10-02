@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - The abstract no longer keeps the printed line breaks of the PDF when the model copies
   them (the default model often does): a line break inside a paragraph becomes one
   space, and a blank line between paragraphs stays (#144).
+- `VAL_ABSTRACT_MISSING` no longer warns on an essay or commentary that prints no
+  abstract when the model found none and the only abstract section is the layout's
+  unlabelled opening column (#144).
 
 ## [0.6.0] - 2026-09-30
 
