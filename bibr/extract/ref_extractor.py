@@ -2249,8 +2249,13 @@ class ReferenceExtractor:
                 selected=False,
                 reason_flags=("source_geometry_unavailable",),
             )
+            # A PDF whose text layer was read still has page lines; it only
+            # lacks a line the geometry capture took for the References header.
             self._record_warning(
-                WarningCode.REF_SEG_GEOM_CASCADE, "no ref-line geometry (DOCX/non-native)"
+                WarningCode.REF_SEG_GEOM_CASCADE,
+                "no reference header line found in the text layer"
+                if self.contents.ref_page_lines
+                else "no ref-line geometry (DOCX/non-native)",
             )
             return None
         with LOCAL_INFERENCE_LOCK:

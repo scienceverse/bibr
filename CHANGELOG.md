@@ -24,6 +24,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A bibliography entry no longer carries the paper's own DOI, which a
   repeated preprint banner or a "cite this article" line inside the
   reference list used to attach to it (#139).
+- On a PDF whose text layer was read but whose References header was not
+  recognised (a line-numbered manuscript's "668 References"), the reference
+  segmentation warning now says that, instead of calling the PDF a DOCX or
+  non-native input (#140).
 
 ## [0.6.0] - 2026-09-30
 
