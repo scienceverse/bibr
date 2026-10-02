@@ -41,7 +41,7 @@ from bibr.extract.research_integrity import affiliation_key
 from bibr.extract.title_marks import drop_title_note_marker
 from bibr.extract.title_subtitle import drop_parallel_title, fold_printed_subtitle
 from bibr.input.consolidate_text import strip_affiliation_markers
-from bibr.models import ErrorCode
+from bibr.models import ORGANIZATION_ROLE, ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
 from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -506,10 +506,19 @@ _LATIN_BASE_TRANSLATION = str.maketrans(
     }
 )
 _CONSORTIUM_NAME_RE = re.compile(
-    r"\b(?:association|collaboration|collective|committee|consortium|group|"
-    r"investigators?|network|society|study\s+group|team)\b",
+    r"\b(?:association|collaborat(?:ion|ive|ors?)|collective|committee|consortium|"
+    r"contributors|group|investigators?|network|society|study\s+group|team|trialists?)\b",
     re.IGNORECASE,
 )
+# A byline's group tail: "..., for the ROAM/1308 Study Collaborators",
+# "on behalf of the EXAMPLE Trial Group".
+_CONSORTIUM_TAIL_RE = re.compile(
+    r"\b(?:for|on\s+behalf\s+of)\s+(?:the\s+)?"
+    r"(?P<span>[^,;:.\n]{0,100}?\b(?:collaborat(?:ion|ive|ors?)|collective|committee|"
+    r"consortium|contributors|group|investigators?|network|society|team|trialists?))\b",
+    re.IGNORECASE,
+)
+_CONSORTIUM_PREFIX_RE = re.compile(r"^(?:for|on\s+behalf\s+of)\s+(?:the\s+)?", re.IGNORECASE)
 _NUMBERED_AFFILIATION_BOUNDARY_RE = re.compile(r"\s+\d+[.)]\s+")
 _ABSTRACT_BYLINE_BOUNDARY_RE = re.compile(r"\babstract\b", re.IGNORECASE)
 _EMAIL_FRAGMENT_RE = re.compile(r"\S*@\S*")
@@ -661,6 +670,68 @@ def _split_case_joins(value: str) -> str:
 _CJK_NAME_RE = re.compile(
     "[\u3005-\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
 )
+
+
+def _rewrite_consortium_authors(authors: list[PaperAuthor], context: str) -> list[PaperAuthor]:
+    """Turn a group byline tail the model returned as a person into a group author.
+
+    "..., for the ROAM/1308 Study Collaborators" came back as a person named
+    "ROAM/1308". An author is rewritten only when its name looks like no
+    person's (a digit or "/", or a leading "for the" / "on behalf of") and
+    every token of it is inside a group tail printed in ``context``; the tail
+    becomes the group's name. A name that only starts with "for the" and has
+    no printed tail loses the prefix. A group already in the list is not
+    added twice. Persons are never touched.
+    """
+    tails = [
+        " ".join(match.group("span").split()) for match in _CONSORTIUM_TAIL_RE.finditer(context)
+    ]
+    kept: list[PaperAuthor] = []
+    groups = {
+        author.family.casefold()
+        for author in authors
+        if ORGANIZATION_ROLE in (author.role or []) and author.family
+    }
+    changed = False
+    for author in authors:
+        name = " ".join(part for part in (author.given, author.family) if part).strip()
+        prefixed = bool(_CONSORTIUM_PREFIX_RE.match(name))
+        if ORGANIZATION_ROLE in (author.role or []) or not (prefixed or re.search(r"[\d/]", name)):
+            kept.append(author)
+            continue
+        tokens = set(re.findall(r"[^\W_]+", _CONSORTIUM_PREFIX_RE.sub("", name).casefold()))
+        span = next(
+            (
+                tail
+                for tail in tails
+                if tokens and tokens <= set(re.findall(r"[^\W_]+", tail.casefold()))
+            ),
+            None,
+        )
+        if span is None and prefixed:
+            span = _CONSORTIUM_PREFIX_RE.sub("", name).strip()
+        if not span:
+            kept.append(author)
+            continue
+        changed = True
+        if span.casefold() in groups:
+            continue
+        groups.add(span.casefold())
+        kept.append(
+            author.model_copy(
+                update={
+                    "given": "",
+                    "family": span,
+                    "affiliation": "",
+                    "role": [*(author.role or []), ORGANIZATION_ROLE],
+                }
+            )
+        )
+    if not changed:
+        return authors
+    for author_id, author in enumerate(kept, start=1):
+        author.author_id = author_id
+    return kept
 
 
 def _name_tokens(value: str) -> tuple[str, ...]:
@@ -2551,11 +2622,16 @@ class CoreMetadataExtractor:
         """Drop translator credits and split glued names; say which repairs applied."""
 
         kept = self._drop_translator_credits(authors, context)
+        dropped_translators = len(kept) != len(authors)
+        before_groups = [(author.given, author.family) for author in kept]
+        kept = _rewrite_consortium_authors(kept, context)
         repairs = len(self.validation_issues)
         self._repair_glued_names(kept)
         transforms = []
-        if len(kept) != len(authors):
+        if dropped_translators:
             transforms.append("translator_credits_dropped")
+        if [(author.given, author.family) for author in kept] != before_groups:
+            transforms.append("group_authors_rewritten")
         if len(self.validation_issues) != repairs:
             transforms.append("glued_names_split")
         return kept, transforms

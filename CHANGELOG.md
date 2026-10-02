@@ -27,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   affiliation lists printed at the end of the article (BMC, Springer) are read
   for the numbers page 1 leaves open, whatever section the list was filed
   under (#116).
+- A byline's group tail that the model returned as a person ("..., for the
+  ROAM/1308 Study Collaborators" as a person named "ROAM/1308") becomes a
+  group author named as printed, and a group the model returned correctly
+  as an organisation is no longer dropped when its name ends in
+  "Collaborators", "Contributors" or "Trialists" (#118).
 - A numbered affiliation list whose markers are glued to the institution
   ("1 Institute of ..., 2University of ..., 3Cornell Tech") no longer gives
   every author the first institution plus the rest of the line; each glued
