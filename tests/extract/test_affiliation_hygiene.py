@@ -489,3 +489,81 @@ def test_the_late_tier_is_not_read_for_body_sections():
     CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
 
     assert authors[0].affiliation == "Example University, Oslo"
+
+
+# ── #107: markers glued to the institution ────────────────────────────────
+
+_GLUED_BYLINE = (
+    "Ann Sahoo∗,†,1 , Bo Chen†,1,2 , Cy Pham†,1,3 , Di\r\n"
+    "Geuter†,1,4 , Ed Dwivedi1 , Flo Pimpalkhute1 , Gus Elhoushi5 , Hal Thickstun3"
+)
+_GLUED_DEFINITIONS = (
+    "1 Institute of Foundation Models, 2University of Illinois Urbana-Champaign, "
+    "3Cornell Tech\r\n4Harvard University 5Cerebras Systems †"
+)
+
+
+def test_glued_markers_bound_each_definition():
+    """One spaced "1 " and glued "2University", "3Cornell", ...: definition 1 ran
+    to the end of the line and became every marker-1 author's affiliation."""
+    frame = _frame((1, _GLUED_BYLINE), (1, _GLUED_DEFINITIONS))
+    authors = [
+        _author(1, "Ann", "Sahoo"),
+        _author(2, "Bo", "Chen"),
+        _author(3, "Cy", "Pham"),
+        _author(4, "Di", "Geuter"),
+        _author(5, "Ed", "Dwivedi"),
+        _author(6, "Flo", "Pimpalkhute"),
+        _author(7, "Gus", "Elhoushi", "Cerebras Systems"),
+        _author(8, "Hal", "Thickstun", "Cornell Tech"),
+    ]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+    CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    texts, author_ids = collect_affiliations(authors)
+    assert texts == [
+        "Institute of Foundation Models",
+        "University of Illinois Urbana-Champaign",
+        "Harvard University",
+        "Cerebras Systems",
+        "Cornell Tech",
+    ]
+    # "Cornell Tech" carries no institution word, so marker 3 does not resolve
+    # and Pham keeps no reconciled value; Thickstun keeps the LLM's.
+    assert author_ids == [[1, 2, 4, 5, 6], [2], [4], [7], [8]]
+
+
+def test_a_definition_that_runs_into_another_never_overwrites_the_llm_value():
+    """Backstop: no author uses marker 2, so "2University" does not bound
+    definition 1, which then holds two institutions and is not used."""
+    frame = _frame(
+        (1, "Ann Lee1 and Bo Chen3"),
+        (1, "1 Institute of Example Models, 2University of Example, 3 Example College, UK"),
+    )
+    authors = [
+        _author(1, "Ann", "Lee", "Institute of Example Models"),
+        _author(2, "Bo", "Chen", "Example College, UK"),
+    ]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "Institute of Example Models"
+    assert authors[1].affiliation == "Example College, UK"
+
+
+def test_a_digit_glued_to_a_word_that_is_not_a_marker_stays_text():
+    """ "3D Printing" and "3M" are not glued markers even when the byline uses 3."""
+    frame = _frame(
+        (1, "Ann Lee1 and Bo Chen3"),
+        (1, "1 Example University, 3D Printing Laboratory, 3M Company, St Paul, MN, USA"),
+        (1, "3 Other College, Oxford, UK"),
+    )
+    authors = [_author(1, "Ann", "Lee"), _author(2, "Bo", "Chen")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == (
+        "Example University, 3D Printing Laboratory, 3M Company, St Paul, MN, USA"
+    )
+    assert authors[1].affiliation == "Other College, Oxford, UK"

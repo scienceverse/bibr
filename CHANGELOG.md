@@ -27,6 +27,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   affiliation lists printed at the end of the article (BMC, Springer) are read
   for the numbers page 1 leaves open, whatever section the list was filed
   under (#116).
+- A numbered affiliation list whose markers are glued to the institution
+  ("1 Institute of ..., 2University of ..., 3Cornell Tech") no longer gives
+  every author the first institution plus the rest of the line; each glued
+  number now ends the previous definition, and a definition that still runs
+  into another one is not used (#107).
 
 ## [0.6.0] - 2026-09-30
 

@@ -96,6 +96,17 @@ _CORRECTION_NOTICE_TITLE_RE = re.compile(
 _NUMBERED_AFFILIATION_RE = re.compile(
     r"(?<![\w,])(?P<number>\d{1,2})\s+(?=[A-Z\u00c0-\u00d6\u00d8-\u00de])"
 )
+# A marker glued to its institution ("..., 2University of Illinois, 3Cornell
+# Tech"). Only taken for numbers the byline uses, and only before a
+# capitalised word, so "3D Printing Lab" and "3M" are not markers.
+_GLUED_AFFILIATION_MARKER_RE = re.compile(
+    r"(?<![\w,.])(?P<number>\d{1,2})(?=[A-Z\u00c0-\u00d6\u00d8-\u00de][a-z])"
+)
+# A marker still inside a captured definition, spaced or glued: the value then
+# runs into the next definition.
+_EMBEDDED_AFFILIATION_MARKER_RE = re.compile(
+    r"(?<!\w)\d{1,2}\s*(?=[A-Z\u00c0-\u00d6\u00d8-\u00de][a-z])"
+)
 _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
 )
@@ -1784,6 +1795,18 @@ def _ungrounded_affiliation_components(part: str, document_key: str) -> tuple[in
     return total, missing
 
 
+def _runs_into_another_definition(value: str) -> bool:
+    """True when a captured definition still holds a marker with an institution
+    on both sides of it: two definitions read as one, which must not replace
+    the LLM's per-author value."""
+    for marker in _EMBEDDED_AFFILIATION_MARKER_RE.finditer(value):
+        if _AFFILIATION_ORG_EVIDENCE_RE.search(
+            value[: marker.start()]
+        ) and _AFFILIATION_ORG_EVIDENCE_RE.search(value[marker.end() :]):
+            return True
+    return False
+
+
 def _ungrounded_affiliation_issue(dropped: list[tuple[int, str]]) -> ValidationIssue:
     """VAL_AFFILIATION_UNGROUNDED for affiliation text the paper does not print."""
     shown = "; ".join(dict.fromkeys(text for _, text in dropped))
@@ -2901,21 +2924,38 @@ class CoreMetadataExtractor:
         def _definitions(lines: list[str]) -> dict[int, list[str]]:
             found: dict[int, list[str]] = {}
             for line in lines:
-                matches = list(_NUMBERED_AFFILIATION_RE.finditer(line))
+                # A glued marker ("2University") bounds a definition like a
+                # spaced one; without it "1 A, 2University B, 3Cornell C" was
+                # read as one definition 1 running to the end of the line.
+                matches = sorted(
+                    [
+                        *_NUMBERED_AFFILIATION_RE.finditer(line),
+                        *(
+                            glued
+                            for glued in _GLUED_AFFILIATION_MARKER_RE.finditer(line)
+                            if int(glued.group("number")) in wanted
+                        ),
+                    ],
+                    key=lambda found_match: found_match.start(),
+                )
                 for index, match in enumerate(matches):
                     number = int(match.group("number"))
                     if number not in wanted:
                         continue
                     end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-                    value = _clean_affiliation_value(line[match.end() : end])
-                    value = _CORRESPONDENCE_SUFFIX_RE.split(value, maxsplit=1)[0].strip(" ,;")
+                    value = _CORRESPONDENCE_SUFFIX_RE.split(line[match.end() : end], maxsplit=1)[0]
+                    value = _clean_affiliation_value(value)
                     # "<digit> <Capital>" is also the shape of a figure or
                     # table caption and of a publication-history line, so the
                     # captured run has to look like an institution before it
                     # can define a marker. Abstaining makes the
                     # ``len(resolved) == len(numbers)`` guard below drop the
                     # author, which is the fail-closed answer.
-                    if value and _looks_like_affiliation(value):
+                    if (
+                        value
+                        and _looks_like_affiliation(value)
+                        and not _runs_into_another_definition(value)
+                    ):
                         found.setdefault(number, []).append(value)
             return found
 
