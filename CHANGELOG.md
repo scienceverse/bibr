@@ -12,6 +12,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and entries with hyphenated initials ("Barabási A-L") are recognised as
   separate entries, so consecutive single-author entries no longer merge
   into one (#137).
+- An IEEE-style "[n]" entry glued to the one before it is split off again,
+  and splitting a merged reference no longer creates a second copy of an
+  entry that was already extracted on its own (#137).
 
 ## [0.6.0] - 2026-09-30
 

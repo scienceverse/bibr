@@ -70,6 +70,16 @@ _MAX_BYLINE_LEAD = 120
 # precedes it); the increment check (below) excludes volume/page/year integers.
 _NUM_ONSET = re.compile(r"(?<=[.)])\s+(\d{1,3})\.\s+(?=[^\W\d_])")
 _NUMBERED_ENTRY_START = re.compile(r"\s*(\d{1,3})\.\s+(?=[^\W\d_])")
+# Bracketed numbering (IEEE/ACM "[11] R. Aishwarya, …"). The marker is its
+# own boundary, so nothing has to close the entry before it: an entry can end
+# "Springer, Berlin, Heidelberg" with no period. Group 1 is the marker (the new
+# reference keeps it), group 2 the number; at most 3 digits, so a bracketed
+# year ("[2019]") never matches. The next entry opens on its author's initial
+# or a quote, never on a lowercase word, which keeps an in-title citation
+# ("… of [3] in …") out; the increment check keeps the remaining in-entry
+# brackets out.
+_BRACKET_ONSET = re.compile(r"(?<=\S)\s+(\[(\d{1,3})\])\s*(?![a-zß-öø-ÿ])(?=[^\W\d_]|[\"“‘'(])")
+_BRACKETED_ENTRY_START = re.compile(r"\s*\[(\d{1,3})\]\s*(?=[^\W\d_]|[\"“‘'(])")
 
 # Abbreviations that legitimately precede an interior "N." inside ONE reference
 # (volume/edition/page/section markers) — a number after these is not a new ref.
@@ -163,10 +173,12 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
     number (``_NUM_EDITION_AFTER``, e.g. "2. Aufl."), and continues the
     sequence (``M == previous + 1``). The strict increment is the precision
     safeguard: volume/page/year integers don't form a run, so they can't be
-    onsets. Empty unless the string starts with a number followed by a letter."""
+    onsets. A string that starts with a bracketed number ("[10] …") gets the
+    same treatment for "[M]" markers (``_bracketed_interior_onsets``). Empty
+    unless the string starts with a number followed by a letter."""
     m0 = _NUMBERED_ENTRY_START.match(ref_string)
     if m0 is None:
-        return []
+        return _bracketed_interior_onsets(ref_string)
     expected = int(m0.group(1)) + 1
     offsets: list[int] = []
     for m in _NUM_ONSET.finditer(ref_string):
@@ -175,6 +187,23 @@ def _numbered_interior_onsets(ref_string: str) -> list[int]:
         if _NUM_ABBREV_BEFORE.search(ref_string[: m.start()]):
             continue
         if _NUM_EDITION_AFTER.match(ref_string, m.end()):
+            continue
+        offsets.append(m.start(1))
+        expected += 1
+    return offsets
+
+
+def _bracketed_interior_onsets(ref_string: str) -> list[int]:
+    """Char offsets (>0) where a new "[N]"-numbered reference begins inside
+    ``ref_string``: an interior "[M]" with ``M == previous + 1``. Empty unless
+    the string starts with a bracketed number."""
+    m0 = _BRACKETED_ENTRY_START.match(ref_string)
+    if m0 is None:
+        return []
+    expected = int(m0.group(1)) + 1
+    offsets: list[int] = []
+    for m in _BRACKET_ONSET.finditer(ref_string):
+        if int(m.group(2)) != expected:
             continue
         offsets.append(m.start(1))
         expected += 1
@@ -327,8 +356,14 @@ def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:
     on a single string leaves that string unchanged (never raises). A split is
     accepted only when every resulting piece is non-empty after stripping; an
     all-non-empty check keeps the count strictly non-decreasing.
+
+    A split-off piece that repeats an entry segmented on its own elsewhere
+    (same list marker, same opening words) is a copy the segmenter carried
+    over from overlapping regions; it is cut off the entry it was glued to and
+    not kept, so splitting never creates a duplicate reference.
     """
     find_onsets = _onset_finder_for_bibliography(ref_strings)
+    listed = _entries_by_marker(ref_strings)
     out: list[str] = []
     for s in ref_strings:
         try:
@@ -341,7 +376,44 @@ def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:
         bounds = [0, *offsets, len(s)]
         pieces = [s[a:b].strip() for a, b in zip(bounds, bounds[1:], strict=False)]
         if all(pieces):
-            out.extend(pieces)
+            out.append(pieces[0])
+            out.extend(piece for piece in pieces[1:] if not _repeats_listed_entry(piece, listed))
         else:
             out.append(s)
     return out, len(out) - len(ref_strings)
+
+
+# A segment's list marker ("[12] " or "12. ") and how much of the following
+# text identifies the entry: two segments that open with the same marker and
+# the same first 20-60 letters and digits are copies of one entry.
+_MARKER_START = re.compile(r"\s*(?:\[(\d{1,3})\]|(\d{1,3})\.)\s")
+_REPEAT_PREFIX_CHARS = 60
+_REPEAT_MIN_CHARS = 20
+
+
+def _match_text(segment: str) -> str:
+    return re.sub(r"\W+", "", segment).casefold()
+
+
+def _entries_by_marker(ref_strings: list[str]) -> dict[str, list[str]]:
+    """Comparison text of every segment that opens with a list marker, by marker number."""
+    listed: dict[str, list[str]] = {}
+    for segment in ref_strings:
+        m = _MARKER_START.match(segment)
+        if m is not None:
+            listed.setdefault(m.group(1) or m.group(2), []).append(_match_text(segment))
+    return listed
+
+
+def _repeats_listed_entry(piece: str, listed: dict[str, list[str]]) -> bool:
+    """Whether ``piece`` opens with the marker and the first words of an entry
+    that already starts its own segment."""
+    m = _MARKER_START.match(piece)
+    if m is None:
+        return False
+    text = _match_text(piece)
+    for other in listed.get(m.group(1) or m.group(2), ()):
+        n = min(len(text), len(other), _REPEAT_PREFIX_CHARS)
+        if n >= _REPEAT_MIN_CHARS and text[:n] == other[:n]:
+            return True
+    return False
