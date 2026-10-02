@@ -21,6 +21,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   such a part is now dropped, an unprinted institution added to a printed one is
   removed, and a `VAL_AFFILIATION_UNGROUNDED` warning lists what was dropped
   (#115).
+- Numbered affiliations are matched for authors whose byline prints symbols,
+  degrees or a stray comma before the number ("Name#*1", "Name MSci1,2",
+  "Name ,1,2,3") or whose name the model wrote without a printed period, and
+  affiliation lists printed at the end of the article (BMC, Springer) are read
+  for the numbers page 1 leaves open, whatever section the list was filed
+  under (#116).
 
 ## [0.6.0] - 2026-09-30
 

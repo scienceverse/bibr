@@ -363,3 +363,129 @@ async def test_the_extractor_warns_about_dropped_affiliations():
     assert len(issues) == 1
     assert issues[0].evidence_ids == ("author:2",)
     assert "Invented Polder University" in issues[0].message
+
+
+# ── numbered reconciler: byline markers and end-of-article lists ─────────
+
+
+def _sectioned_frame(*rows: tuple[int, str, str]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "text_id": list(range(len(rows))),
+            "page_number": [page for page, _, _ in rows],
+            "section_type": [section for _, section, _ in rows],
+            "text": [text for _, _, text in rows],
+        }
+    )
+
+
+def test_symbols_between_name_and_number_do_not_block_the_marker():
+    """medRxiv style "Shin#*1", "Cravedi%5*": those authors kept the LLM value
+    while their co-authors got the printed one."""
+    frame = _frame(
+        (1, "Ann Shin#*1, Bo Weiss#2,4, Cy Moreau%1 and Di Cravedi%5*"),
+        (1, "1 Department of Example Research, Example Institute, Cambridge, MA, USA"),
+        (1, "2 Preclinical Unit, Example Pharma, Basel, Switzerland"),
+        (1, "4 Fellowship Program, Example Pharma, Basel, Switzerland"),
+        (1, "5 Department of Medicine, Example School of Medicine, New York, NY, USA"),
+    )
+    authors = [
+        _author(1, "Ann", "Shin", "llm"),
+        _author(2, "Bo", "Weiss", "llm"),
+        _author(3, "Cy", "Moreau", "llm"),
+        _author(4, "Di", "Cravedi", "llm"),
+    ]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert [author.affiliation for author in authors] == [
+        "Department of Example Research, Example Institute, Cambridge, MA, USA",
+        "Preclinical Unit, Example Pharma, Basel, Switzerland; "
+        "Fellowship Program, Example Pharma, Basel, Switzerland",
+        "Department of Example Research, Example Institute, Cambridge, MA, USA",
+        "Department of Medicine, Example School of Medicine, New York, NY, USA",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("given", "family", "byline"),
+    [
+        # The LLM drops the period the byline prints.
+        ("Robyn A", "Frankel", "Robyn A. Frankel1,2 and Bo Chen1"),
+        # A degree between the name and the numbers.
+        ("Robyn", "Frankel", "Robyn Frankel MSci1,2*, Bo Chen PhD1"),
+        ("Robyn", "Frankel", "Robyn Frankel, MD,1,2 and Bo Chen, MD1"),
+        # BMJ: an ORCID icon was dropped and left a comma before the numbers.
+        ("Robyn", "Frankel", "Robyn Frankel ,1,2 Bo Chen 1"),
+    ],
+)
+def test_name_variants_degrees_and_a_comma_do_not_block_the_marker(given, family, byline):
+    frame = _frame(
+        (1, byline),
+        (1, "1 Department of Psychology, Example University, Toronto, ON, Canada"),
+        (1, "2 Example Research Institute, Toronto, ON, Canada"),
+    )
+    authors = [_author(1, given, family, "llm"), _author(2, "Bo", "Chen", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == (
+        "Department of Psychology, Example University, Toronto, ON, Canada; "
+        "Example Research Institute, Toronto, ON, Canada"
+    )
+    assert authors[1].affiliation == (
+        "Department of Psychology, Example University, Toronto, ON, Canada"
+    )
+
+
+def test_a_name_that_only_starts_like_the_author_is_not_their_marker():
+    frame = _frame(
+        (1, "Ann Leeba1 and Bo Chen2"),
+        (1, "1 Department of Psychology, Example University, Toronto, ON, Canada"),
+        (1, "2 Example Research Institute, Toronto, ON, Canada"),
+    )
+    authors = [_author(1, "Ann", "Lee", "llm"), _author(2, "Bo", "Chen", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "llm"
+
+
+def test_an_end_of_article_list_typed_acknowledgment_fills_only_open_markers():
+    """BMC: page 1 defines the corresponding author's markers and points to the
+    end of the article; that block was typed acknowledgment, so marker 3 stayed
+    open and the LLM's guess was exported."""
+    frame = _sectioned_frame(
+        (1, "title", "Erik Berg1,2* and Cato Moe3"),
+        (
+            1,
+            "footnote",
+            "* Correspondence: someone@example.no 1 Nordland Example Hospital, Bodø, Norway\r\n"
+            "2 Example Arctic University of Norway, Tromsø, Norway\r\nFull list of author "
+            "information is available at the end of the article",
+        ),
+        (9, "acknowledgment", "3 Nord Example University, Bodø, Norway."),
+        (9, "acknowledgment", "1 Somewhere Else University, Oslo, Norway."),
+    )
+    authors = [_author(1, "Erik", "Berg", "guess A"), _author(2, "Cato", "Moe", "guess B")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+    CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    assert authors[1].affiliation == "Nord Example University, Bodø, Norway"
+    assert authors[0].affiliation == (
+        "Nordland Example Hospital, Bodø, Norway; Example Arctic University of Norway, "
+        "Tromsø, Norway"
+    )
+
+
+def test_the_late_tier_is_not_read_for_body_sections():
+    frame = _sectioned_frame(
+        (1, "title", "Erik Berg3"),
+        (5, "results", "3 Department of Example Results, Example University, Oslo, Norway"),
+    )
+    authors = [_author(1, "Erik", "Berg", "Example University, Oslo")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "Example University, Oslo"

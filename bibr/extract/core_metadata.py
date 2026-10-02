@@ -99,6 +99,17 @@ _NUMBERED_AFFILIATION_RE = re.compile(
 _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
 )
+# What a byline may print between an author's name and their affiliation
+# numbers: degrees ("Knight MSci1,2", "Lee, MD,1"), one comma (BMJ "King ,1,2,3"
+# where an ORCID icon was dropped) and symbol markers ("Shin#*1", "Sahoo*,\u2020,1").
+_BYLINE_DEGREE_PATTERN = (
+    r"(?:Ph\.?D|M\.?D|MSci|MSc|MPH|MBBS|MBChB|DPhil|DrPH|PharmD|BSc|BA|MA|MS|RN|"
+    r"FRCP\w*|MRCP\w*)\.?"
+)
+_BYLINE_MARKER_GAP_PATTERN = (
+    rf"(?:\s*,?\s*\b{_BYLINE_DEGREE_PATTERN}){{0,3}}"
+    r"\s*,?\s*(?:[*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]+\s*,?\s*)*"
+)
 _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
     {
         "\u00a0": " ",
@@ -110,6 +121,18 @@ _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
         "\u2014": "-",
         "\u2212": "-",
     }
+)
+# Back-matter section types an end-of-article affiliation list is typed as
+# when the classifier does not call it author_contributions.
+_LATE_AFFILIATION_SECTION_TYPES = (
+    CanonicalSection.ACKNOWLEDGMENT,
+    CanonicalSection.FUNDING,
+    CanonicalSection.ENDNOTE,
+    CanonicalSection.FOOTNOTE,
+    CanonicalSection.COI,
+    CanonicalSection.ETHICS,
+    CanonicalSection.OPEN_DATA,
+    CanonicalSection.UNKNOWN,
 )
 _AFFILIATION_ORG_RE = re.compile(
     r"\b(?:department|faculty|institute|university|college|school|hospital|"
@@ -2837,10 +2860,14 @@ class CoreMetadataExtractor:
         for author in authors:
             full_name = " ".join(part.strip() for part in (author.given, author.family) if part)
             normalized_name = _normalize_affiliation_match_text(full_name)
-            if not normalized_name:
+            tokens = [token.rstrip(".") for token in normalized_name.split() if token.rstrip(".")]
+            if not tokens:
                 continue
+            # A period may stand between name tokens: the LLM's "Robyn A Frankel"
+            # is the printed "Robyn A. Frankel".
+            name_pattern = r"(?:\.\s*|\s+)".join(re.escape(token) for token in tokens)
             marker_re = re.compile(
-                rf"(?<!\w){re.escape(normalized_name)}\s*"
+                rf"(?<!\w){name_pattern}\.?{_BYLINE_MARKER_GAP_PATTERN}"
                 r"(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?!\d)",
                 re.IGNORECASE,
             )
@@ -2913,13 +2940,27 @@ class CoreMetadataExtractor:
 
         page1_definitions = _definitions(marker_lines)
         backmatter_definitions = _definitions(backmatter_lines)
+        # BMC and Springer print "Full list of author information is available
+        # at the end of the article" and define most markers there, and the
+        # section classifier types that block acknowledgment, funding or
+        # endnote as often as author_contributions. This third tier is read
+        # only for numbers the first two leave open, so the page-1 and
+        # author-contributions behaviour is unchanged.
+        late_lines: list[str] = []
+        if "section_type" in meta_df.columns:
+            late_rows = meta_df.loc[
+                (meta_df["page_number"] > _front_page(meta_df))
+                & meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
+            ]
+            late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
+        late_definitions = _definitions(late_lines)
 
         affiliations: dict[int, str] = {}
         for number in wanted:
             # Back-matter first: it is the article's own restatement, so it both
             # outranks the page-1 form and can rescue a number the page-1 tier
             # defines ambiguously.
-            for tier in (backmatter_definitions, page1_definitions):
+            for tier in (backmatter_definitions, page1_definitions, late_definitions):
                 values = tier.get(number)
                 if not values:
                     continue
