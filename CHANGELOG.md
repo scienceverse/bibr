@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `bibr serve`: a client that gives up on a job can now cancel it. `DELETE
+  /papers/jobs/{id}` fails a job that is still queued (`error_code`
+  `job_cancelled`), frees its place under `JOBS_MAX_ACTIVE` and deletes its
+  upload; a job that is already running answers `409` for now (#145).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)

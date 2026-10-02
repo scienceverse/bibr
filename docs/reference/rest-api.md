@@ -104,6 +104,17 @@ Returns the extracted paper JSON once the job has `succeeded` (same shape
 as `/papers/extract`'s response). Responds `409` while the job is still
 queued/running, or the job's original error and status code if it failed.
 
+#### `DELETE /papers/jobs/{id}`
+
+Cancels a job that is still `queued`. The job is failed at once with the
+error `{"detail": "job cancelled before it started", "error_code":
+"job_cancelled"}`: it stops counting against `JOBS_MAX_ACTIVE`, its upload is
+deleted, and `/result` answers `410`. Clients that poll for `succeeded` or
+`failed` therefore stop as they do for any failed job. Returns `200` with the
+job's status (also when it was already cancelled), `409` with
+`{"detail", "status"}` for a job that is `running` or finished (a running
+extraction cannot be stopped yet), and `404` for an unknown job.
+
 Jobs are held in an in-process store and purged after `JOBS_TTL_SECONDS`
 (default `3600`); `JOBS_MAX_ACTIVE` (default `32`) caps concurrently
 active jobs, returning `429` past the cap, and `JOBS_MAX_RUNNING` (default

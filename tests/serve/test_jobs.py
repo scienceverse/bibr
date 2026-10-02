@@ -294,6 +294,63 @@ class TestJobStore:
         assert await harness.count(store) == 3
 
 
+class TestJobCancel:
+    """``cancel`` and the queued-only claim, shared by both backends."""
+
+    async def test_cancel_fails_a_queued_job_and_frees_its_slot(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_active", 1)
+        store = harness.make()
+        job = await store.create(filename="a.pdf")
+        cancelled = await store.cancel(job.job_id)
+        assert cancelled.status == "failed"
+        assert cancelled.http_status == 410
+        assert cancelled.error == jobs_mod.CANCELLED_ERROR
+        assert jobs_mod.is_cancelled(cancelled)
+        got = await store.get(job.job_id)
+        assert jobs_mod.is_cancelled(got)
+        assert got.finished_wall is not None
+        assert got.status_dict()["error"]["error_code"] == "job_cancelled"
+        assert (await store.create(filename="b.pdf")).status == "queued"  # the slot is free
+
+    async def test_cancel_again_returns_the_cancelled_job(self, harness):
+        store = harness.make()
+        job = await store.create(filename="a.pdf")
+        await store.cancel(job.job_id)
+        assert jobs_mod.is_cancelled(await store.cancel(job.job_id))
+
+    async def test_cancel_leaves_running_and_finished_jobs_alone(self, harness):
+        store = harness.make()
+        running = await store.create(filename="r.pdf")
+        assert await store.set_running(running.job_id) is True
+        done = await store.create(filename="d.pdf")
+        await store.set_running(done.job_id)
+        await store.set_succeeded(done.job_id, {"paper_id": "d"})
+        failed = await store.create(filename="f.pdf")
+        await store.set_failed(failed.job_id, http_status=422, error={"detail": "bad parse"})
+        for job, status in ((running, "running"), (done, "succeeded"), (failed, "failed")):
+            got = await store.cancel(job.job_id)
+            assert got.status == status
+            assert not jobs_mod.is_cancelled(got)
+        assert (await store.get(done.job_id)).result == {"paper_id": "d"}
+        assert (await store.get(failed.job_id)).error == {"detail": "bad parse"}
+
+    async def test_cancel_of_an_unknown_job_is_none(self, harness):
+        assert await harness.make().cancel("0" * 32) is None
+
+    async def test_a_cancelled_job_cannot_be_claimed(self, harness):
+        store = harness.make()
+        job = await store.create(filename="a.pdf")
+        await store.cancel(job.job_id)
+        assert await store.set_running(job.job_id) is False
+        got = await store.get(job.job_id)
+        assert jobs_mod.is_cancelled(got)
+        assert got.started_wall is None
+
+    async def test_claiming_a_missing_record_still_runs_the_job(self, harness):
+        # As before cancel existed: a record that is gone does not stop the work.
+        assert await harness.make().set_running("0" * 32) is True
+
+
 class TestJobDispatcher:
     async def test_close_stops_worker_if_job_suppresses_cancellation(self, monkeypatch):
         entered = asyncio.Event()
@@ -430,6 +487,66 @@ class TestJobDispatcher:
         # Both cap slots are free again.
         await store.create(filename="third.pdf")
         await store.create(filename="fourth.pdf")
+
+    async def test_a_job_cancelled_in_the_queue_never_runs(self, harness):
+        """Two jobs, one worker: the second is cancelled while the first runs."""
+        store = harness.make()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class _BlockingTracker(_FakeTracker):
+            async def submit(self, descriptor, request_state=None):
+                self.descriptors.append(descriptor)
+                entered.set()
+                await release.wait()
+                return {"paper_id": descriptor["upload_id"]}
+
+        tracker = _BlockingTracker()
+        dispatcher = jobs_mod.JobDispatcher(store=store, tracker=tracker, max_running=1)
+        first = await store.create(filename="first.pdf")
+        second = await store.create(filename="second.pdf")
+        for job in (first, second):
+            payload = jobs_mod.JobPayload(descriptor={"upload_id": job.filename})
+            await dispatcher.submit(job.job_id, payload)
+        await entered.wait()
+        # Cancelled in the store only, as by another replica: the worker skips it.
+        assert jobs_mod.is_cancelled(await store.cancel(second.job_id))
+        release.set()
+        await dispatcher.join()
+        await dispatcher.close()
+
+        assert tracker.descriptors == [{"upload_id": "first.pdf"}]
+        assert tracker.discarded == [{"upload_id": "second.pdf"}]
+        assert (await store.get(first.job_id)).status == "succeeded"
+        assert jobs_mod.is_cancelled(await store.get(second.job_id))
+
+    async def test_release_cancelled_deletes_the_upload_before_dequeue(self, monkeypatch):
+        entered = asyncio.Event()
+
+        async def blocked_run_job(*, store, job_id, descriptor, tracker):
+            if await store.set_running(job_id) is False:
+                await tracker.discard(descriptor)
+                return
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(jobs_mod, "_run_job", blocked_run_job)
+        store = MemoryJobStore()
+        tracker = _FakeTracker()
+        dispatcher = jobs_mod.JobDispatcher(store=store, tracker=tracker, max_running=1)
+        running = await store.create(filename="running.pdf")
+        queued = await store.create(filename="queued.pdf")
+        for job in (running, queued):
+            payload = jobs_mod.JobPayload(descriptor={"upload_id": job.filename})
+            await dispatcher.submit(job.job_id, payload)
+        await entered.wait()
+
+        await store.cancel(queued.job_id)
+        await dispatcher.release_cancelled(queued.job_id)
+        assert tracker.discarded == [{"upload_id": "queued.pdf"}]  # now, not at dequeue
+        await dispatcher.close()
+        # Shutdown neither runs it nor rewrites its record as a shutdown loss.
+        assert jobs_mod.is_cancelled(await store.get(queued.job_id))
 
     async def test_stale_sweep_preserves_upload_while_job_is_queued(self):
         """Catches a later upload deleting an old descriptor before queue dispatch."""
@@ -827,6 +944,103 @@ class TestJobRoutes:
 # --------------------------------------------------------------------------- #
 # _run_job descriptor dispatch mapping
 # --------------------------------------------------------------------------- #
+
+
+def _hold_first_job(monkeypatch) -> list[str]:
+    """One worker; the first job claimed stays running, so later jobs wait in the queue.
+
+    Returns the ids of the jobs that started. Use the client as a context manager so
+    the worker survives between requests.
+    """
+    monkeypatch.setattr(Settings.jobs, "max_running", 1)
+    started: list[str] = []
+
+    async def run_job(*, store, job_id, descriptor, tracker):
+        if await store.set_running(job_id) is False:
+            await tracker.discard(descriptor)
+            return
+        started.append(job_id)
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(jobs_mod, "_run_job", run_job)
+    return started
+
+
+def _post(client: TestClient, content: bytes = b"%PDF-1.4", **data):
+    return client.post(
+        "/papers/jobs",
+        files={"file": ("a.pdf", content, "application/pdf")},
+        data=data or None,
+    )
+
+
+class TestCancelRoute:
+    def test_delete_cancels_a_queued_job(self, monkeypatch):
+        started = _hold_first_job(monkeypatch)
+        tracker = _FakeTracker()
+        client = _client(MemoryJobStore(), tracker=tracker)
+        try:
+            with client:
+                first = _post(client, b"%PDF-1 first").json()["job_id"]
+                second = _post(client, b"%PDF-1 second").json()["job_id"]
+                _poll_until(client, first, "running")
+
+                resp = client.delete(f"/papers/jobs/{second}")
+                assert resp.status_code == 200
+                body = resp.json()
+                assert body["job_id"] == second
+                assert body["status"] == "failed"
+                assert body["error"] == jobs_mod.CANCELLED_ERROR
+                # Its upload is let go at once, not when a worker reaches it.
+                assert [d["job_id"] for d in tracker.discarded] == [second]
+
+                assert client.get(f"/papers/jobs/{second}").json()["status"] == "failed"
+                result = client.get(f"/papers/jobs/{second}/result")
+                assert result.status_code == 410
+                assert result.json()["error_code"] == "job_cancelled"
+                # Cancelling again answers the same.
+                again = client.delete(f"/papers/jobs/{second}")
+                assert again.status_code == 200
+                assert again.json()["error"] == jobs_mod.CANCELLED_ERROR
+            assert started == [first]
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_delete_of_a_running_job_is_409(self, monkeypatch):
+        _hold_first_job(monkeypatch)
+        client = _client(MemoryJobStore())
+        try:
+            with client:
+                job_id = _post(client).json()["job_id"]
+                _poll_until(client, job_id, "running")
+                resp = client.delete(f"/papers/jobs/{job_id}")
+                assert resp.status_code == 409
+                assert resp.json() == {
+                    "detail": "job is already running; only a queued job can be cancelled",
+                    "status": "running",
+                }
+                assert client.get(f"/papers/jobs/{job_id}").json()["status"] == "running"
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_delete_of_a_finished_job_is_409_and_keeps_its_result(self):
+        client = _client(MemoryJobStore(), tracker=_FakeTracker(result={"paper_id": "done"}))
+        try:
+            with client:
+                job_id = _post(client).json()["job_id"]
+                _poll_until(client, job_id, "succeeded")
+                resp = client.delete(f"/papers/jobs/{job_id}")
+                assert resp.status_code == 409
+                assert resp.json() == {"detail": "job already finished", "status": "succeeded"}
+                assert client.get(f"/papers/jobs/{job_id}/result").json() == {"paper_id": "done"}
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_delete_of_an_unknown_job_is_404(self):
+        client = _client(MemoryJobStore())
+        resp = client.delete("/papers/jobs/" + "0" * 32)
+        assert resp.status_code == 404
+        assert resp.json() == {"detail": "job not found"}
 
 
 class TestRunJobDispatch:
