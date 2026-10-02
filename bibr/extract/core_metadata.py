@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from rapidfuzz.fuzz import partial_ratio
 
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
@@ -1728,6 +1729,56 @@ _AFFILIATION_TRAILING_RE = re.compile(
 _AFFILIATION_ALPHA_RUN_RE = re.compile(r"[^\W\d_]{2}")
 
 
+# A component of an affiliation that names an organisation must be printed in
+# the paper. OCR'd text the LLM silently corrected ("Universily") passes the
+# fuzzy floor; an institution from world knowledge does not.
+_AFFILIATION_GROUNDING_MIN_KEY = 6
+_AFFILIATION_GROUNDING_FUZZY_FLOOR = 90
+
+
+def _ungrounded_affiliation_components(part: str, document_key: str) -> tuple[int, list[str]]:
+    """(organisation components of *part*, those the document does not print).
+
+    Both sides are compared as :func:`affiliation_key` folds, so line breaks,
+    hyphenation spaces, punctuation, accents and "&"/"and" cannot cause a miss.
+    Components with no organisation word, or too short to test, are not counted.
+    """
+    total = 0
+    missing: list[str] = []
+    for component in part.split(","):
+        component = component.strip()
+        if not _AFFILIATION_ORG_RE.search(component):
+            continue
+        key = affiliation_key(component)
+        if len(key) < _AFFILIATION_GROUNDING_MIN_KEY:
+            continue
+        total += 1
+        if key in document_key:
+            continue
+        if partial_ratio(key, document_key, score_cutoff=_AFFILIATION_GROUNDING_FUZZY_FLOOR):
+            continue
+        missing.append(component)
+    return total, missing
+
+
+def _ungrounded_affiliation_issue(dropped: list[tuple[int, str]]) -> ValidationIssue:
+    """VAL_AFFILIATION_UNGROUNDED for affiliation text the paper does not print."""
+    shown = "; ".join(dict.fromkeys(text for _, text in dropped))
+    if len(shown) > 200:
+        shown = shown[:199].rstrip() + "\u2026"
+    return ValidationIssue(
+        code="VAL_AFFILIATION_UNGROUNDED",
+        severity=IssueSeverity.WARNING,
+        message=(
+            f"{len(dropped)} affiliation part(s) name an organisation printed nowhere in the "
+            f"paper and were dropped: {shown}"
+        ),
+        origin_stage="extract",
+        evidence_ids=tuple(dict.fromkeys(f"author:{author_id}" for author_id, _ in dropped)),
+        count=len(dropped),
+    )
+
+
 def _clean_affiliation_value(value: str) -> str:
     """One affiliation without line breaks, its printed marker, a contact or
     end-of-article pointer tail, edge connectives and trailing punctuation."""
@@ -1981,9 +2032,15 @@ class CoreMetadataExtractor:
             if [author.affiliation for author in usable] != affiliations_before:
                 author_trail[-1].transforms.append("affiliations_reconciled")
             affiliations_reconciled = [author.affiliation for author in usable]
-            self._normalize_author_affiliations(usable, self.sentences_df)
+            ungrounded = self._normalize_author_affiliations(
+                usable,
+                self.sentences_df,
+                context_text="\n".join(text for text in (full_text, authors_text) if text),
+            )
             if [author.affiliation for author in usable] != affiliations_reconciled:
                 author_trail[-1].transforms.append("affiliations_cleaned")
+            if ungrounded:
+                self.validation_issues.append(_ungrounded_affiliation_issue(ungrounded))
             self._email_harvester.demote_implausible_flags(usable)
 
             # Title/abstract must resolve BEFORE classification: the trained
@@ -2916,7 +2973,9 @@ class CoreMetadataExtractor:
             return
 
     @staticmethod
-    def _normalize_author_affiliations(authors: list[PaperAuthor], meta_df: pd.DataFrame) -> None:
+    def _normalize_author_affiliations(
+        authors: list[PaperAuthor], meta_df: pd.DataFrame, *, context_text: str = ""
+    ) -> list[tuple[int, str]]:
         """Clean every author's "; "-joined affiliations, whatever produced them.
 
         Runs after both reconcilers, so LLM values and printed definitions get
@@ -2930,14 +2989,24 @@ class CoreMetadataExtractor:
         occurs in the paper's text). Two affiliations printed separately never
         occur that way, so an author's second institution stays separate.
         Duplicates collapse on the folded key.
+
+        Grounding: author names have a fabrication veto, affiliations had none,
+        and when the definitions are outside its context the LLM fills them in
+        from world knowledge. A part none of whose organisation components is
+        printed in the paper (``meta_df`` plus ``context_text``, the text the
+        LLM was given) is dropped, so the value is empty rather than invented;
+        unprinted components of a part that is otherwise printed are removed.
+        Reconciler values are printed text and always pass. Returns
+        ``(author_id, dropped text)`` for each removal.
         """
         if not authors or not any(author.affiliation for author in authors):
-            return
-        printed = ""
+            return []
+        document = ""
         if "text" in meta_df.columns:
-            printed = _normalize_affiliation_match_text(
-                " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
-            ).casefold()
+            document = " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
+        printed = _normalize_affiliation_match_text(document).casefold()
+        document_key = affiliation_key(f"{document} {context_text}")
+        dropped: list[tuple[int, str]] = []
         for author in authors:
             parts: list[str] = []
             previous: str | None = None
@@ -2958,11 +3027,24 @@ class CoreMetadataExtractor:
             seen: set[str] = set()
             kept: list[str] = []
             for part in parts:
+                if document_key:
+                    total, missing = _ungrounded_affiliation_components(part, document_key)
+                    if missing and len(missing) == total:
+                        dropped.append((author.author_id, part))
+                        continue
+                    if missing:
+                        dropped.extend((author.author_id, component) for component in missing)
+                        part = ", ".join(
+                            component.strip()
+                            for component in part.split(",")
+                            if component.strip() not in missing
+                        )
                 key = affiliation_key(part)
-                if key not in seen:
+                if key and key not in seen:
                     seen.add(key)
                     kept.append(part)
             author.affiliation = "; ".join(kept)
+        return dropped
 
     async def _classify_paper(
         self, title: str, abstract: str, llm_metadata, classification_text: str

@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "Full list of author information is available ..." pointer and trailing
   punctuation, and one institution no longer appears twice because of spacing,
   punctuation, accent or "&"/"and" differences (#114).
+- An affiliation whose institution is printed nowhere in the paper is no longer
+  exported. When the affiliations were outside the text the model saw, it could
+  fill them in from general knowledge (a university the paper never names);
+  such a part is now dropped, an unprinted institution added to a printed one is
+  removed, and a `VAL_AFFILIATION_UNGROUNDED` warning lists what was dropped
+  (#115).
 
 ## [0.6.0] - 2026-09-30
 

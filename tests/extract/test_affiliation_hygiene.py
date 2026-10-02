@@ -184,7 +184,10 @@ def test_connective_and_contact_tails_never_become_affiliations():
 
 
 def test_llm_markers_emails_and_marker_only_parts_are_dropped():
-    frame = _frame((1, "Ann Lee1,2"))
+    frame = _frame(
+        (1, "Ann Lee1,2"),
+        (1, "1 Department of Psychology, Example University, Rome, Italy; name@example.com"),
+    )
     authors = [
         _author(
             1,
@@ -224,3 +227,139 @@ def test_the_folded_key_keeps_different_institutions_and_other_scripts_apart():
         "Department of Nursing, University B"
     )
     assert affiliation_key("東京大学医学部") == "東京大学医学部"
+
+
+# ── grounding: affiliation text the paper does not print ──────────────────
+
+
+def test_an_affiliation_printed_nowhere_in_the_paper_is_dropped():
+    """RSC-style: the definitions were page-1 footnotes outside the LLM's
+    context, and it answered with a university the paper never prints."""
+    frame = _frame(
+        (1, "Ann Lee a and Bo Chen b"),
+        (1, "a School of Mechanical Engineering, Qinghai University, Xining 810016, China"),
+        (1, "b Faculty of Materials, Example University of Technology, Beijing, China"),
+    )
+    authors = [
+        _author(
+            1,
+            "Ann",
+            "Lee",
+            "a School of Materials Science and Engineering, Liaocheng University, "
+            "Liaocheng 252059, P. R. China",
+        ),
+        _author(2, "Bo", "Chen", "Faculty of Materials, Example University of Technology, Beijing"),
+    ]
+
+    dropped = CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    assert authors[0].affiliation == ""
+    assert authors[1].affiliation == (
+        "Faculty of Materials, Example University of Technology, Beijing"
+    )
+    assert dropped == [
+        (
+            1,
+            "School of Materials Science and Engineering, Liaocheng University, "
+            "Liaocheng 252059, P. R. China",
+        )
+    ]
+
+
+def test_an_unprinted_component_is_pruned_from_a_printed_affiliation():
+    """World-knowledge completion: "University at Buffalo" became "University at
+    Buffalo, State University of New York", which the paper does not print."""
+    frame = _frame(
+        (1, "Ann Lee3"),
+        (
+            10,
+            "3 Department of Epidemiology, School of Public Health, University at Buffalo, "
+            "Buffalo, NY, USA.",
+        ),
+    )
+    authors = [
+        _author(
+            1,
+            "Ann",
+            "Lee",
+            "Department of Epidemiology, School of Public Health, University at Buffalo, "
+            "State University of New York, Buffalo, NY, USA",
+        )
+    ]
+
+    dropped = CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    assert authors[0].affiliation == (
+        "Department of Epidemiology, School of Public Health, University at Buffalo, "
+        "Buffalo, NY, USA"
+    )
+    assert dropped == [(1, "State University of New York")]
+
+
+def test_ocr_typos_and_text_only_the_llm_saw_are_grounded():
+    """The LLM silently corrects an OCR typo ("Universily"); an author table the
+    LLM context carried is not in the sentence frame. Neither is an invention."""
+    frame = _frame((1, "Ann Lee, Department of Physics, Universily of Exampleton, UK"))
+    authors = [
+        _author(1, "Ann", "Lee", "Department of Physics, University of Exampleton, UK"),
+        _author(2, "Bo", "Chen", "Institute of Table Studies, Example Hospital, Paris"),
+    ]
+
+    dropped = CoreMetadataExtractor._normalize_author_affiliations(
+        authors, frame, context_text="Bo Chen | Institute of Table Studies, Example Hospital"
+    )
+
+    assert dropped == []
+    assert authors[0].affiliation == "Department of Physics, University of Exampleton, UK"
+    assert authors[1].affiliation == "Institute of Table Studies, Example Hospital, Paris"
+
+
+async def test_the_extractor_warns_about_dropped_affiliations():
+    from unittest import mock
+
+    from bibr.paper_contents import PaperContents
+    from bibr.schemas import AuthorLLM, CoreMetadataLLM
+
+    frame = pd.DataFrame(
+        {
+            "section_name": ["Title", "Title"],
+            "page_number": [1, 1],
+            "text": ["A Study of Things", "Ann Lee and Bo Chen, Example University, Utrecht"],
+        }
+    )
+    contents = mock.Mock(spec=PaperContents)
+    contents.sentences_df = frame
+    contents.detected_headers = []
+    contents.detected_footers = []
+    contents.layout_hints = []
+    contents.sections = []
+    contents.sentences = []
+    contents.processing_warnings = []
+    locator = mock.MagicMock()
+    locator.get_cutoff_index.return_value = 2
+    locator.collect_core_metadata_rows.return_value = frame.copy()
+    llm_client = mock.MagicMock()
+    llm_client.extract_core_metadata = mock.AsyncMock(
+        return_value=CoreMetadataLLM(
+            title="A Study of Things",
+            authors=[
+                AuthorLLM(given="Ann", family="Lee", affiliation="Example University, Utrecht"),
+                AuthorLLM(given="Bo", family="Chen", affiliation="Invented Polder University"),
+            ],
+            keywords=[],
+        )
+    )
+    extractor = CoreMetadataExtractor(
+        contents, llm_client=llm_client, locator=locator, email_harvester=mock.MagicMock()
+    )
+
+    metadata = await extractor.extract()
+
+    assert [author.affiliation for author in metadata.authors] == [
+        "Example University, Utrecht",
+        "",
+    ]
+    issues = [i for i in extractor.validation_issues if i.code == "VAL_AFFILIATION_UNGROUNDED"]
+    assert len(issues) == 1
+    assert issues[0].evidence_ids == ("author:2",)
+    assert "Invented Polder University" in issues[0].message
