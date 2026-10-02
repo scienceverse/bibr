@@ -115,6 +115,15 @@ job's status (also when it was already cancelled), `409` with
 `{"detail", "status"}` for a job that is `running` or finished (a running
 extraction cannot be stopped yet), and `404` for an unknown job.
 
+With `JOBS_DEDUPE_INFLIGHT=true` (default `false`), a `POST /papers/jobs`
+whose file (SHA-256) and options match a job the same server still has queued
+or running answers `202` with that job's `job_id`, its current `status` and
+`"duplicate": true`, instead of running the paper a second time. Options are
+compared by value (`1`/`true`, `02`/`2`); an option left out does not match the
+same option sent with its default. bibr serve has one principal (the shared API
+key), so every caller can be handed every other caller's job: enable it only
+when that is fine, and deduplicate per user in a multi-user front end instead.
+
 Jobs are held in an in-process store and purged after `JOBS_TTL_SECONDS`
 (default `3600`); `JOBS_MAX_ACTIVE` (default `32`) caps concurrently
 active jobs, returning `429` past the cap, and `JOBS_MAX_RUNNING` (default

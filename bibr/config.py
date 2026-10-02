@@ -2064,7 +2064,7 @@ class PipelineOptions(_BibrSettings):
 class JobsOptions(_BibrSettings):
     """Async job API (serve). Env: ``JOBS_ENABLED``, ``JOBS_TTL_SECONDS``, ``JOBS_MAX_ACTIVE``,
     ``JOBS_MAX_RUNNING``, ``JOBS_MAX_RETAINED``, ``JOBS_MAX_RETAINED_BYTES``, ``JOBS_STORE``,
-    ``JOBS_REDIS_URL``, ``JOBS_KEY_PREFIX``, ``JOBS_REPLICA_ID``.
+    ``JOBS_REDIS_URL``, ``JOBS_KEY_PREFIX``, ``JOBS_REPLICA_ID``, ``JOBS_DEDUPE_INFLIGHT``.
 
     By default jobs are held in an in-process store on the single HTTP API-server
     process (``serve.app.main`` always pins ``num_api_servers=1`` because upload
@@ -2124,6 +2124,14 @@ class JobsOptions(_BibrSettings):
         "Oldest results are evicted until the rest fit; the newest result is always kept so "
         "that an export larger than the budget can still be fetched once. 0 disables the "
         "budget (count-only retention).",
+    )
+    dedupe_inflight: bool = Field(
+        False,
+        description="Answer a job upload whose file (sha256) and options match a job this "
+        "replica still has queued or running with that job, instead of running the paper "
+        "twice. bibr serve has a single principal (the shared API key), so enable it only "
+        "when every caller may share jobs; a multi-user front end should deduplicate per "
+        "user itself.",
     )
 
 

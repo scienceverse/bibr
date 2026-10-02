@@ -121,6 +121,7 @@ Scale concurrency with these settings:
 | `JOBS_MAX_RUNNING` | `2` | Maximum async jobs dispatched to inference at once. |
 | `JOBS_MAX_ACTIVE` | `32` | Maximum queued plus running async jobs. |
 | `JOBS_MAX_RETAINED` | `128` | Maximum completed job results held in memory; oldest completed records are evicted. |
+| `JOBS_DEDUPE_INFLIGHT` | `false` | Answer an upload whose file and options match a job this replica still has queued or running with that job. Single-tenant deployments only: every caller shares the one API key. |
 
 `PIPELINE_MAX_PAGES` caps the requested processing range; raise it explicitly
 for longer documents and size memory for the concurrent file count.

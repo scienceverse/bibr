@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   /papers/jobs/{id}` fails a job that is still queued (`error_code`
   `job_cancelled`), frees its place under `JOBS_MAX_ACTIVE` and deletes its
   upload; a job that is already running answers `409` for now (#145).
+- `bibr serve`: with `JOBS_DEDUPE_INFLIGHT=true`, uploading the same file with
+  the same options while that paper is still queued or running returns the
+  existing job instead of running the paper twice. Off by default, because every
+  caller of a serve shares one API key (#145).
 
 ## [0.6.0] - 2026-09-30
 

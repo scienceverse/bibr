@@ -17,6 +17,12 @@ dequeues it), and its result answers ``410``. A cancelled job reports
 like it does for any failure. A running job cannot be stopped between pipeline
 stages yet, so ``DELETE`` answers ``409`` for it.
 
+**Duplicate uploads.** With ``JOBS_DEDUPE_INFLIGHT=true`` a ``POST`` whose file
+(sha256) and options match a job this replica still has queued or running
+returns that job instead of queueing the paper again. bibr serve has one
+principal (the shared API key), so this suits a single-tenant deployment; a
+multi-user front end must deduplicate per user itself.
+
 **Architecture.** Jobs persist their uploads through the same disk-backed
 ingress as ``/papers/extract`` and queue only its opaque descriptor. The job
 runner submits that descriptor through LitServe's private inference adapter,
@@ -51,6 +57,7 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol
@@ -456,6 +463,32 @@ def _sanitize_request_id(raw: str | None) -> str | None:
     return cleaned or None
 
 
+_BOOLEAN_OPTIONS = frozenset({"include_figures", "include_regions", "crossref"})
+_INTEGER_OPTIONS = frozenset({"start_page", "end_page"})
+
+
+def _canonical_option(name: str, value: object) -> str:
+    text = str(value).strip()
+    if name in _BOOLEAN_OPTIONS:
+        return "true" if text.lower() in ("true", "1", "yes") else "false"
+    if name in _INTEGER_OPTIONS:
+        try:
+            return str(int(text))
+        except ValueError:
+            return text
+    return text.lower()
+
+
+def upload_fingerprint(sha256_hex: str, options: Mapping[str, object]) -> str:
+    """What makes two uploads the same request: the file's sha256 and its options.
+
+    Options compare by meaning (``1``/``yes``/``true``, ``03``/``3``); an option left
+    out is not the same as its default spelled out, so such a pair just runs twice.
+    """
+    canonical = {name: _canonical_option(name, value) for name, value in options.items()}
+    return sha256_hex + ":" + json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+
+
 @dataclass(frozen=True)
 class JobPayload:
     """Small queue descriptor for one disk-backed job upload."""
@@ -466,8 +499,9 @@ class JobPayload:
 class JobDispatcher:
     """Process-local FIFO dispatcher with bounded descriptor dispatch concurrency.
 
-    It also knows which of its jobs still wait in the queue, so a cancelled one's
-    upload can be deleted at once.
+    It also knows which of its jobs still wait in the queue (so a cancelled one's
+    upload can be deleted at once) and, for ``JOBS_DEDUPE_INFLIGHT``, the upload
+    fingerprint of every job it has queued or running.
     """
 
     def __init__(
@@ -485,6 +519,9 @@ class JobDispatcher:
         self._closed = False
         # Jobs in the queue that no worker has taken yet.
         self._waiting: dict[str, JobPayload] = {}
+        # Upload fingerprint -> job id (and back) for jobs queued or running here.
+        self._by_fingerprint: dict[str, str] = {}
+        self._fingerprint_of: dict[str, str] = {}
 
     async def start(self) -> None:
         if self._closed:
@@ -495,17 +532,32 @@ class JobDispatcher:
                 for index in range(self._max_running)
             ]
 
-    async def submit(self, job_id: str, payload: JobPayload) -> None:
+    async def submit(
+        self, job_id: str, payload: JobPayload, *, fingerprint: str | None = None
+    ) -> None:
         await self.start()
         self._waiting[job_id] = payload
+        if fingerprint is not None:
+            self._by_fingerprint[fingerprint] = job_id
+            self._fingerprint_of[job_id] = fingerprint
         self._queue.put_nowait((job_id, payload))
+
+    def job_for_fingerprint(self, fingerprint: str) -> str | None:
+        """The job this dispatcher holds (queued or running) for an upload fingerprint."""
+        return self._by_fingerprint.get(fingerprint)
 
     async def release_cancelled(self, job_id: str) -> None:
         """Delete the upload of a job cancelled while it waited here, without waiting
         for a worker to dequeue it (the worker then skips it)."""
+        self._forget_fingerprint(job_id)
         payload = self._waiting.pop(job_id, None)
         if payload is not None:
             await self._tracker.discard(payload.descriptor)
+
+    def _forget_fingerprint(self, job_id: str) -> None:
+        fingerprint = self._fingerprint_of.pop(job_id, None)
+        if fingerprint is not None and self._by_fingerprint.get(fingerprint) == job_id:
+            del self._by_fingerprint[fingerprint]
 
     async def join(self) -> None:
         await self._queue.join()
@@ -529,6 +581,7 @@ class JobDispatcher:
                 # and silently stranding every job queued behind it.
                 logger.exception("job %s: runner failed outside the job's own handling", job_id)
             finally:
+                self._forget_fingerprint(job_id)
                 self._queue.task_done()
 
     async def close(self) -> None:
@@ -548,6 +601,7 @@ class JobDispatcher:
                 break
             # A job cancelled here already left _waiting and has its final record.
             cancelled = self._waiting.pop(job_id, None) is None
+            self._forget_fingerprint(job_id)
             try:
                 await self._tracker.discard(payload.descriptor)
                 # The upload is gone, so the job can never run: say so instead of
@@ -641,6 +695,15 @@ def register_job_routes(
             app.state.job_dispatcher = dispatcher
         return dispatcher
 
+    async def _active_duplicate(dispatcher: JobDispatcher, fingerprint: str) -> Job | None:
+        existing_id = dispatcher.job_for_fingerprint(fingerprint)
+        if existing_id is None:
+            return None
+        existing = await store.get(existing_id, include_result=False)
+        if existing is None or existing.status not in _ACTIVE_STATUSES:
+            return None  # finished or cancelled since: run this upload afresh
+        return existing
+
     def _store_unavailable(job_id: str | None, exc: JobStoreUnavailableError) -> JSONResponse:
         logger.error("job store unavailable (job %s): %s", job_id or "-", exc)
         return JSONResponse({"detail": _STORE_UNAVAILABLE_DETAIL}, status_code=503)
@@ -652,6 +715,7 @@ def register_job_routes(
         descriptor: dict[str, object] | None = None
         job: Job | None = None
         stored: StoredUpload | None = None
+        duplicate_of: Job | None = None
 
         async def _discard_submission() -> None:
             if descriptor is not None:
@@ -679,10 +743,22 @@ def register_job_routes(
             # The job id links the worker-side extract record to the job the
             # client polls; the handoff ignores unknown keys.
             descriptor["job_id"] = job.job_id
-            await _job_dispatcher().submit(
-                job.job_id,
-                JobPayload(descriptor=descriptor),
-            )
+            dispatcher = _job_dispatcher()
+            fingerprint: str | None = None
+            if Settings.jobs.dedupe_inflight:
+                fingerprint = upload_fingerprint(stored.sha256_hex, form_values)
+                duplicate_of = await _active_duplicate(dispatcher, fingerprint)
+            if duplicate_of is not None:
+                # The same file with the same options is already queued or running
+                # here: hand back that job and drop this copy.
+                logger.info("job %s: duplicate upload, answered with that job", duplicate_of.job_id)
+                await _discard_submission()
+            else:
+                await dispatcher.submit(
+                    job.job_id,
+                    JobPayload(descriptor=descriptor),
+                    fingerprint=fingerprint,
+                )
         except EmptyUploadError:
             await _discard_submission()
             return JSONResponse({"detail": "Empty or missing file"}, status_code=400)
@@ -712,6 +788,16 @@ def register_job_routes(
             raise
 
         assert job is not None and descriptor is not None
+        if duplicate_of is not None:
+            return JSONResponse(
+                {
+                    "job_id": duplicate_of.job_id,
+                    "status": duplicate_of.status,
+                    "status_url": f"/papers/jobs/{duplicate_of.job_id}",
+                    "duplicate": True,
+                },
+                status_code=202,
+            )
         return JSONResponse(
             {
                 "job_id": job.job_id,

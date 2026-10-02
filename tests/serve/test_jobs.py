@@ -548,6 +548,28 @@ class TestJobDispatcher:
         # Shutdown neither runs it nor rewrites its record as a shutdown loss.
         assert jobs_mod.is_cancelled(await store.get(queued.job_id))
 
+    async def test_fingerprints_are_kept_only_while_the_job_is_held(self, monkeypatch):
+        release = asyncio.Event()
+
+        async def run_job(**kwargs):
+            await release.wait()
+
+        monkeypatch.setattr(jobs_mod, "_run_job", run_job)
+        dispatcher = jobs_mod.JobDispatcher(
+            store=MemoryJobStore(), tracker=_FakeTracker(), max_running=1
+        )
+        for job_id in ("a", "b"):
+            payload = jobs_mod.JobPayload(descriptor={"upload_id": job_id})
+            await dispatcher.submit(job_id, payload, fingerprint=f"fp-{job_id}")
+        assert dispatcher.job_for_fingerprint("fp-a") == "a"
+        assert dispatcher.job_for_fingerprint("fp-b") == "b"
+        await dispatcher.release_cancelled("b")
+        assert dispatcher.job_for_fingerprint("fp-b") is None
+        release.set()
+        await dispatcher.join()
+        assert dispatcher.job_for_fingerprint("fp-a") is None
+        await dispatcher.close()
+
     async def test_stale_sweep_preserves_upload_while_job_is_queued(self):
         """Catches a later upload deleting an old descriptor before queue dispatch."""
         import io
@@ -1041,6 +1063,88 @@ class TestCancelRoute:
         resp = client.delete("/papers/jobs/" + "0" * 32)
         assert resp.status_code == 404
         assert resp.json() == {"detail": "job not found"}
+
+
+class TestInflightDedupe:
+    def test_identical_uploads_run_twice_by_default(self, monkeypatch):
+        _hold_first_job(monkeypatch)
+        store = MemoryJobStore()
+        client = _client(store)
+        try:
+            with client:
+                first = _post(client, start_page="2").json()
+                second = _post(client, start_page="2").json()
+                assert first["job_id"] != second["job_id"]
+                assert "duplicate" not in second
+                assert len(store._jobs) == 2
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_a_duplicate_of_an_active_job_returns_that_job(self, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "dedupe_inflight", True)
+        _hold_first_job(monkeypatch)
+        store = MemoryJobStore()
+        tracker = _FakeTracker()
+        client = _client(store, tracker=tracker)
+        try:
+            with client:
+                first = _post(client, start_page="2", include_figures="true").json()["job_id"]
+                _poll_until(client, first, "running")
+                # Same bytes, the same options spelled differently.
+                resp = _post(client, start_page="02", include_figures="1")
+                assert resp.status_code == 202
+                assert resp.json() == {
+                    "job_id": first,
+                    "status": "running",
+                    "status_url": f"/papers/jobs/{first}",
+                    "duplicate": True,
+                }
+                assert len(store._jobs) == 1  # the copy left no record
+                assert len(tracker.discarded) == 1  # and its upload was dropped
+                # Other options or another file are another job.
+                assert _post(client, start_page="3").json()["job_id"] != first
+                assert _post(client, b"%PDF-1 other", start_page="2").json()["job_id"] != first
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_a_duplicate_of_a_queued_job_returns_it_until_it_is_cancelled(self, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "dedupe_inflight", True)
+        _hold_first_job(monkeypatch)
+        client = _client(MemoryJobStore())
+        try:
+            with client:
+                running = _post(client, b"%PDF-1 a").json()["job_id"]
+                _poll_until(client, running, "running")
+                queued = _post(client, b"%PDF-1 b").json()["job_id"]
+                again = _post(client, b"%PDF-1 b").json()
+                assert again["job_id"] == queued and again["status"] == "queued"
+                assert client.delete(f"/papers/jobs/{queued}").status_code == 200
+                assert _post(client, b"%PDF-1 b").json()["job_id"] != queued
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_a_duplicate_of_a_finished_job_runs_again(self, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "dedupe_inflight", True)
+        client = _client(MemoryJobStore(), tracker=_FakeTracker(result={"paper_id": "x"}))
+        try:
+            with client:
+                first = _post(client).json()["job_id"]
+                _poll_until(client, first, "succeeded")
+                second = _post(client).json()
+                assert second["job_id"] != first
+                assert "duplicate" not in second
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
+    def test_the_fingerprint_compares_options_by_meaning(self):
+        fp = jobs_mod.upload_fingerprint
+        assert fp("ab", {"start_page": "02", "crossref": "yes"}) == fp(
+            "ab", {"crossref": "true", "start_page": "2"}
+        )
+        assert fp("ab", {"refs": "LLM"}) == fp("ab", {"refs": "llm"})
+        assert fp("ab", {"start_page": "2"}) != fp("ab", {"start_page": "3"})
+        assert fp("ab", {}) != fp("ab", {"include_figures": "false"})
+        assert fp("ab", {}) != fp("cd", {})
 
 
 class TestRunJobDispatch:
