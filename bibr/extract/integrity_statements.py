@@ -291,6 +291,7 @@ _REFERENCE_STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
 # competing interests statement The authors declare no competing interests.").
 _HEADING_TAIL_START = re.compile(r"\s(?=[A-Z][a-z]*\s+[a-z])")
 _MAX_HEADING_LABEL_CHARS = 80
+_HEADING_NUMBER = re.compile(r"^\s*(?:\d+(?:[.-]\d+)*(?:[.-]\s*|\s+)|[IVX]+\.\s+)")
 # Rows that open other end matter (or are page furniture) end a statement copy.
 _END_MATTER_LABEL = re.compile(
     r"^\W*(?:(?:patient )?consent for publication|patient and public involvement|"
@@ -779,11 +780,35 @@ def _heading_declaration_tail(field: str, header: str | None) -> str | None:
     return None
 
 
+def _heading_label(heading: str | None) -> str:
+    """A heading as a statement-part label: no numbering, fused tail or colon."""
+    label = _collapse_whitespace(heading or "")
+    for field in _FIELDS:
+        tail = _heading_declaration_tail(field, label)
+        if tail:
+            label = label[: -len(tail)]
+            break
+    label = _HEADING_NUMBER.sub("", label)
+    return label.rstrip(" :.-–—")
+
+
 def _legacy_section_qualifies(field: str, section: PaperSection) -> bool:
-    """Whether a section is copied as ``field``'s statement."""
-    return section.section_type == _FIELD_SECTION_TYPES[field] and not (
-        _legacy_section_is_other_matter(field, section)
-    )
+    """Whether a section is copied as ``field``'s statement.
+
+    Its type is the field's statement type, or the heading is one of the
+    field's strong headings and the section has no other statement type
+    ("Ethics approval and consent to participate" typed as an endnote).
+    """
+    if section.section_type == _FIELD_SECTION_TYPES[field]:
+        return not _legacy_section_is_other_matter(field, section)
+    if section.section_type in _SECTION_TYPE_FIELDS or section.section_type in {
+        CanonicalSection.REFERENCES,
+        CanonicalSection.TITLE,
+        CanonicalSection.ABSTRACT,
+    }:
+        return False
+    heading_field, _normalized, strong, _consent = _heading_field(section)
+    return heading_field == field and strong
 
 
 def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
@@ -841,7 +866,9 @@ def _build_legacy_snapshot_candidates(
                     classification_score=section.classification_score,
                     reason_flags=(
                         "legacy_snapshot",
-                        "canonical_type",
+                        "canonical_type"
+                        if section.section_type == _FIELD_SECTION_TYPES[field]
+                        else "strong_heading",
                         *(("heading_tail",) if heading_tail else ()),
                     ),
                     accepted=True,
@@ -1203,13 +1230,21 @@ def _render_legacy_candidate(
     return " ".join(parts)
 
 
+def _with_heading(candidate: IntegrityStatementCandidate, text: str) -> str:
+    """``text`` led by its section heading, for one part of a joined statement."""
+    label = _heading_label(candidate.heading)
+    if not label or text.casefold().startswith(label.casefold()):
+        return text
+    return f"{label}: {text}"
+
+
 def _render_indices(
     contents: PaperContents,
     resolution: IntegrityStatementResolution,
     indices: tuple[int, ...],
 ) -> str | None:
     parts = [
-        rendered
+        (resolution.candidates[index], rendered)
         for index in indices
         if (
             rendered := (
@@ -1219,7 +1254,11 @@ def _render_indices(
             )
         )
     ]
-    return "\n\n".join(parts) if parts else None
+    if len(parts) > 1:
+        # Joined sections keep their headings, or "Not applicable." parts
+        # lose their meaning.
+        return "\n\n".join(_with_heading(candidate, text) for candidate, text in parts)
+    return parts[0][1] if parts else None
 
 
 def render_integrity_statement(

@@ -1913,7 +1913,8 @@ def test_only_independently_accepted_adjacent_declarations_are_joined():
     )
     _resolution, metadata = _resolve_apply(contents, "active")
     assert metadata.funding_statement == (
-        "Supported by NSF grant 123.\n\nAdditional support came from the Wellcome Trust."
+        "Funding: Supported by NSF grant 123.\n\n"
+        "Financial support: Additional support came from the Wellcome Trust."
     )
 
 
@@ -2875,3 +2876,74 @@ def test_heading_without_a_declaration_sentence_has_no_tail(header: str):
 
     fields = ("funding_statement", "coi_statement", "ethics_statement", "data_availability")
     assert all(module._heading_declaration_tail(field, header) is None for field in fields)
+
+
+def test_joined_statement_sections_keep_their_headings():
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                [
+                    "The datasets used in this study are available from the corresponding"
+                    " author on reasonable request."
+                ],
+            ),
+            (
+                2,
+                "Materials availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            ),
+            (
+                3,
+                "Code availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            ),
+            (
+                4,
+                "Ethics approval and consent to participate",
+                CanonicalSection.ENDNOTE,
+                "model",
+                0.993,
+                ["Not applicable."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Availability of data and materials: The datasets used in this study are available"
+        " from the corresponding author on reasonable request.\n\n"
+        "Materials availability: Not applicable.\n\n"
+        "Code availability: Not applicable."
+    )
+    assert metadata.ethics_statement == "Not applicable."
+
+
+def test_single_statement_section_is_not_prefixed_with_its_heading():
+    contents = _contents(
+        [
+            (
+                1,
+                "5.2 Data availability",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                ["Data are available on OSF."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == "Data are available on OSF."

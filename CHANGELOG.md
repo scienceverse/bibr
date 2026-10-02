@@ -35,6 +35,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   statement that the layout model merged into its heading ("Disclosure and
   competing interests statement The authors declare no competing interests.")
   is recovered from the heading. (#129)
+- A statement joined from several sections now keeps each section's heading
+  ("Materials availability: Not applicable."), so parts such as "Not
+  applicable." keep their meaning, and a section under a standard statement
+  heading ("Ethics approval and consent to participate") is exported even
+  when the section model typed it as something else, such as an endnote.
+  (#131)
 - Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
   two internal statement resolvers, said nothing about the paper, and fired on
   many papers; it is now a debug log message. (#146)
