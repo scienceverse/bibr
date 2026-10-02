@@ -287,3 +287,101 @@ def test_summary_heading_before_a_later_page_abstract_region_is_not_reused():
         ("Summary", False),
         ("Abstract", True),
     ]
+
+
+def test_non_english_reference_heading_owns_the_reference_entries():
+    """A printed "BIBLIOGRAFIA" holds the entries instead of standing empty (#108, #124)."""
+    for heading in ("BIBLIOGRAFIA", "Literaturverzeichnis", "Riferimenti bibliografici"):
+        parser, _ = _parse(
+            [
+                [
+                    _region("paragraph_title", heading, 60),
+                    _region("reference_content", "Rossi M. Adenomatosi polmonare. 1978.", 100),
+                ]
+            ]
+        )
+        assert [(s.header, s.header_is_synthetic) for s in _printed_sections(parser)] == [
+            (heading, False)
+        ], heading
+
+
+def test_front_page_abstract_heading_in_the_papers_language_owns_the_abstract():
+    """ "RIASSUNTO" before the abstract region owns it instead of an empty twin (#108)."""
+    parser, _ = _parse(
+        [
+            [
+                _region("doc_title", "Causa inconsueta di lesioni", 40),
+                _region("paragraph_title", "RIASSUNTO", 100),
+                _region("abstract", "In questa nota gli Autori descrivono un caso.", 130),
+            ]
+        ]
+    )
+    assert [(s.header, s.header_is_synthetic) for s in _printed_sections(parser)][1:] == [
+        ("RIASSUNTO", False)
+    ]
+
+
+def _lancet_back_matter(contributors_text):
+    return [
+        [
+            _region("paragraph_title", "Discussion", 60),
+            _region("text", "The trial shows a benefit of radiotherapy.", 100),
+            _region("paragraph_title", "Contributors", 700),
+            _region("reference", contributors_text, 720),
+        ],
+        [
+            _region("text", "(MP, MW, and DCW).", 60),
+            _region("paragraph_title", "Declaration of interests", 200),
+            _region("text", "MDJ has received consultancy fees.", 230),
+            _region("paragraph_title", "References", 400),
+            _region("reference_content", "1 Smith J, Jones A. A trial. Lancet 2020; 1: 1-9.", 430),
+            _region("reference_content", "2 Brown K, et al. Another trial. BMJ 2021; 2: 3-4.", 470),
+        ],
+    ]
+
+
+def test_back_matter_paragraph_labelled_reference_stays_in_its_section():
+    """A "Contributors" paragraph the layout model labels ``reference`` (#124).
+
+    It must not open the References section: the paragraph would become a
+    bibliography entry and the reference list would move ahead of the
+    remaining back matter.
+    """
+    parser, _ = _parse(
+        _lancet_back_matter("The writing group members are listed in the byline. MDJ was the chief")
+    )
+    sections = _printed_sections(parser)
+    assert [(s.header, s.header_is_synthetic) for s in sections] == [
+        ("Discussion", False),
+        ("Contributors", False),
+        ("Declaration of interests", False),
+        ("References", False),
+    ]
+    entries = _entry_headers(parser)
+    assert ("Contributors", "(MP, MW, and DCW).") in entries
+    assert any(h == "Contributors" and t.startswith("The writing group") for h, t in entries)
+    assert [t for h, t in entries if h == "References"][0].startswith("1 Smith J")
+
+
+def test_reference_region_with_entry_signals_still_opens_references():
+    """A ``reference`` region that reads like entries keeps opening the References section."""
+    parser, _ = _parse(_lancet_back_matter("1 Smith J, et al. An early trial. Lancet 2019; 1: 1."))
+    headers = [(s.header, s.header_is_synthetic) for s in _printed_sections(parser)]
+    assert ("Contributors", False) in headers
+    entries = _entry_headers(parser)
+    assert not any(h == "Contributors" and t.startswith("1 Smith") for h, t in entries)
+
+
+def test_reference_region_without_a_later_printed_heading_opens_references():
+    parser, _ = _parse(
+        [
+            [
+                _region("paragraph_title", "Discussion", 60),
+                _region("reference_content", "Smith J, Jones A. A paper on trials", 100),
+            ]
+        ]
+    )
+    assert [(s.header, s.header_is_synthetic) for s in _printed_sections(parser)] == [
+        ("Discussion", False),
+        ("References", True),
+    ]
