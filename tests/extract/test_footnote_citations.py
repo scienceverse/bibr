@@ -471,6 +471,19 @@ def test_table_notes_and_commentary_are_no_citations(clause):
     assert not fc.looks_like_citation(clause)
 
 
+@pytest.mark.parametrize(
+    "clause",
+    [
+        # A 1980s Nature notes list: one author, journal, volume, pages, year.
+        "Hollis, J. Devl Biol. 64, 112-130 (1979).",
+        "Tanabe, Y. Nature 311, 401-404 (1984).",
+        "Okada, M. Science 228, 1210 (1985).",
+    ],
+)
+def test_single_author_nature_style_notes_are_citations(clause):
+    assert fc.looks_like_citation(clause)
+
+
 # ---------------------------------------------------------------------------
 # When the notes stand in for the reference list
 # ---------------------------------------------------------------------------

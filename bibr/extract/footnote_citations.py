@@ -206,6 +206,13 @@ _CONTAINER_RE = re.compile(
 )
 # "Title, Publisher, 1995." closes on its year.
 _TRAILING_YEAR_RE = re.compile(rf",\s*{_YEAR}[a-z]?\s*[.;]?\s*$")
+# The Nature/Science locator: volume, pages, then the year in parentheses
+# ("Devl Biol. 81, 286-300 (1981).", "Nature 308, 693-698 (1984)."). A
+# single-author entry of that style has no other cue: "Kimble, J." before a
+# capitalised journal word is no name onset, and the year does not close it.
+_VOLUME_PAGES_YEAR_RE = re.compile(
+    rf"\b\d{{1,4}},\s*[A-Z]?\d{{1,6}}(?:\s?[-–]\s?[A-Z]?\d{{1,6}})?\s*\(\s*{_YEAR}[a-z]?\s*\)"
+)
 _WORD_RE = re.compile(r"\w+")
 
 # Court decisions. A decision is cited by its court, a chamber, the date and
@@ -702,11 +709,12 @@ def _citation_kind(clause: str) -> str | None:
     "(1880-1943)" or a date stamp does not count) and one bibliographic cue:
     a name opening the clause, a quoted title, a "Place: Publisher" imprint, a
     container, edition or locator marker ("In", "(ed.)", "vol. 3", "pp. 12-19",
-    "ISBN"), a publisher word, or the year closing the clause. An undated
-    citation needs three of those cues, the book-and-chapter shape of a
-    classical work ("Estrabón, Geografía, XVI, 17"), or an ISO 690 byline
-    ("COLLALTO, Marie Therese.") and a container or locator. A court
-    decision ("Civ. 1re, 16 juill. 1998, D. 1999. 306") is a full citation.
+    "ISBN", "81, 286-300 (1981)"), a publisher word, or the year closing the
+    clause. An undated citation needs three of those cues, the
+    book-and-chapter shape of a classical work ("Estrabón, Geografía, XVI,
+    17"), or an ISO 690 byline ("COLLALTO, Marie Therese.") and a container
+    or locator. A court decision ("Civ. 1re, 16 juill. 1998, D. 1999. 306")
+    is a full citation.
     """
     if len(_WORD_RE.findall(clause)) < 4 or _TABLE_NOTE_RE.match(clause):
         return None
@@ -720,6 +728,7 @@ def _citation_kind(clause: str) -> str | None:
             _QUOTED_RE.search(clause),
             _PLACE_PUBLISHER_RE.search(clause),
             _CONTAINER_RE.search(clause),
+            _VOLUME_PAGES_YEAR_RE.search(clause),
         )
     )
     if _YEAR_RE.search(probe):

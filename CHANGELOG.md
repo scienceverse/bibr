@@ -31,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - On a watermarked review copy, a reference entry is no longer extracted
   twice when a few words of the diagonal stamp land in the entry's own
   layout box (#140).
+- When a paper's notes stand in for its reference list, a single-author
+  note in the old Nature/Science style ("Surname, I. Journal 81, 286-300
+  (1981).") is now kept as a reference (#146).
 
 ## [0.6.0] - 2026-09-30
 
