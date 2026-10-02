@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - An article-type kicker printed above the title ("Retraction", "ARTICLES", "Original
   Article") is no longer taken as the title when the layout labels both as the title:
   the title that follows it is used (#143).
+- A title that starts with "A " ("A genetic pathway for …") is no longer re-typed as a
+  lettered appendix when page 1 opens with the end of the previous article and its
+  reference list; the paper's byline and front matter stayed out of the extraction
+  (#143).
 
 ## [0.6.0] - 2026-09-30
 
