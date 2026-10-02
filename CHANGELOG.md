@@ -32,6 +32,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   every author the first institution plus the rest of the line; each glued
   number now ends the previous definition, and a definition that still runs
   into another one is not used (#107).
+- Affiliations printed as a first-page footnote now reach the model that reads
+  the authors, as a labelled block after the author context (copyright,
+  publication-history, licence and correspondence footnotes excluded, at most
+  2,000 characters). Papers whose only affiliation list was such a footnote
+  came back with every affiliation empty (#117).
 
 ## [0.6.0] - 2026-09-30
 

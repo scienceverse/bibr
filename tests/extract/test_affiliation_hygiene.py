@@ -567,3 +567,101 @@ def test_a_digit_glued_to_a_word_that_is_not_a_marker_stays_text():
         "Example University, 3D Printing Laboratory, 3M Company, St Paul, MN, USA"
     )
     assert authors[1].affiliation == "Other College, Oxford, UK"
+
+
+# ── #117: first-page affiliation footnotes in the author context ──────────
+
+
+def _footnote_extractor(frame: pd.DataFrame) -> CoreMetadataExtractor:
+    extractor = object.__new__(CoreMetadataExtractor)
+    extractor.sentences_df = frame
+    return extractor
+
+
+def test_first_page_affiliation_footnotes_are_collected():
+    frame = _sectioned_frame(
+        (1, "title", "A Study of Things"),
+        (1, "footnote", "a Department of Psychology, Example University, Utrecht, The Netherlands"),
+        (1, "footnote", "© 2024 The Authors. Published by Example Press."),
+        (1, "footnote", "Received 1 May 2024; accepted 2 June 2024"),
+        (1, "footnote", "Correspondence to: Ann Lee, Example University, Utrecht"),
+        (1, "footnote", "b School of Medicine, Other College, Leeds, UK. E-mail: bo@example.org"),
+        (2, "footnote", "c Institute of Elsewhere, Page Two University, Delft"),
+        (1, "introduction", "d Center for Results, Body Text University, Bonn"),
+    )
+
+    found = _footnote_extractor(frame)._front_page_footnote_affiliations("Ann Lee and Bo Chen")
+
+    assert found == [
+        "a Department of Psychology, Example University, Utrecht, The Netherlands",
+        "b School of Medicine, Other College, Leeds, UK. E-mail: bo@example.org",
+    ]
+
+
+def test_footnotes_already_in_the_context_or_over_budget_are_not_added():
+    long_tail = ", ".join(["Example Street"] * 200)
+    frame = _sectioned_frame(
+        (1, "footnote", "Department of Psychology, Example University, Utrecht"),
+        (1, "footnote", f"School of Medicine, Other College, {long_tail}"),
+        (1, "footnote", "Institute of Later, Third University, Delft"),
+    )
+    extractor = _footnote_extractor(frame)
+
+    found = extractor._front_page_footnote_affiliations(
+        "Ann Lee\nDepartment of Psychology, Example University, Utrecht"
+    )
+
+    assert found == []
+    assert extractor._front_page_footnote_affiliations("") == [
+        "Department of Psychology, Example University, Utrecht"
+    ]
+
+
+async def test_the_author_llm_sees_the_first_page_affiliation_footnotes():
+    from unittest import mock
+
+    from bibr.paper_contents import PaperContents
+    from bibr.schemas import AuthorLLM, CoreMetadataLLM
+
+    frame = pd.DataFrame(
+        {
+            "section_name": ["Title", "Title", "Footnote"],
+            "section_type": ["title", "title", "footnote"],
+            "page_number": [1, 1, 1],
+            "text": [
+                "A Study of Things",
+                "Ann Lee and Bo Chen",
+                "Department of Psychology, Example University, Utrecht, The Netherlands",
+            ],
+        }
+    )
+    contents = mock.Mock(spec=PaperContents)
+    contents.sentences_df = frame
+    contents.detected_headers = []
+    contents.detected_footers = []
+    contents.layout_hints = []
+    contents.sections = []
+    contents.sentences = []
+    contents.processing_warnings = []
+    locator = mock.MagicMock()
+    locator.get_cutoff_index.return_value = 2
+    locator.collect_core_metadata_rows.return_value = frame.iloc[:2].copy()
+    llm_client = mock.MagicMock()
+    llm_client.extract_core_metadata = mock.AsyncMock(
+        return_value=CoreMetadataLLM(
+            title="A Study of Things",
+            authors=[AuthorLLM(given="Ann", family="Lee"), AuthorLLM(given="Bo", family="Chen")],
+            keywords=[],
+        )
+    )
+    extractor = CoreMetadataExtractor(
+        contents, llm_client=llm_client, locator=locator, email_harvester=mock.MagicMock()
+    )
+
+    await extractor.extract()
+
+    authors_text = llm_client.extract_core_metadata.await_args.kwargs["authors_text"]
+    assert authors_text.endswith(
+        "\n\n[Affiliation footnotes printed on the first page]\n"
+        "Department of Psychology, Example University, Utrecht, The Netherlands"
+    )

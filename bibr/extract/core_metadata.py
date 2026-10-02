@@ -150,6 +150,16 @@ _AFFILIATION_ORG_RE = re.compile(
     r"centre|center|clinic|laborator(?:y|ies))\b",
     re.IGNORECASE,
 )
+# A front-page footnote that is publication furniture or a contact line, not
+# an affiliation, unless an institution word comes before the match.
+_NON_AFFILIATION_FOOTNOTE_RE = re.compile(
+    r"(?:\u00a9|copyright|\breceived\b|\baccepted\b|\bpublished\b|\bcitation\b|"
+    r"homepage|journal|licen[cs]e|\bdoi\b|https?://|www\.|all rights reserved|"
+    r"to whom correspondence|corresponding author|correspondence to|e-?mail\s*:)",
+    re.IGNORECASE,
+)
+# Upper bound on the footnote text added to the author LLM's context.
+_FOOTNOTE_AFFILIATION_BUDGET = 2000
 
 # Positive evidence that a captured ``<number> <Capital…>`` run really is an
 # institution. Without it the numbered-affiliation reconciler accepted any
@@ -1977,6 +1987,18 @@ class CoreMetadataExtractor:
             if table_text and authors_text is not None and table_text not in authors_text:
                 authors_text += "\n" + table_text
 
+            # Affiliations printed as a first-page footnote are not front-matter
+            # candidates, so neither the author zone nor the block context
+            # carries them and the model returned empty affiliations (or filled
+            # them in from general knowledge). Give it them as a labelled block.
+            if authors_text is not None:
+                footnote_affiliations = self._front_page_footnote_affiliations(authors_text)
+                if footnote_affiliations:
+                    authors_text += (
+                        "\n\n[Affiliation footnotes printed on the first page]\n"
+                        + "\n".join(footnote_affiliations)
+                    )
+
             llm_metadata = await self._call_core_llm(
                 full_text,
                 authors_text=authors_text,
@@ -3126,6 +3148,38 @@ class CoreMetadataExtractor:
                     kept.append(part)
             author.affiliation = "; ".join(kept)
         return dropped
+
+    def _front_page_footnote_affiliations(self, already: str) -> list[str]:
+        """Front-page footnote rows that read as an affiliation and are not in
+        ``already`` (the author context built so far), within a 2,000-character
+        budget. Copyright, publication-history, licence and correspondence
+        footnotes are skipped unless an institution word comes first."""
+        df = self.sentences_df
+        if df.empty or not {"text", "page_number", "section_type"}.issubset(df.columns):
+            return []
+        rows = df.loc[
+            (df["page_number"] == _front_page(df))
+            & (df["section_type"] == CanonicalSection.FOOTNOTE),
+            "text",
+        ]
+        normalized_already = _normalize_affiliation_match_text(already)
+        found: list[str] = []
+        budget = _FOOTNOTE_AFFILIATION_BUDGET
+        for value in rows.values:
+            if pd.isna(value):
+                continue
+            text = _normalize_affiliation_match_text(str(value))
+            if not text or text in normalized_already or not _looks_like_affiliation(text):
+                continue
+            if _NON_AFFILIATION_FOOTNOTE_RE.search(text) and not _AFFILIATION_ORG_RE.search(
+                _NON_AFFILIATION_FOOTNOTE_RE.split(text, maxsplit=1)[0]
+            ):
+                continue
+            if len(text) > budget:
+                break
+            budget -= len(text)
+            found.append(text)
+        return found
 
     async def _classify_paper(
         self, title: str, abstract: str, llm_metadata, classification_text: str
