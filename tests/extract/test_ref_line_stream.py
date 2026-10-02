@@ -561,6 +561,31 @@ def test_dash_led_same_author_entries_open_entries():
     assert len(segmentation.entries) == 4
 
 
+def test_colon_bylines_open_entries():
+    # F1000Research-style single-author entries close the byline with a colon
+    # and carry no end cue, so only the onset separates them.
+    stream = _stream(
+        [
+            "Blum C, Zuber CI: Liquid democracy: Potentials, problems, and",
+            "perspectives. J Polit Philos. 2016; 24(2): 162-182.",
+            "Moreau A: Party change: The causes, challenges and consequences of",
+            "organizational change. Oxford University Press; 2017.",
+            "Gerber P: The networked party: Political organisation online.",
+            "Pluto Press; 2019.",
+            "Hirsch AO: Exit and voice: Responses to decline in firms,",
+            "organizations, and states. Harvard University Press; 1970.",
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert [entry.split(":")[0] for entry in segmentation.entries] == [
+        "Blum C, Zuber CI",
+        "Moreau A",
+        "Gerber P",
+        "Hirsch AO",
+    ]
+
+
 def test_lowercase_continuation_without_a_date_rejoins_the_previous_entry():
     stream = _stream(
         [
