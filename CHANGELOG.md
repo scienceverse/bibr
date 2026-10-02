@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   section, an essay section titled like ethics ("Time Discounting: An Ethical
   Problem") or an AI-tool disclosure is no longer copied into the funding or
   ethics statement. (#128)
+- Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
+  two internal statement resolvers, said nothing about the paper, and fired on
+  many papers; it is now a debug log message. (#146)
 
 ## [0.6.0] - 2026-09-30
 

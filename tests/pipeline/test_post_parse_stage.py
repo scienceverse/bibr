@@ -1,6 +1,7 @@
 """PostParseStage — extractor invocation (post_parse helper)."""
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -497,7 +498,7 @@ async def test_integrity_resolution_receives_available_author_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(monkeypatch):
+async def test_default_shadow_comparison_is_logged_not_exported(monkeypatch, caplog):
     contents = PaperContents(
         sentences=[
             PaperSentence(
@@ -532,19 +533,21 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
     monkeypatch.setattr(
         "bibr.pipeline.stages.post_parse._classify_sections", preserve_classification
     )
-    paper = await post_parse(
-        contents=contents,
-        file_name="synthetic-topical-ethics.pdf",
-        file_hash="synthetic-topical-ethics",
-        no_llm=True,
-    )
+    with caplog.at_level(logging.DEBUG, logger="bibr.pipeline.stages.post_parse"):
+        paper = await post_parse(
+            contents=contents,
+            file_name="synthetic-topical-ethics.pdf",
+            file_hash="synthetic-topical-ethics",
+            no_llm=True,
+        )
 
     assert paper.metadata.ethics_statement == contents.sentences[0].text
-    issue = next(
-        issue for issue in paper.validation_issues if issue.code == "VAL_STATEMENT_SUSPECT"
+    assert not any(issue.code == "VAL_STATEMENT_SUSPECT" for issue in paper.validation_issues)
+    assert any(
+        record.getMessage().startswith("VAL_STATEMENT_SUSPECT:")
+        and "ethics_statement" in record.getMessage()
+        for record in caplog.records
     )
-    assert issue.origin_stage == "post_parse"
-    assert "ethics_statement" in issue.evidence_ids
     assert not any(
         "VAL_STATEMENT_SUSPECT" in f"{w.code}: {w.message}" for w in paper.processing_warnings
     )
