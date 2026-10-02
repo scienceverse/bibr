@@ -178,31 +178,14 @@ def test_topical_philosophy_sections_are_retrieval_only():
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     resolution, active = _resolve_apply(contents, "active")
 
-    expected_legacy = "\n\n".join(
-        " ".join(
-            sentence.text
-            for sentence in contents.sentences
-            if sentence.section_id == section.section_id
-        )
-        for section in contents.sections
-    )
-    assert legacy.ethics_statement == expected_legacy
-    assert shadow.ethics_statement == expected_legacy
+    # Each section is a four-paragraph chapter typed ETHICS by the section
+    # model: too long to be copied as a statement, so the compatibility value
+    # falls back to the lexical path, which finds no ethics anchor.
+    assert legacy.ethics_statement is None
+    assert shadow.ethics_statement is None
     assert active.ethics_statement is None
     assert legacy_resolution.issues == ()
-    issue = next(
-        issue
-        for issue in shadow_resolution.issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
-    )
-    assert issue.evidence_ids[:4] == (
-        "ethics_statement",
-        "section:1",
-        "section:2",
-        "section:3",
-    )
-    assert len(issue.evidence_ids) <= 20
-    assert len(issue.evidence_ids) == len(set(issue.evidence_ids))
+    assert not any("ethics_statement" in issue.evidence_ids for issue in shadow_resolution.issues)
     assert tuple(vars(sentence).copy() for sentence in contents.sentences) == original_body
     section_candidates = {
         candidate.section_ids[0]: candidate
@@ -223,6 +206,37 @@ def test_topical_philosophy_sections_are_retrieval_only():
     assert section_candidates[3].classification_score == 0.96
 
 
+def test_shadow_comparison_evidence_names_every_implicated_section():
+    contents = _synthetic_contents("topical_ethics")
+    first_paragraph = {}
+    for sentence in contents.sentences:
+        first_paragraph.setdefault(sentence.section_id, sentence.paragraph_id)
+    contents.sentences = [
+        sentence
+        for sentence in contents.sentences
+        if sentence.paragraph_id == first_paragraph[sentence.section_id]
+    ]
+
+    shadow_resolution, shadow = _resolve_apply(contents, "shadow")
+
+    # One short paragraph per model-typed section is still copied, while the
+    # bounded selection rejects the topical prose.
+    assert shadow.ethics_statement is not None
+    issue = next(
+        issue
+        for issue in shadow_resolution.issues
+        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
+    )
+    assert issue.evidence_ids[:4] == (
+        "ethics_statement",
+        "section:1",
+        "section:2",
+        "section:3",
+    )
+    assert len(issue.evidence_ids) <= 20
+    assert len(issue.evidence_ids) == len(set(issue.evidence_ids))
+
+
 def test_model_classified_topical_funding_prose_needs_a_declaration_predicate():
     contents = _contents(
         [
@@ -240,7 +254,7 @@ def test_model_classified_topical_funding_prose_needs_a_declaration_predicate():
     assert metadata.funding_statement is None
 
 
-def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bounded():
+def test_section_copy_stops_at_the_next_statement_label():
     contents = _contents(
         [
             (
@@ -261,9 +275,10 @@ def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bound
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     active_resolution, active = _resolve_apply(contents, "active")
 
-    exact_legacy = "This work was supported by NSF grant 123. Ethics: Not applicable."
-    assert legacy.funding_statement == exact_legacy
-    assert shadow.funding_statement == exact_legacy
+    # "Ethics:" opens another statement, so the FUNDING copy ends before it
+    # and agrees with the bounded selection.
+    assert legacy.funding_statement == "This work was supported by NSF grant 123."
+    assert shadow.funding_statement == legacy.funding_statement
     assert active.funding_statement == "This work was supported by NSF grant 123."
     assert active.ethics_statement == "Ethics: Not applicable."
     assert (
@@ -272,21 +287,13 @@ def test_shadow_uses_exact_legacy_section_snapshot_but_selected_funding_is_bound
         )
         == "This work was supported by NSF grant 123."
     )
-    funding_issues = [
-        issue
+    assert not any(
+        issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
         for issue in shadow_resolution.issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
-    ]
-    assert len(funding_issues) == 1
-    assert funding_issues[0].evidence_ids == (
-        "funding_statement",
-        "section:1",
-        "text:1",
-        "text:2",
     )
 
 
-def test_legacy_snapshot_preserves_pre_finalize_bytes_while_selected_renders_final_clean():
+def test_shadow_value_renders_from_final_clean_text_like_the_selection():
     contents = _contents(
         [
             (
@@ -309,16 +316,19 @@ def test_legacy_snapshot_preserves_pre_finalize_bytes_while_selected_renders_fin
 
     module.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
-    )
+    assert metadata.funding_statement == "This work was supported by NSF grant 123 ."
     assert (
         module.render_selected_integrity_statement(contents, resolution, "funding_statement")
         == "This work was supported by NSF grant 123 ."
     )
+    # The resolve-time snapshot (the shadow comparison baseline) keeps the
+    # pre-cleaning text.
+    assert dict(resolution.legacy_statement_snapshots)["funding_statement"] == (
+        "This work was supported by NSF grant $^{123}$ ."
+    )
 
 
-def test_legacy_section_snapshot_preserves_internal_sentence_whitespace():
+def test_legacy_section_copy_collapses_raw_line_breaks():
     contents = _contents(
         [
             (
@@ -328,21 +338,22 @@ def test_legacy_section_snapshot_preserves_internal_sentence_whitespace():
                 "exact_alias",
                 1.0,
                 [
-                    "  This work was supported by NSF grant 123.  ",
-                    "  Ethics: Not applicable.  ",
+                    "  This work was supported by the NSF\r\nunder grant 123.  ",
+                    "  Additional support came from the\r\n  Wellcome Trust.  ",
                 ],
             )
         ]
     )
 
-    _resolution, metadata = _resolve_apply(contents, "legacy")
+    for mode in ("legacy", "shadow"):
+        _resolution, metadata = _resolve_apply(contents, mode)
+        assert metadata.funding_statement == (
+            "This work was supported by the NSF under grant 123. "
+            "Additional support came from the Wellcome Trust."
+        )
 
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant 123.     Ethics: Not applicable."
-    )
 
-
-def test_formatting_only_final_clean_change_keeps_frozen_shadow_comparison_issue_free():
+def test_formatting_only_final_clean_change_keeps_shadow_comparison_issue_free():
     contents = _contents(
         [
             (
@@ -369,7 +380,7 @@ def test_formatting_only_final_clean_change_keeps_frozen_shadow_comparison_issue
     module.apply_integrity_resolution(contents, metadata, resolution)
     module.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert metadata.funding_statement == "This work was supported by NSF grant $^{123}$ ."
+    assert metadata.funding_statement == "This work was supported by NSF grant 123 ."
     assert (
         module.render_selected_integrity_statement(contents, resolution, "funding_statement")
         == "This work was supported by NSF grant 123 ."
@@ -2188,3 +2199,378 @@ def test_legacy_preserves_canonical_scalar_when_heading_points_to_another_field(
         issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
         for issue in shadow_resolution.issues
     )
+
+
+# ── Compatibility-value bounds (tester-reported cases, synthetic text) ──────
+
+
+def _shadow_values(contents: PaperContents) -> PaperMetadata:
+    module = _resolver_module()
+    resolution = module.resolve_integrity_statements(contents, mode="shadow")
+    contents.finalize_text()
+    metadata = PaperMetadata(doi="", title="T")
+    module.apply_integrity_resolution(contents, metadata, resolution)
+    return metadata
+
+
+def _statement_values(metadata: PaperMetadata) -> list[str]:
+    return [
+        value
+        for field in ("funding_statement", "coi_statement", "ethics_statement", "data_availability")
+        if (value := getattr(metadata, field)) is not None
+    ]
+
+
+def test_front_matter_block_statements_stop_at_the_next_label_and_lose_raw_breaks():
+    # An F1000-style block the parser put under Keywords: each statement
+    # ran on into the next label ("Grant information:", "Copyright: ©").
+    contents = _contents(
+        [
+            (
+                1,
+                "Keywords",
+                CanonicalSection.KEYWORDS,
+                "exact_alias",
+                1.0,
+                [
+                    ("Competing interests: No competing interests were disclosed.", 13),
+                    ("Grant information:", 13),
+                    (
+                        "This project has received funding from the Example Framework Programme"
+                        " as\r\npart of the COST Action CA00000, as supported by the COST"
+                        " Association.",
+                        13,
+                    ),
+                    (
+                        "The funders had no role in study design, data collection and analysis,"
+                        " decision to publish, or preparation of the manuscript.",
+                        13,
+                    ),
+                    ("Copyright: © 2026 Author A.", 13),
+                    (
+                        "This is an open access article distributed under the terms of the"
+                        " Creative Commons Attribution License.",
+                        13,
+                    ),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "Competing interests: No competing interests were disclosed."
+    assert metadata.funding_statement == (
+        "This project has received funding from the Example Framework Programme as part of the"
+        " COST Action CA00000, as supported by the COST Association. The funders had no role in"
+        " study design, data collection and analysis, decision to publish, or preparation of the"
+        " manuscript."
+    )
+    assert not any("\r" in value or "\n" in value for value in _statement_values(metadata))
+
+
+def test_funding_capture_stops_before_a_thanks_sentence():
+    contents = _contents(
+        [
+            (
+                1,
+                "Acknowledgements",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "This research was supported by the Example Postdoctoral Fellowship"
+                        " Program.",
+                        40,
+                    ),
+                    ("Additionally, we thank A. Author and B. Author for their leadership.", 40),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This research was supported by the Example Postdoctoral Fellowship Program."
+    )
+
+
+def test_data_capture_stops_at_a_preprint_sidebar():
+    contents = _contents(
+        [
+            (
+                1,
+                "Results",
+                CanonicalSection.RESULTS,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Data are available for review and are being deposited into a public"
+                        " repository.",
+                        50,
+                    ),
+                    ("All rights reserved. No reuse allowed without permission.", 51),
+                    ("The copyright holder for this preprint is the author/funder.", 52),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Data are available for review and are being deposited into a public repository."
+    )
+
+
+def test_statement_section_holding_only_a_licence_is_not_exported():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "model",
+                0.998,
+                [
+                    ("Open Access", 67),
+                    (
+                        "This article is licensed under a Creative\r\nCommons Attribution 4.0"
+                        " International License, which permits use and sharing in any medium.",
+                        67,
+                    ),
+                    (
+                        "To view a copy of this licence, visit"
+                        " http://creativecommons.org/licenses/by/4.0/.",
+                        68,
+                    ),
+                    ("© The Author(s) 2026", 69),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+def test_declaration_then_licence_in_one_row_keeps_only_the_declaration():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    "The authors declare no competing interests. This article is licensed"
+                    " under a Creative Commons Attribution 4.0 International License."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+def test_leading_watermark_row_of_a_statement_section_is_skipped():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding sources",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Disclaimer: The manuscript and its contents are confidential, intended"
+                        " for journal review purposes only.",
+                        30,
+                    ),
+                    ("This work was funded by the Example Research Council (grant 123).", 30),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This work was funded by the Example Research Council (grant 123)."
+    )
+
+
+def test_data_statement_keeps_its_request_to_the_corresponding_author():
+    contents = _contents(
+        [
+            (
+                1,
+                "Data sharing",
+                CanonicalSection.OPEN_DATA,
+                "exact_alias",
+                1.0,
+                [
+                    (
+                        "Individual participant data will be made available beginning 9 months"
+                        " after publication.",
+                        70,
+                    ),
+                    (
+                        "Proposals should be directed to the corresponding author and requesters"
+                        " will need to sign a data access agreement.",
+                        70,
+                    ),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == (
+        "Individual participant data will be made available beginning 9 months after"
+        " publication. Proposals should be directed to the corresponding author and requesters"
+        " will need to sign a data access agreement."
+    )
+
+
+def test_first_page_footnote_keeps_the_funding_after_the_history_line():
+    contents = _contents(
+        [
+            (
+                1,
+                "Footnote 1",
+                CanonicalSection.FOOTNOTE,
+                "exact_alias",
+                1.0,
+                [
+                    "Manuscript received May 1, 2020; revised June 2, 2020; accepted July 3,"
+                    " 2020. This work was supported by the Example Science Foundation under"
+                    " Grant 123."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This work was supported by the Example Science Foundation under Grant 123."
+    )
+
+
+def test_line_broken_anchor_is_matched_on_collapsed_text():
+    contents = _contents(
+        [
+            (
+                1,
+                "Methods",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                ["Ethics \r\napproval was obtained from the University Ethics Board (2020/01)."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Ethics approval was obtained from the University Ethics Board (2020/01)."
+    )
+
+
+def test_label_led_capture_is_preferred_over_an_earlier_prose_mention():
+    contents = _contents(
+        [
+            (
+                1,
+                "Introduction",
+                CanonicalSection.INTRODUCTION,
+                "exact_alias",
+                1.0,
+                ["Earlier trials were funded by industry grants, which raised concerns."],
+            ),
+            (
+                2,
+                "Declarations",
+                CanonicalSection.UNKNOWN,
+                None,
+                0.0,
+                ["Funding: This study was funded by the Example Research Council (grant 123)."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "Funding: This study was funded by the Example Research Council (grant 123)."
+    )
+
+
+def test_long_model_typed_ethics_chapter_falls_back_to_a_lexical_capture():
+    # A thesis chapter typed ETHICS by the section model is not a statement.
+    filler = (
+        "Ethical issues that may surface during data collection include confidentiality,"
+        " deception and covert activities, and each step of the study was planned to avoid"
+        " them while keeping the analysis transparent for later readers of this chapter."
+    )
+    rows: list[str | tuple[str, int]] = [
+        (filler, paragraph) for paragraph in range(8) for _ in (0, 1, 2)
+    ]
+    rows.append(("Data collection began after IRB approval (approval no. 12-34-56).", 8))
+    contents = _contents([(1, "Ethical Procedures", CanonicalSection.ETHICS, "model", 0.999, rows)])
+    assert sum(len(row[0]) for row in rows if isinstance(row, tuple)) > 3000
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Data collection began after IRB approval (approval no. 12-34-56)."
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Uno achieves a 2x speedup at the largest batch size supported by the base AR model.",
+        "Smart homes are increasingly supported by AI and IoT services.",
+        # A raw line break used to hide this anchor; collapsed, it must not
+        # pass on the bare acronyms that follow it.
+        "The cluster was defined as glomerular and supported \r\nby expression of the markers"
+        " NPHS1, NPHS2, and PODXL.",
+    ],
+)
+def test_supported_by_needs_a_funder_not_just_an_acronym(text: str):
+    contents = _contents([(1, "Results", CanonicalSection.RESULTS, "exact_alias", 1.0, [text])])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The first author was supported by a CONICET fellowship.",
+        "This study was supported by FAPESP (process # 2011/14143-2).",
+        "The project was supported by NSFC.",
+        "Data collection was supported by the Example Science Society.",
+    ],
+)
+def test_supported_by_a_named_funder_is_still_funding(text: str):
+    contents = _contents(
+        [(1, "Acknowledgements", CanonicalSection.ACKNOWLEDGMENT, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text

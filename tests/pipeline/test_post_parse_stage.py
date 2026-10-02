@@ -551,7 +551,7 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
 
 
 @pytest.mark.asyncio
-async def test_default_shadow_keeps_pre_finalize_scalar_bytes_through_post_parse(monkeypatch):
+async def test_default_shadow_renders_statement_from_final_text_through_post_parse(monkeypatch):
     contents = PaperContents(
         sentences=[
             PaperSentence(
@@ -600,16 +600,8 @@ async def test_default_shadow_keeps_pre_finalize_scalar_bytes_through_post_parse
         no_llm=True,
     )
 
-    assert paper.metadata.funding_statement == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
-    )
-    assert paper.contents.sentences[0].text == "This work was supported by NSF grant 123 ."
-    funding_issues = [
-        issue
-        for issue in paper.validation_issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
-    ]
-    assert len(funding_issues) == 1
+    assert paper.metadata.funding_statement == "This work was supported by NSF grant 123 ."
+    assert paper.contents.sentences[0].text == paper.metadata.funding_statement
 
 
 @pytest.mark.asyncio

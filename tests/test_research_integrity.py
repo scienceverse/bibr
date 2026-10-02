@@ -406,7 +406,7 @@ async def test_shadow_structured_funding_uses_bounded_selection_not_legacy_scala
     )
 
 
-async def test_shadow_exact_legacy_section_scalar_and_bounded_structured_funding_diverge():
+async def test_shadow_section_copy_ends_at_next_label_and_matches_structured_funding():
     contents = _contents(
         [
             (
@@ -427,10 +427,8 @@ async def test_shadow_exact_legacy_section_scalar_and_bounded_structured_funding
 
     integrity.apply_integrity_resolution(contents, metadata, resolution)
 
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant 123. Ethics: Not applicable."
-    )
-    assert any(
+    assert metadata.funding_statement == "This work was supported by NSF grant 123."
+    assert not any(
         issue.code == "VAL_STATEMENT_SUSPECT" and "funding_statement" in issue.evidence_ids
         for issue in resolution.issues
     )
@@ -453,7 +451,7 @@ async def test_shadow_exact_legacy_section_scalar_and_bounded_structured_funding
     )
 
 
-async def test_legacy_structured_funding_uses_exact_compatibility_scalar():
+async def test_legacy_structured_funding_uses_the_compatibility_section_copy():
     contents = _contents(
         [
             (
@@ -473,9 +471,7 @@ async def test_legacy_structured_funding_uses_exact_compatibility_scalar():
     contents.finalize_text()
     metadata = PaperMetadata(doi="", title="T")
     integrity.apply_integrity_resolution(contents, metadata, resolution)
-    assert metadata.funding_statement == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
-    )
+    assert metadata.funding_statement == "This work was supported by NSF grant 123 ."
 
     result = ResearchIntegrityLLM.model_validate(
         {"funding": [{"funder": "NSF", "award_ids": ["123"]}]}
@@ -491,7 +487,7 @@ async def test_legacy_structured_funding_uses_exact_compatibility_scalar():
     )
 
     assert client.extract_research_integrity.await_args.kwargs["funding_text"] == (
-        "This work was supported by NSF grant $^{123}$ . Ethics: Not applicable."
+        "This work was supported by NSF grant $^{123}$ ."
     )
 
 

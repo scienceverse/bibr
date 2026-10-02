@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Funding, conflict-of-interest, ethics and data-availability statements no
+  longer keep raw PDF line breaks, and they end where the statement ends: a
+  following thanks sentence, the next label ("Grant information:",
+  "Copyright: ©"), a licence block or a preprint sidebar is no longer appended,
+  a statement section that holds only a licence is no longer exported, and a
+  long chapter typed as a statement section (a thesis's "Ethical Procedures")
+  is no longer copied whole. A phrase split by a line break ("supported
+  by") is now found. (#127)
+- "Supported by" followed only by an acronym ("supported by the base AR
+  model") is no longer exported as a funding statement. (#128)
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)
