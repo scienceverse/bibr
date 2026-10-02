@@ -2783,3 +2783,95 @@ def test_labelled_human_and_animal_rights_statement_is_ethics():
     metadata = _shadow_values(contents)
 
     assert metadata.ethics_statement == text
+
+
+def test_labelled_coi_after_the_reference_list_is_found():
+    # The layout model typed the last-page end matter as reference content.
+    statement = (
+        "Conflict of interest statement: The authors declare that the article content was"
+        " composed in the absence of any commercial or financial relationships that could"
+        " be construed as a potential conflict of interest."
+    )
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "1. Doe J, Roe R. A study of outcomes. J Example. 2017;12:1-9.",
+                    statement,
+                    "Received 3 May 2019; accepted 5 June 2019",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == statement
+
+
+def test_reference_entries_that_mention_statement_topics_are_not_statements():
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "2. Roe R. Conflicts of interest in clinical research: the authors declare"
+                    " a problem. J Example. 2010;5:3-8.",
+                    "3. Poe P. Research supported by the National Science Foundation."
+                    " Example Press; 2012.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+    assert metadata.funding_statement is None
+
+
+def test_statement_fused_into_its_heading_region_is_recovered():
+    contents = _contents(
+        [
+            (
+                1,
+                "Disclosure and competing interests statement The authors declare no"
+                " competing interests.",
+                CanonicalSection.COI,
+                "model",
+                0.998,
+                [
+                    "Open Access This article is licensed under a Creative Commons Attribution"
+                    " 4.0 International License."
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Conflict of Interest Statement",
+        "Competing Interests and Their Management in Peer Review",
+        "Funding and Support",
+    ],
+)
+def test_heading_without_a_declaration_sentence_has_no_tail(header: str):
+    module = _resolver_module()
+
+    fields = ("funding_statement", "coi_statement", "ethics_statement", "data_availability")
+    assert all(module._heading_declaration_tail(field, header) is None for field in fields)

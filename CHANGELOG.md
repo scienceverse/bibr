@@ -30,6 +30,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   funding statement. It was parsed from different text, so it was often empty
   while the statement named a funder, or listed funders from another
   paragraph. (#130)
+- A labelled statement printed after the reference list ("Conflict of
+  interest statement: …" on the last page) is now found, and a one-line
+  statement that the layout model merged into its heading ("Disclosure and
+  competing interests statement The authors declare no competing interests.")
+  is recovered from the heading. (#129)
 - Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
   two internal statement resolvers, said nothing about the paper, and fired on
   many papers; it is now a debug log message. (#146)

@@ -280,6 +280,17 @@ _STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
     )
     for field, words in _STATEMENT_LABEL_WORDS.items()
 }
+# Inside the reference list only a row that opens with a punctuated label
+# ("Conflict of interest statement: ...") is a statement: end matter that
+# the layout model put after the last reference.
+_REFERENCE_STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
+    field: re.compile(rf"^\W*(?:{words})(?:\s+statements?)?\s*[:.—–-]", re.IGNORECASE)
+    for field, words in _STATEMENT_LABEL_WORDS.items()
+}
+# A heading region that also holds the one-line statement ("Disclosure and
+# competing interests statement The authors declare no competing interests.").
+_HEADING_TAIL_START = re.compile(r"\s(?=[A-Z][a-z]*\s+[a-z])")
+_MAX_HEADING_LABEL_CHARS = 80
 # Rows that open other end matter (or are page furniture) end a statement copy.
 _END_MATTER_LABEL = re.compile(
     r"^\W*(?:(?:patient )?consent for publication|patient and public involvement|"
@@ -682,7 +693,8 @@ def _legacy_capture_at(
     """The lexical capture anchored at ``rows[index]``, or ``[]``."""
     sentence = rows[index]
     section = section_by_id.get(sentence.section_id)
-    if section is not None and section.section_type == CanonicalSection.REFERENCES:
+    in_references = section is not None and section.section_type == CanonicalSection.REFERENCES
+    if in_references and not _REFERENCE_STATEMENT_LABEL[field].match(sentence.text):
         return []
     if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
         return []
@@ -707,7 +719,7 @@ def _legacy_capture_at(
 
     captured = [sentence]
     for following in rows[index + 1 : index + 3]:
-        if following.section_id != sentence.section_id:
+        if in_references or following.section_id != sentence.section_id:
             break
         if _legacy_categories_in(following.text) - {field}:
             break
@@ -746,6 +758,34 @@ def _legacy_lexical_rows(
     return []
 
 
+def _heading_declaration_tail(field: str, header: str | None) -> str | None:
+    """The declaration sentence a heading region carries after its label, if any."""
+    header = _collapse_whitespace(header or "")
+    for match in _HEADING_TAIL_START.finditer(header):
+        label, tail = header[: match.start()], header[match.end() :]
+        if len(label) > _MAX_HEADING_LABEL_CHARS:
+            return None
+        if re.search(r"[.!?]", label) or not _FIELD_HEADING_WORD[field].search(label):
+            continue
+        if not tail.endswith(".") or not any(
+            pattern.search(tail) for pattern in _LEGACY_ANCHORS[field]
+        ):
+            return None
+        if field == "coi_statement" and not _legacy_coi_declares(tail):
+            return None
+        if field == "ethics_statement" and not _legacy_ethics_declares(tail):
+            return None
+        return tail
+    return None
+
+
+def _legacy_section_qualifies(field: str, section: PaperSection) -> bool:
+    """Whether a section is copied as ``field``'s statement."""
+    return section.section_type == _FIELD_SECTION_TYPES[field] and not (
+        _legacy_section_is_other_matter(field, section)
+    )
+
+
 def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
     """A statement-typed section whose heading says it is something else."""
     heading = section.header or ""
@@ -778,15 +818,14 @@ def _build_legacy_snapshot_candidates(
     rows_by_section: dict[int, list[PaperSentence]] = {}
     for sentence in linear_rows:
         rows_by_section.setdefault(sentence.section_id, []).append(sentence)
-    for field, section_type in _FIELD_SECTION_TYPES.items():
+    for field in _FIELDS:
         canonical_start = len(candidates)
         for section in sections:
-            if section.section_type != section_type or _legacy_section_is_other_matter(
-                field, section
-            ):
+            if not _legacy_section_qualifies(field, section):
                 continue
             rows = _legacy_section_rows(field, rows_by_section.get(section.section_id, []))
-            if not rows or _legacy_section_is_long(section, rows):
+            heading_tail = _heading_declaration_tail(field, section.header)
+            if (not rows and not heading_tail) or _legacy_section_is_long(section, rows):
                 continue
             text_ids, paragraph_ids, pages = _candidate_location(rows)
             candidates.append(
@@ -800,7 +839,11 @@ def _build_legacy_snapshot_candidates(
                     pages=pages,
                     classification_source=section.classification_source,
                     classification_score=section.classification_score,
-                    reason_flags=("legacy_snapshot", "canonical_type"),
+                    reason_flags=(
+                        "legacy_snapshot",
+                        "canonical_type",
+                        *(("heading_tail",) if heading_tail else ()),
+                    ),
                     accepted=True,
                 )
             )
@@ -1138,6 +1181,15 @@ def _render_legacy_candidate(
     """
     by_id = {sentence.text_id: sentence for sentence in contents.sentences}
     parts = []
+    if "heading_tail" in candidate.reason_flags:
+        section = next(
+            (s for s in contents.sections if s.section_id in candidate.section_ids), None
+        )
+        tail = _heading_declaration_tail(
+            candidate.field, section.header if section is not None else candidate.heading
+        )
+        if tail:
+            parts.append(tail)
     for text_id in candidate.text_ids:
         sentence = by_id.get(text_id)
         if sentence is None or sentence.is_display_formula:
