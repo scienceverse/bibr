@@ -1684,6 +1684,57 @@ def _normalize_affiliation_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", translated).strip()
 
 
+# A keyword list the layout boxed as first-page footnotes ("Key words" over
+# "- Choroid plexus tumors" / "- Intraventricular", as in Elsevier's side
+# column). Footnote sections never join the front-matter record, so without
+# this block the title/keywords call never sees the list.
+_KEYWORD_FOOTNOTE_LABEL_RE = re.compile(r"^\W*(?:key\s*-?\s*words?|index\s+terms)\b", re.IGNORECASE)
+_KEYWORD_FOOTNOTE_ITEMS = 15
+_KEYWORD_FOOTNOTE_ITEM_CHARS = 80
+_KEYWORD_FOOTNOTE_CHARS = 600
+
+
+def first_page_keyword_footnote(contents) -> str:
+    """The first-page footnote rows that print the keyword list, as a labelled block, or "".
+
+    The list starts at a footnote that opens with a keyword label and runs
+    through the short footnote rows after it; a long row or a labelled one
+    ("Abbreviations: ...") ends it. Nothing is returned when the paper has a
+    keywords section, or when the label row has no keywords of its own and
+    no short rows follow.
+    """
+    sections = {section.section_id: section for section in getattr(contents, "sections", ()) or ()}
+    if any(section.section_type == CanonicalSection.KEYWORDS for section in sections.values()):
+        return ""
+    sentences = list(getattr(contents, "sentences", ()) or ())
+    first_page = min(
+        (sentence.page_number for sentence in sentences if sentence.page_number is not None),
+        default=None,
+    )
+    notes = [
+        " ".join(sentence.text.split())
+        for sentence in sorted(sentences, key=lambda sentence: sentence.text_id)
+        if sentence.page_number == first_page
+        and getattr(sections.get(sentence.section_id), "section_type", None)
+        == CanonicalSection.FOOTNOTE
+    ]
+    start = next(
+        (i for i, note in enumerate(notes) if _KEYWORD_FOOTNOTE_LABEL_RE.match(note)), None
+    )
+    if start is None:
+        return ""
+    lines = [notes[start]]
+    for note in notes[start + 1 : start + 1 + _KEYWORD_FOOTNOTE_ITEMS]:
+        if not note or len(note) > _KEYWORD_FOOTNOTE_ITEM_CHARS or ":" in note:
+            break
+        lines.append(note)
+    label_only = _KEYWORD_FOOTNOTE_LABEL_RE.sub("", lines[0]).strip(" \t:;,.-\u2013\u2014") == ""
+    if label_only and len(lines) == 1:
+        return ""
+    block = "\n".join(lines)[:_KEYWORD_FOOTNOTE_CHARS]
+    return "[Keywords printed in a first-page footnote]\n" + block
+
+
 @dataclass
 class _AuthorProposal:
     """An author list the extractor produced, with what it did to it."""
@@ -1821,8 +1872,14 @@ class CoreMetadataExtractor:
             if table_text and authors_text is not None and table_text not in authors_text:
                 authors_text += "\n" + table_text
 
+            # Only the title/keywords call reads the full blob: the per-task
+            # slices above are already cut, and the checks below keep reading
+            # the front matter alone.
+            keyword_footnote = first_page_keyword_footnote(self.contents)
+            llm_text = f"{full_text}\n\n{keyword_footnote}" if keyword_footnote else full_text
+
             llm_metadata = await self._call_core_llm(
-                full_text,
+                llm_text,
                 authors_text=authors_text,
                 classification_text=classification_text,
             )

@@ -26,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lettered appendix when page 1 opens with the end of the previous article and its
   reference list; the paper's byline and front matter stayed out of the extraction
   (#143).
+- Keywords printed as first-page footnotes (a "Key words" label over one keyword per
+  line, as in some Elsevier journals) now reach the title and keywords call; before,
+  footnote rows never joined the front matter and the keywords came back empty (#144).
 
 ## [0.6.0] - 2026-09-30
 
