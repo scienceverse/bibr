@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   articles, which also print the version 1 DOI), when a "Citation:" line names it, or
   when the first page prints it next to a linked article's DOI while the running footer
   repeats only the article's own (#141).
+- The abstract no longer keeps the printed line breaks of the PDF when the model copies
+  them (the default model often does): a line break inside a paragraph becomes one
+  space, and a blank line between paragraphs stays (#144).
 
 ## [0.6.0] - 2026-09-30
 
