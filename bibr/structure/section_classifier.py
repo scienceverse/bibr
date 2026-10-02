@@ -236,7 +236,7 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("intro", "Introduction, background, related work, literature review"),
     ("method", "Methods, materials, experimental setup, procedures, participants"),
     ("results", "Results, findings, evaluation, experiments"),
-    ("discussion", "Discussion, interpretation, limitations"),
+    ("discussion", "Discussion, interpretation, limitations, conclusions, future work, outlook"),
     ("references", "References, bibliography"),
     (
         "acknowledgment",
@@ -253,7 +253,11 @@ _LLM_SECTION_TYPE_DESCRIPTIONS: tuple[tuple[str, str], ...] = (
     ("author_contributions", "Author contributions, CRediT authorship contribution statement"),
     ("coi", "Conflict of interest, competing interests, declaration of conflicting interests"),
     ("ethics", "Ethics statement, ethical approval, IRB approval, informed consent"),
-    ("endnote", "Conclusion, future work, extended data"),
+    (
+        "endnote",
+        "Notes outside the argument: publisher's notes, supplementary-material pointers, "
+        "author biographies, correspondence notes, extended data",
+    ),
     ("appendix", "Appendix, appendices, supplementary/supporting material"),
     ("footnote", "Footnotes"),
     ("unknown", "Cannot determine the section type"),
