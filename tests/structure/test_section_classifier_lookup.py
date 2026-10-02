@@ -15,7 +15,7 @@ Together these prevent silent regressions if either layer is removed.
 from __future__ import annotations
 
 from bibr.paper_contents import CanonicalSection
-from bibr.structure.section_classifier import _classify_lookup
+from bibr.structure.section_classifier import _classify_lookup, _classify_lookup_full
 
 
 def test_classify_lookup_is_case_insensitive():
@@ -123,3 +123,98 @@ def test_non_english_headings_resolve_without_the_model():
         section, score = _classify_lookup(header.lower())
         assert section == expected, header
         assert score == 1.0, header
+
+
+async def test_cover_sheet_labels_and_containers_never_reach_the_model_or_llm():
+    """Preprint cover labels and grouping headings are not sections (#121, #123).
+
+    A preprint server's cover page prints "Posted Date: ..." as a heading and
+    the model typed it TITLE; a BMC "Declarations" block went to
+    Acknowledgments; Lancet's "Research in context" box anchored the
+    introduction. None of them names a section type.
+    """
+    import bibr.structure.section_classifier as mod
+
+    headings = [
+        "Posted Date: September 29th, 2026",
+        "Word count",
+        "Running title: Sleep and memory",
+        "Manuscript Number: ABC-D-26-00123",
+        "Authors",
+        "Disclaimer: The manuscript is the authors' accepted version",
+        "Declarations",
+        "Statements and Declarations",
+        "Research in context",
+        "Clinical Perspective",
+        "What is new?",
+        "What this study adds",
+    ]
+
+    out = await mod.classify_headers_batch_async(headings, llm_client=None)
+
+    assert [section for section, *_ in out] == [CanonicalSection.UNKNOWN] * len(headings)
+    assert all(source is None for *_, source in out)
+    assert mod.classify_headers_batch(headings) == [(CanonicalSection.UNKNOWN, 0.0)] * len(headings)
+
+
+async def test_cover_label_guard_keeps_author_sections():
+    import bibr.structure.section_classifier as mod
+
+    out = await mod.classify_headers_batch_async(
+        ["Author contributions", "Authors' contributions", "Contributors"], llm_client=None
+    )
+
+    assert [section for section, *_ in out] == [CanonicalSection.AUTHOR_CONTRIBUTIONS] * 3
+
+
+def test_declaration_block_subheadings_resolve_by_alias():
+    """The BMC/Springer "Declarations" block's sub-headings type by alias (#121)."""
+    for header, expected in (
+        ("ethics approval and consent to participate", CanonicalSection.ETHICS),
+        ("consent for publication", CanonicalSection.ETHICS),
+        ("availability of data and materials", CanonicalSection.OPEN_DATA),
+        ("competing interests", CanonicalSection.COI),
+        ("transparency declarations", CanonicalSection.COI),
+        ("contributors", CanonicalSection.AUTHOR_CONTRIBUTIONS),
+    ):
+        section, score, trusted = _classify_lookup_full(header)
+        assert section == expected, header
+        assert trusted, header
+
+
+def test_substring_coverage_adds_up_hits_of_the_same_type():
+    # "ethics" (6) + "consent to participate" (22) cover 28 of 42 characters;
+    # the longest alias alone covers only 0.52, below the trust bar.
+    section, score, trusted = _classify_lookup_full("ethics approval and consent to participate")
+    assert (section, score, trusted) == (CanonicalSection.ETHICS, 0.95, True)
+    # A single generic hit inside a long heading stays untrusted.
+    section, _score, trusted = _classify_lookup_full("a model of memory consolidation in sleep")
+    assert not trusted
+
+
+def test_float_lists_after_references_are_figure_sections():
+    for header in ("figure legends", "figure captions", "legends to figures", "tables and figures"):
+        section, score = _classify_lookup(header)
+        assert (section, score) == (CanonicalSection.FIGURE, 1.0), header
+
+
+def test_more_non_english_section_names_resolve_by_alias():
+    """Italian, Dutch, Swedish, Portuguese, Spanish and Indonesian headings (#121, #124)."""
+    for header, expected in (
+        ("riassunto", CanonicalSection.ABSTRACT),
+        ("samenvatting", CanonicalSection.ABSTRACT),
+        ("sammanfattning", CanonicalSection.ABSTRACT),
+        ("bibliografia", CanonicalSection.REFERENCES),
+        ("riferimenti bibliografici", CanonicalSection.REFERENCES),
+        ("referências bibliográficas", CanonicalSection.REFERENCES),
+        ("literatuur", CanonicalSection.REFERENCES),
+        ("introduzione", CanonicalSection.INTRODUCTION),
+        ("inleiding", CanonicalSection.INTRODUCTION),
+        ("materiali e metodi", CanonicalSection.METHODS),
+        ("risultati", CanonicalSection.RESULTS),
+        ("discussione", CanonicalSection.DISCUSSION),
+        ("conclusioni", CanonicalSection.DISCUSSION),
+        ("kesimpulan dan saran", CanonicalSection.DISCUSSION),
+    ):
+        section, score = _classify_lookup(header)
+        assert (section, score) == (expected, 1.0), header

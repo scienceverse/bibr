@@ -151,7 +151,6 @@ CANONICAL_SECTION_ALIASES = {
     CanonicalSection.ACKNOWLEDGMENT: [
         "acknowledgments",
         "acknowledgements",
-        "declarations",  # umbrella container; specific subsections route to coi/ethics/etc.
         "transparency",
         "action editor",
         # Author-metadata blocks — currently surface as standalone headings
@@ -170,6 +169,7 @@ CANONICAL_SECTION_ALIASES = {
         "credit author statement",
         "contribution statement",
         "authors' contributions",
+        "contributors",
     ],
     CanonicalSection.COI: [
         "conflict of interest",
@@ -179,6 +179,8 @@ CANONICAL_SECTION_ALIASES = {
         "declaration of interest",
         "declaration of conflicting interests",
         "declaration of competing interest",
+        # Journal of Antimicrobial Chemotherapy's competing-interests heading.
+        "transparency declarations",
     ],
     CanonicalSection.ETHICS: [
         "ethics",
@@ -187,6 +189,7 @@ CANONICAL_SECTION_ALIASES = {
         "irb approval",
         "informed consent",
         "consent to participate",
+        "consent for publication",
         "ethics declaration",
         "institutional review board",
     ],
@@ -230,6 +233,8 @@ CANONICAL_SECTION_ALIASES = {
         "materials availability",
         "data and code availability",
         "data sharing",
+        "availability of data and materials",
+        "availability of data and material",
         "open data",
         "reproducibility",
         "reproducibility statement",
@@ -237,6 +242,12 @@ CANONICAL_SECTION_ALIASES = {
     CanonicalSection.FIGURE: [
         "figure",
         "figures",
+        # Float lists printed after a manuscript's references.
+        "figure legends",
+        "figure captions",
+        "legends to figures",
+        "tables and figures",
+        "figures and tables",
     ],
     CanonicalSection.TABLE: [
         "table",
@@ -263,6 +274,10 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "resumen",
         "resumo",
         "résumé",
+        "riassunto",
+        "sammanfattning",
+        "samenvatting",
+        "sommario",
         "streszczenie",
         "zusammenfassung",
         "要旨",
@@ -298,6 +313,11 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "referências",
         "références",
         "kaynakça",
+        "literatuur",
+        "literatuurlijst",
+        "referências bibliográficas",
+        "referencias bibliográficas",
+        "riferimenti bibliografici",
         "литература",
         "список литературы",
         "список використаних джерел",
@@ -313,6 +333,8 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "введение",
         "вступ",
         "wstęp",
+        "inleiding",
+        "introduzione",
         "はじめに",
         "引言",
     ],
@@ -322,6 +344,8 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "metodologia",
         "méthodologie",
         "methodik",
+        "materiali e metodi",
+        "metodi",
         "yöntem",
         "методы",
         "методика",
@@ -333,6 +357,8 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "resultados",
         "résultats",
         "ergebnisse",
+        "resultaten",
+        "risultati",
         "bulgular",
         "результаты",
         "результати",
@@ -343,6 +369,14 @@ _NON_ENGLISH_SECTION_ALIASES = {
         "discusión",
         "discussão",
         "diskussion",
+        "discussie",
+        "discussione",
+        "discussione e conclusioni",
+        "conclusioni",
+        "conclusiones",
+        "conclusões",
+        "kesimpulan",
+        "kesimpulan dan saran",
         "tartışma",
         "обсуждение",
         "討論",
@@ -402,6 +436,56 @@ def is_exact_front_matter_furniture(text: str) -> bool:
 
     normalized = " ".join(unicodedata.normalize("NFKC", text).casefold().split())
     return normalized.strip(" :.") in FRONT_MATTER_FURNITURE_LABELS
+
+
+# Headings that group other sections without being a section type of their
+# own: the BMC/Springer "Declarations" block, and the fixed box headings of
+# Lancet ("Research in context"), AHA ("Clinical Perspective") and BMJ ("What
+# this study adds") papers. The classifier types them UNKNOWN without asking
+# the model or the LLM, which read them as Acknowledgments or as IMRaD parts,
+# and the hierarchy keeps them top level without letting them parent the body.
+SECTION_CONTAINER_HEADINGS = frozenset(
+    {
+        "declarations",
+        "statements and declarations",
+        "research in context",
+        "evidence before this study",
+        "added value of this study",
+        "implications of all the available evidence",
+        "clinical perspective",
+        "what is new",
+        "what are the clinical implications",
+        "key messages",
+        "what is already known",
+        "what is already known on this topic",
+        "what this study adds",
+        "what this paper adds",
+    }
+)
+
+# Manuscript and preprint cover-sheet labels printed as headings ("Word count",
+# "Running title: ...", "Posted Date: September 29th, 2026", "Manuscript
+# Number: ...", "Disclaimer: The manuscript ..."). They name no section: the
+# classifier types them UNKNOWN instead of letting the model or the LLM guess a
+# title or an abstract.
+_SECTION_FURNITURE_RE = re.compile(
+    r"^(?:word counts?|running (?:title|head)|short title|posted date|"
+    r"manuscript (?:number|no|id)|authors?|disclaimer)\s*(?::.*)?$"
+)
+
+
+def _heading_key(text: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
+def is_section_container_heading(text: str) -> bool:
+    """Whether a heading only groups other sections (``SECTION_CONTAINER_HEADINGS``)."""
+    return _heading_key(text).strip(" :.?!") in SECTION_CONTAINER_HEADINGS
+
+
+def is_section_furniture_heading(text: str) -> bool:
+    """Whether a heading is a manuscript or preprint cover-sheet label."""
+    return _SECTION_FURNITURE_RE.match(_heading_key(text).strip(" .")) is not None
 
 
 @dataclass
