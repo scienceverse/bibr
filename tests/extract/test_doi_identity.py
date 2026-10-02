@@ -1623,7 +1623,7 @@ def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
 
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 
-    own = "10.1016/S0140-6736(26)01804-0"
+    own = "10.1016/S0140-6736(26)90001-1"
     contents = _paragraph_contents(
         [
             (
@@ -1638,7 +1638,7 @@ def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
                 1,
                 CanonicalSection.INTRODUCTION,
                 2,
-                "https://doi.org/10.1016/S0140-6736(26)01867-2",
+                "https://doi.org/10.1016/S0140-6736(26)90002-3",
                 1,
             ),
         ],
