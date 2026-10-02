@@ -389,7 +389,8 @@ async def _normalize_section_structure(
             settings=settings,
         )
 
-    enforce_imrad_order(contents.sections)
+    populated_ids = {s.section_id for s in contents.sentences if s.section_id is not None}
+    enforce_imrad_order(contents.sections, populated_ids)
     enforce_section_sanity(contents.sections)
 
 
