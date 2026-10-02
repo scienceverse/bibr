@@ -28,6 +28,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   recognised (a line-numbered manuscript's "668 References"), the reference
   segmentation warning now says that, instead of calling the PDF a DOCX or
   non-native input (#140).
+- On a watermarked review copy, a reference entry is no longer extracted
+  twice when a few words of the diagonal stamp land in the entry's own
+  layout box (#140).
 
 ## [0.6.0] - 2026-09-30
 

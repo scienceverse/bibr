@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from bibr.input.pdf_outline import OutlineItem
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
-from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered
+from bibr.ocr.ref_patterns import alnum_key, alnum_text_covered, drop_edge_fragments
 from bibr.ocr.types import OcrRegionResult
 from bibr.paper_contents import (
     FRONT_MATTER_MASTHEAD_RE,
@@ -897,7 +897,8 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         its place in reading order, where it keys the References section even
         when the OCR stage blanked its text, and a separate short entry
         elsewhere on the page ("PubMed") is never hidden because the aggregate
-        box's text happens to contain it.
+        box's text happens to contain it. Short lines of a watermark stamp at
+        the ends of an entry box do not keep it (``drop_edge_fragments``).
         """
         for page_idx, regions in enumerate(self.json_result):
             children = [
@@ -926,6 +927,11 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     (page_idx, child_idx)
                     for child_idx, child in contained
                     if alnum_text_covered(alnum_key(child.content or ""), envelope_text)
+                    # or once the watermark words around the entry are set aside
+                    or alnum_text_covered(
+                        alnum_key(drop_edge_fragments(child.content or "", envelope_text)),
+                        envelope_text,
+                    )
                 )
 
         if self._shadowed_reference_regions:

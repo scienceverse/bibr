@@ -278,3 +278,21 @@ def test_alnum_text_covered_takes_entries_read_in_another_order_as_covered(
     needle, haystack, covered
 ):
     assert alnum_text_covered(alnum_key(needle), alnum_key(haystack)) is covered
+
+
+def test_drop_edge_fragments_sets_aside_only_short_edge_lines_the_haystack_holds():
+    from bibr.ocr.ref_patterns import alnum_key, drop_edge_fragments
+
+    haystack = alnum_key(
+        "Notice: this copy and its contents are private, meant for peer review purposes only."
+        " 12 Thorn J, Tamm C. Linked records. Circ Res. 2021;128:2017-36. doi: 10.1000/cr.2017."
+    )
+    entry = "Thorn J, Tamm C. Linked records.\nCirc Res. 2021;128:2017-36. doi: 10.1000/cr.2017."
+    assert drop_edge_fragments("ts contents are\nview purposes\n" + entry, haystack) == entry
+    assert drop_edge_fragments(entry + "\nview purposes", haystack) == entry
+    # a short line the haystack lacks stays, and so does everything after it
+    kept = "Rees P,\nview purposes\n" + entry
+    assert drop_edge_fragments(kept, haystack) == kept
+    # four words are not a fragment
+    longer = "this copy and its\n" + entry
+    assert drop_edge_fragments(longer, haystack) == longer
