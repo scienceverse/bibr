@@ -136,6 +136,14 @@ CANONICAL_SECTION_ALIASES = {
         "conclusions",
         "concluding remarks",
         "summary and conclusions",
+        # Closing sections that look ahead are the end of the argument, which
+        # is how section gold types them; endnotes are publisher's notes,
+        # supplementary-material pointers and author biographies.
+        "future work",
+        "outlook",
+        "conclusions and future work",
+        "conclusion and outlook",
+        "final remarks",
         "broader impact",
         "broader impacts",
     ],
@@ -209,11 +217,6 @@ CANONICAL_SECTION_ALIASES = {
         "online supplement",
         "annexes",
         "annex",
-        "future work",
-        "outlook",
-        "conclusions and future work",
-        "conclusion and outlook",
-        "final remarks",
     ],
     CanonicalSection.APPENDIX: [
         "appendix",
