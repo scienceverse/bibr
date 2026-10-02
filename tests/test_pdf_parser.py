@@ -163,6 +163,63 @@ class TestLabelTreatment:
 
         assert contents.detected_title == "The Actual Paper Title"
 
+    @pytest.mark.parametrize(
+        ("kicker", "title"),
+        [
+            ("Retraction", "Retracted: Haze Removal With a Filter Function"),
+            ("ARTICLES", "A genetic pathway for the development of a small worm"),
+            ("Original Article", "Effects of sleep on recall"),
+        ],
+    )
+    def test_kicker_doc_title_gives_way_to_the_title(self, mock_wtpsplit, kicker, title):
+        """An article-type kicker labelled doc_title above the title is not
+        the first half of a split title ("Retraction Retracted: ...")."""
+        json_result = [
+            [
+                _region(0, "doc_title", kicker, bbox=[100, 60, 300, 80]),
+                _region(1, "doc_title", title, bbox=[100, 100, 900, 160]),
+                _region(2, "text", "Body text."),
+            ]
+        ]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == title
+        title_section = next(s for s in contents.sections if s.header == title)
+        assert [p.bbox for p in title_section.provenance] == [(100, 100, 900, 160)]
+        assert all(kicker not in s.header for s in contents.sections)
+
+    def test_kicker_then_split_title_still_joins_the_title_parts(self, mock_wtpsplit):
+        json_result = [
+            [
+                _region(0, "doc_title", "Research Article", bbox=[100, 60, 300, 80]),
+                _region(1, "doc_title", "Effects of sleep", bbox=[100, 100, 900, 130]),
+                _region(2, "doc_title", "on recall in adults", bbox=[100, 135, 900, 165]),
+                _region(3, "text", "Body text."),
+            ]
+        ]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == "Effects of sleep on recall in adults"
+
+    def test_one_word_title_alone_is_kept(self, mock_wtpsplit):
+        """A real one-word title ("Editorial") with no doc_title after it stays the title."""
+        json_result = [[_region(0, "doc_title", "Editorial"), _region(1, "text", "Body text.")]]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == "Editorial"
+
+    def test_title_starting_with_a_kicker_word_still_merges(self, mock_wtpsplit):
+        json_result = [
+            [
+                _region(0, "doc_title", "Review of sleep studies:", bbox=[100, 60, 900, 90]),
+                _region(1, "doc_title", "a meta-analysis", bbox=[100, 95, 900, 125]),
+                _region(2, "text", "Body text."),
+            ]
+        ]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == "Review of sleep studies: a meta-analysis"
+
     def test_doc_title_strips_markdown_prefix(self, mock_wtpsplit):
         """Leading '# ' from OCR content should be stripped."""
         json_result = [

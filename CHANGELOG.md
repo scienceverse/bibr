@@ -19,6 +19,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `VAL_ABSTRACT_MISSING` no longer warns on an essay or commentary that prints no
   abstract when the model found none and the only abstract section is the layout's
   unlabelled opening column (#144).
+- An article-type kicker printed above the title ("Retraction", "ARTICLES", "Original
+  Article") is no longer taken as the title when the layout labels both as the title:
+  the title that follows it is used (#143).
 
 ## [0.6.0] - 2026-09-30
 
