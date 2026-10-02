@@ -502,7 +502,7 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
         sentences=[
             PaperSentence(
                 text_id=1,
-                text="This section discusses the ethics of discounting climate harms.",
+                text="This section discusses the choices people make in shared spaces.",
                 section_id=200,
                 paragraph_id=1,
                 page_number=12,
@@ -512,7 +512,7 @@ async def test_default_shadow_preserves_legacy_statement_and_emits_typed_issue(m
             PaperSection(section_id=0, header="Root", level=0, parent_section_id=None),
             PaperSection(
                 section_id=200,
-                header="Time Discounting: An Ethical Problem",
+                header="Ethics in Shared Spaces",
                 level=1,
                 parent_section_id=0,
                 section_type=CanonicalSection.ETHICS,

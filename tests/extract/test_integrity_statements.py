@@ -2574,3 +2574,212 @@ def test_supported_by_a_named_funder_is_still_funding(text: str):
     metadata = _shadow_values(contents)
 
     assert metadata.funding_statement == text
+
+
+def test_limitations_sentence_about_conflicts_of_interest_is_not_a_coi_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Limitations",
+                CanonicalSection.DISCUSSION,
+                "exact_alias",
+                1.0,
+                [
+                    "To maintain credibility, avoid conflicts of interest, and ensure that only"
+                    " nonproprietary data were used, I retrieved storm surveys from public"
+                    " portals.",
+                    "Researchers in the literature on conflicts of interest note that"
+                    " disclosure alone is not enough.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The authors declare no conflict of interest.",
+        "Conflict of interest statement: The authors report consulting fees from Example Ltd.",
+        "This study was carried out without any conflict of interest.",
+    ],
+)
+def test_declared_coi_sentence_is_kept(text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == text
+
+
+def test_consent_listed_as_a_topic_is_not_an_ethics_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Methods",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [
+                    "Ethical issues during data collection can include informed consent"
+                    " procedures, confidentiality, or deception.",
+                    "Written informed consent was obtained from all participants.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Written informed consent was obtained from all participants."
+    )
+
+
+def test_role_of_the_funding_source_section_is_not_the_funding_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Role of the funding source",
+                CanonicalSection.FUNDING,
+                "llm",
+                0.85,
+                [
+                    "The funders of the study had no role in study design, data collection,"
+                    " data analysis, data interpretation, or writing of the report."
+                ],
+            ),
+            (
+                2,
+                "Acknowledgments",
+                CanonicalSection.ACKNOWLEDGMENT,
+                "exact_alias",
+                1.0,
+                [
+                    "The study was funded by the National Institute for Health and Care"
+                    " Research (NIHR) Health Technology Assessment programme under grant"
+                    " agreement 12/173/14."
+                ],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "The study was funded by the National Institute for Health and Care Research (NIHR)"
+        " Health Technology Assessment programme under grant agreement 12/173/14."
+    )
+
+
+def test_ai_use_disclosure_section_is_not_joined_to_ethics():
+    contents = _contents(
+        [
+            (
+                1,
+                "Ethics and consent",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                ["Ethical approval and consent were not required for this study."],
+            ),
+            (
+                2,
+                "AI Tool disclosure",
+                CanonicalSection.ETHICS,
+                "model",
+                0.775,
+                ["No AI-assisted writing or revision tools were used."],
+            ),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == (
+        "Ethical approval and consent were not required for this study."
+    )
+
+
+def test_topical_ethics_heading_is_not_copied_as_a_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Time Discounting: An Ethical Problem",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                ["This section discusses the ethics of discounting climate harms."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement is None
+
+
+@pytest.mark.parametrize(
+    ("field", "text"),
+    [
+        (
+            "funding_statement",
+            "Moreover, developing countries have failed to manage the financial support"
+            " provided by donors when national priorities and the GCF priorities conflict.",
+        ),
+        (
+            "data_availability",
+            "In Experiment 2, we included all public schools regardless of their school type"
+            " or data availability.",
+        ),
+    ],
+)
+def test_label_noun_in_running_prose_is_not_a_statement(field: str, text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A. Author acknowledges the financial support of the European Research Council"
+        " (grant 123456).",
+        "We received financial support from the Example Science Foundation.",
+        "Financial support: This research received no external funding.",
+    ],
+)
+def test_financial_support_declaration_is_still_funding(text: str):
+    contents = _contents(
+        [(1, "Acknowledgments", CanonicalSection.ACKNOWLEDGMENT, "exact_alias", 1.0, [text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text
+
+
+def test_labelled_human_and_animal_rights_statement_is_ethics():
+    text = (
+        "Human and Animal Rights and Informed Consent This article does not contain any"
+        " studies with human or animal subjects performed by any of the authors."
+    )
+    contents = _contents([(1, "Declarations", CanonicalSection.UNKNOWN, None, 0.0, [text])])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == text

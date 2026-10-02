@@ -16,8 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   long chapter typed as a statement section (a thesis's "Ethical Procedures")
   is no longer copied whole. A phrase split by a line break ("supported
   by") is now found. (#127)
-- "Supported by" followed only by an acronym ("supported by the base AR
-  model") is no longer exported as a funding statement. (#128)
+- Prose that only mentions a statement topic is no longer exported as the
+  statement: "supported by" followed only by an acronym ("supported by the
+  base AR model") is not funding, a sentence about avoiding conflicts of
+  interest is not a conflict-of-interest declaration, informed consent named
+  as a topic is not an ethics statement, "financial support" or "data
+  availability" inside a sentence about something else is not a statement,
+  and a "Role of the funding source"
+  section, an essay section titled like ethics ("Time Discounting: An Ethical
+  Problem") or an AI-tool disclosure is no longer copied into the funding or
+  ethics statement. (#128)
 
 ## [0.6.0] - 2026-09-30
 

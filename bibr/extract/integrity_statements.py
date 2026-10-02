@@ -19,6 +19,7 @@ from bibr.extract.statement_scan import (
     _ANCHORS,
     _BARE_CATEGORY_LABELS,
     _BOILERPLATE_BOUNDARY,
+    _COI_TOPICAL_PROSE,
     _FUNDING_AMBIGUOUS_ANCHOR,
     _FUNDING_STRONG_ANCHORS,
     _author_aliases,
@@ -326,6 +327,75 @@ _LICENCE_TEXT = re.compile(
 # A section copy from a classifier source that can be wrong (model, LLM, prior)
 # that is longer than this is a chapter, not a statement: use the lexical path.
 _MAX_AMBIGUOUS_SECTION_CHARS = 3000
+# A lexical COI row must declare something, not just mention conflicts of
+# interest ("To maintain credibility, avoid conflicts of interest, ..."): it is
+# label-led, or a declaration cue sits near the anchor.
+_LEGACY_COI_LABEL = re.compile(
+    r"^\W*(?:statement re:? |declarations? of |disclosure of )?(?:potential )?"
+    r"(?:conflicts? of interests?|competing (?:financial )?interests?|conflicting interests?|"
+    r"declarations? of (?:conflicting|competing) interests?|declaration of interests?|"
+    r"(?:financial )?disclosures?|duality of interest)\b",
+    re.IGNORECASE,
+)
+_LEGACY_COI_CUE = re.compile(
+    r"\b(?:no|not|none|nothing|without|declares?|declared|declaring|reports?|reported|"
+    r"discloses?|disclosed|affirms?|absence of|received|receives|has served|serves? as|"
+    r"consult\w*|honorari\w*|personal fees|employee|shareholder|stock)\b",
+    re.IGNORECASE,
+)
+_COI_CUE_WINDOW = 100
+# "financial support" and "data/code availability" are label nouns: in running
+# prose ("failed to manage the financial support provided by donors", "regardless
+# of their school type or data availability") they are not a statement. Outside
+# a label they need the paper's own funding (a recipient, a grant number or a
+# named funder) or must open a sentence.
+_LABEL_NOUN_ANCHORS = {
+    "funding_statement": re.compile(r"\bfinancial support", re.IGNORECASE),
+    "data_availability": re.compile(r"\b(?:data|code) availability", re.IGNORECASE),
+}
+_LABEL_NOUN_PATTERNS = frozenset(
+    {r"\bfinancial support", r"\bdata availability", r"\bcode availability"}
+)
+_FUNDING_RECIPIENT = re.compile(
+    r"\b(?:we|our|us|the authors?|this (?:work|study|research|project|paper|article|"
+    r"publication|trial|review)|the (?:study|research|project|work) (?:was|is|has|received)|"
+    r"acknowledg\w*|grateful(?:ly)?|thanks?)\b",
+    re.IGNORECASE,
+)
+_NAMED_FUNDER_BODY = re.compile(
+    r"\b[A-Z][A-Za-z]+\s+(?:Foundation|Council|Trust|Institute|Fund|Agency|Ministry|"
+    r"Programme|Program|Commission|Society|Academy)\b"
+)
+# An ethics row whose only anchor is "informed consent" must say the consent
+# was obtained, given or waived, not list it among topics.
+_LEGACY_CONSENT_ACTION = re.compile(
+    r"\b(?:obtained|obtain|provided|provide|gave|given|give|signed|sign|received|receive|"
+    r"waived|required|sought|secured|documented|approved|consented|conforms?|accordance|"
+    r"helsinki|voluntar\w*)\b",
+    re.IGNORECASE,
+)
+# Statement-typed sections that are not that statement: the Lancet-style
+# "Role of the funding source" (what the funder did not do), AI-use
+# disclosures, and topical ethics chapters.
+_ROLE_OF_FUNDER_HEADING = re.compile(
+    r"^\W*(?:\d+(?:\.\d+)*\.?\s*)?(?:the )?role of (?:the )?"
+    r"(?:funding sources?|funders?|sponsors?)\b",
+    re.IGNORECASE,
+)
+_AI_USE_HEADING = re.compile(
+    r"\b(?:ai|artificial intelligence|generative|large language models?|llms?|chatgpt)\b",
+    re.IGNORECASE,
+)
+# An AI-use heading still names the statement it holds when it carries the
+# field's own words ("Data and code availability for the LLM benchmark").
+_FIELD_HEADING_WORD = {
+    "funding_statement": re.compile(r"\b(?:fund\w*|grants?|financ\w*)\b", re.IGNORECASE),
+    "coi_statement": re.compile(r"\b(?:interests?|conflicts?|duality)\b", re.IGNORECASE),
+    "ethics_statement": re.compile(
+        r"\b(?:ethic\w*|consent|approval|review board|irb)\b", re.IGNORECASE
+    ),
+    "data_availability": re.compile(r"\b(?:data|code|materials?|availability)\b", re.IGNORECASE),
+}
 
 
 @dataclass(frozen=True)
@@ -539,6 +609,70 @@ def _clip_legacy_row(field: str, text: str) -> str:
     return _text_before_boundary(text, start, after[0].start())
 
 
+def _legacy_coi_declares(text: str) -> bool:
+    """Whether a row with a COI anchor declares interests, not just names them."""
+    if _LEGACY_COI_LABEL.match(text):
+        return True
+    if _COI_TOPICAL_PROSE.search(text):
+        return False
+    return any(
+        _LEGACY_COI_CUE.search(
+            text[max(0, match.start() - _COI_CUE_WINDOW) : match.end() + _COI_CUE_WINDOW]
+        )
+        for pattern in _LEGACY_ANCHORS["coi_statement"]
+        for match in pattern.finditer(text)
+    )
+
+
+def _sentence_around(text: str, start: int, end: int) -> str:
+    """The sentence of ``text`` that holds ``text[start:end]``."""
+    head = max(text.rfind(". ", 0, start), text.rfind("? ", 0, start), text.rfind("! ", 0, start))
+    tail = min(
+        (i for i in (text.find(". ", end), text.find("? ", end), text.find("! ", end)) if i >= 0),
+        default=len(text),
+    )
+    return text[head + 2 if head >= 0 else 0 : tail + 1]
+
+
+def _label_noun_only_in_prose(field: str, text: str) -> bool:
+    """A row whose only anchor is a label noun used inside running prose."""
+    noun = _LABEL_NOUN_ANCHORS.get(field)
+    if noun is None or _STATEMENT_LABEL[field].match(text):
+        return False
+    if any(
+        pattern.search(text)
+        for pattern in _LEGACY_ANCHORS[field]
+        if pattern.pattern not in _LABEL_NOUN_PATTERNS
+    ):
+        return False
+    for match in noun.finditer(text):
+        sentence = _sentence_around(text, match.start(), match.end())
+        if sentence.lower().startswith(match.group().lower()):
+            return False
+        if field == "data_availability" and re.match(
+            r"\s*(?:statement|section|:)", text[match.end() :], re.IGNORECASE
+        ):
+            return False
+        if field == "funding_statement" and (
+            _FUNDING_RECIPIENT.search(sentence)
+            or _SUPPORTED_BY_GRANT_ID.search(sentence)
+            or _NAMED_FUNDER_BODY.search(sentence)
+            or _SUPPORTED_BY_FUNDER_ACRONYM.search(sentence)
+        ):
+            return False
+    return True
+
+
+def _legacy_ethics_declares(text: str) -> bool:
+    """Whether an ethics-anchored row states an approval or consent."""
+    if _STATEMENT_LABEL["ethics_statement"].match(text):
+        return True
+    matched = [pattern for pattern in _LEGACY_ANCHORS["ethics_statement"] if pattern.search(text)]
+    if [pattern.pattern for pattern in matched] != [r"\binformed consent"]:
+        return True
+    return bool(_LEGACY_CONSENT_ACTION.search(text))
+
+
 def _legacy_capture_at(
     field: str,
     rows: list[PaperSentence],
@@ -551,6 +685,12 @@ def _legacy_capture_at(
     if section is not None and section.section_type == CanonicalSection.REFERENCES:
         return []
     if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
+        return []
+    if field == "coi_statement" and not _legacy_coi_declares(sentence.text):
+        return []
+    if field == "ethics_statement" and not _legacy_ethics_declares(sentence.text):
+        return []
+    if _label_noun_only_in_prose(field, sentence.text):
         return []
 
     strong_funding_anchor = False
@@ -606,6 +746,16 @@ def _legacy_lexical_rows(
     return []
 
 
+def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
+    """A statement-typed section whose heading says it is something else."""
+    heading = section.header or ""
+    if field == "funding_statement" and _ROLE_OF_FUNDER_HEADING.search(heading):
+        return True
+    if field == "ethics_statement" and _TOPICAL_ETHICS_HEADING.search(heading):
+        return True
+    return bool(_AI_USE_HEADING.search(heading) and not _FIELD_HEADING_WORD[field].search(heading))
+
+
 def _legacy_section_is_long(section: PaperSection, rows: list[PaperSentence]) -> bool:
     """A long copy of a section whose type may be wrong (a thesis chapter)."""
     return section.classification_source in _AMBIGUOUS_CLASSIFICATION_SOURCES and (
@@ -631,7 +781,9 @@ def _build_legacy_snapshot_candidates(
     for field, section_type in _FIELD_SECTION_TYPES.items():
         canonical_start = len(candidates)
         for section in sections:
-            if section.section_type != section_type:
+            if section.section_type != section_type or _legacy_section_is_other_matter(
+                field, section
+            ):
                 continue
             rows = _legacy_section_rows(field, rows_by_section.get(section.section_id, []))
             if not rows or _legacy_section_is_long(section, rows):
