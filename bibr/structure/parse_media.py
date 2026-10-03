@@ -112,6 +112,23 @@ class MediaHandlersMixin:
     # badge the layout model happened to call a chart was never even eligible.
     _DECORATION_LABELS = frozenset({"chart", "image"})
 
+    # ---- Figure grouping ----------------------------------------------------
+    # Same 0..1000 page space as the decoration bounds above.
+    # A figure region at least this much inside a larger one is part of it.
+    _NESTED_FIGURE_CONTAINMENT = 0.9
+    # Caption-anchored grouping (``_group_figures_by_caption``): how far from
+    # the caption the first region may sit, how far from the group a further
+    # region may sit, and how far around the group a panel label may sit.
+    _ANCHOR_SEED_GAP = 60.0
+    _ANCHOR_GROW_GAP = 100.0
+    _ANCHOR_LABEL_MARGIN = 30.0
+    # Body regions this long between a region and the group keep them apart.
+    _ANCHOR_BODY_LABELS = frozenset({"text", "content", "paragraph_title", "abstract"})
+    _ANCHOR_BODY_MIN_CHARS = 80
+    # An explicit figure caption for anchoring: the figure word followed by
+    # anything, so "Fig.2" and named labels anchor too.
+    _FIGURE_ANCHOR_RE = re.compile(rf"^{SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s*\S", re.IGNORECASE)
+
     def _add_caption_candidate(
         self,
         text: str,
@@ -965,12 +982,27 @@ class MediaHandlersMixin:
         targets: list[CaptionTarget] = []
         for figure in self.figures:
             last_part = figure.parts[-1] if figure.parts else None
+            bbox = last_part.bbox if last_part else None
+            if last_part is not None and bbox is not None:
+                # A grouped figure's caption sits against the whole group on
+                # that page, not against whichever panel came last.
+                page_boxes = [
+                    part.bbox
+                    for part in figure.parts
+                    if part.page_number == last_part.page_number and part.bbox is not None
+                ]
+                bbox = (
+                    min(item[0] for item in page_boxes),
+                    min(item[1] for item in page_boxes),
+                    max(item[2] for item in page_boxes),
+                    max(item[3] for item in page_boxes),
+                )
             targets.append(
                 CaptionTarget(
                     object_id=f"figure:{figure.figure_id}",
                     object_type="figure",
                     page_number=last_part.page_number if last_part else figure.page_number,
-                    bbox=last_part.bbox if last_part else None,
+                    bbox=bbox,
                     source_index=self._figure_source_indices[id(figure)],
                 )
             )
@@ -1049,6 +1081,12 @@ class MediaHandlersMixin:
                     break
                 trailing.insert(0, figure)
             if len(trailing) < 2:
+                continue
+            if any(
+                self._fenced_from_caption(figure, caption, explicit_captions) for figure in trailing
+            ):
+                # A region printed beyond another explicit caption belongs to
+                # that caption's figure, whatever the reading order says.
                 continue
 
             next_figure_source = next(
@@ -1146,6 +1184,366 @@ class MediaHandlersMixin:
         if grouped_ids:
             self.figures = [figure for figure in self.figures if id(figure) not in grouped_ids]
         return descriptions, panel_owners, supporting_owners, caption_owners
+
+    @staticmethod
+    def _fenced_from_caption(
+        figure: PaperFigure, caption: CaptionCandidate, explicit_captions: list[CaptionCandidate]
+    ) -> bool:
+        """Is another explicit caption printed between *figure* and *caption* on their page?"""
+        part = figure.parts[-1] if figure.parts else None
+        if part is None or part.bbox is None or caption.bbox is None:
+            return False
+        if part.page_number != caption.page_number:
+            return False
+        box = part.bbox
+        if box[3] <= caption.bbox[1]:
+            low, high = box[3], caption.bbox[1]
+        elif caption.bbox[3] <= box[1]:
+            low, high = caption.bbox[3], box[1]
+        else:
+            return False
+        for other in explicit_captions:
+            if other is caption or other.page_number != caption.page_number or other.bbox is None:
+                continue
+            width = max(0.0, min(other.bbox[2], box[2]) - max(other.bbox[0], box[0]))
+            if (
+                other.bbox[1] >= low - 2
+                and other.bbox[3] <= high + 2
+                and width / max(1.0, min(other.bbox[2] - other.bbox[0], box[2] - box[0])) >= 0.3
+            ):
+                return True
+        return False
+
+    def _absorb_nested_figures(self) -> None:
+        """Drop a figure region that lies inside a larger figure region.
+
+        Containment filtering keeps every image/chart box (``_PRESERVE_LABELS``
+        in ``bibr.layout_utils``), so a whole-figure box and the panel boxes
+        inside it all reach :meth:`_handle_figure` as separate figures. The
+        outer box's crop already shows the inner one, so the inner figure is
+        dropped; the outer takes its reading-order position when it is later.
+        """
+        single = [
+            figure
+            for figure in self.figures
+            if len(figure.parts) == 1
+            and figure.parts[0].bbox is not None
+            and figure.parts[0].page_number is not None
+        ]
+        dropped: set[int] = set()
+        for inner in single:
+            inner_part = inner.parts[0]
+            inner_box = inner_part.bbox
+            inner_area = (inner_box[2] - inner_box[0]) * (inner_box[3] - inner_box[1])
+            if inner_area <= 0:
+                continue
+            for outer in single:
+                outer_part = outer.parts[0]
+                outer_box = outer_part.bbox
+                if (
+                    outer is inner
+                    or id(outer) in dropped
+                    or outer_part.page_number != inner_part.page_number
+                    or (outer_box[2] - outer_box[0]) * (outer_box[3] - outer_box[1]) <= inner_area
+                ):
+                    continue
+                width = max(0.0, min(inner_box[2], outer_box[2]) - max(inner_box[0], outer_box[0]))
+                height = max(0.0, min(inner_box[3], outer_box[3]) - max(inner_box[1], outer_box[1]))
+                if width * height / inner_area >= self._NESTED_FIGURE_CONTAINMENT:
+                    dropped.add(id(inner))
+                    self._figure_source_indices[id(outer)] = max(
+                        self._figure_source_indices[id(outer)],
+                        self._figure_source_indices[id(inner)],
+                    )
+                    break
+        if dropped:
+            self.figures = [figure for figure in self.figures if id(figure) not in dropped]
+
+    def _group_figures_by_caption(
+        self, candidates: list[CaptionCandidate], taken: dict[str, int]
+    ) -> tuple[dict[str, int], dict[str, tuple[int, list[str]]]]:
+        """Group the figure regions printed around one explicit caption into one figure.
+
+        :meth:`_group_panel_figures` needs one panel letter per region and only
+        looks before the caption in reading order, so unlettered panels, fewer
+        letters than boxes, or a caption printed above its figure all stay one
+        figure per box. Here every explicit caption no grouping has claimed
+        anchors a figure: it is seeded with the regions directly above it
+        (else directly below), within ``_ANCHOR_SEED_GAP`` and overlapping it
+        horizontally, and grows to regions within ``_ANCHOR_GROW_GAP`` of the
+        group on that side. Body text of ``_ANCHOR_BODY_MIN_CHARS`` or more, or
+        another explicit caption, between a region and the group stops it, and
+        a region another explicit caption sits closer to stays with that one,
+        so side-by-side and stacked figures with their own captions stay apart.
+
+        The caption itself still goes through the global solve, which sees the
+        group's union box. Short panel labels inside the group (or inside a
+        single region seeded alone) become its evidence instead of competing
+        with the caption.
+
+        Returns the panel-label owners, and per anchor caption the merged
+        figure's identity with its panel labels, whose descriptions are
+        appended to the caption only when the solve gives it that figure.
+        """
+        anchors = [
+            item
+            for item in candidates
+            if item.object_type == "figure"
+            and item.bbox is not None
+            and item.page_number is not None
+            and (
+                self._EXPLICIT_FIGURE_RE.match(item.text) or self._FIGURE_ANCHOR_RE.match(item.text)
+            )
+        ]
+        free_anchors = sorted(
+            (item for item in anchors if item.caption_id not in taken),
+            key=lambda item: item.source_index,
+        )
+        if not free_anchors:
+            return {}, {}
+        body_boxes: dict[int, list[tuple[float, float, float, float]]] = {}
+        for region in self.region_summaries:
+            if (
+                region.label in self._ANCHOR_BODY_LABELS
+                and region.bbox is not None
+                and len(region.content or "") >= self._ANCHOR_BODY_MIN_CHARS
+            ):
+                body_boxes.setdefault(region.page, []).append(region.bbox)
+        owning_figures = set(taken.values())
+        single = [
+            figure
+            for figure in self.figures
+            if len(figure.parts) == 1
+            and figure.parts[0].bbox is not None
+            and figure.parts[0].page_number is not None
+            and id(figure) not in owning_figures
+        ]
+        if not single:
+            return {}, {}
+
+        def overlap(left: tuple, right: tuple) -> float:
+            width = max(0.0, min(left[2], right[2]) - max(left[0], right[0]))
+            return width / max(1.0, min(left[2] - left[0], right[2] - right[0]))
+
+        def side_gap(figure_box: tuple, anchor_box: tuple, side: str) -> float | None:
+            """Gap from the caption to a region on *side* of it, None when not on it."""
+            if side == "above":
+                return anchor_box[1] - figure_box[3] if figure_box[3] <= anchor_box[1] + 8 else None
+            return figure_box[1] - anchor_box[3] if figure_box[1] >= anchor_box[3] - 8 else None
+
+        def blocked(page: int, first: tuple, second: tuple, anchor: CaptionCandidate) -> bool:
+            """Body text or another explicit caption printed between two boxes."""
+            low, high = min(first[3], second[3]), max(first[1], second[1])
+            if high <= low:
+                return False
+            span = (min(first[0], second[0]), 0.0, max(first[2], second[2]), 0.0)
+            between = [
+                *body_boxes.get(page, []),
+                *(item.bbox for item in anchors if item.page_number == page and item is not anchor),
+            ]
+            return any(
+                other[1] >= low - 2 and other[3] <= high + 2 and overlap(other, span) >= 0.3
+                for other in between
+            )
+
+        def beside_gap(figure_box: tuple, anchor_box: tuple) -> float | None:
+            """Gap to a caption printed beside the region (a side legend), else None."""
+            height = max(0.0, min(figure_box[3], anchor_box[3]) - max(figure_box[1], anchor_box[1]))
+            if height < 0.5 * max(1.0, anchor_box[3] - anchor_box[1]):
+                return None
+            gap = max(anchor_box[0] - figure_box[2], figure_box[0] - anchor_box[2])
+            return gap if 0 <= gap <= self._ANCHOR_SEED_GAP else None
+
+        # The explicit caption each region sits closest to among those above
+        # or below it (overlapping it horizontally) or beside it; None when
+        # no caption does.
+        preferred: dict[int, str | None] = {}
+        for figure in single:
+            figure_box = figure.parts[0].bbox
+            best: tuple[float, str] | None = None
+            for anchor in anchors:
+                if anchor.page_number != figure.parts[0].page_number:
+                    continue
+                if overlap(figure_box, anchor.bbox) < 0.2:
+                    gap = beside_gap(figure_box, anchor.bbox)
+                    if gap is None:
+                        continue
+                else:
+                    gap = side_gap(figure_box, anchor.bbox, "above")
+                    if gap is None:
+                        gap = side_gap(figure_box, anchor.bbox, "below")
+                gap = float("inf") if gap is None else gap
+                if best is None or gap < best[0]:
+                    best = (gap, anchor.caption_id)
+            preferred[id(figure)] = best[1] if best else None
+
+        panel_owners: dict[str, int] = {}
+        anchor_groups: dict[str, tuple[int, list[str]]] = {}
+        used: set[int] = set()
+        members: set[int] = set()
+        for anchor in free_anchors:
+            page, anchor_box = anchor.page_number, anchor.bbox
+            pool = [
+                figure
+                for figure in single
+                if id(figure) not in used
+                and figure.parts[0].page_number == page
+                and preferred[id(figure)] in (None, anchor.caption_id)
+            ]
+            if not pool:
+                continue
+            cluster: list[PaperFigure] = []
+            side = "above"
+            for side in ("above", "below"):
+                cluster = [
+                    figure
+                    for figure in pool
+                    if (gap := side_gap(figure.parts[0].bbox, anchor_box, side)) is not None
+                    and gap <= self._ANCHOR_SEED_GAP
+                    and overlap(figure.parts[0].bbox, anchor_box) >= 0.2
+                    and not blocked(page, figure.parts[0].bbox, anchor_box, anchor)
+                ]
+                if cluster:
+                    break
+            if not cluster:
+                continue
+            grew = True
+            while grew:
+                grew = False
+                union = self._figure_union_box(cluster)
+                for figure in pool:
+                    figure_box = figure.parts[0].bbox
+                    if figure in cluster or side_gap(figure_box, anchor_box, side) is None:
+                        continue
+                    vertical_gap = max(
+                        0.0, max(figure_box[1], union[1]) - min(figure_box[3], union[3])
+                    )
+                    horizontal_gap = max(
+                        0.0, max(figure_box[0], union[0]) - min(figure_box[2], union[2])
+                    )
+                    if (
+                        vertical_gap <= self._ANCHOR_GROW_GAP
+                        and horizontal_gap <= self._ANCHOR_GROW_GAP
+                        and not blocked(page, figure_box, union, anchor)
+                    ):
+                        cluster.append(figure)
+                        grew = True
+            # A single region still takes the panel labels printed inside
+            # it, so a letter cannot outscore the caption for it.
+            union = self._figure_union_box(cluster)
+            if any(
+                self._stacked_captions(anchor, other, union, side, self._ANCHOR_SEED_GAP)
+                for other in anchors
+            ):
+                # Two explicit captions printed together beside one block
+                # (a legend list under stacked figures): which regions belong
+                # to which caption is not readable from geometry, so the
+                # solve keeps one region per caption as before.
+                continue
+            cluster.sort(key=lambda item: self._figure_source_indices[id(item)])
+            primary = cluster[0]
+            for member in cluster[1:]:
+                primary.parts.extend(member.parts)
+                primary.provenance.extend(member.provenance)
+                members.add(id(member))
+            used.update(id(item) for item in cluster)
+            primary.image_b64 = composite_panel_image(primary.parts) or primary.image_b64
+            self._figure_source_indices[id(primary)] = max(
+                self._figure_source_indices[id(item)] for item in cluster
+            )
+            # Panel labels printed between the group and its caption count too.
+            margin = self._ANCHOR_LABEL_MARGIN
+            reach = (
+                union[0] - margin,
+                (min(union[1], anchor_box[3]) if side == "below" else union[1]) - margin,
+                union[2] + margin,
+                (max(union[3], anchor_box[1]) if side == "above" else union[3]) + margin,
+            )
+            labels = [
+                item
+                for item in candidates
+                if item.object_type == "figure"
+                and item.page_number == page
+                and item.bbox is not None
+                and item is not anchor
+                and item.caption_id not in taken
+                and self._is_short_panel_candidate(item)
+                and item.bbox[0] >= reach[0]
+                and item.bbox[1] >= reach[1]
+                and item.bbox[2] <= reach[2]
+                and item.bbox[3] <= reach[3]
+            ]
+            panel_owners.update({item.caption_id: id(primary) for item in labels})
+            anchor_groups[anchor.caption_id] = (id(primary), [item.text for item in labels])
+        if members:
+            self.figures = [figure for figure in self.figures if id(figure) not in members]
+        return panel_owners, anchor_groups
+
+    def _claim_anchor_groups(
+        self,
+        assignments: list[CaptionAssignment],
+        anchor_groups: dict[str, tuple[int, list[str]]],
+    ) -> list[CaptionAssignment]:
+        """Give an abstaining caption the figure grouped around it, when nothing else took it.
+
+        The solve abstains when a caption's two best edges score alike, as
+        for a caption printed between two figures. The figure that
+        :meth:`_group_figures_by_caption` seeded from this caption is the
+        geometric reading; the caption takes it when the solve left it
+        unowned.
+        """
+        figure_id_by_identity = {
+            id(figure): f"figure:{figure.figure_id}" for figure in self.figures
+        }
+        taken = {item.object_id for item in assignments if item.object_id is not None}
+        claimed: list[CaptionAssignment] = []
+        for assignment in assignments:
+            owner = anchor_groups.get(assignment.caption_id, (None, []))[0]
+            object_id = figure_id_by_identity.get(owner) if owner is not None else None
+            if (
+                assignment.object_id is None
+                and assignment.ambiguous
+                and object_id is not None
+                and object_id not in taken
+            ):
+                taken.add(object_id)
+                assignment = CaptionAssignment(
+                    caption_id=assignment.caption_id,
+                    object_id=object_id,
+                    score=0.0,
+                    reasons=("same_page", "anchor_group"),
+                )
+            claimed.append(assignment)
+        return claimed
+
+    @staticmethod
+    def _stacked_captions(
+        anchor: CaptionCandidate,
+        other: CaptionCandidate,
+        group: tuple[float, float, float, float],
+        side: str,
+        max_gap: float,
+    ) -> bool:
+        """Is *other* a second caption printed with *anchor* on the same side of *group*?"""
+        if other is anchor or other.page_number != anchor.page_number or other.bbox is None:
+            return False
+        box, anchor_box = other.bbox, anchor.bbox
+        width = max(0.0, min(box[2], group[2]) - max(box[0], group[0]))
+        if width / max(1.0, min(box[2] - box[0], group[2] - group[0])) < 0.2:
+            return False
+        same_side = group[3] <= box[1] + 8 if side == "above" else group[1] >= box[3] - 8
+        vertical_gap = max(0.0, max(box[1], anchor_box[1]) - min(box[3], anchor_box[3]))
+        return same_side and vertical_gap <= max_gap
+
+    @staticmethod
+    def _figure_union_box(figures: list[PaperFigure]) -> tuple[float, float, float, float]:
+        boxes = [part.bbox for figure in figures for part in figure.parts if part.bbox is not None]
+        return (
+            min(item[0] for item in boxes),
+            min(item[1] for item in boxes),
+            max(item[2] for item in boxes),
+            max(item[3] for item in boxes),
+        )
 
     def _is_short_panel_candidate(self, candidate: CaptionCandidate) -> bool:
         text = self._caption_useful_text(candidate.text)
@@ -1446,19 +1844,41 @@ class MediaHandlersMixin:
             self._caption_canonical_by_id.get(label_id, label_id): owner_id
             for label_id, owner_id in self._confirmed_table_caption_owners.items()
         }
+        self._absorb_nested_figures()
         (
             panel_descriptions,
             panel_owner_ids,
             supporting_figure_owner_ids,
             panel_caption_owner_ids,
         ) = self._group_panel_figures(active_candidates)
+        # Before renumbering, so the provisional ids the number bonus compares
+        # against count each grouped figure once.
+        anchored_panel_owner_ids, anchor_groups = self._group_figures_by_caption(
+            active_candidates,
+            {**panel_owner_ids, **supporting_figure_owner_ids, **panel_caption_owner_ids},
+        )
+        panel_owner_ids.update(anchored_panel_owner_ids)
         (
             continuation_owners,
             fragment_owners,
             confirmed_table_caption_owners,
         ) = self._group_continuation_tables(active_candidates)
 
-        for index, figure in enumerate(self.figures, 1):
+        # The matcher compares a printed figure number with these provisional
+        # ids. A badge or icon on a page with no caption (it can own none:
+        # the solve is same-page only) would shift every later id by one, so
+        # it is numbered after the rest (``_reconcile_media_ids`` restores
+        # document order afterwards).
+        caption_pages = {candidate.page_number for candidate in active_candidates}
+        decoration = {
+            id(figure)
+            for figure in self.figures
+            if self._is_decoration_shaped(figure)
+            and figure.parts[0].page_number not in caption_pages
+        }
+        numbered = [figure for figure in self.figures if id(figure) not in decoration]
+        numbered += [figure for figure in self.figures if id(figure) in decoration]
+        for index, figure in enumerate(numbered, 1):
             figure.figure_id = index
             figure.caption = None
         for index, table in enumerate(self.tables, 1):
@@ -1479,13 +1899,24 @@ class MediaHandlersMixin:
         # Every cross-page assignment is vetoed below, so cross-page edges
         # stay out of the solve: one that outscored a caption's same-page
         # edge won, was vetoed, and left the caption with no owner at all.
+        # A figure that already owns its panel caption is not a target
+        # either: the solve would hand it a second caption, and the figure
+        # that caption belongs to would stay uncaptioned.
+        panel_captioned = set(panel_caption_owner_ids.values())
+        captioned = {
+            f"figure:{figure.figure_id}" for figure in self.figures if id(figure) in panel_captioned
+        }
         assignments = list(
             assign_captions(
                 matching_candidates,
-                [*self._figure_targets(), *self._table_targets()],
+                [
+                    *(t for t in self._figure_targets() if t.object_id not in captioned),
+                    *self._table_targets(),
+                ],
                 same_page_only=True,
             )
         )
+        assignments = self._claim_anchor_groups(assignments, anchor_groups)
         candidate_by_id = {item.caption_id: item for item in self._caption_candidates}
         figure_by_id = {f"figure:{item.figure_id}": item for item in self.figures}
         table_by_id = {f"table:{item.table_id}": item for item in self.tables}
@@ -1593,9 +2024,28 @@ class MediaHandlersMixin:
                     0.0,
                     (*assignment.reasons, veto_reason),
                 )
+            elif (
+                assignment.object_id in figure_by_id
+                and figure_by_id[assignment.object_id].caption
+                and self._is_short_panel_candidate(candidate)
+            ):
+                # Grouping already captioned this figure; a short label the
+                # solve gives it is one of its panel labels, not its caption.
+                assignment = CaptionAssignment(
+                    assignment.caption_id,
+                    assignment.object_id,
+                    assignment.score,
+                    (*assignment.reasons, "panel_evidence"),
+                    assignment.ambiguous,
+                )
             elif assignment.object_id in figure_by_id:
                 text = self._caption_display_text_by_id.get(candidate.caption_id, candidate.text)
                 evidence = panel_descriptions.get(candidate.caption_id, [])
+                anchor_owner, anchor_descriptions = anchor_groups.get(
+                    candidate.caption_id, (None, [])
+                )
+                if anchor_owner == id(figure_by_id[assignment.object_id]):
+                    evidence = anchor_descriptions
                 descriptions = [item for item in evidence if self._panel_description(item)]
                 if descriptions:
                     text = f"{text} | {'; '.join(descriptions)}"

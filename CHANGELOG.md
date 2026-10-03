@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A figure or table caption is no longer lost when a figure or table on the
   previous page scores higher for it: captions are matched only to figures and
   tables on their own page, which is the only match the parser ever kept (#133).
+- A multi-panel figure is exported as one figure instead of one object per
+  panel: panel boxes inside a whole-figure box are dropped as duplicates, the
+  panels printed around one numbered caption are grouped under it, and panel
+  letters inside the group no longer take the figure's caption. Figures printed
+  with their own captions side by side or stacked stay separate, and a badge or
+  icon on a page without captions no longer shifts the figure numbers captions
+  are matched by (#132).
 
 ## [0.6.0] - 2026-09-30
 
