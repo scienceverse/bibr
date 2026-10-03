@@ -473,7 +473,7 @@ SECTION_CONTAINER_HEADINGS = frozenset(
 # title or an abstract.
 _SECTION_FURNITURE_RE = re.compile(
     r"^(?:word counts?|running (?:title|head)|short title|posted date|"
-    r"manuscript (?:number|no|id)|authors?|disclaimer)\s*(?::.*)?$"
+    r"manuscript (?:number|no|id)|authors?|corresponding authors?|disclaimer)\s*(?::.*)?$"
 )
 
 

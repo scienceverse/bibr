@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from bibr.paper_contents import (
     CanonicalSection,
     PaperSection,
+    is_exact_front_matter_furniture,
     is_section_container_heading,
     is_section_furniture_heading,
 )
@@ -606,7 +607,8 @@ def _is_interlude(sec: PaperSection) -> bool:
         and sec.classification_source not in _GUESSED_TYPE_SOURCES
     ):
         return True
-    if is_section_furniture_heading(sec.header or ""):
+    header = sec.header or ""
+    if is_section_furniture_heading(header) or is_exact_front_matter_furniture(header):
         return True
     return (
         sec.classification_source in _TRUSTED_ALIAS_SOURCES

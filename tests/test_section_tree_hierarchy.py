@@ -577,3 +577,17 @@ def test_first_heading_of_a_type_is_a_part_only_when_no_part_name_exists():
     ]
     assign_hierarchy_from_top_level(secs)
     assert _tree(secs) == [(1, 1, 0), (2, 2, 1), (3, 1, 0), (4, 2, 3), (5, 1, 0), (6, 2, 5)]
+
+
+def test_cover_sheet_labels_sit_at_level_one_and_contain_nothing():
+    """A preprint cover page: the label rows are front matter, so the
+    affiliation line after them opens its own section instead of nesting."""
+    secs = [
+        _parsed(1, "Research Article", CanonicalSection.UNKNOWN, None),
+        _parsed(2, "Posted Date: September 29th, 2026", CanonicalSection.UNKNOWN, None),
+        _parsed(3, "Corresponding author", CanonicalSection.UNKNOWN, None),
+        _parsed(4, "Universidade Federal", CanonicalSection.UNKNOWN, None),
+        _parsed(5, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 1, 0), (3, 1, 0), (4, 1, 0), (5, 1, 0)]

@@ -141,6 +141,7 @@ async def test_cover_sheet_labels_and_containers_never_reach_the_model_or_llm():
         "Running title: Sleep and memory",
         "Manuscript Number: ABC-D-26-00123",
         "Authors",
+        "Corresponding author",
         "Disclaimer: The manuscript is the authors' accepted version",
         "Declarations",
         "Statements and Declarations",
