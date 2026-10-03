@@ -3374,3 +3374,67 @@ def test_supported_by_with_a_label_grant_id_or_funder_acronym_is_funding(text: s
     metadata = _shadow_values(contents)
 
     assert metadata.funding_statement == text
+
+
+def test_body_section_under_a_strong_funding_heading_is_not_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Financial support",
+                CanonicalSection.RESULTS,
+                "heading",
+                0.9,
+                [
+                    "Students who received financial support from parents reported lower stress"
+                    " (b = 0.3).",
+                    "This effect was larger for first-generation students.",
+                    "Table 3 shows the full model.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement is None
+
+
+def test_methods_typed_bmc_data_section_under_a_strong_heading_is_still_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                ["Not applicable."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == "Not applicable."
+
+
+def test_endnote_under_a_strong_funding_heading_is_still_copied():
+    contents = _contents(
+        [
+            (
+                1,
+                "Financial support",
+                CanonicalSection.ENDNOTE,
+                "model",
+                0.9,
+                ["The study received no specific grant from any funding agency."],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "The study received no specific grant from any funding agency."
+    )

@@ -154,6 +154,18 @@ _TOPICAL_ETHICS_HEADING = re.compile(
     re.IGNORECASE,
 )
 _PUBLICATION_CONSENT = re.compile(r"^consent for publication$", re.IGNORECASE)
+# End-matter types a strong statement heading is copied from as is; under a
+# body type ("Financial support" typed as results) the copy must be compact
+# and pass the lexical prose guards.
+_STRONG_HEADING_COPY_TYPES = frozenset(
+    {
+        None,
+        CanonicalSection.ENDNOTE,
+        CanonicalSection.FOOTNOTE,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.ACKNOWLEDGMENT,
+    }
+)
 _AMBIGUOUS_CLASSIFICATION_SOURCES = frozenset(
     {"model", "llm", "alias_prior", "substring_alias", "parent_context"}
 )
@@ -785,6 +797,44 @@ def _legacy_ethics_declares(text: str) -> bool:
     return bool(_LEGACY_CONSENT_ACTION.search(text))
 
 
+def _legacy_anchor_row_passes(field: str, text: str) -> bool:
+    """Whether a row holding a legacy anchor of ``field`` passes the prose guards."""
+    if field == "coi_statement" and not _legacy_coi_declares(text):
+        return False
+    if field == "ethics_statement" and not _legacy_ethics_declares(text):
+        return False
+    if _label_noun_only_in_prose(field, text):
+        return False
+    if field == "funding_statement" and not (
+        any(pattern.search(text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS)
+        # A "Funding:" label already says what the sentence is.
+        or _STATEMENT_LABEL[field].match(text)
+    ):
+        ambiguous = _LEGACY_FUNDING_AMBIGUOUS_ANCHOR.search(text)
+        if ambiguous is None or not _supported_by_names_funder(text[ambiguous.end() :]):
+            return False
+    return True
+
+
+def _legacy_body_copy_passes(field: str, rows: list[PaperSentence]) -> bool:
+    """Whether a body section under a strong heading reads as the statement.
+
+    It is compact, and every row holding an anchor of the field passes the
+    lexical prose guards ("Students who received financial support from
+    parents ..." under "Financial support" does not).
+    """
+    if (
+        len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
+        or len(" ".join(row.text for row in rows)) > _MAX_COMPACT_CHARS
+    ):
+        return False
+    return all(
+        _legacy_anchor_row_passes(field, row.text)
+        for row in rows
+        if any(pattern.search(row.text) for pattern in _LEGACY_ANCHORS[field])
+    )
+
+
 def _legacy_capture_at(
     field: str,
     rows: list[PaperSentence],
@@ -799,25 +849,11 @@ def _legacy_capture_at(
         return []
     if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
         return []
-    if field == "coi_statement" and not _legacy_coi_declares(sentence.text):
+    if not _legacy_anchor_row_passes(field, sentence.text):
         return []
-    if field == "ethics_statement" and not _legacy_ethics_declares(sentence.text):
-        return []
-    if _label_noun_only_in_prose(field, sentence.text):
-        return []
-
-    strong_funding_anchor = False
-    if field == "funding_statement":
-        strong_funding_anchor = any(
-            pattern.search(sentence.text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS
-        )
-        # A "Funding:" label already says what the sentence is.
-        if not strong_funding_anchor and not _STATEMENT_LABEL[field].match(sentence.text):
-            ambiguous = _LEGACY_FUNDING_AMBIGUOUS_ANCHOR.search(sentence.text)
-            if ambiguous is None or not _supported_by_names_funder(
-                sentence.text[ambiguous.end() :]
-            ):
-                return []
+    strong_funding_anchor = field == "funding_statement" and any(
+        pattern.search(sentence.text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS
+    )
 
     captured = [sentence]
     for following in rows[index + 1 : index + 3]:
@@ -898,7 +934,8 @@ def _legacy_section_qualifies(field: str, section: PaperSection) -> bool:
 
     Its type is the field's statement type, or the heading is one of the
     field's strong headings and the section has no other statement type
-    ("Ethics approval and consent to participate" typed as an endnote).
+    ("Ethics approval and consent to participate" typed as an endnote). A body
+    section under such a heading must also pass ``_legacy_body_copy_passes``.
     """
     if section.section_type == _FIELD_SECTION_TYPES[field]:
         return not _legacy_section_is_other_matter(field, section)
@@ -966,6 +1003,12 @@ def _build_legacy_snapshot_candidates(
             rows = _legacy_section_rows(field, rows_by_section.get(section.section_id, []))
             heading_tail = _heading_declaration_tail(field, section.header)
             if not rows and not heading_tail:
+                continue
+            if (
+                section.section_type != _FIELD_SECTION_TYPES[field]
+                and section.section_type not in _STRONG_HEADING_COPY_TYPES
+                and not _legacy_body_copy_passes(field, rows)
+            ):
                 continue
             if _legacy_section_is_long(section, rows):
                 long_copies.append((section, rows, heading_tail))
