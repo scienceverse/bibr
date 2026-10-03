@@ -637,8 +637,14 @@ def _legacy_follow_stops(field: str, text: str) -> bool:
     return bool(
         _furniture_boundaries(field, text)
         or _opens_other_end_matter(field, text)
-        or _THANKS.match(text)
+        or _thanks_ends(field, text)
     )
+
+
+def _thanks_ends(field: str, text: str) -> bool:
+    """A thanks sentence ends a statement unless it states the field itself
+    ("We also thank the Jacobs Foundation for financial support (grant ...)")."""
+    return bool(_THANKS.match(text)) and field not in _legacy_categories_in(text)
 
 
 def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSentence]:
@@ -666,7 +672,7 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
         boundaries = _furniture_boundaries(field, text)
         label = _opens_other_end_matter(field, text)
         if not boundaries and not label:
-            if kept and _THANKS.match(text):
+            if kept and _thanks_ends(field, text):
                 break
             kept.append(row)
             continue

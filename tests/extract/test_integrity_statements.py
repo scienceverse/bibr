@@ -3438,3 +3438,39 @@ def test_endnote_under_a_strong_funding_heading_is_still_copied():
     assert metadata.funding_statement == (
         "The study received no specific grant from any funding agency."
     )
+
+
+def test_thanks_sentence_naming_funding_continues_the_funding_statement():
+    rows = [
+        "This research was funded by the Swiss National Science Foundation (grant 100014_123).",
+        "We also thank the Jacobs Foundation for financial support (grant 2018-1234).",
+    ]
+    contents = _contents([(1, "Funding", CanonicalSection.FUNDING, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == " ".join(rows)
+
+
+def test_thanks_sentence_without_funding_still_ends_the_funding_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    "This research was funded by the Swiss National Science Foundation.",
+                    "We thank our participants for their time.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == (
+        "This research was funded by the Swiss National Science Foundation."
+    )
