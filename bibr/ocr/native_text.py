@@ -200,6 +200,20 @@ _WORD_GAP_RATIO = 3.0
 _WORD_GAP_FLOOR = 0.02
 # Gaps outside this range (in line heights) are not neighbours on one line.
 _LINE_GAP_RANGE = (-0.3, 1.5)
+# No space is inserted before closing punctuation, next to a slash, or
+# between a dot and a lowercase letter or digit: a URL or DOI set with loose
+# letter spacing ("doi.org/10.1177/...") has word-sized gaps around its dots
+# and slashes. A sentence still splits ("temperament.As").
+_NO_SPACE_BEFORE = frozenset(".,:;/")
+_NO_SPACE_AFTER = frozenset("/")
+
+
+def _may_split(before: str, after: str) -> bool:
+    if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
+        return False
+    return not (before == "." and (after.islower() or after.isdigit()))
+
+
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -255,7 +269,7 @@ def _repair_word_boundaries(
     for k, (kind, gap) in enumerate(pairs):
         if kind is None:
             continue
-        (ra, _ca, la), (rb, _cb, lb) = glyphs[k], glyphs[k + 1]
+        (ra, ca, la), (rb, cb, lb) = glyphs[k], glyphs[k + 1]
         if la is None or lb is None:  # kind is only set for two boxed glyphs
             continue
         at = ((la[2] + lb[0]) / 2.0, (max(la[1], lb[1]) + min(la[3], lb[3])) / 2.0)
@@ -263,7 +277,7 @@ def _repair_word_boundaries(
             drop.update(range(ra + 1, rb))
             if gap >= _WORD_GAP_MIN:
                 insert[ra] = at
-        elif gap >= _WORD_GAP_MIN:
+        elif gap >= _WORD_GAP_MIN and _may_split(ca, cb):
             in_word = [
                 pairs[j][1]
                 for j in (k - 1, k + 1)

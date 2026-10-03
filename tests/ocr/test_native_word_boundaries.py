@@ -143,3 +143,34 @@ def _line_y(index: int) -> float:
     from tests.ocr.test_watermark_text import _baseline
 
     return _baseline(index)
+
+
+def _spaced_glyphs(text: str, x: float, y: float, *, loose: str, gap: float, size: float = 10.0):
+    """One object per glyph: *gap* points around the glyphs in *loose*, 0.2 pt elsewhere."""
+    out = b""
+    for index, ch in enumerate(text):
+        out += _bt(ch, x, y, size=size)
+        following = text[index + 1] if index + 1 < len(text) else ""
+        x += _width(ch, size) + (gap if ch in loose or following in loose else 0.2)
+    return out
+
+
+def test_loosely_set_doi_link_gets_no_extra_space():
+    """A justified reference line spaces the dots and slashes of its DOI link:
+    "https ://doi . org / 10 . 1177 /" broke the DOI."""
+    link = "https://doi.org/10.1177/0022487108328155"
+    pdf_bytes = _pdf(_spaced_glyphs(link, 72, 700, loose=".:/", gap=1.6))
+    doc = pypdfium2.PdfDocument(pdf_bytes)
+    try:
+        pdfium_text = doc[0].get_textpage().get_text_range()
+    finally:
+        doc.close()
+
+    assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == pdfium_text
+    assert "doi.org" in pdfium_text
+
+
+def test_glued_sentence_after_a_full_stop_still_splits():
+    pdf_bytes = _pdf(_glyph_line("of toddler temperament. As a part", 72, 700, gap=1.6))
+
+    assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == "of toddler temperament. As a part"
