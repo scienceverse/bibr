@@ -666,6 +666,30 @@ def _numbered_parent(
     return None
 
 
+def is_part_heading(text: str) -> bool:
+    """Whether a heading names a whole IMRaD part ("Methods", "Results and
+    discussion", "Patients and methods")."""
+    return _is_part_name(text)
+
+
+def numbering_parent_ids(sections: list[PaperSection]) -> dict[int, int]:
+    """Section id -> id of the nearest earlier heading numbered as its parent
+    (2.3 -> 2, 4.2 -> IV). Only children whose parent number is printed."""
+    numbers = _document_section_numbers(sections)
+    last_by_path: dict[tuple[int | str, ...], int] = {}
+    parents: dict[int, int] = {}
+    for sec in sections:
+        number = numbers.get(sec.section_id)
+        if number is None:
+            continue
+        if len(number.path) > 1:
+            parent_id = last_by_path.get(number.path[:-1])
+            if parent_id is not None:
+                parents[sec.section_id] = parent_id
+        last_by_path[number.path] = sec.section_id
+    return parents
+
+
 def assign_hierarchy_from_top_level(
     sections: list[PaperSection],
     scope_ids: dict[int, int] | None = None,

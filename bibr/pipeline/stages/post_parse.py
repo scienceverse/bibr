@@ -49,10 +49,9 @@ _REF_DEFICIT_RATIO = 0.5
 # inflate the count.
 _NUMBERED_CITE_MIN_DENSITY = 0.5
 
-_RESULTS_CHILD_CUE_RE = re.compile(
-    r"\b(?:results?|findings?|outcomes?|views?|perspectives?|experiences?|themes?|engagement)\b",
-    re.IGNORECASE,
-)
+# Section-type tiers that read the heading itself; their type is kept when
+# the heading's context says otherwise.
+_HEADING_TYPE_SOURCES = frozenset({"exact_alias", "substring_alias", "title"})
 
 
 def _references_from_notes(contents) -> bool:
@@ -63,72 +62,50 @@ def _references_from_notes(contents) -> bool:
     )
 
 
-def _reconcile_result_subsection_types(sections) -> None:
-    """Repair weak METHOD predictions for result-oriented child headings.
+def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> None:
+    """Give a subsection the IMRaD type of the part it is printed in.
 
-    The trained classifier can over-weight procedural vocabulary in a body
-    snippet even when layout hierarchy and the heading identify a subsection
-    of Results (for example, ``Professional view on engagement``). Only weak
-    model predictions are changed; aliases, LLM decisions, and strongly scored
-    method subsections remain untouched.
+    The classifier and the LLM type each heading alone, so "3.2 Structural
+    characterization" under "3 Results" reads as methods. A child that is
+    UNKNOWN, ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes
+    its parent's IMRaD type when the parent is confirmed: by numbering
+    (3.2 -> 3) or as a part-name heading ("Results"). Children typed from their
+    own heading text (alias hits) keep their type. Runs in document order, so
+    a grandchild sees its parent's inherited type. ``only_ids`` limits the
+    children considered.
     """
     from bibr.paper_contents import CanonicalSection
+    from bibr.structure.section_tree import (
+        IMRAD_ANCHORS,
+        is_part_heading,
+        numbering_parent_ids,
+    )
 
+    inheriting = IMRAD_ANCHORS | {CanonicalSection.UNKNOWN, CanonicalSection.ENDNOTE, None}
     by_id = {section.section_id: section for section in sections}
+    numbered_parents = numbering_parent_ids(sections)
     for section in sections:
-        parent = by_id.get(section.parent_section_id)
+        if only_ids is not None and section.section_id not in only_ids:
+            continue
+        if section.level == 0 or section.section_type not in inheriting:
+            continue
+        if section.classification_source in _HEADING_TYPE_SOURCES:
+            continue
+        parent_id = numbered_parents.get(section.section_id)
+        if parent_id is not None:
+            parent = by_id.get(parent_id)
+        else:
+            parent = by_id.get(section.parent_section_id)
+            if parent is None or not is_part_heading(parent.header or ""):
+                continue
         if (
-            parent is not None
-            and parent.section_type == CanonicalSection.RESULTS
-            and section.section_type == CanonicalSection.METHODS
-            and section.classification_source == "model"
-            and section.classification_score < 0.8
-            and _RESULTS_CHILD_CUE_RE.search(section.header)
-        ):
-            section.section_type = CanonicalSection.RESULTS
-            section.classification_score = max(section.classification_score, 0.8)
-            section.classification_source = "parent_context"
-
-
-def _inherit_unknown_child_section_types(sections) -> None:
-    """Fill UNKNOWN child section types from their body-section parent.
-
-    This is a conservative fallback for subsections that are structurally
-    inside Methods/Results/etc. but whose own heading is too specific for the
-    classifier. Explicit child classifications are preserved.
-    """
-    from bibr.paper_contents import CanonicalSection
-    from bibr.structure.section_tree import INTERLUDE_TYPES
-
-    inheritable = {
-        CanonicalSection.INTRODUCTION,
-        CanonicalSection.METHODS,
-        CanonicalSection.RESULTS,
-        CanonicalSection.DISCUSSION,
-    }
-    by_id = {section.section_id: section for section in sections}
-    pos_by_id = {section.section_id: idx for idx, section in enumerate(sections)}
-    for section in sections:
-        if section.section_type not in (CanonicalSection.UNKNOWN, None):
-            continue
-        parent = by_id.get(section.parent_section_id)
-        if parent is None or parent.section_type not in inheritable:
-            continue
-        parent_pos = pos_by_id.get(parent.section_id)
-        child_pos = pos_by_id.get(section.section_id)
-        if parent_pos is None or child_pos is None or parent_pos >= child_pos:
-            continue
-        if any(
-            intervening.section_type in INTERLUDE_TYPES
-            for intervening in sections[parent_pos + 1 : child_pos]
+            parent is None
+            or parent.section_type not in IMRAD_ANCHORS
+            or parent.section_type == section.section_type
         ):
             continue
         section.section_type = parent.section_type
-        parent_score = float(parent.classification_score or 0.7)
-        section.classification_score = max(
-            float(section.classification_score or 0.0),
-            min(parent_score, 0.75),
-        )
+        section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
         section.classification_source = "parent_context"
 
 
@@ -337,8 +314,6 @@ async def _classify_sections(
                 section.classification_source = "title"
                 break
 
-    _reconcile_result_subsection_types(contents.sections)
-
     if layout_hints:
         contents.layout_hints = layout_hints
 
@@ -357,7 +332,7 @@ async def _classify_sections(
     # the same IMRaD 1-2 shape as the PDF path (output uniformity by design —
     # see specs/2026-06-15-docx-hierarchy-flattening-issue.md).
     assign_hierarchy_from_top_level(contents.sections, scope_ids=scope_ids, marker_ids=set(markers))
-    _inherit_unknown_child_section_types(contents.sections)
+    _inherit_child_section_types(contents.sections)
 
 
 async def _normalize_section_structure(
