@@ -435,7 +435,8 @@ def test_numbered_preprint_sections_take_their_depth_and_prefix_parent():
         (10, 1, 0),
         (11, 2, 10),
         (12, 1, 0),
-        (13, 1, 0),
+        # A statement printed under "Declarations" is its subsection.
+        (13, 2, 12),
         (14, 1, 0),
     ]
 
@@ -591,3 +592,67 @@ def test_cover_sheet_labels_sit_at_level_one_and_contain_nothing():
     ]
     assign_hierarchy_from_top_level(secs)
     assert _tree(secs) == [(1, 1, 0), (2, 1, 0), (3, 1, 0), (4, 1, 0), (5, 1, 0)]
+
+
+def test_guessed_back_matter_after_the_numbered_body_sits_at_level_one():
+    """In a numbered paper, an unnumbered heading after the last numbered body
+    heading with a guessed back-matter type is back matter, not part of the
+    conclusions, and holds the unnumbered headings printed under it. Numbered
+    points after the reference list (a peer-review report) do not extend the
+    body."""
+    secs = [
+        _parsed(1, "1. Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "2. Methods", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(3, "Ethics in the sampling frame", CanonicalSection.ETHICS, "model"),
+        _parsed(4, "3. Conclusions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(5, "Policy outlook", CanonicalSection.UNKNOWN, None),
+        _parsed(6, "Ethics and consent", CanonicalSection.ETHICS, "model"),
+        _parsed(7, "Data availability", CanonicalSection.OPEN_DATA, "exact_alias"),
+        _parsed(8, "Underlying data", CanonicalSection.UNKNOWN, None),
+        _parsed(9, "References", CanonicalSection.REFERENCES, "exact_alias"),
+        _parsed(10, "Reviewer report", CanonicalSection.UNKNOWN, None),
+        _parsed(11, "1. Clarify the sampling", CanonicalSection.METHODS, "model"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs)[:9] == [
+        (1, 1, 0),
+        (2, 1, 0),
+        (3, 2, 2),
+        (4, 1, 0),
+        (5, 2, 4),
+        (6, 1, 0),
+        (7, 1, 0),
+        (8, 2, 7),
+        (9, 1, 0),
+    ]
+
+
+def test_lettered_appendices_do_not_end_the_numbered_body():
+    """Lettered appendix numbers are not body numbering: guessed back matter
+    between the conclusions and "A.1" still sits at level 1."""
+    secs = [
+        _parsed(1, "1 Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(2, "2 Results", CanonicalSection.RESULTS, "exact_alias"),
+        _parsed(3, "3 Conclusions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(4, "Author statement", CanonicalSection.AUTHOR_CONTRIBUTIONS, "model"),
+        _parsed(5, "A.1 Proofs", CanonicalSection.APPENDIX, "substring_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs)[3] == (4, 1, 0)
+
+
+def test_statements_under_a_declarations_heading_are_its_subsections():
+    """BMC prints its statements under "Declarations"; the reference list
+    after them is level 1 again."""
+    secs = [
+        _parsed(1, "Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _parsed(2, "Declarations", CanonicalSection.UNKNOWN, None),
+        _parsed(
+            3, "Ethics approval and consent to participate", CanonicalSection.ETHICS, "exact_alias"
+        ),
+        _parsed(4, "Competing interests", CanonicalSection.COI, "exact_alias"),
+        _parsed(5, "References", CanonicalSection.REFERENCES, "exact_alias"),
+        _parsed(6, "Funding", CanonicalSection.FUNDING, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    assert _tree(secs) == [(1, 1, 0), (2, 1, 0), (3, 2, 2), (4, 2, 2), (5, 1, 0), (6, 1, 0)]

@@ -572,6 +572,21 @@ _ALWAYS_INTERLUDE_TYPES: frozenset[CanonicalSection] = frozenset(
     }
 )
 _TRUSTED_ALIAS_SOURCES = frozenset({"exact_alias", "substring_alias"})
+# Numbering schemes of body parts; lettered appendices ("A.1") are not body.
+_BODY_NUMBER_KINDS = frozenset({"arabic", "roman", "chapter"})
+# BMC and Springer group their statements under one printed heading; the
+# statement headings printed after it are its subsections.
+_DECLARATIONS_HEADINGS = frozenset({"declarations", "statements and declarations"})
+_STATEMENT_TYPES = frozenset(
+    {
+        CanonicalSection.ACKNOWLEDGMENT,
+        CanonicalSection.FUNDING,
+        CanonicalSection.OPEN_DATA,
+        CanonicalSection.AUTHOR_CONTRIBUTIONS,
+        CanonicalSection.COI,
+        CanonicalSection.ETHICS,
+    }
+)
 _GUESSED_TYPE_SOURCES = frozenset({"model", "llm", "alias_prior"})
 
 
@@ -629,6 +644,13 @@ class _DocumentHeadings:
     # "Chapter N" headings number the document (a thesis): the part names
     # inside a chapter ("Introduction", "Methodology") are its subsections.
     chapter_mode: bool
+    # Unnumbered headings between the last numbered body heading of a
+    # numbered paper and its reference list. A back-matter type guessed for
+    # one of them ("Ethics and consent" after "5. Conclusions") is back
+    # matter, not a subsection of the last part, and back matter there holds
+    # the unnumbered headings printed under it ("Data availability" >
+    # "Underlying data").
+    trailing_ids: frozenset[int]
 
     @classmethod
     def of(cls, sections: list[PaperSection]) -> "_DocumentHeadings":
@@ -651,7 +673,30 @@ class _DocumentHeadings:
             and any(not _is_all_caps(s.header or "") for s in other_body)
         )
         chapter_mode = sum(number.kind == "chapter" for number in numbers.values()) >= 2
-        return cls(numbers, part_types, caps_mode, chapter_mode)
+        # The body ends at the reference list: numbered headings after it
+        # (a peer-review report's points, numbered appendices) are not body.
+        references_at = next(
+            (
+                index
+                for index, sec in enumerate(sections)
+                if sec.section_type == CanonicalSection.REFERENCES
+                and sec.classification_source not in _GUESSED_TYPE_SOURCES
+            ),
+            len(sections),
+        )
+        body_numbered = [
+            index
+            for index, sec in enumerate(sections[:references_at])
+            if sec.section_id in numbers and numbers[sec.section_id].kind in _BODY_NUMBER_KINDS
+        ]
+        trailing_ids: frozenset[int] = frozenset()
+        if len(body_numbered) >= 3:
+            trailing_ids = frozenset(
+                sec.section_id
+                for sec in sections[body_numbered[-1] + 1 : references_at]
+                if sec.level > 0 and sec.section_id not in numbers
+            )
+        return cls(numbers, part_types, caps_mode, chapter_mode, trailing_ids)
 
 
 def _numbered_parent(
@@ -714,7 +759,10 @@ def assign_hierarchy_from_top_level(
       open a level-1 section;
     - back and front matter (title, abstract, keywords, references, alias-typed
       acknowledgments, funding, statements, appendices; cover-sheet labels)
-      sits at level 1 but never contains the headings after it;
+      sits at level 1 but never contains the headings after it; so does an
+      unnumbered heading guessed as back matter after the last numbered body
+      heading of a numbered paper. Statements printed under a "Declarations"
+      heading are its subsections;
     - every other heading is a child of the most recent level-1 or numbered
       body section; before any, or after the reference list, it opens a
       level-1 section itself.
@@ -797,13 +845,26 @@ def assign_hierarchy_from_top_level(
             and sec.section_type not in doc.part_types
             and len(doc.numbers) < 3
         )
-        if _is_interlude(sec):
+        if _is_interlude(sec) or (
+            sec.section_id in doc.trailing_ids and sec.section_type in _INTERLUDE_HEADING_TYPES
+        ):
+            if (
+                last_body is not None
+                and sec.section_type in _STATEMENT_TYPES
+                and _part_name_key(last_body.header or "") in _DECLARATIONS_HEADINGS
+            ):
+                sec.level = min(last_body.level + 1, _MAX_LEVEL)
+                sec.parent_section_id = last_body.section_id
+                continue
             sec.level = 1
             sec.parent_section_id = 0
             if sec.section_type == CanonicalSection.REFERENCES:
                 # The reference list ends the body: what follows (appendices,
                 # supplementary material, notes) is not inside its last part.
                 last_body = None
+            elif sec.section_id in doc.trailing_ids:
+                # Past the numbered body only back matter follows.
+                last_body = sec
             continue
         if doc.caps_mode:
             # The casing is the document's own level-1 typography: it
