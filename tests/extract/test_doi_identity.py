@@ -1807,6 +1807,62 @@ def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
     )
 
 
+def test_a_running_footer_misreading_the_doi_still_corroborates_it():
+    """The footer repeats the DOI with "S0140" read as "50140"; one page prints it right."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = "10.1016/S0140-6736(26)90001-1"
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.INTRODUCTION, 1, f"Published Online https://doi.org/{own}", 1),
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                2,
+                "See Comment https://doi.org/10.1016/S0140-6736(26)90002-3",
+                1,
+            ),
+        ],
+        footers=["www.example.com Vol 408 https://doi.org/10.1016/50140-6736(26)90001-1"] * 4
+        + [f"www.example.com Vol 408 https://doi.org/{own}"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == own.casefold()
+
+
+def test_a_footer_printed_once_does_not_corroborate_a_linked_doi():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                1,
+                "Published Online https://doi.org/10.1234/own.1",
+                1,
+            ),
+            (
+                1,
+                CanonicalSection.INTRODUCTION,
+                2,
+                "See Comment https://doi.org/10.1234/linked.2",
+                1,
+            ),
+        ],
+        footers=["See Comment page 12 https://doi.org/10.1234/linked.2"],
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is None
+    assert [issue.code for issue in selection.issues] == ["VAL_DOI_AMBIGUOUS"]
+
+
 def test_a_tie_both_dois_of_which_are_corroborated_still_abstains():
     from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
 

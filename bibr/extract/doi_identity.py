@@ -1170,27 +1170,45 @@ def _prefer_lowest_page(candidates: list[DoiCandidate]) -> list[DoiCandidate]:
     return [c for c in candidates if c.page == lowest]
 
 
+# OCR reads a DOI's letters as the digits they resemble: a running footer
+# repeats "S0140-6736(…)" as "50140-6736(…)".
+_OCR_DIGIT_FOLD = str.maketrans("oils", "0115")
+
+
+def _ocr_folded(value: str) -> str:
+    return value.casefold().translate(_OCR_DIGIT_FOLD)
+
+
 def _prefer_corroborated(
     resolved: list[DoiCandidate], candidates: tuple[DoiCandidate, ...]
 ) -> list[DoiCandidate]:
-    """Prefer the one tied DOI that both the page body and the page furniture print.
+    """Prefer the one tied DOI that both the page body and the running furniture print.
 
     The last rung, for a tie the ladder leaves. A first page can print the
     article's DOI beside a linked article's ("See Online/Comment
     https://doi.org/…"), and only the article's own also runs in the header or
     footer. Only printed sources count: the body (sentences, the text layer, a
-    publication box) and the header/footer furniture. Link targets and the
-    document information never break a tie, so a DOI no second printed source
-    names never wins.
+    publication box) and header/footer lines repeated on several pages, which
+    may misread letters as digits. A line printed once may be a stray
+    reference or a linked article's, as for ``_prefer_body_sources``. Link
+    targets and the document information never break a tie, so a DOI no second
+    printed source names never wins.
     """
 
-    printed: dict[str, set[bool]] = defaultdict(set)
+    body: set[str] = set()
+    running: set[str] = set()
     for candidate in candidates:
-        if candidate.rejection_reason is None:
-            printed[candidate.normalized.casefold()].add(
-                candidate.source_kind in _FURNITURE_SOURCES
-            )
-    corroborated = [value for value in _distinct_dois(resolved) if len(printed[value]) == 2]
+        if candidate.rejection_reason is not None:
+            continue
+        if candidate.source_kind not in _FURNITURE_SOURCES:
+            body.add(candidate.normalized.casefold())
+        elif candidate.repeated_header_footer_count > 1:
+            running.add(_ocr_folded(candidate.normalized))
+    corroborated = [
+        value
+        for value in _distinct_dois(resolved)
+        if value in body and _ocr_folded(value) in running
+    ]
     if len(corroborated) != 1:
         return resolved
     return [c for c in resolved if c.normalized.casefold() == corroborated[0]]
