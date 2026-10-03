@@ -3725,3 +3725,53 @@ def test_section_under_a_statement_heading_needs_a_phrase_level_cue(
     metadata = _shadow_values(contents)
 
     assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "source", "row", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Students without parental funding reported more stress.",
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Students receiving Pell grants worked fewer hours.",
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.DISCUSSION,
+            "model",
+            "Clubs with corporate sponsors kept more members.",
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.RESULTS,
+            "heading",
+            "Residents consulted planners before every vote.",
+            "coi_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            "heading",
+            "Farming and tourism can coexist, and there is no conflict between the two goals.",
+            "coi_statement",
+        ),
+    ],
+)
+def test_topic_like_strong_heading_over_body_text_is_not_copied(
+    heading, section_type, source, row, field
+):
+    contents = _contents([(1, heading, section_type, source, 0.9, [row])])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None

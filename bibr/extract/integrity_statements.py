@@ -157,6 +157,11 @@ _PUBLICATION_CONSENT = re.compile(r"^consent for publication$", re.IGNORECASE)
 # End-matter types a strong statement heading is copied from as is; under a
 # body type ("Financial support" typed as results) the copy must be compact
 # and pass the lexical prose guards.
+# Strong headings that also name a topic of body text: never copied from a
+# body-typed section.
+_TOPIC_LIKE_STRONG_HEADING = re.compile(
+    r"^(?:financial support|competing interests?)$", re.IGNORECASE
+)
 _STRONG_HEADING_COPY_TYPES = frozenset(
     {
         None,
@@ -335,7 +340,8 @@ _STATES_FIELD_CUE = {
         re.IGNORECASE,
     ),
     "coi_statement": re.compile(
-        r"\b(?:declare[sd]?|declaring|disclos\w*|honorari\w*|consult\w*|employee|"
+        r"\b(?:declare[sd]?|declaring|disclos\w*|honorari\w*|consultan\w*|"
+        r"consulting (?:fees|for)|employee|"
         r"shareholder|none declared)\b|\bno (?:\w+ ){0,2}(?:conflicts?|competing)\b|"
         r"^\W*none\W*$",
         re.IGNORECASE,
@@ -1118,7 +1124,10 @@ def _build_legacy_snapshot_candidates(
             if (
                 section.section_type != _FIELD_SECTION_TYPES[field]
                 and section.section_type not in _STRONG_HEADING_COPY_TYPES
-                and not _legacy_body_copy_passes(field, rows)
+                and (
+                    _TOPIC_LIKE_STRONG_HEADING.match(_heading_label(section.header))
+                    or not _legacy_body_copy_passes(field, rows)
+                )
             ):
                 continue
             if _legacy_section_is_long(field, section, rows):
