@@ -237,13 +237,16 @@ _SUPPORTED_BY_FUNDER_NAME = re.compile(
 _SUPPORTED_BY_GRANT_ID = re.compile(
     r"#\s?\d|\b[A-Z]{2,}[\s_-]?\d{4,}|\b\d{1,4}/\d{1,4}/\d{1,6}\b|"
     r"\bNo\.?\s+[A-Z0-9][\w./-]*\d|\b[Nn]o\.\s*\d{3,}|\b[Nn]o\s+\d{4,}|"
-    r"\b[A-Z]{1,6}\d{2,}(?:[-/_][A-Z0-9]+)+"
+    r"\b[A-Z]{1,6}\d{2,}(?:[-/_][A-Z0-9]+)+|"
+    # digit-led ("01GL1234") and slash ("UIDB/04501/2020") grant IDs
+    r"\b\d{2,}[A-Z]{1,4}\d{2,}\b|\b[A-Z]{2,}/\d{3,}(?:/\d{2,4})?\b"
 )
 # Funder acronyms that are rarely anything else (the bounded scan's own list
 # covers NSF, ERC, NIH, NSERC and DFG).
 _SUPPORTED_BY_FUNDER_ACRONYM = re.compile(
     r"\b(?:NSFC|JSPS|KAKENHI|AMED|CONICET|FAPESP|FAPERJ|FAPEMIG|CNPq|CAPES|ANR|SNSF|NHMRC|"
-    r"ESRC|EPSRC|BBSRC|AHRC|MRC|NERC|UKRI|NIHR|CIHR|SSHRC|NWO|FWF|DAAD|NCN|NCBiR)\b"
+    r"ESRC|EPSRC|BBSRC|AHRC|MRC|NERC|UKRI|NIHR|CIHR|SSHRC|NWO|FWF|DAAD|NCN|NCBiR|"
+    r"BMBF|FCT|JST|CREST)\b"
 )
 
 # Row-start statement labels: "Funding:", "Conflict of interest statement:",
@@ -808,7 +811,8 @@ def _legacy_capture_at(
         strong_funding_anchor = any(
             pattern.search(sentence.text) for pattern in _LEGACY_FUNDING_STRONG_ANCHORS
         )
-        if not strong_funding_anchor:
+        # A "Funding:" label already says what the sentence is.
+        if not strong_funding_anchor and not _STATEMENT_LABEL[field].match(sentence.text):
             ambiguous = _LEGACY_FUNDING_AMBIGUOUS_ANCHOR.search(sentence.text)
             if ambiguous is None or not _supported_by_names_funder(
                 sentence.text[ambiguous.end() :]

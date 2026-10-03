@@ -3351,3 +3351,26 @@ def test_licence_block_continuing_into_the_next_paragraph_is_skipped():
     metadata = _shadow_values(contents)
 
     assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Funding: This study was supported by the BMBF (01GL1234).",
+        "Funding: The project was supported by the regional programme.",
+        "This study was supported by FCT (UIDB/04501/2020).",
+        "This research was partly supported by JST CREST.",
+        "The trial was supported by grant 01KG2104 to the first author.",
+    ],
+)
+def test_supported_by_with_a_label_grant_id_or_funder_acronym_is_funding(text: str):
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [text]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == text
