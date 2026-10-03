@@ -1618,6 +1618,100 @@ def test_a_cited_work_after_a_citation_cue_is_not_promoted():
     assert candidate.selection_tier == 1
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        pytest.param(
+            [
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "Models were fitted with brms (please cite as: Burkner, P. (2017). brms: "
+                    "An R package. Journal of Statistical Software, 80(1), 1-28. "
+                    "https://doi.org/10.18637/jss.v080.i01).",
+                    5,
+                )
+            ],
+            id="software-please-cite-as",
+        ),
+        pytest.param(
+            [
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "If you use the task, please cite this paper as follows.",
+                    6,
+                ),
+                (
+                    2,
+                    CanonicalSection.METHODS,
+                    3,
+                    "Jones A. The task. Behav Res Methods. 2018;50:1-9. "
+                    "https://doi.org/10.3758/s13428-017-0001-1",
+                    6,
+                ),
+            ],
+            id="task-please-cite-this-paper",
+        ),
+        pytest.param(
+            [
+                (
+                    3,
+                    CanonicalSection.UNKNOWN,
+                    9,
+                    "Citation: Smith J. The companion protocol. Trials. 2018;19:1. "
+                    "https://doi.org/10.1186/s13063-018-0001-1",
+                    12,
+                )
+            ],
+            id="back-matter-citation-line",
+        ),
+    ],
+)
+def test_a_weak_citation_cue_outside_the_front_matter_promotes_nothing(rows):
+    """ "Please cite … as" or "Citation:" past page 2 names software or a companion paper."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    own = "10.1234/own.2020.1"
+    contents = _paragraph_contents(
+        [(1, CanonicalSection.TITLE, 1, f"https://doi.org/{own}", 1), *rows]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert selection.selected.normalized == own
+    assert all(c.marker_kind != "self_citation" for c in selection.candidates)
+
+
+def test_a_how_to_cite_block_on_the_last_page_still_names_the_paper():
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, "https://doi.org/10.1234/linked.7", 1),
+            (1, CanonicalSection.TITLE, 2, "https://doi.org/10.1234/own.8", 1),
+            (
+                5,
+                CanonicalSection.UNKNOWN,
+                9,
+                "How to cite this article: Doe, J. (2026). A study. Journal, 1, 1-9. "
+                "https://doi.org/10.1234/own.8",
+                22,
+            ),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert selection.selected is not None
+    assert (selection.selected.normalized, selection.selected.page) == ("10.1234/own.8", 22)
+    assert selection.selected.marker_kind == "self_citation"
+
+
 def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
     """A first page printing the article DOI beside a linked Comment's DOI."""
 

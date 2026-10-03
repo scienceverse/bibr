@@ -10,7 +10,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The DOI is no longer left empty when the article's own citation block names it a few
   sentences after "How to cite this article" (version 2 and later of F1000-family
-  articles, which also print the version 1 DOI), when a "Citation:" line names it, or
+  articles, which also print the version 1 DOI), when a "Citation:" line in the front
+  matter names it, or
   when the first page prints it next to a linked article's DOI while the running footer
   repeats only the article's own (#141).
 - The abstract no longer keeps the printed line breaks of the PDF when the model copies

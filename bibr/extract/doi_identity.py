@@ -182,10 +182,22 @@ _SELF_CITATION_RE = re.compile(
 # platforms), "Please cite this article as: …", or a line opening "Citation:
 # Journal (2019) 129:467-486. https://doi.org/…". A referee report's "How to
 # cite this report" names the report, not the article.
-_SELF_CITATION_CUE_RE = re.compile(
-    r"\b(?:how\s+to\s+cite\s+this\s+(?:article|paper|preprint|chapter|work)"
-    r"|cite\s+this\s+(?:article|paper|preprint|chapter)"
-    r"|please\s+cite\s+(?:this\s+(?:article|paper)\s+)?(?:in\s+press\s+)?as"
+#
+# The strong form names this article wherever it is printed: "How to cite this
+# article", or a line opening "Cite this article" / "To cite this article"
+# (a back-matter "How to cite this article" block names the article on its
+# last page). The weak form is also how a methods section asks readers to cite
+# software or a task ("please cite this paper as follows"), and how back matter
+# introduces a companion paper or dataset ("Citation: …"), so it names the
+# article only in the front matter.
+_STRONG_CITATION_CUE_RE = re.compile(
+    r"\bhow\s+to\s+cite\s+this\s+(?:article|paper|preprint|chapter|work)\b"
+    r"|^\W*(?:to\s+)?cite\s+this\s+(?:article|paper|preprint|chapter)\b",
+    re.IGNORECASE,
+)
+_WEAK_CITATION_CUE_RE = re.compile(
+    r"\b(?:cite\s+this\s+(?:article|paper|preprint|chapter)"
+    r"|please\s+cite\s+(?:in\s+press\s+)?as"
     r"|(?:recommended|suggested)\s+citation)\b"
     r"|^\s*citation\s*:",
     re.IGNORECASE,
@@ -234,6 +246,20 @@ def _reads_as_citation(text: str) -> bool:
     return _looks_like_terminal_reference_start(_SOURCE_NOTE_RE.sub("", text, count=1))
 
 
+def _in_front_matter(
+    *, source_kind: str, section_type: str | None, page: int | None, front_block: bool
+) -> bool:
+    """Where a paper names itself: the page furniture, the title, abstract and
+    keywords sections, pages 1-2, and an unpaged input's front block."""
+
+    return (
+        source_kind in {"header", "footer"}
+        or str(section_type or "").casefold() in _FRONT_MATTER_SECTIONS
+        or (page is not None and page <= 2)
+        or front_block
+    )
+
+
 def _candidate_from_match(
     text: str,
     match: re.Match[str],
@@ -259,14 +285,9 @@ def _candidate_from_match(
     # sentence still is (a Zenodo DOI beside it marks a software citation).
     context = text.replace(match.group(0), " ")
     section_value = str(section_type or "").casefold()
-    # Where a paper names itself: the page furniture, the title, abstract and
-    # keywords sections, pages 1-2, and an unpaged input's front block. A DOI
-    # label anywhere else is how a cited work's DOI is printed.
-    in_front = (
-        source_kind in {"header", "footer"}
-        or section_value in _FRONT_MATTER_SECTIONS
-        or (page is not None and page <= 2)
-        or front_block
+    # A DOI label outside the front matter is how a cited work's DOI is printed.
+    in_front = _in_front_matter(
+        source_kind=source_kind, section_type=section_value, page=page, front_block=front_block
     )
 
     rejection_reason = None
@@ -608,26 +629,42 @@ def _section_type(section, page: int | None) -> str | None:
 _NOT_PROMOTED_CONTEXTS = frozenset({"cited_work", "journal_identity"})
 
 
+def _citation_cue(text: str) -> tuple[re.Match[str] | None, bool]:
+    """The self-citation cue in *text*, and whether it is the strong form."""
+
+    strong = _STRONG_CITATION_CUE_RE.search(text)
+    if strong is not None:
+        return strong, True
+    return _WEAK_CITATION_CUE_RE.search(text), False
+
+
 def _promote_self_citation(
-    sentence, found: list[DoiCandidate], open_cues: set[tuple[int | None, int | None]]
+    sentence,
+    found: list[DoiCandidate],
+    open_cues: dict[tuple[int | None, int | None], bool],
+    *,
+    in_front: bool,
 ) -> list[DoiCandidate]:
     """Make the first DOI after a self-citation cue an explicit self-identification.
 
-    The cue (``_SELF_CITATION_CUE_RE``) opens the article's citation block in
+    The cue (``_citation_cue``) opens the article's citation block in
     its paragraph, and the block's first DOI is the article's, in the cue's own
     sentence or a later one: a version-2 F1000 article prints "How to cite this
     article: … [version 2; …]", then its ``.2`` DOI two sentences on, then
-    "First published: … ….1". *open_cues* holds the paragraphs whose cue no
-    DOI has followed yet. The first DOI closes the block; it is promoted to
-    tier 3 unless it is rejected, already tier 3, or reads as another work's.
+    "First published: … ….1". *open_cues* maps the paragraphs whose cue no
+    DOI has followed yet to whether the cue is the strong form. The first DOI
+    closes the block; it is promoted to tier 3 unless it is rejected, already
+    tier 3, or reads as another work's, or the cue is the weak form and the
+    DOI is printed outside the front matter (*in_front*).
     """
 
     text = sentence.text or ""
     key = (sentence.section_id, sentence.paragraph_id)
-    cue = _SELF_CITATION_CUE_RE.search(text)
+    cue, strong = _citation_cue(text)
     target = None
     if key in open_cues and found:
         target = 0
+        strong = open_cues[key]
     elif cue is not None:
         position = 0
         for index, candidate in enumerate(found):
@@ -635,7 +672,7 @@ def _promote_self_citation(
             if at < 0:
                 # A DOI the sentence does not spell as read: which DOI
                 # follows the cue is unknown, so none is promoted.
-                open_cues.discard(key)
+                open_cues.pop(key, None)
                 return found
             if at >= cue.end():
                 target = index
@@ -643,12 +680,13 @@ def _promote_self_citation(
             position = at + len(candidate.raw)
     if target is None:
         if cue is not None:
-            open_cues.add(key)
+            open_cues[key] = strong
         return found
-    open_cues.discard(key)
+    open_cues.pop(key, None)
     first = found[target]
     if (
-        first.rejection_reason is not None
+        not (strong or in_front)
+        or first.rejection_reason is not None
         or first.selection_tier >= EXPLICIT_SELF_ID
         or first.semantic_context in _NOT_PROMOTED_CONTEXTS
     ):
@@ -676,22 +714,30 @@ def collect_doi_candidates(
     section_map = {section.section_id: section for section in contents.sections}
     front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
-    open_cues: set[tuple[int | None, int | None]] = set()
+    open_cues: dict[tuple[int | None, int | None], bool] = {}
     for sentence in contents.sentences:
         section = section_map.get(sentence.section_id)
         region_meta = sentence.region_meta or {}
+        section_type = _section_type(section, sentence.page_number)
+        front_block = front_block_end is not None and sentence.text_id < front_block_end
         found = _candidates_from_text(
             sentence.text,
             source_kind="sentence",
             page=sentence.page_number,
             section_id=sentence.section_id,
-            section_type=_section_type(section, sentence.page_number),
+            section_type=section_type,
             region_index=_sentence_region_index(sentence),
             region_type=region_meta.get("region_type"),
             text_id=sentence.text_id,
-            front_block=front_block_end is not None and sentence.text_id < front_block_end,
+            front_block=front_block,
         )
-        candidates.extend(_promote_self_citation(sentence, found, open_cues))
+        in_front = _in_front_matter(
+            source_kind="sentence",
+            section_type=section_type,
+            page=sentence.page_number,
+            front_block=front_block,
+        )
+        candidates.extend(_promote_self_citation(sentence, found, open_cues, in_front=in_front))
 
     furniture = [("header", line) for line in contents.detected_headers] + [
         ("footer", line) for line in contents.detected_footers
