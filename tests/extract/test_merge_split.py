@@ -1,3 +1,5 @@
+import pytest
+
 from bibr.extract import merge_split
 from bibr.extract.merge_split import detect_merges, find_interior_onsets, split_merged_refs
 
@@ -517,6 +519,24 @@ def test_bracket_numbered_list_splits_only_on_the_next_number():
         "[7] A. Author, “Revisiting the method of [3],” IEEE Trans. Ind. Electron., "
         "vol. 4, pp. 1-9, [2019] 2020."
     )
+    out, n_new = split_merged_refs([single])
+
+    assert out == [single]
+    assert n_new == 0
+
+
+@pytest.mark.parametrize(
+    "single",
+    [
+        # a bracketed volume or note number before a dated parenthesis
+        "[3] J. Doe, “Title,” Ann. Phys., vol. 12 [4] (2001), pp. 3-9.",
+        "[9] S. Freud, Totem und Tabu [10] (1913).",
+        # an in-text citation before a lowercase word outside Latin-1
+        "[2] Иванов И.И. Комментарий к [3] работе о методах. М., 2001.",
+        "[5] J. Nowak, Analiza [6] średnich wartości. Warszawa, 2010.",
+    ],
+)
+def test_bracket_marker_inside_one_entry_does_not_split_it(single):
     out, n_new = split_merged_refs([single])
 
     assert out == [single]

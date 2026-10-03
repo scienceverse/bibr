@@ -74,11 +74,12 @@ _NUMBERED_ENTRY_START = re.compile(r"\s*(\d{1,3})\.\s+(?=[^\W\d_])")
 # own boundary, so nothing has to close the entry before it: an entry can end
 # "Springer, Berlin, Heidelberg" with no period. Group 1 is the marker (the new
 # reference keeps it), group 2 the number; at most 3 digits, so a bracketed
-# year ("[2019]") never matches. The next entry opens on its author's initial
-# or a quote, never on a lowercase word, which keeps an in-title citation
-# ("… of [3] in …") out; the increment check keeps the remaining in-entry
-# brackets out.
-_BRACKET_ONSET = re.compile(r"(?<=\S)\s+(\[(\d{1,3})\])\s*(?![a-zß-öø-ÿ])(?=[^\W\d_]|[\"“‘'(])")
+# year ("[2019]") never matches. The next entry opens on its author's initial,
+# a quote or a parenthesis that does not hold a number ("[4] (2001)" is a
+# date); ``_bracketed_interior_onsets`` also rejects a lowercase letter in any
+# script, which keeps an in-title citation ("… of [3] in …") out, and the
+# increment check keeps the remaining in-entry brackets out.
+_BRACKET_ONSET = re.compile(r"(?<=\S)\s+(\[(\d{1,3})\])\s*(?=[^\W\d_]|[\"“‘']|\((?!\d))")
 _BRACKETED_ENTRY_START = re.compile(r"\s*\[(\d{1,3})\]\s*(?=[^\W\d_]|[\"“‘'(])")
 
 # Abbreviations that legitimately precede an interior "N." inside ONE reference
@@ -203,7 +204,7 @@ def _bracketed_interior_onsets(ref_string: str) -> list[int]:
     expected = int(m0.group(1)) + 1
     offsets: list[int] = []
     for m in _BRACKET_ONSET.finditer(ref_string):
-        if int(m.group(2)) != expected:
+        if int(m.group(2)) != expected or ref_string[m.end() : m.end() + 1].islower():
             continue
         offsets.append(m.start(1))
         expected += 1
