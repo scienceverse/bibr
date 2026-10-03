@@ -44,7 +44,7 @@ class PdfPageInspection:
     # apart from the regions' OCR fallback text (``_invisible_layer_text``).
     invisible_text_layer: bool = False
     # Diagonal watermark strings removed before the text layer was read
-    # ("For Review Only", "RETRACTED"; see ``strip_watermark_objects``).
+    # ("For Review Only", "RETRACTED"; see ``strip_furniture_objects``).
     watermarks: tuple[str, ...] = ()
 
 

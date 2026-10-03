@@ -30,6 +30,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   lines, is now dropped as page furniture. Copies the layout model labelled
   as text used to land in the body, the figure legends and the references
   (#112).
+- Line numbers printed in the margin of a submitted manuscript no longer end
+  up in headings, paragraphs and references ("38 References", "668
+  References"). A rising column of bare numbers in the outer margin, aligned
+  on one edge and set one per text line, is removed before the PDF's text
+  layer is read. Numbered reference lists, table row numbers and numbers set
+  against their text are kept (#113).
 
 ## [0.6.0] - 2026-09-30
 

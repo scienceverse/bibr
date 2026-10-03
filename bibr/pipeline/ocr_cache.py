@@ -53,7 +53,8 @@ logger = logging.getLogger(__name__)
 # (the regions change), and the page inspection records the removed strings.
 # Version 14: the native-text fill repairs missing word spaces and generated
 # mid-line breaks from the glyph positions.
-_CACHE_FORMAT_VERSION = 14
+# Version 15: manuscript line numbers are removed before the native-text fill.
+_CACHE_FORMAT_VERSION = 15
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:

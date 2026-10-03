@@ -19,11 +19,13 @@ Coordinate systems:
 
 from __future__ import annotations
 
+import bisect
 import ctypes
 import logging
 import math
 import re
 import unicodedata
+from collections import Counter
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
 from bibr.ocr.utils import pdfium_lock
@@ -212,8 +214,6 @@ def _may_split(before: str, after: str) -> bool:
     if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
         return False
     return not (before == "." and (after.islower() or after.isdigit()))
-
-
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -1214,19 +1214,18 @@ def _is_watermark_text(pdfium_c, obj, matrix: tuple[float, ...]) -> bool:
     return size.value * math.sqrt(abs(a * d - b * c)) >= _WATERMARK_MIN_SIZE_PT
 
 
-def _collect_watermark_objects(pdfium_c, objects, parent, matrix, depth: int, found: list) -> None:
-    """Append ``(parent form or None, text object)`` for every watermark text object.
+def _collect_text_objects(pdfium_c, objects, parent, matrix, depth: int, found: list) -> None:
+    """Append ``(parent form or None, text object, parent matrix)`` for every text object.
 
     Like :func:`_collect_image_boxes`, an object inside a Form XObject is
-    judged in page space, through the matrices of the forms that contain it:
-    a stamp can be upright text inside a rotated form.
+    judged in page space, through the matrices of the forms that contain it
+    (*matrix*, ``None`` at the top level): a stamp can be upright text inside
+    a rotated form.
     """
     for obj in objects:
         kind = pdfium_c.FPDFPageObj_GetType(obj)
         if kind == pdfium_c.FPDF_PAGEOBJ_TEXT:
-            own = _object_matrix(pdfium_c, obj)
-            if own is not None and _is_watermark_text(pdfium_c, obj, _compose(own, matrix)):
-                found.append((parent, obj))
+            found.append((parent, obj, matrix))
         elif kind == pdfium_c.FPDF_PAGEOBJ_FORM and depth < _SCAN_PAGE_MAX_FORM_DEPTH:
             own = _object_matrix(pdfium_c, obj)
             if own is None:
@@ -1235,9 +1234,7 @@ def _collect_watermark_objects(pdfium_c, objects, parent, matrix, depth: int, fo
                 pdfium_c.FPDFFormObj_GetObject(obj, index)
                 for index in range(pdfium_c.FPDFFormObj_CountObjects(obj))
             ]
-            _collect_watermark_objects(
-                pdfium_c, children, obj, _compose(own, matrix), depth + 1, found
-            )
+            _collect_text_objects(pdfium_c, children, obj, _compose(own, matrix), depth + 1, found)
 
 
 def _text_object_text(pdfium_c, obj, textpage) -> str:
@@ -1251,35 +1248,163 @@ def _text_object_text(pdfium_c, obj, textpage) -> str:
     return buffer.raw[: length - 2].decode("utf-16-le", "replace")
 
 
-def strip_watermark_objects(page) -> list[str]:
-    """Remove diagonal watermark text objects from *page* in memory.
+# --- Manuscript line numbers ----------------------------------------------
+#
+# A line-numbered manuscript prints a number in the outer margin beside every
+# text line. Native text assigns glyphs to regions by centre containment, so a
+# layout box that reaches over the margin takes the numbers: headings like
+# "239 References", reference titles with "675" inside them. Each number is
+# its own text object (on every line-numbered dev PDF and the reported
+# preprint), so the column is found among the page's text objects and removed
+# like the watermark, and every reader of the text layer drops it.
+#
+# A column is at least _LINE_NUMBER_MIN_COUNT integer-only objects (1-4
+# digits, no punctuation) wholly inside the outer _LINE_NUMBER_MARGIN of the
+# page width, aligned on the edge that faces the text within
+# _LINE_NUMBER_ALIGN_PT, mostly increasing down the page in steps of 1, 2, 5
+# or 10. Two more rules keep numbered lists out:
+# - one step of the numbers spans one text line: between two consecutive
+#   numbers there is no text line other than the ones a step of 2, 5 or 10
+#   skips, for at least _LINE_NUMBER_MIN_CLEAN_PAIRS of the pairs (a caption
+#   or table between two numbers is not numbered). A bare-numbered reference
+#   list has its entries' continuation lines between the numbers.
+# - the text keeps a gap of at least _LINE_NUMBER_MIN_GAP_PT from the column.
+#   Numbers that touch their text are labels.
+# Pages read by OCR keep their numbers.
+_LINE_NUMBER_MARGIN = 0.13
+_LINE_NUMBER_MIN_COUNT = 8
+_LINE_NUMBER_ALIGN_PT = 4.0
+_LINE_NUMBER_MAX_WIDTH_PT = 40.0
+_LINE_NUMBER_MAX_HEIGHT_PT = 20.0
+_LINE_NUMBER_STEPS = frozenset({1, 2, 5, 10})
+_LINE_NUMBER_MIN_INCREASING = 0.9
+_LINE_NUMBER_MIN_CLEAN_PAIRS = 0.75
+_LINE_NUMBER_LINE_TOLERANCE = 0.35
+_LINE_NUMBER_MIN_GAP_PT = 6.0
+_LINE_NUMBER_MAX_TOUCHING = 0.2
+_LINE_NUMBER_RE = re.compile(r"\d{1,4}")
 
-    Returns the removed strings (whitespace-normalised, one per object that
-    had text). Only the loaded page changes: nothing is written back, and the
-    callers open the document from bytes for their own pass. Operates on a
-    caller-provided (lock-held) page.
+_Box = tuple[float, float, float, float]
+
+
+def _line_number_candidate(box: _Box, page_left: float, page_right: float) -> bool:
+    left, bottom, right, top = box
+    if not (0 < right - left <= _LINE_NUMBER_MAX_WIDTH_PT):
+        return False
+    if not (0 < top - bottom <= _LINE_NUMBER_MAX_HEIGHT_PT):
+        return False
+    margin = _LINE_NUMBER_MARGIN * (page_right - page_left)
+    return right <= page_left + margin or left >= page_right - margin
+
+
+def _aligned_cluster(members: list[int], edges: list[float]) -> list[int]:
+    """The largest subset of *members* whose *edges* lie within the alignment tolerance."""
+    ordered = sorted(members, key=lambda index: edges[index])
+    best: list[int] = []
+    start = 0
+    for end in range(len(ordered)):
+        while edges[ordered[end]] - edges[ordered[start]] > _LINE_NUMBER_ALIGN_PT:
+            start += 1
+        if end - start + 1 > len(best):
+            best = ordered[start : end + 1]
+    return best
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def _clean_pair_share(centres: list[float], steps: list[int], text_centres: list[float]) -> float:
+    """Share of consecutive number pairs with no unnumbered text line between them.
+
+    *centres* run down the page with their value *steps*; *text_centres* are
+    the sorted centres of the text beside the column. A step of ``s`` skips
+    ``s - 1`` lines, which sit at multiples of the per-line pitch.
     """
-    import pypdfium2.raw as pdfium_c
+    pairs = clean = 0
+    for upper, lower, step in zip(centres, centres[1:], steps, strict=False):
+        if step <= 0:
+            continue
+        pairs += 1
+        pitch = (upper - lower) / step
+        slack = _LINE_NUMBER_LINE_TOLERANCE * pitch
+        first = bisect.bisect_right(text_centres, lower + slack)
+        last = bisect.bisect_left(text_centres, upper - slack)
+        expected = True
+        for centre in text_centres[first:last]:
+            k = round((upper - centre) / pitch)
+            if not (1 <= k < step and abs(upper - k * pitch - centre) <= slack):
+                expected = False
+                break
+        clean += expected
+    return clean / pairs if pairs else 0.0
 
-    found: list = []
-    top_level = [
-        pdfium_c.FPDFPage_GetObject(page.raw, index)
-        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
-    ]
-    _collect_watermark_objects(pdfium_c, top_level, None, None, 0, found)
-    if not found:
-        return []
-    texts: list[str] = []
-    # The strings need a text page of the unstripped page; only pages that
-    # carry a watermark pay for it.
-    textpage = page.get_textpage()
-    try:
-        for _parent, obj in found:
-            text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
-            if text:
-                texts.append(text)
-    finally:
-        textpage.close()
+
+def _line_number_column(
+    numbers: list[tuple[int, _Box]], others: list[_Box], page_left: float, page_right: float
+) -> set[int]:
+    """Indices of *numbers* that form a manuscript line-number column.
+
+    *numbers* are the page's integer-only text objects in the outer margins
+    as ``(value, box)``, *others* the boxes of its other text objects, all in
+    page space (PDF points, y up).
+    """
+    found: set[int] = set()
+    width = page_right - page_left
+    for side in ("left", "right"):
+        if side == "left":
+            members = [i for i, (_, box) in enumerate(numbers) if box[2] <= page_left + 0.5 * width]
+            edges = [box[2] for _, box in numbers]
+        else:
+            members = [i for i, (_, box) in enumerate(numbers) if box[0] >= page_left + 0.5 * width]
+            edges = [box[0] for _, box in numbers]
+        column = _aligned_cluster(members, edges)
+        if len(column) < _LINE_NUMBER_MIN_COUNT:
+            continue
+        column.sort(key=lambda index: -(numbers[index][1][1] + numbers[index][1][3]))
+        values = [numbers[index][0] for index in column]
+        centres = [(numbers[index][1][1] + numbers[index][1][3]) / 2.0 for index in column]
+        steps = [later - earlier for earlier, later in zip(values, values[1:], strict=False)]
+        rising = [step for step in steps if step > 0]
+        if len(rising) < _LINE_NUMBER_MIN_INCREASING * len(steps):
+            continue
+        if Counter(rising).most_common(1)[0][0] not in _LINE_NUMBER_STEPS:
+            continue
+        height = _median([numbers[index][1][3] - numbers[index][1][1] for index in column])
+        inner = max(edges[i] for i in column) if side == "left" else min(edges[i] for i in column)
+        top, bottom = centres[0] + height, centres[-1] - height
+        # Text beside the column, without the empty and dash-thin objects
+        # some generators set on the baseline between the glyph runs.
+        beside = [
+            box
+            for box in others
+            if bottom <= (box[1] + box[3]) / 2.0 <= top
+            and box[3] - box[1] >= 0.5 * height
+            and (box[0] >= inner if side == "left" else box[2] <= inner)
+        ]
+        text_centres = sorted((box[1] + box[3]) / 2.0 for box in beside)
+        if _clean_pair_share(centres, steps, text_centres) < _LINE_NUMBER_MIN_CLEAN_PAIRS:
+            continue
+        touching = 0
+        for index in column:
+            _, nbottom, _, ntop = numbers[index][1]
+            for box in beside:
+                overlaps = min(ntop, box[3]) - max(nbottom, box[1]) > 0.5 * (ntop - nbottom)
+                gap = box[0] - inner if side == "left" else inner - box[2]
+                if overlaps and gap < _LINE_NUMBER_MIN_GAP_PT:
+                    touching += 1
+                    break
+        if touching > _LINE_NUMBER_MAX_TOUCHING * len(column):
+            continue
+        found.update(column)
+    return found
+
+
+def _remove_objects(pdfium_c, page, found: list) -> None:
     remove_from_form = getattr(pdfium_c, "FPDFFormObj_RemoveObject", None)
     for parent, obj in found:
         if parent is None:
@@ -1291,17 +1416,82 @@ def strip_watermark_objects(page) -> list[str]:
         if removed:
             # Removal hands the object to the caller.
             pdfium_c.FPDFPageObj_Destroy(obj)
-    return texts
+
+
+def strip_furniture_objects(page) -> tuple[list[str], int]:
+    """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
+
+    Returns the removed watermark strings (whitespace-normalised, one per
+    object that had text) and the number of line-number objects removed.
+    Only the loaded page changes: nothing is written back, and the callers
+    open the document from bytes for their own pass. Operates on a
+    caller-provided (lock-held) page.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    objects: list = []
+    top_level = [
+        pdfium_c.FPDFPage_GetObject(page.raw, index)
+        for index in range(pdfium_c.FPDFPage_CountObjects(page.raw))
+    ]
+    _collect_text_objects(pdfium_c, top_level, None, None, 0, objects)
+    watermarks = []
+    candidates = []
+    boxes: list[_Box | None] = []
+    page_left, _, page_right, _ = _page_crop_box(page)
+    numbered = _page_rotation(page) == 0
+    for entry in objects:
+        _parent, obj, matrix = entry
+        own = _object_matrix(pdfium_c, obj)
+        if own is not None and _is_watermark_text(pdfium_c, obj, _compose(own, matrix)):
+            watermarks.append(entry)
+            boxes.append(None)
+            continue
+        bounds = _object_bounds(pdfium_c, obj)
+        box = None if bounds is None else _transform_box(matrix, bounds) if matrix else bounds
+        boxes.append(box)
+        if numbered and box is not None and _line_number_candidate(box, page_left, page_right):
+            candidates.append(len(boxes) - 1)
+    if not watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
+        return [], 0
+    texts: list[str] = []
+    numbers: list[tuple[int, _Box]] = []
+    number_entries: list[int] = []
+    # The strings need a text page of the unstripped page; only pages that
+    # carry a watermark or enough margin candidates pay for it.
+    textpage = page.get_textpage()
+    try:
+        for _parent, obj, _matrix in watermarks:
+            text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
+            if text:
+                texts.append(text)
+        if len(candidates) >= _LINE_NUMBER_MIN_COUNT:
+            for index in candidates:
+                text = _text_object_text(pdfium_c, objects[index][1], textpage).strip()
+                if _LINE_NUMBER_RE.fullmatch(text):
+                    numbers.append((int(text), boxes[index]))
+                    number_entries.append(index)
+    finally:
+        textpage.close()
+    line_numbers: list = []
+    if len(numbers) >= _LINE_NUMBER_MIN_COUNT:
+        taken = set(number_entries)
+        others = [box for index, box in enumerate(boxes) if box is not None and index not in taken]
+        column = _line_number_column(numbers, others, page_left, page_right)
+        line_numbers = [objects[number_entries[i]] for i in sorted(column)]
+    _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in watermarks + line_numbers])
+    return texts, len(line_numbers)
 
 
 def open_text_page(page, watermarks: list[str] | None = None):
-    """Build *page*'s pdfium text page without its diagonal watermark text.
+    """Build *page*'s pdfium text page without its watermark text and line numbers.
 
     Every native-text reader goes through this, so region text, font
     metadata, reference geometry and DOI evidence see the same characters.
-    The removed strings are appended to *watermarks* when it is given.
+    The removed watermark strings are appended to *watermarks* when it is
+    given.
     """
-    removed = strip_watermark_objects(page)
+    removed, _line_numbers = strip_furniture_objects(page)
     if watermarks is not None:
         watermarks.extend(removed)
     return page.get_textpage()
