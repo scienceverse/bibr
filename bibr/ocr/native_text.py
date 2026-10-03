@@ -1720,15 +1720,22 @@ def _document_is_line_numbered(pdf) -> bool:
 
     A manuscript numbers its lines on page after page; a numbered column on
     a single page is a table's or a list's. Pages are loaded fresh, so the
-    check sees them unstripped.
+    check sees them unstripped; a page that fails to load or scan is skipped.
     """
     found = _LINE_NUMBERED_PAGES.get(pdf)
     if found is None:
         found = 0
         for index in range(len(pdf)):
-            page = pdf[index]
+            try:
+                page = pdf[index]
+            except Exception:  # noqa: BLE001 - a broken page only drops out of the count
+                logger.debug("Line-number scan could not load page %d", index, exc_info=True)
+                continue
             try:
                 found += bool(_find_furniture(page, watermark_text=False)[2])
+            except Exception:  # noqa: BLE001
+                logger.debug("Line-number scan failed on page %d", index, exc_info=True)
+                continue
             finally:
                 page.close()
             if found >= _LINE_NUMBER_MIN_PAGES:
@@ -1765,7 +1772,11 @@ def open_text_page(page, watermarks: list[str] | None = None):
     The removed watermark strings are appended to *watermarks* when it is
     given.
     """
-    removed, _line_numbers = strip_furniture_objects(page)
+    try:
+        removed, _line_numbers = strip_furniture_objects(page)
+    except Exception:  # noqa: BLE001 - never lose the text layer to the furniture pass
+        logger.debug("Page furniture removal failed; reading the page as it is", exc_info=True)
+        removed = []
     if watermarks is not None:
         watermarks.extend(removed)
     return page.get_textpage()

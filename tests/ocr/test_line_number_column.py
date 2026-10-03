@@ -12,6 +12,7 @@ text, a table's restarting row numbers or prefixed ids, one numbered page.
 
 from __future__ import annotations
 
+from bibr.ocr import native_text
 from bibr.ocr.native_text import fill_native_text_and_fonts
 from bibr.ocr.pdf_inspection import inspect_pdf
 from tests.ocr.test_watermark_text import _bt, _pdf, _width
@@ -217,3 +218,25 @@ def test_numbered_column_on_a_single_page_is_kept():
 
     assert text.splitlines()[0].startswith("1")
     assert "12" in text
+
+
+def test_furniture_failure_falls_back_to_the_plain_text_layer(monkeypatch):
+    def broken(page):
+        raise RuntimeError("furniture pass failed")
+
+    monkeypatch.setattr(native_text, "strip_furniture_objects", broken)
+
+    (text,) = _fill(_reference_page(), [_region(687.0, 440.0, "reference_content")])
+
+    assert "transcriptome atlas" in text
+
+
+def test_document_scan_skips_pages_that_fail_to_load():
+    class _BrokenDocument:
+        def __len__(self) -> int:
+            return 3
+
+        def __getitem__(self, index: int):
+            raise RuntimeError("page failed to load")
+
+    assert native_text._document_is_line_numbered(_BrokenDocument()) is False
