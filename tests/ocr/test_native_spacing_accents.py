@@ -96,3 +96,9 @@ def test_reference_page_lines_are_composed():
     )
 
     assert [line["text"] for line in inspection.page_lines] == ["Başkaya, A. (2020). Title."]
+
+
+def test_generated_space_after_a_composed_capital_is_dropped():
+    parts = [("E", "´"), *_plain("rica")]
+
+    assert _text(_name(parts)) == "Érica"

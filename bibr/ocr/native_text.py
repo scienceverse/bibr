@@ -275,6 +275,7 @@ def _repair_word_boundaries(
     records: list[tuple[str, float, float, bool]],
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
     generated_breaks: set[int],
+    blank: frozenset[int] = frozenset(),
     generated_spaces: frozenset[int] = frozenset(),
 ) -> list[tuple[str, float, float, bool]]:
     """Fix pdfium's whitespace between consecutive glyphs of one line.
@@ -289,27 +290,34 @@ def _repair_word_boundaries(
     ``_WORD_GAP_RATIO`` times an in-word gap next to it. Printed whitespace
     and printed line breaks are never touched, and no space goes into a
     URL, DOI or e-mail address. *glyphs* holds the record index, char and
-    loose box of every non-whitespace glyph, in order.
+    loose box of every non-whitespace glyph, in order; the records in
+    *blank* (accents merged into their letter) count as absent, and so does a
+    generated space next to one, which pdfium set for the accent.
     """
     pairs: list[tuple[str | None, float]] = []
     # Whether two glyphs belong to one link run (see _link_run).
     connected: list[bool] = []
     for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
         between = range(ra + 1, rb)
+        after_accent = any(index in blank for index in between)
+        joined = all(
+            index in generated_breaks
+            or index in blank
+            or (after_accent and index in generated_spaces)
+            for index in between
+        )
         gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
         connected.append(
             all(
-                (gap is not None and index in generated_breaks)
+                index in blank
+                or (gap is not None and index in generated_breaks)
                 or (index in generated_spaces and (ca in _LINK_JOINERS or cb in _LINK_JOINERS))
                 for index in between
             )
         )
         kind = None
-        if gap is not None:
-            if rb == ra + 1:
-                kind = "adjacent"
-            elif all(index in generated_breaks for index in range(ra + 1, rb)):
-                kind = "break"
+        if gap is not None and joined:
+            kind = "adjacent" if all(index in blank for index in between) else "break"
         pairs.append((kind, gap if gap is not None else 0.0))
     drop: set[int] = set()
     insert: dict[int, tuple[float, float]] = {}
@@ -322,7 +330,11 @@ def _repair_word_boundaries(
             continue
         at = ((la[2] + lb[0]) / 2.0, (max(la[1], lb[1]) + min(la[3], lb[3])) / 2.0)
         if kind == "break":
-            drop.update(range(ra + 1, rb))
+            drop.update(
+                index
+                for index in range(ra + 1, rb)
+                if index in generated_breaks or index in generated_spaces
+            )
             if gap >= _WORD_GAP_MIN and _may_split(ca, cb):
                 insert[ra] = at
                 spaces[ra] = k
@@ -536,7 +548,7 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     # repair after the loop.
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]] = []
     generated_breaks: set[int] = set()
-    # pdfium's generated spaces, for link runs.
+    # pdfium's generated spaces, for link runs and the accent merge.
     generated_spaces: set[int] = set()
     # The tight box of each entry of *glyphs*, for the spacing-accent merge.
     glyph_boxes: list[tuple[str, tuple[float, float, float, float]]] = []
@@ -631,8 +643,9 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         records[at] = (_with_accent(ch, glyphs[accent][1]), x, y, is_newline)
         records[glyphs[accent][0]] = ("", 0.0, 0.0, False)
     kept = [glyph for index, glyph in enumerate(glyphs) if index not in accents]
+    blank = frozenset(glyphs[accent][0] for accent in accents)
     repaired = _repair_word_boundaries(
-        records, kept, generated_breaks, generated_spaces=frozenset(generated_spaces)
+        records, kept, generated_breaks, blank, frozenset(generated_spaces)
     )
     return [record for record in repaired if record[0]]
 
