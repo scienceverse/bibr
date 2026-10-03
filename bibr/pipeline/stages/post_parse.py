@@ -94,7 +94,7 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
 
     The classifier and the LLM type each heading alone, so "3.2 Structural
     characterization" under "3 Results" reads as methods. A child that is
-    ENDNOTE, introduction or methods by the model, the LLM or a parent takes its
+    ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes its
     parent's IMRaD type when the parent is confirmed: by numbering (3.2 -> 3)
     or as a part-name heading ("Results"). An untyped child takes the type of
     any IMRaD-typed parent. Under an untyped parent (a "Study 1" scope or a
@@ -111,15 +111,13 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
         numbering_parent_ids,
     )
 
-    # A results or discussion guess is kept: "3.1 Effect of treatment" printed
-    # after "2.1 Data" (its "3 Results" heading lost) is not a method.
-    inheriting = {
-        CanonicalSection.INTRODUCTION,
-        CanonicalSection.METHODS,
-        CanonicalSection.UNKNOWN,
-        CanonicalSection.ENDNOTE,
-        None,
-    }
+    inheriting = IMRAD_ANCHORS | {CanonicalSection.UNKNOWN, CanonicalSection.ENDNOTE, None}
+    # A results or discussion guess is not pulled back into the introduction
+    # or the methods: "3.1 Effect of treatment" after "2.1 Data" (its "3
+    # Results" heading lost) is not a method. Between results and discussion
+    # the part decides ("Principal findings" under "Discussion").
+    late_types = (CanonicalSection.RESULTS, CanonicalSection.DISCUSSION)
+    early_types = (CanonicalSection.INTRODUCTION, CanonicalSection.METHODS)
     untyped_types = (CanonicalSection.UNKNOWN, None)
     by_id = {section.section_id: section for section in sections}
     numbered_parents = numbering_parent_ids(sections)
@@ -160,6 +158,7 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
             source is None
             or source.section_type not in IMRAD_ANCHORS
             or source.section_type == section.section_type
+            or (section.section_type in late_types and source.section_type in early_types)
         ):
             continue
         section.section_type = source.section_type
@@ -252,6 +251,7 @@ def _gate_non_imrad_section_types(
       that names its own part ("Historical Background"), keep their type.
     """
     from bibr.paper_contents import CanonicalSection
+    from bibr.structure.section_tree import numbering_parent_ids
 
     body = [section for section in sections if section.level > 0]
     has_title = any(section.classification_source == "title" for section in body)
@@ -285,15 +285,27 @@ def _gate_non_imrad_section_types(
     first_intro = next(
         (s.section_id for s in body if s.section_type == CanonicalSection.INTRODUCTION), None
     )
-    # An introduction that stays one holds its subsections ("Introduction" >
-    # "Scope of this review", "4. Literature review" > "4.1 ...").
-    kept: set[int] = {
+    # An introduction that stays one holds the subsections numbered under it
+    # ("4. Literature review" > "4.1") or guessed introduction on their own
+    # ("Introduction" > "Scope of this review"). A heading that only follows
+    # the Introduction in an unnumbered commentary got its type from that
+    # parent, and is body.
+    intro_roots = {
         s.section_id
         for s in body
         if s.section_type == CanonicalSection.INTRODUCTION
         and (s.section_id == first_intro or s.classification_source in _HEADING_TYPE_SOURCES)
     }
+    numbered_parents = numbering_parent_ids(sections)
+    kept: set[int] = set(intro_roots)
     for section in body:
+        if section.parent_section_id in intro_roots:
+            if (
+                numbered_parents.get(section.section_id) == section.parent_section_id
+                or section.classification_source in _GUESSED_SOURCES
+            ):
+                kept.add(section.section_id)
+            continue
         if section.parent_section_id in kept or (
             section.section_id != first_intro
             and section.section_type in guessed

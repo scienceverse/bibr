@@ -140,8 +140,7 @@ def test_guessed_child_types_follow_a_part_heading_parent():
 
 
 def test_numbered_children_follow_their_numbered_part():
-    """A preprint's "3.2" and "4.2" subsections, typed alone by the LLM, take
-    their part's type; a results guess ("4.1") is kept."""
+    """A preprint's "3.2" and "4.1" subsections, typed alone by the LLM."""
     secs = [
         _typed(3, "3 Results", CanonicalSection.RESULTS, "substring_alias"),
         _typed(4, "3.2 Structural characterization", CanonicalSection.METHODS, "llm", 3, 2),
@@ -154,7 +153,7 @@ def test_numbered_children_follow_their_numbered_part():
         CanonicalSection.RESULTS,
         CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
-        CanonicalSection.RESULTS,
+        CanonicalSection.DISCUSSION,
         CanonicalSection.DISCUSSION,
     ]
 
@@ -196,14 +195,15 @@ def _review_sections():
 
 
 def test_review_body_guesses_become_discussion():
-    """Introduction guesses after the introduction become discussion; the
-    introduction's own subsections keep their type."""
+    """Introduction guesses after the introduction become discussion. A
+    subsection the model itself read as introduction stays one; a heading
+    that only took the Introduction's type from its parent is body."""
     secs = _review_sections()
     _gate_non_imrad_section_types(secs, "review", review_body=True)
     assert [(s.section_type, s.classification_source) for s in secs] == [
         (CanonicalSection.INTRODUCTION, "exact_alias"),
         (CanonicalSection.INTRODUCTION, "model"),
-        (CanonicalSection.INTRODUCTION, "parent_context"),
+        (CanonicalSection.DISCUSSION, "positional"),
         (CanonicalSection.DISCUSSION, "positional"),
         (CanonicalSection.DISCUSSION, "exact_alias"),
         (CanonicalSection.DISCUSSION, "positional"),
@@ -260,9 +260,10 @@ def test_review_headings_naming_their_part_keep_it_with_their_subsections():
     ]
 
 
-def test_a_results_or_discussion_guess_is_not_overridden_by_its_parent():
+def test_a_results_or_discussion_guess_is_not_pulled_back_into_methods():
     """A lost "3 Results" heading: 3.1/3.2 sit after "2 Methods" but keep
-    their results guess; a methods guess under "3 Results" still follows it."""
+    their results guess; a methods guess under "4 Results" still follows it,
+    and between results and discussion the part decides."""
     secs = [
         _typed(1, "2 Methods", CanonicalSection.METHODS, "exact_alias"),
         _typed(2, "2.1 Data", CanonicalSection.METHODS, "model", 1, 2),
@@ -271,6 +272,10 @@ def test_a_results_or_discussion_guess_is_not_overridden_by_its_parent():
         _typed(5, "4 Results", CanonicalSection.RESULTS, "exact_alias"),
         _typed(6, "4.1 Structural characterization", CanonicalSection.METHODS, "model", 5, 2),
         _typed(7, "4.2 What the trend implies", CanonicalSection.DISCUSSION, "model", 5, 2),
+        _typed(8, "5 Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(9, "5.1 Principal findings", CanonicalSection.RESULTS, "model", 8, 2),
+        _typed(10, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(11, "Effect of treatment", CanonicalSection.RESULTS, "model", 10, 2),
     ]
     _inherit_child_section_types(secs)
     assert [s.section_type for s in secs[1:]] == [
@@ -279,7 +284,11 @@ def test_a_results_or_discussion_guess_is_not_overridden_by_its_parent():
         CanonicalSection.RESULTS,
         CanonicalSection.RESULTS,
         CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.METHODS,
+        CanonicalSection.RESULTS,
     ]
 
 
