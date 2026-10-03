@@ -75,13 +75,15 @@ def group_chars_into_lines(
 
 
 def _extract_page_chars(textpage) -> list[tuple[str, tuple[float, float, float, float]]]:
+    from bibr.ocr.native_text import compose_spacing_accents
+
     out = []
     for i in range(textpage.count_chars()):
         ch = textpage.get_text_range(i, 1)
         if not ch:
             continue
         out.append((ch, textpage.get_charbox(i)))
-    return out
+    return compose_spacing_accents(out)
 
 
 def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:

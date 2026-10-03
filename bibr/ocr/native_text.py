@@ -336,6 +336,95 @@ def _is_inner_whitespace(
     return next_loose[0] - ligature_loose[2] < _INNER_WHITESPACE_MAX_GAP * width
 
 
+# --- Spacing accents --------------------------------------------------------
+#
+# TeX and some other generators set an accented letter as the letter plus a
+# spacing accent glyph moved over (or under) it. pdfium reports both chars, in
+# either order, so names came out as "Bas¸kaya", "Brˇci´c",
+# "Ca´rcel". An accent that covers most of a neighbouring letter (or that the
+# letter covers), above it (below it for a cedilla or ogonek), is merged into
+# that letter and the result NFC-composed. A spacing accent between two letters,
+# such as an acute typed for an apostrophe ("don´t"), is over neither and
+# stays.
+_SPACING_ACCENTS = {
+    "\u00b4": "\u0301",  # acute
+    "\u02c7": "\u030c",  # caron
+    "\u00a8": "\u0308",  # diaeresis
+    "\u02d8": "\u0306",  # breve
+    "\u02d9": "\u0307",  # dot above
+    "\u02da": "\u030a",  # ring above
+    "\u02dd": "\u030b",  # double acute
+    "\u00b8": "\u0327",  # cedilla
+    "\u02db": "\u0328",  # ogonek
+}
+_ACCENTS_BELOW = frozenset("\u00b8\u02db")
+# TeX puts an accent over a dotless i or j.
+_DOTLESS = {"\u0131": "i", "\u0237": "j"}
+
+_ACCENT_MIN_OVERLAP = 0.5
+
+_CharBox = tuple[float, float, float, float]
+
+
+def _spacing_accent_targets(glyphs: list[tuple[str, _CharBox | None]]) -> dict[int, int]:
+    """Map the index of each spacing accent set on a neighbouring letter to that letter."""
+    targets: dict[int, int] = {}
+    for index, (ch, box) in enumerate(glyphs):
+        if ch not in _SPACING_ACCENTS or box is None:
+            continue
+        centre_x = (box[0] + box[2]) / 2.0
+        centre_y = (box[1] + box[3]) / 2.0
+        best: tuple[float, int] | None = None
+        for other in (index - 1, index + 1, index - 2, index + 2):
+            if not 0 <= other < len(glyphs):
+                continue
+            letter, letter_box = glyphs[other]
+            if letter_box is None or len(letter) != 1 or not letter.isalpha():
+                continue
+            left, bottom, right, top = letter_box
+            # Most of the narrower ink box lies under (over) the other: a narrow
+            # stem such as a dotless i sits under part of a wider accent.
+            overlap = min(right, box[2]) - max(left, box[0])
+            narrower = min(right - left, box[2] - box[0])
+            if narrower <= 0 or overlap < _ACCENT_MIN_OVERLAP * narrower:
+                continue
+            letter_y = (bottom + top) / 2.0
+            if (centre_y < letter_y) != (ch in _ACCENTS_BELOW):
+                continue
+            distance = abs(centre_x - (left + right) / 2.0)
+            if best is None or distance < best[0]:
+                best = (distance, other)
+        if best is not None:
+            targets[index] = best[1]
+    return targets
+
+
+def _with_accent(letter: str, accent: str) -> str:
+    if accent not in _ACCENTS_BELOW:
+        letter = _DOTLESS.get(letter, letter)
+    return unicodedata.normalize("NFC", letter + _SPACING_ACCENTS[accent])
+
+
+def compose_spacing_accents(
+    chars: list[tuple[str, _CharBox]],
+) -> list[tuple[str, _CharBox]]:
+    """Merge spacing accents into the letters they are set on, for ``(char, box)`` lists."""
+    positions = [index for index, (ch, _box) in enumerate(chars) if not ch.isspace()]
+    targets = _spacing_accent_targets([chars[index] for index in positions])
+    if not targets:
+        return chars
+    composed: dict[int, str] = {}
+    for accent, letter in targets.items():
+        at = positions[letter]
+        composed[at] = _with_accent(composed.get(at, chars[at][0]), chars[positions[accent]][0])
+    dropped = {positions[accent] for accent in targets}
+    return [
+        (composed.get(index, ch), box)
+        for index, (ch, box) in enumerate(chars)
+        if index not in dropped
+    ]
+
+
 def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     """Precompute ``(char, center_x, center_y, is_newline)`` for every char on the page.
 
@@ -390,6 +479,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     # repair after the loop.
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]] = []
     generated_breaks: set[int] = set()
+    # The tight box of each entry of *glyphs*, for the spacing-accent merge.
+    glyph_boxes: list[tuple[str, tuple[float, float, float, float]]] = []
 
     def _settle(next_box: tuple[float, float, float, float] | None) -> None:
         for index, own_y, glyph_y in raised:
@@ -464,10 +555,21 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
                 raised.append((len(records), center_y, (gb + gt) / 2.0))
         if not ch.isspace():
             glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
+            glyph_boxes.append((ch, box))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
     _settle(None)
-    return _repair_word_boundaries(records, glyphs, generated_breaks)
+    accents = _spacing_accent_targets(glyph_boxes)
+    if not accents:
+        return _repair_word_boundaries(records, glyphs, generated_breaks)
+    for accent, letter in accents.items():
+        at = glyphs[letter][0]
+        ch, x, y, is_newline = records[at]
+        records[at] = (_with_accent(ch, glyphs[accent][1]), x, y, is_newline)
+        records[glyphs[accent][0]] = ("", 0.0, 0.0, False)
+    kept = [glyph for index, glyph in enumerate(glyphs) if index not in accents]
+    repaired = _repair_word_boundaries(records, kept, generated_breaks)
+    return [record for record in repaired if record[0]]
 
 
 def _reconstruct_text_from_records(

@@ -36,6 +36,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on one edge and set one per text line, is removed before the PDF's text
   layer is read. Numbered reference lists, table row numbers and numbers set
   against their text are kept (#113).
+- Accented letters that a PDF draws as a letter plus a separate spacing
+  accent no longer come out split in names, titles and references
+  ("Bas¸kaya", "Brˇci´c", "Ca´rcel"). An accent set over or under a
+  neighbouring letter in the PDF's text layer is now composed with it
+  ("Başkaya", "Brčić", "Cárcel"); an accent between two letters, typed for an
+  apostrophe, is left as it is (part of #138).
 
 ## [0.6.0] - 2026-09-30
 

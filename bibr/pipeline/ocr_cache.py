@@ -54,7 +54,8 @@ logger = logging.getLogger(__name__)
 # Version 14: the native-text fill repairs missing word spaces and generated
 # mid-line breaks from the glyph positions.
 # Version 15: manuscript line numbers are removed before the native-text fill.
-_CACHE_FORMAT_VERSION = 15
+# Version 16: the native-text fill composes spacing accents with their letters.
+_CACHE_FORMAT_VERSION = 16
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
