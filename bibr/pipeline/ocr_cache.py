@@ -57,7 +57,9 @@ logger = logging.getLogger(__name__)
 # Version 16: the native-text fill composes spacing accents with their letters.
 # Version 17: line numbers are removed only from documents numbered on at least
 # two pages, and not when text lies further out than the numbers.
-_CACHE_FORMAT_VERSION = 17
+# Version 18: no spaces inside links, more spacing accents, and line numbers
+# only from documents numbered on 40% of their pages with text.
+_CACHE_FORMAT_VERSION = 18
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
