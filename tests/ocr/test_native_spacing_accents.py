@@ -15,7 +15,16 @@ from tests.ocr.test_watermark_text import _bt, _pdf, _width
 
 _WHOLE_PAGE = [0.0, 0.0, 1000.0, 1000.0]
 # StandardEncoding codes and Helvetica widths of the accent glyphs.
-_ACCENTS = {"´": ("\xc2", 333), "ˇ": ("\xcf", 333), "¸": ("\xcb", 333), "¨": ("\xc8", 333)}
+_ACCENTS = {
+    "´": ("\xc2", 333),
+    "ˇ": ("\xcf", 333),
+    "¸": ("\xcb", 333),
+    "¨": ("\xc8", 333),
+    "`": ("\xc1", 333),
+    "ˆ": ("\xc3", 333),
+    "˜": ("\xc4", 333),
+    "¯": ("\xc5", 333),
+}
 _DOTLESS_I = ("\xf5", 278)
 
 
@@ -96,6 +105,30 @@ def test_reference_page_lines_are_composed():
     )
 
     assert [line["text"] for line in inspection.page_lines] == ["Başkaya, A. (2020). Title."]
+
+
+def test_tilde_after_its_letter():
+    parts = [*_plain("Pe"), ("n", "˜"), ("a", None)]
+
+    assert _text(_name(parts)) == "Peña"
+
+
+def test_circumflex_and_acute_before_their_letters():
+    parts = [("C", None), ("o", "ˆ"), ("t", None), ("e", "´")]
+
+    assert _text(_name(parts, accent_first=True)) == "Côté"
+
+
+def test_grave_after_its_letter():
+    parts = [*_plain("Universit"), ("a", "`")]
+
+    assert _text(_name(parts)) == "Università"
+
+
+def test_macron_after_its_letter():
+    parts = [*_plain("T"), ("o", "¯"), *_plain("kyo")]
+
+    assert _text(_name(parts)) == "Tōkyo"
 
 
 def test_generated_space_after_a_composed_capital_is_dropped():

@@ -42,8 +42,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   accent no longer come out split in names, titles and references
   ("Bas¸kaya", "Brˇci´c", "Ca´rcel"). An accent set over or under a
   neighbouring letter in the PDF's text layer is now composed with it
-  ("Başkaya", "Brčić", "Cárcel"); an accent between two letters, typed for an
-  apostrophe, is left as it is (part of #138).
+  ("Başkaya", "Brčić", "Cárcel", "Peña", "Côté"); an accent between two
+  letters, typed for an apostrophe, is left as it is (part of #138).
 
 ## [0.6.0] - 2026-09-30
 

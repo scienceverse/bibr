@@ -425,6 +425,12 @@ _SPACING_ACCENTS = {
     "\u02dd": "\u030b",  # double acute
     "\u00b8": "\u0327",  # cedilla
     "\u02db": "\u0328",  # ogonek
+    "\u02dc": "\u0303",  # tilde
+    "\u02c6": "\u0302",  # circumflex
+    "\u0060": "\u0300",  # grave
+    "\u02cb": "\u0300",  # grave
+    "\u00af": "\u0304",  # macron
+    "\u02c9": "\u0304",  # macron
 }
 _ACCENTS_BELOW = frozenset("\u00b8\u02db")
 # TeX puts an accent over a dotless i or j.
