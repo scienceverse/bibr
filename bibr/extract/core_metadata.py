@@ -1693,9 +1693,13 @@ _KEYWORD_FOOTNOTE_ITEMS = 15
 _KEYWORD_FOOTNOTE_ITEM_CHARS = 80
 _KEYWORD_FOOTNOTE_CHARS = 600
 # A first-page footnote row that is no keyword: one opening with a footnote
-# marker, a digit or a copyright sign ("* These authors contributed equally.",
-# "1 Department of …", "© 2020 …"), or one ending a sentence.
-_NOT_A_KEYWORD_ROW_RE = re.compile(r"^[*\u2020\u2021\u00a7\u00b6\u00a9\d]|[.!?]$")
+# marker, a numeric marker or a copyright sign ("* These authors contributed
+# equally.", "1 Department of …", "© 2020 …"), a funding line, or one ending a
+# sentence. A keyword may open with a digit ("5-HT receptors").
+_NOT_A_KEYWORD_ROW_RE = re.compile(
+    r"^(?:[*\u2020\u2021\u00a7\u00b6\u00a9]|\d+\s|(?:funded|supported)\s+by\b)|[.!?]$",
+    re.IGNORECASE,
+)
 
 
 def first_page_keyword_footnote(contents) -> str:

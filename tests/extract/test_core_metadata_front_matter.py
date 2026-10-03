@@ -2214,6 +2214,16 @@ def test_an_inline_keyword_footnote_is_kept_whole():
             "Key words\nChoroid plexus",
             id="bare-label-then-a-marker",
         ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "Funded by the Example Trust"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-funding-line",
+        ),
+        pytest.param(
+            ("Key words", "5-HT receptors", "Sleep", "1 Department of Psychology"),
+            "Key words\n5-HT receptors\nSleep",
+            id="keyword-opening-with-a-digit",
+        ),
     ],
 )
 def test_the_keyword_block_stops_before_other_first_page_footnotes(notes, block):
