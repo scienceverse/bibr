@@ -332,3 +332,15 @@ def drop_edge_fragments(text: str, haystack: str) -> str:
     while end > start and fragment(lines[end - 1]):
         end -= 1
     return "\n".join(lines[start:end])
+
+
+def covered_without_edge_fragments(text: str, haystack: str) -> bool:
+    """Whether *haystack* holds *text* once its edge fragments are set aside.
+
+    ``alnum_text_covered`` on ``drop_edge_fragments(text, haystack)``, but only
+    when at least 30 letters and digits remain: short keys ("nature2019") turn
+    up in a long haystack by chance, and a box of short lines only ("Smith J,",
+    "Ibid.", "Nature 2019.") would otherwise lose every line and count as held.
+    """
+    rest = alnum_key(drop_edge_fragments(text, haystack))
+    return len(rest) >= _COVERED_MIN_CHARS and alnum_text_covered(rest, haystack)

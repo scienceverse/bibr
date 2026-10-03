@@ -296,3 +296,18 @@ def test_drop_edge_fragments_sets_aside_only_short_edge_lines_the_haystack_holds
     # four words are not a fragment
     longer = "this copy and its\n" + entry
     assert drop_edge_fragments(longer, haystack) == longer
+
+
+def test_entry_box_of_short_lines_is_not_held_once_its_fragments_are_set_aside():
+    from bibr.ocr.ref_patterns import alnum_key, covered_without_edge_fragments
+
+    haystack = alnum_key(
+        "Notice: this copy and its contents are private, meant for peer review purposes only."
+        " 12 Thorn J, Tamm C. Linked records of care. Circ Res. 2021;128:2017-36. Smith J, Doe A."
+        " Ibid. Cell. Nature 2019. 13 Rees P. Other records. Nature. 2019;5:1-9."
+    )
+    entry = "Thorn J, Tamm C. Linked records of care.\nCirc Res. 2021;128:2017-36."
+    assert covered_without_edge_fragments("ts contents are\n" + entry, haystack)
+    # every line is short and somewhere in the haystack: nothing is left to compare
+    assert not covered_without_edge_fragments("Smith J,\nIbid.\nNature 2019.", haystack)
+    assert not covered_without_edge_fragments("view purposes\nNature 2019.", haystack)
