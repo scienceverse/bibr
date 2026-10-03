@@ -6,6 +6,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Section levels and parents follow the paper's numbering and the order of
+  its headings: "3 Results" is a top-level section, "3.2" sits under "3",
+  Roman-numbered and "Chapter N" parts are recognised, and a subsection stays
+  in the part where it is printed instead of folding back under an earlier
+  heading of the same type. Back matter after the numbered body sits at the
+  top level, and statements printed under "Declarations" are its
+  subsections (#119).
+- Subsections take the type of the numbered or named part they are printed
+  in, the body headings of reviews, commentaries and case studies are typed
+  discussion (setting `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by
+  default), and body headings are no longer typed as the paper title (#120).
+- Declaration blocks ("Declarations", "Contributors", "Consent for
+  publication", "Availability of data and materials") and box headings
+  ("Research in context", "Clinical Perspective", "What this study adds") get
+  the right type or none, conclusions-and-outlook headings are typed
+  discussion instead of endnotes, and non-English headings such as
+  "Riassunto", "Bibliografia" and "Literatuur" are recognised (#121).
+- Cover-sheet labels ("Posted Date", "Word count", "Running title",
+  "Manuscript Number", "Corresponding author") no longer become typed
+  sections, and section headings lose watermark letters, gutter line numbers,
+  overprinted repeats and letter spacing ("A B S T R A C T") (#123).
+- A paper no longer exports two references sections when its references
+  heading is not in English or a back-matter block sits before the reference
+  list, and the implicit introduction stops at the next printed heading
+  instead of swallowing a case report (#124, #108).
+- A structured abstract whose "Background", "Methods", "Results" and
+  "Conclusions" subheadings are printed as separate rows keeps all its parts
+  (#125).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)
