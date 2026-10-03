@@ -121,10 +121,12 @@ has queued or running answers `202` with that job's `job_id`, its current
 `status` and `"duplicate": true`, instead of running the paper a second time.
 Options are compared by value (`1`/`true`, `02`/`2`); an option left out does
 not match the same option sent with its default, and a renamed copy of a file
-runs again (the export names the file it was sent as). bibr serve has one
-principal (the shared API key), so every caller can be handed every other
-caller's job: enable it only when that is fine, and deduplicate per user in a
-multi-user front end instead.
+runs again (the export names the file it was sent as). The `JOBS_MAX_ACTIVE`
+cap is checked before the duplicate lookup, so a full server answers a
+duplicate with `429` like any other upload. bibr serve has one principal (the
+shared API key), so every caller can be handed every other caller's job: enable
+it only when that is fine, and deduplicate per user in a multi-user front end
+instead.
 
 Jobs are held in an in-process store and purged after `JOBS_TTL_SECONDS`
 (default `3600`); `JOBS_MAX_ACTIVE` (default `32`) caps concurrently

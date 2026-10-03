@@ -19,8 +19,9 @@ stages yet, so ``DELETE`` answers ``409`` for it.
 
 **Duplicate uploads.** With ``JOBS_DEDUPE_INFLIGHT=true`` a ``POST`` whose file
 (sha256), filename and options match a job this replica still has queued or
-running returns that job instead of queueing the paper again. bibr serve has one
-principal (the shared API key), so this suits a single-tenant deployment; a
+running returns that job instead of queueing the paper again. The active-job cap
+is checked first, so at ``JOBS_MAX_ACTIVE`` a duplicate is refused with 429 too.
+bibr serve has one principal (the shared API key), so this suits a single-tenant deployment; a
 multi-user front end must deduplicate per user itself.
 
 **Architecture.** Jobs persist their uploads through the same disk-backed

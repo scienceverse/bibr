@@ -1168,6 +1168,22 @@ class TestInflightDedupe:
         finally:
             asyncio.run(client.app.state.upload_store.close())
 
+    def test_at_the_active_cap_a_duplicate_is_refused_like_any_upload(self, monkeypatch):
+        # The documented order: the cap is checked before the duplicate lookup.
+        monkeypatch.setattr(Settings.jobs, "dedupe_inflight", True)
+        monkeypatch.setattr(Settings.jobs, "max_active", 1)
+        _hold_first_job(monkeypatch)
+        client = _client(MemoryJobStore())
+        try:
+            with client:
+                first = _post(client).json()["job_id"]
+                _poll_until(client, first, "running")
+                resp = _post(client)
+                assert resp.status_code == 429
+                assert "duplicate" not in resp.json()
+        finally:
+            asyncio.run(client.app.state.upload_store.close())
+
     def test_a_duplicate_of_a_queued_job_returns_it_until_it_is_cancelled(self, monkeypatch):
         monkeypatch.setattr(Settings.jobs, "dedupe_inflight", True)
         _hold_first_job(monkeypatch)
