@@ -137,7 +137,7 @@ class MediaHandlersMixin:
     # An explicit figure caption for anchoring: the figure word followed by
     # anything, so "Fig.2" and named labels anchor too.
     _FIGURE_ANCHOR_RE = re.compile(
-        rf"^{SUPPLEMENT_WORD}?Fig(?:ure|ura|uur|ur)?s?\.?(?![a-z])\s*\S", re.IGNORECASE
+        rf"^{SUPPLEMENT_WORD}?Fig(?:ure|ura|uur|uren|ur)?s?\.?(?![a-z])\s*\S", re.IGNORECASE
     )
     # A figure-kind caption for another kind of float ("Scheme 1.", "Box 2")
     # anchors no group of its own, but it keeps its regions out of a
@@ -1115,14 +1115,25 @@ class MediaHandlersMixin:
                 # A region printed beyond another explicit caption belongs to
                 # that caption's figure, whatever the reading order says.
                 continue
-            if any(
-                (figure.parts[-1].page_number if figure.parts else figure.page_number)
-                != caption.page_number
+            off_page = [
+                figure
                 for figure in trailing
-            ) and self._captions_figure_below(caption, grouped_ids):
+                if (figure.parts[-1].page_number if figure.parts else figure.page_number)
+                != caption.page_number
+            ]
+            if (
+                off_page
+                and all(
+                    self._captioned_above_on_own_page(figure, explicit_captions)
+                    for figure in off_page
+                )
+                and self._captions_figure_below(caption, grouped_ids)
+            ):
                 # A caption printed above a figure on its own page captions
                 # that figure, not the previous page's panels (caption-above
-                # layouts put those panels before it in reading order).
+                # layouts put those panels before it in reading order) — as
+                # long as those panels sit under a caption of their own. A
+                # figure split across the page break has none on its first page.
                 continue
 
             next_figure_source = next(
@@ -1220,6 +1231,24 @@ class MediaHandlersMixin:
         if grouped_ids:
             self.figures = [figure for figure in self.figures if id(figure) not in grouped_ids]
         return descriptions, panel_owners, supporting_owners, caption_owners
+
+    @staticmethod
+    def _captioned_above_on_own_page(
+        figure: PaperFigure, explicit_captions: list[CaptionCandidate]
+    ) -> bool:
+        """Is an explicit caption printed above *figure* on the figure's own page?"""
+        part = figure.parts[0] if figure.parts else None
+        if part is None or part.bbox is None:
+            return False
+        x1, y1, x2, _y2 = part.bbox
+        for item in explicit_captions:
+            if item.page_number != part.page_number or item.bbox is None:
+                continue
+            overlap = min(item.bbox[2], x2) - max(item.bbox[0], x1)
+            narrower = max(1.0, min(item.bbox[2] - item.bbox[0], x2 - x1))
+            if item.bbox[3] <= y1 + 8 and overlap / narrower >= 0.2:
+                return True
+        return False
 
     def _captions_figure_below(self, caption: CaptionCandidate, grouped_ids: set[int]) -> bool:
         """Is an ungrouped figure printed right below *caption* on its page?"""

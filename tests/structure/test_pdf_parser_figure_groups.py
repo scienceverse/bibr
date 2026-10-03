@@ -309,6 +309,7 @@ def test_a_scheme_beside_a_figure_keeps_its_own_float():
         ("Figs. 3 and 4", True),
         ("Fig.2. Results", True),
         ("Figura 1. Resultados", True),
+        ("Figuren 1-3. Resultaten", True),
         ("Fight or flight responses", False),
         ("Figurative language", False),
     ],
@@ -317,3 +318,31 @@ def test_figure_anchor_words(text, anchors):
     from bibr.structure.parse_media import MediaHandlersMixin
 
     assert bool(MediaHandlersMixin._FIGURE_ANCHOR_RE.match(text)) is anchors
+
+
+def test_a_figure_split_across_a_page_break_keeps_its_first_panel():
+    """Panel (a) ends page 1 with no caption above it; page 2 has (b), then
+    "Figure 1", then another captioned figure below. The figure under
+    "Figure 1" does not make it a caption-above layout."""
+    pages = [
+        [
+            _region(0, "text", _BODY, [100, 60, 900, 300]),
+            _region(1, "image", bbox=[100, 600, 900, 880], image_b64="1a"),
+            _region(2, "figure_title", "(a)", [480, 885, 520, 900]),
+        ],
+        [
+            _region(0, "image", bbox=[100, 60, 900, 340], image_b64="1b"),
+            _region(1, "figure_title", "(b)", [480, 345, 520, 360]),
+            _region(2, "figure_title", "Figure 1. Two conditions.", [100, 370, 900, 390]),
+            _region(3, "image", bbox=[100, 430, 900, 700], image_b64="f2"),
+            _region(4, "figure_title", "Figure 2. Other.", [100, 710, 900, 730]),
+            _region(5, "text", _BODY, [100, 760, 900, 900]),
+        ],
+    ]
+
+    figures = {
+        figure.label: [part.image_b64 for part in figure.parts]
+        for figure in PDFParser(pages).parse().figures
+    }
+
+    assert figures == {"1": ["1a", "1b"], "2": ["f2"]}

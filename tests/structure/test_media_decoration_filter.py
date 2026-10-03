@@ -283,25 +283,24 @@ _PANEL_FAMILY_PAGES = [
 
 
 def test_a_small_figure_below_a_panel_group_keeps_its_own_caption():
-    """Measured: HEAD gives "Figure 2. Real." to crop ``W``; round 2 gave it to
-    ``Z`` and deleted ``W`` outright.
+    """ "Figure 2. Real." is printed directly under crop ``Z`` (``W`` sits above
+    ``Z``), so ``Z`` owns it and survives suppression. ``W`` owns no caption and
+    is front-page badge-shaped, so it is dropped as decoration.
 
-    Round 2's preview vetoed the panel-label candidate that had won the only
-    edge to ``W``, so ``W`` looked unowned and was deleted before the real
-    matcher ran — and the real caption then landed on ``Z``. Nothing about
-    that sequence is visible to a preview; only the finished assignment shows
-    that ``W`` is owned.
+    Earlier revisions gave the caption to ``W``: the number bonus compared "2"
+    with raw provisional ids. Ownership must still be read from the finished
+    assignment, not a preview of it.
     """
     contents = _parse(_PANEL_FAMILY_PAGES)
 
     by_caption = {
         figure.caption: [part.image_b64 for part in figure.parts] for figure in contents.figures
     }
-    # The caption is printed directly under ``Z``; ``W`` only won it while
-    # the number bonus compared "2" with raw provisional ids.
     assert by_caption["Figure 2. Real."] == ["Z"]
     assert by_caption["Figure 1. Panels."] == ["panel-a", "panel-b", "panel-c"]
     assert by_caption[None] == ["big"]
+    exported = {part.image_b64 for figure in contents.figures for part in figure.parts}
+    assert "W" not in exported
 
 
 def test_suppression_reads_captions_that_are_already_attached(monkeypatch):
