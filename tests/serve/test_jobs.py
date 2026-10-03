@@ -567,6 +567,44 @@ class TestJobDispatcher:
         # Shutdown neither runs it nor rewrites its record as a shutdown loss.
         assert jobs_mod.is_cancelled(await store.get(queued.job_id))
 
+    async def test_shutdown_keeps_a_cancel_made_through_another_replica(self, harness, monkeypatch):
+        entered = asyncio.Event()
+
+        async def blocked_run_job(*, store, job_id, descriptor, tracker):
+            await store.set_running(job_id)
+            entered.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(jobs_mod, "_run_job", blocked_run_job)
+        store = harness.make()
+        other_replica = harness.make(replica_id="replica-b")
+        dispatcher = jobs_mod.JobDispatcher(store=store, tracker=_FakeTracker(), max_running=1)
+        running = await store.create(filename="running.pdf")
+        queued = await store.create(filename="queued.pdf")
+        for job in (running, queued):
+            payload = jobs_mod.JobPayload(descriptor={"upload_id": job.filename})
+            await dispatcher.submit(job.job_id, payload)
+        await entered.wait()
+
+        # The memory store is per process; there the "other replica" is the same store.
+        canceller = other_replica if harness.backend == "redis" else store
+        assert jobs_mod.is_cancelled(await canceller.cancel(queued.job_id))
+        await dispatcher.close()  # this replica still holds the job in its queue
+        got = await store.get(queued.job_id)
+        assert jobs_mod.is_cancelled(got)
+        assert got.http_status == jobs_mod.CANCELLED_HTTP_STATUS
+
+    async def test_a_queued_only_failure_leaves_other_states_alone(self, harness):
+        store = harness.make()
+        queued = await store.create(filename="queued.pdf")
+        running = await store.create(filename="running.pdf")
+        await store.set_running(running.job_id)
+        error = {"detail": "replica shut down before the job finished"}
+        for job in (queued, running):
+            await store.set_failed(job.job_id, http_status=503, error=error, required="queued")
+        assert (await store.get(queued.job_id)).http_status == 503
+        assert (await store.get(running.job_id)).status == "running"
+
     async def test_fingerprints_are_kept_only_while_the_job_is_held(self, monkeypatch):
         release = asyncio.Event()
 

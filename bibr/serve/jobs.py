@@ -264,7 +264,11 @@ class JobStore(Protocol):
 
     async def set_succeeded(self, job_id: str, result: dict) -> None: ...
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None: ...
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
+        """Record a failure; with ``required`` set, only a job in that status changes."""
+        ...
 
     async def close(self) -> None: ...
 
@@ -396,10 +400,12 @@ class MemoryJobStore:
             job.finished_wall = self._wall_clock()
             self._purge_locked()
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None:
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
         async with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
+            if job is None or (required and job.status != required):
                 return
             job.status = "failed"
             job.http_status = http_status
@@ -606,8 +612,11 @@ class JobDispatcher:
                 # The upload is gone, so the job can never run: say so instead of
                 # leaving a "queued" record (in a shared store, one that would hold
                 # a cap slot until its safety TTL).
+                # Only a job still queued: another replica may have cancelled it.
                 if not cancelled:
-                    await self._store.set_failed(job_id, http_status=503, error=_SHUTDOWN_ERROR)
+                    await self._store.set_failed(
+                        job_id, http_status=503, error=_SHUTDOWN_ERROR, required="queued"
+                    )
             finally:
                 self._queue.task_done()
 

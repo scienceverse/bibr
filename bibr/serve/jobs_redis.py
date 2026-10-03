@@ -431,7 +431,9 @@ class RedisJobStore:
             result_size=len(encoded),
         )
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None:
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
         await self._finish(
             job_id,
             status="failed",
@@ -439,6 +441,7 @@ class RedisJobStore:
             error=error,
             result=b"",
             result_size=0,
+            required=required,
         )
 
     async def _finish(
@@ -450,6 +453,7 @@ class RedisJobStore:
         error: dict | None,
         result: bytes,
         result_size: int,
+        required: str = "",
     ) -> None:
         keys, args = self._finish_call(
             job_id,
@@ -458,6 +462,7 @@ class RedisJobStore:
             error=error,
             result=result,
             result_size=result_size,
+            required=required,
         )
         try:
             await self._bounded(f"set_{status}", self._finish_script(keys=keys, args=args))
