@@ -91,9 +91,12 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
     ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes its
     parent's IMRaD type when the parent is confirmed: by numbering (3.2 -> 3)
     or as a part-name heading ("Results"). An untyped child takes the type of
-    any IMRaD-typed parent. Children typed from their own heading text (alias
-    hits) keep their type. Runs in document order, so a grandchild sees its
-    parent's inherited type. ``only_ids`` limits the children considered.
+    any IMRaD-typed parent. Under an untyped parent (a "Study 1" scope or a
+    topic heading) an untyped child takes the methods, results or discussion
+    type of the sibling printed just before it, so "Virtual reality scenario"
+    after "Participants" stays methods. Children typed from their own heading text (alias hits) keep
+    their type. Runs in document order, so a grandchild sees its parent's
+    inherited type. ``only_ids`` limits the children considered.
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.section_tree import (
@@ -103,31 +106,50 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
     )
 
     inheriting = IMRAD_ANCHORS | {CanonicalSection.UNKNOWN, CanonicalSection.ENDNOTE, None}
+    untyped_types = (CanonicalSection.UNKNOWN, None)
     by_id = {section.section_id: section for section in sections}
     numbered_parents = numbering_parent_ids(sections)
+    last_child: dict[int, object] = {}
     for section in sections:
+        previous = None
+        if section.level > 0 and section.parent_section_id is not None:
+            previous = last_child.get(section.parent_section_id)
+            last_child[section.parent_section_id] = section
         if only_ids is not None and section.section_id not in only_ids:
             continue
         if section.level == 0 or section.section_type not in inheriting:
             continue
         if section.classification_source in _HEADING_TYPE_SOURCES:
             continue
+        untyped = section.section_type in untyped_types
         parent_id = numbered_parents.get(section.section_id)
         if parent_id is not None:
             parent = by_id.get(parent_id)
         else:
             parent = by_id.get(section.parent_section_id)
-            untyped = section.section_type in (CanonicalSection.UNKNOWN, None)
             if parent is None or not (untyped or is_part_heading(parent.header or "")):
                 continue
+        source = parent
         if (
-            parent is None
-            or parent.section_type not in IMRAD_ANCHORS
-            or parent.section_type == section.section_type
+            untyped
+            and parent is not None
+            and parent.level > 0
+            and parent.section_type in untyped_types
+        ):
+            # An "Overview" or "Opening remarks" heading in a later part reads
+            # as introduction to the model; following it would spread one
+            # wrong guess over the whole part.
+            source = previous
+            if source is not None and source.section_type == CanonicalSection.INTRODUCTION:
+                source = None
+        if (
+            source is None
+            or source.section_type not in IMRAD_ANCHORS
+            or source.section_type == section.section_type
         ):
             continue
-        section.section_type = parent.section_type
-        section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
+        section.section_type = source.section_type
+        section.classification_score = min(float(source.classification_score or 0.7), 0.75)
         section.classification_source = "parent_context"
 
 

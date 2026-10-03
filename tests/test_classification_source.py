@@ -253,3 +253,45 @@ def test_an_untyped_child_takes_any_imrad_parents_type():
         (CanonicalSection.METHODS, "parent_context"),
         (CanonicalSection.RESULTS, "model"),
     ]
+
+
+def test_an_untyped_child_of_an_untyped_scope_follows_the_sibling_before_it():
+    """Under "Study 1" (untyped), the model left some method subsections
+    untyped; each takes the IMRaD type of the sibling printed just before it.
+    The first child, and a child after an untyped sibling, stay untyped."""
+    secs = [
+        _typed(1, "Study 1: a pilot study", CanonicalSection.UNKNOWN, None, score=0.0),
+        _typed(2, "Overview", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(3, "Participants", CanonicalSection.METHODS, "exact_alias", 1, 2),
+        _typed(4, "Virtual reality scenario", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(5, "Interview", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(6, "Research in context", CanonicalSection.UNKNOWN, "exact_alias", 1, 2),
+        _typed(7, "Evidence before this study", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert [(s.section_type, s.classification_source) for s in secs[1:]] == [
+        (CanonicalSection.UNKNOWN, None),
+        (CanonicalSection.METHODS, "exact_alias"),
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.UNKNOWN, "exact_alias"),
+        (CanonicalSection.UNKNOWN, None),
+    ]
+    # An introduction guess is not followed: "Overview" in a later part is
+    # not introduction.
+    secs = [
+        _typed(1, "4. Proposed scheme", CanonicalSection.UNKNOWN, None, score=0.0),
+        _typed(2, "4.1. Overview", CanonicalSection.INTRODUCTION, "model", 1, 2),
+        _typed(3, "4.2. Processing of requests", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert secs[2].section_type == CanonicalSection.UNKNOWN
+    # Top-level headings are not siblings in a scope: the level-0 root is not
+    # a parent to follow.
+    secs = [
+        _typed(0, "", None, None, level=0, score=0.0),
+        _typed(1, "Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(2, "Conceptual revisions", CanonicalSection.UNKNOWN, None, score=0.0),
+    ]
+    _inherit_child_section_types(secs)
+    assert secs[2].section_type == CanonicalSection.UNKNOWN
