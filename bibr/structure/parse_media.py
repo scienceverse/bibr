@@ -27,6 +27,7 @@ from bibr.paper_contents import (
 from bibr.structure.caption_matcher import CaptionTarget, assign_captions
 from bibr.structure.float_images import composite_panel_image
 from bibr.structure.float_labels import LABEL, SUPPLEMENT_WORD, caption_label, normalize_label
+from bibr.structure.floats_normalize import continuation_frame
 from bibr.structure.html_table import html_table_frame
 from bibr.structure.text_repair import bbox_to_tuple
 from bibr.validation import IssueSeverity, ValidationIssue
@@ -128,6 +129,14 @@ class MediaHandlersMixin:
     # An explicit figure caption for anchoring: the figure word followed by
     # anything, so "Fig.2" and named labels anchor too.
     _FIGURE_ANCHOR_RE = re.compile(rf"^{SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s*\S", re.IGNORECASE)
+
+    # ---- Table parts ----------------------------------------------------------
+    # A block printed this close under a captioned table on the same page is
+    # one of its parts (a table wrapped into stacked blocks).
+    _TABLE_BLOCK_MAX_GAP = 30.0
+    # Regions between two table parts that end the first table: a figure, or
+    # a table note (notes are printed at a table's end).
+    _TABLE_RUN_ENDING_LABELS = frozenset({"image", "chart", "vision_footnote"})
 
     def _add_caption_candidate(
         self,
@@ -1677,18 +1686,44 @@ class MediaHandlersMixin:
                 and page_edge_continuation
                 and no_new_table_label
             )
+            uncaptioned_part = bool(
+                current_candidate is None
+                and previous_label is not None
+                and len(previous.df.columns) == len(table.df.columns)
+                and (
+                    (adjacent_page and page_edge_continuation)
+                    or self._is_stacked_table_block(previous_bbox, current_bbox, previous, table)
+                )
+                and not self._ends_table_run(previous_last_source, current_source, candidates)
+            )
             if not (
-                adjacent_page
-                and compatible_columns
-                and no_heading_barrier
-                and (same_explicit_label or continuation_of_previous or implicit_repeated_header)
+                no_heading_barrier
+                and (
+                    (
+                        adjacent_page
+                        and compatible_columns
+                        and (
+                            same_explicit_label
+                            or continuation_of_previous
+                            or implicit_repeated_header
+                        )
+                    )
+                    or uncaptioned_part
+                )
             ):
                 grouped.append(table)
                 group_last_source[id(table)] = current_source
                 continue
             previous.parts.extend(table.parts)
             previous.provenance.extend(table.provenance)
-            previous.df = pd.concat([previous.df, table.df], ignore_index=True)
+            # A part that does not repeat the header had its first row read as
+            # column names; ``continuation_frame`` puts it back into the rows.
+            merged_frame = None if compatible_columns else continuation_frame(previous.df, table.df)
+            previous.df = (
+                merged_frame
+                if merged_frame is not None
+                else pd.concat([previous.df, table.df], ignore_index=True)
+            )
             # Keep each printed piece's source markup (rowspans, multi-level
             # headers) rather than re-rendering the merged frame, which is lossy
             # (see ``_handle_table``); the merged frame still feeds ``contents``.
@@ -1715,6 +1750,54 @@ class MediaHandlersMixin:
             and candidate.caption_id in self._confirmed_table_caption_owners
         }
         return continuation_owners, fragment_owners, confirmed_owners
+
+    def _is_stacked_table_block(
+        self,
+        previous_bbox: tuple[float, float, float, float] | None,
+        current_bbox: tuple[float, float, float, float] | None,
+        previous: PaperTable,
+        table: PaperTable,
+    ) -> bool:
+        """Is *table* a block printed directly under *previous* on the same page?"""
+        if (
+            previous_bbox is None
+            or current_bbox is None
+            or not previous.parts
+            or not table.parts
+            or previous.parts[-1].page_number != table.parts[0].page_number
+        ):
+            return False
+        width = max(
+            0.0, min(previous_bbox[2], current_bbox[2]) - max(previous_bbox[0], current_bbox[0])
+        )
+        narrower = max(
+            1.0, min(previous_bbox[2] - previous_bbox[0], current_bbox[2] - current_bbox[0])
+        )
+        gap = current_bbox[1] - previous_bbox[3]
+        return (
+            width / narrower >= 0.5
+            and -self._TABLE_BLOCK_MAX_GAP / 6 <= gap <= self._TABLE_BLOCK_MAX_GAP
+        )
+
+    def _ends_table_run(
+        self, previous_source: int, current_source: int, candidates: list[CaptionCandidate]
+    ) -> bool:
+        """Is anything printed between two table parts that ends the first table?
+
+        A caption of any kind, a figure, a table note, or a body paragraph
+        between them means the second part is a table of its own (one whose
+        caption the layout model missed), not a continuation.
+        """
+        if any(previous_source < item.source_index < current_source for item in candidates):
+            return True
+        return any(
+            region.label in self._TABLE_RUN_ENDING_LABELS
+            or (
+                region.label in self._ANCHOR_BODY_LABELS
+                and len(region.content or "") >= self._ANCHOR_BODY_MIN_CHARS
+            )
+            for region in self.region_summaries[previous_source + 1 : current_source]
+        )
 
     def _is_decoration_shaped(self, figure: PaperFigure) -> bool:
         """Does this figure have publisher-furniture geometry?
