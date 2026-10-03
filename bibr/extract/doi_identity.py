@@ -627,6 +627,22 @@ def _section_type(section, page: int | None) -> str | None:
 # Contexts a self-citation cue does not promote: a DOI that reads as a cited
 # work's, or a journal's own DOI.
 _NOT_PROMOTED_CONTEXTS = frozenset({"cited_work", "journal_identity"})
+# How many sentences after its cue a citation block may print its DOI: an
+# F1000 "How to cite this article: … [version 2; …]" prints it two sentences
+# on, and a "Citation:" line whose title holds full stops three.
+_CITATION_BLOCK_SENTENCES = 3
+# A sentence naming another work ("This is a commentary on https://doi.org/…")
+# ends the citation block before its DOI: the block printed none of its own.
+_ANOTHER_WORK_RE = re.compile(
+    r"\b(?:(?:commentary|comments?)\s+on"
+    r"|(?:reply|response|rebuttal)\s+to"
+    r"|(?:retraction|correction|erratum|corrigendum)\s+(?:to|of|for)"
+    r"|original\s+(?:article|paper|research|publication)"
+    r"|linked\s+(?:article|paper)"
+    r"|refers?\s+to"
+    r"|see\s+also)\b",
+    re.IGNORECASE,
+)
 
 
 def _citation_cue(text: str) -> tuple[re.Match[str] | None, bool]:
@@ -641,7 +657,7 @@ def _citation_cue(text: str) -> tuple[re.Match[str] | None, bool]:
 def _promote_self_citation(
     sentence,
     found: list[DoiCandidate],
-    open_cues: dict[tuple[int | None, int | None], bool],
+    open_cues: dict[tuple[int | None, int | None], tuple[bool, int]],
     *,
     in_front: bool,
 ) -> list[DoiCandidate]:
@@ -652,37 +668,42 @@ def _promote_self_citation(
     sentence or a later one: a version-2 F1000 article prints "How to cite this
     article: … [version 2; …]", then its ``.2`` DOI two sentences on, then
     "First published: … ….1". *open_cues* maps the paragraphs whose cue no
-    DOI has followed yet to whether the cue is the strong form. The first DOI
-    closes the block; it is promoted to tier 3 unless it is rejected, already
-    tier 3, or reads as another work's, or the cue is the weak form and the
-    DOI is printed outside the front matter (*in_front*).
+    DOI has followed yet to whether the cue is the strong form and how many
+    more sentences the block may run; a sentence naming another work ends it.
+    The first DOI closes the block; it is promoted to tier 3 unless it is
+    rejected, already tier 3, or reads as another work's, or the cue is the
+    weak form and the DOI is printed outside the front matter (*in_front*).
     """
 
     text = sentence.text or ""
     key = (sentence.section_id, sentence.paragraph_id)
     cue, strong = _citation_cue(text)
+    carried = open_cues.pop(key, None)
+    if carried is not None and cue is None and _ANOTHER_WORK_RE.search(text):
+        return found
     target = None
-    if key in open_cues and found:
+    if carried is not None and found:
         target = 0
-        strong = open_cues[key]
-    elif cue is not None:
+        strong = carried[0]
+    elif cue is None:
+        if carried is not None and carried[1] > 1:
+            open_cues[key] = (carried[0], carried[1] - 1)
+        return found
+    else:
         position = 0
         for index, candidate in enumerate(found):
             at = text.find(candidate.raw, position)
             if at < 0:
                 # A DOI the sentence does not spell as read: which DOI
                 # follows the cue is unknown, so none is promoted.
-                open_cues.pop(key, None)
                 return found
             if at >= cue.end():
                 target = index
                 break
             position = at + len(candidate.raw)
     if target is None:
-        if cue is not None:
-            open_cues[key] = strong
+        open_cues[key] = (strong, _CITATION_BLOCK_SENTENCES)
         return found
-    open_cues.pop(key, None)
     first = found[target]
     if (
         not (strong or in_front)
@@ -714,7 +735,7 @@ def collect_doi_candidates(
     section_map = {section.section_id: section for section in contents.sections}
     front_block_end = _pageless_front_block_end(contents, section_map)
     candidates: list[DoiCandidate] = []
-    open_cues: dict[tuple[int | None, int | None], bool] = {}
+    open_cues: dict[tuple[int | None, int | None], tuple[bool, int]] = {}
     for sentence in contents.sentences:
         section = section_map.get(sentence.section_id)
         region_meta = sentence.region_meta or {}

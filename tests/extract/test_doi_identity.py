@@ -1712,6 +1712,64 @@ def test_a_how_to_cite_block_on_the_last_page_still_names_the_paper():
     assert selection.selected.marker_kind == "self_citation"
 
 
+@pytest.mark.parametrize(
+    ("own_line", "linked_line", "selected"),
+    [
+        pytest.param(
+            "DOI: 10.1234/own.2020.1",
+            "This is a commentary on https://doi.org/10.1234/target.2019.9",
+            "10.1234/own.2020.1",
+            id="labelled-own-doi",
+        ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "Commentary on: https://doi.org/10.1234/target.2019.9",
+            None,
+            id="own-doi-as-url",
+        ),
+    ],
+)
+def test_a_citation_block_ends_at_a_sentence_naming_another_work(own_line, linked_line, selected):
+    """A reply's citation block prints no DOI; the next sentence names the target's."""
+
+    from bibr.extract.doi_identity import collect_doi_candidates, select_doi_candidates
+
+    contents = _paragraph_contents(
+        [
+            (1, CanonicalSection.TITLE, 1, own_line, 1),
+            (
+                1,
+                CanonicalSection.TITLE,
+                2,
+                "How to cite this article: Doe J. A reply. J Things 2020;1:1-2.",
+                1,
+            ),
+            (1, CanonicalSection.TITLE, 2, linked_line, 1),
+        ]
+    )
+
+    selection = select_doi_candidates(collect_doi_candidates(contents))
+
+    assert (selection.selected.normalized if selection.selected else None) == selected
+    assert all(c.marker_kind != "self_citation" for c in selection.candidates)
+
+
+@pytest.mark.parametrize(("title_sentences", "promoted"), [(2, True), (3, False)])
+def test_a_citation_block_runs_three_sentences_past_its_cue(title_sentences, promoted):
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    rows = [(1, CanonicalSection.UNKNOWN, 1, "Citation: Doe JH. 2018.", 1)]
+    rows += [
+        (1, CanonicalSection.UNKNOWN, 1, f"Part {index} of a title with full stops.", 1)
+        for index in range(title_sentences)
+    ]
+    rows.append((1, CanonicalSection.UNKNOWN, 1, "PeerJ 6:e1234 https://doi.org/10.1234/x.9", 1))
+
+    (candidate,) = collect_doi_candidates(_paragraph_contents(rows))
+
+    assert (candidate.marker_kind == "self_citation") is promoted
+
+
 def test_a_doi_both_the_body_and_the_running_footer_print_breaks_the_tie():
     """A first page printing the article DOI beside a linked Comment's DOI."""
 
