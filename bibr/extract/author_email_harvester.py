@@ -2,7 +2,10 @@
 
 Bridges parsed PaperContents to LLM-extracted authors: finds explicit
 "Corresponding author:" anchors in the OCR'd text, promotes the matching
-author's ``corresponding`` flag, and attaches the anchored email.
+author's ``corresponding`` flag, and attaches the anchored email. Two
+name-paired forms are read before the proximity rules: the footnote
+"E-mail address: x@y (Initials Surname)" (read from the whole paper) and a
+labelled "E-mail:" inside an affiliation block that names the author.
 
 Previously inline methods on MetadataExtractor; moved here as a
 self-contained class so the harvesting logic can be tested without
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -101,6 +105,116 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
     return len(family_compact) == 2 and local_compact.startswith(family_compact)
 
 
+# --- name-paired e-mails -------------------------------------------------------
+# Elsevier prints the corresponding author's address in a page footnote, paired
+# with the name in parentheses: "E-mail address: x@y.org (J.K. Okafor)." or
+# "E-mail addresses: a@y.org (A. Lindqvist), b@z.org (B. Okafor)." The pairing is explicit,
+# so it is matched against the author list by surname and initials, which makes
+# the footnote safe to read wherever it landed (it usually sits outside the
+# front-matter block and is often typed as a footnote or even a references section).
+_EMAIL_LABEL_RE = re.compile(r"\be-?\s?mail(?:\s+address(?:es)?)?\s*:", re.IGNORECASE)
+_NAMED_EMAIL_RE = re.compile(_EMAIL_RE.pattern + r"\s*\(\s*([^()@;:]{3,70}?)\s*\)")
+# A real "Corresponding author(s)" / "Correspondence" phrase. Unlike the broad
+# marker above it does not match "corresponds to" or "correspondingly" in body text.
+_CORRESPONDENCE_PHRASE_RE = re.compile(r"\bcorrespond(?:ing\s+authors?|ence)\b|✉", re.IGNORECASE)
+_NAME_TITLES = frozenset(
+    {"prof", "professor", "dr", "mr", "mrs", "ms", "miss", "assoc", "assist", "phd", "md"}
+)
+# A Wiley-style affiliation block can legitimately print one or two addresses;
+# more than this many labelled addresses looks like an every-author layout.
+_MAX_LABELLED_AFFILIATION_EMAILS = 3
+
+
+def _fold(text: str | None) -> str:
+    """Lower-case, accent-free, letters and digits only ("Al-Tammemi" -> "altammemi")."""
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    base = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"[\W_]+", "", base.casefold())
+
+
+def _initials(tokens: list[str]) -> list[str]:
+    """Initials of given-name tokens: "H.-K." -> H, K; "HK" -> H, K; "Hong-Kwan" -> H, K."""
+    out: list[str] = []
+    for token in tokens:
+        for raw in re.split(r"[\s.\-\u2010-\u2015]+", token):
+            part = _fold(raw)
+            if not part:
+                continue
+            # "HK" is two initials, "Hong" is one given name.
+            out.extend(part if raw.isupper() and len(part) <= 3 else part[0])
+    return out
+
+
+def _initials_compatible(left: list[str], right: list[str]) -> bool:
+    """The first initial must agree; later ones are compared only when both sides have them."""
+    if not left or not right or left[0] != right[0]:
+        return False
+    if len(left) >= 2 and len(right) >= 2:
+        return left[: min(len(left), len(right))] == right[: min(len(left), len(right))]
+    return True
+
+
+def _given_tokens(given: str | None) -> list[str]:
+    return [t for t in (given or "").split() if _fold(t)]
+
+
+def _strip_titles(tokens: list[str]) -> list[str]:
+    return [t for t in tokens if _fold(t) not in _NAME_TITLES]
+
+
+def _printed_name_matches(name: str, author: PaperAuthor) -> bool:
+    """Whether a printed "Initials Surname" (or "Given Surname") names this author.
+
+    The surname is the trailing run of tokens whose folded text equals the
+    author's family name (so "van der Berg" works whether or not the extractor
+    kept the particle in the family name); everything before it must be
+    initial-compatible with the author's given name.
+    """
+    family = _fold(author.family)
+    if len(family) < 2:
+        return False
+    tokens = _strip_titles(name.replace("\r", " ").replace("\n", " ").split())
+    author_initials = _initials(_given_tokens(author.given))
+    for k in range(1, len(tokens)):
+        if _fold("".join(tokens[k:])) == family and _initials_compatible(
+            _initials(tokens[:k]), author_initials
+        ):
+            return True
+    return False
+
+
+def _named_in_text(text: str, author: PaperAuthor) -> bool:
+    """Whether *text* prints this author as "[Title] Initials Surname" somewhere."""
+    family = _fold(author.family)
+    if len(family) < 2:
+        return False
+    tokens = text.replace("\r", " ").replace("\n", " ").split()
+    author_initials = _initials(_given_tokens(author.given))
+    for start in range(len(tokens)):
+        for span in range(1, 5):
+            if start + span > len(tokens):
+                break
+            if _fold("".join(tokens[start : start + span])) != family:
+                continue
+            before: list[str] = []
+            for tok in reversed(tokens[max(0, start - 4) : start]):
+                bare = tok.strip(",;:()")
+                if not bare or not bare[0].isupper() or _fold(bare) in _NAME_TITLES:
+                    break
+                before.insert(0, bare)
+                if _initials_compatible(_initials(before), author_initials):
+                    return True
+    return False
+
+
+def _surname_in_local_part(family: str | None, local_compact: str) -> bool:
+    """A 3+ letter surname inside the address, or a 2-letter one leading it ('lixh@' for Li)."""
+    family_compact = _fold(family)
+    if len(family_compact) >= 3:
+        return family_compact in local_compact
+    return len(family_compact) == 2 and local_compact.startswith(family_compact)
+
+
 class AuthorEmailHarvester:
     """Promote corresponding authors and attach their emails.
 
@@ -108,8 +222,15 @@ class AuthorEmailHarvester:
     ``PaperAuthor`` (modified in place).
     """
 
-    def __init__(self, contents: PaperContents):
+    def __init__(self, contents: PaperContents, document: PaperContents | None = None):
+        """``contents`` is what the extractor scoped to the selected front-matter block.
+
+        ``document`` is the whole paper. Only the name-paired footnote pass reads it,
+        because the footnote carrying a corresponding author's address sits outside
+        the front-matter block on most layouts. Everything else stays scoped.
+        """
         self.contents = contents
+        self._document = document if document is not None else contents
 
     @staticmethod
     def demote_implausible_flags(authors: list[PaperAuthor]) -> None:
@@ -199,6 +320,12 @@ class AuthorEmailHarvester:
             for s in self.contents.sentences
             if section_type_by_id.get(s.section_id) != CanonicalSection.REFERENCES
         ]
+
+        # Name-paired addresses first: they carry the strongest evidence (an explicit
+        # "x@y (Initials Surname)" pairing or a named affiliation block), and an author
+        # who gets an address here drops out of the proximity matching below.
+        self._harvest_named_footnote_emails(authors)
+        self._harvest_affiliation_emails(authors, sentences)
 
         # Only fill gaps — never overwrite an LLM-extracted email.
         # Surname → every still-emailless author carrying it. Keeping a single
@@ -356,6 +483,103 @@ class AuthorEmailHarvester:
 
         self._promote_corresponding_from_anchors(authors, sentences)
         self._promote_sole_author(authors)
+
+    @staticmethod
+    def _assign_corresponding_email(
+        author: PaperAuthor, email: str, claimed_emails: set[str]
+    ) -> bool:
+        """Attach *email* to *author* and mark them corresponding; True if anything changed.
+
+        Never overwrites a different address and never takes one another author holds.
+        """
+        wanted = email.lower()
+        current = (author.email or "").lower()
+        if current and current != wanted:
+            return False
+        if not current and wanted in claimed_emails:
+            return False
+        changed = False
+        if not current:
+            author.email = email
+            claimed_emails.add(wanted)
+            changed = True
+        if not author.corresponding:
+            author.corresponding = True
+            changed = True
+        return changed
+
+    def _harvest_named_footnote_emails(self, authors: list[PaperAuthor]) -> None:
+        """Pair "E-mail address(es): x@y (Initials Surname), ..." footnotes with authors.
+
+        Reads the whole paper, not the front-matter scope. A pair is used only when
+        a "Corresponding author"/"Correspondence" phrase sits in the same sentence or
+        among the three sentences before it (same section), and exactly one author
+        fits the printed name by surname and initials; anything else is left alone.
+        """
+        sentences = list(getattr(self._document, "sentences", None) or [])
+        if not authors or not sentences:
+            return
+        claimed = {a.email.lower() for a in authors if a.email}
+        changed = 0
+        for i, sent in enumerate(sentences):
+            text = sent.text or ""
+            if "@" not in text:
+                continue
+            label = _EMAIL_LABEL_RE.search(text)
+            if label is None:
+                continue
+            preceding = " ".join(
+                sentences[j].text or ""
+                for j in range(max(0, i - _EMAIL_NAME_WINDOW), i)
+                if sentences[j].section_id == sent.section_id
+            )
+            for pair in _NAMED_EMAIL_RE.finditer(text, label.end()):
+                email, name = pair.group(1), pair.group(2)
+                if not _CORRESPONDENCE_PHRASE_RE.search(preceding + " " + text[: pair.start()]):
+                    continue
+                fits = [a for a in authors if _printed_name_matches(name, a)]
+                if len(fits) == 1 and self._assign_corresponding_email(fits[0], email, claimed):
+                    changed += 1
+        if changed:
+            logger.info(
+                "Paired %d corresponding-author e-mail(s) from name-paired footnotes", changed
+            )
+
+    def _harvest_affiliation_emails(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Pair a labelled "E-mail:" in an affiliation block with the author it names.
+
+        Wiley prints the corresponding author's address inside the affiliation block,
+        after the block's author names ("Prof. M. Lindqvist ... E-mail: m.lindqvist@x.edu"),
+        with no "Corresponding author" wording. The address is used when the block prints
+        exactly one author whose surname also appears in the address. A layout that
+        labels many addresses (every author listed) is ignored.
+        """
+        found: list[tuple[PaperAuthor, str]] = []
+        labelled: set[str] = set()
+        for i, sent in enumerate(sentences):
+            text = _PG_PREFIX_RE.sub("", sent.text or "")
+            label = _EMAIL_LABEL_RE.search(text)
+            if label is None:
+                continue
+            emails = [m.group(1) for m in _EMAIL_RE.finditer(text, label.end())]
+            if not emails:
+                continue
+            labelled.update(e.lower() for e in emails)
+            block = text[: label.start()]
+            if len(block.split()) < 3 and i > 0 and sentences[i - 1].section_id == sent.section_id:
+                block = (sentences[i - 1].text or "") + " " + block
+            named = [a for a in authors if _named_in_text(block, a)]
+            for email in emails:
+                local_compact = re.sub(r"[^a-z0-9]", "", email.split("@", 1)[0].lower())
+                fits = [a for a in named if _surname_in_local_part(a.family, local_compact)]
+                if len(fits) == 1:
+                    found.append((fits[0], email))
+        if not found or len(labelled) > _MAX_LABELLED_AFFILIATION_EMAILS:
+            return
+        claimed = {a.email.lower() for a in authors if a.email}
+        changed = sum(self._assign_corresponding_email(a, e, claimed) for a, e in found)
+        if changed:
+            logger.info("Paired %d corresponding-author e-mail(s) from affiliation blocks", changed)
 
     def _promote_corresponding_from_anchors(
         self, authors: list[PaperAuthor], sentences: list
