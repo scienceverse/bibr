@@ -595,6 +595,40 @@ def test_split_drops_a_dot_numbered_copy_of_a_listed_entry():
     assert n_new == 0
 
 
+def test_split_keeps_an_entry_of_a_restarted_list_that_only_opens_like_another():
+    # A second list restarts at [1]; its [2] opens like the first list's [2]
+    # but is a different report.
+    refs = [
+        "[1] Doe J. Annual surveillance summary. 2019.",
+        "[2] Centers for Disease Control and Prevention. Morbidity and Mortality Weekly "
+        "Report 2016;65:1-3.",
+        "[1] Smith J. Supplement list. 2020. [2] Centers for Disease Control and Prevention. "
+        "Morbidity and Mortality Weekly Report 2021;70:9-12.",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out[-1] == (
+        "[2] Centers for Disease Control and Prevention. Morbidity and Mortality Weekly "
+        "Report 2021;70:9-12."
+    )
+    assert n_new == 1
+
+
+def test_split_drops_a_carried_over_copy_that_turns_to_ocr_noise_after_its_opening():
+    refs = [
+        "4. Bell Y, Tessier A, Cachia C, Giroud M, Mossiat C, Bertrand N, Garnier P, Marie C. "
+        "Time-dependent contribution of glial cells to BDNF production. Neurochem Int. "
+        "2011;58:102-11.",
+        "3. Lee TH, Kato H. Hypertension and BDNF. Brain Res. 2006;1101:1-9. 4. Bell Y, "
+        "Tessier A, Cachia C, Giroud M, Mossiat C, Bertrand N, Garnier P, Marie C. "
+        "Time-dependent contributlon of glial cells to BDNF",
+    ]
+    out, n_new = split_merged_refs(refs)
+
+    assert out == [refs[0], "3. Lee TH, Kato H. Hypertension and BDNF. Brain Res. 2006;1101:1-9."]
+    assert n_new == 0
+
+
 def test_split_keeps_a_piece_whose_marker_is_listed_with_other_text():
     refs = [
         "6. Bateson P. Mate choice. Cambridge University Press; 1983. 7. ten Cate C, Vos DR. "

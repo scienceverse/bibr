@@ -384,9 +384,13 @@ def split_merged_refs(ref_strings: list[str]) -> tuple[list[str], int]:
     return out, len(out) - len(ref_strings)
 
 
-# A segment's list marker ("[12] " or "12. ") and how much of the following
-# text identifies the entry: two segments that open with the same marker and
-# the same first 20-60 letters and digits are copies of one entry.
+# A segment's list marker ("[12] " or "12. ") and how much text two segments
+# must share: one that opens with the same marker as another and the same first
+# 20-60 letters and digits is a copy of that entry, unless the two part at a
+# number both of them print. Carried-over copies agree on their opening and then
+# break off or turn to OCR junk; two entries of a restarted list that open alike
+# ("[2] Centers for Disease Control … Report 2016;65" and "… 2021;70") part at
+# their year, volume or pages and stay apart.
 _MARKER_START = re.compile(r"\s*(?:\[(\d{1,3})\]|(\d{1,3})\.)\s")
 _REPEAT_PREFIX_CHARS = 60
 _REPEAT_MIN_CHARS = 20
@@ -406,15 +410,21 @@ def _entries_by_marker(ref_strings: list[str]) -> dict[str, list[str]]:
     return listed
 
 
+def _part_at_a_number(a: str, b: str) -> bool:
+    """Whether *a* and *b* first differ where both have a digit."""
+    i = next((i for i, (x, y) in enumerate(zip(a, b, strict=False)) if x != y), None)
+    return i is not None and a[i].isdigit() and b[i].isdigit()
+
+
 def _repeats_listed_entry(piece: str, listed: dict[str, list[str]]) -> bool:
     """Whether ``piece`` opens with the marker and the first words of an entry
-    that already starts its own segment."""
+    that already starts its own segment, and does not part from it at a number."""
     m = _MARKER_START.match(piece)
     if m is None:
         return False
     text = _match_text(piece)
     for other in listed.get(m.group(1) or m.group(2), ()):
         n = min(len(text), len(other), _REPEAT_PREFIX_CHARS)
-        if n >= _REPEAT_MIN_CHARS and text[:n] == other[:n]:
+        if n >= _REPEAT_MIN_CHARS and text[:n] == other[:n] and not _part_at_a_number(text, other):
             return True
     return False
