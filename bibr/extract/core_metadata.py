@@ -96,17 +96,17 @@ _CORRECTION_NOTICE_TITLE_RE = re.compile(
 _NUMBERED_AFFILIATION_RE = re.compile(
     r"(?<![\w,])(?P<number>\d{1,2})\s+(?=[A-Z\u00c0-\u00d6\u00d8-\u00de])"
 )
-# A marker glued to its institution ("..., 2University of Illinois, 3Cornell
-# Tech"). Only taken for numbers the byline uses, and only before a
-# capitalised word, so "3D Printing Lab" and "3M" are not markers.
-_GLUED_AFFILIATION_MARKER_RE = re.compile(
-    r"(?<![\w,.])(?P<number>\d{1,2})(?=[A-Z\u00c0-\u00d6\u00d8-\u00de][a-z])"
+# What follows a glued marker: a capitalised word or a dotted acronym
+# ("5E.T.S. de Ingenieria"), never a bare capital ("3D Printing", "3M").
+_GLUED_MARKER_FOLLOW = (
+    r"(?=[A-Z\u00c0-\u00d6\u00d8-\u00de](?:[a-z]|\.[A-Z\u00c0-\u00d6\u00d8-\u00de]))"
 )
+# A marker glued to its institution ("..., 2University of Illinois, 3Cornell
+# Tech"). Only taken for numbers the byline uses.
+_GLUED_AFFILIATION_MARKER_RE = re.compile(r"(?<![\w,.])(?P<number>\d{1,2})" + _GLUED_MARKER_FOLLOW)
 # A marker still inside a captured definition, spaced or glued: the value then
 # runs into the next definition.
-_EMBEDDED_AFFILIATION_MARKER_RE = re.compile(
-    r"(?<!\w)\d{1,2}\s*(?=[A-Z\u00c0-\u00d6\u00d8-\u00de][a-z])"
-)
+_EMBEDDED_AFFILIATION_MARKER_RE = re.compile(r"(?<!\w)\d{1,2}\s*" + _GLUED_MARKER_FOLLOW)
 _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
 )

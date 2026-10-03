@@ -665,3 +665,30 @@ async def test_the_author_llm_sees_the_first_page_affiliation_footnotes():
         "\n\n[Affiliation footnotes printed on the first page]\n"
         "Department of Psychology, Example University, Utrecht, The Netherlands"
     )
+
+
+def test_a_glued_marker_before_an_acronym_bounds_the_definition():
+    """ "..., South Korea, 5E.T.S. de Ingenieria ...": the glued 5 before an
+    acronym ended nothing, so definition 4 ran into definition 5."""
+    frame = _frame(
+        (1, "Ann Lee3,4 and Bo Chen5"),
+        (
+            1,
+            "3 Example Business School, Example University, Asan, South Korea, "
+            "4Korea Example Institute of Science and Technology, College of Business, "
+            "Seoul, South Korea, 5E.T.S. de Ingenieria Agronomica, Technical University "
+            "of Madrid, Madrid, Spain",
+        ),
+    )
+    authors = [_author(1, "Ann", "Lee"), _author(2, "Bo", "Chen")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == (
+        "Example Business School, Example University, Asan, South Korea; "
+        "Korea Example Institute of Science and Technology, College of Business, "
+        "Seoul, South Korea"
+    )
+    assert authors[1].affiliation == (
+        "E.T.S. de Ingenieria Agronomica, Technical University of Madrid, Madrid, Spain"
+    )
