@@ -605,6 +605,36 @@ def test_wrapped_vancouver_title_shaped_like_a_colon_byline_stays_in_its_entry()
     assert [entry.split(" ")[0] for entry in segmentation.entries] == ["Holick", "Smith", "Lok"]
 
 
+def test_title_after_a_byline_line_stays_in_its_entry_whatever_its_opening():
+    # The byline fills its line; the title opens like a colon byline
+    # ("Generation Z:") but no stoplist word.
+    stream = _stream(
+        [
+            "Twenge JM, Campbell WK, Freeman EC, Hoffman BJ, Lance CE.",
+            "Generation Z: values at work. J Manage. 2010;36:1117-42.",
+            "Smith J, Brown K. Bone health in adults. Lancet. 2019;393:1-2.",
+            "Okafor N.",
+            "Complex I: assembly and disease. Biochem J. 2018;475:1-9.",
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert [entry.split(" ")[0] for entry in segmentation.entries] == ["Twenge", "Smith", "Okafor"]
+
+
+def test_entry_ending_in_a_place_and_state_does_not_swallow_the_next():
+    stream = _stream(
+        [
+            "Doe J. Principles of nursing. 3rd ed. Springer: New York NY.",
+            "Smith J, Brown K. Bone health in adults. Lancet. 2019;393:1-2.",
+            "Lee A, Kim B. Sleep in shift workers. Sleep. 2020;43:1-8.",
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert [entry.split(" ")[0] for entry in segmentation.entries] == ["Doe", "Smith", "Lee"]
+
+
 def test_lowercase_continuation_without_a_date_rejoins_the_previous_entry():
     stream = _stream(
         [

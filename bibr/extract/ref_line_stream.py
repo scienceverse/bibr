@@ -817,6 +817,15 @@ _OCR_SPECK_AUTHOR = re.compile(r"^[.,](?=[^\W\d_]{2,},\s*[A-ZÀ-ÖØ-Þ]\.)")
 _CONTINUES_NEXT = re.compile(
     r"(?:[A-Za-zß-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bet\s+al\.?|\bpp\.?|\bvol\.?)\s*$"
 )
+# The previous line closes a Vancouver author list ("Hoffman BJ, Lance CE." or a
+# lone "12. Twenge JM."), so the title follows, however its opening looks
+# ("Generation Z: …", "Complex I: …"). Two "Surname AB" groups, or one filling
+# the line, so a place before a publisher ("New York NY.") does not count.
+_VANCOUVER_NAME = r"[A-ZÀ-ÖØ-Þ][^\W\d_]*[a-zß-öø-ÿ][^\W\d_]*"
+_ENDS_WITH_BYLINE = re.compile(
+    rf"(?:{_VANCOUVER_NAME}\s+[A-Z]{{1,3}},\s*|^(?:\[?\d{{1,3}}[.\]]?\s+)?)"
+    rf"{_VANCOUVER_NAME}\s+[A-Z]{{1,3}}\.\s*$"
+)
 _ENDS_WITH_LOCATOR = re.compile(
     r"(?:https?://\S+|\b" + DOI_BODY + r"\S+|doi:\s*\S+)\s*[.,;]?\s*$", re.I
 )
@@ -1124,7 +1133,7 @@ def _start_scores(
             previous = collapse_ws(lines[i - 1].text)
             if _ENDS_WITH_LOCATOR.search(previous) or lines[i - 1].link_dois:
                 score += _W_PREV_ENDS_ENTRY
-            elif _CONTINUES_NEXT.search(previous):
+            elif _CONTINUES_NEXT.search(previous) or _ENDS_WITH_BYLINE.search(previous):
                 score += _W_PREV_CONTINUES
         if _LOWER_START.match(stripped) and not _is_dash_start(text):
             # A reference box opening in lower case is still more often an
