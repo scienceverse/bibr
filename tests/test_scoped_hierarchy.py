@@ -10,13 +10,11 @@ from unittest.mock import AsyncMock
 from bibr.paper import enforce_imrad_order
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
 from bibr.structure.section_tree import (
-    IMRAD_ANCHORS,
     INTERLUDE_TYPES,
     assign_hierarchy_from_top_level,
     assign_provisional_scopes,
     close_scopes,
     detect_study_markers,
-    infer_level_from_numbering,
 )
 
 
@@ -257,20 +255,16 @@ class TestScopedHierarchy:
         assert by_id[5].level == 1 and by_id[5].parent_section_id == 0
         assert by_id[5].section_type == CanonicalSection.UNKNOWN  # type kept
 
-    def test_marker_updates_top_level_not_imrad_anchor(self):
+    def test_headings_after_a_marker_are_its_subsections(self):
         secs = [
             _section(1, "Study 2", CanonicalSection.UNKNOWN),
-            # is_top=False subsection folds under the most recent top level —
-            # the study header itself.
             _section(2, "Overview", CanonicalSection.UNKNOWN, is_top=False),
-            # UNKNOWN positional fold has no scope-local IMRaD anchor (the
-            # marker must not have become one) — left untouched.
             _section(3, "Stray", CanonicalSection.UNKNOWN, level=2, parent=0),
         ]
         scopes = {1: 1, 2: 1, 3: 1}
         assign_hierarchy_from_top_level(secs, scope_ids=scopes, marker_ids={1})
         assert secs[1].level == 2 and secs[1].parent_section_id == 1
-        assert secs[2].level == 2 and secs[2].parent_section_id == 0
+        assert secs[2].level == 2 and secs[2].parent_section_id == 1
 
     def test_unknown_folds_under_scope_local_anchor(self):
         secs = [
@@ -287,58 +281,8 @@ class TestScopedHierarchy:
 
 
 # ---------------------------------------------------------------------------
-# Hard invariant: scope_ids None / all-zero ⇒ byte-identical to the frozen
-# pre-refactor implementation.
+# Invariant: scope_ids None and all-zero scope_ids give the same hierarchy.
 # ---------------------------------------------------------------------------
-
-
-def _frozen_assign_hierarchy_from_top_level(sections: list[PaperSection]) -> None:
-    """Verbatim copy of assign_hierarchy_from_top_level before the scoped
-    refactor (main @ 39dc666). Do not edit."""
-    most_recent_top_level: int = 0
-    most_recent_imrad_anchor: int = 0
-    first_of_type: dict[CanonicalSection, int] = {}
-    for sec in sections:
-        if sec.level == 0:
-            continue
-        if infer_level_from_numbering(sec.header) is not None:
-            if sec.level == 1:
-                most_recent_top_level = sec.section_id
-                if sec.section_type in IMRAD_ANCHORS:
-                    most_recent_imrad_anchor = sec.section_id
-                    first_of_type.setdefault(sec.section_type, sec.section_id)
-            continue
-
-        is_top = getattr(sec, "is_top_level_predicted", None)
-
-        if is_top is True:
-            sec.level = 1
-            sec.parent_section_id = 0
-            most_recent_top_level = sec.section_id
-            if sec.section_type in IMRAD_ANCHORS:
-                most_recent_imrad_anchor = sec.section_id
-                first_of_type.setdefault(sec.section_type, sec.section_id)
-        elif is_top is False:
-            sec.level = 2
-            sec.parent_section_id = most_recent_top_level
-        else:
-            if sec.section_type in IMRAD_ANCHORS:
-                if sec.section_type in first_of_type:
-                    sec.level = 2
-                    sec.parent_section_id = first_of_type[sec.section_type]
-                else:
-                    sec.level = 1
-                    sec.parent_section_id = 0
-                    most_recent_top_level = sec.section_id
-                    most_recent_imrad_anchor = sec.section_id
-                    first_of_type[sec.section_type] = sec.section_id
-            elif sec.section_type in INTERLUDE_TYPES:
-                sec.level = 1
-                sec.parent_section_id = 0
-                most_recent_top_level = sec.section_id
-            elif sec.section_type == CanonicalSection.UNKNOWN and most_recent_imrad_anchor:
-                sec.level = 2
-                sec.parent_section_id = most_recent_imrad_anchor
 
 
 def _fixture_section_lists() -> list[list[PaperSection]]:
@@ -447,22 +391,14 @@ def _triples(secs: list[PaperSection]) -> list[tuple[int, int, int | None]]:
 
 
 class TestNoScopeIdentityInvariant:
-    def test_scope_ids_none_is_identity(self):
+    def test_scope_ids_all_zero_matches_no_scopes(self):
         for fixture in _fixture_section_lists():
-            frozen = copy.deepcopy(fixture)
-            current = copy.deepcopy(fixture)
-            _frozen_assign_hierarchy_from_top_level(frozen)
-            assign_hierarchy_from_top_level(current)
-            assert _triples(current) == _triples(frozen)
-
-    def test_scope_ids_all_zero_is_identity(self):
-        for fixture in _fixture_section_lists():
-            frozen = copy.deepcopy(fixture)
-            current = copy.deepcopy(fixture)
-            _frozen_assign_hierarchy_from_top_level(frozen)
-            scope_ids = {s.section_id: 0 for s in current}
-            assign_hierarchy_from_top_level(current, scope_ids=scope_ids, marker_ids=set())
-            assert _triples(current) == _triples(frozen)
+            unscoped = copy.deepcopy(fixture)
+            zero = copy.deepcopy(fixture)
+            assign_hierarchy_from_top_level(unscoped)
+            scope_ids = {s.section_id: 0 for s in zero}
+            assign_hierarchy_from_top_level(zero, scope_ids=scope_ids, marker_ids=set())
+            assert _triples(zero) == _triples(unscoped)
 
 
 # ---------------------------------------------------------------------------

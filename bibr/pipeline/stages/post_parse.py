@@ -346,12 +346,11 @@ async def _classify_sections(
     # back matter revert themselves and all followers to scope 0.
     scope_ids = close_scopes(contents.sections, provisional_scopes, markers)
 
-    # Section hierarchy: assign levels + parents using the alias-driven
-    # `is_top_level_predicted` signal (when set) plus a positional rule
-    # that folds UNKNOWN sections into the most-recent IMRaD anchor —
-    # both per study scope, so Study 2's Methods doesn't fold under
-    # Study 1's. Numbered headings keep the level/parent inferred from
-    # their numbering prefix in `pdf_parser._handle_heading`.
+    # Section hierarchy: numbered headings take their depth and numbered
+    # parent; unnumbered ones follow document order (part names open level-1
+    # sections, other headings sit under the most recent body section, back
+    # matter never contains what follows it), with first-of-type anchors kept
+    # per study scope.
     #
     # Runs for DOCX too: it intentionally canonicalizes the native Word
     # hierarchy that `docx_native` builds, flattening unnumbered headings to
