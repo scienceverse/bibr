@@ -11,7 +11,7 @@ def _author(author_id: int, given: str, family: str, affiliation: str = "") -> P
 
 
 _GROUP_BYLINE = (
-    "Ann Lee, Bo Chen, Cy Pham, for the ROAM/1308 Study Collaborators‡\n"
+    "Ann Lee, Bo Chen, Cy Pham, for the ABC/1234 Study Collaborators‡\n"
     "Summary Background Example text."
 )
 
@@ -27,7 +27,7 @@ def test_a_group_tail_returned_as_a_person_becomes_a_group_author():
         _author(1, "Ann", "Lee", "Example University"),
         _author(2, "Bo", "Chen"),
         _author(3, "Cy", "Pham"),
-        _author(4, "", "ROAM/1308", "Example University"),
+        _author(4, "", "ABC/1234", "Example University"),
     ]
 
     kept, transforms = _group_extractor()._sanitize_authors(authors, _GROUP_BYLINE)
@@ -36,7 +36,7 @@ def test_a_group_tail_returned_as_a_person_becomes_a_group_author():
         (1, "Ann", "Lee"),
         (2, "Bo", "Chen"),
         (3, "Cy", "Pham"),
-        (4, "", "ROAM/1308 Study Collaborators"),
+        (4, "", "ABC/1234 Study Collaborators"),
     ]
     assert "organization" in kept[3].role
     assert kept[3].affiliation == ""
@@ -49,23 +49,23 @@ def test_a_group_the_model_also_returned_is_not_added_twice():
     converted = CoreMetadataExtractor._convert_llm_authors(
         [
             AuthorLLM(given="Ann", family="Lee"),
-            AuthorLLM(given="", family="ROAM/1308 Study Collaborators", role=["organization"]),
-            AuthorLLM(given="Roam", family="1308"),
+            AuthorLLM(given="", family="ABC/1234 Study Collaborators", role=["organization"]),
+            AuthorLLM(given="Abc", family="1234"),
         ]
     )
     # "collaborators" now counts as a group word, so the organisation entry
     # survives the fragment filter instead of being dropped.
     assert [(a.given, a.family) for a in converted] == [
         ("Ann", "Lee"),
-        ("", "ROAM/1308 Study Collaborators"),
-        ("Roam", "1308"),
+        ("", "ABC/1234 Study Collaborators"),
+        ("Abc", "1234"),
     ]
 
     kept, _ = _group_extractor()._sanitize_authors(converted, _GROUP_BYLINE)
 
     assert [(a.author_id, a.given, a.family) for a in kept] == [
         (1, "Ann", "Lee"),
-        (2, "", "ROAM/1308 Study Collaborators"),
+        (2, "", "ABC/1234 Study Collaborators"),
     ]
 
 

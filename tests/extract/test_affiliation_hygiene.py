@@ -380,20 +380,20 @@ def _sectioned_frame(*rows: tuple[int, str, str]) -> pd.DataFrame:
 
 
 def test_symbols_between_name_and_number_do_not_block_the_marker():
-    """medRxiv style "Shin#*1", "Cravedi%5*": those authors kept the LLM value
+    """medRxiv style "Moe#*1", "Vance%5*": those authors kept the LLM value
     while their co-authors got the printed one."""
     frame = _frame(
-        (1, "Ann Shin#*1, Bo Weiss#2,4, Cy Moreau%1 and Di Cravedi%5*"),
+        (1, "Ann Moe#*1, Bo Lund#2,4, Cy Rossi%1 and Di Vance%5*"),
         (1, "1 Department of Example Research, Example Institute, Cambridge, MA, USA"),
         (1, "2 Preclinical Unit, Example Pharma, Basel, Switzerland"),
         (1, "4 Fellowship Program, Example Pharma, Basel, Switzerland"),
         (1, "5 Department of Medicine, Example School of Medicine, New York, NY, USA"),
     )
     authors = [
-        _author(1, "Ann", "Shin", "llm"),
-        _author(2, "Bo", "Weiss", "llm"),
-        _author(3, "Cy", "Moreau", "llm"),
-        _author(4, "Di", "Cravedi", "llm"),
+        _author(1, "Ann", "Moe", "llm"),
+        _author(2, "Bo", "Lund", "llm"),
+        _author(3, "Cy", "Rossi", "llm"),
+        _author(4, "Di", "Vance", "llm"),
     ]
 
     CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
@@ -494,28 +494,28 @@ def test_the_late_tier_is_not_read_for_body_sections():
 # ── #107: markers glued to the institution ────────────────────────────────
 
 _GLUED_BYLINE = (
-    "Ann Sahoo∗,†,1 , Bo Chen†,1,2 , Cy Pham†,1,3 , Di\r\n"
-    "Geuter†,1,4 , Ed Dwivedi1 , Flo Pimpalkhute1 , Gus Elhoushi5 , Hal Thickstun3"
+    "Ann Hale∗,†,1 , Bo Chen†,1,2 , Cy Holt†,1,3 , Di\r\n"
+    "Berg†,1,4 , Ed Nair1 , Flo Kale1 , Gus Amin5 , Hal Thorn3"
 )
 _GLUED_DEFINITIONS = (
-    "1 Institute of Foundation Models, 2University of Illinois Urbana-Champaign, "
-    "3Cornell Tech\r\n4Harvard University 5Cerebras Systems †"
+    "1 Institute of Example Models, 2University of Example Valley, "
+    "3Example Tech\r\n4Northfield University 5Example Systems †"
 )
 
 
 def test_glued_markers_bound_each_definition():
-    """One spaced "1 " and glued "2University", "3Cornell", ...: definition 1 ran
+    """One spaced "1 " and glued "2University", "3Example", ...: definition 1 ran
     to the end of the line and became every marker-1 author's affiliation."""
     frame = _frame((1, _GLUED_BYLINE), (1, _GLUED_DEFINITIONS))
     authors = [
-        _author(1, "Ann", "Sahoo"),
+        _author(1, "Ann", "Hale"),
         _author(2, "Bo", "Chen"),
-        _author(3, "Cy", "Pham"),
-        _author(4, "Di", "Geuter"),
-        _author(5, "Ed", "Dwivedi"),
-        _author(6, "Flo", "Pimpalkhute"),
-        _author(7, "Gus", "Elhoushi", "Cerebras Systems"),
-        _author(8, "Hal", "Thickstun", "Cornell Tech"),
+        _author(3, "Cy", "Holt"),
+        _author(4, "Di", "Berg"),
+        _author(5, "Ed", "Nair"),
+        _author(6, "Flo", "Kale"),
+        _author(7, "Gus", "Amin", "Example Systems"),
+        _author(8, "Hal", "Thorn", "Example Tech"),
     ]
 
     CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
@@ -523,14 +523,14 @@ def test_glued_markers_bound_each_definition():
 
     texts, author_ids = collect_affiliations(authors)
     assert texts == [
-        "Institute of Foundation Models",
-        "University of Illinois Urbana-Champaign",
-        "Harvard University",
-        "Cerebras Systems",
-        "Cornell Tech",
+        "Institute of Example Models",
+        "University of Example Valley",
+        "Northfield University",
+        "Example Systems",
+        "Example Tech",
     ]
-    # "Cornell Tech" carries no institution word, so marker 3 does not resolve
-    # and Pham keeps no reconciled value; Thickstun keeps the LLM's.
+    # "Example Tech" carries no institution word, so marker 3 does not resolve
+    # and Holt keeps no reconciled value; Thorn keeps the LLM's.
     assert author_ids == [[1, 2, 4, 5, 6], [2], [4], [7], [8]]
 
 
@@ -676,8 +676,8 @@ def test_a_glued_marker_before_an_acronym_bounds_the_definition():
             1,
             "3 Example Business School, Example University, Asan, South Korea, "
             "4Korea Example Institute of Science and Technology, College of Business, "
-            "Seoul, South Korea, 5E.T.S. de Ingenieria Agronomica, Technical University "
-            "of Madrid, Madrid, Spain",
+            "Seoul, South Korea, 5E.T.S. de Ingenieria Example, Technical University "
+            "of Example, Madrid, Spain",
         ),
     )
     authors = [_author(1, "Ann", "Lee"), _author(2, "Bo", "Chen")]
@@ -690,7 +690,7 @@ def test_a_glued_marker_before_an_acronym_bounds_the_definition():
         "Seoul, South Korea"
     )
     assert authors[1].affiliation == (
-        "E.T.S. de Ingenieria Agronomica, Technical University of Madrid, Madrid, Spain"
+        "E.T.S. de Ingenieria Example, Technical University of Example, Madrid, Spain"
     )
 
 

@@ -101,7 +101,7 @@ _NUMBERED_AFFILIATION_RE = re.compile(
 _GLUED_MARKER_FOLLOW = (
     r"(?=[A-Z\u00c0-\u00d6\u00d8-\u00de](?:[a-z]|\.[A-Z\u00c0-\u00d6\u00d8-\u00de]))"
 )
-# A marker glued to its institution ("..., 2University of Illinois, 3Cornell
+# A marker glued to its institution ("..., 2University of Example, 3Example
 # Tech"). Only taken for numbers the byline uses.
 _GLUED_AFFILIATION_MARKER_RE = re.compile(r"(?<![\w,.])(?P<number>\d{1,2})" + _GLUED_MARKER_FOLLOW)
 # A marker still inside a captured definition, spaced or glued: the value then
@@ -111,8 +111,8 @@ _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
 )
 # What a byline may print between an author's name and their affiliation
-# numbers: degrees ("Knight MSci1,2", "Lee, MD,1"), one comma (BMJ "King ,1,2,3"
-# where an ORCID icon was dropped) and symbol markers ("Shin#*1", "Sahoo*,\u2020,1").
+# numbers: degrees ("Doe MSci1,2", "Roe, MD,1"), one comma ("Poe ,1,2,3" where an
+# ORCID icon was dropped) and symbol markers ("Moe#*1", "Hale*,\u2020,1").
 _BYLINE_DEGREE_PATTERN = (
     r"(?:Ph\.?D|M\.?D|MSci|MSc|MPH|MBBS|MBChB|DPhil|DrPH|PharmD|BSc|BA|MA|MS|RN|"
     r"FRCP\w*|MRCP\w*)\.?"
@@ -511,7 +511,7 @@ _CONSORTIUM_NAME_RE = re.compile(
     r"contributors|group|investigators?|network|society|study\s+group|team|trialists?)\b",
     re.IGNORECASE,
 )
-# A byline's group tail: "..., for the ROAM/1308 Study Collaborators",
+# A byline's group tail: "..., for the ABC/1234 Study Collaborators",
 # "on behalf of the EXAMPLE Trial Group".
 _CONSORTIUM_TAIL_RE = re.compile(
     r"\b(?:for|on\s+behalf\s+of)\s+(?:the\s+)?"
@@ -676,8 +676,8 @@ _CJK_NAME_RE = re.compile(
 def _rewrite_consortium_authors(authors: list[PaperAuthor], context: str) -> list[PaperAuthor]:
     """Turn a group byline tail the model returned as a person into a group author.
 
-    "..., for the ROAM/1308 Study Collaborators" came back as a person named
-    "ROAM/1308". An author is rewritten only when its name looks like no
+    "..., for the ABC/1234 Study Collaborators" came back as a person named
+    "ABC/1234". An author is rewritten only when its name looks like no
     person's (a digit or "/", or a leading "for the" / "on behalf of") and
     every token of it is inside a group tail printed in ``context``; the tail
     becomes the group's name. A name that only starts with "for the" and has
@@ -3046,8 +3046,8 @@ class CoreMetadataExtractor:
             )
             # The numbers never follow ", " (a comma and a space): that is a
             # contact line ("Jane Doe, 77 Massachusetts Avenue"), while the
-            # stray comma of a byline is glued to the numbers ("King ,1,2,3",
-            # "Lee, MD,1", "Sahoo*,\u2020,1").
+            # stray comma of a byline is glued to the numbers ("Poe ,1,2,3",
+            # "Roe, MD,1", "Hale*,\u2020,1").
             marker_re = re.compile(
                 rf"(?<!\w){name_pattern}\.?{_BYLINE_MARKER_GAP_PATTERN}"
                 r"(?<!,\s)(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?![\d@])",
@@ -3084,7 +3084,7 @@ class CoreMetadataExtractor:
             found: dict[int, list[str]] = {}
             for line in lines:
                 # A glued marker ("2University") bounds a definition like a
-                # spaced one; without it "1 A, 2University B, 3Cornell C" was
+                # spaced one; without it "1 A, 2University B, 3Example C" was
                 # read as one definition 1 running to the end of the line.
                 matches = sorted(
                     [

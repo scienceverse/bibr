@@ -32,12 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ("Jane Doe, 77 Massachusetts Avenue", "jane.doe2@...") is never read as a
   byline marker.
 - A byline's group tail that the model returned as a person ("..., for the
-  ROAM/1308 Study Collaborators" as a person named "ROAM/1308") becomes a
+  ABC/1234 Study Collaborators" as a person named "ABC/1234") becomes a
   group author named as printed, and a group the model returned correctly
   as an organisation is no longer dropped when its name ends in
   "Collaborators", "Contributors" or "Trialists" (#118).
 - A numbered affiliation list whose markers are glued to the institution
-  ("1 Institute of ..., 2University of ..., 3Cornell Tech") no longer gives
+  ("1 Institute of ..., 2University of ..., 3Example Tech") no longer gives
   every author the first institution plus the rest of the line; each glued
   number now ends the previous definition, and a definition that still runs
   into another one is not used (#107).
