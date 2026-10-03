@@ -465,6 +465,9 @@ def test_supra_inside_a_hyphenated_title_word_is_no_repeat():
         "Kurt Lewin (1890-1947), psychologue américain spécialiste du comportement.",
         "A portion of the funds used for ‘‘home improvement’’ may in fact have been spent in 1999.",
         "Lo mismo ocurre en X-Men 2 de Brian Signer (2003), donde la superheroina Tormenta explica.",
+        # numbers before a year in parentheses, but no journal locator
+        "Response rates were 45, 52 (2019) and 61 (2020) across the two waves.",
+        "See Tables 3, 4 (2015) for the full regression output of this model.",
     ],
 )
 def test_table_notes_and_commentary_are_no_citations(clause):

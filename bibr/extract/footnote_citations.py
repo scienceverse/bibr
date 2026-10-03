@@ -206,12 +206,16 @@ _CONTAINER_RE = re.compile(
 )
 # "Title, Publisher, 1995." closes on its year.
 _TRAILING_YEAR_RE = re.compile(rf",\s*{_YEAR}[a-z]?\s*[.;]?\s*$")
-# The Nature/Science locator: volume, pages, then the year in parentheses
-# ("Devl Biol. 81, 286-300 (1981).", "Nature 308, 693-698 (1984)."). A
-# single-author entry of that style has no other cue: "Kimble, J." before a
+# The Nature/Science locator: journal, volume, pages, then the year in
+# parentheses ("Devl Biol. 81, 286-300 (1981).", "Science 228, 1210 (1985).").
+# A single-author entry of that style has no other cue: "Kimble, J." before a
 # capitalised journal word is no name onset, and the year does not close it.
+# The capitalised word before the volume and a page range or a page of three
+# or more digits keep prose ("rates were 45, 52 (2019)", "Tables 3, 4 (2015)")
+# out.
 _VOLUME_PAGES_YEAR_RE = re.compile(
-    rf"\b\d{{1,4}},\s*[A-Z]?\d{{1,6}}(?:\s?[-–]\s?[A-Z]?\d{{1,6}})?\s*\(\s*{_YEAR}[a-z]?\s*\)"
+    rf"\b[A-Z][^\W\d_]*\.?\s+\d{{1,4}},\s*"
+    rf"(?:[A-Z]?\d{{1,6}}\s?[-–]\s?[A-Z]?\d{{1,6}}|[A-Z]?\d{{3,6}})\s*\(\s*{_YEAR}[a-z]?\s*\)"
 )
 _WORD_RE = re.compile(r"\w+")
 
