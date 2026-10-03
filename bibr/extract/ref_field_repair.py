@@ -955,8 +955,16 @@ def _rule_title_closing_quote(fields: dict[str, Any], _text: str) -> bool:
     title = fields.get("title")
     if not isinstance(title, str) or not _TITLE_CLOSING_QUOTE_RE.search(title):
         return False
-    if title.count('"') % 2 == 0 and title.count("”") <= title.count("“"):
-        return False
+    if title.rstrip().rstrip(",.;").rstrip().endswith('"'):
+        if title.count('"') % 2 == 0:
+            return False
+    else:
+        # „…” (Polish, Romanian, Hungarian, Croatian) and ”…” (Swedish,
+        # Finnish) titles close their own quotes: only an odd surplus of ”
+        # over its openers is the residue of a quoted-title style.
+        surplus = title.count("”") - title.count("“") - title.count("„")
+        if surplus <= 0 or surplus % 2 == 0:
+            return False
     cut = _TITLE_CLOSING_QUOTE_RE.sub("", title).strip()
     if not _has_word(cut, 3):
         return False

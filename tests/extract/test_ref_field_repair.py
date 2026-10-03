@@ -746,6 +746,7 @@ def test_title_naming_et_al_is_not_a_byline():
             "Assessment of the effect of haze on visibility in Sumatra",
         ),
         ('Single image haze removal",', "Single image haze removal"),
+        ("A study of the “nudge” debate,”", "A study of the “nudge” debate"),
     ],
 )
 def test_closing_quote_left_on_a_title_is_dropped(title, expected):
@@ -760,6 +761,11 @@ def test_closing_quote_left_on_a_title_is_dropped(title, expected):
         "“Mini-Mental State”",
         'The "hot hand" in basketball',
         "Why “nudge” works",
+        # Polish/Romanian „…” and Swedish/Finnish ”…” quotes close themselves.
+        "Recepcja powieści „Lalka”",
+        "Studia nad „Panem Tadeuszem”",
+        "Begreppet ”hem”",
+        "”Vi och dom”",
     ],
 )
 def test_balanced_quotes_in_a_title_are_kept(title):
