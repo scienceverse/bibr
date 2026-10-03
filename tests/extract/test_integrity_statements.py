@@ -3151,3 +3151,42 @@ def test_publisher_note_and_rights_retention_sentences_end_a_statement(
     metadata = _shadow_values(contents)
 
     assert getattr(metadata, field) == rows[0][0]
+
+
+def test_grant_information_label_is_the_funding_label_not_furniture():
+    row = (
+        "Grant information: The author(s) declared that no grants were involved in"
+        " supporting this work."
+    )
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Grant information", CanonicalSection.FUNDING, "exact_alias", 1.0, [row]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == row
+
+
+def test_grant_information_label_still_ends_a_competing_interests_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    "No competing interests were disclosed.",
+                    "Grant information: This work was supported by the Wellcome Trust [208].",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "No competing interests were disclosed."

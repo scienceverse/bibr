@@ -581,7 +581,12 @@ def _furniture_boundaries(field: str, text: str) -> list[tuple[int, int]]:
         ):
             continue
         candidates.append((match.start(), match.end()))
-    candidates.extend((match.start(), match.end()) for match in _EXTRA_BOUNDARY.finditer(text))
+    candidates.extend(
+        (match.start(), match.end())
+        for match in _EXTRA_BOUNDARY.finditer(text)
+        # "Grant information:" is the funding label of F1000-family journals.
+        if not (field == "funding_statement" and match.group().casefold().startswith("grant"))
+    )
     candidates.extend((match.start(), match.end()) for match in _FURNITURE_SHAPE.finditer(text))
     found = set()
     for start, end in candidates:
