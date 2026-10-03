@@ -305,8 +305,9 @@ def test_non_english_reference_heading_owns_the_reference_entries():
         ], heading
 
 
-def test_front_page_abstract_heading_in_the_papers_language_owns_the_abstract():
-    """ "RIASSUNTO" before the abstract region owns it instead of an empty twin (#108)."""
+def test_front_page_abstract_heading_in_another_language_leaves_the_region_to_the_hint():
+    """ "RIASSUNTO" does not take the abstract region: the synthetic twin holds
+    it, and post-parse dedup keeps the populated section."""
     parser, _ = _parse(
         [
             [
@@ -317,7 +318,8 @@ def test_front_page_abstract_heading_in_the_papers_language_owns_the_abstract():
         ]
     )
     assert [(s.header, s.header_is_synthetic) for s in _printed_sections(parser)][1:] == [
-        ("RIASSUNTO", False)
+        ("RIASSUNTO", False),
+        ("Abstract", True),
     ]
 
 

@@ -94,31 +94,13 @@ _HINT_REUSE_ALIASES: dict[str, frozenset[str]] = {
     ),
 }
 # A printed heading directly before a front-page abstract region may also
-# read "Summary" (Lancet style) or name the abstract in the paper's language
-# ("RIASSUNTO"); a "Summary" after the abstract region (a discussion
-# subsection, a lay summary box) is its own section.
-_FRONT_ABSTRACT_HEADING_ALIASES = frozenset(
-    {
-        "abstract",
-        "summary",
-        "abstrak",
-        "аннотация",
-        "анотація",
-        "özet",
-        "resumen",
-        "resumo",
-        "résumé",
-        "riassunto",
-        "sammanfattning",
-        "samenvatting",
-        "sommario",
-        "streszczenie",
-        "zusammenfassung",
-        "要旨",
-        "摘要",
-        "초록",
-    }
-)
+# read "Summary" (Lancet style); a "Summary" after the abstract region (a
+# discussion subsection, a lay summary box) is its own section. Abstract
+# names in other languages ("RIASSUNTO", "Resumen") do not take the region:
+# on papers whose layout labels body regions as abstract, the printed heading
+# then pulled body text into the front matter and split the metadata record.
+# The empty printed twin is resolved after parsing instead.
+_FRONT_ABSTRACT_HEADING_ALIASES = frozenset({"abstract", "summary"})
 # What a reference entry carries and a back-matter paragraph usually does not:
 # a year, "et al." or a DOI.
 _REFERENCE_ENTRY_SIGNAL_RE = re.compile(
