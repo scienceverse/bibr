@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 from typing import TYPE_CHECKING
 
 from bibr.extract.doi_identity import collect_doi_candidates, doi_sha256, select_doi_candidates
 from bibr.extract.pdf_doi_evidence import is_pdf, read_pdf_doi_evidence
+from bibr.utils.text import normalize_doi
 from bibr.validation import IssueSeverity, ValidationIssue
 
 if TYPE_CHECKING:
@@ -78,6 +80,44 @@ def _pdf_doi_evidence(fs: FileState) -> PdfDoiEvidence | None:
         return None
 
 
+def _title_key(title: str | None) -> str:
+    return re.sub(r"\W+", "", title or "").casefold()
+
+
+def _clear_own_doi_from_references(paper) -> int:
+    """Take the paper's own DOI off its bibliography entries; return how many.
+
+    A banner, a "cite this article" line or a page footer printed inside the
+    reference list lands in an entry with the paper's own DOI (medRxiv prints
+    one on every page). An article does not cite its own DOI: a preprint
+    citing its published version, or an erratum citing the corrected article,
+    carries a different one. The entry keeps its other fields, which are often
+    a real reference the banner was glued to. An entry whose title is the
+    paper's own (one version of this work citing another) is left alone, since
+    there the selected DOI may be the other version's.
+    """
+    metadata = paper.metadata
+    own = normalize_doi(metadata.doi) if metadata is not None else None
+    if not own:
+        return 0
+    own = own.casefold()
+    own_title = _title_key(metadata.title)
+    cleared = 0
+    for ref in metadata.references:
+        doi = normalize_doi(ref.doi)
+        if not doi or doi.casefold() != own:
+            continue
+        if own_title and _title_key(ref.title) == own_title:
+            continue
+        ref.doi = None
+        if ref.url and own in ref.url.casefold():
+            ref.url = None
+        cleared += 1
+    if cleared:
+        logger.info("Cleared the paper's own DOI from %d bibliography entr(ies)", cleared)
+    return cleared
+
+
 def doi_field_source(source_kind: str) -> str:
     """``extraction.fields.doi.source`` for a selected candidate's source kind."""
     return "native" if source_kind == "structured_metadata" else source_kind
@@ -128,6 +168,7 @@ class IdentityValidationStage:
             else:
                 # A scalar DOI without selected source evidence contradicts the receipt.
                 paper.metadata.doi = ""
+            _clear_own_doi_from_references(paper)
 
         issues = list(selection.issues)
         if expected is not None:
