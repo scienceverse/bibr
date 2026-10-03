@@ -2059,14 +2059,14 @@ class PipelineOptions(_BibrSettings):
         description="Use the PDF outline (bookmarks) as a heading-level signal for section "
         "hierarchy. Ships dark pending an eval gate.",
     )
-    # Reviews, commentaries and case studies argue rather than report: their
-    # body headings are discussion, not the introduction/methods/results the
-    # classifier guesses one heading at a time. Applies only when the paper
-    # type says so and no heading is alias-typed methods or results.
+    # Reviews and commentaries argue rather than report: their body headings
+    # are discussion, not the introduction/methods/results the classifier
+    # guesses one heading at a time. Applies only when the paper type says so
+    # and no heading is alias-typed methods or results.
     non_imrad_body_as_discussion: bool = Field(
         True,
-        description="Type the model/LLM-typed body headings of reviews, commentaries and case "
-        "studies with no Methods or Results heading as discussion.",
+        description="Type the model/LLM-typed body headings of reviews and commentaries with no "
+        "Methods or Results heading as discussion.",
     )
 
 

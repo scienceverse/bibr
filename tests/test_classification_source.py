@@ -189,7 +189,7 @@ def _review_sections():
         _typed(2, "Embolization techniques", CanonicalSection.METHODS, "llm"),
         _typed(3, "Outcomes after treatment", CanonicalSection.RESULTS, "model"),
         _typed(4, "Future directions", CanonicalSection.DISCUSSION, "exact_alias"),
-        _typed(5, "Background of the field", CanonicalSection.INTRODUCTION, "model"),
+        _typed(5, "State of the field", CanonicalSection.INTRODUCTION, "model"),
     ]
 
 
@@ -212,5 +212,44 @@ def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_headin
         assert secs[1].section_type == CanonicalSection.METHODS
     secs = _review_sections()
     secs.append(_typed(6, "Methods", CanonicalSection.METHODS, "exact_alias"))
-    _gate_non_imrad_section_types(secs, "case-study", review_body=True)
+    _gate_non_imrad_section_types(secs, "commentary", review_body=True)
     assert secs[2].section_type == CanonicalSection.RESULTS
+    # Case studies report methods and results like a research paper.
+    secs = _review_sections()
+    _gate_non_imrad_section_types(secs, "case-study", review_body=True)
+    assert secs[1].section_type == CanonicalSection.METHODS
+
+
+def test_review_headings_naming_their_part_keep_it_with_their_subsections():
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Scope of the debate", CanonicalSection.INTRODUCTION, "parent_context", 1, 2),
+        _typed(3, "Historical Background", CanonicalSection.INTRODUCTION, "alias_prior"),
+        _typed(4, "3. Treatment Methods", CanonicalSection.METHODS, "alias_prior"),
+        _typed(5, "3.1 Gravity separation", CanonicalSection.METHODS, "parent_context", 4, 2),
+        _typed(6, "Remaining gaps", CanonicalSection.RESULTS, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.DISCUSSION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.METHODS,
+        CanonicalSection.METHODS,
+        CanonicalSection.DISCUSSION,
+    ]
+
+
+def test_an_untyped_child_takes_any_imrad_parents_type():
+    """The model typed the part from a keyword; its untyped subsections follow
+    it, while a model guess for a subsection needs a confirmed part."""
+    secs = [
+        _typed(1, "Engaging the panel in the design work", CanonicalSection.METHODS, "alias_prior"),
+        _typed(2, "Recruitment of the panel", CanonicalSection.UNKNOWN, None, 1, 2, score=0.0),
+        _typed(3, "Overall experience", CanonicalSection.RESULTS, "model", 1, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert [(s.section_type, s.classification_source) for s in secs[1:]] == [
+        (CanonicalSection.METHODS, "parent_context"),
+        (CanonicalSection.RESULTS, "model"),
+    ]

@@ -16,7 +16,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   top level, and statements printed under "Declarations" are its
   subsections (#119).
 - Subsections take the type of the numbered or named part they are printed
-  in, the body headings of reviews, commentaries and case studies are typed
+  in, the body headings of reviews and commentaries are typed
   discussion (setting `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by
   default), and body headings are no longer typed as the paper title (#120).
 - Declaration blocks ("Declarations", "Contributors", "Consent for

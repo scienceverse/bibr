@@ -63,8 +63,16 @@ _STRUCTURED_ABSTRACT_LABEL_RE = re.compile(
 )
 _ABSTRACT_LABEL_MAX_SENTENCES = 8
 _ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.IGNORECASE)
-# Paper types whose body is argument, not an IMRaD report.
-_NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary", "case_study"})
+# Paper types whose body is argument, not an IMRaD report. Case studies are
+# left out: they print their methods and results like a research paper.
+_NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
+# A heading that names its own part ("Treatment Methods", "Historical
+# Background") keeps its type in a review body, and so do its subsections.
+_PART_WORD_RES = {
+    "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
+    "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
+    "results": re.compile(r"result|finding|hallazgo", re.IGNORECASE),
+}
 
 
 def _references_from_notes(contents) -> bool:
@@ -80,12 +88,12 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
 
     The classifier and the LLM type each heading alone, so "3.2 Structural
     characterization" under "3 Results" reads as methods. A child that is
-    UNKNOWN, ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes
-    its parent's IMRaD type when the parent is confirmed: by numbering
-    (3.2 -> 3) or as a part-name heading ("Results"). Children typed from their
-    own heading text (alias hits) keep their type. Runs in document order, so
-    a grandchild sees its parent's inherited type. ``only_ids`` limits the
-    children considered.
+    ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes its
+    parent's IMRaD type when the parent is confirmed: by numbering (3.2 -> 3)
+    or as a part-name heading ("Results"). An untyped child takes the type of
+    any IMRaD-typed parent. Children typed from their own heading text (alias
+    hits) keep their type. Runs in document order, so a grandchild sees its
+    parent's inherited type. ``only_ids`` limits the children considered.
     """
     from bibr.paper_contents import CanonicalSection
     from bibr.structure.section_tree import (
@@ -109,7 +117,8 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
             parent = by_id.get(parent_id)
         else:
             parent = by_id.get(section.parent_section_id)
-            if parent is None or not is_part_heading(parent.header or ""):
+            untyped = section.section_type in (CanonicalSection.UNKNOWN, None)
+            if parent is None or not (untyped or is_part_heading(parent.header or "")):
                 continue
         if (
             parent is None
@@ -195,10 +204,12 @@ def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_bo
     - A model or LLM ``title`` on any heading but the paper's title (a body
       heading in capitals, a cover label, an author name) becomes UNKNOWN and
       then takes its part's type, if any.
-    - With ``review_body`` on, in a review, commentary or case study that
-      prints no alias-typed Methods or Results heading, the model/LLM
-      introduction, methods and results types after the first introduction
-      become discussion: the body of such a paper is argument, not a report.
+    - With ``review_body`` on, in a review or commentary that prints no
+      alias-typed Methods or Results heading, the model/LLM introduction,
+      methods and results types after the first introduction become
+      discussion: the body of such a paper is argument, not a report. A
+      heading that names its own part ("Treatment Methods") keeps its type,
+      and so do its subsections.
     """
     from bibr.paper_contents import CanonicalSection
 
@@ -229,6 +240,18 @@ def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_bo
     ):
         return
     guessed = {CanonicalSection.INTRODUCTION, CanonicalSection.METHODS, CanonicalSection.RESULTS}
+    first_intro = next(
+        (s.section_id for s in body if s.section_type == CanonicalSection.INTRODUCTION), None
+    )
+    kept: set[int] = set()
+    for section in body:
+        if section.parent_section_id in kept or (
+            section.section_id != first_intro
+            and section.section_type in guessed
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+            and _PART_WORD_RES[section.section_type.value].search(section.header or "")
+        ):
+            kept.add(section.section_id)
     seen_intro = False
     for section in body:
         if section.section_type == CanonicalSection.INTRODUCTION and not seen_intro:
@@ -238,6 +261,7 @@ def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_bo
             seen_intro
             and section.section_type in guessed
             and section.classification_source not in _HEADING_TYPE_SOURCES
+            and section.section_id not in kept
         ):
             section.section_type = CanonicalSection.DISCUSSION
             section.classification_source = "positional"
