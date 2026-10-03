@@ -464,6 +464,9 @@ def _spacing_accent_targets(glyphs: list[tuple[str, _CharBox | None]]) -> dict[i
             if narrower <= 0 or overlap < _ACCENT_MIN_OVERLAP * narrower:
                 continue
             letter_y = (bottom + top) / 2.0
+            # Within one letter height: not a letter on the line below.
+            if abs(centre_y - letter_y) > top - bottom:
+                continue
             if (centre_y < letter_y) != (ch in _ACCENTS_BELOW):
                 continue
             distance = abs(centre_x - (left + right) / 2.0)

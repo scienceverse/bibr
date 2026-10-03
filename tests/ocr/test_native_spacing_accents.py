@@ -131,6 +131,19 @@ def test_macron_after_its_letter():
     assert _text(_name(parts)) == "Tōkyo"
 
 
+def test_accent_at_a_line_end_does_not_land_on_the_next_line():
+    """A trailing accent over the first letter of the line below stays put."""
+    line = _name(_plain("Peoples"), y=700.0)
+    end = 72.0 + _width("Peoples", 12.0)
+    accent = _bt("\xc2", end, 700.0, size=12.0)
+    below = _name(_plain("et al."), x=end - 1.0, y=688.0)
+
+    text = _text(line + accent + below)
+
+    assert "ét" not in text
+    assert "et al." in text
+
+
 def test_generated_space_after_a_composed_capital_is_dropped():
     parts = [("E", "´"), *_plain("rica")]
 
