@@ -207,24 +207,36 @@ _LINE_GAP_RANGE = (-0.3, 1.5)
 # underscore or at sign, or between a dot and a lowercase letter or digit:
 # url.sty stretches the space around these in a URL, DOI or e-mail address
 # ("doi.org/10.0000/...", "uni-example.edu"). A sentence still splits
-# ("temperament.As").
+# ("temperament.As"). Where pdfium set a line break, the gap is already
+# marked, so only the punctuation and slash rules apply there ("Fig. 3",
+# "3-1- Sample") and the link-run check guards links.
 _NO_SPACE_BEFORE = frozenset(".,:;/")
 _NO_SPACE_AFTER = frozenset("/")
 _NO_SPACE_NEXT_TO = frozenset("-\u2010_@")
 # url.sty also stretches around ( ) ? = & #, so no space at all is inserted
 # in a run of glyphs that holds a URL, DOI or e-mail address.
-_LINK_RUN_RE = re.compile(r"@|10\.\d{4,}/")
+_LINK_RUN_RE = re.compile(r"\w@[\w-]+\.\w|10\.\d{4,}/")
 # pdfium itself sometimes sets a space next to these inside a link
 # ("https ://", "view _only"), so a link run reads through such a space.
-_LINK_JOINERS = frozenset(":/?=&#_@.%~+-\u2010")
+_LINK_JOINERS = frozenset(":/?=&#_@%~+-\u2010")
+# A link run ends before an opening bracket that follows punctuation
+# ("org) [55]", "[77] (http", "s. <https").
+_OPENING_BRACKETS = frozenset("([{<")
 
 
-def _may_split(before: str, after: str) -> bool:
-    if before in _NO_SPACE_NEXT_TO or after in _NO_SPACE_NEXT_TO:
-        return False
+def _may_split(before: str, after: str, *, line_break: bool = False) -> bool:
     if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
         return False
+    if line_break:
+        return True
+    if before in _NO_SPACE_NEXT_TO or after in _NO_SPACE_NEXT_TO:
+        return False
     return not (before == "." and (after.islower() or after.isdigit()))
+
+
+def _bracket_gap(glyphs: list, k: int) -> bool:
+    """Whether the gap after glyph *k* opens a bracket after punctuation."""
+    return glyphs[k + 1][1] in _OPENING_BRACKETS and not glyphs[k][1].isalnum()
 
 
 def _link_run(
@@ -238,14 +250,27 @@ def _link_run(
     The run is the glyphs around the gap with no whitespace between them. It
     reads through pdfium's generated breaks within a line and its generated
     spaces next to a ``_LINK_JOINERS`` char, and ends at printed whitespace,
-    line ends, other generated spaces and the other word gaps between two
-    letters or digits (a glued "seethe" before a link is not part of it).
+    line ends, other generated spaces, the other word gaps between two
+    letters or digits (a glued "seethe" before a link is not part of it) and
+    before an opening bracket that follows punctuation.
     """
+    if _bracket_gap(glyphs, k):
+        return False
     start = k
-    while start > 0 and connected[start - 1] and start - 1 not in word_gaps:
+    while (
+        start > 0
+        and connected[start - 1]
+        and start - 1 not in word_gaps
+        and not _bracket_gap(glyphs, start - 1)
+    ):
         start -= 1
     end = k + 1
-    while end < len(connected) and connected[end] and end not in word_gaps:
+    while (
+        end < len(connected)
+        and connected[end]
+        and end not in word_gaps
+        and not _bracket_gap(glyphs, end)
+    ):
         end += 1
     run = "".join(glyphs[index][1] for index in range(start, end + 1))
     return bool(DOI_URL_CONTEXT_RE.search(run) or _LINK_RUN_RE.search(run))
@@ -335,7 +360,7 @@ def _repair_word_boundaries(
                 for index in range(ra + 1, rb)
                 if index in generated_breaks or index in generated_spaces
             )
-            if gap >= _WORD_GAP_MIN and _may_split(ca, cb):
+            if gap >= _WORD_GAP_MIN and _may_split(ca, cb, line_break=True):
                 insert[ra] = at
                 spaces[ra] = k
         elif gap >= _WORD_GAP_MIN and _may_split(ca, cb):
