@@ -17,7 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   letters inside the group no longer take the figure's caption. Figures printed
   with their own captions side by side or stacked stay separate, and a badge or
   icon on a page without captions no longer shifts the figure numbers captions
-  are matched by (#132).
+  are matched by. Figures with their captions printed above them keep their own
+  captions, a Scheme or Box beside a figure keeps its own float, and printed
+  figure numbers are compared with each page's offset, so a figure the paper
+  does not number no longer swaps the captions of the figures after it (#132).
 - A caption the layout split in two (a two-column caption under a full-width
   figure, or a bare "FIGURE 1" label above its title line) is joined, so its
   second half no longer ends up in the body text or the footnotes (#134).
