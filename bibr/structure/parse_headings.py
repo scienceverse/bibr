@@ -142,7 +142,8 @@ _NOTICE_KICKER_RE = re.compile(
     r"retract|errat|corrigend|correction|expression\s+of\s+concern", re.IGNORECASE
 )
 _NOTICE_TITLE_RE = re.compile(
-    r"\W*(?:retract|withdraw|errat|corrigend|correct|expression\s+of\s+concern|notice\s+of)",
+    r"\W*(?:retracted|retraction|withdrawn|erratum|errata|corrigendum|correction"
+    r"|expression\s+of\s+concern|notice\s+of)\b",
     re.IGNORECASE,
 )
 

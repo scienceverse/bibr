@@ -213,6 +213,20 @@ class TestLabelTreatment:
                 id="notice-kicker-over-a-notice-title",
             ),
             pytest.param(
+                "Retraction",
+                "Withdrawal symptoms after opioid tapering",
+                [100, 100, 900, 160],
+                "Retraction Withdrawal symptoms after opioid tapering",
+                id="notice-kicker-over-a-notice-word-prefix",
+            ),
+            pytest.param(
+                "Correction",
+                "Correcting for attenuation in reliability",
+                [100, 100, 900, 160],
+                "Correction Correcting for attenuation in reliability",
+                id="correction-kicker-over-a-correct-prefix",
+            ),
+            pytest.param(
                 "Editorial",
                 "Introduction",
                 [100, 700, 300, 720],
