@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with their own captions side by side or stacked stay separate, and a badge or
   icon on a page without captions no longer shifts the figure numbers captions
   are matched by (#132).
+- A caption the layout split in two (a two-column caption under a full-width
+  figure, or a bare "FIGURE 1" label above its title line) is joined, so its
+  second half no longer ends up in the body text or the footnotes (#134).
 
 ## [0.6.0] - 2026-09-30
 
