@@ -136,6 +136,9 @@ class TestRegionAnchorTexts:
             # A colon after capitals is a label, not a colon byline.
             "KEY WORDS: party reform, digital democracy, 2020",
             "The WHO reported: cases rose in 2020.",
+            "Vitamin D: evaluation, treatment, and prevention of deficiency. 2011.",
+            "Part II: methods and results of the trial, 2019.",
+            "Smith II: a second look at the data, 2019.",
         ],
     )
     def test_unicode_fallback_does_not_promote_prose(self, prose):

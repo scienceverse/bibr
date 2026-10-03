@@ -812,9 +812,11 @@ _PUNCT_START = re.compile(r"^[,;:.)\]}]")
 # An OCR speck glued to a family name ("\.lehrer, H. R." for "Lehrer, H. R."):
 # the line opens an author list, not a continuation.
 _OCR_SPECK_AUTHOR = re.compile(r"^[.,](?=[^\W\d_]{2,},\s*[A-ZÀ-ÖØ-Þ]\.)")
-# The previous line runs on: a word broken at a hyphen, an author list or a
-# locator cut mid-way.
-_CONTINUES_NEXT = re.compile(r"(?:[A-Za-zß-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bpp\.?|\bvol\.?)\s*$")
+# The previous line runs on: a word broken at a hyphen, an author list (also
+# one closed by "et al.", whose title follows) or a locator cut mid-way.
+_CONTINUES_NEXT = re.compile(
+    r"(?:[A-Za-zß-ÿ]-|[,&]|\band|\bin|\bIn:?|\bet|\bet\s+al\.?|\bpp\.?|\bvol\.?)\s*$"
+)
 _ENDS_WITH_LOCATOR = re.compile(
     r"(?:https?://\S+|\b" + DOI_BODY + r"\S+|doi:\s*\S+)\s*[.,;]?\s*$", re.I
 )

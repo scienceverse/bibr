@@ -586,6 +586,25 @@ def test_colon_bylines_open_entries():
     ]
 
 
+def test_wrapped_vancouver_title_shaped_like_a_colon_byline_stays_in_its_entry():
+    # The byline breaks after "et al." and the title opens on a word, one
+    # capital and a colon: a title, not the next entry.
+    stream = _stream(
+        [
+            "Holick MF, Binkley NC, Bischoff-Ferrari HA, Gordon CM, Hanley DA, et al.",
+            "Vitamin D: evaluation, treatment, and prevention of deficiency. J Clin",
+            "Endocrinol Metab. 2011;96:1911-30.",
+            "Smith J, Brown K. Bone health in adults. Lancet. 2019;393:1-2.",
+            "Lok AS, McMahon BJ, Brown RS, Wong JB, Ahmed AT, Farah W, et al.",
+            "Hepatitis B: antiviral therapy for chronic infection. Hepatology.",
+            "2016;63:284-306.",
+        ]
+    )
+    segmentation = segment_line_stream(stream)
+
+    assert [entry.split(" ")[0] for entry in segmentation.entries] == ["Holick", "Smith", "Lok"]
+
+
 def test_lowercase_continuation_without_a_date_rejoins_the_previous_entry():
     stream = _stream(
         [
