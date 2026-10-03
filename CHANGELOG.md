@@ -12,14 +12,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   its headings: "3 Results" is a top-level section, "3.2" sits under "3",
   Roman-numbered and "Chapter N" parts are recognised, and a subsection stays
   in the part where it is printed instead of folding back under an earlier
-  heading of the same type. Back matter after the numbered body sits at the
-  top level, and statements printed under "Declarations" are its
-  subsections (#119).
+  heading of the same type ("2.1" under "2 Study 1", never under another
+  part). Back matter after the body sits at the top level, statements
+  printed under "Declarations" are its subsections, headings set in
+  capitals at two levels nest, and a general discussion after "Part 1" /
+  "Part 2" is not inside the last part (#119).
 - Subsections take the type of the numbered or named part they are printed
   in (untyped subsections of an untyped "Study 1" scope follow the sibling
-  printed before them), the body headings of reviews and commentaries are typed
-  discussion (setting `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by
-  default), and body headings are no longer typed as the paper title (#120).
+  printed before them; a results or discussion guess keeps its type), the
+  introduction guesses in the body of a review or commentary with no methods
+  or results heading are typed discussion (setting
+  `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by default; not for systematic
+  or scoping reviews and meta-analyses), and body headings are no longer
+  typed as the paper title (#120).
 - Declaration blocks ("Declarations", "Contributors", "Consent for
   publication", "Availability of data and materials") and box headings
   ("Research in context", "Clinical Perspective", "What this study adds") get
@@ -28,7 +33,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "Riassunto", "Bibliografia" and "Literatuur" are recognised (#121).
 - Cover-sheet labels ("Posted Date", "Word count", "Running title",
   "Manuscript Number", "Corresponding author") no longer become typed
-  sections, and section headings lose watermark letters, gutter line numbers,
+  sections, and section headings lose watermark letters (a trailing letter
+  only under a heading in capitals), gutter line numbers,
   overprinted repeats and letter spacing ("A B S T R A C T") (#123).
 - A paper no longer exports two references sections when its references
   heading is not in English or a back-matter block sits before the reference
