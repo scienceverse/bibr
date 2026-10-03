@@ -6,6 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A figure or table caption is no longer lost when a figure or table on the
+  previous page scores higher for it: captions are matched only to figures and
+  tables on their own page, which is the only match the parser ever kept (#133).
+- A multi-panel figure is exported as one figure instead of one object per
+  panel: panel boxes inside a whole-figure box are dropped as duplicates, the
+  panels printed around one numbered caption are grouped under it, and panel
+  letters inside the group no longer take the figure's caption. Figures printed
+  with their own captions side by side or stacked stay separate, and a badge or
+  icon on a page without captions no longer shifts the figure numbers captions
+  are matched by. Figures with their captions printed above them keep their own
+  captions, a Scheme or Box beside a figure keeps its own float, and printed
+  figure numbers are compared with each page's offset, so a figure the paper
+  does not number no longer swaps the captions of the figures after it (#132).
+- A caption the layout split in two (a two-column caption under a full-width
+  figure, or a bare "FIGURE 1" label above its title line) is joined, so its
+  second half no longer ends up in the body text or the footnotes (#134).
+- A table that continues at the top of the next page, or in a second block
+  directly under the first, without repeating its caption is merged into the
+  captioned table instead of being exported as a separate uncaptioned table (#135).
+- Small caption fixes: a full "Table 1: …" caption the layout read as a note
+  now captions its table; "Sup. Fig. NAME", "Sup. Table 1" and "Fig.2" are
+  read as labels; a caption that opens with "Table" never captions a figure;
+  and licence or open-access icons on later pages are no longer exported as
+  figures (#136).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)
