@@ -226,7 +226,23 @@ _OPENING_BRACKETS = frozenset("([{<")
 _CLOSING_PUNCTUATION = frozenset(".,;)]}>\"'\u201d\u2019")
 
 
+def _is_cjk(ch: str) -> bool:
+    """Han, Hiragana or Katakana: scripts written without word spaces."""
+    code = ord(ch)
+    return (
+        0x3040 <= code <= 0x30FF
+        or 0x31F0 <= code <= 0x31FF
+        or 0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0xFF66 <= code <= 0xFF9F
+        or 0x20000 <= code <= 0x3FFFF
+    )
+
+
 def _may_split(before: str, after: str, *, line_break: bool = False) -> bool:
+    if _is_cjk(before) and _is_cjk(after):
+        return False
     if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
         return False
     if line_break:

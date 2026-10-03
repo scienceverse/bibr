@@ -211,9 +211,15 @@ def test_link_on_the_next_line_leaves_the_words_above_alone():
 
 
 def _repair_line(text: str) -> str:
-    """Repair one 12 pt line of 6 pt wide glyphs; "|" is a generated line break at a 3 pt gap."""
+    """Repair one 12 pt line of 6 pt wide glyphs.
+
+    "|" is a generated line break at a 3 pt gap and "~" a 3 pt gap with nothing in it.
+    """
     records, glyphs, breaks, x = [], [], set(), 72.0
     for ch in text:
+        if ch == "~":
+            x += 3.0
+            continue
         if ch == "|":
             breaks.update((len(records), len(records) + 1))
             records += [("\r", 0.0, 0.0, True), ("\n", 0.0, 0.0, True)]
@@ -254,3 +260,12 @@ def test_glued_word_gap_before_a_link_gets_a_space():
     pdf_bytes = _pdf(_glyph_line(line, 72, 700, gap=1.6))
 
     assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == line
+
+
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [("データ検~索", "データ検索"), ("果情|報", "果情報"), ("see~Fig", "see Fig")],
+)
+def test_no_space_goes_between_two_cjk_glyphs(line, expected):
+    """Japanese and Chinese set no spaces between words."""
+    assert _repair_line(line) == expected
