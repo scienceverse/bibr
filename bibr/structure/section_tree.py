@@ -600,17 +600,30 @@ def _part_name_key(text: str) -> str:
 _PART_NAME_JOIN_RE = re.compile(r"\s*(?:,|&|\band\b)\s*")
 
 
+# Singular part names that are not section aliases of their own ("RESULT AND
+# DISCUSSIONS").
+_SINGULAR_PART_NAMES = frozenset({"result"})
+
+
+def _names_part(key: str) -> bool:
+    return (
+        key in _PART_HEADINGS
+        or key.removesuffix("s") in _PART_HEADINGS
+        or key in _SINGULAR_PART_NAMES
+    )
+
+
 def _is_part_name(text: str) -> bool:
     """Whether a heading names a whole part: "Methods", or a short compound
-    with one ("Patients and methods", "Discussion and conclusion")."""
+    with one ("Patients and methods", "Result and discussions")."""
     key = _part_name_key(text)
-    if key in _PART_HEADINGS or key.removesuffix("s") in _PART_HEADINGS:
+    if _names_part(key):
         return True
     pieces = [piece for piece in _PART_NAME_JOIN_RE.split(key) if piece]
     return (
         2 <= len(pieces) <= 3
         and all(len(piece.split()) <= 2 for piece in pieces)
-        and any(piece in _PART_HEADINGS for piece in pieces)
+        and any(_names_part(piece) for piece in pieces)
     )
 
 

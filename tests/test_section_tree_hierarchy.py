@@ -726,6 +726,22 @@ def test_capitals_used_for_two_levels_nest_under_the_part():
     assert [parents[i] for i in (2, 3, 4, 5, 6, 7, 8, 9, 10)] == [0, 0, 3, 3, 3, 0, 7, 7, 0]
 
 
+def test_a_singular_or_plural_part_name_in_capitals_opens_its_part():
+    """'RESULT AND DISCUSSIONS' names a part: it does not go under 'METHODS'."""
+    secs = [
+        _title(),
+        _parsed(2, "INTRODUCTION", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _parsed(3, "METHODS", CanonicalSection.METHODS, "exact_alias"),
+        _parsed(4, "Research Design", CanonicalSection.METHODS, "model"),
+        _parsed(5, "RESULT AND DISCUSSIONS", CanonicalSection.RESULTS, "model"),
+        _parsed(6, "Validity Test", CanonicalSection.RESULTS, "model"),
+        _parsed(7, "CONCLUSION", CanonicalSection.DISCUSSION, "exact_alias"),
+    ]
+    assign_hierarchy_from_top_level(secs)
+    parents = {s.section_id: s.parent_section_id for s in secs}
+    assert [parents[i] for i in (2, 3, 4, 5, 6, 7)] == [0, 0, 3, 0, 5, 0]
+
+
 def test_a_closing_conclusion_does_not_switch_off_the_first_of_type_rule():
     secs = [
         _title(),
