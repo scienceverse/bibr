@@ -59,7 +59,9 @@ logger = logging.getLogger(__name__)
 # two pages, and not when text lies further out than the numbers.
 # Version 18: no spaces inside links, more spacing accents, and line numbers
 # only from documents numbered on 40% of their pages with text.
-_CACHE_FORMAT_VERSION = 18
+# Version 19: link runs end before a bracket after punctuation, and a line break
+# keeps its space after a dot or hyphen outside links.
+_CACHE_FORMAT_VERSION = 19
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
