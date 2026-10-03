@@ -20,13 +20,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fill them in from general knowledge (a university the paper never names);
   such a part is now dropped, an unprinted institution added to a printed one is
   removed, and a `VAL_AFFILIATION_UNGROUNDED` warning lists what was dropped
-  (#115).
+  (#115). Common abbreviations ("Dept.", "Univ.", "Inst.", ...) count as
+  printed in either form.
 - Numbered affiliations are matched for authors whose byline prints symbols,
   degrees or a stray comma before the number ("Name#*1", "Name MSci1,2",
   "Name ,1,2,3") or whose name the model wrote without a printed period, and
   affiliation lists printed at the end of the article (BMC, Springer) are read
-  for the numbers page 1 leaves open, whatever section the list was filed
-  under (#116).
+  for the numbers page 1 does not define, when the list was filed under
+  acknowledgments, funding, competing interests, ethics or data availability
+  rather than author information (#116). A contact line or an e-mail address
+  ("Jane Doe, 77 Massachusetts Avenue", "jane.doe2@...") is never read as a
+  byline marker.
 - A byline's group tail that the model returned as a person ("..., for the
   ROAM/1308 Study Collaborators" as a person named "ROAM/1308") becomes a
   group author named as printed, and a group the model returned correctly

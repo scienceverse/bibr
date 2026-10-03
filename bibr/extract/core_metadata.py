@@ -117,9 +117,11 @@ _BYLINE_DEGREE_PATTERN = (
     r"(?:Ph\.?D|M\.?D|MSci|MSc|MPH|MBBS|MBChB|DPhil|DrPH|PharmD|BSc|BA|MA|MS|RN|"
     r"FRCP\w*|MRCP\w*)\.?"
 )
+# One character class for the symbols, spaces and commas: a nested repetition
+# here backtracked exponentially on a run of "* * * ...".
 _BYLINE_MARKER_GAP_PATTERN = (
     rf"(?:\s*,?\s*\b{_BYLINE_DEGREE_PATTERN}){{0,3}}"
-    r"\s*,?\s*(?:[*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]+\s*,?\s*)*"
+    r"[*\u2217\u2020\u2021\u00a7\u00b6#%\u2709\s,]*"
 )
 _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
     {
@@ -134,16 +136,15 @@ _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
     }
 )
 # Back-matter section types an end-of-article affiliation list is typed as
-# when the classifier does not call it author_contributions.
+# when the classifier does not call it author_contributions. Unknown (the body
+# fallback), footnote and endnote are left out: body prose such as "In
+# Experiment 2 University students ..." reads like a definition.
 _LATE_AFFILIATION_SECTION_TYPES = (
     CanonicalSection.ACKNOWLEDGMENT,
     CanonicalSection.FUNDING,
-    CanonicalSection.ENDNOTE,
-    CanonicalSection.FOOTNOTE,
     CanonicalSection.COI,
     CanonicalSection.ETHICS,
     CanonicalSection.OPEN_DATA,
-    CanonicalSection.UNKNOWN,
 )
 _AFFILIATION_ORG_RE = re.compile(
     r"\b(?:department|faculty|institute|university|college|school|hospital|"
@@ -1832,7 +1833,7 @@ _AFFILIATION_EDGE_CONNECTIVE_RE = re.compile(
 # "2. NIHR", "1Department", "a School", "* Institute". "3M Company" survives:
 # a glued digit is a marker only before a capitalised word.
 _AFFILIATION_LEADING_MARKER_RE = re.compile(
-    r"^(?:\d{1,2}(?:\s*[.)]\s*|\s+)|\d{1,2}(?=[A-Z\u00c0-\u00de][a-z])|[a-h]\s+(?=[A-Z])"
+    r"^(?:\d{1,2}(?:\s*[.)]\s*|\s+(?=[A-Z\u00c0-\u00de]))|\d{1,2}(?=[A-Z\u00c0-\u00de][a-z])|[a-h]\s+(?=[A-Z])"
     r"|[*\u2217\u2020\u2021\u00a7\u00b6#%]+\s*(?=[A-Z]))"
 )
 # Trailing punctuation, marker symbols and the "|" some publishers print
@@ -1851,10 +1852,53 @@ _AFFILIATION_GROUNDING_MIN_KEY = 6
 _AFFILIATION_GROUNDING_FUZZY_FLOOR = 90
 
 
-def _ungrounded_affiliation_components(part: str, document_key: str) -> tuple[int, list[str]]:
+# Abbreviations folded to one form on both sides before grounding, so an LLM
+# that expands "Dept. of Psychology, Univ. of Toronto" is still grounded.
+_AFFILIATION_ABBREVIATIONS = {
+    "department": "dept",
+    "departments": "dept",
+    "depts": "dept",
+    "university": "univ",
+    "institute": "inst",
+    "hospital": "hosp",
+    "laboratory": "lab",
+    "laboratories": "lab",
+    "labs": "lab",
+    "national": "natl",
+    "science": "sci",
+    "sciences": "sci",
+    "medicine": "med",
+    "medical": "med",
+    "college": "coll",
+    "center": "ctr",
+    "centre": "ctr",
+    "cent": "ctr",
+    "cntr": "ctr",
+    "saint": "st",
+    "street": "st",
+}
+_AFFILIATION_ABBREVIATION_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_AFFILIATION_ABBREVIATIONS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
+def _grounding_key(text: str) -> str:
+    """:func:`affiliation_key` after folding common abbreviations."""
+    return affiliation_key(
+        _AFFILIATION_ABBREVIATION_RE.sub(
+            lambda match: _AFFILIATION_ABBREVIATIONS[match.group(0).lower()], text
+        )
+    )
+
+
+def _ungrounded_affiliation_components(
+    part: str, document_key: str, folded_document_key: str = ""
+) -> tuple[int, list[str]]:
     """(organisation components of *part*, those the document does not print).
 
-    Both sides are compared as :func:`affiliation_key` folds, so line breaks,
+    Both sides are compared as :func:`affiliation_key` folds, and again with abbreviations
+    folded (:func:`_grounding_key`), so line breaks, "Dept."/"Department",
     hyphenation spaces, punctuation, accents and "&"/"and" cannot cause a miss.
     Components with no organisation word, or too short to test, are not counted.
     """
@@ -1869,6 +1913,8 @@ def _ungrounded_affiliation_components(part: str, document_key: str) -> tuple[in
             continue
         total += 1
         if key in document_key:
+            continue
+        if folded_document_key and _grounding_key(component) in folded_document_key:
             continue
         if partial_ratio(key, document_key, score_cutoff=_AFFILIATION_GROUNDING_FUZZY_FLOOR):
             continue
@@ -2984,12 +3030,27 @@ class CoreMetadataExtractor:
             tokens = [token.rstrip(".") for token in normalized_name.split() if token.rstrip(".")]
             if not tokens:
                 continue
-            # A period may stand between name tokens: the LLM's "Robyn A Frankel"
-            # is the printed "Robyn A. Frankel".
-            name_pattern = r"(?:\.\s*|\s+)".join(re.escape(token) for token in tokens)
+            # A period may follow a one-letter initial ("A", "J.A"): the LLM's
+            # "Robyn A Frankel" is the printed "Robyn A. Frankel". Between longer tokens
+            # it would match an e-mail address ("jane.doe2@...").
+            name_pattern = "".join(
+                re.escape(token)
+                + (
+                    ""
+                    if index == len(tokens) - 1
+                    else r"(?:\.\s*|\s+)"
+                    if len(token.rsplit(".", 1)[-1]) == 1
+                    else r"\s+"
+                )
+                for index, token in enumerate(tokens)
+            )
+            # The numbers never follow ", " (a comma and a space): that is a
+            # contact line ("Jane Doe, 77 Massachusetts Avenue"), while the
+            # stray comma of a byline is glued to the numbers ("King ,1,2,3",
+            # "Lee, MD,1", "Sahoo*,\u2020,1").
             marker_re = re.compile(
                 rf"(?<!\w){name_pattern}\.?{_BYLINE_MARKER_GAP_PATTERN}"
-                r"(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?!\d)",
+                r"(?<!,\s)(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?![\d@])",
                 re.IGNORECASE,
             )
             for line in marker_lines:
@@ -3080,10 +3141,10 @@ class CoreMetadataExtractor:
         backmatter_definitions = _definitions(backmatter_lines)
         # BMC and Springer print "Full list of author information is available
         # at the end of the article" and define most markers there, and the
-        # section classifier types that block acknowledgment, funding or
-        # endnote as often as author_contributions. This third tier is read
-        # only for numbers the first two leave open, so the page-1 and
-        # author-contributions behaviour is unchanged.
+        # section classifier types that block acknowledgment or funding as
+        # often as author_contributions. This third tier is read only for
+        # numbers neither of the first two defines, even ambiguously, so the
+        # page-1 and author-contributions behaviour is unchanged.
         late_lines: list[str] = []
         if "section_type" in meta_df.columns:
             late_rows = meta_df.loc[
@@ -3099,6 +3160,13 @@ class CoreMetadataExtractor:
             # outranks the page-1 form and can rescue a number the page-1 tier
             # defines ambiguously.
             for tier in (backmatter_definitions, page1_definitions, late_definitions):
+                # A number page 1 or the back matter defines, even ambiguously
+                # (a combined issue restarting at 1), is not open: the late
+                # tier must not break the fail-closed answer.
+                if tier is late_definitions and (
+                    number in backmatter_definitions or number in page1_definitions
+                ):
+                    break
                 values = tier.get(number)
                 if not values:
                     continue
@@ -3185,6 +3253,7 @@ class CoreMetadataExtractor:
             document = " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
         printed = _normalize_affiliation_match_text(document).casefold()
         document_key = affiliation_key(f"{document} {context_text}")
+        folded_document_key = _grounding_key(f"{document} {context_text}")
         dropped: list[tuple[int, str]] = []
         for author in authors:
             parts: list[str] = []
@@ -3207,7 +3276,9 @@ class CoreMetadataExtractor:
             kept: list[str] = []
             for part in parts:
                 if document_key:
-                    total, missing = _ungrounded_affiliation_components(part, document_key)
+                    total, missing = _ungrounded_affiliation_components(
+                        part, document_key, folded_document_key
+                    )
                     if missing and len(missing) == total:
                         dropped.append((author.author_id, part))
                         continue

@@ -692,3 +692,136 @@ def test_a_glued_marker_before_an_acronym_bounds_the_definition():
     assert authors[1].affiliation == (
         "E.T.S. de Ingenieria Agronomica, Technical University of Madrid, Madrid, Spain"
     )
+
+
+# ── review follow-ups: negative cases ─────────────────────────────────────
+
+
+def test_a_correspondence_address_is_not_a_byline_marker():
+    frame = _frame(
+        (1, "Jane Doe* and John Smith"),
+        (1, "Department of Psychology, Example University, Cambridge, MA, USA"),
+        (1, "*Correspondence: Jane Doe, 77 Massachusetts Avenue, Cambridge, MA 02139, USA"),
+    )
+    llm = "Department of Psychology, Example University, Cambridge, MA, USA"
+    authors = [_author(1, "Jane", "Doe", llm), _author(2, "John", "Smith", llm)]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert [author.affiliation for author in authors] == [llm, llm]
+
+
+def test_an_email_address_is_not_a_byline_marker():
+    frame = _frame(
+        (1, "Jane A. Doe and John Smith"),
+        (1, "1 Department of Psychology, Example University, Boston, MA, USA"),
+        (1, "2 Department of Biology, Other University, Boston, MA, USA"),
+        (1, "E-mail: jane.doe2@example.com"),
+    )
+    llm = "Department of Psychology, Example University, Boston, MA, USA"
+    authors = [_author(1, "Jane", "Doe", llm)]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == llm
+
+
+def test_the_late_tier_does_not_rescue_a_number_page_one_defines_twice():
+    """A combined issue restarts its numbering: page 1 defines 1 twice, so
+    the author is not reconciled, and a later page must not decide."""
+    frame = _sectioned_frame(
+        (1, "title", "Jane Doe1"),
+        (1, "title", "1 Department of Chemistry, Alpha University, Oslo, Norway"),
+        (1, "title", "Next article. Ola Nordmann1"),
+        (1, "title", "1 Department of Physics, Beta University, Bergen, Norway"),
+        (2, "unknown", "1 Department of Geology, Gamma University, Tromso, Norway"),
+    )
+    authors = [_author(1, "Jane", "Doe", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "llm"
+
+
+def test_the_late_tier_does_not_read_body_prose():
+    llm = "Department of Psychology, Example University, Leeds, UK"
+    frame = _sectioned_frame(
+        (1, "title", "Jane Doe1,2"),
+        (1, "title", "1 Department of Psychology, Example University, Leeds, UK"),
+        (1, "title", "2 These authors contributed equally"),
+        (
+            3,
+            "unknown",
+            "In Experiment 2 University students were recruited from the participant pool.",
+        ),
+    )
+    authors = [_author(1, "Jane", "Doe", llm)]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == llm
+
+
+def test_an_expanded_abbreviation_is_grounded_and_a_translation_is_not():
+    frame = _frame(
+        (1, "Ann Lee, Dept. of Psychology, Univ. of Toronto, Toronto, ON, Canada"),
+        (1, "Bo Chen, Institut fur Example, Universitat Wien, Wien, Austria"),
+    )
+    authors = [
+        _author(1, "Ann", "Lee", "Department of Psychology, University of Toronto, Toronto, ON"),
+        _author(2, "Bo", "Chen", "University of Vienna, Vienna, Austria"),
+    ]
+
+    dropped = CoreMetadataExtractor._normalize_author_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "Department of Psychology, University of Toronto, Toronto, ON"
+    assert authors[1].affiliation == ""
+    assert dropped == [(2, "University of Vienna, Vienna, Austria")]
+
+
+def test_a_run_of_symbols_after_a_name_is_matched_in_linear_time():
+    import time
+
+    frame = _frame((1, "Jane Doe " + "* " * 40 + "Notes"))
+    authors = [_author(1, "Jane", "Doe", "llm")]
+
+    started = time.perf_counter()
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert time.perf_counter() - started < 0.1
+    assert authors[0].affiliation == "llm"
+
+
+def test_a_number_that_is_part_of_the_name_is_not_a_marker():
+    assert _clean_affiliation_value("12 de Octubre University Hospital, Madrid, Spain") == (
+        "12 de Octubre University Hospital, Madrid, Spain"
+    )
+    assert _clean_affiliation_value("12 Department of Surgery, Example Hospital") == (
+        "Department of Surgery, Example Hospital"
+    )
+
+
+@pytest.mark.parametrize("gap", [",\r\n", ",  ", ", "])
+def test_a_contact_line_split_across_lines_is_not_a_byline_marker(gap):
+    frame = _frame(
+        (1, "Jane Doe and John Smith"),
+        (1, f"Correspondence: Jane Doe{gap}77 Massachusetts Avenue, Cambridge, MA 02139, USA"),
+    )
+    authors = [_author(1, "Jane", "Doe", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "llm"
+
+
+def test_dotted_initials_from_the_model_still_match_the_byline():
+    frame = _frame(
+        (1, "J.A. Doe1 and Bo Chen2"),
+        (1, "1 Department of Psychology, Example University, Leeds, UK"),
+        (1, "2 Department of Biology, Other University, York, UK"),
+    )
+    authors = [_author(1, "J.A.", "Doe", "llm"), _author(2, "Bo", "Chen", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "Department of Psychology, Example University, Leeds, UK"
