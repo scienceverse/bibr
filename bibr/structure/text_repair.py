@@ -137,7 +137,7 @@ _LETTER_TAKING_WORD_RE = re.compile(
     r"\b(?:appendix|study|experiment|part|chapter|section|phase|panel|box|group|type|"
     r"model|case|sample|table|figure|supplement|vitamin|hepatitis|class|grade|stage|"
     r"cohort|wave|trial|series|scenario|condition|option|plan|factor|protein|category|"
-    r"level)$",
+    r"level|hypothesis|arm|lemma|theorem|proposition|corollary|step|task|session)$",
     re.IGNORECASE,
 )
 # A manuscript line number caught from the gutter ("668 References"): a
@@ -196,6 +196,14 @@ def _is_watermark_glyph(lines: list[str], i: int) -> bool:
         return line.islower()
     if i != len(lines) - 1:
         return False
+    # A trailing letter is a watermark only under a heading set in capitals
+    # ("IV PROPOSED METHOD\nR") or a bare section name ("Results\nR"); under
+    # a mixed-case heading it is a label ("Results for Hypothesis\nA",
+    # "Treatment arm\nB").
+    letters = [char for line in lines[:i] for char in line if char.isalpha()]
+    capitals = bool(letters) and all(char.isupper() for char in letters)
+    if not capitals and not _is_alias(" ".join(lines[:i])):
+        return False
     before = lines[i - 1].split()[-1]
     return len(before) > 1 and not _LETTER_TAKING_WORD_RE.search(before)
 
@@ -205,12 +213,13 @@ def strip_heading_watermark_text(text: str) -> str:
 
     Runs on a heading region's raw text, before its lines are joined:
 
-    - a lowercase first line or a last line holding a single letter is
-      dropped when the rest of the heading holds two or more words or is a
-      known section name (``"V MODULE DESCRIPTION\\nT"`` → ``"V MODULE
-      DESCRIPTION"``, ``"o\\nStatistical Analyses"`` → ``"Statistical
-      Analyses"``), unless the line before ends in a word that takes a letter
-      (``"Appendix\\nA"``);
+    - a lowercase first line, or a last line holding a single letter under a
+      heading set in capitals, is dropped when the rest of the heading holds
+      two or more words or is a known section name (``"V MODULE
+      DESCRIPTION\\nT"`` → ``"V MODULE DESCRIPTION"``, ``"o\\nStatistical
+      Analyses"`` → ``"Statistical Analyses"``), unless the line before ends
+      in a word that takes a letter (``"APPENDIX\\nA"``); a mixed-case
+      heading keeps its trailing letter (``"Treatment arm\\nB"``);
     - a leading integer above 50 is dropped when the rest is a known section
       name (``"668 References"`` → ``"References"``);
     - letter-spaced lines are closed up (``"A B S T R A C T"`` →

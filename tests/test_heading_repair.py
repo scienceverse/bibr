@@ -68,6 +68,15 @@ class TestWatermarkAndGutterText:
         ):
             assert strip_heading_watermark_text(text) == text
 
+    def test_trailing_letter_of_a_mixed_case_heading_is_a_label(self):
+        for text in (
+            "Results for Hypothesis\r\nA",
+            "Treatment arm\r\nB",
+            "Proof of Lemma\r\nB",
+            "Outcomes in the control\r\nC",
+        ):
+            assert strip_heading_watermark_text(text) == text
+
     def test_gutter_line_number_is_dropped_before_a_section_name(self):
         assert strip_heading_watermark_text("668 References") == "References"
         # A plausible section number, or a heading that is not a section name, stays.
