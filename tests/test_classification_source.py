@@ -10,6 +10,7 @@ from __future__ import annotations
 from bibr.paper_contents import CanonicalSection, PaperContents, PaperSection
 from bibr.pipeline.stages.post_parse import (
     _classify_sections,
+    _gate_non_imrad_section_types,
     _inherit_child_section_types,
 )
 
@@ -164,3 +165,52 @@ def test_a_keyword_heading_parent_does_not_retype_its_children():
     ]
     _inherit_child_section_types(secs)
     assert secs[1].section_type == CanonicalSection.METHODS
+
+
+def test_guessed_title_on_a_body_heading_becomes_its_parts_type():
+    secs = [
+        _typed(1, "A Review of Treatment", CanonicalSection.TITLE, "title"),
+        _typed(2, "Discussion", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(3, "CURATIVE EMBOLIZATION", CanonicalSection.TITLE, "model", 2, 2),
+        _typed(4, "Walden University", CanonicalSection.TITLE, "model"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.TITLE, "title"),
+        (CanonicalSection.DISCUSSION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "parent_context"),
+        (CanonicalSection.UNKNOWN, "model"),
+    ]
+
+
+def _review_sections():
+    return [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Embolization techniques", CanonicalSection.METHODS, "llm"),
+        _typed(3, "Outcomes after treatment", CanonicalSection.RESULTS, "model"),
+        _typed(4, "Future directions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(5, "Background of the field", CanonicalSection.INTRODUCTION, "model"),
+    ]
+
+
+def test_review_body_guesses_become_discussion():
+    secs = _review_sections()
+    _gate_non_imrad_section_types(secs, "review", review_body=True)
+    assert [(s.section_type, s.classification_source) for s in secs] == [
+        (CanonicalSection.INTRODUCTION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.DISCUSSION, "exact_alias"),
+        (CanonicalSection.DISCUSSION, "positional"),
+    ]
+
+
+def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_heading():
+    for paper_type, review_body in (("review", False), ("empirical", True), (None, True)):
+        secs = _review_sections()
+        _gate_non_imrad_section_types(secs, paper_type, review_body=review_body)
+        assert secs[1].section_type == CanonicalSection.METHODS
+    secs = _review_sections()
+    secs.append(_typed(6, "Methods", CanonicalSection.METHODS, "exact_alias"))
+    _gate_non_imrad_section_types(secs, "case-study", review_body=True)
+    assert secs[2].section_type == CanonicalSection.RESULTS

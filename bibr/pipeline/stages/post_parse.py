@@ -52,6 +52,8 @@ _NUMBERED_CITE_MIN_DENSITY = 0.5
 # Section-type tiers that read the heading itself; their type is kept when
 # the heading's context says otherwise.
 _HEADING_TYPE_SOURCES = frozenset({"exact_alias", "substring_alias", "title"})
+# Paper types whose body is argument, not an IMRaD report.
+_NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary", "case_study"})
 
 
 def _references_from_notes(contents) -> bool:
@@ -107,6 +109,60 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
         section.section_type = parent.section_type
         section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
         section.classification_source = "parent_context"
+
+
+def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_body: bool) -> None:
+    """Retype section guesses that only fit an IMRaD research paper.
+
+    - A model or LLM ``title`` on any heading but the paper's title (a body
+      heading in capitals, a cover label, an author name) becomes UNKNOWN and
+      then takes its part's type, if any.
+    - With ``review_body`` on, in a review, commentary or case study that
+      prints no alias-typed Methods or Results heading, the model/LLM
+      introduction, methods and results types after the first introduction
+      become discussion: the body of such a paper is argument, not a report.
+    """
+    from bibr.paper_contents import CanonicalSection
+
+    body = [section for section in sections if section.level > 0]
+    has_title = any(section.classification_source == "title" for section in body)
+    retitled: set[int] = set()
+    for index, section in enumerate(body):
+        if (
+            section.section_type == CanonicalSection.TITLE
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+            and (has_title or index > 0)
+        ):
+            section.section_type = CanonicalSection.UNKNOWN
+            section.classification_score = 0.0
+            retitled.add(section.section_id)
+    if retitled:
+        _inherit_child_section_types(sections, only_ids=retitled)
+
+    if not review_body:
+        return
+    kind = re.sub(r"[\s-]+", "_", (paper_type or "").strip().lower())
+    if kind not in _NON_IMRAD_PAPER_TYPES:
+        return
+    if any(
+        section.section_type in (CanonicalSection.METHODS, CanonicalSection.RESULTS)
+        and section.classification_source in _HEADING_TYPE_SOURCES
+        for section in body
+    ):
+        return
+    guessed = {CanonicalSection.INTRODUCTION, CanonicalSection.METHODS, CanonicalSection.RESULTS}
+    seen_intro = False
+    for section in body:
+        if section.section_type == CanonicalSection.INTRODUCTION and not seen_intro:
+            seen_intro = True
+            continue
+        if (
+            seen_intro
+            and section.section_type in guessed
+            and section.classification_source not in _HEADING_TYPE_SOURCES
+        ):
+            section.section_type = CanonicalSection.DISCUSSION
+            section.classification_source = "positional"
 
 
 def _count_distinct_intext_citations(text: str) -> int:
@@ -1428,6 +1484,14 @@ async def post_parse(
                     if terminal_processing_error is None:
                         raise
                     logger.warning("LLM client cleanup failed after terminal processing error")
+
+    # Section types that only fit an IMRaD paper, once the paper type is
+    # known and the title and statements no longer read the section types.
+    _gate_non_imrad_section_types(
+        contents.sections,
+        paper_metadata.paper_type,
+        review_body=effective_settings.pipeline.non_imrad_body_as_discussion,
+    )
 
     # Populate Section.children from parent_section_id pointers, after all
     # section list mutations (implicit detection, re-parenting, IMRaD ordering).
