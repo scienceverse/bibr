@@ -943,9 +943,23 @@ def _rule_title_et_al_byline(fields: dict[str, Any], _text: str) -> bool:
     return True
 
 
-# A title closed by the quote of a quoted-title style ("…in Sumatra,”") whose
-# opening quote the tagger left outside the span.
-_TITLE_CLOSING_QUOTE_RE = re.compile(r"\s*[,.;]?\s*[”\"]\s*[,.;]?\s*$")
+# The punctuation a quoted-title style puts on either side of a closing quote.
+_QUOTE_PUNCT = ",.;"
+
+
+def _cut_closing_quote(title: str) -> tuple[str, str] | None:
+    """*title* without a closing quote at its end and one comma, period or
+    semicolon on either side of it, and the quote; None when it does not end
+    in one. String operations, not a regex: no backtracking on long spaces."""
+    rest = title.rstrip()
+    if rest[-1:] and rest[-1] in _QUOTE_PUNCT:
+        rest = rest[:-1].rstrip()
+    if rest[-1:] not in ("”", '"'):
+        return None
+    quote, rest = rest[-1], rest[:-1].rstrip()
+    if rest[-1:] and rest[-1] in _QUOTE_PUNCT:
+        rest = rest[:-1].rstrip()
+    return rest, quote
 
 
 def _rule_title_closing_quote(fields: dict[str, Any], _text: str) -> bool:
@@ -953,9 +967,11 @@ def _rule_title_closing_quote(fields: dict[str, Any], _text: str) -> bool:
     (and the comma or period before or after it) of a quoted title when the
     tagged title holds no opening quote of its own."""
     title = fields.get("title")
-    if not isinstance(title, str) or not _TITLE_CLOSING_QUOTE_RE.search(title):
+    cut_quote = _cut_closing_quote(title) if isinstance(title, str) else None
+    if cut_quote is None:
         return False
-    if title.rstrip().rstrip(",.;").rstrip().endswith('"'):
+    cut, quote = cut_quote
+    if quote == '"':
         if title.count('"') % 2 == 0:
             return False
     else:
@@ -965,10 +981,9 @@ def _rule_title_closing_quote(fields: dict[str, Any], _text: str) -> bool:
         surplus = title.count("”") - title.count("“") - title.count("„")
         if surplus <= 0 or surplus % 2 == 0:
             return False
-    cut = _TITLE_CLOSING_QUOTE_RE.sub("", title).strip()
     if not _has_word(cut, 3):
         return False
-    fields["title"] = cut
+    fields["title"] = cut.strip()
     return True
 
 

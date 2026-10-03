@@ -755,6 +755,18 @@ def test_closing_quote_left_on_a_title_is_dropped(title, expected):
     assert "title_closing_quote" in fired
 
 
+def test_closing_quote_check_is_linear_on_long_space_runs():
+    import time
+
+    from bibr.extract.ref_field_repair import _rule_title_closing_quote
+
+    title = "a" + " " * 20000 + "b"
+    start = time.perf_counter()
+    assert not _rule_title_closing_quote({"title": title}, title)
+    assert not _rule_title_closing_quote({"title": title + ' ."'}, title)
+    assert time.perf_counter() - start < 0.5
+
+
 @pytest.mark.parametrize(
     "title",
     [
