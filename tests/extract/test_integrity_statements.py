@@ -3254,3 +3254,100 @@ def test_long_model_typed_section_without_an_anchor_keeps_its_opening_paragraphs
     assert metadata.ethics_statement == " ".join(
         f"{filler} ({paragraph})" for paragraph in range(3)
     )
+
+
+def test_statement_sharing_a_paragraph_with_a_licence_line_is_kept():
+    contents = _contents(
+        [
+            (
+                1,
+                "Funding",
+                CanonicalSection.FUNDING,
+                "exact_alias",
+                1.0,
+                [
+                    ("© The Author(s) 2024.", 7),
+                    ("This research received no external funding.", 7),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.funding_statement == "This research received no external funding."
+
+
+def test_licence_paragraph_rows_are_skipped_up_to_the_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "Competing interests",
+                CanonicalSection.COI,
+                "exact_alias",
+                1.0,
+                [
+                    ("Open Access This article is licensed under a Creative Commons", 3),
+                    ("Attribution 4.0 International License, which permits use, sharing,", 3),
+                    ("adaptation, distribution and reproduction in any medium.", 3),
+                    ("The authors declare no competing interests.", 3),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."
+
+
+def test_licence_block_continuing_into_the_next_paragraph_is_skipped():
+    contents = _contents(
+        [
+            (
+                1,
+                "Disclosure and competing interests statement The authors declare no competing"
+                " interests.",
+                CanonicalSection.COI,
+                "model",
+                0.99,
+                [
+                    ("Open Access", 67),
+                    (
+                        "This article is licensed under a Creative Commons Attribution 4.0"
+                        " International License, which permits use, sharing, adaptation,"
+                        " distribution and reproduction in any medium or format, as long as you"
+                        " give appropriate credit to the original author(s)",
+                        67,
+                    ),
+                    (
+                        "and the source, provide a link to the Creative Commons licence, and"
+                        " indicate if changes were made.",
+                        68,
+                    ),
+                    (
+                        "The images or other third party material in this article are included in"
+                        " the article's Creative Commons licence.",
+                        68,
+                    ),
+                    (
+                        "Creative Commons Public Domain Dedication waiver applies to the data"
+                        " associated with this article.",
+                        68,
+                    ),
+                    ("This waiver removes legal barriers to the re-use of research data.", 68),
+                    (
+                        "According to standard scholarly practice, it is recommended to provide"
+                        " appropriate citation and attribution whenever technically possible.",
+                        68,
+                    ),
+                    ("© The Author(s) 2026", 69),
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == "The authors declare no competing interests."

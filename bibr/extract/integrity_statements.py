@@ -376,6 +376,13 @@ _LICENCE_TEXT = re.compile(
     r"creative commons|licen[cs]ed?|copyright|all rights reserved)\b|©",
     re.IGNORECASE,
 )
+# The rest of a licence paragraph: a continuation row or more licence terms.
+_LICENCE_CONTINUATION = re.compile(
+    r"^\W*(?-i:[a-z])|\b(?:permit\w*|reproduc\w*|distribut\w*|adapt\w*|credit|licen[cs]\w*|"
+    r"copyright|creative ?commons|changes were made|statutory|third[- ]party material|"
+    r"open access|waiver|public domain|re-?use|attribution)\b|https?://|©",
+    re.IGNORECASE,
+)
 # A section copy from a classifier source that can be wrong (model, LLM, prior)
 # that is longer than this is a chapter, not a statement: use the lexical path.
 _MAX_AMBIGUOUS_SECTION_CHARS = 3000
@@ -629,11 +636,18 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
     """
     kept: list[PaperSentence] = []
     licence_seen = False
-    skipped_paragraph: int | None = None
+    in_licence = False
     for row in rows:
         text = row.text
-        if not text or (skipped_paragraph is not None and row.paragraph_id == skipped_paragraph):
+        if not text:
             continue
+        if in_licence:
+            if _LICENCE_CONTINUATION.search(text):
+                continue
+            # The licence block ends at the first row that does not continue
+            # it, even in the same paragraph ("© The Author(s) 2024. This
+            # research received no external funding.").
+            in_licence = False
         boundaries = _furniture_boundaries(field, text)
         label = _opens_other_end_matter(field, text)
         if not boundaries and not label:
@@ -644,9 +658,8 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
         if kept:
             break
         if _LICENCE_TEXT.search(text) and (licence_seen or label or boundaries[0][0] == 0):
-            # A licence block: drop its whole paragraph.
-            licence_seen = True
-            skipped_paragraph = row.paragraph_id
+            # A licence block: drop it and the licence rows that follow it.
+            licence_seen = in_licence = True
             continue
         if not label and boundaries[0][0] > 0:
             kept.append(row)
