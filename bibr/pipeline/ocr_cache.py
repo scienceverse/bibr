@@ -55,7 +55,9 @@ logger = logging.getLogger(__name__)
 # mid-line breaks from the glyph positions.
 # Version 15: manuscript line numbers are removed before the native-text fill.
 # Version 16: the native-text fill composes spacing accents with their letters.
-_CACHE_FORMAT_VERSION = 16
+# Version 17: line numbers are removed only from documents numbered on at least
+# two pages, and not when text lies further out than the numbers.
+_CACHE_FORMAT_VERSION = 17
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:

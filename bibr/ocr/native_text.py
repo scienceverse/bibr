@@ -25,6 +25,7 @@ import logging
 import math
 import re
 import unicodedata
+import weakref
 from collections import Counter
 
 from bibr.input.consolidate_text import fix_ocr_artifacts
@@ -1370,11 +1371,16 @@ def _text_object_text(pdfium_c, obj, textpage) -> str:
 #   skips, for at least _LINE_NUMBER_MIN_CLEAN_PAIRS of the pairs (a caption
 #   or table between two numbers is not numbered). A bare-numbered reference
 #   list has its entries' continuation lines between the numbers.
-# - the text keeps a gap of at least _LINE_NUMBER_MIN_GAP_PT from the column.
-#   Numbers that touch their text are labels.
+# - the text keeps a gap of at least _LINE_NUMBER_MIN_GAP_PT from the column,
+#   and nothing on the numbers' lines lies further out. Numbers that touch
+#   their text are labels; text further out makes them a table column
+#   ("HSF-" before "99").
+# - the document has such a column on at least _LINE_NUMBER_MIN_PAGES pages.
+#   A numbered column on a single page is a table's or a list's.
 # Pages read by OCR keep their numbers.
 _LINE_NUMBER_MARGIN = 0.13
 _LINE_NUMBER_MIN_COUNT = 8
+_LINE_NUMBER_MIN_PAGES = 2
 _LINE_NUMBER_ALIGN_PT = 4.0
 _LINE_NUMBER_MAX_WIDTH_PT = 40.0
 _LINE_NUMBER_MAX_HEIGHT_PT = 20.0
@@ -1384,6 +1390,7 @@ _LINE_NUMBER_MIN_CLEAN_PAIRS = 0.75
 _LINE_NUMBER_LINE_TOLERANCE = 0.35
 _LINE_NUMBER_MIN_GAP_PT = 6.0
 _LINE_NUMBER_MAX_TOUCHING = 0.2
+_LINE_NUMBER_MAX_OUTER = 0.2
 _LINE_NUMBER_RE = re.compile(r"\d{1,4}")
 
 _Box = tuple[float, float, float, float]
@@ -1446,6 +1453,37 @@ def _clean_pair_share(centres: list[float], steps: list[int], text_centres: list
     return clean / pairs if pairs else 0.0
 
 
+def _outer_share(
+    column: list[int], numbers: list[tuple[int, _Box]], others: list[_Box], side: str
+) -> float:
+    """Share of the column's numbers with a line of text further out on their line.
+
+    Only line-sized boxes count: a vertical stamp in the margin is one tall
+    object.
+    """
+    boxes = [numbers[index][1] for index in column]
+    height = 2.0 * max(box[3] - box[1] for box in boxes)
+    if side == "left":
+        edge = max(box[0] for box in boxes)
+        outside = [box for box in others if (box[0] + box[2]) / 2.0 < edge]
+    else:
+        edge = min(box[2] for box in boxes)
+        outside = [box for box in others if (box[0] + box[2]) / 2.0 > edge]
+    outside = [box for box in outside if box[3] - box[1] <= height]
+    outer = 0
+    for left, bottom, right, top in boxes:
+        for box in outside:
+            if min(top, box[3]) - max(bottom, box[1]) <= 0.5 * (top - bottom):
+                continue
+            if box[3] - box[1] > 2.0 * (top - bottom):
+                continue
+            centre = (box[0] + box[2]) / 2.0
+            if (centre < left) if side == "left" else (centre > right):
+                outer += 1
+                break
+    return outer / len(boxes)
+
+
 def _line_number_column(
     numbers: list[tuple[int, _Box]], others: list[_Box], page_left: float, page_right: float
 ) -> set[int]:
@@ -1502,6 +1540,8 @@ def _line_number_column(
                     break
         if touching > _LINE_NUMBER_MAX_TOUCHING * len(column):
             continue
+        if _outer_share(column, numbers, others, side) > _LINE_NUMBER_MAX_OUTER:
+            continue
         found.update(column)
     return found
 
@@ -1520,14 +1560,12 @@ def _remove_objects(pdfium_c, page, found: list) -> None:
             pdfium_c.FPDFPageObj_Destroy(obj)
 
 
-def strip_furniture_objects(page) -> tuple[list[str], int]:
-    """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
+def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[str], list]:
+    """The watermark entries, their strings and the line-number entries of *page*.
 
-    Returns the removed watermark strings (whitespace-normalised, one per
-    object that had text) and the number of line-number objects removed.
-    Only the loaded page changes: nothing is written back, and the callers
-    open the document from bytes for their own pass. Operates on a
-    caller-provided (lock-held) page.
+    Nothing is removed. Entries are ``(parent, object, matrix)`` as collected
+    by ``_collect_text_objects``; the strings are only read when
+    *watermark_text* is set.
     """
     import pypdfium2.raw as pdfium_c
 
@@ -1554,8 +1592,9 @@ def strip_furniture_objects(page) -> tuple[list[str], int]:
         boxes.append(box)
         if numbered and box is not None and _line_number_candidate(box, page_left, page_right):
             candidates.append(len(boxes) - 1)
-    if not watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
-        return [], 0
+    read_watermarks = watermark_text and bool(watermarks)
+    if not read_watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
+        return watermarks, [], []
     texts: list[str] = []
     numbers: list[tuple[int, _Box]] = []
     number_entries: list[int] = []
@@ -1563,10 +1602,11 @@ def strip_furniture_objects(page) -> tuple[list[str], int]:
     # carry a watermark or enough margin candidates pay for it.
     textpage = page.get_textpage()
     try:
-        for _parent, obj, _matrix in watermarks:
-            text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
-            if text:
-                texts.append(text)
+        if read_watermarks:
+            for _parent, obj, _matrix in watermarks:
+                text = " ".join(_text_object_text(pdfium_c, obj, textpage).split())
+                if text:
+                    texts.append(text)
         if len(candidates) >= _LINE_NUMBER_MIN_COUNT:
             for index in candidates:
                 text = _text_object_text(pdfium_c, objects[index][1], textpage).strip()
@@ -1581,6 +1621,52 @@ def strip_furniture_objects(page) -> tuple[list[str], int]:
         others = [box for index, box in enumerate(boxes) if box is not None and index not in taken]
         column = _line_number_column(numbers, others, page_left, page_right)
         line_numbers = [objects[number_entries[i]] for i in sorted(column)]
+    return watermarks, texts, line_numbers
+
+
+# Documents already checked for line-numbered pages, with the count found
+# (stopping at _LINE_NUMBER_MIN_PAGES). Callers hold ``pdfium_lock``.
+_LINE_NUMBERED_PAGES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _document_is_line_numbered(pdf) -> bool:
+    """Whether at least _LINE_NUMBER_MIN_PAGES pages of *pdf* carry a line-number column.
+
+    A manuscript numbers its lines on page after page; a numbered column on
+    a single page is a table's or a list's. Pages are loaded fresh, so the
+    check sees them unstripped.
+    """
+    found = _LINE_NUMBERED_PAGES.get(pdf)
+    if found is None:
+        found = 0
+        for index in range(len(pdf)):
+            page = pdf[index]
+            try:
+                found += bool(_find_furniture(page, watermark_text=False)[2])
+            finally:
+                page.close()
+            if found >= _LINE_NUMBER_MIN_PAGES:
+                break
+        _LINE_NUMBERED_PAGES[pdf] = found
+    return found >= _LINE_NUMBER_MIN_PAGES
+
+
+def strip_furniture_objects(page) -> tuple[list[str], int]:
+    """Remove diagonal watermark text and manuscript line numbers from *page* in memory.
+
+    Returns the removed watermark strings (whitespace-normalised, one per
+    object that had text) and the number of line-number objects removed.
+    Line numbers are removed only when the document has a line-number
+    column on at least _LINE_NUMBER_MIN_PAGES pages. Only the loaded page
+    changes: nothing is written back, and the callers open the document from
+    bytes for their own pass. Operates on a caller-provided (lock-held) page.
+    """
+    import pypdfium2.raw as pdfium_c
+
+    watermarks, texts, line_numbers = _find_furniture(page)
+    pdf = getattr(page, "pdf", None)
+    if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
+        line_numbers = []
     _remove_objects(pdfium_c, page, [(parent, obj) for parent, obj, _ in watermarks + line_numbers])
     return texts, len(line_numbers)
 

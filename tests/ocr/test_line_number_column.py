@@ -4,9 +4,10 @@ A line-numbered manuscript prints a number in the margin beside every line.
 A layout box that reaches over the margin used to take the numbers with the
 text: a heading "668 References", reference titles with "675" inside them.
 The fixtures copy the shape of the reported preprint's reference page (12 pt
-numbers right-aligned at x = 53, text from x = 73, 25 pt line pitch) and of
-the numbered columns that must survive: a bare-numbered reference list, labels
-that touch their text, a table's restarting row numbers.
+numbers right-aligned at x = 53, text from x = 73, 25 pt line pitch), on two
+pages as a manuscript numbers page after page, and of the numbered columns
+that must survive: a bare-numbered reference list, labels that touch their
+text, a table's restarting row numbers or prefixed ids, one numbered page.
 """
 
 from __future__ import annotations
@@ -67,7 +68,7 @@ def _reference_page(*, first: int = 668, pitch: float = 25.0) -> bytes:
     for index, line in enumerate(lines):
         y = top - pitch * index
         content += _number(first + index, y) + _bt(line, _TEXT_LEFT, y)
-    return _pdf(content)
+    return _pdf(content, pages=2)
 
 
 def test_heading_and_reference_lines_lose_the_margin_numbers():
@@ -108,7 +109,7 @@ def test_numbers_every_fifth_line_are_removed():
             content += _number(index + 1, y, size=8.0)
         content += _bt(f"Body text line {index + 1} of the manuscript.", _TEXT_LEFT, y, size=10.0)
 
-    (text,) = _fill(_pdf(content), [_region(770.0, 30.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(770.0, 30.0)])
 
     assert text.splitlines()[4] == "Body text line 5 of the manuscript."
     assert "55 Body" not in text
@@ -121,7 +122,7 @@ def test_right_hand_column_is_removed():
         content += _bt(f"Line {index} of a right-numbered page.", _TEXT_LEFT, y)
         content += _bt(str(index + 1), 572.0, y)
 
-    (text,) = _fill(_pdf(content), [_region(712.0, 420.0, left=60.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 420.0, left=60.0)])
 
     assert text.splitlines() == [f"Line {index} of a right-numbered page." for index in range(12)]
 
@@ -133,7 +134,7 @@ def test_numbers_drawn_inside_a_form_are_removed():
         for index, line in enumerate(["References", *_REFERENCE_LINES])
     )
 
-    (heading,) = _fill(_pdf(body + b"/Fm1 Do\n", form=form), [_region(712.0, 696.0)])
+    (heading,) = _fill(_pdf(body + b"/Fm1 Do\n", form=form, pages=2), [_region(712.0, 696.0)])
 
     assert heading == "References"
 
@@ -149,7 +150,7 @@ def test_bare_numbered_reference_list_keeps_its_numbers():
         )
         content += _bt("J Example 1, 1-9 (2020).", _TEXT_LEFT, y - 12.0, size=10.0)
 
-    (text,) = _fill(_pdf(content), [_region(712.0, 450.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 450.0)])
 
     assert "3 Author2 A." in text
     assert "10 Author9 A." in text
@@ -161,7 +162,7 @@ def test_numbers_touching_their_text_are_kept():
         y = 700.0 - 25.0 * index
         content += _number(index + 1, y) + _bt(f"Item {index} of a list.", _NUMBER_RIGHT + 2.0, y)
 
-    (text,) = _fill(_pdf(content), [_region(712.0, 420.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 420.0)])
 
     assert text.splitlines()[0].startswith("1")
     assert "12" in text
@@ -173,7 +174,7 @@ def test_short_column_is_kept():
         y = 700.0 - 25.0 * index
         content += _number(index + 1, y) + _bt(f"Line {index} of a short page.", _TEXT_LEFT, y)
 
-    (text,) = _fill(_pdf(content), [_region(712.0, 530.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 530.0)])
 
     assert text.splitlines()[0].startswith("1")
 
@@ -186,6 +187,33 @@ def test_restarting_table_row_numbers_are_kept():
         y = 700.0 - 14.0 * index
         content += _number(value, y, size=10.0) + _bt("0.52  0.48  0.61", _TEXT_LEFT, y, size=10.0)
 
-    (text,) = _fill(_pdf(content), [_region(712.0, 480.0)])
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 480.0)])
 
     assert text.splitlines()[0].startswith("2")
+
+
+def test_table_ids_with_a_prefix_further_out_are_kept():
+    """Sample ids "ID-99", "ID-100", ... drawn as a prefix and a number: a table column."""
+    content = b""
+    for index in range(12):
+        y = 700.0 - 19.0 * index
+        content += _bt("ID-", 30.0, y, size=10.0) + _number(99 + index, y, size=10.0)
+        content += _bt("3060.5  2446.5  6048.5", _TEXT_LEFT, y, size=10.0)
+
+    (text,) = _fill(_pdf(content, pages=2), [_region(712.0, 480.0, left=20.0)])
+
+    assert text.splitlines()[0].startswith("ID-99")
+    assert "ID-110" in text
+
+
+def test_numbered_column_on_a_single_page_is_kept():
+    """A manuscript numbers page after page; one numbered page is a table or list."""
+    content = b""
+    for index in range(12):
+        y = 700.0 - 25.0 * index
+        content += _number(index + 1, y) + _bt(f"Row {index} of a numbered table.", _TEXT_LEFT, y)
+
+    (text,) = _fill(_pdf(content), [_region(712.0, 420.0)])
+
+    assert text.splitlines()[0].startswith("1")
+    assert "12" in text

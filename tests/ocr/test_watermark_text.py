@@ -80,8 +80,8 @@ def _body() -> bytes:
     return out
 
 
-def _pdf(content: bytes, form: bytes | None = None) -> bytes:
-    """A one-page PDF; *form* is the content of a Form XObject ``/Fm1``."""
+def _pdf(content: bytes, form: bytes | None = None, *, pages: int = 1) -> bytes:
+    """A PDF of *pages* identical pages; *form* is the content of a Form XObject ``/Fm1``."""
     objects: list[bytes] = [b"", b""]
 
     def add(body: bytes) -> int:
@@ -100,15 +100,21 @@ def _pdf(content: bytes, form: bytes | None = None) -> bytes:
         )
         xobjects = b" /XObject << /Fm1 %d 0 R >>" % form_id
     stream = add(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
-    page = add(
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-        b"/Resources << /Font << /F1 %d 0 R >>"
-        % font
-        + xobjects
-        + b" >> /Contents %d 0 R >>" % stream
-    )
+    kids = [
+        add(
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 %d 0 R >>"
+            % font
+            + xobjects
+            + b" >> /Contents %d 0 R >>" % stream
+        )
+        for _ in range(pages)
+    ]
     objects[0] = b"<< /Type /Catalog /Pages 2 0 R >>"
-    objects[1] = b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % page
+    objects[1] = b"<< /Type /Pages /Kids [%s] /Count %d >>" % (
+        b" ".join(b"%d 0 R" % kid for kid in kids),
+        pages,
+    )
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
     for number, body in enumerate(objects, start=1):
