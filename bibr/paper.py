@@ -161,6 +161,9 @@ def enforce_imrad_order(
             if i == winner:
                 continue
             section = sections[i]
+            if section.parent_section_id == sections[winner].section_id:
+                # A structured abstract's subheading, nested under it.
+                continue
             logger.debug(
                 f"IMRaD dedup: resetting '{section.header}' from "
                 f"{section.section_type.value} to UNKNOWN (duplicate)"

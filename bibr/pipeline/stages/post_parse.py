@@ -52,6 +52,17 @@ _NUMBERED_CITE_MIN_DENSITY = 0.5
 # Section-type tiers that read the heading itself; their type is kept when
 # the heading's context says otherwise.
 _HEADING_TYPE_SOURCES = frozenset({"exact_alias", "substring_alias", "title"})
+# Subheadings a structured abstract prints as rows of their own.
+_STRUCTURED_ABSTRACT_LABEL_RE = re.compile(
+    r"^(?:background(?: and (?:aims?|objectives?|purpose))?|context|objectives?"
+    r"|aims?(?: and objectives)?|purpose|methods?|methodology|materials and methods|design"
+    r"|study design|setting|participants|patients|population studied|interventions?"
+    r"|(?:main )?outcome measures?|measurements|results?|findings|conclusions?"
+    r"|conclusions? and relevance|interpretation|limitations|significance|implications)$",
+    re.IGNORECASE,
+)
+_ABSTRACT_LABEL_MAX_SENTENCES = 8
+_ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.IGNORECASE)
 # Paper types whose body is argument, not an IMRaD report.
 _NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary", "case_study"})
 
@@ -109,6 +120,73 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
         section.section_type = parent.section_type
         section.classification_score = min(float(parent.classification_score or 0.7), 0.75)
         section.classification_source = "parent_context"
+
+
+def _structured_abstract_labels(contents):
+    """The printed subheadings of a structured abstract, with their Abstract.
+
+    Some layouts print "Background" / "Methods" / "Results" / "Conclusions"
+    as rows of their own inside the abstract. They open sections the
+    classifier types as body parts, so the front-matter collector, which
+    reads only front-matter sections, cut the abstract at the first of them,
+    and the hierarchy made them anchors for the body's Results and
+    Discussion. A run of at least two distinct labels right after a printed
+    Abstract heading, each over a short text, closed by a Keywords heading, a
+    numbered heading or an Introduction on the same or the next page, belongs
+    to the abstract. Sections between the labels that are not labels (a
+    sidebar) are skipped; an IMRaD-typed section that is not a label, or the
+    references, ends the scan. Returns ``(abstract, labels)`` or ``None``.
+    """
+    from bibr.paper_contents import CanonicalSection
+
+    sections = [s for s in contents.sections if s.level > 0 and not s.synthetic_kind]
+    counts: dict[int, int] = {}
+    for sentence in contents.sentences:
+        counts[sentence.section_id] = counts.get(sentence.section_id, 0) + 1
+    start = next(
+        (
+            i
+            for i, s in enumerate(sections)
+            if s.section_type == CanonicalSection.ABSTRACT
+            and s.header.strip()
+            and not s.header_is_synthetic
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    abstract = sections[start]
+    pages = [item.page_no for item in abstract.provenance if item.page_no is not None]
+    abstract_page = min(pages) if pages else None
+    labels = []
+    seen: set[str] = set()
+    closed = False
+    for section in sections[start + 1 :]:
+        header = " ".join(section.header.split()).strip(" :.")
+        page = min((item.page_no for item in section.provenance if item.page_no), default=None)
+        if abstract_page is not None and page is not None and page > abstract_page + 1:
+            break
+        if section.section_type == CanonicalSection.KEYWORDS or _ABSTRACT_CLOSE_RE.match(header):
+            closed = True
+            break
+        if _STRUCTURED_ABSTRACT_LABEL_RE.fullmatch(header):
+            key = header.casefold()
+            if key in seen or counts.get(section.section_id, 0) > _ABSTRACT_LABEL_MAX_SENTENCES:
+                break
+            seen.add(key)
+            labels.append(section)
+            continue
+        if section.section_type in {
+            CanonicalSection.INTRODUCTION,
+            CanonicalSection.METHODS,
+            CanonicalSection.RESULTS,
+            CanonicalSection.DISCUSSION,
+            CanonicalSection.REFERENCES,
+        }:
+            break
+    if not closed or len(seen) < 2:
+        return None
+    return abstract, labels
 
 
 def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_body: bool) -> None:
@@ -373,6 +451,16 @@ async def _classify_sections(
     if layout_hints:
         contents.layout_hints = layout_hints
 
+    # A structured abstract's printed subheadings are the abstract's.
+    structured_abstract = _structured_abstract_labels(contents)
+    if structured_abstract is not None:
+        for section in structured_abstract[1]:
+            if section.section_type != CanonicalSection.ABSTRACT:
+                logger.info("Structured-abstract label %r folded into the abstract", section.header)
+            section.section_type = CanonicalSection.ABSTRACT
+            section.classification_source = "parent_context"
+            section.classification_score = max(float(section.classification_score or 0.0), 0.8)
+
     # Scope closing needs the final section types: General Discussion and
     # back matter revert themselves and all followers to scope 0.
     scope_ids = close_scopes(contents.sections, provisional_scopes, markers)
@@ -388,6 +476,11 @@ async def _classify_sections(
     # the same IMRaD 1-2 shape as the PDF path (output uniformity by design —
     # see specs/2026-06-15-docx-hierarchy-flattening-issue.md).
     assign_hierarchy_from_top_level(contents.sections, scope_ids=scope_ids, marker_ids=set(markers))
+    if structured_abstract is not None:
+        abstract, labels = structured_abstract
+        for section in labels:
+            section.level = min(abstract.level + 1, 6)
+            section.parent_section_id = abstract.section_id
     _inherit_child_section_types(contents.sections)
 
 
