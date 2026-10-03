@@ -321,7 +321,7 @@ _REFERENCE_STATEMENT_CUE = {
     ),
     "data_availability": re.compile(
         r"\b(?:availab\w*|deposit\w*|request|access\w*|repositor\w*|osf|zenodo|github|doi|"
-        r"shared|not applicable)\b|https?://",
+        r"shared|not applicable|included|supplementa\w*|additional files?)\b|https?://",
         re.IGNORECASE,
     ),
 }
@@ -878,20 +878,29 @@ def _legacy_anchor_row_passes(field: str, text: str) -> bool:
 def _legacy_body_copy_passes(field: str, rows: list[PaperSentence]) -> bool:
     """Whether a body section under a strong heading reads as the statement.
 
-    It is compact, and every row holding an anchor of the field passes the
-    lexical prose guards ("Students who received financial support from
-    parents ..." under "Financial support" does not).
+    It is compact, every row holding an anchor of the field passes the lexical
+    prose guards ("Students who received financial support from parents ..."
+    under "Financial support" does not), and some row declares the field.
     """
     if (
         len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
         or len(" ".join(row.text for row in rows)) > _MAX_COMPACT_CHARS
     ):
         return False
-    return all(
-        _legacy_anchor_row_passes(field, row.text)
+    anchored = [
+        row.text
         for row in rows
         if any(pattern.search(row.text) for pattern in _LEGACY_ANCHORS[field])
-    )
+    ]
+    if not all(_legacy_anchor_row_passes(field, text) for text in anchored):
+        return False
+    # Something in it must declare the field, not just sit under the heading.
+    return bool(anchored) or _states_field(field, rows)
+
+
+def _states_field(field: str, rows: list[PaperSentence]) -> bool:
+    """Whether the rows carry a declaration cue of the field."""
+    return bool(_REFERENCE_STATEMENT_CUE[field].search(" ".join(row.text for row in rows)))
 
 
 def _legacy_capture_at(

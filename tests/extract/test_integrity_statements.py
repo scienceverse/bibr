@@ -3587,3 +3587,66 @@ def test_data_statement_after_a_licence_or_copyright_row_is_kept(rows, expected)
     metadata = _shadow_values(contents)
 
     assert metadata.data_availability == expected
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "source", "rows", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            "heading",
+            [
+                "Parental contributions predicted lower stress (b = 0.3, p < .01).",
+                "This effect was larger for first-generation students.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            "model",
+            [
+                "Stakeholders often disagree about land use.",
+                "We discuss how planners mediate such disagreements.",
+            ],
+            "coi_statement",
+        ),
+    ],
+)
+def test_body_section_under_a_strong_heading_without_a_declaration_is_not_copied(
+    heading, section_type, source, rows, field
+):
+    contents = _contents([(1, heading, section_type, source, 0.9, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        "The datasets used during the current study are available from the corresponding"
+        " author on reasonable request.",
+        "All data generated or analyzed during this study are included in this published"
+        " article and its supplementary information files.",
+    ],
+)
+def test_methods_typed_bmc_data_section_with_a_data_statement_is_copied(row: str):
+    contents = _contents(
+        [
+            (
+                1,
+                "Availability of data and materials",
+                CanonicalSection.METHODS,
+                "exact_alias",
+                1.0,
+                [row],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == row
