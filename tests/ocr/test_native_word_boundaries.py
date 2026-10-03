@@ -157,8 +157,8 @@ def _spaced_glyphs(text: str, x: float, y: float, *, loose: str, gap: float, siz
 
 def test_loosely_set_doi_link_gets_no_extra_space():
     """A justified reference line spaces the dots and slashes of its DOI link:
-    "https ://doi . org / 10 . 1177 /" broke the DOI."""
-    link = "https://doi.org/10.1177/0022487108328155"
+    "https ://doi . org / 10 . 0000 /" broke the DOI."""
+    link = "https://doi.org/10.0000/0000000000000000"
     pdf_bytes = _pdf(_spaced_glyphs(link, 72, 700, loose=".:/", gap=1.6))
     doc = pypdfium2.PdfDocument(pdf_bytes)
     try:

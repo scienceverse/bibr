@@ -1374,7 +1374,7 @@ def _text_object_text(pdfium_c, obj, textpage) -> str:
 # - the text keeps a gap of at least _LINE_NUMBER_MIN_GAP_PT from the column,
 #   and nothing on the numbers' lines lies further out. Numbers that touch
 #   their text are labels; text further out makes them a table column
-#   ("HSF-" before "99").
+#   ("ID-" before "99").
 # - the document has such a column on at least _LINE_NUMBER_MIN_PAGES pages.
 #   A numbered column on a single page is a table's or a list's.
 # Pages read by OCR keep their numbers.
