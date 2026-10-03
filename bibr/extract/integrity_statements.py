@@ -389,11 +389,16 @@ _FURNITURE_SHAPE = re.compile(
     r"©|copyright\s*(?:©|\(c\)|:|\d{4})|(?-i:Open Access\s+This)\b", re.IGNORECASE
 )
 _LICENCE_SENTENCE = re.compile(
-    r"\W*(?:open access\b|this is an open[- ]access|it is made available under|licensee\b|"
+    r"\W*(?:open access(?=\s*$|\s+this\b|\s*[:.])|this is an open[- ]access|"
+    r"it is made available under|licensee\b|"
     r"this (?:article|work|paper|chapter|manuscript|preprint|version) is (?:an open[- ]access|"
     r"licensed|distributed|published under|made available under)|"
     r"(?:published|distributed|licensed) under\b|to view a copy of this licen[cs]e|"
     r"the images or other third[- ]party material|which permits (?:unrestricted )?use|"
+    # the rest of the Springer Nature licence block
+    r"if material is not included in the article[’']?s creative commons|"
+    r"creative commons public domain dedication|this waiver\b|"
+    r"according to standard scholarly practice|"
     # rights-retention statements: "For the purpose of open access, the author
     # has applied a CC BY licence ...", "A CC-BY license is applied to the Author
     # Accepted Manuscript ..."
@@ -412,13 +417,6 @@ _CONTACT_FURNITURE = re.compile(
 _LICENCE_TEXT = re.compile(
     r"\b(?:open access(?!\s+(?:funding|publication|fees?|charges?|costs?|was|is|has)\b)|"
     r"creative commons|licen[cs]ed?|copyright|all rights reserved)\b|©",
-    re.IGNORECASE,
-)
-# The rest of a licence paragraph: a continuation row or more licence terms.
-_LICENCE_CONTINUATION = re.compile(
-    r"^\W*(?-i:[a-z])|\b(?:permit\w*|reproduc\w*|distribut\w*|adapt\w*|credit|licen[cs]\w*|"
-    r"copyright|creative ?commons|changes were made|statutory|third[- ]party material|"
-    r"open access|waiver|public domain|re-?use|attribution)\b|https?://|©",
     re.IGNORECASE,
 )
 # A section copy from a classifier source that can be wrong (model, LLM, prior)
@@ -688,19 +686,21 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
     is kept and clipped when rendered.
     """
     kept: list[PaperSentence] = []
-    licence_seen = False
-    in_licence = False
+    licence: PaperSentence | None = None
     for row in rows:
         text = row.text
         if not text:
             continue
-        if in_licence:
-            if _LICENCE_CONTINUATION.search(text):
-                continue
-            # The licence block ends at the first row that does not continue
-            # it, even in the same paragraph ("© The Author(s) 2024. This
-            # research received no external funding.").
-            in_licence = False
+        if not kept and licence is not None and _continues_licence(licence, row):
+            licence = row
+            continue
+        # The licence block ends at the first row that does not continue it
+        # ("© The Author(s) 2024." then "This research received no external
+        # funding.").
+        licence = None
+        if not kept and _licence_shaped(text):
+            licence = row
+            continue
         boundaries = _furniture_boundaries(field, text)
         label = _opens_other_end_matter(field, text)
         if not boundaries and not label:
@@ -710,10 +710,6 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
             continue
         if kept:
             break
-        if _LICENCE_TEXT.search(text) and (licence_seen or label or boundaries[0][0] == 0):
-            # A licence block: drop it and the licence rows that follow it.
-            licence_seen = in_licence = True
-            continue
         if not label and boundaries[0][0] > 0:
             kept.append(row)
             break
@@ -722,6 +718,30 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
             # introduces this field's own anchored sentence.
             kept.append(row)
     return kept
+
+
+def _licence_shaped(text: str) -> bool:
+    """A row that is licence text from its start ("This article is licensed ...", "©")."""
+    start = len(text) - len(text.lstrip())
+    return bool(_LICENCE_SENTENCE.match(text) or _FURNITURE_SHAPE.match(text, start))
+
+
+def _continues_licence(previous: PaperSentence, row: PaperSentence) -> bool:
+    """Whether ``row`` continues the licence block that ``previous`` belongs to.
+
+    A licence-shaped row does; so does a lower-case continuation in the same
+    paragraph, or the rest of a licence sentence the previous row left open
+    ("... appropriate credit to the original author(s)" / "and the source,
+    ...").
+    """
+    text = row.text.strip()
+    if _licence_shaped(text):
+        return True
+    lower = text[:1].islower()
+    if lower and row.paragraph_id == previous.paragraph_id:
+        return True
+    left_open = not re.search(r"[.!?][\W]*$", previous.text.strip())
+    return left_open and (lower or bool(_LICENCE_TEXT.search(text)))
 
 
 def _text_before_boundary(text: str, start: int, boundary: int) -> str:

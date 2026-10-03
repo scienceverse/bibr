@@ -3542,3 +3542,48 @@ def test_reference_title_that_opens_with_a_statement_label_is_not_a_statement():
     metadata = _shadow_values(contents)
 
     assert metadata.coi_statement is None
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            [
+                (
+                    "This article is licensed under a Creative Commons Attribution 4.0"
+                    " International License.",
+                    7,
+                ),
+                (
+                    "The data that support the findings of this study are openly available in"
+                    " OSF at https://osf.io/xyz.",
+                    8,
+                ),
+            ],
+            "The data that support the findings of this study are openly available in OSF at"
+            " https://osf.io/xyz.",
+        ),
+        (
+            [
+                ("© The Author(s) 2024.", 7),
+                ("All scripts needed to reproduce the analyses can be downloaded from GitHub.", 7),
+            ],
+            "All scripts needed to reproduce the analyses can be downloaded from GitHub.",
+        ),
+        (
+            [
+                ("Copyright restrictions prevent sharing the raw videos.", 7),
+                ("Coded data and scripts can be downloaded from https://osf.io/abc.", 7),
+            ],
+            "Coded data and scripts can be downloaded from https://osf.io/abc.",
+        ),
+    ],
+)
+def test_data_statement_after_a_licence_or_copyright_row_is_kept(rows, expected):
+    contents = _contents(
+        [(1, "Data availability", CanonicalSection.OPEN_DATA, "heading", 0.9, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == expected
