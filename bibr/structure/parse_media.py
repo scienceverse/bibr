@@ -77,6 +77,9 @@ class MediaHandlersMixin:
     _TABLE_LABEL_RE = re.compile(
         rf"^(?P<supplement>{SUPPLEMENT_WORD})?Table\s+(?P<label>{LABEL})", re.IGNORECASE
     )
+    # A caption region that opens with the word "Table" is a table's even when
+    # OCR garbled the label ("Table Il", "T able |"); it never captions a figure.
+    _TABLE_WORD_CAPTION_RE = re.compile(rf"^{SUPPLEMENT_WORD}?T\s?able\b", re.IGNORECASE)
     _ROMAN_LABEL_RE = re.compile(r"[IVXLCDM]+")
     _DOTTED_NUMBER_RE = re.compile(r"(?P<major>\d+)(?:\.\d+)*")
     # Parenthesized continuation marker, mirroring
@@ -107,6 +110,11 @@ class MediaHandlersMixin:
     # remaining caption and ownership checks before suppressing a crop.
     _DECORATION_FOOTER_TOP = 0.88 * _PAGE_SPAN  # 880
     _DECORATION_MARGIN = 0.08 * _PAGE_SPAN  # 80
+    # Inside the body column past the front page, only an icon-sized crop
+    # (licence and open-access marks) is decoration: smaller than this area,
+    # with no side this long.
+    _DECORATION_ICON_MAX_AREA = 0.0045 * _PAGE_SPAN * _PAGE_SPAN  # 4_500
+    _DECORATION_ICON_MAX_SIDE = 0.08 * _PAGE_SPAN  # 80
     # Both labels that can reach ``_handle_figure``: ``LABEL_TREATMENT`` maps
     # only "chart" and "image" to the "figure" treatment
     # (``pdf_parser.py:105-106``). The old filter accepted "image" alone, so a
@@ -469,7 +477,7 @@ class MediaHandlersMixin:
             from_ocr=from_ocr,
         ):
             return
-        if self._LOOSE_TABLE_CAPTION_RE.match(text):
+        if self._LOOSE_TABLE_CAPTION_RE.match(text) or self._TABLE_WORD_CAPTION_RE.match(text):
             self._handle_table_caption(content, bbox, page_number, from_ocr=from_ocr)
         else:
             self._handle_figure_caption(content, bbox, page_number, from_ocr=from_ocr)
@@ -1824,12 +1832,17 @@ class MediaHandlersMixin:
             # Front-page badges sit anywhere: beside the byline, under the
             # masthead, against the DOI block. No band restriction applies.
             return True
-        # Past the front page only page furniture qualifies — a badge-sized
-        # region inside the body column there is a real (small) float.
+        # Past the front page only page furniture and icons qualify — a
+        # badge-sized region inside the body column there may be a real
+        # (small) float, but an icon-sized one is a licence or access mark.
         return (
             y1 >= self._DECORATION_FOOTER_TOP
             or x2 <= self._DECORATION_MARGIN
             or x1 >= self._PAGE_SPAN - self._DECORATION_MARGIN
+            or (
+                (x2 - x1) * height < self._DECORATION_ICON_MAX_AREA
+                and max(x2 - x1, height) < self._DECORATION_ICON_MAX_SIDE
+            )
         )
 
     def _figure_source_labels_map(self) -> dict[int, str | None]:

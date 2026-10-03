@@ -24,6 +24,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - A table that continues at the top of the next page, or in a second block
   directly under the first, without repeating its caption is merged into the
   captioned table instead of being exported as a separate uncaptioned table (#135).
+- Small caption fixes: a full "Table 1: …" caption the layout read as a note
+  now captions its table; "Sup. Fig. NAME", "Sup. Table 1" and "Fig.2" are
+  read as labels; a caption that opens with "Table" never captions a figure;
+  and licence or open-access icons on later pages are no longer exported as
+  figures (#136).
 
 ## [0.6.0] - 2026-09-30
 

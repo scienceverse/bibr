@@ -370,3 +370,36 @@ def test_badge_on_a_sliced_front_page_is_suppressed():
     contents = _parse(pages, first_page_index=4)
 
     assert [figure.parts[0].image_b64 for figure in contents.figures] == ["figure-1"]
+
+
+# Licence and collection icons inside the body column of later pages (an
+# open-research platform's article: two collection marks beside their
+# one-line notes, then a reviewer's licence and identifier icons).
+_BODY_COLUMN_ICONS = [
+    pytest.param([111, 541, 173, 560], id="collection-mark-62x19"),
+    pytest.param([104, 595, 179, 651], id="collection-mark-75x56"),
+    pytest.param([439, 132, 468, 151], id="status-icon-29x19"),
+    pytest.param([333, 374, 355, 391], id="identifier-icon-22x17"),
+]
+
+
+@pytest.mark.parametrize("bbox", _BODY_COLUMN_ICONS)
+def test_icon_sized_body_column_crop_on_a_later_page_is_suppressed(bbox):
+    contents = _parse([[], [_region(0, "image", bbox=bbox)], [_real_figure(0)]])
+
+    assert [figure.parts[0].image_b64 for figure in contents.figures] == ["figure-1"]
+
+
+def test_icon_sized_crop_that_wins_a_caption_on_a_later_page_survives():
+    contents = _parse(
+        [
+            [],
+            [
+                _region(0, "image", bbox=[300, 400, 370, 460], image_b64="inline-glyph"),
+                _region(1, "figure_title", "Figure 2. Symbol key.", bbox=[300, 465, 600, 480]),
+            ],
+        ]
+    )
+
+    assert [figure.parts[0].image_b64 for figure in contents.figures] == ["inline-glyph"]
+    assert contents.figures[0].caption == "Figure 2. Symbol key."

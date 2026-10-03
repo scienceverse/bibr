@@ -201,7 +201,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         re.IGNORECASE | re.DOTALL,
     )
     _FIGURE_CAPTION_RE = re.compile(
-        rf"^({SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s+{LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
+        rf"^({SUPPLEMENT_WORD}?(?:Figure\s+|Fig\.\s*|Fig\s+){LABEL}\s*(?:[:–\-—|]|\.(?!\d)).*)$",
         re.IGNORECASE | re.DOTALL,
     )
 
@@ -966,6 +966,27 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             key for keys in self._caption_continuation_parts.values() for key in keys
         }
 
+    def _is_footnote_caption(self, page_idx: int, text: str) -> bool:
+        """Is a ``vision_footnote`` region a full caption of a float on its page?
+
+        The layout model reads some captions as notes ("Table 1: Characteristics
+        of …" under its table, a rotated table's caption beside it). A note that
+        opens with a label, a separator and a title is the caption when its
+        page has a float of that kind; ordinary notes ("Data are n (%)") never
+        open with a label.
+        """
+        if self._TABLE_CAPTION_RE.match(text):
+            kinds = {"table"}
+        elif self._FIGURE_CAPTION_RE.match(text):
+            kinds = {"image", "chart"}
+        else:
+            return False
+        return any(
+            (region.native_label if region.native_label in LABEL_TREATMENT else region.label)
+            in kinds
+            for region in self.json_result[page_idx]
+        )
+
     def _joined_caption_region(
         self, key: tuple[int, int], content: str, bbox: list | None
     ) -> tuple[str, list | None]:
@@ -1073,6 +1094,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 # "Table S1") is safe to promote; ordinary statistical notes
                 # remain footnotes.
                 treatment = "table_caption"
+            elif effective_label == "vision_footnote" and self._is_footnote_caption(
+                page_idx, content.strip()
+            ):
+                treatment = "caption"
             dispatch_treatment = (
                 "structural"
                 if (page_idx, region_idx) in self._running_header_regions
