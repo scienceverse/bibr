@@ -297,7 +297,9 @@ def test_a_small_figure_below_a_panel_group_keeps_its_own_caption():
     by_caption = {
         figure.caption: [part.image_b64 for part in figure.parts] for figure in contents.figures
     }
-    assert by_caption["Figure 2. Real."] == ["W"]
+    # The caption is printed directly under ``Z``; ``W`` only won it while
+    # the number bonus compared "2" with raw provisional ids.
+    assert by_caption["Figure 2. Real."] == ["Z"]
     assert by_caption["Figure 1. Panels."] == ["panel-a", "panel-b", "panel-c"]
     assert by_caption[None] == ["big"]
 
