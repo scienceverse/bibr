@@ -188,6 +188,62 @@ class TestLabelTreatment:
         assert [p.bbox for p in title_section.provenance] == [(100, 100, 900, 160)]
         assert all(kicker not in s.header for s in contents.sections)
 
+    @pytest.mark.parametrize(
+        ("kicker", "after", "after_bbox", "title"),
+        [
+            pytest.param(
+                "Erratum",
+                "Effects of sleep on recall",
+                [100, 100, 900, 160],
+                "Erratum Effects of sleep on recall",
+                id="notice-kicker-over-a-plain-title",
+            ),
+            pytest.param(
+                "Expression of Concern",
+                "Effects of sleep on recall",
+                [100, 100, 900, 160],
+                "Expression of Concern Effects of sleep on recall",
+                id="concern-kicker-over-a-plain-title",
+            ),
+            pytest.param(
+                "Erratum",
+                "Erratum to: Effects of sleep on recall",
+                [100, 100, 900, 160],
+                "Erratum to: Effects of sleep on recall",
+                id="notice-kicker-over-a-notice-title",
+            ),
+            pytest.param(
+                "Editorial",
+                "Introduction",
+                [100, 700, 300, 720],
+                "Editorial",
+                id="distant-doc-title",
+            ),
+            pytest.param(
+                "Commentary",
+                "Journal of Things",
+                [100, 100, 900, 160],
+                "Commentary Journal of Things",
+                id="masthead",
+            ),
+        ],
+    )
+    def test_kicker_keeps_the_title_when_the_next_doc_title_is_no_title(
+        self, mock_wtpsplit, kicker, after, after_bbox, title
+    ):
+        """A notice kicker is the notice's title unless a notice title follows;
+        a distant doc_title or a masthead never displaces a kicker."""
+        json_result = [
+            [
+                _region(0, "doc_title", kicker, bbox=[100, 60, 400, 80]),
+                _region(1, "doc_title", after, bbox=after_bbox),
+                _region(2, "text", "Body text."),
+            ]
+        ]
+        contents = _parse_and_segment(json_result)
+
+        assert contents.detected_title == title
+
     def test_kicker_then_split_title_still_joins_the_title_parts(self, mock_wtpsplit):
         json_result = [
             [
