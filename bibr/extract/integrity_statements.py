@@ -1029,11 +1029,17 @@ def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
     return bool(_AI_USE_HEADING.search(heading) and not _FIELD_HEADING_WORD[field].search(heading))
 
 
-def _legacy_section_is_long(section: PaperSection, rows: list[PaperSentence]) -> bool:
-    """A long copy of a section whose type may be wrong (a thesis chapter)."""
-    return (
-        section.classification_source in _AMBIGUOUS_CLASSIFICATION_SOURCES
-        and len(" ".join(row.text for row in rows)) > _MAX_AMBIGUOUS_SECTION_CHARS
+def _legacy_section_is_long(field: str, section: PaperSection, rows: list[PaperSentence]) -> bool:
+    """A long copy of a section whose type may be wrong (a thesis chapter).
+
+    Over the character cap, or more than a few paragraphs without any
+    declaration cue of the field (a model-typed essay section).
+    """
+    if section.classification_source not in _AMBIGUOUS_CLASSIFICATION_SOURCES:
+        return False
+    return len(" ".join(row.text for row in rows)) > _MAX_AMBIGUOUS_SECTION_CHARS or (
+        len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
+        and not _states_field(field, rows)
     )
 
 
@@ -1080,7 +1086,7 @@ def _build_legacy_snapshot_candidates(
                 and not _legacy_body_copy_passes(field, rows)
             ):
                 continue
-            if _legacy_section_is_long(section, rows):
+            if _legacy_section_is_long(field, section, rows):
                 long_copies.append((section, rows, heading_tail))
                 continue
             candidates.append(_legacy_section_candidate(field, section, rows, heading_tail))
@@ -1090,14 +1096,15 @@ def _build_legacy_snapshot_candidates(
         rows = _legacy_lexical_rows(field, linear_rows, section_by_id)
         if not rows:
             # No statement sentence in a long, possibly mistyped section: keep
-            # its opening paragraphs rather than nothing.
-            if long_copies:
-                section, rows, heading_tail = long_copies[0]
-                candidates.append(
-                    _legacy_section_candidate(
-                        field, section, _leading_paragraph_rows(rows), heading_tail
+            # its opening paragraphs rather than nothing, if they declare
+            # something of the field.
+            for section, rows, heading_tail in long_copies:
+                opening = _leading_paragraph_rows(rows)
+                if _states_field(field, opening):
+                    candidates.append(
+                        _legacy_section_candidate(field, section, opening, heading_tail)
                     )
-                )
+                    break
             continue
         section = section_by_id.get(rows[0].section_id)
         text_ids, paragraph_ids, pages = _candidate_location(rows)

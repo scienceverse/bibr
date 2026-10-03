@@ -178,29 +178,14 @@ def test_topical_philosophy_sections_are_retrieval_only():
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     resolution, active = _resolve_apply(contents, "active")
 
-    # Each section is a short four-paragraph chapter typed ETHICS by the
-    # section model. Paragraph count alone does not make it a chapter, so the
-    # compatibility value still copies it (with headings, as a join); only the
-    # bounded selection rejects the topical prose.
-    expected_legacy = "\n\n".join(
-        f"{section.header}: "
-        + " ".join(
-            sentence.text
-            for sentence in contents.sentences
-            if sentence.section_id == section.section_id
-        )
-        for section in contents.sections
-    )
-    assert legacy.ethics_statement == expected_legacy
-    assert shadow.ethics_statement == expected_legacy
+    # Each section is a four-paragraph chapter typed ETHICS by the section
+    # model with no ethics declaration cue: a mistyped essay section, so the
+    # compatibility value falls back to the lexical path, which finds nothing.
+    assert legacy.ethics_statement is None
+    assert shadow.ethics_statement is None
     assert active.ethics_statement is None
     assert legacy_resolution.issues == ()
-    issue = next(
-        issue
-        for issue in shadow_resolution.issues
-        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
-    )
-    assert issue.evidence_ids[:4] == ("ethics_statement", "section:1", "section:2", "section:3")
+    assert not any("ethics_statement" in issue.evidence_ids for issue in shadow_resolution.issues)
     assert tuple(vars(sentence).copy() for sentence in contents.sentences) == original_body
     section_candidates = {
         candidate.section_ids[0]: candidate
@@ -3247,13 +3232,27 @@ def test_long_model_typed_section_without_an_anchor_keeps_its_opening_paragraphs
     rows: list[str | tuple[str, int]] = [
         (f"{filler} ({paragraph})", paragraph) for paragraph in range(20)
     ]
+    rows[1] = ("The procedures were discussed with the review board of the department.", 1)
     contents = _contents([(1, "Ethical Procedures", CanonicalSection.ETHICS, "model", 0.999, rows)])
+    without_cue = _contents(
+        [
+            (
+                1,
+                "Ethical Procedures",
+                CanonicalSection.ETHICS,
+                "model",
+                0.999,
+                [(f"{filler} ({paragraph})", paragraph) for paragraph in range(20)],
+            )
+        ]
+    )
 
     metadata = _shadow_values(contents)
 
     assert metadata.ethics_statement == " ".join(
-        f"{filler} ({paragraph})" for paragraph in range(3)
+        str(text) for text, _paragraph in rows[:3] if isinstance(text, str)
     )
+    assert _shadow_values(without_cue).ethics_statement is None
 
 
 def test_statement_sharing_a_paragraph_with_a_licence_line_is_kept():
