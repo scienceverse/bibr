@@ -49,7 +49,21 @@ logger = logging.getLogger(__name__)
 # Version 12: native-text spacing + page box. Bundles store the regions after
 # the native-text fill, which now places spaces against the glyph before them
 # and maps regions through the page box pdfium renders.
-_CACHE_FORMAT_VERSION = 12
+# Version 13: diagonal watermark text is removed before the native-text fill
+# (the regions change), and the page inspection records the removed strings.
+# Version 14: the native-text fill repairs missing word spaces and generated
+# mid-line breaks from the glyph positions.
+# Version 15: manuscript line numbers are removed before the native-text fill.
+# Version 16: the native-text fill composes spacing accents with their letters.
+# Version 17: line numbers are removed only from documents numbered on at least
+# two pages, and not when text lies further out than the numbers.
+# Version 18: no spaces inside links, more spacing accents, and line numbers
+# only from documents numbered on 40% of their pages with text.
+# Version 19: link runs end before a bracket after punctuation, and a line break
+# keeps its space after a dot or hyphen outside links.
+# Version 20: the link check vetoes a space only inside the link itself.
+# Version 21: a link broken inside keeps no space, and CJK punctuation takes none.
+_CACHE_FORMAT_VERSION = 21
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:

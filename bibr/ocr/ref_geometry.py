@@ -75,19 +75,23 @@ def group_chars_into_lines(
 
 
 def _extract_page_chars(textpage) -> list[tuple[str, tuple[float, float, float, float]]]:
+    from bibr.ocr.native_text import compose_spacing_accents
+
     out = []
     for i in range(textpage.count_chars()):
         ch = textpage.get_text_range(i, 1)
         if not ch:
             continue
         out.append((ch, textpage.get_charbox(i)))
-    return out
+    return compose_spacing_accents(out)
 
 
 def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:
     """Return ordered reference-section lines, or ``[]`` when there is no text
     layer or no References header."""
     import pypdfium2
+
+    from bibr.ocr.native_text import open_text_page
 
     page_lines: dict[int, list[LineRecord]] = {}
     header_page: int | None = None
@@ -97,7 +101,7 @@ def recover_reference_lines(pdf_bytes: bytes) -> list[LineRecord]:
             for pi in range(len(doc)):
                 page = doc[pi]
                 try:
-                    tp = page.get_textpage()
+                    tp = open_text_page(page)
                     try:
                         full = tp.get_text_range() or ""
                         if header_page is None and _REF_HEADER_RE.search(full):

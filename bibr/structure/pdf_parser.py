@@ -733,6 +733,18 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         _, y1, _, y2 = bbox
         return y1 <= _RUNNING_HEADER_TOP_Y or y2 >= _RUNNING_HEADER_BOTTOM_Y
 
+    def _is_inside_margin_band(self, page_idx: int, region_idx: int) -> bool:
+        """True if the whole region lies in a page's top or bottom margin band.
+
+        Stricter than :meth:`_is_in_margin_band`: a paragraph that starts
+        near the top of a page touches the band, a banner sits inside it.
+        """
+        bbox = bbox_to_tuple(self.json_result[page_idx][region_idx].bbox_2d)
+        if bbox is None:
+            return False
+        _, y1, _, y2 = bbox
+        return y2 <= _RUNNING_HEADER_TOP_Y or y1 >= _RUNNING_HEADER_BOTTOM_Y
+
     def _mark_running_headers(self) -> None:
         """Detect heading regions that are actually per-page running headers.
 
@@ -744,10 +756,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
            headers (Methods, References, Discussion) appear exactly once.
 
         2. **Extra ``doc_title`` regions** — academic papers have exactly
-           one ``doc_title`` (the paper title, on page 1). Any subsequent
-           ``doc_title`` region is the layout model misclassifying a
-           running-header (page-2+ author line, banner, journal name).
-           Demoting these prevents later author-line regions from splitting the body.
+           one ``doc_title`` (the paper title, on page 1). A ``doc_title`` on
+           a later page is usually the layout model misclassifying a
+           running-header (page-2+ author line, banner, journal name), and
+           is demoted when it has furniture's geometry or text (see
+           :meth:`_is_later_doc_title_furniture`); a mid-page one is a
+           sidebar heading and stays.
         """
         # Heuristic 1: multi-page repeats (any heading label).
         seen: dict[str, list[tuple[int, int]]] = {}
@@ -756,7 +770,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         # banner) bypasses the heading-only heuristics and leaks into whatever
         # section is active at the page break — corrupting the References
         # block. Page furniture is short; the length cap keeps a genuine
-        # paragraph that happens to repeat from being demoted.
+        # paragraph that happens to repeat from being demoted. A longer
+        # region counts only when it lies wholly inside the margin band: a
+        # preprint banner (the medRxiv rights, licence and DOI lines run to
+        # about 340 chars) that the layout model labels ``text`` on some
+        # pages. A manuscript that prints its body twice repeats long
+        # paragraphs that start or end in the band.
         seen_body: dict[str, list[tuple[int, int]]] = {}
         # Heuristic 2: track doc_title occurrences so all but the first
         # can be demoted regardless of repetition. Content is kept so
@@ -775,7 +794,10 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                     continue
                 if effective in _BODY_TEXT_LABELS:
                     normalized = re.sub(r"\s+", " ", content).lower().strip()
-                    if normalized and len(normalized) <= _RUNNING_HEADER_MAX_LEN:
+                    if normalized and (
+                        len(normalized) <= _RUNNING_HEADER_MAX_LEN
+                        or self._is_inside_margin_band(page_idx, region_idx)
+                    ):
                         seen_body.setdefault(normalized, []).append((page_idx, region_idx))
                     continue
                 if effective not in ("doc_title", "paragraph_title"):
@@ -821,8 +843,9 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 )
         repeated_body = {
             occurrence
-            for occurrences in seen_body.values()
-            if len({pi for pi, _ in occurrences}) >= 2
+            for normalized, occurrences in seen_body.items()
+            if len(normalized) <= _RUNNING_HEADER_MAX_LEN
+            and len({pi for pi, _ in occurrences}) >= 2
             for occurrence in occurrences
         }
 
@@ -874,7 +897,12 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             # to its first region.
             anchor_page = doc_title_occurrences[anchor][0]
             self._running_header_regions.update(
-                (pi, ri) for pi, ri, _ in doc_title_occurrences[anchor + 1 :] if pi != anchor_page
+                (pi, ri)
+                for pi, ri, text in doc_title_occurrences[anchor + 1 :]
+                if pi != anchor_page
+                and self._is_later_doc_title_furniture(
+                    pi, ri, text, anchor_page, doc_title_occurrences, seen
+                )
             )
 
         if self._running_header_regions:
@@ -882,6 +910,36 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
                 "Demoted %d heading regions detected as running headers",
                 len(self._running_header_regions),
             )
+
+    def _is_later_doc_title_furniture(
+        self,
+        page_idx: int,
+        region_idx: int,
+        text: str,
+        anchor_page: int,
+        doc_title_occurrences: list[tuple[int, int, str]],
+        seen: dict[str, list[tuple[int, int]]],
+    ) -> bool:
+        """Whether a ``doc_title`` on a page after the title's is page furniture.
+
+        A running head, a journal banner or a copyright line sits in the
+        margin band, repeats on other pages, or is the title again (the
+        article page behind a cover sheet). A ``doc_title`` in the middle of
+        a later page that is none of these is a sidebar or box heading ("When
+        No Default Is Your Best Option") and stays a heading; demoting it
+        dropped the heading and merged the sidebar into the section around it.
+        """
+        if self._is_in_margin_band(page_idx, region_idx) or self._is_copyright_notice(text):
+            return True
+        if len({pi for pi, _ in seen.get(text, ())}) >= 2:
+            return True
+        key = alnum_key(text)
+        title_key = alnum_key(
+            " ".join(t for pi, _, t in doc_title_occurrences if pi == anchor_page)
+        )
+        return bool(key and title_key) and (
+            alnum_text_covered(key, title_key) or alnum_text_covered(title_key, key)
+        )
 
     def _mark_reference_envelopes(self) -> None:
         """Shadow whichever of an aggregate reference box and its entries is redundant.
