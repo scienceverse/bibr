@@ -274,8 +274,15 @@ def assign_captions(
     targets: list[CaptionTarget] | tuple[CaptionTarget, ...],
     *,
     ambiguity_margin: float = 0.25,
+    same_page_only: bool = False,
 ) -> tuple[CaptionAssignment, ...]:
-    """Assign captions globally with strict type compatibility and geometry abstention."""
+    """Assign captions globally with strict type compatibility and geometry abstention.
+
+    With *same_page_only*, adjacent-page edges are never built. A caller that
+    refuses every cross-page assignment afterwards must pass it: an edge it
+    would veto still wins targets in the solve and narrows the abstention
+    margin, so the same-page caption it beat is lost too.
+    """
 
     ordered_captions = tuple(
         sorted(captions, key=lambda item: (item.source_index, item.caption_id))
@@ -288,7 +295,8 @@ def assign_captions(
         row = {
             target_index: edge
             for target_index, target in enumerate(ordered_targets)
-            if (edge := _score_edge(caption, target, ordered_targets)) is not None
+            if not (same_page_only and caption.page_number != target.page_number)
+            and (edge := _score_edge(caption, target, ordered_targets)) is not None
         }
         compatible = [
             target for target in ordered_targets if target.object_type == caption.object_type

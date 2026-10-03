@@ -1476,10 +1476,14 @@ class MediaHandlersMixin:
             and candidate.caption_id not in confirmed_table_caption_owners
             and candidate.caption_id not in self._non_caption_candidate_reasons
         ]
+        # Every cross-page assignment is vetoed below, so cross-page edges
+        # stay out of the solve: one that outscored a caption's same-page
+        # edge won, was vetoed, and left the caption with no owner at all.
         assignments = list(
             assign_captions(
                 matching_candidates,
                 [*self._figure_targets(), *self._table_targets()],
+                same_page_only=True,
             )
         )
         candidate_by_id = {item.caption_id: item for item in self._caption_candidates}

@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A figure or table caption is no longer lost when a figure or table on the
+  previous page scores higher for it: captions are matched only to figures and
+  tables on their own page, which is the only match the parser ever kept (#133).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)
