@@ -231,9 +231,12 @@ def _repair_line(text: str) -> str:
         ("see Fig.|3 for", "see Fig. 3 for"),
         ("6-2-|Funding", "6-2- Funding"),
         ("10.0000/S0000-|0000", "10.0000/S0000-0000"),
+        ("see|https://osf.io/abc", "see https://osf.io/abc"),
+        ("at|10.0000/abc", "at 10.0000/abc"),
+        ("mail|jane@uni.edu", "mail jane@uni.edu"),
     ],
 )
-def test_generated_break_keeps_its_space_after_a_dot_or_hyphen_outside_links(line, expected):
+def test_generated_break_at_a_word_gap_becomes_a_space_outside_links(line, expected):
     """A line break pdfium set at a word gap becomes a space, except inside a link."""
     assert _repair_line(line) == expected
 
@@ -241,6 +244,13 @@ def test_generated_break_keeps_its_space_after_a_dot_or_hyphen_outside_links(lin
 def test_link_run_ends_at_a_bracket_after_punctuation():
     """The space in "[77] (http" is not part of the URL after it."""
     line = "analysis [77] (http://www.example.org/tool)"
+    pdf_bytes = _pdf(_glyph_line(line, 72, 700, gap=1.6))
+
+    assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == line
+
+
+def test_glued_word_gap_before_a_link_gets_a_space():
+    line = "available at https://osf.io/abc"
     pdf_bytes = _pdf(_glyph_line(line, 72, 700, gap=1.6))
 
     assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == line

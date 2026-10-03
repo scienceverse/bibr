@@ -214,8 +214,9 @@ _NO_SPACE_BEFORE = frozenset(".,:;/")
 _NO_SPACE_AFTER = frozenset("/")
 _NO_SPACE_NEXT_TO = frozenset("-\u2010_@")
 # url.sty also stretches around ( ) ? = & #, so no space at all is inserted
-# in a run of glyphs that holds a URL, DOI or e-mail address.
-_LINK_RUN_RE = re.compile(r"\w@[\w-]+\.\w|10\.\d{4,}/")
+# inside a URL, DOI or e-mail address: from where DOI_URL_CONTEXT_RE matches
+# to the end of its run of glyphs, or over the whole address.
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 # pdfium itself sometimes sets a space next to these inside a link
 # ("https ://", "view _only"), so a link run reads through such a space.
 _LINK_JOINERS = frozenset(":/?=&#_@%~+-\u2010")
@@ -253,7 +254,9 @@ def _link_run(
     spaces next to a ``_LINK_JOINERS`` char, and ends at printed whitespace,
     line ends, other generated spaces, the other word gaps between two
     letters or digits (a glued "seethe" before a link is not part of it) and
-    before an opening bracket that follows closing punctuation.
+    before an opening bracket that follows closing punctuation. The gap is
+    inside the link only when the link has glyphs on both sides of it, so a
+    space before "https://" or before an address stays.
     """
     if _bracket_gap(glyphs, k):
         return False
@@ -274,7 +277,10 @@ def _link_run(
     ):
         end += 1
     run = "".join(glyphs[index][1] for index in range(start, end + 1))
-    return bool(DOI_URL_CONTEXT_RE.search(run) or _LINK_RUN_RE.search(run))
+    at = k + 1 - start  # the run index of the glyph after the gap
+    spans = [(m.start(), len(run)) for m in DOI_URL_CONTEXT_RE.finditer(run)]
+    spans += [m.span() for m in _EMAIL_RE.finditer(run)]
+    return any(first < at < stop for first, stop in spans)
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -318,13 +324,15 @@ def _repair_word_boundaries(
     URL, DOI or e-mail address. *glyphs* holds the record index, char and
     loose box of every non-whitespace glyph, in order; the records in
     *blank* (accents merged into their letter) count as absent, and so does a
-    generated space next to one, which pdfium set for the accent.
+    generated space next to one, which pdfium set for the accent; at a word gap
+    the space comes back as an inserted one.
     """
     pairs: list[tuple[str | None, float]] = []
     # Whether two glyphs belong to one link run (see _link_run).
     connected: list[bool] = []
     for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
         between = range(ra + 1, rb)
+        gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
         after_accent = any(index in blank for index in between)
         joined = all(
             index in generated_breaks
@@ -332,7 +340,6 @@ def _repair_word_boundaries(
             or (after_accent and index in generated_spaces)
             for index in between
         )
-        gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
         connected.append(
             all(
                 index in blank
@@ -348,6 +355,10 @@ def _repair_word_boundaries(
     drop: set[int] = set()
     insert: dict[int, tuple[float, float]] = {}
     spaces: dict[int, int] = {}
+    # Word gaps pdfium marked with a line break, or with a space after a merged
+    # accent, between two letters or digits: they stay spaces next to a link
+    # ("see https://", "at 10.0000/", "café https://").
+    marked: set[int] = set()
     for k, (kind, gap) in enumerate(pairs):
         if kind is None:
             continue
@@ -364,6 +375,8 @@ def _repair_word_boundaries(
             if gap >= _WORD_GAP_MIN and _may_split(ca, cb, line_break=True):
                 insert[ra] = at
                 spaces[ra] = k
+                if ca.isalnum() and cb.isalnum():
+                    marked.add(k)
         elif gap >= _WORD_GAP_MIN and _may_split(ca, cb):
             in_word = [
                 pairs[j][1]
@@ -378,7 +391,7 @@ def _repair_word_boundaries(
             k for k in spaces.values() if glyphs[k][1].isalnum() and glyphs[k + 1][1].isalnum()
         }
         for ra, k in spaces.items():
-            if _link_run(glyphs, connected, word_gaps, k):
+            if k not in marked and _link_run(glyphs, connected, word_gaps, k):
                 del insert[ra]
     if not drop and not insert:
         return records

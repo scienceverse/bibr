@@ -9,6 +9,8 @@ StandardEncoding codes for the accents, centred on the letter.
 
 from __future__ import annotations
 
+import pytest
+
 from bibr.ocr.native_text import get_native_text_in_bbox
 from bibr.ocr.pdf_inspection import inspect_pdf
 from tests.ocr.test_watermark_text import _bt, _pdf, _width
@@ -148,3 +150,17 @@ def test_generated_space_after_a_composed_capital_is_dropped():
     parts = [("E", "´"), *_plain("rica")]
 
     assert _text(_name(parts)) == "Érica"
+
+
+@pytest.mark.parametrize(
+    ("word", "link", "expected"),
+    [
+        ("caf", "https://osf.io/abc", "café https://osf.io/abc"),
+        ("Jos", "jose@uni.es", "José jose@uni.es"),
+    ],
+)
+def test_space_after_a_word_final_accent_stays_before_a_link(word, link, expected):
+    first = _name([*_plain(word), ("e", "´")])
+    x = 72.0 + _width(word + "e", 12.0) + 3.5
+
+    assert expected in _text(first + _name(_plain(link), x=x))
