@@ -219,9 +219,10 @@ _LINK_RUN_RE = re.compile(r"\w@[\w-]+\.\w|10\.\d{4,}/")
 # pdfium itself sometimes sets a space next to these inside a link
 # ("https ://", "view _only"), so a link run reads through such a space.
 _LINK_JOINERS = frozenset(":/?=&#_@%~+-\u2010")
-# A link run ends before an opening bracket that follows punctuation
-# ("org) [55]", "[77] (http", "s. <https").
+# A link run ends before an opening bracket that follows closing punctuation
+# ("org) [55]", "[77] (http", "s. <https"), but not inside "10.0000/(SICI)".
 _OPENING_BRACKETS = frozenset("([{<")
+_CLOSING_PUNCTUATION = frozenset(".,;)]}>\"'\u201d\u2019")
 
 
 def _may_split(before: str, after: str, *, line_break: bool = False) -> bool:
@@ -235,8 +236,8 @@ def _may_split(before: str, after: str, *, line_break: bool = False) -> bool:
 
 
 def _bracket_gap(glyphs: list, k: int) -> bool:
-    """Whether the gap after glyph *k* opens a bracket after punctuation."""
-    return glyphs[k + 1][1] in _OPENING_BRACKETS and not glyphs[k][1].isalnum()
+    """Whether the gap after glyph *k* opens a bracket after closing punctuation."""
+    return glyphs[k + 1][1] in _OPENING_BRACKETS and glyphs[k][1] in _CLOSING_PUNCTUATION
 
 
 def _link_run(
@@ -252,7 +253,7 @@ def _link_run(
     spaces next to a ``_LINK_JOINERS`` char, and ends at printed whitespace,
     line ends, other generated spaces, the other word gaps between two
     letters or digits (a glued "seethe" before a link is not part of it) and
-    before an opening bracket that follows punctuation.
+    before an opening bracket that follows closing punctuation.
     """
     if _bracket_gap(glyphs, k):
         return False

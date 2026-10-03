@@ -183,6 +183,7 @@ def test_glued_sentence_after_a_full_stop_still_splits():
         ("10.0000/S0000-0000(20)30183-5", ".:/-()"),
         ("first.last@uni-example.edu", ".@-"),
         ("https://example.org/abcde/?view_only=0123", ".:/?_="),
+        ("10.0000/(SICI)1097-4571", "()"),
     ],
 )
 def test_loosely_set_dois_urls_and_addresses_stay_whole(link, loose):
