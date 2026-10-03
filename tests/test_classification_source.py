@@ -184,9 +184,9 @@ def test_guessed_title_on_a_body_heading_becomes_its_parts_type():
 
 
 def test_guessed_title_on_the_printed_paper_title_is_kept():
-    """A masthead before the title heading does not cost the title its type;
-    a body heading that opens the title and a running-head repeat do not get
-    it."""
+    """A masthead before the title heading does not cost the title its type
+    (and does not keep it either); a body heading that opens the title and a
+    running-head repeat do not get it."""
     secs = [
         _typed(1, "SCIENTIFIC JOURNAL", CanonicalSection.TITLE, "model"),
         _typed(
@@ -209,7 +209,7 @@ def test_guessed_title_on_the_printed_paper_title_is_kept():
         paper_title="Stable Magnetite Nanocrystals from a Single Domain",
     )
     assert [s.section_type for s in secs] == [
-        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
         CanonicalSection.TITLE,
         CanonicalSection.RESULTS,
         CanonicalSection.UNKNOWN,
@@ -227,6 +227,95 @@ def test_guessed_title_on_the_printed_paper_title_is_kept():
         paper_title="Geographical accessibility of eye care services in rural districts",
     )
     assert secs[1].section_type == CanonicalSection.INTRODUCTION
+
+
+def _title_gate(headers, paper_title):
+    """Gate a run of level-1 model-typed title guesses followed by an
+    introduction; return the types of the guesses."""
+    secs = [_typed(i, header, CanonicalSection.TITLE, "model") for i, header in headers]
+    secs.append(_typed(99, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"))
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=paper_title)
+    assert secs[-1].section_type == CanonicalSection.INTRODUCTION
+    return [s.section_type for s in secs[:-1]]
+
+
+def test_a_masthead_before_the_printed_title_is_retyped():
+    """The first heading is exempt only while no heading prints the title: a
+    masthead before the real title heading is a cover label."""
+    title = "Social capital and trust in post-Soviet cities"
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, title)], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # No heading prints the title (a translated title): the first heading is
+    # still exempt, the later guesses are retyped.
+    assert _title_gate([(1, "Journal masthead"), (2, "Another label")], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    # The first heading is the title itself.
+    assert _title_gate([(1, title), (2, "SCIENTIFIC REPORTS")], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    # The title heading is untyped: the first heading may still be the title
+    # (a letter-spaced one), so it keeps its type; a later repeat does not.
+    secs = [
+        _typed(1, "Journal masthead", CanonicalSection.TITLE, "model"),
+        _typed(2, title, CanonicalSection.UNKNOWN, "model"),
+        _typed(3, title.upper(), CanonicalSection.TITLE, "llm"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.UNKNOWN,
+    ]
+
+
+def test_the_best_matching_heading_keeps_the_title_type():
+    """A running head before the title that holds over half of it does not
+    win over the heading that prints all of it; among equal matches the first
+    wins."""
+    title = "Mindfulness training and test anxiety in adolescents: a randomized trial"
+    running = "Mindfulness training and test anxiety in adolescents"
+    assert _title_gate([(1, running), (2, title)], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # The title with a byline counts as the whole title.
+    assert _title_gate([(1, running), (2, title + " Ann Author")], title) == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    # With no full match the longer partial one wins.
+    assert _title_gate(
+        [(1, "Mindfulness training and test anxiety"), (2, running)],
+        title,
+    ) == [CanonicalSection.UNKNOWN, CanonicalSection.TITLE]
+    # The title repeated later: the first full match keeps the type.
+    assert _title_gate([(1, title), (2, title.upper())], title) == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+
+
+def test_a_short_title_keeps_its_type_on_an_exact_match():
+    """Under 20 characters a heading counts only when it is the title (case
+    and punctuation aside); a longer heading that opens it does not."""
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, "On Bullshit")], "On bullshit") == [
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
+    ]
+    assert _title_gate([(1, "ON BULLSHIT."), (2, "SCIENTIFIC REPORTS")], "On Bullshit") == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    assert _title_gate([(1, "Journal masthead"), (2, "On Bullshit and Lies")], "On Bullshit") == [
+        CanonicalSection.TITLE,
+        CanonicalSection.UNKNOWN,
+    ]
+    assert _title_gate([(1, "Journal masthead")], "") == [CanonicalSection.TITLE]
 
 
 def _review_sections():

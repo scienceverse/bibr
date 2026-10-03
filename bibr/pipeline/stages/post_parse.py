@@ -77,7 +77,8 @@ _SYSTEMATIC_REVIEW_RE = re.compile(
 # The printed title heading may carry the subtitle's first line or the byline,
 # so a heading counts as the paper's title when one text starts the other. A
 # body heading that only opens the title ("Geographical accessibility") is
-# too short a share of it to count.
+# too short a share of it to count, and neither text may be under 20
+# characters unless the two are the same ("On Bullshit").
 _TITLE_MATCH_MIN_CHARS = 20
 _TITLE_MATCH_MIN_SHARE = 0.5
 
@@ -86,13 +87,22 @@ def _title_key(text: str | None) -> str:
     return re.sub(r"[\W_]+", " ", (text or "").casefold()).strip()
 
 
-def _prints_paper_title(header: str, paper_title: str | None) -> bool:
+def _title_match_share(header: str, paper_title: str | None) -> float:
+    """How much of the paper title the heading prints from the start: 1.0 for
+    the whole title (alone or with a byline after it), the covered share (at
+    least half) for a heading that holds only its first lines, else 0.0."""
     heading, title = _title_key(header), _title_key(paper_title)
+    if not heading or not title:
+        return 0.0
+    if heading == title:
+        return 1.0
     if min(len(heading), len(title)) < _TITLE_MATCH_MIN_CHARS:
-        return False
+        return 0.0
     if heading.startswith(title):
-        return True
-    return title.startswith(heading) and len(heading) >= _TITLE_MATCH_MIN_SHARE * len(title)
+        return 1.0
+    if title.startswith(heading) and len(heading) >= _TITLE_MATCH_MIN_SHARE * len(title):
+        return len(heading) / len(title)
+    return 0.0
 
 
 _PART_WORD_RES = {
@@ -266,9 +276,10 @@ def _gate_non_imrad_section_types(
 
     - A model or LLM ``title`` on any heading but the paper's title (a body
       heading in capitals, a cover label, an author name) becomes UNKNOWN and
-      then takes its part's type, if any. The first heading that prints the
-      extracted paper title keeps it, also after a masthead or cover label;
-      the title repeated as a running head does not.
+      then takes its part's type, if any. The heading that prints the
+      extracted paper title (the best match, the first on a tie) keeps it,
+      also after a masthead or cover label; a running head before it, or the
+      title repeated later, does not.
     - With ``review_body`` on, in a review or commentary with no methods or
       results heading (alias-, model- or LLM-typed), the introduction guesses
       after the first introduction become discussion: the body of such a
@@ -283,16 +294,24 @@ def _gate_non_imrad_section_types(
 
     body = [section for section in sections if section.level > 0]
     has_title = any(section.classification_source == "title" for section in body)
-    title_heading = next(
-        (s.section_id for s in body if _prints_paper_title(s.header, paper_title)), None
-    )
+    # The heading that prints most of the extracted title (the first one on a
+    # tie) keeps a title type; a repeat of the title does not. The first
+    # heading is exempt (it may be the title itself) unless that heading is
+    # a title guess too: then a masthead before it is a cover label.
+    title_heading = None
+    best_share = 0.0
+    for section in body:
+        share = _title_match_share(section.header, paper_title)
+        if share > best_share:
+            title_heading, best_share = section, share
+    title_found = title_heading is not None and title_heading.section_type == CanonicalSection.TITLE
     retitled: set[int] = set()
     for index, section in enumerate(body):
         if (
             section.section_type == CanonicalSection.TITLE
             and section.classification_source not in _HEADING_TYPE_SOURCES
-            and (has_title or index > 0)
-            and section.section_id != title_heading
+            and (has_title or index > 0 or title_found)
+            and section is not title_heading
         ):
             section.section_type = CanonicalSection.UNKNOWN
             section.classification_score = 0.0

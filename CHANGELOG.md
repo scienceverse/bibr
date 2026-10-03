@@ -25,8 +25,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   or results heading are typed discussion (setting
   `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by default; not for systematic
   or scoping reviews and meta-analyses), and body headings are no longer
-  typed as the paper title, while the heading that prints it keeps that type
-  after a masthead (#120).
+  typed as the paper title, while the heading that prints it (the best match,
+  a short title included) keeps that type after a masthead (#120).
 - Declaration blocks ("Declarations", "Contributors", "Consent for
   publication", "Availability of data and materials") and box headings
   ("Research in context", "Clinical Perspective", "What this study adds") get
