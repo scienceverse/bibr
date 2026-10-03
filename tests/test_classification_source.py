@@ -183,6 +183,52 @@ def test_guessed_title_on_a_body_heading_becomes_its_parts_type():
     ]
 
 
+def test_guessed_title_on_the_printed_paper_title_is_kept():
+    """A masthead before the title heading does not cost the title its type;
+    a body heading that opens the title and a running-head repeat do not get
+    it."""
+    secs = [
+        _typed(1, "SCIENTIFIC JOURNAL", CanonicalSection.TITLE, "model"),
+        _typed(
+            2,
+            "Stable magnetite nanocrystals from a single domain Ann Author",
+            CanonicalSection.TITLE,
+            "model",
+        ),
+        _typed(3, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        _typed(4, "Stable magnetite growth", CanonicalSection.TITLE, "model"),
+        _typed(5, "Stable magnetite nanocrystals", CanonicalSection.TITLE, "model"),
+        _typed(
+            6, "STABLE MAGNETITE NANOCRYSTALS FROM A SINGLE DOMAIN", CanonicalSection.TITLE, "llm"
+        ),
+    ]
+    _gate_non_imrad_section_types(
+        secs,
+        "empirical",
+        review_body=True,
+        paper_title="Stable Magnetite Nanocrystals from a Single Domain",
+    )
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.TITLE,
+        CanonicalSection.TITLE,
+        CanonicalSection.RESULTS,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.UNKNOWN,
+    ]
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(2, "Geographical accessibility", CanonicalSection.TITLE, "model", 1, 2),
+    ]
+    _gate_non_imrad_section_types(
+        secs,
+        "empirical",
+        review_body=True,
+        paper_title="Geographical accessibility of eye care services in rural districts",
+    )
+    assert secs[1].section_type == CanonicalSection.INTRODUCTION
+
+
 def _review_sections():
     return [
         _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),

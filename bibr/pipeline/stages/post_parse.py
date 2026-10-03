@@ -74,6 +74,27 @@ _SYSTEMATIC_REVIEW_RE = re.compile(
     r"|meta-?\s?analys[ie]s|meta-?\s?analytic)",
     re.IGNORECASE,
 )
+# The printed title heading may carry the subtitle's first line or the byline,
+# so a heading counts as the paper's title when one text starts the other. A
+# body heading that only opens the title ("Geographical accessibility") is
+# too short a share of it to count.
+_TITLE_MATCH_MIN_CHARS = 20
+_TITLE_MATCH_MIN_SHARE = 0.5
+
+
+def _title_key(text: str | None) -> str:
+    return re.sub(r"[\W_]+", " ", (text or "").casefold()).strip()
+
+
+def _prints_paper_title(header: str, paper_title: str | None) -> bool:
+    heading, title = _title_key(header), _title_key(paper_title)
+    if min(len(heading), len(title)) < _TITLE_MATCH_MIN_CHARS:
+        return False
+    if heading.startswith(title):
+        return True
+    return title.startswith(heading) and len(heading) >= _TITLE_MATCH_MIN_SHARE * len(title)
+
+
 _PART_WORD_RES = {
     "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
     "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
@@ -234,13 +255,20 @@ def _structured_abstract_labels(contents):
 
 
 def _gate_non_imrad_section_types(
-    sections, paper_type: str | None, *, review_body: bool, title_abstract: str = ""
+    sections,
+    paper_type: str | None,
+    *,
+    review_body: bool,
+    title_abstract: str = "",
+    paper_title: str | None = None,
 ) -> None:
     """Retype section guesses that only fit an IMRaD research paper.
 
     - A model or LLM ``title`` on any heading but the paper's title (a body
       heading in capitals, a cover label, an author name) becomes UNKNOWN and
-      then takes its part's type, if any.
+      then takes its part's type, if any. The first heading that prints the
+      extracted paper title keeps it, also after a masthead or cover label;
+      the title repeated as a running head does not.
     - With ``review_body`` on, in a review or commentary with no methods or
       results heading (alias-, model- or LLM-typed), the introduction guesses
       after the first introduction become discussion: the body of such a
@@ -255,12 +283,16 @@ def _gate_non_imrad_section_types(
 
     body = [section for section in sections if section.level > 0]
     has_title = any(section.classification_source == "title" for section in body)
+    title_heading = next(
+        (s.section_id for s in body if _prints_paper_title(s.header, paper_title)), None
+    )
     retitled: set[int] = set()
     for index, section in enumerate(body):
         if (
             section.section_type == CanonicalSection.TITLE
             and section.classification_source not in _HEADING_TYPE_SOURCES
             and (has_title or index > 0)
+            and section.section_id != title_heading
         ):
             section.section_type = CanonicalSection.UNKNOWN
             section.classification_score = 0.0
@@ -1675,6 +1707,7 @@ async def post_parse(
                 (getattr(paper_metadata, "title", None), getattr(paper_metadata, "abstract", None)),
             )
         ),
+        paper_title=getattr(paper_metadata, "title", None),
     )
 
     # Populate Section.children from parent_section_id pointers, after all

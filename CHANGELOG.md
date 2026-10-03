@@ -19,12 +19,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "Part 2" is not inside the last part (#119).
 - Subsections take the type of the numbered or named part they are printed
   in (untyped subsections of an untyped "Study 1" scope follow the sibling
-  printed before them; a results or discussion guess keeps its type), the
+  printed before them; a results or discussion guess under an introduction
+  or methods part keeps its type), the
   introduction guesses in the body of a review or commentary with no methods
   or results heading are typed discussion (setting
   `PIPELINE_NON_IMRAD_BODY_AS_DISCUSSION`, on by default; not for systematic
   or scoping reviews and meta-analyses), and body headings are no longer
-  typed as the paper title (#120).
+  typed as the paper title, while the heading that prints it keeps that type
+  after a masthead (#120).
 - Declaration blocks ("Declarations", "Contributors", "Consent for
   publication", "Availability of data and materials") and box headings
   ("Research in context", "Clinical Perspective", "What this study adds") get
