@@ -14,7 +14,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   "Copyright: ©"), a licence block or a preprint sidebar is no longer appended,
   a statement section that holds only a licence is no longer exported, and a
   long chapter typed as a statement section (a thesis's "Ethical Procedures")
-  is no longer copied whole. A phrase split by a line break ("supported
+  is no longer copied whole. A sentence that only mentions copyright, a
+  licence or a publisher ("Due to copyright restrictions, the stimuli cannot
+  be shared.") is kept whole. A phrase split by a line break ("supported
   by") is now found. (#127)
 - Prose that only mentions a statement topic is no longer exported as the
   statement: "supported by" followed only by an acronym ("supported by the

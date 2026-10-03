@@ -299,7 +299,7 @@ _END_MATTER_LABEL = re.compile(
     r"authors?'? contributions?|author's contributions?|contributors|credit authorship|"
     r"keywords?|key words|e-?mail|correspondence|how to cite|cite this article|"
     r"open access(?!\s+(?:funding|publication|fees?|charges?|costs?|was|is|has)\b)|"
-    r"copyright|abbreviations|supplementary (?:material|information|data)|orcid|"
+    r"copyright(?=\s*(?:©|\(c\)|:|\d{4}|notice|holder))|abbreviations|supplementary (?:material|information|data)|orcid|"
     r"article history|disclaimer|publisher'?s note|additional information|"
     r"ai tool disclosure|use of (?:ai|artificial intelligence)|declaration of generative ai|"
     r"all rights reserved|no reuse allowed|the copyright holder)\b|^\W*©",
@@ -319,7 +319,47 @@ _EXTRA_BOUNDARY = re.compile(
     r"\bopen access\b(?=\s+this\b)|\ball rights reserved\b|\bno reuse allowed\b|"
     r"\bthe copyright holder\b|\bpatient consent for publication\b|"
     r"\bprovenance and peer review\b|\bpatient and public involvement\b|"
-    r"\bgrant information\s*:",
+    r"\bgrant information\s*:|\bpublisher[’']s note\b|\ball claims expressed in this article\b",
+    re.IGNORECASE,
+)
+# Furniture words ("copyright", "licence", "published by", "received ...") also
+# occur inside statements ("Due to copyright restrictions ...", "MW is the
+# copyright holder of ...", "published under a CC BY licence"). They end a
+# statement only at a row or sentence start, inside a licence sentence ("This
+# article is licensed under ..."), or in an unmistakable furniture shape: "©",
+# "Copyright © 2024", "Open Access This ...", "Received: 3 May 2019".
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|"
+    r"sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b\.?"
+)
+_DATE = (
+    rf"(?:\d{{1,2}}(?:st|nd|rd|th)?\s+{_MONTH}\s*,?\s+\d{{4}}|"
+    rf"{_MONTH}\s+\d{{1,2}}(?:st|nd|rd|th)?\s*,?\s+\d{{4}}|"
+    r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})(?!\w)"
+)
+# "received"/"accepted" followed by a day, a whole month name or a year (not
+# "received separate funding" or "received 15,000 CHF").
+_HISTORY_WORD = re.compile(
+    rf"(?:received|accepted)\s*(?:on\b|:)?\s*(?:\d{{1,2}}(?![\d,])|{_MONTH}|(?:19|20)\d{{2}}\b)",
+    re.IGNORECASE,
+)
+_HISTORY_SHAPE = re.compile(
+    rf"(?:received|accepted|revised|published(?:\s+online)?)\s*(?:on\s+|:\s*)?{_DATE}",
+    re.IGNORECASE,
+)
+_FURNITURE_SHAPE = re.compile(
+    r"©|copyright\s*(?:©|\(c\)|:|\d{4})|(?-i:Open Access\s+This)\b", re.IGNORECASE
+)
+_LICENCE_SENTENCE = re.compile(
+    r"\W*(?:open access\b|this is an open[- ]access|it is made available under|licensee\b|"
+    r"this (?:article|work|paper|chapter|manuscript|preprint|version) is (?:an open[- ]access|"
+    r"licensed|distributed|published under|made available under)|"
+    r"(?:published|distributed|licensed) under\b|to view a copy of this licen[cs]e|"
+    r"the images or other third[- ]party material|which permits (?:unrestricted )?use|"
+    # rights-retention statements: "For the purpose of open access, the author
+    # has applied a CC BY licence ...", "A CC-BY license is applied to the Author
+    # Accepted Manuscript ..."
+    r"for the purpose of open access|(?=[^.]{0,200}\bauthor accepted manuscript))",
     re.IGNORECASE,
 )
 # "correspond..." is furniture only as a contact line; a statement may point to
@@ -504,19 +544,57 @@ def _matching_rows(contents: PaperContents) -> list[PaperSentence]:
     ]
 
 
-def _furniture_boundaries(field: str, text: str) -> list[re.Match[str]]:
-    """Publisher-furniture boundaries in one row, in order of position."""
-    found = []
+def _sentence_start(text: str, position: int) -> int:
+    """Where the sentence holding ``text[position]`` starts."""
+    head = max(
+        text.rfind(". ", 0, position), text.rfind("? ", 0, position), text.rfind("! ", 0, position)
+    )
+    return head + 2 if head >= 0 else 0
+
+
+def _history_shape_at(text: str, position: int) -> bool:
+    """A dated "Received ...", "Manuscript received ...; accepted ..." line."""
+    if not _HISTORY_SHAPE.match(text, position):
+        return False
+    before = text[:position].rstrip()
+    return bool(
+        text[position].isupper()
+        or not before
+        or before.endswith((";", ","))
+        or re.search(r"\b(?:manuscript|article|paper)$", before, re.IGNORECASE)
+    )
+
+
+def _furniture_boundaries(field: str, text: str) -> list[tuple[int, int]]:
+    """Publisher-furniture boundaries ``(start, end)`` in one row, in order."""
+    candidates: list[tuple[int, int]] = []
     for match in _BOILERPLATE_BOUNDARY.finditer(text):
         if _boundary_is_declaration_text(field, match, text):
             continue
-        if match.group().casefold().startswith("correspond") and not _CONTACT_FURNITURE.match(
-            text, match.start()
+        word = match.group().casefold()
+        if word.startswith("correspond"):
+            if _CONTACT_FURNITURE.match(text, match.start()):
+                candidates.append((match.start(), match.end()))
+            continue
+        if word.startswith(("received", "accepted")) and not (
+            _HISTORY_WORD.match(text, match.start()) or _history_shape_at(text, match.start())
         ):
             continue
-        found.append(match)
-    found.extend(_EXTRA_BOUNDARY.finditer(text))
-    return sorted(found, key=lambda match: match.start())
+        candidates.append((match.start(), match.end()))
+    candidates.extend((match.start(), match.end()) for match in _EXTRA_BOUNDARY.finditer(text))
+    candidates.extend((match.start(), match.end()) for match in _FURNITURE_SHAPE.finditer(text))
+    found = set()
+    for start, end in candidates:
+        sentence = _sentence_start(text, start)
+        if (
+            not re.search(r"\w", text[sentence:start])
+            or _FURNITURE_SHAPE.match(text, start)
+            or _history_shape_at(text, start)
+        ):
+            found.add((start, end))
+        elif _LICENCE_SENTENCE.match(text, sentence):
+            found.add((sentence, end))
+    return sorted(found)
 
 
 def _opens_other_end_matter(field: str, text: str) -> bool:
@@ -560,12 +638,12 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
             continue
         if kept:
             break
-        if _LICENCE_TEXT.search(text) and (licence_seen or label or boundaries[0].start() == 0):
+        if _LICENCE_TEXT.search(text) and (licence_seen or label or boundaries[0][0] == 0):
             # A licence block: drop its whole paragraph.
             licence_seen = True
             skipped_paragraph = row.paragraph_id
             continue
-        if not label and boundaries[0].start() > 0:
+        if not label and boundaries[0][0] > 0:
             kept.append(row)
             break
         if label and not boundaries and field in _legacy_categories_in(text):
@@ -578,8 +656,9 @@ def _legacy_section_rows(field: str, rows: list[PaperSentence]) -> list[PaperSen
 def _text_before_boundary(text: str, start: int, boundary: int) -> str:
     """``text[start:boundary]``, ending at the last full sentence when there is one.
 
-    "... no competing interests. This article is licensed under a Creative
-    Commons ..." keeps the declaration, not "This article is licensed under a".
+    Boundaries sit at a sentence start or at a furniture shape, so the text
+    before one is whole sentences, or a declaration that runs into furniture
+    without a full stop ("... no competing interests Copyright: © 2024").
     """
     segment = text[start:boundary]
     cut = max(segment.rfind(". "), segment.rfind("? "), segment.rfind("! "))
@@ -601,15 +680,15 @@ def _clip_legacy_row(field: str, text: str) -> str:
         if (match := pattern.search(text))
     ]
     if not anchors:
-        if boundaries[0].start() == 0:
+        if boundaries[0][0] == 0:
             return text
-        return _text_before_boundary(text, 0, boundaries[0].start())
+        return _text_before_boundary(text, 0, boundaries[0][0])
     anchor = min(anchors)
-    before = [match for match in boundaries if match.start() < anchor]
-    after = [match for match in boundaries if match.start() >= anchor]
+    before = [boundary for boundary in boundaries if boundary[0] < anchor]
+    after = [boundary for boundary in boundaries if boundary[0] >= anchor]
     start = 0
     if before:
-        floor = before[-1].end()
+        floor = before[-1][1]
         if text[anchor : anchor + 1].isupper() or _STATEMENT_LABEL[field].match(text[anchor:]):
             start = anchor
         else:
@@ -618,7 +697,7 @@ def _clip_legacy_row(field: str, text: str) -> str:
             start = floor + (cut + 2 if cut >= 0 else 0)
     if not after:
         return text[start:].strip()
-    return _text_before_boundary(text, start, after[0].start())
+    return _text_before_boundary(text, start, after[0][0])
 
 
 def _legacy_coi_declares(text: str) -> bool:

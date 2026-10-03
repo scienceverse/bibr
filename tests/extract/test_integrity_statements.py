@@ -2947,3 +2947,207 @@ def test_single_statement_section_is_not_prefixed_with_its_heading():
     metadata = _shadow_values(contents)
 
     assert metadata.data_availability == "Data are available on OSF."
+
+
+_FURNITURE_WORDS_INSIDE_STATEMENTS = [
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability statement",
+        [
+            "Due to copyright restrictions, the stimuli cannot be shared publicly.",
+            "Anonymised trial data are on OSF.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability statement",
+        [
+            "The data are available at https://osf.io/abc.",
+            "The questionnaire items cannot be shared for copyright reasons.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        ["All data are shared on OSF under a Creative Commons Attribution 4.0 licence."],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        [
+            "The dataset is published under a CC BY licence at Zenodo"
+            " (https://doi.org/10.5281/zenodo.1)."
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "MW is the copyright holder of the Pain Catastrophizing Scale and receives royalties.",
+            "The other authors declare no competing interests.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Conflict of interest",
+        [
+            "JS has received license fees from Pearson for the WAIS-IV.",
+            "The remaining authors declare no conflicts.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "AB is an employee of Springer Nature, the publisher of this journal;"
+            " she was not involved in peer review."
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.COI,
+        "Competing interests",
+        [
+            "AB receives royalties for the BDI-II, published by Pearson.",
+            "The other authors declare no conflicts of interest.",
+        ],
+        "coi_statement",
+    ),
+    (
+        CanonicalSection.OPEN_DATA,
+        "Data availability",
+        [
+            "The questionnaire is available under license from the publisher.",
+            "All other data are on OSF.",
+        ],
+        "data_availability",
+    ),
+    (
+        CanonicalSection.FUNDING,
+        "Funding",
+        [
+            "This work was supported by the Swiss National Science Foundation.",
+            "The first author received 15,000 CHF from the University of Bern.",
+        ],
+        "funding_statement",
+    ),
+    (
+        CanonicalSection.FUNDING,
+        "Funding",
+        [
+            "Each author received separate funding from the European Research Council"
+            " (ERC-2020-StG)."
+        ],
+        "funding_statement",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("section_type", "heading", "rows", "field"), _FURNITURE_WORDS_INSIDE_STATEMENTS
+)
+def test_furniture_words_inside_a_statement_sentence_keep_the_statement_whole(
+    section_type, heading, rows, field
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == " ".join(rows)
+
+
+def test_lexical_capture_keeps_a_sentence_holding_a_furniture_word_whole():
+    row = "The authors declare no competing interests; JS holds the copyright of the ABC scale."
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [row]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == row
+
+
+@pytest.mark.parametrize(
+    ("rows", "expected"),
+    [
+        (
+            [
+                "The authors declare no competing interests.",
+                "Copyright © 2024 The Authors.",
+            ],
+            "The authors declare no competing interests.",
+        ),
+        (
+            [
+                "The authors declare no competing interests."
+                " This article is licensed under a Creative Commons Attribution 4.0 licence."
+            ],
+            "The authors declare no competing interests.",
+        ),
+        (
+            [
+                "The authors declare no competing interests. Received: 3 May 2019; accepted 1 June 2019"
+            ],
+            "The authors declare no competing interests.",
+        ),
+    ],
+)
+def test_furniture_shapes_still_end_a_statement(rows, expected):
+    contents = _contents(
+        [(1, "Competing interests", CanonicalSection.COI, "exact_alias", 1.0, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement == expected
+
+
+@pytest.mark.parametrize(
+    ("section_type", "heading", "field", "rows"),
+    [
+        (
+            CanonicalSection.COI,
+            "Conflict of interest",
+            "coi_statement",
+            [
+                ("The authors declare no conflict of interest.", 1),
+                (
+                    "All claims expressed in this article are solely those of the authors and do"
+                    " not necessarily represent those of the publisher.",
+                    2,
+                ),
+            ],
+        ),
+        (
+            CanonicalSection.OPEN_DATA,
+            "Open Practices Statement",
+            "data_availability",
+            [
+                ("The data are available at https://osf.io/abc.", 1),
+                (
+                    "A CC-BY license is applied to the Author Accepted Manuscript (AAM) arising"
+                    " from this submission.",
+                    1,
+                ),
+                ("CRediT taxonomy of author contributions, in alphabetical order:", 2),
+            ],
+        ),
+    ],
+)
+def test_publisher_note_and_rights_retention_sentences_end_a_statement(
+    section_type, heading, field, rows
+):
+    contents = _contents([(1, heading, section_type, "exact_alias", 1.0, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == rows[0][0]
