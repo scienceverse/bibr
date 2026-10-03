@@ -3649,3 +3649,79 @@ def test_methods_typed_bmc_data_section_with_a_data_statement_is_copied(row: str
     metadata = _shadow_values(contents)
 
     assert metadata.data_availability == row
+
+
+_ESSAY = "Each interview lasted about an hour and was transcribed verbatim afterwards."
+
+
+@pytest.mark.parametrize(
+    ("heading", "section_type", "rows", "field"),
+    [
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            [
+                "The effect of family income on stress was not significant (p = .21).",
+                "Older students reported less stress overall.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Financial support",
+            CanonicalSection.RESULTS,
+            [
+                "Parental support predicted lower stress (b = 0.3).",
+                "The effect held across cohorts.",
+            ],
+            "funding_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            [
+                "Stakeholders do not agree about land use.",
+                "We discuss how planners mediate such disagreements.",
+            ],
+            "coi_statement",
+        ),
+        (
+            "Competing interests",
+            CanonicalSection.DISCUSSION,
+            [
+                "Residents reported tensions between farming and tourism.",
+                "Planners rarely resolved them.",
+            ],
+            "coi_statement",
+        ),
+        (
+            "Data collection",
+            CanonicalSection.OPEN_DATA,
+            [
+                ("Students were included if they were enrolled full time.", 1),
+                (_ESSAY, 2),
+                ("Sessions took place in a quiet room on campus.", 3),
+                ("Two researchers coded every transcript independently.", 4),
+            ],
+            "data_availability",
+        ),
+        (
+            "Moral judgement",
+            CanonicalSection.ETHICS,
+            [
+                ("Social approval shapes moral choices.", 1),
+                ("People weigh fairness against loyalty in many settings.", 2),
+                ("These weights shift with group membership.", 3),
+                ("We return to this tension in the next chapter.", 4),
+            ],
+            "ethics_statement",
+        ),
+    ],
+)
+def test_section_under_a_statement_heading_needs_a_phrase_level_cue(
+    heading, section_type, rows, field
+):
+    contents = _contents([(1, heading, section_type, "model", 0.9, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) is None

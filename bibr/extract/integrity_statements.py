@@ -325,6 +325,35 @@ _REFERENCE_STATEMENT_CUE = {
         re.IGNORECASE,
     ),
 }
+# Phrase-level cues that a section under a statement heading declares the
+# field. Unlike the after-label check above, bare words of running prose
+# ("no", "not", "support", "reported", "approval", "included") do not count.
+_STATES_FIELD_CUE = {
+    "funding_statement": re.compile(
+        r"\b(?:fund(?:ed|ing|ers?)|grants?|awards?|awarded|sponsor(?:ed|s|ship)?|"
+        r"fellowships?|scholarships?)\b",
+        re.IGNORECASE,
+    ),
+    "coi_statement": re.compile(
+        r"\b(?:declare[sd]?|declaring|disclos\w*|honorari\w*|consult\w*|employee|"
+        r"shareholder|none declared)\b|\bno (?:\w+ ){0,2}(?:conflicts?|competing)\b|"
+        r"^\W*none\W*$",
+        re.IGNORECASE,
+    ),
+    "ethics_statement": re.compile(
+        r"\b(?:ethics|ethical (?:approval|committee|review|clearance)|"
+        r"committee approv\w*|approv\w* by (?:the|an?) (?:[\w-]+ ){0,6}(?:committee|board)|"
+        r"(?:informed|written|verbal|oral) consent|irb|review board|helsinki|waive[sd]?)\b",
+        re.IGNORECASE,
+    ),
+    "data_availability": re.compile(
+        r"\b(?:availab\w*|deposit\w*|repositor\w*|osf|zenodo|github|figshare|dryad)\b|"
+        r"https?://|\bincluded (?:with)?in (?:this|the) (?:published )?article\b|"
+        r"\bsupplementary (?:information|materials?|data|files?)\b|\badditional files?\b",
+        re.IGNORECASE,
+    ),
+}
+_NOT_APPLICABLE = re.compile(r"\bnot applicable\b", re.IGNORECASE)
 # A heading region that also holds the one-line statement ("Disclosure and
 # competing interests statement The authors declare no competing interests.").
 _HEADING_TAIL_START = re.compile(r"\s(?=[A-Z][a-z]*\s+[a-z])")
@@ -899,8 +928,14 @@ def _legacy_body_copy_passes(field: str, rows: list[PaperSentence]) -> bool:
 
 
 def _states_field(field: str, rows: list[PaperSentence]) -> bool:
-    """Whether the rows carry a declaration cue of the field."""
-    return bool(_REFERENCE_STATEMENT_CUE[field].search(" ".join(row.text for row in rows)))
+    """Whether the rows carry a phrase-level declaration cue of the field."""
+    text = " ".join(row.text for row in rows)
+    if _STATES_FIELD_CUE[field].search(text) or _NOT_APPLICABLE.search(text):
+        return True
+    return field == "funding_statement" and bool(
+        _SUPPORTED_BY_FUNDER_ACRONYM.search(text)
+        or re.search(r"\b[A-Z][A-Za-z]+\s+(?:Foundation|Council|Trust|Agency)\b", text)
+    )
 
 
 def _legacy_capture_at(
