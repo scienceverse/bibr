@@ -83,6 +83,8 @@ def _line_text(monkeypatch, chars, left, bottom, right, top):
     monkeypatch.setattr(
         pypdfium2.raw, "FPDFText_GetUnicode", lambda _raw, index: ord(chars[index][0])
     )
+    # The recorded spaces count as printed ones.
+    monkeypatch.setattr(pypdfium2.raw, "FPDFText_IsGenerated", lambda _raw, _index: 0)
     records = _build_page_char_records(_BoxTextPage(chars))
     return _reconstruct_text_from_records(records, left, bottom, right, top)
 
@@ -215,6 +217,7 @@ def test_code_point_past_unicode_after_a_ligature_space_reads_as_a_replacement(m
     codes = [ord(ch) for ch, _tight, _loose in _SEX_TRAFFICKING]
     codes[11] = 0x110000  # the "c" after the space inside the "ffi" ligature
     monkeypatch.setattr(pypdfium2.raw, "FPDFText_GetUnicode", lambda _raw, index: codes[index])
+    monkeypatch.setattr(pypdfium2.raw, "FPDFText_IsGenerated", lambda _raw, _index: 0)
 
     records = _build_page_char_records(_BoxTextPage(_SEX_TRAFFICKING))
 

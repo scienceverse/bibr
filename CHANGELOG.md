@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   breaks inserted in the middle of a line ("Buyer -Supplier", a break before
   ", are") when a PDF draws each glyph or word group as its own object are
   repaired from the glyph positions. Printed spaces and line breaks,
-  superscripts and letter-spaced headings are left as they are (#142).
+  superscripts and letter-spaced headings are left as they are, and no space
+  is put into a URL, DOI or e-mail address (#142).
 - A heading in the middle of a later page that the layout model labels as a
   document title, such as a sidebar or box heading ("When No Default Is Your
   Best Option"), is no longer dropped as a running head, so the sidebar no

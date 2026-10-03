@@ -28,7 +28,7 @@ import unicodedata
 import weakref
 from collections import Counter
 
-from bibr.input.consolidate_text import fix_ocr_artifacts
+from bibr.input.consolidate_text import DOI_URL_CONTEXT_RE, fix_ocr_artifacts
 from bibr.ocr.utils import pdfium_lock
 
 logger = logging.getLogger(__name__)
@@ -203,18 +203,52 @@ _WORD_GAP_RATIO = 3.0
 _WORD_GAP_FLOOR = 0.02
 # Gaps outside this range (in line heights) are not neighbours on one line.
 _LINE_GAP_RANGE = (-0.3, 1.5)
-# No space is inserted before closing punctuation, next to a slash, or
-# between a dot and a lowercase letter or digit: a URL or DOI set with loose
-# letter spacing ("doi.org/10.1177/...") has word-sized gaps around its dots
-# and slashes. A sentence still splits ("temperament.As").
+# No space is inserted before closing punctuation, next to a slash, hyphen,
+# underscore or at sign, or between a dot and a lowercase letter or digit:
+# url.sty stretches the space around these in a URL, DOI or e-mail address
+# ("doi.org/10.0000/...", "uni-example.edu"). A sentence still splits
+# ("temperament.As").
 _NO_SPACE_BEFORE = frozenset(".,:;/")
 _NO_SPACE_AFTER = frozenset("/")
+_NO_SPACE_NEXT_TO = frozenset("-\u2010_@")
+# url.sty also stretches around ( ) ? = & #, so no space at all is inserted
+# in a run of glyphs that holds a URL, DOI or e-mail address.
+_LINK_RUN_RE = re.compile(r"@|10\.\d{4,}/")
+# pdfium itself sometimes sets a space next to these inside a link
+# ("https ://", "view _only"), so a link run reads through such a space.
+_LINK_JOINERS = frozenset(":/?=&#_@.%~+-\u2010")
 
 
 def _may_split(before: str, after: str) -> bool:
+    if before in _NO_SPACE_NEXT_TO or after in _NO_SPACE_NEXT_TO:
+        return False
     if after in _NO_SPACE_BEFORE or before in _NO_SPACE_AFTER:
         return False
     return not (before == "." and (after.islower() or after.isdigit()))
+
+
+def _link_run(
+    glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
+    connected: list[bool],
+    word_gaps: set[int],
+    k: int,
+) -> bool:
+    """Whether the gap after glyph *k* lies inside a URL, DOI or e-mail address.
+
+    The run is the glyphs around the gap with no whitespace between them. It
+    reads through pdfium's generated breaks within a line and its generated
+    spaces next to a ``_LINK_JOINERS`` char, and ends at printed whitespace,
+    line ends, other generated spaces and the other word gaps between two
+    letters or digits (a glued "seethe" before a link is not part of it).
+    """
+    start = k
+    while start > 0 and connected[start - 1] and start - 1 not in word_gaps:
+        start -= 1
+    end = k + 1
+    while end < len(connected) and connected[end] and end not in word_gaps:
+        end += 1
+    run = "".join(glyphs[index][1] for index in range(start, end + 1))
+    return bool(DOI_URL_CONTEXT_RE.search(run) or _LINK_RUN_RE.search(run))
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -241,6 +275,7 @@ def _repair_word_boundaries(
     records: list[tuple[str, float, float, bool]],
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
     generated_breaks: set[int],
+    generated_spaces: frozenset[int] = frozenset(),
 ) -> list[tuple[str, float, float, bool]]:
     """Fix pdfium's whitespace between consecutive glyphs of one line.
 
@@ -252,12 +287,23 @@ def _repair_word_boundaries(
     a space when the gap is word-sized), and a missing space is inserted when
     the gap is at least ``_WORD_GAP_MIN`` of the line height and
     ``_WORD_GAP_RATIO`` times an in-word gap next to it. Printed whitespace
-    and printed line breaks are never touched. *glyphs* holds the record
-    index, char and loose box of every non-whitespace glyph, in order.
+    and printed line breaks are never touched, and no space goes into a
+    URL, DOI or e-mail address. *glyphs* holds the record index, char and
+    loose box of every non-whitespace glyph, in order.
     """
     pairs: list[tuple[str | None, float]] = []
+    # Whether two glyphs belong to one link run (see _link_run).
+    connected: list[bool] = []
     for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
+        between = range(ra + 1, rb)
         gap = _same_line_gap(la, lb) if _printable_glyph(ca) and _printable_glyph(cb) else None
+        connected.append(
+            all(
+                (gap is not None and index in generated_breaks)
+                or (index in generated_spaces and (ca in _LINK_JOINERS or cb in _LINK_JOINERS))
+                for index in between
+            )
+        )
         kind = None
         if gap is not None:
             if rb == ra + 1:
@@ -267,6 +313,7 @@ def _repair_word_boundaries(
         pairs.append((kind, gap if gap is not None else 0.0))
     drop: set[int] = set()
     insert: dict[int, tuple[float, float]] = {}
+    spaces: dict[int, int] = {}
     for k, (kind, gap) in enumerate(pairs):
         if kind is None:
             continue
@@ -276,8 +323,9 @@ def _repair_word_boundaries(
         at = ((la[2] + lb[0]) / 2.0, (max(la[1], lb[1]) + min(la[3], lb[3])) / 2.0)
         if kind == "break":
             drop.update(range(ra + 1, rb))
-            if gap >= _WORD_GAP_MIN:
+            if gap >= _WORD_GAP_MIN and _may_split(ca, cb):
                 insert[ra] = at
+                spaces[ra] = k
         elif gap >= _WORD_GAP_MIN and _may_split(ca, cb):
             in_word = [
                 pairs[j][1]
@@ -286,6 +334,14 @@ def _repair_word_boundaries(
             ]
             if in_word and gap >= _WORD_GAP_RATIO * max(max(in_word), _WORD_GAP_FLOOR):
                 insert[ra] = at
+                spaces[ra] = k
+    if insert:
+        word_gaps = {
+            k for k in spaces.values() if glyphs[k][1].isalnum() and glyphs[k + 1][1].isalnum()
+        }
+        for ra, k in spaces.items():
+            if _link_run(glyphs, connected, word_gaps, k):
+                del insert[ra]
     if not drop and not insert:
         return records
     repaired: list[tuple[str, float, float, bool]] = []
@@ -480,6 +536,8 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
     # repair after the loop.
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]] = []
     generated_breaks: set[int] = set()
+    # pdfium's generated spaces, for link runs.
+    generated_spaces: set[int] = set()
     # The tight box of each entry of *glyphs*, for the spacing-accent merge.
     glyph_boxes: list[tuple[str, tuple[float, float, float, float]]] = []
 
@@ -557,19 +615,25 @@ def _build_page_char_records(textpage) -> list[tuple[str, float, float, bool]]:
         if not ch.isspace():
             glyphs.append((len(records), ch, _loose_charbox(textpage, i)))
             glyph_boxes.append((ch, box))
+        if ch == " " and pdfium.raw.FPDFText_IsGenerated(textpage.raw, i) == 1:
+            generated_spaces.add(len(records))
         records.append((ch, (cl + cr) / 2.0, center_y, False))
         i += consumed
     _settle(None)
     accents = _spacing_accent_targets(glyph_boxes)
     if not accents:
-        return _repair_word_boundaries(records, glyphs, generated_breaks)
+        return _repair_word_boundaries(
+            records, glyphs, generated_breaks, generated_spaces=frozenset(generated_spaces)
+        )
     for accent, letter in accents.items():
         at = glyphs[letter][0]
         ch, x, y, is_newline = records[at]
         records[at] = (_with_accent(ch, glyphs[accent][1]), x, y, is_newline)
         records[glyphs[accent][0]] = ("", 0.0, 0.0, False)
     kept = [glyph for index, glyph in enumerate(glyphs) if index not in accents]
-    repaired = _repair_word_boundaries(records, kept, generated_breaks)
+    repaired = _repair_word_boundaries(
+        records, kept, generated_breaks, generated_spaces=frozenset(generated_spaces)
+    )
     return [record for record in repaired if record[0]]
 
 

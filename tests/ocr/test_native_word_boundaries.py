@@ -174,3 +174,35 @@ def test_glued_sentence_after_a_full_stop_still_splits():
     pdf_bytes = _pdf(_glyph_line("of toddler temperament. As a part", 72, 700, gap=1.6))
 
     assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == "of toddler temperament. As a part"
+
+
+@pytest.mark.parametrize(
+    ("link", "loose"),
+    [
+        ("10.0000/S0000-0000(20)30183-5", ".:/-()"),
+        ("first.last@uni-example.edu", ".@-"),
+        ("https://example.org/abcde/?view_only=0123", ".:/?_="),
+    ],
+)
+def test_loosely_set_dois_urls_and_addresses_stay_whole(link, loose):
+    """url.sty stretches the space around - ( ) @ _ ? = as well as . : /."""
+    pdf_bytes = _pdf(_spaced_glyphs(link, 72, 700, loose=loose, gap=1.6))
+    doc = pypdfium2.PdfDocument(pdf_bytes)
+    try:
+        pdfium_text = doc[0].get_textpage().get_text_range()
+    finally:
+        doc.close()
+
+    assert get_native_text_in_bbox(pdf_bytes, 0, _WHOLE_PAGE) == pdfium_text
+    assert pdfium_text.replace(" ", "") == link
+
+
+def test_link_on_the_next_line_leaves_the_words_above_alone():
+    """A link run ends at the line end, so the address below does not glue "increased risk"."""
+    content = _glyph_line("children are at increased risk", 72, _line_y(0), gap=1.6)
+    content += _glyph_line("first.last@example.edu", 72, _line_y(1), gap=1.6)
+
+    text = get_native_text_in_bbox(_pdf(content), 0, _WHOLE_PAGE)
+
+    assert "children are at increased risk" in text
+    assert "first.last@example.edu" in text
