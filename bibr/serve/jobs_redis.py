@@ -401,7 +401,8 @@ class RedisJobStore:
         except JobStoreUnavailableError as exc:
             logger.error("job %s: could not record the running state (%s)", job_id, exc)
             return True
-        return int(claimed) != -1
+        # 1 = claimed; -1 = no longer queued; 0 = the record is gone (evicted).
+        return int(claimed) == 1
 
     async def cancel(self, job_id: str) -> Job | None:
         keys, args = self._finish_call(

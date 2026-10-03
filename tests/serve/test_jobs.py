@@ -346,9 +346,28 @@ class TestJobCancel:
         assert jobs_mod.is_cancelled(got)
         assert got.started_wall is None
 
-    async def test_claiming_a_missing_record_still_runs_the_job(self, harness):
-        # As before cancel existed: a record that is gone does not stop the work.
-        assert await harness.make().set_running("0" * 32) is True
+    async def test_claiming_a_missing_record_skips_the_job(self, harness):
+        # Nothing can record the outcome of a job whose record is gone.
+        assert await harness.make().set_running("0" * 32) is False
+
+    async def test_a_cancelled_job_evicted_before_dequeue_never_runs(self, harness, monkeypatch):
+        monkeypatch.setattr(Settings.jobs, "max_retained", 1)
+        clock = _Clock()
+        store = harness.make(clock)
+        cancelled = await store.create(filename="cancelled.pdf")
+        await store.cancel(cancelled.job_id)
+        clock.advance(1)
+        later = await store.create(filename="later.pdf")
+        await store.set_succeeded(later.job_id, {"ok": True})
+        assert await store.get(cancelled.job_id) is None  # evicted as the oldest finished
+
+        tracker = _FakeTracker(result={"paper_id": "x"})
+        descriptor = {"upload_id": "cancelled.pdf"}
+        await jobs_mod._run_job(
+            store=store, job_id=cancelled.job_id, descriptor=descriptor, tracker=tracker
+        )
+        assert tracker.descriptors == []
+        assert tracker.discarded == [descriptor]
 
 
 class TestJobDispatcher:

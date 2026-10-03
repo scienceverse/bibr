@@ -246,9 +246,10 @@ class JobStore(Protocol):
     async def set_running(self, job_id: str) -> bool:
         """Claim a dequeued job for execution.
 
-        ``False`` means the job is no longer queued (it was cancelled while it waited)
-        and the runner must skip it. A record the store cannot find or reach returns
-        ``True``, so such a job runs as it always did.
+        ``False`` means the runner must skip the job: it is no longer queued (it was
+        cancelled while it waited) or its record is gone (a finished record, such as
+        a cancelled one, that retention already evicted). A store that cannot be
+        reached returns ``True``, so an outage does not stop the work.
         """
         ...
 
@@ -361,9 +362,7 @@ class MemoryJobStore:
     async def set_running(self, job_id: str) -> bool:
         async with self._lock:
             job = self._jobs.get(job_id)
-            if job is None:
-                return True
-            if job.status != "queued":
+            if job is None or job.status != "queued":
                 return False
             job.status = "running"
             job.started_mono = self._clock()
@@ -623,9 +622,10 @@ async def _run_job(
     """Execute one job through LitServe's in-process descriptor adapter."""
 
     if await store.set_running(job_id) is False:
-        # Cancelled while it waited: its record is final; only the upload is left
-        # (already gone when the cancel reached the replica that holds it).
-        logger.info("job %s: cancelled before it started; skipped", job_id)
+        # Cancelled while it waited (its record is final, or already evicted as a
+        # finished one): only the upload is left, and that is already gone when the
+        # cancel reached the replica that holds it.
+        logger.info("job %s: cancelled or expired before it started; skipped", job_id)
         await tracker.discard(descriptor)
         return
     try:
