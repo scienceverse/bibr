@@ -24,13 +24,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   printed in either form.
 - Numbered affiliations are matched for authors whose byline prints symbols,
   degrees or a stray comma before the number ("Name#*1", "Name MSci1,2",
-  "Name ,1,2,3") or whose name the model wrote without a printed period, and
+  "Name ,1,2,3"), whose name the model wrote without a printed period, or whose
+  name has an abbreviated part ("Kristen St. John", "J.-P. Martin"), and
   affiliation lists printed at the end of the article (BMC, Springer) are read
   for the numbers page 1 does not define, when the list was filed under
   acknowledgments, funding, competing interests, ethics or data availability
-  rather than author information (#116). A contact line or an e-mail address
-  ("Jane Doe, 77 Massachusetts Avenue", "jane.doe2@...") is never read as a
-  byline marker.
+  rather than author information and each line opens with its number (#116).
+  Contact details ("Correspondence: Jane Doe ,2 Main Street",
+  "jane.doe2@...") are never read as a byline marker.
 - A byline's group tail that the model returned as a person ("..., for the
   ABC/1234 Study Collaborators" as a person named "ABC/1234") becomes a
   group author named as printed, and a group the model returned correctly

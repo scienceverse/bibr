@@ -825,3 +825,82 @@ def test_dotted_initials_from_the_model_still_match_the_byline():
     CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
 
     assert authors[0].affiliation == "Department of Psychology, Example University, Leeds, UK"
+
+
+@pytest.mark.parametrize(
+    "contact",
+    [
+        "*Correspondence: Jane Doe ,2 Main Street, Springfield, USA",
+        "Correspondence to Jane Doe,2 Main Street, Springfield, USA",
+        "Jane Doe,2 Main Street, Springfield, USA; jane.doe@example.org",
+    ],
+)
+def test_a_contact_line_with_a_stray_comma_does_not_overwrite_the_value(contact):
+    llm = "Department of Chemistry, Example University, Oslo, Norway"
+    frame = _frame(
+        (1, "Jane Doe* and John Smith2"),
+        (1, "2 Department of Biology, Other University, Bergen, Norway"),
+        (1, contact),
+    )
+    authors = [_author(1, "Jane", "Doe", llm), _author(2, "John", "Smith", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == llm
+    assert authors[1].affiliation == "Department of Biology, Other University, Bergen, Norway"
+
+
+def test_a_glued_stray_comma_in_the_byline_is_still_a_marker():
+    frame = _frame(
+        (1, "Jane Doe ,1,2 John Roe 2"),
+        (1, "1 Department of Chemistry, Example University, Oslo, Norway"),
+        (1, "2 Department of Biology, Other University, Bergen, Norway"),
+    )
+    authors = [_author(1, "Jane", "Doe", "llm"), _author(2, "John", "Roe", "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == (
+        "Department of Chemistry, Example University, Oslo, Norway; "
+        "Department of Biology, Other University, Bergen, Norway"
+    )
+    assert authors[1].affiliation == "Department of Biology, Other University, Bergen, Norway"
+
+
+@pytest.mark.parametrize(
+    ("given", "family", "byline"),
+    [
+        ("Kristen", "St. John", "Kristen St. John1"),
+        ("Th.", "Muller", "Th. Muller1"),
+        ("J.-P.", "Martin", "J.-P. Martin1"),
+        ("Ma. Cristina", "Santos", "Ma. Cristina Santos1"),
+        ("Kristen", "St John", "Kristen St. John1"),
+    ],
+)
+def test_a_name_with_an_abbreviated_token_matches_the_byline(given, family, byline):
+    frame = _frame(
+        (1, f"{byline} and Bo Chen2"),
+        (1, "1 Department of Biology, Example University, Oslo, Norway"),
+        (1, "2 Department of Physics, Other University, Bergen, Norway"),
+    )
+    authors = [_author(1, given, family, "llm")]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == "Department of Biology, Example University, Oslo, Norway"
+
+
+@pytest.mark.parametrize("section", ["acknowledgment", "funding"])
+def test_the_late_tier_does_not_read_acknowledgment_prose(section):
+    llm = "Department of Psychology, Example University, Leeds, UK"
+    frame = _sectioned_frame(
+        (1, "title", "Jane Doe1,2"),
+        (1, "title", "1 Department of Psychology, Example University, Leeds, UK"),
+        (1, "title", "2 These authors contributed equally"),
+        (3, section, "We thank the 2 University hospitals in Oslo for access."),
+    )
+    authors = [_author(1, "Jane", "Doe", llm)]
+
+    CoreMetadataExtractor._reconcile_numbered_affiliations(authors, frame)
+
+    assert authors[0].affiliation == llm

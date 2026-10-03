@@ -107,6 +107,16 @@ _GLUED_AFFILIATION_MARKER_RE = re.compile(r"(?<![\w,.])(?P<number>\d{1,2})" + _G
 # A marker still inside a captured definition, spaced or glued: the value then
 # runs into the next definition.
 _EMBEDDED_AFFILIATION_MARKER_RE = re.compile(r"(?<!\w)\d{1,2}\s*" + _GLUED_MARKER_FOLLOW)
+# Contact details on page 1 are not searched for byline markers:
+# "*Correspondence: Jane Doe ,2 Main Street" is an address, not marker 2. A line
+# is cut where "correspond..." or "e-mail" starts, since OCR often appends
+# "*Corresponding author" to the byline itself, and a line that still holds an
+# e-mail address is skipped.
+_CONTACT_DETAILS_RE = re.compile(r"correspond|e-?mail", re.IGNORECASE)
+# A late-tier line has to open with its marker ("3 Nord University", "3Nord"),
+# as an end-of-article affiliation list does. Acknowledgment and funding prose
+# ("We thank the 2 University hospitals in Oslo") mentions numbers mid-sentence.
+_LATE_DEFINITION_LINE_RE = re.compile(r"\s*\d{1,2}\s*[A-Z\u00c0-\u00de]")
 _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
 )
@@ -138,7 +148,8 @@ _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
 # Back-matter section types an end-of-article affiliation list is typed as
 # when the classifier does not call it author_contributions. Unknown (the body
 # fallback), footnote and endnote are left out: body prose such as "In
-# Experiment 2 University students ..." reads like a definition.
+# Experiment 2 University students ..." reads like a definition. Lines must
+# also open with their marker (``_LATE_DEFINITION_LINE_RE``).
 _LATE_AFFILIATION_SECTION_TYPES = (
     CanonicalSection.ACKNOWLEDGMENT,
     CanonicalSection.FUNDING,
@@ -3023,6 +3034,14 @@ class CoreMetadataExtractor:
         if not marker_lines:
             return
 
+        byline_lines = []
+        for line in marker_lines:
+            text = _normalize_affiliation_match_text(line)
+            contact = _CONTACT_DETAILS_RE.search(text)
+            text = text[: contact.start()] if contact else text
+            if "@" not in text:
+                byline_lines.append(text)
+
         author_numbers: dict[int, list[int]] = {}
         for author in authors:
             full_name = " ".join(part.strip() for part in (author.given, author.family) if part)
@@ -3030,9 +3049,11 @@ class CoreMetadataExtractor:
             tokens = [token.rstrip(".") for token in normalized_name.split() if token.rstrip(".")]
             if not tokens:
                 continue
-            # A period may follow a one-letter initial ("A", "J.A"): the LLM's
-            # "Robyn A Frankel" is the printed "Robyn A. Frankel". Between longer tokens
-            # it would match an e-mail address ("jane.doe2@...").
+            # A period may follow any token when a space follows it ("St. John",
+            # "Th. Muller", "J.-P. Martin"), and a one-letter initial also without
+            # the space ("J.A"): the LLM's "Robyn A Frankel" is the printed
+            # "Robyn A. Frankel". A bare period between longer tokens would match
+            # an e-mail address ("jane.doe2@...").
             name_pattern = "".join(
                 re.escape(token)
                 + (
@@ -3040,7 +3061,7 @@ class CoreMetadataExtractor:
                     if index == len(tokens) - 1
                     else r"(?:\.\s*|\s+)"
                     if len(token.rsplit(".", 1)[-1]) == 1
-                    else r"\s+"
+                    else r"\.?\s+"
                 )
                 for index, token in enumerate(tokens)
             )
@@ -3053,8 +3074,8 @@ class CoreMetadataExtractor:
                 r"(?<!,\s)(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?![\d@])",
                 re.IGNORECASE,
             )
-            for line in marker_lines:
-                match = marker_re.search(_normalize_affiliation_match_text(line))
+            for line in byline_lines:
+                match = marker_re.search(line)
                 if match:
                     author_numbers[author.author_id] = [
                         int(number) for number in re.findall(r"\d{1,2}", match.group("numbers"))
@@ -3152,7 +3173,9 @@ class CoreMetadataExtractor:
                 & meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
             ]
             late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
-        late_definitions = _definitions(late_lines)
+        late_definitions = _definitions(
+            [line for line in late_lines if _LATE_DEFINITION_LINE_RE.match(line)]
+        )
 
         affiliations: dict[int, str] = {}
         for number in wanted:
