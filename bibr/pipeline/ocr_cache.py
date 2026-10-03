@@ -62,7 +62,8 @@ logger = logging.getLogger(__name__)
 # Version 19: link runs end before a bracket after punctuation, and a line break
 # keeps its space after a dot or hyphen outside links.
 # Version 20: the link check vetoes a space only inside the link itself.
-_CACHE_FORMAT_VERSION = 20
+# Version 21: a link broken inside keeps no space, and CJK punctuation takes none.
+_CACHE_FORMAT_VERSION = 21
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
