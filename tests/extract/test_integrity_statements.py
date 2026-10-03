@@ -3474,3 +3474,48 @@ def test_thanks_sentence_without_funding_still_ends_the_funding_statement():
     assert metadata.funding_statement == (
         "This research was funded by the Swiss National Science Foundation."
     )
+
+
+@pytest.mark.parametrize(
+    ("text", "field"),
+    [
+        (
+            "The authors declare that there is no conflict of interest between the authors and"
+            " the funding body.",
+            "coi_statement",
+        ),
+        ("The authors are unaware of any conflicts of interest.", "coi_statement"),
+        ("This study is free of any conflict of interest.", "coi_statement"),
+        ("Written informed consent was collected from all participants.", "ethics_statement"),
+        ("Informed consent was taken from the parents of every child.", "ethics_statement"),
+    ],
+)
+def test_declarations_with_less_common_wording_are_captured(text: str, field: str):
+    contents = _contents(
+        [
+            (1, "Introduction", CanonicalSection.INTRODUCTION, "model", 0.9, ["We study things."]),
+            (2, "Notes", CanonicalSection.ENDNOTE, "model", 0.9, [text]),
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert getattr(metadata, field) == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "In the literature on conflicts of interest there is no consensus on disclosure rules.",
+        "Researchers note that declarations of conflicts of interest between sponsors and"
+        " authors vary widely.",
+    ],
+)
+def test_topical_conflict_of_interest_prose_stays_rejected(text: str):
+    contents = _contents(
+        [(1, "Discussion", CanonicalSection.DISCUSSION, "model", 0.9, ["We discuss.", text])]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None

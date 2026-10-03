@@ -414,7 +414,16 @@ _LEGACY_COI_LABEL = re.compile(
 _LEGACY_COI_CUE = re.compile(
     r"\b(?:no|not|none|nothing|without|declares?|declared|declaring|reports?|reported|"
     r"discloses?|disclosed|affirms?|absence of|received|receives|has served|serves? as|"
-    r"consult\w*|honorari\w*|personal fees|employee|shareholder|stock)\b",
+    r"consult\w*|honorari\w*|personal fees|employee|shareholder|stock|unaware|free of)\b",
+    re.IGNORECASE,
+)
+# A cue that declares even in a sentence that reads like topical prose
+# ("... no conflict of interest between the authors and the funding body").
+_LEGACY_COI_STRONG_CUE = re.compile(
+    r"\b(?:declare[sd]?|declaring|unaware|free (?:of|from)|"
+    r"nothing to (?:disclose|declare|report)|"
+    r"(?:has|have|had|there (?:is|are|was|were)) no (?:\w+ ){0,3}?"
+    r"(?:conflicts?|competing|financial|relevant|known|potential|interests?)\b)",
     re.IGNORECASE,
 )
 _COI_CUE_WINDOW = 100
@@ -445,7 +454,7 @@ _NAMED_FUNDER_BODY = re.compile(
 _LEGACY_CONSENT_ACTION = re.compile(
     r"\b(?:obtained|obtain|provided|provide|gave|given|give|signed|sign|received|receive|"
     r"waived|required|sought|secured|documented|approved|consented|conforms?|accordance|"
-    r"helsinki|voluntar\w*)\b",
+    r"helsinki|voluntar\w*|collected|collect|taken|acquired)\b",
     re.IGNORECASE,
 )
 # Statement-typed sections that are not that statement: the Lancet-style
@@ -743,15 +752,16 @@ def _legacy_coi_declares(text: str) -> bool:
     """Whether a row with a COI anchor declares interests, not just names them."""
     if _LEGACY_COI_LABEL.match(text):
         return True
-    if _COI_TOPICAL_PROSE.search(text):
-        return False
-    return any(
-        _LEGACY_COI_CUE.search(
-            text[max(0, match.start() - _COI_CUE_WINDOW) : match.end() + _COI_CUE_WINDOW]
-        )
+    windows = [
+        text[max(0, match.start() - _COI_CUE_WINDOW) : match.end() + _COI_CUE_WINDOW]
         for pattern in _LEGACY_ANCHORS["coi_statement"]
         for match in pattern.finditer(text)
-    )
+    ]
+    if any(_LEGACY_COI_STRONG_CUE.search(window) for window in windows):
+        return True
+    if _COI_TOPICAL_PROSE.search(text):
+        return False
+    return any(_LEGACY_COI_CUE.search(window) for window in windows)
 
 
 def _sentence_around(text: str, start: int, end: int) -> str:
