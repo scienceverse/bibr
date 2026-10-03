@@ -613,6 +613,13 @@ def _names_part(key: str) -> bool:
     )
 
 
+def _names_discussion_only(text: str) -> bool:
+    """Whether a heading names a discussion part without a results part:
+    "Discussion", "General discussion", not "Results and discussion"."""
+    key = _part_name_key(text)
+    return "discussion" in key and "result" not in key
+
+
 def _is_part_name(text: str) -> bool:
     """Whether a heading names a whole part: "Methods", or a short compound
     with one ("Patients and methods", "Result and discussions")."""
@@ -834,7 +841,8 @@ def assign_hierarchy_from_top_level(
     # ("METHOD"); an introduction part heading clears it.
     anchor: PaperSection | None = None
     # A discussion part has opened: guessed back matter after it is back
-    # matter, not a subsection of the discussion.
+    # matter, not a subsection of the discussion. A study marker ends it:
+    # Study 2's own parts follow.
     after_discussion = False
 
     for sec in sections:
@@ -873,6 +881,7 @@ def assign_hierarchy_from_top_level(
             sec.parent_section_id = 0
             last_body = sec
             anchor = None
+            after_discussion = False
             if number is not None:
                 numbered.append((sec, number.path))
             continue
@@ -974,8 +983,7 @@ def assign_hierarchy_from_top_level(
         if sec.level == 1 and sec.section_type in IMRAD_ANCHORS:
             seen.add(sec.section_type)
         if sec.level == 1 and (
-            sec.section_type == CanonicalSection.DISCUSSION
-            or "discussion" in _part_name_key(header)
+            sec.section_type == CanonicalSection.DISCUSSION or _names_discussion_only(header)
         ):
             after_discussion = True
 

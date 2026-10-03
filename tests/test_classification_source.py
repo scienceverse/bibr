@@ -13,6 +13,12 @@ from bibr.pipeline.stages.post_parse import (
     _gate_non_imrad_section_types,
     _inherit_child_section_types,
 )
+from bibr.structure.section_tree import (
+    assign_hierarchy_from_top_level,
+    assign_provisional_scopes,
+    close_scopes,
+    detect_study_markers,
+)
 
 
 def _sec(sid: int, header: str, level: int = 1) -> PaperSection:
@@ -482,3 +488,66 @@ def test_an_untyped_child_of_an_untyped_scope_follows_the_sibling_before_it():
     ]
     _inherit_child_section_types(secs)
     assert secs[2].section_type == CanonicalSection.UNKNOWN
+
+
+def _typed_hierarchy(secs):
+    """The hierarchy with study scopes, then the type inheritance."""
+    markers = detect_study_markers(secs)
+    scopes = close_scopes(secs, assign_provisional_scopes(secs, markers), markers)
+    assign_hierarchy_from_top_level(secs, scope_ids=scopes, marker_ids=set(markers))
+    _inherit_child_section_types(secs)
+    return {s.section_id: s for s in secs}
+
+
+def test_a_study_marker_ends_the_guessed_back_matter_after_a_discussion():
+    """Study 2's "Materials and stimuli" and "Exploratory analyses" are not
+    level-1 back matter after Study 1's Discussion: they sit in their part,
+    and the endnote guess takes the part's type."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(6, "Study 2", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(8, "Materials and stimuli", CanonicalSection.APPENDIX, "model", level=2),
+        _typed(9, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(10, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(11, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[8].level, by[8].parent_section_id) == (2, 7)
+    assert (by[10].level, by[10].parent_section_id, by[10].section_type) == (
+        2,
+        9,
+        CanonicalSection.RESULTS,
+    )
+
+
+def test_a_results_and_discussion_part_does_not_open_the_back_matter():
+    """A "Results and discussion" part (typed results) is no discussion part: a
+    guessed endnote inside it stays a subsection with the part's type. A
+    discussion part still lifts the guesses after it."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Results and discussion", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(3, "Synthesis of the ligands", CanonicalSection.METHODS, "model", level=2),
+        _typed(4, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(5, "Catalytic activity", CanonicalSection.RESULTS, "model", level=2),
+        _typed(6, "Conclusions", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(7, "Experimental", CanonicalSection.METHODS, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[4].level, by[4].parent_section_id, by[4].section_type) == (
+        2,
+        2,
+        CanonicalSection.RESULTS,
+    )
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Discussion", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Supplementary characterization", CanonicalSection.ENDNOTE, "model", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[3].level, by[3].parent_section_id) == (1, 0)
