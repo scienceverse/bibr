@@ -300,3 +300,20 @@ def test_a_scheme_beside_a_figure_keeps_its_own_float():
 
     assert figures["Figure 1. Yield by solvent."] == ["figure"]
     assert figures["Scheme 1. Synthesis route."] == ["scheme"]
+
+
+@pytest.mark.parametrize(
+    ("text", "anchors"),
+    [
+        ("Figure 2. Results", True),
+        ("Figs. 3 and 4", True),
+        ("Fig.2. Results", True),
+        ("Figura 1. Resultados", True),
+        ("Fight or flight responses", False),
+        ("Figurative language", False),
+    ],
+)
+def test_figure_anchor_words(text, anchors):
+    from bibr.structure.parse_media import MediaHandlersMixin
+
+    assert bool(MediaHandlersMixin._FIGURE_ANCHOR_RE.match(text)) is anchors

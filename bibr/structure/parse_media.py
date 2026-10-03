@@ -136,7 +136,9 @@ class MediaHandlersMixin:
     _ANCHOR_BODY_MIN_CHARS = 80
     # An explicit figure caption for anchoring: the figure word followed by
     # anything, so "Fig.2" and named labels anchor too.
-    _FIGURE_ANCHOR_RE = re.compile(rf"^{SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s*\S", re.IGNORECASE)
+    _FIGURE_ANCHOR_RE = re.compile(
+        rf"^{SUPPLEMENT_WORD}?Fig(?:ure|ura|uur|ur)?s?\.?(?![a-z])\s*\S", re.IGNORECASE
+    )
     # A figure-kind caption for another kind of float ("Scheme 1.", "Box 2")
     # anchors no group of its own, but it keeps its regions out of a
     # neighbouring Figure's group.
