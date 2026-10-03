@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Corresponding authors whose address sits in a footnote are now found without the
+  LLM. An Elsevier-style footnote ("E-mail address: x@y.org (J.K. Okafor)", with several
+  pairs separated by commas or semicolons) is read from the whole paper, not only the
+  front-matter block, and each address goes to the one author whose surname and
+  initials fit; two fitting authors, or none, attach nothing. It marks the author
+  corresponding only when a "Corresponding author" or "Correspondence" phrase sits in
+  the same sentence or the three before it. A Wiley-style affiliation block that prints
+  one labelled "E-mail:" address next to the author it names (and whose address
+  contains that author's surname) now marks that author corresponding too. No prompt
+  or LLM input changes.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)

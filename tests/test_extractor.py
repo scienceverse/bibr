@@ -209,6 +209,95 @@ async def test_metadata_extractor_scopes_email_harvester_to_selected_text_ids(mo
     assert "outside.footer" not in llm_context
 
 
+async def test_metadata_extractor_reads_a_name_paired_footnote_outside_the_selected_block(
+    monkeypatch,
+):
+    """The corresponding-author footnote sits outside the front-matter block.
+
+    The harvester stays scoped to the selected block for everything else, but the
+    "E-mail address: x@y (Initials Surname)" footnote is read from the whole paper.
+    """
+    from bibr.extract.front_matter import (
+        FrontMatterBlock,
+        FrontMatterCandidate,
+        FrontMatterResolution,
+    )
+    from bibr.paper_contents import PaperSentence
+    from bibr.schemas import AuthorLLM, CoreMetadataLLM
+
+    sentences = [
+        PaperSentence(1, "Selected title", 0, 1, page_number=1),
+        PaperSentence(2, "Alice Example, Hui-Kai Tan", 0, 2, page_number=1),
+        PaperSentence(3, "Body text.", 1, 3, page_number=1),
+        PaperSentence(4, "* Corresponding author.", 2, 4, page_number=1),
+        PaperSentence(5, "E-mail address: hk.tan@outside.test (H.K. Tan).", 2, 5, page_number=1),
+    ]
+    sections = [
+        PaperSection(0, "Title", 0, None, CanonicalSection.TITLE, 1.0),
+        PaperSection(1, "Introduction", 1, None, CanonicalSection.INTRODUCTION, 1.0),
+        PaperSection(2, "Footnote 1", 1, None, CanonicalSection.FOOTNOTE, 1.0),
+    ]
+    contents = PaperContents(sentences, sections, [], [], {0: "", 1: "", 2: ""})
+
+    def candidate(candidate_id, raw_text, roles, text_ids):
+        return FrontMatterCandidate(
+            candidate_id=candidate_id,
+            source_kind="paragraph",
+            reading_order=int(candidate_id[-1]),
+            page=1,
+            bbox=None,
+            region_label="text",
+            font_size=None,
+            font_bold=None,
+            section_id=0,
+            text_ids=text_ids,
+            paragraph_id=None,
+            raw_text=raw_text,
+            normalized_text=raw_text.casefold(),
+            roles=frozenset(roles),
+        )
+
+    selected = (
+        candidate("c1", "Selected title", {"title"}, (1,)),
+        candidate("c2", "Alice Example, Hui-Kai Tan", {"byline"}, (2,)),
+    )
+    resolution = FrontMatterResolution(
+        candidates=selected,
+        blocks=(FrontMatterBlock("b1", ("c1", "c2"), ("c1",)),),
+        selected_block_id="b1",
+        selection_method="unique_block",
+        reason_flags=(),
+        allowed_text_ids=frozenset({1, 2}),
+        allowed_section_ids=frozenset({0}),
+    )
+    llm = mock.MagicMock()
+    llm.extract_core_metadata = mock.AsyncMock(
+        return_value=CoreMetadataLLM(
+            title="Selected title",
+            authors=[
+                AuthorLLM(given="Alice", family="Example"),
+                AuthorLLM(given="Hui-Kai", family="Tan"),
+            ],
+        )
+    )
+    extractor = MetadataExtractor(
+        contents,
+        llm_client=llm,
+        front_matter_resolution=resolution,
+    )
+    monkeypatch.setattr(
+        extractor.core,
+        "_classify_paper",
+        mock.AsyncMock(return_value=("", "", "", None, None)),
+    )
+
+    await extractor.extract_core_metadata()
+
+    alice, tan = extractor.metadata.authors
+    assert (alice.email, alice.corresponding) == (None, False)
+    assert (tan.email, tan.corresponding) == ("hk.tan@outside.test", True)
+
+
 class TestBuildRefText:
     """``ref_text`` must collapse OCR wide-letter-spacing before segmentation.
 
