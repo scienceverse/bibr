@@ -137,6 +137,14 @@ class MediaHandlersMixin:
     # An explicit figure caption for anchoring: the figure word followed by
     # anything, so "Fig.2" and named labels anchor too.
     _FIGURE_ANCHOR_RE = re.compile(rf"^{SUPPLEMENT_WORD}?(?:Figure|Fig\.?)\s*\S", re.IGNORECASE)
+    # A figure-kind caption for another kind of float ("Scheme 1.", "Box 2")
+    # anchors no group of its own, but it keeps its regions out of a
+    # neighbouring Figure's group.
+    _OTHER_FLOAT_CAPTION_RE = re.compile(
+        r"^(?:Scheme|Box|Chart|Plate|Exhibit|Graph|Map|Diagram|Illustration|Photo)s?\.?"
+        r"\s*(?:\d|[IVX]+\b|[A-Z]\b)",
+        re.IGNORECASE,
+    )
 
     # ---- Table parts ----------------------------------------------------------
     # A block printed this close under a captioned table on the same page is
@@ -1339,6 +1347,15 @@ class MediaHandlersMixin:
                 self._EXPLICIT_FIGURE_RE.match(item.text) or self._FIGURE_ANCHOR_RE.match(item.text)
             )
         ]
+        rivals = [
+            item
+            for item in candidates
+            if item.object_type == "figure"
+            and item.bbox is not None
+            and item.page_number is not None
+            and item not in anchors
+            and self._OTHER_FLOAT_CAPTION_RE.match(item.text)
+        ]
         free_anchors = sorted(
             (item for item in anchors if item.caption_id not in taken),
             key=lambda item: item.source_index,
@@ -1383,7 +1400,11 @@ class MediaHandlersMixin:
             span = (min(first[0], second[0]), 0.0, max(first[2], second[2]), 0.0)
             between = [
                 *body_boxes.get(page, []),
-                *(item.bbox for item in anchors if item.page_number == page and item is not anchor),
+                *(
+                    item.bbox
+                    for item in (*anchors, *rivals)
+                    if item.page_number == page and item is not anchor
+                ),
             ]
             return any(
                 other[1] >= low - 2 and other[3] <= high + 2 and overlap(other, span) >= 0.3
@@ -1405,7 +1426,7 @@ class MediaHandlersMixin:
         for figure in single:
             figure_box = figure.parts[0].bbox
             best: tuple[float, str] | None = None
-            for anchor in anchors:
+            for anchor in (*anchors, *rivals):
                 if anchor.page_number != figure.parts[0].page_number:
                     continue
                 if overlap(figure_box, anchor.bbox) < 0.2:

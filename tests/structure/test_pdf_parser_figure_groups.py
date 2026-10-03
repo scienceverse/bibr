@@ -282,3 +282,21 @@ def test_caption_above_lettered_panels_does_not_take_the_previous_page(first_tit
     }
 
     assert figures == {"1": [1], "2": [2], "3": [3]}
+
+
+def test_a_scheme_beside_a_figure_keeps_its_own_float():
+    page = [
+        _region(0, "image", bbox=[60, 100, 480, 400], image_b64="scheme"),
+        _region(1, "figure_title", "Scheme 1. Synthesis route.", [60, 410, 480, 430]),
+        _region(2, "text", _BODY, [60, 450, 480, 600]),
+        _region(3, "image", bbox=[520, 100, 940, 400], image_b64="figure"),
+        _region(4, "figure_title", "Figure 1. Yield by solvent.", [520, 410, 940, 430]),
+    ]
+
+    figures = {
+        figure.caption: [part.image_b64 for part in figure.parts]
+        for figure in PDFParser([page]).parse().figures
+    }
+
+    assert figures["Figure 1. Yield by solvent."] == ["figure"]
+    assert figures["Scheme 1. Synthesis route."] == ["scheme"]
