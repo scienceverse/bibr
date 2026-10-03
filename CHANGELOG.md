@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The DOI is no longer left empty when the article's own citation block names it a few
+  sentences after "How to cite this article" (version 2 and later of F1000-family
+  articles, which also print the version 1 DOI), when a "Citation:" line in the front
+  matter names it, or
+  when the first page prints it next to a linked article's DOI while the running footer
+  repeats only the article's own (#141).
+- The abstract no longer keeps the printed line breaks of the PDF when the model copies
+  them (the default model often does): a line break inside a paragraph becomes one
+  space, while a blank line between paragraphs and a break before a list item stay
+  (#144).
+- `VAL_ABSTRACT_MISSING` no longer warns on an essay or commentary that prints no
+  abstract when the model found none and the only abstract section is the layout's
+  unlabelled opening column (#144).
+- An article-type kicker printed above the title ("Retraction", "ARTICLES", "Original
+  Article") is no longer taken as the title when the layout labels both as the title:
+  the title that follows it is used (#143).
+- A title that starts with "A " ("A genetic pathway for …") is no longer re-typed as a
+  lettered appendix when page 1 opens with the end of the previous article and its
+  reference list; the paper's byline and front matter stayed out of the extraction
+  (#143).
+- Keywords printed as first-page footnotes (a "Key words" label over one keyword per
+  line, as in some Elsevier journals) now reach the title and keywords call; before,
+  footnote rows never joined the front matter and the keywords came back empty (#144).
+
 ## [0.6.0] - 2026-09-30
 
 ### Added — export schema 12.1 (additive)

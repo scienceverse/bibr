@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import re
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -370,6 +371,39 @@ def decide_authors(
     )
 
 
+# A line break inside a paragraph, with the spaces around it, and a blank line
+# between paragraphs. A word hyphenated at the line end ("open-\nlabel",
+# "COVID-\n19") keeps its hyphen and gets no space. A line opening a list item
+# ("• …", "- …", "1) …", "(a) …") keeps its break.
+_PARAGRAPH_BREAK_RE = re.compile(r"[ \t]*\n(?:[ \t]*\n)+[ \t]*")
+_LINE_BREAK_RE = re.compile(
+    r"[ \t]*\n[ \t]*"
+    r"(?P<item>(?:[\u2022\u25aa\u25a0\u25e6\u25cf\u00b7*-]|\(?\d{1,2}[.)]|\(?[a-z]\))[ \t])?"
+)
+_HYPHEN_LINE_BREAK_RE = re.compile(r"(?<=[^\W_]-)[ \t]*\n[ \t]*(?=[^\W_])")
+
+
+def _line_join(match: re.Match[str]) -> str:
+    return "\n" + match.group("item") if match.group("item") else " "
+
+
+def _join_line_breaks(text: str) -> str:
+    """*text* with each paragraph on one line; a blank line still separates paragraphs."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return "\n\n".join(
+        _LINE_BREAK_RE.sub(_line_join, _HYPHEN_LINE_BREAK_RE.sub("", paragraph))
+        for paragraph in _PARAGRAPH_BREAK_RE.split(text)
+    )
+
+
+def _joined_abstract(candidate: FieldCandidate, text: str) -> tuple[FieldCandidate, str]:
+    """*text* with its printed line breaks joined, and the candidate with that repair noted."""
+    joined = _join_line_breaks(text)
+    if joined == text:
+        return candidate, text
+    return replace(candidate, transforms=(*candidate.transforms, "line_breaks_joined")), joined
+
+
 @_with_flags
 def decide_abstract(
     incumbent: FieldCandidate | None,
@@ -385,13 +419,16 @@ def decide_abstract(
     copyright lines, affiliation blocks) routinely flow into the abstract
     section. The layout fallback is skipped when the model explicitly found no
     abstract, unless the selected record prints an Abstract heading. Nothing is
-    chosen when front-matter selection abstained.
+    chosen when front-matter selection abstained. The chosen text is one line
+    per paragraph: a model that copies the printed lines keeps their breaks.
     """
     producer = incumbent.source if incumbent is not None else None
     if abstained:
         return FieldDecision(
             "abstract",
-            incumbent.value if incumbent is not None and incumbent.veto is None else "",
+            _join_line_breaks(incumbent.value or "")
+            if incumbent is not None and incumbent.veto is None
+            else "",
             None,
             "abstained",
             producer=producer,
@@ -404,9 +441,10 @@ def decide_abstract(
         elif not text:
             considered.append(Verdict(incumbent, False, "empty"))
         else:
-            considered.append(Verdict(incumbent, True, "extracted"))
+            selected, text = _joined_abstract(incumbent, text)
+            considered.append(Verdict(selected, True, "extracted"))
             return FieldDecision(
-                "abstract", text, incumbent, _incumbent_rule(incumbent), tuple(considered)
+                "abstract", text, selected, _incumbent_rule(incumbent), tuple(considered)
             )
     if explicitly_absent and not printed_abstract:
         if fallback is not None:
@@ -415,9 +453,10 @@ def decide_abstract(
     if fallback is not None:
         text = (fallback.value or "").strip()
         if text:
-            considered.append(Verdict(fallback, True, "no extracted abstract"))
+            selected, text = _joined_abstract(fallback, text)
+            considered.append(Verdict(selected, True, "no extracted abstract"))
             return FieldDecision(
-                "abstract", text, fallback, "abstract_section_fallback", tuple(considered)
+                "abstract", text, selected, "abstract_section_fallback", tuple(considered)
             )
         considered.append(Verdict(fallback, False, "empty"))
     return FieldDecision("abstract", "", None, "none", tuple(considered), producer)

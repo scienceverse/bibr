@@ -114,6 +114,47 @@ _REF_LEADIN_RE = re.compile(r"^[A-Z][\w'’\-]+\s*(?:\[\d{4}\]|\(\d{4}\))\s*[:.]
 # next doc_title region is not appended to it.
 _SPLIT_TITLE_MASTHEAD_RE = re.compile(r"\bjournal\b|https?://|www\.|\bISSN\b", re.IGNORECASE)
 
+# Nor is an article-type kicker the layout model labelled ``doc_title`` above
+# the title ("Retraction" over "Retracted: …", "ARTICLES" on an old scan,
+# "Original Article"): the next doc_title region is the title, and the kicker
+# stays out of it.
+_TITLE_KICKER_RE = re.compile(
+    r"(?:articles?|retraction(?:\s+notice)?|retracted\s+article|errat(?:um|a)|corrigendum"
+    r"|correction|expression\s+of\s+concern|editorial|commentary|perspectives?|letters?"
+    r"|review(?:\s+article)?|research(?:\s+(?:article|paper|letter|report))?"
+    r"|original(?:\s+(?:article|research|paper|investigation))?"
+    r"|(?:brief|short)\s+(?:report|communication)|case\s+report|news\s*(?:&|and)\s*views)",
+    re.IGNORECASE,
+)
+
+
+def _is_title_kicker(text: str) -> bool:
+    """Whether a captured page-1 title is only an article-type kicker."""
+    return bool(_TITLE_KICKER_RE.fullmatch(" ".join(text.split()).strip(" .:")))
+
+
+# A notice kicker ("Erratum", "Retraction", "Expression of Concern") may be the
+# notice's own title, the notice signal ``_apply_correction_notice_guard`` and
+# the model read. It gives way only to a title that is a notice too
+# ("Retraction" over "Retracted: …"); over any other doc_title it stays the
+# start of the title, as before.
+_NOTICE_KICKER_RE = re.compile(
+    r"retract|errat|corrigend|correction|expression\s+of\s+concern", re.IGNORECASE
+)
+_NOTICE_TITLE_RE = re.compile(
+    r"\W*(?:retracted|retraction|withdrawn|erratum|errata|corrigendum|correction"
+    r"|expression\s+of\s+concern|notice\s+of)\b",
+    re.IGNORECASE,
+)
+
+
+def _kicker_gives_way_to(kicker: str, title: str) -> bool:
+    """Whether a captured kicker gives way to the doc_title *title* after it."""
+    if _SPLIT_TITLE_MASTHEAD_RE.search(title):
+        return False
+    return not _NOTICE_KICKER_RE.search(kicker) or bool(_NOTICE_TITLE_RE.match(title))
+
+
 # A byline the layout model labelled ``doc_title`` ("ADRIAN LARNER" under an
 # all-caps title on an old scan) is not a title continuation: joined into the
 # title, the name leaves the byline zone and the author call never sees it.
@@ -298,6 +339,43 @@ class HeadingHandlersMixin:
             self._detected_title = text
             logger.debug("Detected doc_title on page 1: %s", self._detected_title[:80])
             captured_title = True
+
+        # A captured title that is only a kicker gives way to the next
+        # front-page doc_title, which is the title: still on the title
+        # section, nothing emitted since, vertically adjacent, and the new
+        # region is no masthead, byline or copyright notice, nor (under a
+        # notice kicker) a title that is not itself a notice. The title
+        # section takes its text, box and page.
+        if (
+            label == "doc_title"
+            and not captured_title
+            and self._is_front_page(page_number)
+            and self._detected_title is not None
+            and _is_title_kicker(self._detected_title)
+            and _kicker_gives_way_to(self._detected_title, text)
+            and self._title_section_id is not None
+            and self._current_section_id == self._title_section_id
+            and len(self.assembler) == self._title_assembler_len
+            and self._title_bbox is not None
+            and self._is_bbox_nearby(self._title_bbox, self._title_page, bbox, page_number)
+            and not self._is_byline_continuation(text)
+            and not self._is_copyright_notice(text)
+        ):
+            kicker = self._detected_title
+            self._detected_title = _TITLE_BADGE_GLYPH_RE.sub("", text)
+            for section in self.sections:
+                if section.section_id == self._title_section_id:
+                    section.header = self._detected_title
+                    section.provenance = [Provenance(page_no=page_number, bbox=bbox_to_tuple(bbox))]
+                    break
+            self._title_bbox = bbox_to_tuple(bbox)
+            self._title_page = page_number
+            logger.debug(
+                "Title kicker %r gave way to doc_title on page 1: %s",
+                kicker,
+                self._detected_title[:80],
+            )
+            return
 
         # A front-page title split across doc_title regions continues the
         # title instead of opening a stray level-1 section: still on the

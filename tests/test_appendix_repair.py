@@ -398,6 +398,21 @@ class TestAppendixNeedsARealAnchor:
             CanonicalSection.APPENDIX,
         ]
 
+    def test_a_title_after_the_previous_articles_references_is_no_appendix(self):
+        # Page 1 opens with the end of the previous article, its reference
+        # list, and then this paper's title, which starts with "A ".
+        secs = [
+            _sec(1, "References", CanonicalSection.REFERENCES, level=1),
+            _sec(2, "A genetic pathway for the development of a small worm", level=1),
+            _sec(3, "Abstract", CanonicalSection.ABSTRACT, level=1),
+        ]
+        secs[1].section_type = CanonicalSection.TITLE
+        secs[1].classification_source = "title"
+
+        assert repair_appendix_hierarchy(secs) == set()
+        assert secs[1].section_type == CanonicalSection.TITLE
+        assert secs[1].classification_source == "title"
+
 
 class TestTocAnchorGuard:
     def test_contents_never_becomes_anchor(self):
