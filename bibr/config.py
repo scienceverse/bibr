@@ -2127,9 +2127,9 @@ class JobsOptions(_BibrSettings):
     )
     dedupe_inflight: bool = Field(
         False,
-        description="Answer a job upload whose file (sha256) and options match a job this "
-        "replica still has queued or running with that job, instead of running the paper "
-        "twice. bibr serve has a single principal (the shared API key), so enable it only "
+        description="Answer a job upload whose file (sha256), filename and options match a "
+        "job this replica still has queued or running with that job, instead of running the "
+        "paper twice. bibr serve has a single principal (the shared API key), so enable it only "
         "when every caller may share jobs; a multi-user front end should deduplicate per "
         "user itself.",
     )

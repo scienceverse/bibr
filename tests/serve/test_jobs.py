@@ -1045,10 +1045,10 @@ def _hold_first_job(monkeypatch) -> list[str]:
     return started
 
 
-def _post(client: TestClient, content: bytes = b"%PDF-1.4", **data):
+def _post(client: TestClient, content: bytes = b"%PDF-1.4", *, filename="a.pdf", **data):
     return client.post(
         "/papers/jobs",
-        files={"file": ("a.pdf", content, "application/pdf")},
+        files={"file": (filename, content, "application/pdf")},
         data=data or None,
     )
 
@@ -1161,6 +1161,10 @@ class TestInflightDedupe:
                 # Other options or another file are another job.
                 assert _post(client, start_page="3").json()["job_id"] != first
                 assert _post(client, b"%PDF-1 other", start_page="2").json()["job_id"] != first
+                # So is a renamed copy: its export names the file it was sent as.
+                renamed = _post(client, start_page="2", include_figures="true", filename="b.pdf")
+                assert renamed.json()["job_id"] != first
+                assert "duplicate" not in renamed.json()
         finally:
             asyncio.run(client.app.state.upload_store.close())
 
@@ -1194,7 +1198,9 @@ class TestInflightDedupe:
             asyncio.run(client.app.state.upload_store.close())
 
     def test_the_fingerprint_compares_options_by_meaning(self):
-        fp = jobs_mod.upload_fingerprint
+        def fp(sha, options, filename="a.pdf"):
+            return jobs_mod.upload_fingerprint(sha, filename, options)
+
         assert fp("ab", {"start_page": "02", "crossref": "yes"}) == fp(
             "ab", {"crossref": "true", "start_page": "2"}
         )
@@ -1202,6 +1208,7 @@ class TestInflightDedupe:
         assert fp("ab", {"start_page": "2"}) != fp("ab", {"start_page": "3"})
         assert fp("ab", {}) != fp("ab", {"include_figures": "false"})
         assert fp("ab", {}) != fp("cd", {})
+        assert fp("ab", {}) != fp("ab", {}, filename="b.pdf")
 
 
 class TestRunJobDispatch:

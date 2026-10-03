@@ -18,8 +18,8 @@ like it does for any failure. A running job cannot be stopped between pipeline
 stages yet, so ``DELETE`` answers ``409`` for it.
 
 **Duplicate uploads.** With ``JOBS_DEDUPE_INFLIGHT=true`` a ``POST`` whose file
-(sha256) and options match a job this replica still has queued or running
-returns that job instead of queueing the paper again. bibr serve has one
+(sha256), filename and options match a job this replica still has queued or
+running returns that job instead of queueing the paper again. bibr serve has one
 principal (the shared API key), so this suits a single-tenant deployment; a
 multi-user front end must deduplicate per user itself.
 
@@ -484,14 +484,18 @@ def _canonical_option(name: str, value: object) -> str:
     return text.lower()
 
 
-def upload_fingerprint(sha256_hex: str, options: Mapping[str, object]) -> str:
-    """What makes two uploads the same request: the file's sha256 and its options.
+def upload_fingerprint(sha256_hex: str, filename: str, options: Mapping[str, object]) -> str:
+    """What makes two uploads the same request: the file's sha256, name and options.
 
-    Options compare by meaning (``1``/``yes``/``true``, ``03``/``3``); an option left
-    out is not the same as its default spelled out, so such a pair just runs twice.
+    The name counts because the export carries it (``source.file_name``): a renamed
+    copy of a file runs again rather than receiving a result named after the first
+    upload. Options compare by meaning (``1``/``yes``/``true``, ``03``/``3``); an
+    option left out is not the same as its default spelled out, so such a pair just
+    runs twice.
     """
     canonical = {name: _canonical_option(name, value) for name, value in options.items()}
-    return sha256_hex + ":" + json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+    material = {"filename": filename, "options": canonical}
+    return sha256_hex + ":" + json.dumps(material, sort_keys=True, separators=(",", ":"))
 
 
 @dataclass(frozen=True)
@@ -755,7 +759,7 @@ def register_job_routes(
             dispatcher = _job_dispatcher()
             fingerprint: str | None = None
             if Settings.jobs.dedupe_inflight:
-                fingerprint = upload_fingerprint(stored.sha256_hex, form_values)
+                fingerprint = upload_fingerprint(stored.sha256_hex, job.filename, form_values)
                 duplicate_of = await _active_duplicate(dispatcher, fingerprint)
             if duplicate_of is not None:
                 # The same file with the same options is already queued or running
