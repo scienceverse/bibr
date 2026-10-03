@@ -227,15 +227,15 @@ _CLOSING_PUNCTUATION = frozenset(".,;)]}>\"'\u201d\u2019")
 
 
 def _is_cjk(ch: str) -> bool:
-    """Han, Hiragana or Katakana: scripts written without word spaces."""
+    """Han, Hiragana, Katakana and their punctuation: written without word spaces."""
     code = ord(ch)
     return (
-        0x3040 <= code <= 0x30FF
+        0x3000 <= code <= 0x30FF
         or 0x31F0 <= code <= 0x31FF
         or 0x3400 <= code <= 0x4DBF
         or 0x4E00 <= code <= 0x9FFF
         or 0xF900 <= code <= 0xFAFF
-        or 0xFF66 <= code <= 0xFF9F
+        or 0xFF01 <= code <= 0xFF9F
         or 0x20000 <= code <= 0x3FFFF
     )
 
@@ -257,13 +257,13 @@ def _bracket_gap(glyphs: list, k: int) -> bool:
     return glyphs[k + 1][1] in _OPENING_BRACKETS and glyphs[k][1] in _CLOSING_PUNCTUATION
 
 
-def _link_run(
+def _link_kind(
     glyphs: list[tuple[int, str, tuple[float, float, float, float] | None]],
     connected: list[bool],
     word_gaps: set[int],
     k: int,
-) -> bool:
-    """Whether the gap after glyph *k* lies inside a URL, DOI or e-mail address.
+) -> str | None:
+    """Which link the gap after glyph *k* lies inside: "url" (URL or DOI), "email" or None.
 
     The run is the glyphs around the gap with no whitespace between them. It
     reads through pdfium's generated breaks within a line and its generated
@@ -272,10 +272,11 @@ def _link_run(
     letters or digits (a glued "seethe" before a link is not part of it) and
     before an opening bracket that follows closing punctuation. The gap is
     inside the link only when the link has glyphs on both sides of it, so a
-    space before "https://" or before an address stays.
+    space before "https://" or before an address stays. A gap inside both kinds
+    is reported as "url".
     """
     if _bracket_gap(glyphs, k):
-        return False
+        return None
     start = k
     while (
         start > 0
@@ -294,9 +295,11 @@ def _link_run(
         end += 1
     run = "".join(glyphs[index][1] for index in range(start, end + 1))
     at = k + 1 - start  # the run index of the glyph after the gap
-    spans = [(m.start(), len(run)) for m in DOI_URL_CONTEXT_RE.finditer(run)]
-    spans += [m.span() for m in _EMAIL_RE.finditer(run)]
-    return any(first < at < stop for first, stop in spans)
+    if any(m.start() < at for m in DOI_URL_CONTEXT_RE.finditer(run)):
+        return "url"
+    if any(first < at < stop for first, stop in (m.span() for m in _EMAIL_RE.finditer(run))):
+        return "email"
+    return None
 
 
 def _printable_glyph(ch: str) -> bool:
@@ -344,7 +347,7 @@ def _repair_word_boundaries(
     the space comes back as an inserted one.
     """
     pairs: list[tuple[str | None, float]] = []
-    # Whether two glyphs belong to one link run (see _link_run).
+    # Whether two glyphs belong to one link run (see _link_kind).
     connected: list[bool] = []
     for (ra, ca, la), (rb, cb, lb) in zip(glyphs, glyphs[1:], strict=False):
         between = range(ra + 1, rb)
@@ -372,8 +375,11 @@ def _repair_word_boundaries(
     insert: dict[int, tuple[float, float]] = {}
     spaces: dict[int, int] = {}
     # Word gaps pdfium marked with a line break, or with a space after a merged
-    # accent, between two letters or digits: they stay spaces next to a link
-    # ("see https://", "at 10.0000/", "café https://").
+    # accent, between two letters or digits: they stay spaces next to an e-mail
+    # address, whose pattern reaches left over a glued word ("mail jane@uni.edu",
+    # "José jose@uni.es"). A URL or DOI span starts exactly at the link, so the
+    # span check alone keeps the space before it, and a marked gap inside the
+    # link still joins ("10.0000/abc00001|23").
     marked: set[int] = set()
     for k, (kind, gap) in enumerate(pairs):
         if kind is None:
@@ -407,7 +413,8 @@ def _repair_word_boundaries(
             k for k in spaces.values() if glyphs[k][1].isalnum() and glyphs[k + 1][1].isalnum()
         }
         for ra, k in spaces.items():
-            if k not in marked and _link_run(glyphs, connected, word_gaps, k):
+            kind = _link_kind(glyphs, connected, word_gaps, k)
+            if kind == "url" or (kind == "email" and k not in marked):
                 del insert[ra]
     if not drop and not insert:
         return records

@@ -247,6 +247,19 @@ def test_generated_break_at_a_word_gap_becomes_a_space_outside_links(line, expec
     assert _repair_line(line) == expected
 
 
+@pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        ("10.0000/abc00001|23", "10.0000/abc0000123"),
+        ("https://osf.io/ab|cde", "https://osf.io/abcde"),
+        ("https://doi.|org/10.0000/x", "https://doi.org/10.0000/x"),
+    ],
+)
+def test_generated_break_between_letters_inside_a_link_joins(line, expected):
+    """A break pdfium set between two letters or digits of a DOI or URL is not a word gap."""
+    assert _repair_line(line) == expected
+
+
 def test_link_run_ends_at_a_bracket_after_punctuation():
     """The space in "[77] (http" is not part of the URL after it."""
     line = "analysis [77] (http://www.example.org/tool)"
@@ -264,7 +277,15 @@ def test_glued_word_gap_before_a_link_gets_a_space():
 
 @pytest.mark.parametrize(
     ("line", "expected"),
-    [("データ検~索", "データ検索"), ("果情|報", "果情報"), ("see~Fig", "see Fig")],
+    [
+        ("データ検~索", "データ検索"),
+        ("果情|報", "果情報"),
+        ("see~Fig", "see Fig"),
+        ("検索~。次", "検索。次"),
+        ("検索。~次", "検索。次"),
+        ("日本~Japan", "日本 Japan"),
+        ("Japan~日本", "Japan 日本"),
+    ],
 )
 def test_no_space_goes_between_two_cjk_glyphs(line, expected):
     """Japanese and Chinese set no spaces between words."""
