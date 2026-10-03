@@ -2190,6 +2190,71 @@ def test_an_inline_keyword_footnote_is_kept_whole():
     )
 
 
+@pytest.mark.parametrize(
+    ("notes", "block"),
+    [
+        pytest.param(
+            (
+                "Keywords: anxiety; depression; sleep",
+                "* These authors contributed equally.",
+                "1 Department of Psychology, Example University, Town",
+                "© 2020 Example Publisher. All rights reserved.",
+                "Received 3 May 2020",
+            ),
+            "Keywords: anxiety; depression; sleep",
+            id="inline-label",
+        ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "Corresponding author.", "Funded by the Example Trust"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-sentence",
+        ),
+        pytest.param(
+            ("Key words", "Choroid plexus", "† Deceased", "Sleep"),
+            "Key words\nChoroid plexus",
+            id="bare-label-then-a-marker",
+        ),
+    ],
+)
+def test_the_keyword_block_stops_before_other_first_page_footnotes(notes, block):
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]), notes
+    )
+
+    assert first_page_keyword_footnote(contents) == (
+        "[Keywords printed in a first-page footnote]\n" + block
+    )
+
+
+def test_the_keyword_block_stops_at_a_row_from_elsewhere_in_the_text():
+    from dataclasses import replace
+
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]),
+        ("Key words", "Choroid plexus", "Sleep"),
+    )
+    contents.sentences[-1] = replace(contents.sentences[-1], text_id=99)
+
+    assert first_page_keyword_footnote(contents).endswith("\nKey words\nChoroid plexus")
+
+
+def test_no_keyword_block_without_page_numbers():
+    from dataclasses import replace
+
+    from bibr.extract.core_metadata import first_page_keyword_footnote
+
+    contents = _with_first_page_notes(
+        _paper_contents([(1, "Selected title", 0), (2, "Body", 1)]), ("Keywords: a; b",)
+    )
+    contents.sentences[:] = [replace(s, page_number=None) for s in contents.sentences]
+
+    assert first_page_keyword_footnote(contents) == ""
+
+
 async def test_only_the_title_and_keywords_call_reads_the_keyword_footnote(monkeypatch):
     title = _candidate("c1", "Selected title", roles=frozenset({"title"}), text_ids=(1,))
     byline = _candidate("c2", "Alice Example", roles=frozenset({"byline"}), text_ids=(2,))

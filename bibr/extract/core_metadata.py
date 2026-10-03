@@ -1692,16 +1692,23 @@ _KEYWORD_FOOTNOTE_LABEL_RE = re.compile(r"^\W*(?:key\s*-?\s*words?|index\s+terms
 _KEYWORD_FOOTNOTE_ITEMS = 15
 _KEYWORD_FOOTNOTE_ITEM_CHARS = 80
 _KEYWORD_FOOTNOTE_CHARS = 600
+# A first-page footnote row that is no keyword: one opening with a footnote
+# marker, a digit or a copyright sign ("* These authors contributed equally.",
+# "1 Department of …", "© 2020 …"), or one ending a sentence.
+_NOT_A_KEYWORD_ROW_RE = re.compile(r"^[*\u2020\u2021\u00a7\u00b6\u00a9\d]|[.!?]$")
 
 
 def first_page_keyword_footnote(contents) -> str:
     """The first-page footnote rows that print the keyword list, as a labelled block, or "".
 
-    The list starts at a footnote that opens with a keyword label and runs
-    through the short footnote rows after it; a long row or a labelled one
-    ("Abbreviations: ...") ends it. Nothing is returned when the paper has a
-    keywords section, or when the label row has no keywords of its own and
-    no short rows follow.
+    The list starts at a footnote that opens with a keyword label. A label row
+    with keywords of its own ("Keywords: a; b; c") is the whole list. A bare
+    label ("Key words") runs through the short keyword rows printed right
+    after it, and ends at a row from elsewhere in the text, a long or
+    labelled row ("Abbreviations: ..."), or one that reads as another
+    footnote (a marker, a digit or "©" first, or a full sentence). Nothing
+    is returned when the paper has a keywords section or no page numbers,
+    or when a bare label has no keyword rows after it.
     """
     sections = {section.section_id: section for section in getattr(contents, "sections", ()) or ()}
     if any(section.section_type == CanonicalSection.KEYWORDS for section in sections.values()):
@@ -1711,26 +1718,36 @@ def first_page_keyword_footnote(contents) -> str:
         (sentence.page_number for sentence in sentences if sentence.page_number is not None),
         default=None,
     )
+    if first_page is None:
+        return ""
     notes = [
-        " ".join(sentence.text.split())
+        (sentence.text_id, " ".join(sentence.text.split()))
         for sentence in sorted(sentences, key=lambda sentence: sentence.text_id)
         if sentence.page_number == first_page
         and getattr(sections.get(sentence.section_id), "section_type", None)
         == CanonicalSection.FOOTNOTE
     ]
     start = next(
-        (i for i, note in enumerate(notes) if _KEYWORD_FOOTNOTE_LABEL_RE.match(note)), None
+        (i for i, (_, note) in enumerate(notes) if _KEYWORD_FOOTNOTE_LABEL_RE.match(note)), None
     )
     if start is None:
         return ""
-    lines = [notes[start]]
-    for note in notes[start + 1 : start + 1 + _KEYWORD_FOOTNOTE_ITEMS]:
-        if not note or len(note) > _KEYWORD_FOOTNOTE_ITEM_CHARS or ":" in note:
-            break
-        lines.append(note)
-    label_only = _KEYWORD_FOOTNOTE_LABEL_RE.sub("", lines[0]).strip(" \t:;,.-\u2013\u2014") == ""
-    if label_only and len(lines) == 1:
-        return ""
+    previous_id, label = notes[start]
+    lines = [label]
+    if _KEYWORD_FOOTNOTE_LABEL_RE.sub("", label).strip(" \t:;,.-\u2013\u2014") == "":
+        for text_id, note in notes[start + 1 : start + 1 + _KEYWORD_FOOTNOTE_ITEMS]:
+            if (
+                text_id != previous_id + 1
+                or not note
+                or len(note) > _KEYWORD_FOOTNOTE_ITEM_CHARS
+                or ":" in note
+                or _NOT_A_KEYWORD_ROW_RE.search(note)
+            ):
+                break
+            lines.append(note)
+            previous_id = text_id
+        if len(lines) == 1:
+            return ""
     block = "\n".join(lines)[:_KEYWORD_FOOTNOTE_CHARS]
     return "[Keywords printed in a first-page footnote]\n" + block
 
