@@ -641,9 +641,9 @@ _ANOTHER_WORK_RE = re.compile(
     r"|original\s+(?:article|paper|research|publication)"
     r"|linked\s+(?:article|paper)"
     r"|refers?\s+to"
-    r"|related"
     r"|see\s+(?:also|(?:online\s*/\s*)?comments?))\b"
-    r"|\blinked\s*:",
+    r"|\blinked\s*:"
+    r"|(?<!-)\brelated\s+(?:article|content|commentary)\b|\brelated\s*:",
     re.IGNORECASE,
 )
 

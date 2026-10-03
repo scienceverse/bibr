@@ -1766,6 +1766,20 @@ def test_a_citation_block_ends_at_a_sentence_naming_another_work(own_line, linke
     assert all(c.marker_kind != "self_citation" for c in selection.candidates)
 
 
+def test_a_related_inside_the_cited_title_does_not_end_the_citation_block():
+    from bibr.extract.doi_identity import collect_doi_candidates
+
+    rows = [
+        (1, CanonicalSection.UNKNOWN, 1, "How to cite this article: Doe J.", 1),
+        (1, CanonicalSection.UNKNOWN, 1, "Health-related quality of life in adults.", 1),
+        (1, CanonicalSection.UNKNOWN, 1, "J Things 2020 https://doi.org/10.1234/x.9", 1),
+    ]
+
+    (candidate,) = collect_doi_candidates(_paragraph_contents(rows))
+
+    assert candidate.marker_kind == "self_citation"
+
+
 @pytest.mark.parametrize(("title_sentences", "promoted"), [(2, True), (3, False)])
 def test_a_citation_block_runs_three_sentences_past_its_cue(title_sentences, promoted):
     from bibr.extract.doi_identity import collect_doi_candidates
