@@ -302,6 +302,29 @@ _REFERENCE_STATEMENT_LABEL: dict[str, re.Pattern[str]] = {
     field: re.compile(rf"^\W*(?:{words})(?:\s+statements?)?\s*[:.—–-]", re.IGNORECASE)
     for field, words in _STATEMENT_LABEL_WORDS.items()
 }
+# ... and only when the text after the label declares something: a reference
+# title split into rows ("Conflicts of interest: a hidden threat to science.")
+# is not a statement.
+_REFERENCE_STATEMENT_CUE = {
+    "funding_statement": re.compile(
+        r"\b(?:fund\w*|grants?|support\w*|award\w*|sponsor\w*|none|no|not)\b", re.IGNORECASE
+    ),
+    "coi_statement": re.compile(
+        r"\b(?:no|not|none|nothing|declare[sd]?|report\w*|disclose[sd]?|receive[sd]?|"
+        r"consult\w*|honorari\w*|employee|shareholder|unaware|free of)\b",
+        re.IGNORECASE,
+    ),
+    "ethics_statement": re.compile(
+        r"\b(?:approv\w*|consent\w*|waive[sd]?|exempt\w*|committee|review board|irb|"
+        r"helsinki|not (?:applicable|required))\b",
+        re.IGNORECASE,
+    ),
+    "data_availability": re.compile(
+        r"\b(?:availab\w*|deposit\w*|request|access\w*|repositor\w*|osf|zenodo|github|doi|"
+        r"shared|not applicable)\b|https?://",
+        re.IGNORECASE,
+    ),
+}
 # A heading region that also holds the one-line statement ("Disclosure and
 # competing interests statement The authors declare no competing interests.").
 _HEADING_TAIL_START = re.compile(r"\s(?=[A-Z][a-z]*\s+[a-z])")
@@ -861,8 +884,10 @@ def _legacy_capture_at(
     sentence = rows[index]
     section = section_by_id.get(sentence.section_id)
     in_references = section is not None and section.section_type == CanonicalSection.REFERENCES
-    if in_references and not _REFERENCE_STATEMENT_LABEL[field].match(sentence.text):
-        return []
+    if in_references:
+        label = _REFERENCE_STATEMENT_LABEL[field].match(sentence.text)
+        if not label or not _REFERENCE_STATEMENT_CUE[field].search(sentence.text[label.end() :]):
+            return []
     if not any(pattern.search(sentence.text) for pattern in _LEGACY_ANCHORS[field]):
         return []
     if not _legacy_anchor_row_passes(field, sentence.text):

@@ -3519,3 +3519,26 @@ def test_topical_conflict_of_interest_prose_stays_rejected(text: str):
     metadata = _shadow_values(contents)
 
     assert metadata.coi_statement is None
+
+
+def test_reference_title_that_opens_with_a_statement_label_is_not_a_statement():
+    contents = _contents(
+        [
+            (
+                1,
+                "References",
+                CanonicalSection.REFERENCES,
+                "exact_alias",
+                1.0,
+                [
+                    "1. Smith J, Doe A.",
+                    "Conflicts of interest: a hidden threat to science.",
+                    "J Ethics. 2019;3:1-9.",
+                ],
+            )
+        ]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.coi_statement is None
