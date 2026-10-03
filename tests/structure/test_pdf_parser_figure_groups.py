@@ -6,6 +6,8 @@ synthetic.
 
 from __future__ import annotations
 
+import pytest
+
 from bibr.structure.pdf_parser import PDFParser
 
 _BODY = (
@@ -251,3 +253,32 @@ def test_a_figure_that_owns_its_panel_caption_takes_no_second_caption():
 
     assert figures["Figure 2. Filter circuit."] == ["a", "b"]
     assert figures["Figure 3. Hardware parts."] == ["hardware"]
+
+
+def _caption_above_page(number, first_title, second_title):
+    return [
+        _region(
+            0, "figure_title", f"Figure {number}: Effect on outcome {number}", [190, 89, 808, 109]
+        ),
+        _region(1, "figure_title", first_title, [441, 120, 559, 137]),
+        _region(2, "chart", bbox=[337, 148, 656, 323], image_b64=f"{number}a"),
+        _region(3, "figure_title", second_title, [425, 329, 575, 345]),
+        _region(4, "chart", bbox=[337, 356, 657, 532], image_b64=f"{number}b"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("first_title", "second_title"),
+    [("A", "B"), ("(a) Women", "(b) Men"), ("Panel A: Women", "Panel B: Men")],
+)
+def test_caption_above_lettered_panels_does_not_take_the_previous_page(first_title, second_title):
+    """With captions printed above their figures, the previous page's panels
+    come before "Figure n" in reading order; each page keeps its own caption."""
+    pages = [_caption_above_page(n, first_title, second_title) for n in (1, 2, 3)]
+
+    figures = {
+        figure.label: sorted({part.page_number for part in figure.parts})
+        for figure in PDFParser(pages).parse().figures
+    }
+
+    assert figures == {"1": [1], "2": [2], "3": [3]}

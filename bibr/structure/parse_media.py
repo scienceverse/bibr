@@ -1105,6 +1105,15 @@ class MediaHandlersMixin:
                 # A region printed beyond another explicit caption belongs to
                 # that caption's figure, whatever the reading order says.
                 continue
+            if any(
+                (figure.parts[-1].page_number if figure.parts else figure.page_number)
+                != caption.page_number
+                for figure in trailing
+            ) and self._captions_figure_below(caption, grouped_ids):
+                # A caption printed above a figure on its own page captions
+                # that figure, not the previous page's panels (caption-above
+                # layouts put those panels before it in reading order).
+                continue
 
             next_figure_source = next(
                 (source for source in figure_sources if source > caption.source_index),
@@ -1201,6 +1210,24 @@ class MediaHandlersMixin:
         if grouped_ids:
             self.figures = [figure for figure in self.figures if id(figure) not in grouped_ids]
         return descriptions, panel_owners, supporting_owners, caption_owners
+
+    def _captions_figure_below(self, caption: CaptionCandidate, grouped_ids: set[int]) -> bool:
+        """Is an ungrouped figure printed right below *caption* on its page?"""
+        if caption.bbox is None:
+            return False
+        cx1, _cy1, cx2, cy2 = caption.bbox
+        for figure in self.figures:
+            if id(figure) in grouped_ids:
+                continue
+            for part in figure.parts:
+                if part.page_number != caption.page_number or part.bbox is None:
+                    continue
+                x1, y1, x2, _y2 = part.bbox
+                overlap = min(cx2, x2) - max(cx1, x1)
+                narrower = max(1.0, min(cx2 - cx1, x2 - x1))
+                if y1 >= cy2 - 8 and overlap / narrower >= 0.2:
+                    return True
+        return False
 
     @staticmethod
     def _fenced_from_caption(
