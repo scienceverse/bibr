@@ -35,9 +35,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   up in headings, paragraphs and references ("38 References", "668
   References"). A rising column of bare numbers in the outer margin, aligned
   on one edge and set one per text line, is removed before the PDF's text
-  layer is read when the document numbers its lines on at least two pages.
-  Numbered reference lists, table row numbers and ids, a numbered list on a
-  single page and numbers set against their text are kept (#113).
+  layer is read when the document numbers its lines on at least two pages
+  and on 40% of its pages with text. Numbered reference lists, numbers set
+  against their text, such as row ids, and a numbered list or table on a few
+  pages of a longer document are kept (#113).
 - Accented letters that a PDF draws as a letter plus a separate spacing
   accent no longer come out split in names, titles and references
   ("Bas¸kaya", "Brˇci´c", "Ca´rcel"). An accent set over or under a

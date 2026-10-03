@@ -220,6 +220,22 @@ def test_numbered_column_on_a_single_page_is_kept():
     assert "12" in text
 
 
+def test_numbered_table_on_two_pages_of_a_longer_paper_is_kept():
+    """Items 1-12 on two pages of a six-page paper: a questionnaire, not line numbers."""
+    content = b""
+    for index in range(12):
+        y = 700.0 - 25.0 * index
+        content += _number(index + 1, y) + _bt(f"Item {index} of the questionnaire.", _TEXT_LEFT, y)
+    prose = b"".join(
+        _bt("Body text of an unnumbered page.", _TEXT_LEFT, 700.0 - 14.0 * i) for i in range(20)
+    )
+
+    (text,) = _fill(_pdf(content, pages=2, extra_pages=(prose,) * 4), [_region(712.0, 420.0)])
+
+    assert text.splitlines()[0].startswith("1")
+    assert "12" in text
+
+
 def test_furniture_failure_falls_back_to_the_plain_text_layer(monkeypatch):
     def broken(page):
         raise RuntimeError("furniture pass failed")

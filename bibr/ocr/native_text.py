@@ -1461,12 +1461,14 @@ def _text_object_text(pdfium_c, obj, textpage) -> str:
 #   and nothing on the numbers' lines lies further out. Numbers that touch
 #   their text are labels; text further out makes them a table column
 #   ("ID-" before "99").
-# - the document has such a column on at least _LINE_NUMBER_MIN_PAGES pages.
-#   A numbered column on a single page is a table's or a list's.
+# - the document has such a column on at least _LINE_NUMBER_MIN_PAGES pages
+#   and on _LINE_NUMBER_MIN_PAGE_SHARE of its pages with text. A manuscript
+#   numbers nearly every page; a numbered table or list covers a few.
 # Pages read by OCR keep their numbers.
 _LINE_NUMBER_MARGIN = 0.13
 _LINE_NUMBER_MIN_COUNT = 8
 _LINE_NUMBER_MIN_PAGES = 2
+_LINE_NUMBER_MIN_PAGE_SHARE = 0.4
 _LINE_NUMBER_ALIGN_PT = 4.0
 _LINE_NUMBER_MAX_WIDTH_PT = 40.0
 _LINE_NUMBER_MAX_HEIGHT_PT = 20.0
@@ -1646,8 +1648,8 @@ def _remove_objects(pdfium_c, page, found: list) -> None:
             pdfium_c.FPDFPageObj_Destroy(obj)
 
 
-def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[str], list]:
-    """The watermark entries, their strings and the line-number entries of *page*.
+def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[str], list, int]:
+    """The watermark entries, their strings, the line-number entries and the text-object count.
 
     Nothing is removed. Entries are ``(parent, object, matrix)`` as collected
     by ``_collect_text_objects``; the strings are only read when
@@ -1680,7 +1682,7 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
             candidates.append(len(boxes) - 1)
     read_watermarks = watermark_text and bool(watermarks)
     if not read_watermarks and len(candidates) < _LINE_NUMBER_MIN_COUNT:
-        return watermarks, [], []
+        return watermarks, [], [], len(objects)
     texts: list[str] = []
     numbers: list[tuple[int, _Box]] = []
     number_entries: list[int] = []
@@ -1707,41 +1709,47 @@ def _find_furniture(page, *, watermark_text: bool = True) -> tuple[list, list[st
         others = [box for index, box in enumerate(boxes) if box is not None and index not in taken]
         column = _line_number_column(numbers, others, page_left, page_right)
         line_numbers = [objects[number_entries[i]] for i in sorted(column)]
-    return watermarks, texts, line_numbers
+    return watermarks, texts, line_numbers, len(objects)
 
 
-# Documents already checked for line-numbered pages, with the count found
-# (stopping at _LINE_NUMBER_MIN_PAGES). Callers hold ``pdfium_lock``.
-_LINE_NUMBERED_PAGES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Documents already checked for line-numbered pages. Callers hold
+# ``pdfium_lock``.
+_LINE_NUMBERED_DOCUMENTS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def _document_is_line_numbered(pdf) -> bool:
-    """Whether at least _LINE_NUMBER_MIN_PAGES pages of *pdf* carry a line-number column.
+    """Whether *pdf* numbers its lines on enough of its pages.
 
-    A manuscript numbers its lines on page after page; a numbered column on
-    a single page is a table's or a list's. Pages are loaded fresh, so the
-    check sees them unstripped; a page that fails to load or scan is skipped.
+    That is at least _LINE_NUMBER_MIN_PAGES pages and
+    _LINE_NUMBER_MIN_PAGE_SHARE of the pages with text. Pages are loaded
+    fresh, so the check sees them unstripped; a page that fails to load or
+    scan is skipped.
     """
-    found = _LINE_NUMBERED_PAGES.get(pdf)
-    if found is None:
-        found = 0
-        for index in range(len(pdf)):
-            try:
-                page = pdf[index]
-            except Exception:  # noqa: BLE001 - a broken page only drops out of the count
-                logger.debug("Line-number scan could not load page %d", index, exc_info=True)
-                continue
-            try:
-                found += bool(_find_furniture(page, watermark_text=False)[2])
-            except Exception:  # noqa: BLE001
-                logger.debug("Line-number scan failed on page %d", index, exc_info=True)
-                continue
-            finally:
-                page.close()
-            if found >= _LINE_NUMBER_MIN_PAGES:
-                break
-        _LINE_NUMBERED_PAGES[pdf] = found
-    return found >= _LINE_NUMBER_MIN_PAGES
+    numbered = _LINE_NUMBERED_DOCUMENTS.get(pdf)
+    if numbered is not None:
+        return numbered
+    n_pages = len(pdf)
+    found = with_text = 0
+    for index in range(n_pages):
+        try:
+            page = pdf[index]
+        except Exception:  # noqa: BLE001 - a broken page only drops out of the count
+            logger.debug("Line-number scan could not load page %d", index, exc_info=True)
+            continue
+        try:
+            _watermarks, _texts, line_numbers, n_text = _find_furniture(page, watermark_text=False)
+        except Exception:  # noqa: BLE001
+            logger.debug("Line-number scan failed on page %d", index, exc_info=True)
+            continue
+        finally:
+            page.close()
+        found += bool(line_numbers)
+        with_text += n_text > 0
+        if found >= max(_LINE_NUMBER_MIN_PAGES, _LINE_NUMBER_MIN_PAGE_SHARE * n_pages):
+            break
+    numbered = found >= max(_LINE_NUMBER_MIN_PAGES, _LINE_NUMBER_MIN_PAGE_SHARE * with_text)
+    _LINE_NUMBERED_DOCUMENTS[pdf] = numbered
+    return numbered
 
 
 def strip_furniture_objects(page) -> tuple[list[str], int]:
@@ -1756,7 +1764,7 @@ def strip_furniture_objects(page) -> tuple[list[str], int]:
     """
     import pypdfium2.raw as pdfium_c
 
-    watermarks, texts, line_numbers = _find_furniture(page)
+    watermarks, texts, line_numbers, _n_text = _find_furniture(page)
     pdf = getattr(page, "pdf", None)
     if line_numbers and (pdf is None or not _document_is_line_numbered(pdf)):
         line_numbers = []
