@@ -372,18 +372,26 @@ def decide_authors(
 
 
 # A line break inside a paragraph, with the spaces around it, and a blank line
-# between paragraphs. A word hyphenated at the line end ("open-\nlabel") keeps
-# its hyphen and gets no space.
+# between paragraphs. A word hyphenated at the line end ("open-\nlabel",
+# "COVID-\n19") keeps its hyphen and gets no space. A line opening a list item
+# ("• …", "- …", "1) …", "(a) …") keeps its break.
 _PARAGRAPH_BREAK_RE = re.compile(r"[ \t]*\n(?:[ \t]*\n)+[ \t]*")
-_LINE_BREAK_RE = re.compile(r"[ \t]*\n[ \t]*")
-_HYPHEN_LINE_BREAK_RE = re.compile(r"(?<=[^\W\d_]-)[ \t]*\n[ \t]*(?=[^\W\d_])")
+_LINE_BREAK_RE = re.compile(
+    r"[ \t]*\n[ \t]*"
+    r"(?P<item>(?:[\u2022\u25aa\u25a0\u25e6\u25cf\u00b7*-]|\(?\d{1,2}[.)]|\(?[a-z]\))[ \t])?"
+)
+_HYPHEN_LINE_BREAK_RE = re.compile(r"(?<=[^\W_]-)[ \t]*\n[ \t]*(?=[^\W_])")
+
+
+def _line_join(match: re.Match[str]) -> str:
+    return "\n" + match.group("item") if match.group("item") else " "
 
 
 def _join_line_breaks(text: str) -> str:
     """*text* with each paragraph on one line; a blank line still separates paragraphs."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     return "\n\n".join(
-        _LINE_BREAK_RE.sub(" ", _HYPHEN_LINE_BREAK_RE.sub("", paragraph))
+        _LINE_BREAK_RE.sub(_line_join, _HYPHEN_LINE_BREAK_RE.sub("", paragraph))
         for paragraph in _PARAGRAPH_BREAK_RE.split(text)
     )
 
@@ -418,7 +426,9 @@ def decide_abstract(
     if abstained:
         return FieldDecision(
             "abstract",
-            incumbent.value if incumbent is not None and incumbent.veto is None else "",
+            _join_line_breaks(incumbent.value or "")
+            if incumbent is not None and incumbent.veto is None
+            else "",
             None,
             "abstained",
             producer=producer,
