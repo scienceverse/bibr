@@ -631,8 +631,9 @@ _NOT_PROMOTED_CONTEXTS = frozenset({"cited_work", "journal_identity"})
 # F1000 "How to cite this article: … [version 2; …]" prints it two sentences
 # on, and a "Citation:" line whose title holds full stops three.
 _CITATION_BLOCK_SENTENCES = 3
-# A sentence naming another work ("This is a commentary on https://doi.org/…")
-# ends the citation block before its DOI: the block printed none of its own.
+# A sentence naming another work ("This is a commentary on https://doi.org/…",
+# "See Comment page 12 https://doi.org/…") ends the citation block before its
+# DOI: the block printed none of its own.
 _ANOTHER_WORK_RE = re.compile(
     r"\b(?:(?:commentary|comments?)\s+on"
     r"|(?:reply|response|rebuttal)\s+to"
@@ -640,7 +641,9 @@ _ANOTHER_WORK_RE = re.compile(
     r"|original\s+(?:article|paper|research|publication)"
     r"|linked\s+(?:article|paper)"
     r"|refers?\s+to"
-    r"|see\s+also)\b",
+    r"|related"
+    r"|see\s+(?:also|(?:online\s*/\s*)?comments?))\b"
+    r"|\blinked\s*:",
     re.IGNORECASE,
 )
 

@@ -1727,6 +1727,18 @@ def test_a_how_to_cite_block_on_the_last_page_still_names_the_paper():
             None,
             id="own-doi-as-url",
         ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "See Comment page 12 https://doi.org/10.1234/target.2019.9",
+            None,
+            id="see-comment",
+        ),
+        pytest.param(
+            "https://doi.org/10.1234/own.2020.1",
+            "Linked: https://doi.org/10.1234/target.2019.9",
+            None,
+            id="linked-label",
+        ),
     ],
 )
 def test_a_citation_block_ends_at_a_sentence_naming_another_work(own_line, linked_line, selected):
