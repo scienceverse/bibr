@@ -588,6 +588,9 @@ _STATEMENT_TYPES = frozenset(
     }
 )
 _GUESSED_TYPE_SOURCES = frozenset({"model", "llm", "alias_prior"})
+_SUBDIVIDED_PART_TYPES = frozenset(
+    {CanonicalSection.METHODS, CanonicalSection.RESULTS, CanonicalSection.DISCUSSION}
+)
 
 
 def _part_name_key(text: str) -> str:
@@ -609,6 +612,22 @@ def _is_part_name(text: str) -> bool:
         and all(len(piece.split()) <= 2 for piece in pieces)
         and any(piece in _PART_HEADINGS for piece in pieces)
     )
+
+
+# Part names that close a document rather than name its discussion: a paper
+# that ends with "Conclusion" can still open a section with its first
+# discussion-typed heading ("Implications for Theory and Research").
+_CLOSING_PART_RE = re.compile(r"^(?:conclu|summary|final remarks)")
+# Headings that close a "Part 1" / "Part 2" body: the general discussion and
+# the conclusion belong to the whole paper, not to the last part.
+_CLOSES_PARTS_RE = re.compile(r"^(?:general discussion|conclu|concluding|overall discussion)")
+_CHAPTER_WORD_RE = re.compile(r"^\s*chapter\b", re.IGNORECASE)
+
+
+def _is_panel_heading(text: str) -> bool:
+    """A boxed panel ("Research in context", "Key messages"): printed beside
+    the body, so it holds no body headings."""
+    return is_section_container_heading(text) and _part_name_key(text) not in _DECLARATIONS_HEADINGS
 
 
 def _is_all_caps(text: str) -> bool:
@@ -644,6 +663,9 @@ class _DocumentHeadings:
     # "Chapter N" headings number the document (a thesis): the part names
     # inside a chapter ("Introduction", "Methodology") are its subsections.
     chapter_mode: bool
+    # The chapters are "Part N" only (a two-survey paper): a general
+    # discussion or a conclusion after them is not inside the last part.
+    part_mode: bool
     # Unnumbered headings between the last numbered body heading of a
     # numbered paper and its reference list. A back-matter type guessed for
     # one of them ("Ethics and consent" after "5. Conclusions") is back
@@ -657,7 +679,12 @@ class _DocumentHeadings:
         numbers = _document_section_numbers(sections)
         body = [s for s in sections if s.level > 0]
         parts = [s for s in body if s.section_id not in numbers and _is_part_name(s.header or "")]
-        part_types = frozenset(s.section_type for s in parts if s.section_type in IMRAD_ANCHORS)
+        part_types = frozenset(
+            s.section_type
+            for s in parts
+            if s.section_type in IMRAD_ANCHORS
+            and not _CLOSING_PART_RE.match(_part_name_key(s.header or ""))
+        )
         caps_parts = sum(_is_all_caps(s.header or "") for s in parts)
         other_body = [
             s
@@ -672,7 +699,12 @@ class _DocumentHeadings:
             and caps_parts > len(parts) // 2
             and any(not _is_all_caps(s.header or "") for s in other_body)
         )
-        chapter_mode = sum(number.kind == "chapter" for number in numbers.values()) >= 2
+        chapter_ids = [sid for sid, number in numbers.items() if number.kind == "chapter"]
+        chapter_mode = len(chapter_ids) >= 2
+        by_id = {s.section_id: s for s in sections}
+        part_mode = chapter_mode and not any(
+            _CHAPTER_WORD_RE.match(by_id[sid].header or "") for sid in chapter_ids if sid in by_id
+        )
         # The body ends at the reference list: numbered headings after it
         # (a peer-review report's points, numbered appendices) are not body.
         references_at = next(
@@ -696,19 +728,22 @@ class _DocumentHeadings:
                 for sec in sections[body_numbered[-1] + 1 : references_at]
                 if sec.level > 0 and sec.section_id not in numbers
             )
-        return cls(numbers, part_types, caps_mode, chapter_mode, trailing_ids)
+        return cls(numbers, part_types, caps_mode, chapter_mode, part_mode, trailing_ids)
 
 
 def _numbered_parent(
     path: tuple[int | str, ...], earlier: list[tuple[PaperSection, tuple[int | str, ...]]]
 ) -> PaperSection | None:
     """Nearest earlier numbered heading whose number is a prefix of ``path``
-    (2.3 -> 2), else the nearest earlier one with a shorter number."""
+    (2.3 -> 2), else the nearest earlier one with a shorter number in the same
+    top-level part (2.3.1 -> 2.2 when "2" and "2.3" are not printed). A
+    sub-number never crosses into another part: "3.1" after "2 Methods" with
+    no "3" printed has no numbered parent."""
     for prev, prev_path in reversed(earlier):
         if len(prev_path) < len(path) and path[: len(prev_path)] == prev_path:
             return prev
     for prev, prev_path in reversed(earlier):
-        if len(prev_path) < len(path):
+        if len(prev_path) < len(path) and prev_path[0] == path[0]:
             return prev
     return None
 
@@ -782,6 +817,12 @@ def assign_hierarchy_from_top_level(
     seen_types: dict[int, set[CanonicalSection]] = {}
     numbered: list[tuple[PaperSection, tuple[int | str, ...]]] = []
     last_body: PaperSection | None = None
+    # The most recent level-1 methods, results or discussion part heading
+    # ("METHOD"); an introduction part heading clears it.
+    anchor: PaperSection | None = None
+    # A discussion part has opened: guessed back matter after it is back
+    # matter, not a subsection of the discussion.
+    after_discussion = False
 
     for sec in sections:
         if sec.level == 0:
@@ -813,10 +854,14 @@ def assign_hierarchy_from_top_level(
             continue
 
         if sec.section_id in markers:
-            # Study marker header ("Study 2"): a level-1 scope opener.
+            # Study marker header ("Study 2"): a level-1 scope opener. A
+            # numbered one ("2 Study 1") is the numbered parent of 2.1.
             sec.level = 1
             sec.parent_section_id = 0
             last_body = sec
+            anchor = None
+            if number is not None:
+                numbered.append((sec, number.path))
             continue
 
         if sec.section_type == CanonicalSection.TITLE and sec.classification_source == "title":
@@ -826,7 +871,16 @@ def assign_hierarchy_from_top_level(
         if number is not None:
             level = min(len(number.path), _MAX_LEVEL)
             parent = _numbered_parent(number.path, numbered)
-            if parent is None and level > 1 and last_body is not None and last_body.level < level:
+            last_number = doc.numbers.get(last_body.section_id) if last_body is not None else None
+            if (
+                parent is None
+                and level > 1
+                and last_body is not None
+                and last_body.level < level
+                and (last_number is None or last_number.path[0] == number.path[0])
+            ):
+                # "1.1" under an unnumbered "Introduction"; never "3.1" under
+                # "2 Methods".
                 parent = last_body
             if parent is not None and parent.level >= level:
                 level = min(parent.level + 1, _MAX_LEVEL)
@@ -845,8 +899,15 @@ def assign_hierarchy_from_top_level(
             and sec.section_type not in doc.part_types
             and len(doc.numbers) < 3
         )
-        if _is_interlude(sec) or (
-            sec.section_id in doc.trailing_ids and sec.section_type in _INTERLUDE_HEADING_TYPES
+        if (
+            _is_interlude(sec)
+            or (sec.section_id in doc.trailing_ids and sec.section_type in _INTERLUDE_HEADING_TYPES)
+            or (
+                after_discussion
+                and not doc.numbers
+                and sec.section_type in _INTERLUDE_HEADING_TYPES
+                and sec.classification_source in _GUESSED_TYPE_SOURCES
+            )
         ):
             if (
                 last_body is not None
@@ -862,17 +923,22 @@ def assign_hierarchy_from_top_level(
                 # The reference list ends the body: what follows (appendices,
                 # supplementary material, notes) is not inside its last part.
                 last_body = None
+                anchor = None
             elif sec.section_id in doc.trailing_ids:
                 # Past the numbered body only back matter follows.
                 last_body = sec
             continue
         if doc.caps_mode:
             # The casing is the document's own level-1 typography: it
-            # outranks type guesses.
+            # outranks type guesses. Some papers set two levels in capitals
+            # ("METHOD" > "PARTICIPANTS"): a capitals heading that names no
+            # part goes under the methods, results or discussion part heading
+            # before it. After "INTRODUCTION" a capitals heading is a part
+            # of its own (a review's "HISTORY").
             opens_section = (
-                _is_all_caps(header)
-                or _is_part_name(header)
+                _is_part_name(header)
                 or is_section_container_heading(header)
+                or (_is_all_caps(header) and anchor is None)
             )
         else:
             opens_section = (
@@ -881,15 +947,24 @@ def assign_hierarchy_from_top_level(
                 or first_of_type
                 or getattr(sec, "is_top_level_predicted", None) is True
             )
-        if last_body is None or (opens_section and not doc.chapter_mode):
+        closes_parts = doc.part_mode and bool(_CLOSES_PARTS_RE.match(_part_name_key(header)))
+        if last_body is None or (opens_section and (not doc.chapter_mode or closes_parts)):
             sec.level = 1
             sec.parent_section_id = 0
-            last_body = sec
+            if not _is_panel_heading(header):
+                last_body = sec
+            if _is_part_name(header):
+                anchor = sec if sec.section_type in _SUBDIVIDED_PART_TYPES else None
         else:
             sec.level = min(last_body.level + 1, _MAX_LEVEL)
             sec.parent_section_id = last_body.section_id
         if sec.level == 1 and sec.section_type in IMRAD_ANCHORS:
             seen.add(sec.section_type)
+        if sec.level == 1 and (
+            sec.section_type == CanonicalSection.DISCUSSION
+            or "discussion" in _part_name_key(header)
+        ):
+            after_discussion = True
 
 
 def build_section_tree(sections: list[PaperSection]) -> None:
