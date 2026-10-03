@@ -178,14 +178,29 @@ def test_topical_philosophy_sections_are_retrieval_only():
     shadow_resolution, shadow = _resolve_apply(contents, "shadow")
     resolution, active = _resolve_apply(contents, "active")
 
-    # Each section is a four-paragraph chapter typed ETHICS by the section
-    # model: too long to be copied as a statement, so the compatibility value
-    # falls back to the lexical path, which finds no ethics anchor.
-    assert legacy.ethics_statement is None
-    assert shadow.ethics_statement is None
+    # Each section is a short four-paragraph chapter typed ETHICS by the
+    # section model. Paragraph count alone does not make it a chapter, so the
+    # compatibility value still copies it (with headings, as a join); only the
+    # bounded selection rejects the topical prose.
+    expected_legacy = "\n\n".join(
+        f"{section.header}: "
+        + " ".join(
+            sentence.text
+            for sentence in contents.sentences
+            if sentence.section_id == section.section_id
+        )
+        for section in contents.sections
+    )
+    assert legacy.ethics_statement == expected_legacy
+    assert shadow.ethics_statement == expected_legacy
     assert active.ethics_statement is None
     assert legacy_resolution.issues == ()
-    assert not any("ethics_statement" in issue.evidence_ids for issue in shadow_resolution.issues)
+    issue = next(
+        issue
+        for issue in shadow_resolution.issues
+        if issue.code == "VAL_STATEMENT_SUSPECT" and "ethics_statement" in issue.evidence_ids
+    )
+    assert issue.evidence_ids[:4] == ("ethics_statement", "section:1", "section:2", "section:3")
     assert tuple(vars(sentence).copy() for sentence in contents.sentences) == original_body
     section_candidates = {
         candidate.section_ids[0]: candidate
@@ -3190,3 +3205,52 @@ def test_grant_information_label_still_ends_a_competing_interests_statement():
     metadata = _shadow_values(contents)
 
     assert metadata.coi_statement == "No competing interests were disclosed."
+
+
+def test_model_typed_data_section_with_four_short_paragraphs_is_copied_whole():
+    rows: list[str | tuple[str, int]] = [
+        (
+            "Single-cell RNA-seq data have been deposited at GEO as GSE123456 and are publicly"
+            " available as of the date of publication.",
+            1,
+        ),
+        (
+            "Microscopy data reported in this paper will be shared by the lead contact upon request.",
+            2,
+        ),
+        (
+            "All original code has been deposited at Zenodo and is publicly available at"
+            " https://doi.org/10.5281/zenodo.1.",
+            3,
+        ),
+        (
+            "Any additional information required to reanalyze the data reported in this paper is"
+            " available from the lead contact upon request.",
+            4,
+        ),
+    ]
+    contents = _contents(
+        [(1, "Data and code availability", CanonicalSection.OPEN_DATA, "model", 0.97, rows)]
+    )
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.data_availability == " ".join(text for text, _ in rows)
+
+
+def test_long_model_typed_section_without_an_anchor_keeps_its_opening_paragraphs():
+    filler = (
+        "Ethical issues that may surface during data collection include confidentiality,"
+        " deception and covert activities, and each step of the study was planned to avoid"
+        " them while keeping the analysis transparent for later readers of this chapter."
+    )
+    rows: list[str | tuple[str, int]] = [
+        (f"{filler} ({paragraph})", paragraph) for paragraph in range(20)
+    ]
+    contents = _contents([(1, "Ethical Procedures", CanonicalSection.ETHICS, "model", 0.999, rows)])
+
+    metadata = _shadow_values(contents)
+
+    assert metadata.ethics_statement == " ".join(
+        f"{filler} ({paragraph})" for paragraph in range(3)
+    )

@@ -907,10 +907,23 @@ def _legacy_section_is_other_matter(field: str, section: PaperSection) -> bool:
 
 def _legacy_section_is_long(section: PaperSection, rows: list[PaperSentence]) -> bool:
     """A long copy of a section whose type may be wrong (a thesis chapter)."""
-    return section.classification_source in _AMBIGUOUS_CLASSIFICATION_SOURCES and (
-        len(" ".join(row.text for row in rows)) > _MAX_AMBIGUOUS_SECTION_CHARS
-        or len({row.paragraph_id for row in rows}) > _MAX_COMPACT_PARAGRAPHS
+    return (
+        section.classification_source in _AMBIGUOUS_CLASSIFICATION_SOURCES
+        and len(" ".join(row.text for row in rows)) > _MAX_AMBIGUOUS_SECTION_CHARS
     )
+
+
+def _leading_paragraph_rows(rows: list[PaperSentence]) -> list[PaperSentence]:
+    """The rows of the first ``_MAX_COMPACT_PARAGRAPHS`` paragraphs."""
+    paragraph_ids: list[int] = []
+    kept = []
+    for row in rows:
+        if row.paragraph_id not in paragraph_ids:
+            if len(paragraph_ids) == _MAX_COMPACT_PARAGRAPHS:
+                break
+            paragraph_ids.append(row.paragraph_id)
+        kept.append(row)
+    return kept
 
 
 def _build_legacy_snapshot_candidates(
@@ -929,40 +942,32 @@ def _build_legacy_snapshot_candidates(
         rows_by_section.setdefault(sentence.section_id, []).append(sentence)
     for field in _FIELDS:
         canonical_start = len(candidates)
+        long_copies: list[tuple[PaperSection, list[PaperSentence], str | None]] = []
         for section in sections:
             if not _legacy_section_qualifies(field, section):
                 continue
             rows = _legacy_section_rows(field, rows_by_section.get(section.section_id, []))
             heading_tail = _heading_declaration_tail(field, section.header)
-            if (not rows and not heading_tail) or _legacy_section_is_long(section, rows):
+            if not rows and not heading_tail:
                 continue
-            text_ids, paragraph_ids, pages = _candidate_location(rows)
-            candidates.append(
-                IntegrityStatementCandidate(
-                    field=field,
-                    method="legacy_section_copy",
-                    heading=section.header,
-                    section_ids=(section.section_id,),
-                    text_ids=text_ids,
-                    paragraph_ids=paragraph_ids,
-                    pages=pages,
-                    classification_source=section.classification_source,
-                    classification_score=section.classification_score,
-                    reason_flags=(
-                        "legacy_snapshot",
-                        "canonical_type"
-                        if section.section_type == _FIELD_SECTION_TYPES[field]
-                        else "strong_heading",
-                        *(("heading_tail",) if heading_tail else ()),
-                    ),
-                    accepted=True,
-                )
-            )
+            if _legacy_section_is_long(section, rows):
+                long_copies.append((section, rows, heading_tail))
+                continue
+            candidates.append(_legacy_section_candidate(field, section, rows, heading_tail))
         if len(candidates) > canonical_start:
             continue
 
         rows = _legacy_lexical_rows(field, linear_rows, section_by_id)
         if not rows:
+            # No statement sentence in a long, possibly mistyped section: keep
+            # its opening paragraphs rather than nothing.
+            if long_copies:
+                section, rows, heading_tail = long_copies[0]
+                candidates.append(
+                    _legacy_section_candidate(
+                        field, section, _leading_paragraph_rows(rows), heading_tail
+                    )
+                )
             continue
         section = section_by_id.get(rows[0].section_id)
         text_ids, paragraph_ids, pages = _candidate_location(rows)
@@ -986,6 +991,34 @@ def _build_legacy_snapshot_candidates(
             )
         )
     return candidates
+
+
+def _legacy_section_candidate(
+    field: str,
+    section: PaperSection,
+    rows: list[PaperSentence],
+    heading_tail: str | None,
+) -> IntegrityStatementCandidate:
+    text_ids, paragraph_ids, pages = _candidate_location(rows)
+    return IntegrityStatementCandidate(
+        field=field,
+        method="legacy_section_copy",
+        heading=section.header,
+        section_ids=(section.section_id,),
+        text_ids=text_ids,
+        paragraph_ids=paragraph_ids,
+        pages=pages,
+        classification_source=section.classification_source,
+        classification_score=section.classification_score,
+        reason_flags=(
+            "legacy_snapshot",
+            "canonical_type"
+            if section.section_type == _FIELD_SECTION_TYPES[field]
+            else "strong_heading",
+            *(("heading_tail",) if heading_tail else ()),
+        ),
+        accepted=True,
+    )
 
 
 def _candidate_location(
