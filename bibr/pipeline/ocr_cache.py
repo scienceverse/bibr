@@ -61,7 +61,8 @@ logger = logging.getLogger(__name__)
 # only from documents numbered on 40% of their pages with text.
 # Version 19: link runs end before a bracket after punctuation, and a line break
 # keeps its space after a dot or hyphen outside links.
-_CACHE_FORMAT_VERSION = 19
+# Version 20: the link check vetoes a space only inside the link itself.
+_CACHE_FORMAT_VERSION = 20
 
 
 def _effective_settings(settings: GlobalSettings | None) -> GlobalSettings:
