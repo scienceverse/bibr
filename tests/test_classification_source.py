@@ -140,7 +140,8 @@ def test_guessed_child_types_follow_a_part_heading_parent():
 
 
 def test_numbered_children_follow_their_numbered_part():
-    """A preprint's "3.2" and "4.1" subsections, typed alone by the LLM."""
+    """A preprint's "3.2" and "4.2" subsections, typed alone by the LLM, take
+    their part's type; a results guess ("4.1") is kept."""
     secs = [
         _typed(3, "3 Results", CanonicalSection.RESULTS, "substring_alias"),
         _typed(4, "3.2 Structural characterization", CanonicalSection.METHODS, "llm", 3, 2),
@@ -153,7 +154,7 @@ def test_numbered_children_follow_their_numbered_part():
         CanonicalSection.RESULTS,
         CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
-        CanonicalSection.DISCUSSION,
+        CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
     ]
 
@@ -186,19 +187,23 @@ def test_guessed_title_on_a_body_heading_becomes_its_parts_type():
 def _review_sections():
     return [
         _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
-        _typed(2, "Embolization techniques", CanonicalSection.METHODS, "llm"),
-        _typed(3, "Outcomes after treatment", CanonicalSection.RESULTS, "model"),
-        _typed(4, "Future directions", CanonicalSection.DISCUSSION, "exact_alias"),
-        _typed(5, "State of the field", CanonicalSection.INTRODUCTION, "model"),
+        _typed(2, "Scope of this review", CanonicalSection.INTRODUCTION, "model", 1, 2),
+        _typed(3, "Definitions", CanonicalSection.INTRODUCTION, "parent_context", 1, 2),
+        _typed(4, "Embolization in practice", CanonicalSection.INTRODUCTION, "llm"),
+        _typed(5, "Future directions", CanonicalSection.DISCUSSION, "exact_alias"),
+        _typed(6, "State of the field", CanonicalSection.INTRODUCTION, "model"),
     ]
 
 
 def test_review_body_guesses_become_discussion():
+    """Introduction guesses after the introduction become discussion; the
+    introduction's own subsections keep their type."""
     secs = _review_sections()
     _gate_non_imrad_section_types(secs, "review", review_body=True)
     assert [(s.section_type, s.classification_source) for s in secs] == [
         (CanonicalSection.INTRODUCTION, "exact_alias"),
-        (CanonicalSection.DISCUSSION, "positional"),
+        (CanonicalSection.INTRODUCTION, "model"),
+        (CanonicalSection.INTRODUCTION, "parent_context"),
         (CanonicalSection.DISCUSSION, "positional"),
         (CanonicalSection.DISCUSSION, "exact_alias"),
         (CanonicalSection.DISCUSSION, "positional"),
@@ -209,33 +214,71 @@ def test_review_body_gate_needs_the_setting_the_paper_type_and_no_methods_headin
     for paper_type, review_body in (("review", False), ("empirical", True), (None, True)):
         secs = _review_sections()
         _gate_non_imrad_section_types(secs, paper_type, review_body=review_body)
-        assert secs[1].section_type == CanonicalSection.METHODS
-    secs = _review_sections()
-    secs.append(_typed(6, "Methods", CanonicalSection.METHODS, "exact_alias"))
-    _gate_non_imrad_section_types(secs, "commentary", review_body=True)
-    assert secs[2].section_type == CanonicalSection.RESULTS
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+    # Any methods or results heading, printed or guessed, means the paper
+    # reports a study: "Data" / "Empirical strategy" / "Estimates".
+    for source in ("exact_alias", "model", "llm"):
+        secs = _review_sections()
+        secs.append(_typed(7, "Empirical strategy", CanonicalSection.METHODS, source))
+        _gate_non_imrad_section_types(secs, "commentary", review_body=True)
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
+    # Systematic and scoping reviews and meta-analyses report a search.
+    for text in (
+        "Bleeding risk: a systematic review",
+        "A scoping review of embolization outcomes",
+        "We ran a meta-analysis of 40 trials.",
+        "An umbrella review",
+    ):
+        secs = _review_sections()
+        _gate_non_imrad_section_types(secs, "review", review_body=True, title_abstract=text)
+        assert secs[3].section_type == CanonicalSection.INTRODUCTION
     # Case studies report methods and results like a research paper.
     secs = _review_sections()
     _gate_non_imrad_section_types(secs, "case-study", review_body=True)
-    assert secs[1].section_type == CanonicalSection.METHODS
+    assert secs[3].section_type == CanonicalSection.INTRODUCTION
 
 
 def test_review_headings_naming_their_part_keep_it_with_their_subsections():
     secs = [
         _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
-        _typed(2, "Scope of the debate", CanonicalSection.INTRODUCTION, "parent_context", 1, 2),
+        _typed(2, "Background of the debate", CanonicalSection.INTRODUCTION, "model"),
         _typed(3, "Historical Background", CanonicalSection.INTRODUCTION, "alias_prior"),
-        _typed(4, "3. Treatment Methods", CanonicalSection.METHODS, "alias_prior"),
-        _typed(5, "3.1 Gravity separation", CanonicalSection.METHODS, "parent_context", 4, 2),
-        _typed(6, "Remaining gaps", CanonicalSection.RESULTS, "model"),
+        _typed(4, "Early accounts", CanonicalSection.INTRODUCTION, "parent_context", 3, 2),
+        _typed(5, "4. Literature review", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(6, "4.1 Supply chains", CanonicalSection.INTRODUCTION, "model", 5, 2),
+        _typed(7, "Remaining gaps", CanonicalSection.INTRODUCTION, "model"),
     ]
     _gate_non_imrad_section_types(secs, "review", review_body=True)
     assert [s.section_type for s in secs] == [
         CanonicalSection.INTRODUCTION,
-        CanonicalSection.DISCUSSION,
         CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.DISCUSSION,
+    ]
+
+
+def test_a_results_or_discussion_guess_is_not_overridden_by_its_parent():
+    """A lost "3 Results" heading: 3.1/3.2 sit after "2 Methods" but keep
+    their results guess; a methods guess under "3 Results" still follows it."""
+    secs = [
+        _typed(1, "2 Methods", CanonicalSection.METHODS, "exact_alias"),
+        _typed(2, "2.1 Data", CanonicalSection.METHODS, "model", 1, 2),
+        _typed(3, "3.1 Effect of treatment on recovery", CanonicalSection.RESULTS, "model", 1, 2),
+        _typed(4, "3.2 Subgroup analyses", CanonicalSection.RESULTS, "model", 1, 2),
+        _typed(5, "4 Results", CanonicalSection.RESULTS, "exact_alias"),
+        _typed(6, "4.1 Structural characterization", CanonicalSection.METHODS, "model", 5, 2),
+        _typed(7, "4.2 What the trend implies", CanonicalSection.DISCUSSION, "model", 5, 2),
+    ]
+    _inherit_child_section_types(secs)
+    assert [s.section_type for s in secs[1:]] == [
         CanonicalSection.METHODS,
-        CanonicalSection.METHODS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
+        CanonicalSection.RESULTS,
         CanonicalSection.DISCUSSION,
     ]
 

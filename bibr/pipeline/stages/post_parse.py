@@ -68,6 +68,12 @@ _ABSTRACT_CLOSE_RE = re.compile(r"^(?:\d+(?:\.\d+)*\.?\s+\S|introduction$)", re.
 _NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
 # A heading that names its own part ("Treatment Methods", "Historical
 # Background") keeps its type in a review body, and so do its subsections.
+_GUESSED_SOURCES = frozenset({"model", "llm", "alias_prior"})
+_SYSTEMATIC_REVIEW_RE = re.compile(
+    r"\b(?:systematic(?:\s+literature)?\s+review|scoping\s+review|umbrella\s+review"
+    r"|meta-?\s?analys[ie]s|meta-?\s?analytic)",
+    re.IGNORECASE,
+)
 _PART_WORD_RES = {
     "intro": re.compile(r"introduc|background|antecedentes", re.IGNORECASE),
     "method": re.compile(r"method|metodolog|métod", re.IGNORECASE),
@@ -88,7 +94,7 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
 
     The classifier and the LLM type each heading alone, so "3.2 Structural
     characterization" under "3 Results" reads as methods. A child that is
-    ENDNOTE or IMRaD-typed by the model, the LLM or a parent takes its
+    ENDNOTE, introduction or methods by the model, the LLM or a parent takes its
     parent's IMRaD type when the parent is confirmed: by numbering (3.2 -> 3)
     or as a part-name heading ("Results"). An untyped child takes the type of
     any IMRaD-typed parent. Under an untyped parent (a "Study 1" scope or a
@@ -105,7 +111,15 @@ def _inherit_child_section_types(sections, only_ids: set[int] | None = None) -> 
         numbering_parent_ids,
     )
 
-    inheriting = IMRAD_ANCHORS | {CanonicalSection.UNKNOWN, CanonicalSection.ENDNOTE, None}
+    # A results or discussion guess is kept: "3.1 Effect of treatment" printed
+    # after "2.1 Data" (its "3 Results" heading lost) is not a method.
+    inheriting = {
+        CanonicalSection.INTRODUCTION,
+        CanonicalSection.METHODS,
+        CanonicalSection.UNKNOWN,
+        CanonicalSection.ENDNOTE,
+        None,
+    }
     untyped_types = (CanonicalSection.UNKNOWN, None)
     by_id = {section.section_id: section for section in sections}
     numbered_parents = numbering_parent_ids(sections)
@@ -220,18 +234,22 @@ def _structured_abstract_labels(contents):
     return abstract, labels
 
 
-def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_body: bool) -> None:
+def _gate_non_imrad_section_types(
+    sections, paper_type: str | None, *, review_body: bool, title_abstract: str = ""
+) -> None:
     """Retype section guesses that only fit an IMRaD research paper.
 
     - A model or LLM ``title`` on any heading but the paper's title (a body
       heading in capitals, a cover label, an author name) becomes UNKNOWN and
       then takes its part's type, if any.
-    - With ``review_body`` on, in a review or commentary that prints no
-      alias-typed Methods or Results heading, the model/LLM introduction,
-      methods and results types after the first introduction become
-      discussion: the body of such a paper is argument, not a report. A
-      heading that names its own part ("Treatment Methods") keeps its type,
-      and so do its subsections.
+    - With ``review_body`` on, in a review or commentary with no methods or
+      results heading (alias-, model- or LLM-typed), the introduction guesses
+      after the first introduction become discussion: the body of such a
+      paper is argument, not a report. The paper-type label is a guess, so a
+      paper with a methods or results heading is left alone, and so is a
+      systematic, scoping or umbrella review or a meta-analysis (named in the
+      title or abstract). The subsections of an introduction, and a heading
+      that names its own part ("Historical Background"), keep their type.
     """
     from bibr.paper_contents import CanonicalSection
 
@@ -257,15 +275,24 @@ def _gate_non_imrad_section_types(sections, paper_type: str | None, *, review_bo
         return
     if any(
         section.section_type in (CanonicalSection.METHODS, CanonicalSection.RESULTS)
-        and section.classification_source in _HEADING_TYPE_SOURCES
+        and section.classification_source in _HEADING_TYPE_SOURCES | _GUESSED_SOURCES
         for section in body
     ):
+        return
+    if _SYSTEMATIC_REVIEW_RE.search(title_abstract or ""):
         return
     guessed = {CanonicalSection.INTRODUCTION, CanonicalSection.METHODS, CanonicalSection.RESULTS}
     first_intro = next(
         (s.section_id for s in body if s.section_type == CanonicalSection.INTRODUCTION), None
     )
-    kept: set[int] = set()
+    # An introduction that stays one holds its subsections ("Introduction" >
+    # "Scope of this review", "4. Literature review" > "4.1 ...").
+    kept: set[int] = {
+        s.section_id
+        for s in body
+        if s.section_type == CanonicalSection.INTRODUCTION
+        and (s.section_id == first_intro or s.classification_source in _HEADING_TYPE_SOURCES)
+    }
     for section in body:
         if section.parent_section_id in kept or (
             section.section_id != first_intro
@@ -1630,6 +1657,12 @@ async def post_parse(
         contents.sections,
         paper_metadata.paper_type,
         review_body=effective_settings.pipeline.non_imrad_body_as_discussion,
+        title_abstract=" ".join(
+            filter(
+                None,
+                (getattr(paper_metadata, "title", None), getattr(paper_metadata, "abstract", None)),
+            )
+        ),
     )
 
     # Populate Section.children from parent_section_id pointers, after all
