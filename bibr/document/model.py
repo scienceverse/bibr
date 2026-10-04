@@ -21,10 +21,9 @@ Conventions:
 - Ids are deterministic and do not move when a layer is built for another page
   range (:mod:`bibr.document.ids`): blocks ``p3.r12`` (page, post-OCR region
   index), lines ``p3.l40``, spans ``p3.sp210``, links ``p3.lk4`` (page,
-  position among the page's link annotations), structure elements ``p3.st12``
-  (page, position in that page's tree). An object of the whole PDF names no
-  page: outline entries ``ol5`` (position in the outline, which is always
-  read whole).
+  position among the page's link annotations). An object of the whole PDF
+  names no page: outline entries ``ol5`` (position in the outline, which is
+  always read whole) and structure elements ``st0.3.2`` (place in the tree).
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus
@@ -376,28 +375,29 @@ class Link:
 
 @dataclass(frozen=True, slots=True)
 class StructElem:
-    """An element of a tagged PDF's structure tree, as one page's tree holds it (D2).
+    """An element of a tagged PDF's structure tree (D2).
 
-    pdfium reads the tree page by page: an element with content on several
-    pages, and each ancestor of such content, appears once per page and holds
-    only that page's marked content. The id ``p{page}.st{n}`` numbers the
-    page's elements in document order and ``parent`` is the element above on
-    the same page. ``path`` is the element's place in the whole tree (its
-    index among its parent's kids, from the root down); it is the same in
-    every page's copy, so copies of one element can be grouped by it.
+    ``path`` is the element's place in the whole tree: its index among its
+    parent's kids, from the root down. The id is ``st`` and the path joined
+    by dots (``st0.3.2``), so it depends on the PDF alone, and ``parent`` is
+    the id of the element above (None for a top-level element). pdfium reads
+    the tree page by page: an element with content on several pages, and each
+    ancestor of such content, comes from each page's tree holding only that
+    page's marked content, and the layer joins those copies into the one
+    element (:func:`bibr.document.structure.merge`).
 
     ``role`` is the structure type after /RoleMap as pdfium resolves it (one
     mapping step). ``mcrs`` are the ``(page, mcid)`` pairs of the marked content
-    the element holds directly: an mcid is unique only within its page's
-    content stream, so the page is part of the key, and the text objects that
-    carry it are those whose ``obj_mcid`` is that mcid on that page.
+    the element holds directly, from every page read, in page order: an mcid is
+    unique only within its page's content stream, so the page is part of the
+    key, and the text objects that carry it are those whose ``obj_mcid`` is
+    that mcid on that page.
     """
 
     elem_id: str
     parent: str | None
     role: str
     mcrs: tuple[tuple[int, int], ...]
-    page: int
     path: tuple[int, ...]
     alt: str | None
     actual: str | None

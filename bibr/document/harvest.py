@@ -1140,6 +1140,19 @@ class LayerBuilder:
             self.errors["links"] = _error_text(exc)
             return None
 
+    def _merge_struct(self) -> list[StructElem]:
+        """The structure elements, one for each place in the tree; none if they cannot be joined."""
+        try:
+            merged, differing = structure.merge(self.struct)
+        except Exception as exc:  # noqa: BLE001 - a layer component never fails the paper
+            self.errors["struct"] = _error_text(exc)
+            return []
+        if differing:
+            self.errors["struct"] = (
+                f"{differing} copies of a structure element differ from its first"
+            )
+        return merged
+
     def _is_tagged(self) -> bool | None:
         """Whether the PDF is tagged: its /MarkInfo says so, as pdfium reads it.
 
@@ -1193,6 +1206,7 @@ class LayerBuilder:
             page.label = self.labels.get(page.index)
         guard = self._judge_outline(pages)
         built_links = self._build_links(pages)
+        struct = self._merge_struct()
         # A fact no examined page shows is unknown, not absent, while another
         # page was not examined. A page's text source counts once decided, even
         # if the page failed later; marked content needs the page's columns.
@@ -1246,7 +1260,7 @@ class LayerBuilder:
             outline=self.outline or [],
             outline_guard=guard,
             links=built_links or [],
-            struct=self.struct,
+            struct=struct,
             roles=roles,
             presence=presence,
             component_errors=dict(self.errors),
