@@ -111,7 +111,8 @@ class FileState:
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
     # The document layer (``bibr.document``), built by NativeTextStage or
     # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on.
-    # Outlives the OCR stage; handed on as ``PaperContents.document``.
+    # Outlives the OCR stage; handed on as ``PaperContents.document`` and
+    # dropped after PostParse unless the memory mode is ``keep_all``.
     doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
@@ -134,6 +135,12 @@ class FileState:
         # Native parser is held across its handling stage →
         # ParseSegmentStage so the parser can be reused; release after parse.
         self._native_parser = None
+
+    def free_document_layer(self):
+        """Free the document layer once PostParse, its last reader, is done."""
+        self.doc_layer = None
+        if self.contents is not None:
+            self.contents.document = None
 
     def set_error(
         self,

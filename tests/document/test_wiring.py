@@ -126,6 +126,32 @@ def test_file_state_ignores_its_layer_and_frees_it():
     assert second.doc_layer is None
 
 
+@pytest.mark.parametrize(
+    ("mode", "kept"), [("aggressive", False), ("balanced", False), ("keep_all", True)]
+)
+def test_the_layer_is_freed_after_post_parse_unless_keep_all(mode, kept):
+    layer = object()
+    fs = FileState(path=Path("a.pdf"))
+    fs.doc_layer = layer
+    fs.contents = MagicMock()
+    fs.contents.document = layer
+    ctx = PipelineContext(
+        file_states=[fs],
+        progress=NullProgress(),
+        resources=MagicMock(),
+        config=RunConfig(memory_mode=mode),
+    )
+
+    # ParseSegment attaches the blocks and PostParse reads them: both keep it.
+    ctx.free_after_stage("parse")
+    assert fs.doc_layer is layer
+    assert fs.contents.document is layer
+
+    ctx.free_after_stage("extract")
+    assert (fs.doc_layer is layer) is kept
+    assert (fs.contents.document is layer) is kept
+
+
 def test_paper_contents_takes_the_layer_by_keyword_only():
     fields = dataclasses.fields(PaperContents)
     positional = [item.name for item in fields if not item.kw_only]

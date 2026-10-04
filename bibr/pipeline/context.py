@@ -190,12 +190,15 @@ class PipelineContext:
         Stages no longer need to call ``fs.free_*`` themselves. A file that
         has errored (and has no exported result to preserve) is fully freed
         at the next boundary — it will never be exported, so holding its
-        buffers until GC just pins memory.
+        buffers until GC just pins memory. The document layer goes after
+        PostParse (``extract``), its last reader, except under ``keep_all``.
         """
         for fs in self.file_states:
             if stage_name == "ocr":
                 fs.free_pre_ocr()
             elif stage_name == "parse":
                 fs.free_pre_parse()
+            elif stage_name == "extract" and self.config.memory_mode != "keep_all":
+                fs.free_document_layer()
             if fs.error is not None and fs.result_json is None:
                 fs.free_all()
