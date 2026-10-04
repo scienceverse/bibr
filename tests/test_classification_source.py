@@ -265,16 +265,19 @@ def test_a_masthead_before_the_printed_title_is_retyped():
         CanonicalSection.UNKNOWN,
     ]
     # The title heading is untyped: the first heading may still be the title
-    # (a letter-spaced one), so it keeps its type; a later repeat does not.
+    # (a letter-spaced one), so it keeps its type; a repeat after the
+    # introduction heading is no title heading and does not take the type.
     secs = [
         _typed(1, "Journal masthead", CanonicalSection.TITLE, "model"),
         _typed(2, title, CanonicalSection.UNKNOWN, "model"),
-        _typed(3, title.upper(), CanonicalSection.TITLE, "llm"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(4, title.upper(), CanonicalSection.TITLE, "llm"),
     ]
     _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
     assert [s.section_type for s in secs] == [
         CanonicalSection.TITLE,
         CanonicalSection.UNKNOWN,
+        CanonicalSection.INTRODUCTION,
         CanonicalSection.UNKNOWN,
     ]
 
@@ -306,6 +309,75 @@ def test_the_best_matching_heading_keeps_the_title_type():
     ]
 
 
+def test_the_title_heading_is_looked_for_before_the_first_alias_heading():
+    """A full-title repeat after the Methods or Abstract heading is a running
+    head: it does not beat a title heading that prints only part of the
+    title, whatever its type."""
+    title = "Mindfulness training and test anxiety in adolescents: a randomized trial"
+    part = "Mindfulness training and test anxiety in adolescents"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    for repeat_type, repeat_source in ((U, "model"), (T, "llm")):
+        secs = [
+            _typed(1, "SCIENTIFIC REPORTS", T, "model"),
+            _typed(2, part, T, "model"),
+            _typed(3, "Method", CanonicalSection.METHODS, "exact_alias"),
+            _typed(4, title.upper(), repeat_type, repeat_source),
+            _typed(5, "Results", CanonicalSection.RESULTS, "exact_alias"),
+        ]
+        _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+        assert [s.section_type for s in secs] == [
+            U,
+            T,
+            CanonicalSection.METHODS,
+            U,
+            CanonicalSection.RESULTS,
+        ]
+    # The heading the title pass found is the title heading when it matches
+    # the title, even when it holds half of it and a full model-typed repeat
+    # follows the abstract.
+    secs = [
+        _typed(1, part, T, "title"),
+        _typed(2, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _typed(3, title, T, "model"),
+        _typed(4, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        T,
+        CanonicalSection.ABSTRACT,
+        U,
+        CanonicalSection.INTRODUCTION,
+    ]
+
+
+def test_the_heading_found_by_the_title_pass_is_a_cover_label_when_it_does_not_match():
+    """A title-pass heading that shares nothing with the extracted title (a
+    journal masthead) leaves the title heading to the best-matching guess; an
+    abstract label before the title heading does not end the search."""
+    title = "Social capital and trust in post-Soviet cities"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    secs = [
+        _typed(1, "SCIENTIFIC REPORTS", T, "title"),
+        _typed(2, title, T, "model"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs[:2]] == [T, T]
+    secs = [
+        _typed(1, "Abstract", CanonicalSection.ABSTRACT, "exact_alias"),
+        _typed(2, title, T, "model"),
+        _typed(3, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+        _typed(4, title.upper(), T, "llm"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs] == [
+        CanonicalSection.ABSTRACT,
+        T,
+        CanonicalSection.INTRODUCTION,
+        U,
+    ]
+
+
 def test_a_short_title_keeps_its_type_on_an_exact_match():
     """Under 20 characters a heading counts only when it is the title (case
     and punctuation aside); a longer heading that opens it does not."""
@@ -313,9 +385,9 @@ def test_a_short_title_keeps_its_type_on_an_exact_match():
         CanonicalSection.UNKNOWN,
         CanonicalSection.TITLE,
     ]
-    assert _title_gate([(1, "ON BULLSHIT."), (2, "SCIENTIFIC REPORTS")], "On Bullshit") == [
-        CanonicalSection.TITLE,
+    assert _title_gate([(1, "SCIENTIFIC REPORTS"), (2, "ON BULLSHIT.")], "On Bullshit") == [
         CanonicalSection.UNKNOWN,
+        CanonicalSection.TITLE,
     ]
     assert _title_gate([(1, "Journal masthead"), (2, "On Bullshit and Lies")], "On Bullshit") == [
         CanonicalSection.TITLE,

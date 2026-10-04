@@ -69,6 +69,7 @@ _NON_IMRAD_PAPER_TYPES = frozenset({"review", "commentary"})
 # A heading that names its own part ("Treatment Methods", "Historical
 # Background") keeps its type in a review body, and so do its subsections.
 _GUESSED_SOURCES = frozenset({"model", "llm", "alias_prior"})
+_ALIAS_SOURCES = _HEADING_TYPE_SOURCES - {"title"}
 _SYSTEMATIC_REVIEW_RE = re.compile(
     r"\b(?:systematic(?:\s+literature)?\s+review|scoping\s+review|umbrella\s+review"
     r"|meta-?\s?analys[ie]s|meta-?\s?analytic)",
@@ -276,10 +277,12 @@ def _gate_non_imrad_section_types(
 
     - A model or LLM ``title`` on any heading but the paper's title (a body
       heading in capitals, a cover label, an author name) becomes UNKNOWN and
-      then takes its part's type, if any. The heading that prints the
-      extracted paper title (the best match, the first on a tie) keeps it,
-      also after a masthead or cover label; a running head before it, or the
-      title repeated later, does not.
+      then takes its part's type, if any. The heading the title pass found
+      when it matches the extracted paper title, else the title-typed heading
+      that matches it best (the first on a tie, none after the first alias
+      heading that follows a title-typed one), keeps it, also after a
+      masthead or cover label; a running head before it, or the title
+      repeated later, does not.
     - With ``review_body`` on, in a review or commentary with no methods or
       results heading (alias-, model- or LLM-typed), the introduction guesses
       after the first introduction become discussion: the body of such a
@@ -293,18 +296,37 @@ def _gate_non_imrad_section_types(
     from bibr.structure.section_tree import numbering_parent_ids
 
     body = [section for section in sections if section.level > 0]
+    # The heading the paper's title is printed in: the heading the title pass
+    # found when it matches the extracted title (it is a cover label when it
+    # does not), else the title-typed heading that matches it best (the first
+    # on a tie). That search stops at the first heading typed from its own
+    # words ("Abstract", "Methods") once a title-typed heading has been seen:
+    # a repeat after it is a running head. The heading keeps its type. The
+    # first heading is exempt (it may be the title itself) unless the title
+    # heading is a title guess too, then a masthead before it is a cover label.
     has_title = any(section.classification_source == "title" for section in body)
-    # The heading that prints most of the extracted title (the first one on a
-    # tie) keeps a title type; a repeat of the title does not. The first
-    # heading is exempt (it may be the title itself) unless that heading is
-    # a title guess too: then a masthead before it is a cover label.
-    title_heading = None
-    best_share = 0.0
-    for section in body:
-        share = _title_match_share(section.header, paper_title)
-        if share > best_share:
-            title_heading, best_share = section, share
-    title_found = title_heading is not None and title_heading.section_type == CanonicalSection.TITLE
+    title_heading = next(
+        (
+            section
+            for section in body
+            if section.classification_source == "title"
+            and _title_match_share(section.header, paper_title) > 0
+        ),
+        None,
+    )
+    if title_heading is None:
+        best_share = 0.0
+        seen_title = False
+        for section in body:
+            if seen_title and section.classification_source in _ALIAS_SOURCES:
+                break
+            if section.section_type != CanonicalSection.TITLE:
+                continue
+            seen_title = True
+            share = _title_match_share(section.header, paper_title)
+            if share > best_share:
+                title_heading, best_share = section, share
+    title_found = title_heading is not None
     retitled: set[int] = set()
     for index, section in enumerate(body):
         if (
