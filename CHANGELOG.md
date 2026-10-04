@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Corresponding authors whose address sits in a footnote are now found without the
+  LLM. An Elsevier-style footnote ("E-mail address: x@y.org (J.K. Okafor)", with several
+  pairs separated by commas or semicolons) is read from the whole paper, not only the
+  front-matter block, and each address is attached to the one author whose surname and
+  initials fit and who has no address yet; two fitting authors, or none, attach nothing. The author is also marked
+  corresponding only when a "Corresponding author" or "Correspondence" phrase opens the
+  sentence or one of the three before it, the phrase is plural or the footnote prints a
+  single pair, and no other author is already flagged. No prompt or LLM input changes.
 - Section levels and parents follow the paper's numbering and the order of
   its headings: "3 Results" is a top-level section, "3.2" sits under "3",
   Roman-numbered and "Chapter N" parts are recognised, and a subsection stays

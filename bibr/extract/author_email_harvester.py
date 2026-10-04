@@ -2,7 +2,9 @@
 
 Bridges parsed PaperContents to LLM-extracted authors: finds explicit
 "Corresponding author:" anchors in the OCR'd text, promotes the matching
-author's ``corresponding`` flag, and attaches the anchored email.
+author's ``corresponding`` flag, and attaches the anchored email. The footnote
+"E-mail address: x@y (Initials Surname)" is read from the whole paper before the
+proximity rules.
 
 Previously inline methods on MetadataExtractor; moved here as a
 self-contained class so the harvesting logic can be tested without
@@ -13,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -101,6 +104,107 @@ def _email_name_affinity(given: str | None, family: str | None, local_compact: s
     return len(family_compact) == 2 and local_compact.startswith(family_compact)
 
 
+# --- name-paired e-mails -------------------------------------------------------
+# Elsevier prints the corresponding author's address in a page footnote, paired
+# with the name in parentheses: "E-mail address: x@y.org (J.K. Okafor)." or
+# "E-mail addresses: a@y.org (A. Lindqvist), b@z.org (B. Okafor)." The pairing is explicit,
+# so it is matched against the author list by surname and initials, which makes
+# the footnote safe to read wherever it landed (it usually sits outside the
+# front-matter block and is often typed as a footnote or even a references section).
+_EMAIL_LABEL_RE = re.compile(r"\be-?\s?mail(?:\s+address(?:es)?)?\s*:", re.IGNORECASE)
+_NAMED_EMAIL_RE = re.compile(_EMAIL_RE.pattern + r"\s*\(\s*([^()@;:]{3,70}?)\s*\)")
+# A "Corresponding author(s)" / "Correspondence" / envelope phrase that OPENS a line or
+# sentence, as a footnote marker does ("* Corresponding author at: ..."). Anchoring it keeps
+# body prose ("multiple correspondence analysis ... (e-mail: x@y.org (H.K. Tan))") out, and
+# "Correspondence" counts only as a label: followed by ":" or "*", or by "to", "concerning"
+# or "should" ("Correspondence between the two raters was high" is prose).
+_CORRESPONDENCE_PHRASE_RE = re.compile(
+    r"^[\W\d_]*(?:(?:co-?)?corresponding\s+authors?\b|correspondence(?=\s*[:*]|\s+(?:to|concerning|should)\b)|✉)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_PLURAL_CORRESPONDENCE_RE = re.compile(
+    r"^[\W\d_]*(?:co-?)?corresponding\s+authors\b", re.IGNORECASE | re.MULTILINE
+)
+_NAME_TITLES = frozenset(
+    {"prof", "professor", "dr", "mr", "mrs", "ms", "miss", "assoc", "assist", "phd", "md"}
+)
+# Lower-case surname particles; a printed "H. de Vries" must not read as initials H, D.
+_NAME_PARTICLES = frozenset(
+    {"de", "den", "der", "des", "di", "da", "del", "della", "dos", "das", "du", "la", "le"}
+    | {"ter", "ten", "van", "von"}
+)
+# Letters NFKD leaves whole.
+_FOLD_EXTRA = str.maketrans({"ł": "l", "ı": "i", "ø": "o", "đ": "d"})
+
+
+def _fold(text: str | None) -> str:
+    """Lower-case, accent-free, letters and digits only ("Al-Tammemi" -> "altammemi")."""
+    decomposed = unicodedata.normalize("NFKD", text or "")
+    base = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
+    return re.sub(r"[\W_]+", "", base.casefold().translate(_FOLD_EXTRA))
+
+
+def _initials(tokens: list[str]) -> list[str]:
+    """Initials of given-name tokens: "H.-K." -> H, K; "HK" -> H, K; "Hong-Kwan" -> H, K."""
+    out: list[str] = []
+    for token in tokens:
+        for raw in re.split(r"[\s.\-\u2010-\u2015]+", token):
+            part = _fold(raw)
+            if not part or raw in _NAME_PARTICLES:
+                continue
+            # "HK" is two initials, "Hong" is one given name.
+            out.extend(part if raw.isupper() and len(part) <= 3 else part[0])
+    return out
+
+
+def _initials_compatible(left: list[str], right: list[str]) -> bool:
+    """The first initial must agree; later ones are compared only when both sides have them."""
+    if not left or not right or left[0] != right[0]:
+        return False
+    if len(left) >= 2 and len(right) >= 2:
+        return left[: min(len(left), len(right))] == right[: min(len(left), len(right))]
+    return True
+
+
+def _given_tokens(given: str | None) -> list[str]:
+    return [t for t in (given or "").split() if _fold(t)]
+
+
+def _strip_titles(tokens: list[str]) -> list[str]:
+    return [t for t in tokens if _fold(t) not in _NAME_TITLES]
+
+
+def _index_authors_by_family(authors: list[PaperAuthor]) -> dict[str, list]:
+    """Folded family name -> [(author, given-name initials)], built once per paper."""
+    index: dict[str, list] = {}
+    for author in authors:
+        family = _fold(author.family)
+        if len(family) >= 2:
+            index.setdefault(family, []).append((author, _initials(_given_tokens(author.given))))
+    return index
+
+
+def _authors_named(name: str, index: dict[str, list]) -> list[PaperAuthor]:
+    """The authors a printed "Initials Surname" (or "Given Surname") names.
+
+    The surname is the trailing run of tokens whose folded text equals an author's
+    family name (so "van der Berg" works whether or not the extractor kept the
+    particle in the family name); everything before it must be initial-compatible
+    with that author's given name.
+    """
+    tokens = _strip_titles(name.replace("\r", " ").replace("\n", " ").split())
+    fits: list[PaperAuthor] = []
+    for k in range(1, len(tokens)):
+        entries = index.get(_fold("".join(tokens[k:])))
+        if not entries:
+            continue
+        printed = _initials(tokens[:k])
+        for author, initials in entries:
+            if _initials_compatible(printed, initials) and all(author is not f for f in fits):
+                fits.append(author)
+    return fits
+
+
 class AuthorEmailHarvester:
     """Promote corresponding authors and attach their emails.
 
@@ -108,8 +212,15 @@ class AuthorEmailHarvester:
     ``PaperAuthor`` (modified in place).
     """
 
-    def __init__(self, contents: PaperContents):
+    def __init__(self, contents: PaperContents, document: PaperContents | None = None):
+        """``contents`` is what the extractor scoped to the selected front-matter block.
+
+        ``document`` is the whole paper. Only the name-paired footnote pass reads it,
+        because the footnote carrying a corresponding author's address sits outside
+        the front-matter block on most layouts. Everything else stays scoped.
+        """
         self.contents = contents
+        self._document = document if document is not None else contents
 
     @staticmethod
     def demote_implausible_flags(authors: list[PaperAuthor]) -> None:
@@ -184,6 +295,16 @@ class AuthorEmailHarvester:
              Anything else is skipped, leaving the author emailless for
              their real address instead of blocking it with someone else's.
 
+        Name-paired footnotes ("E-mail address(es): x@y (Initials Surname)") are read
+        last, from the whole paper rather than the scoped block, and only for authors
+        still without an address after everything above. Each pair is attached to the
+        one author whose surname and initials fit (none or two fit: nothing), whether or
+        not the footnote says "Corresponding author". The author is also
+        flagged corresponding, after the steps above, only when a "Corresponding
+        author(s)" / "Correspondence" phrase opens the sentence or one of the three
+        before it, the phrase is plural or the window holds a single pair, and no other
+        author is already flagged (by the LLM, a marker sentence or the envelope glyph).
+
         Mutates ``authors`` in place.  Skips silently when no authors or no
         email-bearing text are available.
         """
@@ -210,8 +331,7 @@ class AuthorEmailHarvester:
             if author.family and not author.email:
                 authors_by_family.setdefault(author.family.lower().strip(), []).append(author)
         if not authors_by_family:
-            self._promote_corresponding_from_anchors(authors, sentences)
-            self._promote_sole_author(authors)
+            self._finish(authors, sentences)
             return
 
         strict_emails = self._marker_sentence_emails(sentences)
@@ -354,8 +474,118 @@ class AuthorEmailHarvester:
                 harvested,
             )
 
+        self._finish(authors, sentences)
+
+    def _finish(self, authors: list[PaperAuthor], sentences: list) -> None:
+        """Name-paired footnote addresses, then the promotions, in order.
+
+        Footnote pairs are attached only now, after every in-scope rule above had its
+        turn, and only to authors still without an address, so they can never displace
+        an address those rules assigned. The anchor promotion then sees them (an in-scope
+        "Correspondence to: x@y" line that names no one flags the author a footnote pairs
+        with x@y), and the footnote flags go after it so they can see who is flagged.
+        """
+        footnote_groups = self._harvest_named_footnote_emails(authors)
         self._promote_corresponding_from_anchors(authors, sentences)
+        self._flag_named_footnote_authors(authors, footnote_groups)
         self._promote_sole_author(authors)
+
+    @staticmethod
+    def _attach_email(author: PaperAuthor, email: str, claimed: set[str]) -> bool:
+        """Attach *email* to *author*; True when the author holds it afterwards.
+
+        Never overwrites a different address and never takes one another author holds.
+        """
+        wanted = email.lower()
+        current = (author.email or "").lower()
+        if current:
+            return current == wanted
+        if wanted in claimed:
+            return False
+        author.email = email
+        claimed.add(wanted)
+        return True
+
+    def _harvest_named_footnote_emails(self, authors: list[PaperAuthor]) -> list[list[PaperAuthor]]:
+        """Attach "E-mail address(es): x@y (Initials Surname), ..." footnote pairs to authors.
+
+        Reads the whole paper, not the front-matter scope. Each pair goes to the one
+        author whose surname and initials fit the printed name (no fit or two fits:
+        nothing). Whether the footnote also marks them corresponding is decided
+        later (:meth:`_flag_named_footnote_authors`); this returns the groups of
+        authors that earned a flag: a "Corresponding author(s)"/"Correspondence"
+        phrase opens the sentence or one of the three before it (same section), and
+        either that phrase is plural or the window holds exactly one pair.
+        """
+        sentences = list(getattr(self._document, "sentences", None) or [])
+        if not authors or not sentences:
+            return []
+        index: dict[str, list] | None = None
+        claimed = {a.email.lower() for a in authors if a.email}
+        groups: list[list[PaperAuthor]] = []
+        attached = 0
+        for i, sent in enumerate(sentences):
+            text = sent.text or ""
+            if "@" not in text:
+                continue
+            label = _EMAIL_LABEL_RE.search(text)
+            if label is None:
+                continue
+            pairs = list(_NAMED_EMAIL_RE.finditer(text, label.end()))
+            if not pairs:
+                continue
+            if index is None:
+                index = _index_authors_by_family(authors)
+            window = [
+                sentences[j].text or ""
+                for j in range(max(0, i - _EMAIL_NAME_WINDOW), i)
+                if sentences[j].section_id == sent.section_id
+            ]
+            openers = [*window, text[: label.start()]]
+            holders: list[PaperAuthor] = []
+            for pair in pairs:
+                fits = _authors_named(pair.group(2), index)
+                if len(fits) != 1:
+                    continue
+                had_email = bool(fits[0].email)
+                if self._attach_email(fits[0], pair.group(1), claimed):
+                    holders.append(fits[0])
+                    attached += not had_email
+            if not holders or not any(_CORRESPONDENCE_PHRASE_RE.search(t) for t in openers):
+                continue
+            plural = any(_PLURAL_CORRESPONDENCE_RE.search(t) for t in openers)
+            pairs_in_window = len(pairs) + sum(
+                len(_NAMED_EMAIL_RE.findall(t)) for t in window if "@" in t
+            )
+            if plural or pairs_in_window == 1:
+                groups.append(holders)
+        if attached:
+            logger.info("Attached %d e-mail(s) from name-paired footnotes", attached)
+        return groups
+
+    @staticmethod
+    def _flag_named_footnote_authors(
+        authors: list[PaperAuthor], groups: list[list[PaperAuthor]]
+    ) -> None:
+        """Mark the authors a name-paired footnote names as corresponding.
+
+        Never adds a flag next to a different flagged author, whether that flag came from
+        the LLM, a marker sentence or the envelope glyph: a group is applied only when
+        every currently flagged author belongs to it.
+        """
+        if not groups:
+            return
+        flagged = {id(a) for a in authors if a.corresponding}
+        promoted = 0
+        for group in groups:
+            if flagged - {id(a) for a in group}:
+                continue
+            for author in group:
+                if not author.corresponding:
+                    author.corresponding = True
+                    promoted += 1
+        if promoted:
+            logger.info("Marked %d author(s) corresponding from name-paired footnotes", promoted)
 
     def _promote_corresponding_from_anchors(
         self, authors: list[PaperAuthor], sentences: list
