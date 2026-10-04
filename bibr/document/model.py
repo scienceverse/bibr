@@ -118,8 +118,9 @@ class Decided:
     # Model sha or rule version, e.g. "superscript/1".
     version: str
     score: float | None = None
-    # False for scores that are not probabilities (rule margins, constant LLM scores).
-    calibrated: bool = True
+    # True only for a calibrated model probability. Rules, rule margins and
+    # constant LLM scores keep the default.
+    calibrated: bool = False
     # Layer ids the decision rests on.
     evidence: tuple[str, ...] = ()
 

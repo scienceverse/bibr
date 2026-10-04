@@ -438,6 +438,16 @@ def test_the_removed_watermark_is_kept_as_furniture():
     assert all(not other.furniture for other in layer.pages if other.index != 6)
 
 
+def test_rule_decisions_do_not_claim_calibration():
+    _inspection, layer = _synthetic_layer()
+    decided = [item.decided for page in layer.pages for item in page.furniture]
+    decided += [tag.decided for tag in layer.roles]
+
+    assert Decided("any_rule", "any_rule/1").calibrated is False
+    assert decided
+    assert not any(item.calibrated for item in decided)
+
+
 def test_render_recipe_mirrors_the_layout_render():
     # A small budget, so a letter page renders at a reduced DPI and a stamp-sized
     # rotated page at the full one.
