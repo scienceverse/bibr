@@ -287,6 +287,9 @@ def inspect_pdf(
                     )
                 finally:
                     page.close()
+            # The last page's char records and object walk would otherwise
+            # stay alive through the layer's finish().
+            trace = records = walk = None
 
             if include_outline:
                 try:
