@@ -198,10 +198,10 @@ def test_a_missing_catalog_function_leaves_the_flag_to_the_tree(monkeypatch):
 def test_a_page_whose_tree_cannot_be_read_is_left_out_and_the_rest_kept(monkeypatch):
     real = structure.read_page_tree
 
-    def fail_on_page_2(api, page, page_index):
+    def fail_on_page_2(api, page, page_index, **kwargs):
         if page_index == 2:
             raise RuntimeError("bad tree")
-        return real(api, page, page_index)
+        return real(api, page, page_index, **kwargs)
 
     monkeypatch.setattr(structure, "read_page_tree", fail_on_page_2)
     layer = _layer()
@@ -211,13 +211,50 @@ def test_a_page_whose_tree_cannot_be_read_is_left_out_and_the_rest_kept(monkeypa
     assert layer.presence.is_tagged is True
 
 
-def test_a_tree_over_the_limit_is_read_to_the_limit_and_says_so(monkeypatch):
+def test_a_document_over_the_limit_is_read_to_the_limit_and_says_so(monkeypatch):
     monkeypatch.setattr(structure, "MAX_ELEMENTS", 4)
     layer = _layer()
 
-    assert [len([e for e in layer.struct if e.page == page]) for page in range(5)] == [4] * 5
-    assert layer.component_errors["struct:0"] == "more than 4 structure elements, the rest unread"
-    assert _rows(layer)[:4] == _expected(0)[:4]
+    # The allowance runs out on the first page; every later page that has a tree says so.
+    assert _rows(layer) == _expected(0)[:4]
+    note = "more than 4 structure elements, the rest unread"
+    assert layer.component_errors == {f"struct:{page}": note for page in range(5)}
+    assert layer.presence.is_tagged is True
+
+
+def test_a_document_with_exactly_the_limit_is_read_whole_and_says_nothing(monkeypatch):
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", len(_layer().struct))
+    layer = _layer()
+
+    assert _rows(layer) == [row for page in range(_linked.N_PAGES) for row in _expected(page)]
+    assert layer.component_errors == {}
+
+
+def test_an_element_with_too_many_kids_is_read_to_the_limit_and_says_so(monkeypatch):
+    monkeypatch.setattr(structure, "MAX_KIDS", 2)
+    tree = Tag(
+        "Document",
+        (Tag("P", ((0, 0), (0, 1), (0, 2), (0, 3))), Tag("P", ((0, 4),)), Tag("P", ((0, 5),))),
+    )
+    layer = _layer(tree=tree)
+
+    # The first two kids of the root are read, and the first two marked-content
+    # references of the paragraph that holds four.
+    assert [(e.role, e.mcrs) for e in layer.struct if e.page == 0] == [
+        ("Document", ()),
+        ("P", ((0, 0), (0, 1))),
+        ("P", ((0, 4),)),
+    ]
+    assert layer.component_errors["struct:0"] == "an element with more than 2 kids, the rest unread"
+
+
+def test_a_tree_with_too_many_top_level_elements_is_read_to_the_limit_and_says_so(monkeypatch):
+    monkeypatch.setattr(structure, "MAX_KIDS", 0)
+    layer = _layer()
+
+    assert layer.struct == []
+    note = "a tree with more than 0 top-level elements, the rest unread"
+    assert layer.component_errors == {f"struct:{page}": note for page in range(_linked.N_PAGES)}
 
 
 def test_the_inline_build_reads_the_same_tree():
