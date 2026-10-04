@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from bibr.document import ids
 from bibr.document.model import (
     COLUMN_DTYPES,
     GLYPH_EXCLUDED,
@@ -593,14 +594,14 @@ def _script_tags(
                 continue
             tags.append(
                 RoleTag(
-                    f"p{page_index}.sp{span_index}",
+                    ids.span(page_index, span_index),
                     role,
                     Decided(
                         SCRIPT_RULE.component,
                         SCRIPT_RULE.version,
                         score=round(shift, 4),
                         calibrated=False,
-                        evidence=(f"p{page_index}.l{line_index}",),
+                        evidence=(ids.line(page_index, line_index),),
                     ),
                 )
             )

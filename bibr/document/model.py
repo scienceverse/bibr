@@ -7,16 +7,18 @@ sizes and baselines, superscripts, furniture, page render recipes.
 Conventions:
 
 - Geometry is in unrotated PDF user space (points, y up), with each page's
-  ``crop_box`` and ``/Rotate`` kept on :class:`Page`. Convert to the layout
-  frame with ``bibr.ocr.native_text._pdf_points_to_normalized_bbox``.
+  ``crop_box`` and ``/Rotate`` kept on :class:`Page`. Convert to and from the
+  layout frame with ``bibr.document.views.to_layout_bbox`` and
+  ``from_layout_bbox``.
 - Page indices are absolute and 0-based.
 - Glyph indices are pdfium char indices of the text page built after
   ``strip_furniture_objects`` ran (``index_frame="post_strip"``).
 - Per-page data is held as numpy columns (:class:`PageColumns`).
 - Every derived fact carries a :class:`Decided` saying which rule or model
   made it.
-- Ids are deterministic: blocks ``p3.r12`` (page, post-OCR region index),
-  lines ``p3.l40``, spans ``p3.sp210``.
+- Ids are deterministic and page-scoped (:mod:`bibr.document.ids`): blocks
+  ``p3.r12`` (page, post-OCR region index), lines ``p3.l40``, spans
+  ``p3.sp210``.
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus

@@ -21,9 +21,28 @@ from bibr.document.model import (
     Box,
     DocumentLayer,
     Page,
+    as_box,
 )
 
 TEXT_SOURCES = ("native", "invisible_layer", "ocr")
+
+
+def to_layout_bbox(page: Page, box: Box) -> Box:
+    """*box* (PDF points) in the layout frame: ``bbox_2d``'s 0..1000 image space.
+
+    The frame of the rendered page image, so the page's ``/Rotate`` applies;
+    the result is ``(x1, y1, x2, y2)`` with y down.
+    """
+    from bibr.ocr.native_text import _pdf_points_to_normalized_bbox
+
+    return as_box(_pdf_points_to_normalized_bbox(box, page.crop_box, page.rotation))
+
+
+def from_layout_bbox(page: Page, bbox_2d) -> Box:
+    """A layout ``bbox_2d`` (0..1000 image space) in the page's PDF points."""
+    from bibr.ocr.native_text import _normalized_bbox_to_pdf_points
+
+    return as_box(_normalized_bbox_to_pdf_points(list(bbox_2d), page.crop_box, page.rotation))
 
 
 def find_block(layer: DocumentLayer, block_id: str) -> tuple[Page, Block] | None:

@@ -16,7 +16,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from bibr.document.harvest import RenderBudget, build_document_layer
-from bibr.document.model import COLUMN_DTYPES, Block, DocumentLayer, Page, as_box
+from bibr.document.model import COLUMN_DTYPES, Block, DocumentLayer, Page
+from bibr.document.views import from_layout_bbox
 
 if TYPE_CHECKING:
     from bibr.ocr.types import OcrRegionResult
@@ -125,8 +126,6 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
     before a ``start_page`` with empty lists). Replaces earlier blocks, and
     assigns every line to the block holding most of its records' centres.
     """
-    from bibr.ocr.native_text import _normalized_bbox_to_pdf_points
-
     for page in layer.pages:
         regions = ocr_regions[page.index] if page.index < len(ocr_regions) else []
         blocks: list[Block] = []
@@ -138,13 +137,12 @@ def attach_blocks(layer: DocumentLayer, ocr_regions: list[list[OcrRegionResult]]
             if block_id in seen:
                 block_id = f"{block_id}.{position}"
             seen.add(block_id)
-            box = _normalized_bbox_to_pdf_points(region.bbox_2d, page.crop_box, page.rotation)
             chosen = _chosen_source(region, page)
             blocks.append(
                 Block(
                     block_id=block_id,
                     page=page.index,
-                    bbox_pdf=as_box(box),
+                    bbox_pdf=from_layout_bbox(page, region.bbox_2d),
                     label=region.label,
                     native_label=region.native_label,
                     read_order=position,
