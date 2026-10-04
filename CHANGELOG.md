@@ -8,6 +8,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Affiliations no longer gain fake rows from a ";" printed inside one affiliation
+  ("..., Cambridge, MA, USA; Basel, Switzerland" stays one affiliation, and a
+  list's "; and" no longer becomes an affiliation called "and"). Affiliation
+  text loses line breaks, printed markers, e-mail and telephone tails, the
+  "Full list of author information is available ..." pointer and trailing
+  punctuation, and one institution no longer appears twice because of spacing,
+  punctuation, accent or "&"/"and" differences (#114).
+- An affiliation whose institution is printed nowhere in the paper is no longer
+  exported. When the affiliations were outside the text the model saw, it could
+  fill them in from general knowledge (a university the paper never names);
+  such a part is now dropped, an unprinted institution added to a printed one is
+  removed, and a `VAL_AFFILIATION_UNGROUNDED` warning lists what was dropped
+  (#115). Common abbreviations ("Dept.", "Univ.", "Inst.", ...) count as
+  printed in either form.
+- Numbered affiliations are matched for authors whose byline prints symbols,
+  degrees or a stray comma before the number ("Name#*1", "Name MSci1,2",
+  "Name ,1,2,3"), whose name the model wrote without a printed period, or whose
+  name has an abbreviated part ("Kristen St. John", "J.-P. Martin"), and
+  affiliation lists printed at the end of the article (BMC, Springer) are read
+  for the numbers page 1 does not define, when the list was filed under
+  acknowledgments, funding, competing interests, ethics or data availability
+  rather than author information and each line opens with its number (#116).
+  Contact details ("Correspondence: Jane Doe ,2 Main Street",
+  "jane.doe2@...") are never read as a byline marker.
+- A byline's group tail that the model returned as a person ("..., for the
+  ABC/1234 Study Collaborators" as a person named "ABC/1234") becomes a
+  group author named as printed, and a group the model returned correctly
+  as an organisation is no longer dropped when its name ends in
+  "Collaborators", "Contributors" or "Trialists" (#118).
+- A numbered affiliation list whose markers are glued to the institution
+  ("1 Institute of ..., 2University of ..., 3Example Tech") no longer gives
+  every author the first institution plus the rest of the line; each glued
+  number now ends the previous definition, and a definition that still runs
+  into another one is not used (#107).
+- Affiliations printed as a first-page footnote now reach the model that reads
+  the authors, as a labelled block after the author context (copyright,
+  publication-history, licence and correspondence footnotes excluded, at most
+  2,000 characters). Papers whose only affiliation list was such a footnote
+  came back with every affiliation empty (#117).
 - Diagonal watermarks ("For Review Only", review disclaimers, "RETRACTED",
   "ARTICLE IN PRESS") no longer leak stray letters into abstracts, headings,
   statements, author lines and references, no longer inflate region font

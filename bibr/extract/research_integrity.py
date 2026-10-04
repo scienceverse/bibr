@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import TYPE_CHECKING
 
 from bibr.exceptions import ProcessingError
@@ -162,9 +163,31 @@ def _apply_contributions(
     return added
 
 
+def affiliation_key(text: str) -> str:
+    """Comparison form of an affiliation string.
+
+    Accents, case, "&" versus "and", spacing and punctuation are folded away,
+    so the same printed institution compares equal whether it was copied with
+    its line breaks ("...London,\r\nLondonUK") or cleaned ("...London, UK").
+    Word characters of every script are kept.
+    """
+    folded = unicodedata.normalize("NFKD", text or "")
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch)).casefold()
+    return re.sub(r"[\W_]+", "", folded.replace("&", " and "))
+
+
+def _separator_count(text: str) -> int:
+    return len(re.findall(r"[\W_]", text))
+
+
 def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[list[int]]]:
-    """Split each author's ``affiliation`` on "; " into verbatim components and
-    dedupe across authors, preserving first-seen order.
+    """Split each author's ``affiliation`` on "; " into components and dedupe
+    across authors, preserving first-seen order.
+
+    Components are whitespace-collapsed and compared by :func:`affiliation_key`,
+    so variants of one institution that differ only in line breaks, spacing,
+    punctuation, accents or "&"/"and" become one row. Of such variants the one
+    with more separators is kept ("London, UK" over "LondonUK").
 
     Returns ``(unique, author_ids)``: ``unique[k]`` is the k-th distinct
     affiliation string, and ``author_ids[k]`` is the ``author_id``s (in author
@@ -176,15 +199,18 @@ def collect_affiliations(authors: list[PaperAuthor]) -> tuple[list[str], list[li
     for author in authors:
         seen_for_author: set[str] = set()
         for raw in author.affiliation.split("; "):
-            comp = raw.strip()
-            if not comp or comp in seen_for_author:
+            comp = " ".join(raw.split())
+            key = affiliation_key(comp)
+            if not key or key in seen_for_author:
                 continue
-            seen_for_author.add(comp)
-            if comp not in index_of:
-                index_of[comp] = len(unique)
+            seen_for_author.add(key)
+            if key not in index_of:
+                index_of[key] = len(unique)
                 unique.append(comp)
                 author_ids.append([])
-            ids = author_ids[index_of[comp]]
+            elif _separator_count(comp) > _separator_count(unique[index_of[key]]):
+                unique[index_of[key]] = comp
+            ids = author_ids[index_of[key]]
             if author.author_id not in ids:
                 ids.append(author.author_id)
     return unique, author_ids

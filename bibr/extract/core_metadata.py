@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pandas as pd
+from rapidfuzz.fuzz import partial_ratio
 
 from bibr.config import snapshot_settings
 from bibr.exceptions import ProcessingError, UpstreamServiceError
@@ -36,10 +37,11 @@ from bibr.extract.field_decisions import (
 from bibr.extract.front_matter import AFFILIATION_MARKER_RE
 from bibr.extract.metadata_precision import refine_publication_date, repair_author_partitions
 from bibr.extract.ref_locator import _ORCID_BARE_INLINE_RE, RefLocator
+from bibr.extract.research_integrity import affiliation_key
 from bibr.extract.title_marks import drop_title_note_marker
 from bibr.extract.title_subtitle import drop_parallel_title, fold_printed_subtitle
 from bibr.input.consolidate_text import strip_affiliation_markers
-from bibr.models import ErrorCode
+from bibr.models import ORGANIZATION_ROLE, ErrorCode
 from bibr.paper import PaperAuthor, PaperMetadata
 from bibr.paper_contents import FRONT_MATTER_FURNITURE_LABELS, CanonicalSection, PaperContents
 from bibr.processing_warnings import ProcessingWarning, WarningCode
@@ -94,8 +96,42 @@ _CORRECTION_NOTICE_TITLE_RE = re.compile(
 _NUMBERED_AFFILIATION_RE = re.compile(
     r"(?<![\w,])(?P<number>\d{1,2})\s+(?=[A-Z\u00c0-\u00d6\u00d8-\u00de])"
 )
+# What follows a glued marker: a capitalised word or a dotted acronym
+# ("5E.T.S. de Ingenieria"), never a bare capital ("3D Printing", "3M").
+_GLUED_MARKER_FOLLOW = (
+    r"(?=[A-Z\u00c0-\u00d6\u00d8-\u00de](?:[a-z]|\.[A-Z\u00c0-\u00d6\u00d8-\u00de]))"
+)
+# A marker glued to its institution ("..., 2University of Example, 3Example
+# Tech"). Only taken for numbers the byline uses.
+_GLUED_AFFILIATION_MARKER_RE = re.compile(r"(?<![\w,.])(?P<number>\d{1,2})" + _GLUED_MARKER_FOLLOW)
+# A marker still inside a captured definition, spaced or glued: the value then
+# runs into the next definition.
+_EMBEDDED_AFFILIATION_MARKER_RE = re.compile(r"(?<!\w)\d{1,2}\s*" + _GLUED_MARKER_FOLLOW)
+# Contact details on page 1 are not searched for byline markers:
+# "*Correspondence: Jane Doe ,2 Main Street" is an address, not marker 2. A line
+# is cut where "correspond..." or "e-mail" starts, since OCR often appends
+# "*Corresponding author" to the byline itself, and a line that still holds an
+# e-mail address is skipped.
+_CONTACT_DETAILS_RE = re.compile(r"correspond|e-?mail", re.IGNORECASE)
+# A late-tier line has to open with its marker ("3 Nord University", "3Nord"),
+# as an end-of-article affiliation list does. Acknowledgment and funding prose
+# ("We thank the 2 University hospitals in Oslo") mentions numbers mid-sentence.
+_LATE_DEFINITION_LINE_RE = re.compile(r"\s*\d{1,2}\s*[A-Z\u00c0-\u00de]")
 _CORRESPONDENCE_SUFFIX_RE = re.compile(
     r"\s+(?:corresponding\s+author|correspondence)\s*:", re.IGNORECASE
+)
+# What a byline may print between an author's name and their affiliation
+# numbers: degrees ("Doe MSci1,2", "Roe, MD,1"), one comma ("Poe ,1,2,3" where an
+# ORCID icon was dropped) and symbol markers ("Moe#*1", "Hale*,\u2020,1").
+_BYLINE_DEGREE_PATTERN = (
+    r"(?:Ph\.?D|M\.?D|MSci|MSc|MPH|MBBS|MBChB|DPhil|DrPH|PharmD|BSc|BA|MA|MS|RN|"
+    r"FRCP\w*|MRCP\w*)\.?"
+)
+# One character class for the symbols, spaces and commas: a nested repetition
+# here backtracked exponentially on a run of "* * * ...".
+_BYLINE_MARKER_GAP_PATTERN = (
+    rf"(?:\s*,?\s*\b{_BYLINE_DEGREE_PATTERN}){{0,3}}"
+    r"[*\u2217\u2020\u2021\u00a7\u00b6#%\u2709\s,]*"
 )
 _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
     {
@@ -109,11 +145,33 @@ _AFFILIATION_MATCH_TRANSLATION = str.maketrans(
         "\u2212": "-",
     }
 )
+# Back-matter section types an end-of-article affiliation list is typed as
+# when the classifier does not call it author_contributions. Unknown (the body
+# fallback), footnote and endnote are left out: body prose such as "In
+# Experiment 2 University students ..." reads like a definition. Lines must
+# also open with their marker (``_LATE_DEFINITION_LINE_RE``).
+_LATE_AFFILIATION_SECTION_TYPES = (
+    CanonicalSection.ACKNOWLEDGMENT,
+    CanonicalSection.FUNDING,
+    CanonicalSection.COI,
+    CanonicalSection.ETHICS,
+    CanonicalSection.OPEN_DATA,
+)
 _AFFILIATION_ORG_RE = re.compile(
     r"\b(?:department|faculty|institute|university|college|school|hospital|"
     r"centre|center|clinic|laborator(?:y|ies))\b",
     re.IGNORECASE,
 )
+# A front-page footnote that is publication furniture or a contact line, not
+# an affiliation, unless an institution word comes before the match.
+_NON_AFFILIATION_FOOTNOTE_RE = re.compile(
+    r"(?:\u00a9|copyright|\breceived\b|\baccepted\b|\bpublished\b|\bcitation\b|"
+    r"homepage|journal|licen[cs]e|\bdoi\b|https?://|www\.|all rights reserved|"
+    r"to whom correspondence|corresponding author|correspondence to|e-?mail\s*:)",
+    re.IGNORECASE,
+)
+# Upper bound on the footnote text added to the author LLM's context.
+_FOOTNOTE_AFFILIATION_BUDGET = 2000
 
 # Positive evidence that a captured ``<number> <Capital…>`` run really is an
 # institution. Without it the numbered-affiliation reconciler accepted any
@@ -460,10 +518,19 @@ _LATIN_BASE_TRANSLATION = str.maketrans(
     }
 )
 _CONSORTIUM_NAME_RE = re.compile(
-    r"\b(?:association|collaboration|collective|committee|consortium|group|"
-    r"investigators?|network|society|study\s+group|team)\b",
+    r"\b(?:association|collaborat(?:ion|ive|ors?)|collective|committee|consortium|"
+    r"contributors|group|investigators?|network|society|study\s+group|team|trialists?)\b",
     re.IGNORECASE,
 )
+# A byline's group tail: "..., for the ABC/1234 Study Collaborators",
+# "on behalf of the EXAMPLE Trial Group".
+_CONSORTIUM_TAIL_RE = re.compile(
+    r"\b(?:for|on\s+behalf\s+of)\s+(?:the\s+)?"
+    r"(?P<span>[^,;:.\n]{0,100}?\b(?:collaborat(?:ion|ive|ors?)|collective|committee|"
+    r"consortium|contributors|group|investigators?|network|society|team|trialists?))\b",
+    re.IGNORECASE,
+)
+_CONSORTIUM_PREFIX_RE = re.compile(r"^(?:for|on\s+behalf\s+of)\s+(?:the\s+)?", re.IGNORECASE)
 _NUMBERED_AFFILIATION_BOUNDARY_RE = re.compile(r"\s+\d+[.)]\s+")
 _ABSTRACT_BYLINE_BOUNDARY_RE = re.compile(r"\babstract\b", re.IGNORECASE)
 _EMAIL_FRAGMENT_RE = re.compile(r"\S*@\S*")
@@ -615,6 +682,68 @@ def _split_case_joins(value: str) -> str:
 _CJK_NAME_RE = re.compile(
     "[\u3005-\u3007\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+"
 )
+
+
+def _rewrite_consortium_authors(authors: list[PaperAuthor], context: str) -> list[PaperAuthor]:
+    """Turn a group byline tail the model returned as a person into a group author.
+
+    "..., for the ABC/1234 Study Collaborators" came back as a person named
+    "ABC/1234". An author is rewritten only when its name looks like no
+    person's (a digit or "/", or a leading "for the" / "on behalf of") and
+    every token of it is inside a group tail printed in ``context``; the tail
+    becomes the group's name. A name that only starts with "for the" and has
+    no printed tail loses the prefix. A group already in the list is not
+    added twice. Persons are never touched.
+    """
+    tails = [
+        " ".join(match.group("span").split()) for match in _CONSORTIUM_TAIL_RE.finditer(context)
+    ]
+    kept: list[PaperAuthor] = []
+    groups = {
+        author.family.casefold()
+        for author in authors
+        if ORGANIZATION_ROLE in (author.role or []) and author.family
+    }
+    changed = False
+    for author in authors:
+        name = " ".join(part for part in (author.given, author.family) if part).strip()
+        prefixed = bool(_CONSORTIUM_PREFIX_RE.match(name))
+        if ORGANIZATION_ROLE in (author.role or []) or not (prefixed or re.search(r"[\d/]", name)):
+            kept.append(author)
+            continue
+        tokens = set(re.findall(r"[^\W_]+", _CONSORTIUM_PREFIX_RE.sub("", name).casefold()))
+        span = next(
+            (
+                tail
+                for tail in tails
+                if tokens and tokens <= set(re.findall(r"[^\W_]+", tail.casefold()))
+            ),
+            None,
+        )
+        if span is None and prefixed:
+            span = _CONSORTIUM_PREFIX_RE.sub("", name).strip()
+        if not span:
+            kept.append(author)
+            continue
+        changed = True
+        if span.casefold() in groups:
+            continue
+        groups.add(span.casefold())
+        kept.append(
+            author.model_copy(
+                update={
+                    "given": "",
+                    "family": span,
+                    "affiliation": "",
+                    "role": [*(author.role or []), ORGANIZATION_ROLE],
+                }
+            )
+        )
+    if not changed:
+        return authors
+    for author_id, author in enumerate(kept, start=1):
+        author.author_id = author_id
+    return kept
 
 
 def _name_tokens(value: str) -> tuple[str, ...]:
@@ -1702,6 +1831,87 @@ _NOT_A_KEYWORD_ROW_RE = re.compile(
 )
 
 
+# Affiliation value hygiene. A reconciler copies the printed definition and the
+# LLM copies what it reads, so both carry what the page prints around the
+# institution: line breaks, the list's own marker, a contact line, the list's
+# connectives and trailing punctuation.
+#
+# A contact field needs its colon or period ("Tel Aviv" is a city); a bare
+# address cuts from the address on.
+_AFFILIATION_CONTACT_TAIL_RE = re.compile(
+    r"[\s,;.]*(?:"
+    r"\b(?:e-?mail(?:\s+address(?:es)?)?|tel(?:ephone)?|phone|fax|mob(?:ile)?)\s*[:.]+(?:\s|$)"
+    r"|\be-?mail\s+(?=\S+@)"
+    r"|\S+@\S+\.\w"
+    r").*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# BMC and Springer print a pointer to the end-of-article list after the last
+# page-1 definition, and it is captured with it.
+_AFFILIATION_BOILERPLATE_TAIL_RE = re.compile(
+    r"[\s,;.]*\b(?:full\s+list\s+of\s+author\s+information\s+is\s+available"
+    r"|extended\s+author\s+information\s+(?:is\s+)?available)\b.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+# The connective a numbered list prints between two definitions ("...,
+# Houston, Texas; and 2Department of ..."), at either edge of a value.
+_AFFILIATION_EDGE_CONNECTIVE_RE = re.compile(
+    r"^(?:and|&|und|et|y|e)$|^(?:(?:and|&)\s+)+|(?:[\s,;]+(?:and|&|und|et|y|e))+$"
+)
+# A printed marker the LLM kept at the start of a value: "1 Department",
+# "2. NIHR", "1Department", "a School", "* Institute". "3M Company" survives:
+# a glued digit is a marker only before a capitalised word.
+_AFFILIATION_LEADING_MARKER_RE = re.compile(
+    r"^(?:\d{1,2}(?:\s*[.)]\s*|\s+(?=[A-Z\u00c0-\u00de]))|\d{1,2}(?=[A-Z\u00c0-\u00de][a-z])|[a-h]\s+(?=[A-Z])"
+    r"|[*\u2217\u2020\u2021\u00a7\u00b6#%]+\s*(?=[A-Z]))"
+)
+# Trailing punctuation, marker symbols and the "|" some publishers print
+# between affiliations. A final "." after a single capital ("U.S.A.") stays.
+_AFFILIATION_TRAILING_RE = re.compile(
+    r"(?:[\s,;:|*\u2217\u2020\u2021\u00a7\u00b6#%\u2709]|(?<!\b[A-Z])\.)+$"
+)
+# Two letters in a row: a part without them is a bare marker ("1", "2; 3").
+_AFFILIATION_ALPHA_RUN_RE = re.compile(r"[^\W\d_]{2}")
+
+
+# A component of an affiliation that names an organisation must be printed in
+# the paper. OCR'd text the LLM silently corrected ("Universily") passes the
+# fuzzy floor; an institution from world knowledge does not.
+_AFFILIATION_GROUNDING_MIN_KEY = 6
+_AFFILIATION_GROUNDING_FUZZY_FLOOR = 90
+
+
+# Abbreviations folded to one form on both sides before grounding, so an LLM
+# that expands "Dept. of Psychology, Univ. of Toronto" is still grounded.
+_AFFILIATION_ABBREVIATIONS = {
+    "department": "dept",
+    "departments": "dept",
+    "depts": "dept",
+    "university": "univ",
+    "institute": "inst",
+    "hospital": "hosp",
+    "laboratory": "lab",
+    "laboratories": "lab",
+    "labs": "lab",
+    "national": "natl",
+    "science": "sci",
+    "sciences": "sci",
+    "medicine": "med",
+    "medical": "med",
+    "college": "coll",
+    "center": "ctr",
+    "centre": "ctr",
+    "cent": "ctr",
+    "cntr": "ctr",
+    "saint": "st",
+    "street": "st",
+}
+_AFFILIATION_ABBREVIATION_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_AFFILIATION_ABBREVIATIONS, key=len, reverse=True)) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def first_page_keyword_footnote(contents) -> str:
     """The first-page footnote rows that print the keyword list, as a labelled block, or "".
 
@@ -1754,6 +1964,90 @@ def first_page_keyword_footnote(contents) -> str:
             return ""
     block = "\n".join(lines)[:_KEYWORD_FOOTNOTE_CHARS]
     return "[Keywords printed in a first-page footnote]\n" + block
+
+
+def _grounding_key(text: str) -> str:
+    """:func:`affiliation_key` after folding common abbreviations."""
+    return affiliation_key(
+        _AFFILIATION_ABBREVIATION_RE.sub(
+            lambda match: _AFFILIATION_ABBREVIATIONS[match.group(0).lower()], text
+        )
+    )
+
+
+def _ungrounded_affiliation_components(
+    part: str, document_key: str, folded_document_key: str = ""
+) -> tuple[int, list[str]]:
+    """(organisation components of *part*, those the document does not print).
+
+    Both sides are compared as :func:`affiliation_key` folds, and again with abbreviations
+    folded (:func:`_grounding_key`), so line breaks, "Dept."/"Department",
+    hyphenation spaces, punctuation, accents and "&"/"and" cannot cause a miss.
+    Components with no organisation word, or too short to test, are not counted.
+    """
+    total = 0
+    missing: list[str] = []
+    for component in part.split(","):
+        component = component.strip()
+        if not _AFFILIATION_ORG_RE.search(component):
+            continue
+        key = affiliation_key(component)
+        if len(key) < _AFFILIATION_GROUNDING_MIN_KEY:
+            continue
+        total += 1
+        if key in document_key:
+            continue
+        if folded_document_key and _grounding_key(component) in folded_document_key:
+            continue
+        if partial_ratio(key, document_key, score_cutoff=_AFFILIATION_GROUNDING_FUZZY_FLOOR):
+            continue
+        missing.append(component)
+    return total, missing
+
+
+def _runs_into_another_definition(value: str) -> bool:
+    """True when a captured definition still holds a marker with an institution
+    on both sides of it: two definitions read as one, which must not replace
+    the LLM's per-author value."""
+    for marker in _EMBEDDED_AFFILIATION_MARKER_RE.finditer(value):
+        if _AFFILIATION_ORG_EVIDENCE_RE.search(
+            value[: marker.start()]
+        ) and _AFFILIATION_ORG_EVIDENCE_RE.search(value[marker.end() :]):
+            return True
+    return False
+
+
+def _ungrounded_affiliation_issue(dropped: list[tuple[int, str]]) -> ValidationIssue:
+    """VAL_AFFILIATION_UNGROUNDED for affiliation text the paper does not print."""
+    shown = "; ".join(dict.fromkeys(text for _, text in dropped))
+    if len(shown) > 200:
+        shown = shown[:199].rstrip() + "\u2026"
+    return ValidationIssue(
+        code="VAL_AFFILIATION_UNGROUNDED",
+        severity=IssueSeverity.WARNING,
+        message=(
+            f"{len(dropped)} affiliation part(s) name an organisation printed nowhere in the "
+            f"paper and were dropped: {shown}"
+        ),
+        origin_stage="extract",
+        evidence_ids=tuple(dict.fromkeys(f"author:{author_id}" for author_id, _ in dropped)),
+        count=len(dropped),
+    )
+
+
+def _clean_affiliation_value(value: str) -> str:
+    """One affiliation without line breaks, its printed marker, a contact or
+    end-of-article pointer tail, edge connectives and trailing punctuation."""
+    text = _normalize_affiliation_match_text(value or "")
+    text = _AFFILIATION_LEADING_MARKER_RE.sub("", text, count=1)
+    text = _AFFILIATION_BOILERPLATE_TAIL_RE.sub("", text)
+    text = _AFFILIATION_CONTACT_TAIL_RE.sub("", text)
+    previous = None
+    while previous != text:
+        previous = text
+        text = _AFFILIATION_TRAILING_RE.sub("", text)
+        text = _AFFILIATION_EDGE_CONNECTIVE_RE.sub("", text).strip()
+    return text
 
 
 @dataclass
@@ -1899,6 +2193,18 @@ class CoreMetadataExtractor:
             keyword_footnote = first_page_keyword_footnote(self.contents)
             llm_text = f"{full_text}\n\n{keyword_footnote}" if keyword_footnote else full_text
 
+            # Affiliations printed as a first-page footnote are not front-matter
+            # candidates, so neither the author zone nor the block context
+            # carries them and the model returned empty affiliations (or filled
+            # them in from general knowledge). Give it them as a labelled block.
+            if authors_text is not None:
+                footnote_affiliations = self._front_page_footnote_affiliations(authors_text)
+                if footnote_affiliations:
+                    authors_text += (
+                        "\n\n[Affiliation footnotes printed on the first page]\n"
+                        + "\n".join(footnote_affiliations)
+                    )
+
             llm_metadata = await self._call_core_llm(
                 llm_text,
                 authors_text=authors_text,
@@ -1999,6 +2305,16 @@ class CoreMetadataExtractor:
             self._reconcile_repeated_name_affiliations(usable, self.sentences_df)
             if [author.affiliation for author in usable] != affiliations_before:
                 author_trail[-1].transforms.append("affiliations_reconciled")
+            affiliations_reconciled = [author.affiliation for author in usable]
+            ungrounded = self._normalize_author_affiliations(
+                usable,
+                self.sentences_df,
+                context_text="\n".join(text for text in (full_text, authors_text) if text),
+            )
+            if [author.affiliation for author in usable] != affiliations_reconciled:
+                author_trail[-1].transforms.append("affiliations_cleaned")
+            if ungrounded:
+                self.validation_issues.append(_ungrounded_affiliation_issue(ungrounded))
             self._email_harvester.demote_implausible_flags(usable)
 
             # Title/abstract must resolve BEFORE classification: the trained
@@ -2441,11 +2757,16 @@ class CoreMetadataExtractor:
         """Drop translator credits and split glued names; say which repairs applied."""
 
         kept = self._drop_translator_credits(authors, context)
+        dropped_translators = len(kept) != len(authors)
+        before_groups = [(author.given, author.family) for author in kept]
+        kept = _rewrite_consortium_authors(kept, context)
         repairs = len(self.validation_issues)
         self._repair_glued_names(kept)
         transforms = []
-        if len(kept) != len(authors):
+        if dropped_translators:
             transforms.append("translator_credits_dropped")
+        if [(author.given, author.family) for author in kept] != before_groups:
+            transforms.append("group_authors_rewritten")
         if len(self.validation_issues) != repairs:
             transforms.append("glued_names_split")
         return kept, transforms
@@ -2791,19 +3112,48 @@ class CoreMetadataExtractor:
         if not marker_lines:
             return
 
+        byline_lines = []
+        for line in marker_lines:
+            text = _normalize_affiliation_match_text(line)
+            contact = _CONTACT_DETAILS_RE.search(text)
+            text = text[: contact.start()] if contact else text
+            if "@" not in text:
+                byline_lines.append(text)
+
         author_numbers: dict[int, list[int]] = {}
         for author in authors:
             full_name = " ".join(part.strip() for part in (author.given, author.family) if part)
             normalized_name = _normalize_affiliation_match_text(full_name)
-            if not normalized_name:
+            tokens = [token.rstrip(".") for token in normalized_name.split() if token.rstrip(".")]
+            if not tokens:
                 continue
+            # A period may follow any token when a space follows it ("St. John",
+            # "Th. Muller", "J.-P. Martin"), and a one-letter initial also without
+            # the space ("J.A"): the LLM's "Robyn A Frankel" is the printed
+            # "Robyn A. Frankel". A bare period between longer tokens would match
+            # an e-mail address ("jane.doe2@...").
+            name_pattern = "".join(
+                re.escape(token)
+                + (
+                    ""
+                    if index == len(tokens) - 1
+                    else r"(?:\.\s*|\s+)"
+                    if len(token.rsplit(".", 1)[-1]) == 1
+                    else r"\.?\s+"
+                )
+                for index, token in enumerate(tokens)
+            )
+            # The numbers never follow ", " (a comma and a space): that is a
+            # contact line ("Jane Doe, 77 Massachusetts Avenue"), while the
+            # stray comma of a byline is glued to the numbers ("Poe ,1,2,3",
+            # "Roe, MD,1", "Hale*,\u2020,1").
             marker_re = re.compile(
-                rf"(?<!\w){re.escape(normalized_name)}\s*"
-                r"(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?!\d)",
+                rf"(?<!\w){name_pattern}\.?{_BYLINE_MARKER_GAP_PATTERN}"
+                r"(?<!,\s)(?P<numbers>\d{1,2}(?:\s*[,;]\s*\d{1,2})*)(?![\d@])",
                 re.IGNORECASE,
             )
-            for line in marker_lines:
-                match = marker_re.search(_normalize_affiliation_match_text(line))
+            for line in byline_lines:
+                match = marker_re.search(line)
                 if match:
                     author_numbers[author.author_id] = [
                         int(number) for number in re.findall(r"\d{1,2}", match.group("numbers"))
@@ -2832,21 +3182,38 @@ class CoreMetadataExtractor:
         def _definitions(lines: list[str]) -> dict[int, list[str]]:
             found: dict[int, list[str]] = {}
             for line in lines:
-                matches = list(_NUMBERED_AFFILIATION_RE.finditer(line))
+                # A glued marker ("2University") bounds a definition like a
+                # spaced one; without it "1 A, 2University B, 3Example C" was
+                # read as one definition 1 running to the end of the line.
+                matches = sorted(
+                    [
+                        *_NUMBERED_AFFILIATION_RE.finditer(line),
+                        *(
+                            glued
+                            for glued in _GLUED_AFFILIATION_MARKER_RE.finditer(line)
+                            if int(glued.group("number")) in wanted
+                        ),
+                    ],
+                    key=lambda found_match: found_match.start(),
+                )
                 for index, match in enumerate(matches):
                     number = int(match.group("number"))
                     if number not in wanted:
                         continue
                     end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
-                    value = line[match.end() : end].strip(" ,;")
-                    value = _CORRESPONDENCE_SUFFIX_RE.split(value, maxsplit=1)[0].strip(" ,;")
+                    value = _CORRESPONDENCE_SUFFIX_RE.split(line[match.end() : end], maxsplit=1)[0]
+                    value = _clean_affiliation_value(value)
                     # "<digit> <Capital>" is also the shape of a figure or
                     # table caption and of a publication-history line, so the
                     # captured run has to look like an institution before it
                     # can define a marker. Abstaining makes the
                     # ``len(resolved) == len(numbers)`` guard below drop the
                     # author, which is the fail-closed answer.
-                    if value and _looks_like_affiliation(value):
+                    if (
+                        value
+                        and _looks_like_affiliation(value)
+                        and not _runs_into_another_definition(value)
+                    ):
                         found.setdefault(number, []).append(value)
             return found
 
@@ -2871,13 +3238,36 @@ class CoreMetadataExtractor:
 
         page1_definitions = _definitions(marker_lines)
         backmatter_definitions = _definitions(backmatter_lines)
+        # BMC and Springer print "Full list of author information is available
+        # at the end of the article" and define most markers there, and the
+        # section classifier types that block acknowledgment or funding as
+        # often as author_contributions. This third tier is read only for
+        # numbers neither of the first two defines, even ambiguously, so the
+        # page-1 and author-contributions behaviour is unchanged.
+        late_lines: list[str] = []
+        if "section_type" in meta_df.columns:
+            late_rows = meta_df.loc[
+                (meta_df["page_number"] > _front_page(meta_df))
+                & meta_df["section_type"].isin(_LATE_AFFILIATION_SECTION_TYPES)
+            ]
+            late_lines = [str(value) for value in late_rows["text"].values if pd.notna(value)]
+        late_definitions = _definitions(
+            [line for line in late_lines if _LATE_DEFINITION_LINE_RE.match(line)]
+        )
 
         affiliations: dict[int, str] = {}
         for number in wanted:
             # Back-matter first: it is the article's own restatement, so it both
             # outranks the page-1 form and can rescue a number the page-1 tier
             # defines ambiguously.
-            for tier in (backmatter_definitions, page1_definitions):
+            for tier in (backmatter_definitions, page1_definitions, late_definitions):
+                # A number page 1 or the back matter defines, even ambiguously
+                # (a combined issue restarting at 1), is not open: the late
+                # tier must not break the fail-closed answer.
+                if tier is late_definitions and (
+                    number in backmatter_definitions or number in page1_definitions
+                ):
+                    break
                 values = tier.get(number)
                 if not values:
                     continue
@@ -2929,6 +3319,115 @@ class CoreMetadataExtractor:
             for author, affiliation in resolved.values():
                 author.affiliation = affiliation
             return
+
+    @staticmethod
+    def _normalize_author_affiliations(
+        authors: list[PaperAuthor], meta_df: pd.DataFrame, *, context_text: str = ""
+    ) -> list[tuple[int, str]]:
+        """Clean every author's "; "-joined affiliations, whatever produced them.
+
+        Runs after both reconcilers, so LLM values and printed definitions get
+        the same treatment. Each part loses what the page prints around the
+        institution (``_clean_affiliation_value``); a part with no two letters
+        in a row ("1", "2; 3") is dropped. "; " is both the join and a printed
+        character, so one printed affiliation with an inner ";" ("...,
+        Cambridge, MA, USA; Basel, Switzerland") arrives as two parts: a part
+        that is not an institution on its own is glued back to the previous one
+        with ", ", but only when the two were printed as one run ("prev; part"
+        occurs in the paper's text). Two affiliations printed separately never
+        occur that way, so an author's second institution stays separate.
+        Duplicates collapse on the folded key.
+
+        Grounding: author names have a fabrication veto, affiliations had none,
+        and when the definitions are outside its context the LLM fills them in
+        from world knowledge. A part none of whose organisation components is
+        printed in the paper (``meta_df`` plus ``context_text``, the text the
+        LLM was given) is dropped, so the value is empty rather than invented;
+        unprinted components of a part that is otherwise printed are removed.
+        Reconciler values are printed text and always pass. Returns
+        ``(author_id, dropped text)`` for each removal.
+        """
+        if not authors or not any(author.affiliation for author in authors):
+            return []
+        document = ""
+        if "text" in meta_df.columns:
+            document = " ".join(str(value) for value in meta_df["text"].values if pd.notna(value))
+        printed = _normalize_affiliation_match_text(document).casefold()
+        document_key = affiliation_key(f"{document} {context_text}")
+        folded_document_key = _grounding_key(f"{document} {context_text}")
+        dropped: list[tuple[int, str]] = []
+        for author in authors:
+            parts: list[str] = []
+            previous: str | None = None
+            for raw in (author.affiliation or "").split("; "):
+                part = _clean_affiliation_value(raw)
+                if not _AFFILIATION_ALPHA_RUN_RE.search(part):
+                    previous = None
+                    continue
+                if (
+                    previous is not None
+                    and not _looks_like_affiliation(part)
+                    and f"{previous}; {part}".casefold() in printed
+                ):
+                    parts[-1] = f"{parts[-1]}, {part}"
+                else:
+                    parts.append(part)
+                previous = part
+            seen: set[str] = set()
+            kept: list[str] = []
+            for part in parts:
+                if document_key:
+                    total, missing = _ungrounded_affiliation_components(
+                        part, document_key, folded_document_key
+                    )
+                    if missing and len(missing) == total:
+                        dropped.append((author.author_id, part))
+                        continue
+                    if missing:
+                        dropped.extend((author.author_id, component) for component in missing)
+                        part = ", ".join(
+                            component.strip()
+                            for component in part.split(",")
+                            if component.strip() not in missing
+                        )
+                key = affiliation_key(part)
+                if key and key not in seen:
+                    seen.add(key)
+                    kept.append(part)
+            author.affiliation = "; ".join(kept)
+        return dropped
+
+    def _front_page_footnote_affiliations(self, already: str) -> list[str]:
+        """Front-page footnote rows that read as an affiliation and are not in
+        ``already`` (the author context built so far), within a 2,000-character
+        budget. Copyright, publication-history, licence and correspondence
+        footnotes are skipped unless an institution word comes first."""
+        df = self.sentences_df
+        if df.empty or not {"text", "page_number", "section_type"}.issubset(df.columns):
+            return []
+        rows = df.loc[
+            (df["page_number"] == _front_page(df))
+            & (df["section_type"] == CanonicalSection.FOOTNOTE),
+            "text",
+        ]
+        normalized_already = _normalize_affiliation_match_text(already)
+        found: list[str] = []
+        budget = _FOOTNOTE_AFFILIATION_BUDGET
+        for value in rows.values:
+            if pd.isna(value):
+                continue
+            text = _normalize_affiliation_match_text(str(value))
+            if not text or text in normalized_already or not _looks_like_affiliation(text):
+                continue
+            if _NON_AFFILIATION_FOOTNOTE_RE.search(text) and not _AFFILIATION_ORG_RE.search(
+                _NON_AFFILIATION_FOOTNOTE_RE.split(text, maxsplit=1)[0]
+            ):
+                continue
+            if len(text) > budget:
+                break
+            budget -= len(text)
+            found.append(text)
+        return found
 
     async def _classify_paper(
         self, title: str, abstract: str, llm_metadata, classification_text: str
