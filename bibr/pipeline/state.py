@@ -110,9 +110,10 @@ class FileState:
     stage_times: dict = field(default_factory=dict)
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
     # The document layer (``bibr.document``), built by NativeTextStage or
-    # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on.
-    # Outlives the OCR stage; handed on as ``PaperContents.document`` and
-    # dropped after PostParse unless the memory mode is ``keep_all``.
+    # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on,
+    # and handed on as ``PaperContents.document``. In every memory mode its
+    # glyph columns are freed after the last stage that requires it, and the
+    # rest of it lives until ``free_all``.
     doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
     # The layer was asked for once, inline or rebuilt; a failed build leaves
     # doc_layer None and is not tried again.
@@ -139,16 +140,17 @@ class FileState:
         # ParseSegmentStage so the parser can be reused; release after parse.
         self._native_parser = None
 
-    def free_document_layer(self):
-        """Free the document layer once PostParse, its last reader, is done.
+    def free_layer_columns(self):
+        """Free the document layer's glyph columns after the last stage that requires it.
 
-        Runs for every file, layer or not, so it must not raise: contents that
-        hold no layer are left alone.
+        The layer stays, in ``doc_layer`` and ``contents.document``, with
+        ``columns_freed`` set. Runs for every file, layer or not, so it must
+        not raise, and it is duck-typed so that a run with the layer off never
+        imports ``bibr.document``.
         """
-        self.doc_layer = None
-        contents = self.contents
-        if contents is not None and getattr(contents, "document", None) is not None:
-            contents.document = None
+        free_columns = getattr(self.doc_layer, "free_columns", None)
+        if free_columns is not None:
+            free_columns()
 
     def set_error(
         self,

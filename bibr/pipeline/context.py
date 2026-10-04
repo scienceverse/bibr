@@ -20,6 +20,9 @@ MemoryMode = Literal["aggressive", "balanced", "keep_all"]
 RefParseStrategy = Literal["ner", "llm", "llm-chunked", "off"]
 RefSegStrategy = Literal["geom", "region", "llm", "crf"]
 
+# The stage after which the document layer's glyph columns are freed: the last
+# stage whose ``requires`` names ``doc_layer`` (a test holds the two together).
+LAYER_COLUMNS_FREED_AFTER = "extract"
 
 _figure_tier_warned = False
 
@@ -190,15 +193,17 @@ class PipelineContext:
         Stages no longer need to call ``fs.free_*`` themselves. A file that
         has errored (and has no exported result to preserve) is fully freed
         at the next boundary — it will never be exported, so holding its
-        buffers until GC just pins memory. The document layer goes after
-        PostParse (``extract``), its last reader, except under ``keep_all``.
+        buffers until GC just pins memory. In every memory mode the document
+        layer's glyph columns go after :data:`LAYER_COLUMNS_FREED_AFTER`, the
+        last stage that requires the layer; the rest of it lives until
+        ``free_all``.
         """
         for fs in self.file_states:
             if stage_name == "ocr":
                 fs.free_pre_ocr()
             elif stage_name == "parse":
                 fs.free_pre_parse()
-            elif stage_name == "extract" and self.config.memory_mode != "keep_all":
-                fs.free_document_layer()
+            elif stage_name == LAYER_COLUMNS_FREED_AFTER:
+                fs.free_layer_columns()
             if fs.error is not None and fs.result_json is None:
                 fs.free_all()

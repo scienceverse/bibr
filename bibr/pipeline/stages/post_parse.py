@@ -1827,7 +1827,10 @@ async def post_parse(
 class PostParseStage:
     name = "extract"
     # FileState fields consumed / populated (see validate_stage_contracts).
-    requires = ("contents", "file_hash", "native_metadata")
+    # The document layer, handed on as ``contents.document``, is whole up to
+    # here: its glyph columns are freed after the last stage that requires it
+    # (``bibr.pipeline.context.LAYER_COLUMNS_FREED_AFTER``).
+    requires = ("contents", "file_hash", "native_metadata", "doc_layer")
     produces = ("paper",)
 
     async def run(self, ctx: PipelineContext) -> None:

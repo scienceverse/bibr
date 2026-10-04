@@ -2,9 +2,9 @@
 
 NativeTextStage builds the layer inside ``inspect_pdf``, ParseSegmentStage
 attaches the post-OCR regions as blocks and hands it on as
-``PaperContents.document``, PostParse reads it, and the balanced memory mode
-frees it after PostParse. Only layout, segmentation, OCR and the LLM are
-faked, as in ``tests/test_pipeline_smoke.py``.
+``PaperContents.document``, PostParse reads it, and its glyph columns are
+freed after PostParse, as in every memory mode. Only layout, segmentation,
+OCR and the LLM are faked, as in ``tests/test_pipeline_smoke.py``.
 """
 
 from __future__ import annotations
@@ -56,8 +56,16 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
     real_post_parse = post_parse_mod.post_parse
 
     async def post_parse(*, contents, **kwargs):
-        seen["layer"] = contents.document
+        layer = contents.document
+        seen["layer"] = layer
         seen["summaries"] = list(contents.region_summaries)
+        if layer is not None:
+            # The columns are freed after PostParse: read the text layer under each block now.
+            seen["native_text"] = {
+                block.block_id: views.block_text(layer, block.block_id)
+                for page in layer.pages
+                for block in page.blocks
+            }
         return await real_post_parse(contents=contents, **kwargs)
 
     real_free = PipelineContext.free_after_stage
@@ -118,6 +126,12 @@ async def test_the_local_pipeline_hands_the_layer_of_its_page_range_to_post_pars
     native = [block for block in page.blocks if block.chosen == "native"]
     assert native
     for block in native:
-        assert views.block_text(layer, block.block_id) == block.text["native"]
-    # Balanced memory mode frees the layer after PostParse; it was built once.
-    assert seen["freed"] == [(None, True, None)]
+        assert seen["native_text"][block.block_id] == block.text["native"]
+    # After PostParse only the glyph columns go; the layer, built once, and its
+    # blocks stay with the file and its contents.
+    [(kept, attempted, handed_on)] = seen["freed"]
+    assert kept is layer
+    assert handed_on is layer
+    assert attempted is True
+    assert layer.columns_freed
+    assert [page.cols for page in layer.pages] == [None]

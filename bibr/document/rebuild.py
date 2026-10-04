@@ -86,10 +86,14 @@ def ensure_document_layer(
     None for inputs that are not PDFs, when the processed bytes are gone (an
     input file that changed since the run read it) and when a build was
     already tried and failed: a rebuild would parse the same bytes again
-    under the lock. Never raises.
+    under the lock. A layer whose columns were freed comes back as it is,
+    with ``columns_freed`` set: it is neither rebuilt nor given new blocks,
+    which would lose the blocks' lines. Never raises.
     """
     try:
         layer = fs.doc_layer
+        if layer is not None and layer.columns_freed:
+            return layer
         if layer is None:
             if fs.doc_layer_attempted:
                 return None

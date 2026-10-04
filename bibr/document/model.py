@@ -470,6 +470,20 @@ class DocumentLayer:
     # Failures of layer components, keyed like "harvest:3"; they never fail
     # the paper and never reach PdfInspection.component_errors.
     component_errors: dict[str, str] = field(default_factory=dict)
+    # Set by free_columns: every page's cols is then None because the
+    # columns were dropped, not because a page has no text layer or failed.
+    columns_freed: bool = False
+
+    def free_columns(self) -> None:
+        """Drop every page's glyph columns, the bulk of the layer, and keep the rest.
+
+        The pipeline calls it after the last stage that requires the layer.
+        Blocks, furniture, roles, fonts and presence stay, and
+        :attr:`columns_freed` records that the columns are gone.
+        """
+        for page in self.pages:
+            page.cols = None
+        self.columns_freed = True
 
     def page(self, index: int) -> Page | None:
         """The page with absolute 0-based *index*, if the layer covers it."""

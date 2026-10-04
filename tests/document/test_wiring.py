@@ -126,11 +126,20 @@ def test_file_state_ignores_its_layer_and_frees_it():
     assert second.doc_layer is None
 
 
-@pytest.mark.parametrize(
-    ("mode", "kept"), [("aggressive", False), ("balanced", False), ("keep_all", True)]
-)
-def test_the_layer_is_freed_after_post_parse_unless_keep_all(mode, kept):
-    layer = object()
+def _layer_with_blocks():
+    pdf_bytes = _pdfs.synthetic_paper()
+    inspection = _inspect(pdf_bytes, _pdfs.band_layout(len(_pdfs.SYNTHETIC_TEXT_SOURCES)))
+    attach_blocks(inspection.document, _regions(inspection.layout_results))
+    return inspection.document
+
+
+@pytest.mark.parametrize("mode", ["aggressive", "balanced", "keep_all"])
+def test_every_memory_mode_frees_only_the_columns_after_post_parse(mode):
+    layer = _layer_with_blocks()
+    expected = serialize.to_dict(layer)
+    for page in expected["pages"]:
+        page["cols"] = None
+    expected["columns_freed"] = True
     fs = FileState(path=Path("a.pdf"))
     fs.doc_layer = layer
     fs.contents = MagicMock()
@@ -142,22 +151,41 @@ def test_the_layer_is_freed_after_post_parse_unless_keep_all(mode, kept):
         config=RunConfig(memory_mode=mode),
     )
 
-    # ParseSegment attaches the blocks and PostParse reads them: both keep it.
+    # ParseSegment attaches the blocks and PostParse may read the columns.
     ctx.free_after_stage("parse")
-    assert fs.doc_layer is layer
-    assert fs.contents.document is layer
+    assert not layer.columns_freed
+    assert any(page.cols is not None for page in layer.pages)
 
     ctx.free_after_stage("extract")
-    assert (fs.doc_layer is layer) is kept
-    assert (fs.contents.document is layer) is kept
+    assert fs.doc_layer is layer
+    assert fs.contents.document is layer
+    assert layer.nbytes == 0
+    # Blocks and their lines, furniture, roles, fonts and presence stay.
+    assert serialize.to_dict(layer) == expected
+
+    fs.free_all()
+    assert fs.doc_layer is None
+    assert fs.contents is None
 
 
-@pytest.mark.parametrize("contents", [object(), "parsed text"])
-def test_freeing_the_layer_leaves_contents_without_one_alone(contents):
+@pytest.mark.parametrize("mode", ["local", "serve"])
+def test_the_columns_are_freed_after_the_last_stage_that_requires_the_layer(mode):
+    from bibr.pipeline.context import LAYER_COLUMNS_FREED_AFTER
+    from bibr.pipeline.plans import build_stage_plan
+
+    stages = build_stage_plan(mode=mode, stream_backhalf=False, enrichers=[])
+    requiring = [stage.name for stage in stages if "doc_layer" in getattr(stage, "requires", ())]
+
+    assert requiring[-1:] == [LAYER_COLUMNS_FREED_AFTER]
+
+
+@pytest.mark.parametrize("stand_in", [object(), "parsed text"])
+def test_freeing_the_columns_leaves_stand_ins_alone(stand_in):
     # The streaming back-half tests stand plain objects in for PaperContents,
     # and the free runs for every file whether or not it has a layer.
     fs = FileState(path=Path("a.pdf"))
-    fs.contents = contents
+    fs.contents = stand_in
+    fs.doc_layer = stand_in
     ctx = PipelineContext(
         file_states=[fs],
         progress=NullProgress(),
@@ -167,8 +195,8 @@ def test_freeing_the_layer_leaves_contents_without_one_alone(contents):
 
     ctx.free_after_stage("extract")
 
-    assert fs.contents is contents
-    assert fs.doc_layer is None
+    assert fs.contents is stand_in
+    assert fs.doc_layer is stand_in
 
 
 def test_paper_contents_takes_the_layer_by_keyword_only():
@@ -405,6 +433,27 @@ def test_an_inline_layer_is_kept_and_given_blocks(tmp_path, monkeypatch):
     assert layer is inspection.document
     assert layer.page(0).blocks
     assert layer.page(0).blocks[0].block_id == "p0.r0"
+
+
+def test_a_layer_whose_columns_were_freed_comes_back_as_it_is(tmp_path, monkeypatch):
+    layer = _layer_with_blocks()
+    lines = [block.lines for page in layer.pages for block in page.blocks]
+    assert any(lines)
+    layer.free_columns()
+    fs = FileState(path=tmp_path / "missing.pdf")
+    fs.doc_layer = layer
+    fs.doc_layer_attempted = True
+    fs.ocr_regions = [[] for _page in layer.pages]
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("a freed layer is neither rebuilt nor given new blocks")
+
+    monkeypatch.setattr(rebuild_mod, "rebuild_document_layer", unexpected)
+    monkeypatch.setattr(rebuild_mod, "attach_blocks", unexpected)
+
+    assert ensure_document_layer(fs, GlobalSettings(), start_page=None, end_page=None) is layer
+    assert layer.columns_freed
+    assert [block.lines for page in layer.pages for block in page.blocks] == lines
 
 
 def test_no_layer_without_the_processed_pdf(tmp_path):
