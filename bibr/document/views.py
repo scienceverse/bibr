@@ -78,19 +78,6 @@ def block_for_region(layer: DocumentLayer, *, page_no: int, region_index: int) -
     return page.blocks[region_index]
 
 
-def page_records(page: Page) -> list[tuple[str, float, float, bool]]:
-    """The page's char records as ``_build_page_char_records`` returned them."""
-    cols = page.cols
-    if cols is None:
-        return []
-    return [
-        (cols.record_char(index), cx, cy, newline)
-        for index, (cx, cy, newline) in enumerate(
-            zip(cols.rec_cx.tolist(), cols.rec_cy.tolist(), cols.rec_newline.tolist(), strict=True)
-        )
-    ]
-
-
 def text_in_box(page: Page, box: Box) -> str:
     """Text of the records whose centre lies in *box* (PDF points).
 
@@ -194,7 +181,7 @@ def page_chars(page: Page) -> list[tuple[str, Box]]:
         if flags & GLYPH_EXCLUDED:
             continue
         if code == 0x2 and flags & GLYPH_HYPHEN:
-            ch = "￾"
+            ch = "\ufffe"
         elif 0xD800 <= code <= 0xDFFF or code > 0xFFFF:
             continue
         else:
