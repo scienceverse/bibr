@@ -18,10 +18,12 @@ or persist them before then.
 
 An object that belongs to the whole PDF, not to a page, has no page in its
 id: ``{kind}{n}``, with a ``.{n}`` more for each level of its place in a
-tree. D2's document kind is outline entries ``ol`` (``ol5``, the entry's
-position in the outline). Such an id depends on the PDF alone: not on the page
-range a layer is built for, nor on a page that failed. A kind is a page kind
-or a document kind, never both (:data:`DOCUMENT_KINDS`).
+tree. D2's document kinds are outline entries ``ol`` (``ol5``, the entry's
+position in the outline) and structure elements ``st`` (``st0.3.2``, the
+element's path from the structure tree's root down). Such an id depends on the
+PDF alone: not on the page range a layer is built for, nor on a page that
+failed. A kind is a page kind or a document kind, never both
+(:data:`DOCUMENT_KINDS`).
 """
 
 from __future__ import annotations
@@ -34,9 +36,10 @@ LINE = "l"
 BLOCK = "r"
 FURNITURE = "f"
 OUTLINE = "ol"
+STRUCT = "st"
 
 # The kinds of the ids that name no page, so that "r5" or "p3" is no id.
-DOCUMENT_KINDS = frozenset({OUTLINE})
+DOCUMENT_KINDS = frozenset({OUTLINE, STRUCT})
 
 _KIND = re.compile(r"[a-z]+")
 _ID = re.compile(r"p(0|[1-9][0-9]*)\.([a-z]+)(0|[1-9][0-9]*)")
@@ -107,3 +110,7 @@ def furniture(page: int, n: int) -> str:
 
 def outline_entry(n: int) -> str:
     return make_document(OUTLINE, n)
+
+
+def struct_element(path: tuple[int, ...]) -> str:
+    return make_document(STRUCT, *path)

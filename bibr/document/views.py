@@ -305,25 +305,19 @@ class StructIndex:
         self.layer = layer
         self.by_id = {elem.elem_id: elem for elem in layer.struct}
         self.by_mcr: dict[tuple[int, int], StructElem] = {}
-        self.by_path: dict[tuple[int, ...], list[StructElem]] = {}
         self.children: dict[str, list[StructElem]] = {}
         self._mcr_spans: dict[tuple[int, int], list[int]] | None = None
         for elem in layer.struct:
-            self.by_path.setdefault(elem.path, []).append(elem)
             if elem.parent is not None:
                 self.children.setdefault(elem.parent, []).append(elem)
             for mcr in elem.mcrs:
                 self.by_mcr.setdefault(mcr, elem)
 
     def ancestors(self, elem: StructElem) -> Iterator[StructElem]:
-        """The elements above *elem* on its page, nearest first."""
+        """The elements above *elem*, nearest first."""
         while elem.parent is not None:
             elem = self.by_id[elem.parent]
             yield elem
-
-    def copies(self, elem: StructElem) -> list[StructElem]:
-        """*elem* as each page that holds content of it reads it, in page order (itself included)."""
-        return self.by_path[elem.path]
 
     def span_element(self, page: Page, span: int) -> StructElem | None:
         """The element that holds the marked content the span's text is in.
@@ -341,9 +335,7 @@ class StructIndex:
     def spans_of(self, elem: StructElem) -> list[str]:
         """The ids of the spans of the text *elem* holds, with that of the elements below it.
 
-        Every page that holds content of the element is read through its copy of
-        it (:meth:`copies`); the ids come in page order and, on a page, in the
-        order the text was drawn.
+        The ids come in page order and, on a page, in the order the text was drawn.
         """
         if self._mcr_spans is None:
             self._mcr_spans = {}
@@ -357,13 +349,12 @@ class StructIndex:
                         key = (page.index, int(cols.obj_mcid[obj]))
                         self._mcr_spans.setdefault(key, []).append(span)
         found: set[tuple[int, int]] = set()
-        for copy in self.copies(elem):
-            pending = [copy]
-            while pending:
-                member = pending.pop()
-                pending.extend(self.children.get(member.elem_id, ()))
-                for mcr in member.mcrs:
-                    found.update((mcr[0], span) for span in self._mcr_spans.get(mcr, ()))
+        pending = [elem]
+        while pending:
+            member = pending.pop()
+            pending.extend(self.children.get(member.elem_id, ()))
+            for mcr in member.mcrs:
+                found.update((mcr[0], span) for span in self._mcr_spans.get(mcr, ()))
         return [ids.span(page, span) for page, span in sorted(found)]
 
     def link_element(self, link: Link) -> StructElem | None:

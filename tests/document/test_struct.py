@@ -1,11 +1,15 @@
-"""The structure tree: the elements each page's tree holds, and how they join to text and links."""
+"""The structure tree: one element for each place in it, and how they join to text and links."""
 
 from __future__ import annotations
 
+import re
+from dataclasses import replace
+
 import pytest
 
-from bibr.document import harvest, structure, views
+from bibr.document import harvest, ids, structure, views
 from bibr.document.harvest import build_document_layer
+from bibr.document.model import StructElem
 from tests.document import _linked
 from tests.document._linked import ROLE_MAP, TREE, Tag
 from tests.document.test_layer import _BUDGET, _inspect
@@ -27,22 +31,30 @@ def _page_nodes(tag: Tag, path: tuple[int, ...], page: int):
     return (tag, path, mine, kids) if mine or kids else None
 
 
-def _expected(page: int, tree: Tag = TREE, role_map=ROLE_MAP) -> list[tuple]:
-    """What page *page*'s tree should read as, from the tags the fixture was written from."""
-    rows: list[tuple] = []
+def _expected(pages, tree: Tag = TREE, role_map=ROLE_MAP) -> list[tuple]:
+    """What the elements of *pages* should read as, from the tags the fixture was written from.
 
-    def flatten(node, parent: str | None) -> None:
+    One row for each place in the tree, in the order the first page's tree reaches it, with
+    the marked content it holds on *pages*.
+    """
+    rows: dict[tuple[int, ...], list] = {}
+
+    def flatten(node) -> None:
         tag, path, mine, kids = node
-        elem_id = f"p{page}.st{len(rows)}"
+        parent = ids.struct_element(path[:-1]) if len(path) > 1 else None
         role = role_map.get(tag.role, tag.role)
-        rows.append((elem_id, parent, role, mine, path, tag.alt, tag.actual, tag.lang))
+        row = rows.setdefault(
+            path, [ids.struct_element(path), parent, role, [], path, tag.alt, tag.actual, tag.lang]
+        )
+        row[3].extend(mine)
         for kid in kids:
-            flatten(kid, elem_id)
+            flatten(kid)
 
-    root = _page_nodes(tree, (0,), page)
-    if root is not None:
-        flatten(root, None)
-    return rows
+    for page in pages:
+        root = _page_nodes(tree, (0,), page)
+        if root is not None:
+            flatten(root)
+    return [(*row[:3], tuple(row[3]), *row[4:]) for row in rows.values()]
 
 
 def _rows(layer) -> list[tuple]:
@@ -51,27 +63,34 @@ def _rows(layer) -> list[tuple]:
     ]
 
 
-def test_each_page_reads_the_elements_its_tree_holds():
+def _pages_of(layer) -> set[int]:
+    return {page for elem in layer.struct for page, _mcid in elem.mcrs}
+
+
+def test_the_tree_reads_as_one_element_for_each_place_in_it():
     layer = _layer()
 
-    assert _rows(layer) == [row for page in range(_linked.N_PAGES) for row in _expected(page)]
+    assert _rows(layer) == _expected(range(_linked.N_PAGES))
     assert layer.component_errors == {}
-    assert {e.page for e in layer.struct} == {0, 1, 2, 3, 4}
+    assert _pages_of(layer) == {0, 1, 2, 3, 4}
+    assert len({elem.elem_id for elem in layer.struct}) == len(layer.struct)
     for elem in layer.struct:
-        assert elem.elem_id.startswith(f"p{elem.page}.st")
-        assert all(page == elem.page for page, _mcid in elem.mcrs)
+        assert elem.elem_id == ids.struct_element(elem.path)
+        assert elem.parent == (ids.struct_element(elem.path[:-1]) if len(elem.path) > 1 else None)
+        pages = [page for page, _mcid in elem.mcrs]
+        assert pages == sorted(pages)
 
 
 def test_a_page_without_tagged_content_has_a_tree_and_no_elements():
     layer = _layer()
 
-    assert [e for e in layer.struct if e.page == 5] == []
+    assert 5 not in _pages_of(layer)
     assert layer.presence.is_tagged is True
 
 
 def test_a_type_is_read_after_the_role_map():
     layer = _layer()
-    first = [e for e in layer.struct if e.page == 0][2]
+    first = layer.struct[2]
 
     assert first.role == "H1"
     assert ROLE_MAP == {"Heading": "H1"} and "Heading" not in {e.role for e in layer.struct}
@@ -89,17 +108,13 @@ def test_a_chain_in_the_role_map_stops_at_its_first_step():
     chain = {"Kopf": "Heading", "Heading": "H1", "Loop": "Loop2", "Loop2": "Loop"}
     layer = _layer(tree=tree, role_map=chain)
 
-    assert [e.role for e in layer.struct if e.page == 0] == [
-        "Document",
-        "Heading",
-        "Custom",
-        "Loop2",
-    ]
+    assert [e.role for e in layer.struct] == ["Document", "Heading", "Custom", "Loop2"]
 
 
 def test_alternate_and_actual_text_and_language_are_read():
     layer = _layer()
-    by_role = {(e.role, e.page): e for e in layer.struct if e.alt or e.actual or e.lang}
+    # An element with marked content is told apart by the page its first is on.
+    by_role = {(e.role, e.mcrs[0][0]): e for e in layer.struct if e.alt or e.actual or e.lang}
 
     assert by_role[("Figure", 3)].alt == "A diagram of the linked pipeline."
     assert by_role[("H1", 0)].lang == "en-US"
@@ -111,48 +126,49 @@ def test_alternate_and_actual_text_and_language_are_read():
 
 def test_marked_content_is_listed_with_its_page_and_in_the_kid_order():
     layer = _layer()
-    paragraph = next(e for e in layer.struct if e.page == 1 and e.role == "P" and len(e.mcrs) == 4)
+    paragraph = views.StructIndex(layer).by_mcr[(1, 1)]
 
     # The paragraph's own marked content, between its Link kids.
-    assert paragraph.mcrs == ((1, 1), (1, 8), (1, 9), (1, 10))
+    assert paragraph.role == "P" and paragraph.mcrs == ((1, 1), (1, 8), (1, 9), (1, 10))
     # A figure whose marked content draws nothing still holds it.
     figure = next(e for e in layer.struct if e.role == "Figure")
     assert figure.mcrs == ((3, 5),)
 
 
-def test_a_container_holds_no_marked_content_of_its_own_and_every_tagged_page_has_the_root():
+def test_a_container_holds_no_marked_content_of_its_own_and_the_root_is_the_only_top_element():
     layer = _layer()
+    root = layer.struct[0]
 
-    for page in range(5):
-        elements = [e for e in layer.struct if e.page == page]
-        assert elements[0].role == "Document" and elements[0].parent is None
-        assert elements[0].mcrs == () and elements[0].path == (0,)
-        assert all(e.parent is not None for e in elements[1:])
+    assert root.role == "Document" and root.parent is None
+    assert root.mcrs == () and root.path == (0,) and root.elem_id == "st0"
+    assert all(e.parent is not None for e in layer.struct[1:])
 
 
-def test_an_element_across_a_page_break_is_read_once_per_page_and_keeps_its_path():
+def test_an_element_across_a_page_break_is_one_element_holding_the_content_of_both_pages():
     layer = _layer()
     index = views.StructIndex(layer)
-    first, second = index.by_mcr[(1, 4)], index.by_mcr[(2, 0)]
+    paragraph = index.by_mcr[(1, 4)]
 
-    assert (first.page, second.page) == (1, 2)
-    assert first.role == second.role == "P"
-    assert first.path == second.path == (0, 1, 4)
-    assert (first.mcrs, second.mcrs) == (((1, 4),), ((2, 0),))
-    assert index.copies(first) == index.copies(second) == [first, second]
-    # An element on one page has itself only.
-    heading = index.by_mcr[(3, 0)]
-    assert index.copies(heading) == [heading]
-    # Its ancestors are read again on each page, with the same paths.
-    assert index.by_id[first.parent].path == index.by_id[second.parent].path == (0, 1)
+    assert index.by_mcr[(2, 0)] is paragraph
+    assert paragraph.role == "P" and paragraph.path == (0, 1, 4) and paragraph.elem_id == "st0.1.4"
+    assert paragraph.mcrs == ((1, 4), (2, 0))
+    # An element on one page holds that page's content only.
+    assert {page for page, _mcid in index.by_mcr[(3, 0)].mcrs} == {3}
+    # Its ancestors are read again on each page, and are one element each.
+    assert [e.elem_id for e in index.ancestors(paragraph)] == ["st0.1", "st0"]
 
 
 def test_a_tree_can_be_read_for_a_page_range_only():
     layer = _layer(pages=[2])
 
-    assert _rows(layer) == _expected(2)
-    # The ids do not move with the range.
-    assert _rows(layer) == [row for row in _rows(_layer()) if row[0].startswith("p2.")]
+    assert _rows(layer) == _expected([2])
+    # The ids do not move with the range: an element of the range is the whole document's,
+    # holding what it has on the range.
+    whole = {row[0]: row for row in _rows(_layer())}
+    for row in _rows(layer):
+        full = whole[row[0]]
+        assert row[:3] == full[:3] and row[4:] == full[4:]
+        assert row[3] == tuple(mcr for mcr in full[3] if mcr[0] == 2)
 
 
 @pytest.mark.parametrize(
@@ -207,7 +223,85 @@ def test_a_page_whose_tree_cannot_be_read_is_left_out_and_the_rest_kept(monkeypa
     layer = _layer()
 
     assert layer.component_errors == {"struct:2": "RuntimeError: bad tree"}
-    assert {e.page for e in layer.struct} == {0, 1, 3, 4}
+    assert _rows(layer) == _expected([0, 1, 3, 4])
+    assert layer.presence.is_tagged is True
+
+
+def _copy(path, role="P", mcrs=()) -> StructElem:
+    return StructElem(
+        elem_id=ids.struct_element(path),
+        parent=ids.struct_element(path[:-1]) if len(path) > 1 else None,
+        role=role,
+        mcrs=mcrs,
+        path=path,
+        alt=None,
+        actual=None,
+        lang=None,
+    )
+
+
+def test_the_copies_of_an_element_are_joined_in_the_order_of_the_first():
+    copies = [
+        _copy((0,), "Document"),
+        _copy((0, 1), "Sect"),
+        _copy((0, 1, 0), "P", ((0, 3),)),
+        _copy((0,), "Document"),
+        _copy((0, 1), "Sect"),
+        _copy((0, 1, 0), "P", ((1, 0), (1, 2))),
+        _copy((0, 1, 1), "P", ((1, 5),)),
+    ]
+
+    merged, differing = structure.merge(copies)
+
+    assert [(e.elem_id, e.mcrs) for e in merged] == [
+        ("st0", ()),
+        ("st0.1", ()),
+        ("st0.1.0", ((0, 3), (1, 0), (1, 2))),
+        ("st0.1.1", ((1, 5),)),
+    ]
+    assert differing == 0
+    assert structure.merge([]) == ([], 0)
+
+
+def test_a_copy_that_differs_from_the_first_is_counted_and_its_content_kept():
+    merged, differing = structure.merge(
+        [_copy((0,), "P", ((0, 0),)), _copy((0,), "H1", ((1, 0),)), _copy((0,), "P", ((2, 0),))]
+    )
+
+    assert differing == 1
+    assert [(e.role, e.mcrs) for e in merged] == [("P", ((0, 0), (1, 0), (2, 0)))]
+
+
+def test_copies_that_differ_are_noted_in_the_layer(monkeypatch):
+    real = structure.read_page_tree
+
+    def rename_on_page_2(api, page, page_index, **kwargs):
+        found, has_tree, note = real(api, page, page_index, **kwargs)
+        if page_index == 2:
+            found = [replace(elem, role="Other") for elem in found]
+        return found, has_tree, note
+
+    monkeypatch.setattr(structure, "read_page_tree", rename_on_page_2)
+    layer = _layer()
+
+    assert set(layer.component_errors) == {"struct"}
+    assert re.fullmatch(
+        r"[1-9][0-9]* copies of a structure element differ from its first",
+        layer.component_errors["struct"],
+    )
+    # The first copy gives the element's type; the content of the other is kept.
+    assert views.StructIndex(layer).by_mcr[(2, 0)].role == "P"
+
+
+def test_a_failure_to_join_the_copies_leaves_the_elements_out_and_the_paper_alone(monkeypatch):
+    def broken(copies):
+        raise RuntimeError("bad copies")
+
+    monkeypatch.setattr(structure, "merge", broken)
+    layer = _layer()
+
+    assert layer.struct == []
+    assert layer.component_errors == {"struct": "RuntimeError: bad copies"}
     assert layer.presence.is_tagged is True
 
 
@@ -216,17 +310,20 @@ def test_a_document_over_the_limit_is_read_to_the_limit_and_says_so(monkeypatch)
     layer = _layer()
 
     # The allowance runs out on the first page; every later page that has a tree says so.
-    assert _rows(layer) == _expected(0)[:4]
+    assert _rows(layer) == _expected([0])[:4]
     note = "more than 4 structure elements, the rest unread"
     assert layer.component_errors == {f"struct:{page}": note for page in range(5)}
     assert layer.presence.is_tagged is True
 
 
 def test_a_document_with_exactly_the_limit_is_read_whole_and_says_nothing(monkeypatch):
-    monkeypatch.setattr(structure, "MAX_ELEMENTS", len(_layer().struct))
+    # The limit counts each page's copy of an element.
+    copies = sum(len(_expected([page])) for page in range(_linked.N_PAGES))
+    assert copies > len(_layer().struct)
+    monkeypatch.setattr(structure, "MAX_ELEMENTS", copies)
     layer = _layer()
 
-    assert _rows(layer) == [row for page in range(_linked.N_PAGES) for row in _expected(page)]
+    assert _rows(layer) == _expected(range(_linked.N_PAGES))
     assert layer.component_errors == {}
 
 
@@ -240,7 +337,7 @@ def test_an_element_with_too_many_kids_is_read_to_the_limit_and_says_so(monkeypa
 
     # The first two kids of the root are read, and the first two marked-content
     # references of the paragraph that holds four.
-    assert [(e.role, e.mcrs) for e in layer.struct if e.page == 0] == [
+    assert [(e.role, e.mcrs) for e in layer.struct] == [
         ("Document", ()),
         ("P", ((0, 0), (0, 1))),
         ("P", ((0, 4),)),
@@ -368,17 +465,14 @@ def test_an_elements_spans_are_the_spans_that_join_to_it_or_to_an_element_below_
             for child in index.children.get(pending.pop(), ()):
                 below.add(child.elem_id)
                 pending.append(child.elem_id)
-        page = layer.page(elem.page)
-        # The copy on this page alone: the spans of this page that join to the copy or below it.
         expected = [
             f"p{page.index}.sp{span}"
+            for page in layer.pages
+            if page.cols is not None
             for span in range(len(page.cols.span_rec))
             if (joined := index.span_element(page, span)) is not None and joined.elem_id in below
         ]
-        here = [
-            span_id for span_id in index.spans_of(elem) if span_id.startswith(f"p{page.index}.")
-        ]
-        assert here == expected, elem.elem_id
+        assert index.spans_of(elem) == expected, elem.elem_id
 
 
 def test_the_root_holds_every_tagged_span():

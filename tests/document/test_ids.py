@@ -57,28 +57,44 @@ def test_a_document_id_names_no_page():
     assert str(parsed) == ids.outline_entry(5) == ids.make_document("ol", 5) == "ol5"
 
 
+def test_a_structure_element_id_is_its_path_in_the_tree():
+    made = ids.struct_element((0, 3, 2))
+    parsed = ids.parse(made)
+
+    assert made == ids.make_document("st", 0, 3, 2) == "st0.3.2"
+    assert parsed == ids.LayerId(None, "st", 2, (0, 3))
+    assert parsed.path == (0, 3, 2)
+    assert str(parsed) == made
+
+
 def test_the_path_of_a_page_id_is_its_index():
     assert ids.parse("p2.lk17").path == (17,)
 
 
 @pytest.mark.parametrize(
     "text",
-    ["ol", "ol05", "ol-1", "ol5.", "ol.5", "ol5x", "OL5", " ol5", "xx5", "r5", "p3", "p3.ol5"],
+    [
+        *["ol", "ol05", "ol-1", "ol5.", "ol.5", "ol5x", "OL5", " ol5", "xx5", "r5", "p3", "p3.ol5"],
+        *["st", "st0.", "st0..1", "st.1", "st0.01", "st0.3x", "st0 .3", "p3.st5"],
+    ],
 )
 def test_parse_rejects_what_is_not_a_document_id_either(text):
     with pytest.raises(ValueError):
         ids.parse(text)
 
 
-@pytest.mark.parametrize("args", [("r", 5), ("ol",), ("ol", -1), ("OL", 1), ("", 1)])
+@pytest.mark.parametrize(
+    "args", [("r", 5), ("ol",), ("ol", -1), ("OL", 1), ("", 1), ("st",), ("st", 0, -1)]
+)
 def test_make_document_rejects_what_parse_could_not_read(args):
     with pytest.raises(ValueError):
         ids.make_document(*args)
 
 
-def test_a_kind_is_a_page_kind_or_a_document_kind_never_both():
+@pytest.mark.parametrize("kind", ["ol", "st"])
+def test_a_kind_is_a_page_kind_or_a_document_kind_never_both(kind):
     with pytest.raises(ValueError):
-        ids.make(3, "ol", 5)
+        ids.make(3, kind, 5)
 
 
 def test_a_document_id_names_no_block():
