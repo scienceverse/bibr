@@ -521,6 +521,57 @@ def test_sidebar_prose_that_mentions_an_abstract_keeps_its_heading():
     assert (2, 1) not in parser._running_header_regions
 
 
+@pytest.mark.parametrize(
+    "lead_in",
+    [
+        "キーワード：土壌・牧草地・夏",
+        "摘 要",
+        "キ ー ワ ー ド: 土壌",
+        "Palabras claves: suelo, pastizal",
+        "Schlüsselwörter: Boden · Weide",
+    ],
+    ids=["fullwidth-colon", "spaced-cjk-heading", "spaced-cjk-lead-in", "es-variant", "de-variant"],
+)
+def test_record_lead_in_forms_keep_the_title_demoted(lead_in):
+    parser = PDFParser(json_result=_two_language_pages([_text(lead_in, y=470)]))
+    parser._mark_running_headers()
+
+    assert (1, 1) in parser._running_header_regions
+
+
+def test_title_split_across_doc_title_regions_stays_demoted_whole():
+    """The scan used to stop at the title's second region and keep the first."""
+    pages = _two_language_pages(
+        [
+            _heading("doc_title", "dans les pâturages d’altitude", y=450),
+            _heading("paragraph_title", "Résumé", y=490),
+            _text("Les pâturages gardent l’humidité d’un printemps humide.", y=520),
+        ]
+    )
+    pages[1][1] = _heading("doc_title", "Mémoire de l’humidité du sol", y=420)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert {(1, 1), (1, 2)} <= parser._running_header_regions
+
+
+def test_sidebar_heading_before_another_title_record_keeps_its_heading():
+    """Only the doc_title rows directly after a title continue it."""
+    pages = _two_language_pages(
+        [
+            _text("Sometimes the best default is no default at all.", y=470),
+            _heading("doc_title", _TRANSLATED_TITLE, y=560),
+            _heading("paragraph_title", "Résumé", y=600),
+        ]
+    )
+    pages[1][1] = _heading("doc_title", "When No Default Is Your Best Option", y=420)
+    parser = PDFParser(json_result=pages)
+    parser._mark_running_headers()
+
+    assert (1, 1) not in parser._running_header_regions
+    assert (1, 3) in parser._running_header_regions
+
+
 # A preprint server banner: the rights line plus the licence and DOI lines, one
 # region of about 340 characters at the top of every page.
 _PREPRINT_BANNER = (

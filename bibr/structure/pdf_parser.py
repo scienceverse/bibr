@@ -140,23 +140,39 @@ _RUNNING_HEADER_TOP_Y = 100.0
 _RUNNING_HEADER_BOTTOM_Y = 900.0
 
 # A row that opens an abstract or a keyword list, in any language the section
-# aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …").
-_RECORD_LEAD_IN_RE = re.compile(
-    r"(?:"
-    + "|".join(
-        re.escape(alias)
-        for alias in sorted(
-            {
-                *CANONICAL_SECTION_ALIASES[CanonicalSection.ABSTRACT],
-                *CANONICAL_SECTION_ALIASES[CanonicalSection.KEYWORDS],
-            },
-            key=len,
-            reverse=True,
-        )
-    )
-    + r")\s*(?:[:.—–-]|$)",
-    re.IGNORECASE,
+# aliases know: the bare heading ("RÉSUMÉ") or its lead-in ("Key words: …",
+# "キーワード：…"). CJK headings are often letter-spaced ("摘 要"), so CJK
+# aliases are matched against the row with its spaces removed.
+_RECORD_LEAD_IN_ALIASES = {
+    *CANONICAL_SECTION_ALIASES[CanonicalSection.ABSTRACT],
+    *CANONICAL_SECTION_ALIASES[CanonicalSection.KEYWORDS],
+    "palabras claves",
+    "schlüsselwörter",
+}
+_CJK_CHAR_RE = re.compile(r"[\u1100-\u11ff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
+_RECORD_LEAD_IN_END = r"\s*(?:[:：.．—–-]|$)"
+
+
+def _lead_in_re(aliases: set[str]) -> re.Pattern[str]:
+    alternatives = "|".join(re.escape(alias) for alias in sorted(aliases, key=len, reverse=True))
+    return re.compile(rf"(?:{alternatives}){_RECORD_LEAD_IN_END}", re.IGNORECASE)
+
+
+_RECORD_LEAD_IN_RE = _lead_in_re(
+    {alias for alias in _RECORD_LEAD_IN_ALIASES if not _CJK_CHAR_RE.search(alias)}
 )
+_CJK_RECORD_LEAD_IN_RE = _lead_in_re(
+    {alias for alias in _RECORD_LEAD_IN_ALIASES if _CJK_CHAR_RE.search(alias)}
+)
+
+
+def _opens_record_lead_in(row: str) -> bool:
+    """Whether a row is an abstract or keywords heading or lead-in."""
+    return bool(
+        _RECORD_LEAD_IN_RE.match(row) or _CJK_RECORD_LEAD_IN_RE.match(re.sub(r"\s+", "", row))
+    )
+
+
 # A byline's contact line: an e-mail address or an ORCID.
 _RECORD_CONTACT_RE = re.compile(
     r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+|\borcid\b|\b\d{4}-\d{4}-\d{4}-\d{3}[\dX]\b",
@@ -981,13 +997,19 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
         by the sidebar's prose. Kept as a heading, such a title opens a second
         title section, and front matter then cannot choose between the two
         records, so it stays demoted as before. The rows read are the body
-        rows after it on its page, up to the next ``doc_title``.
+        rows after it on its page, up to the next ``doc_title``. The
+        ``doc_title`` rows directly after it continue the same title (a title
+        split across regions), so the scan reads past them.
         """
+        in_title = True
         for row_idx in range(region_idx + 1, len(self.json_result[page_idx])):
             region = self.json_result[page_idx][row_idx]
             label = region.native_label if region.native_label in LABEL_TREATMENT else region.label
             if label == "doc_title":
+                if in_title:
+                    continue
                 return False
+            in_title = False
             if label == "abstract":
                 return True
             if (page_idx, row_idx) in self._running_header_regions or (
@@ -997,7 +1019,7 @@ class PDFParser(HeadingHandlersMixin, MediaHandlersMixin, TextHandlersMixin):
             row = self._clean_region_content.get((page_idx, row_idx), "")
             row = strip_markdown_emphasis(re.sub(r"^#{1,6}\s*", "", row.strip()))
             row = " ".join(row.split())
-            if _RECORD_LEAD_IN_RE.match(row) or _RECORD_CONTACT_RE.search(row):
+            if _opens_record_lead_in(row) or _RECORD_CONTACT_RE.search(row):
                 return True
         return False
 
