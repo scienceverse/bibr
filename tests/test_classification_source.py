@@ -350,6 +350,23 @@ def test_the_title_heading_is_looked_for_before_the_first_alias_heading():
     ]
 
 
+def test_known_residual_a_title_after_an_alias_heading_loses_its_type_to_the_masthead():
+    """Documents current behaviour, not a goal: a title-typed masthead, then a
+    heading typed from its own words, then the real title heading. The search
+    stops at the alias heading, so the masthead keeps the exemption and the
+    real title heading is retyped (b49da32 kept both)."""
+    title = "Social capital and trust in post-Soviet cities"
+    T, U = CanonicalSection.TITLE, CanonicalSection.UNKNOWN
+    secs = [
+        _typed(1, "SCIENTIFIC REPORTS", T, "model"),
+        _typed(2, "Corresponding author", U, "exact_alias"),
+        _typed(3, title, T, "model"),
+        _typed(4, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias"),
+    ]
+    _gate_non_imrad_section_types(secs, "empirical", review_body=True, paper_title=title)
+    assert [s.section_type for s in secs[:3]] == [T, U, U]
+
+
 def test_the_heading_found_by_the_title_pass_is_a_cover_label_when_it_does_not_match():
     """A title-pass heading that shares nothing with the extracted title (a
     journal masthead) leaves the title heading to the best-matching guess; an
@@ -657,6 +674,9 @@ def test_a_part_that_names_results_does_not_open_the_back_matter_whatever_its_ty
     for header, part_type, source in (
         ("Findings and discussion", CanonicalSection.RESULTS, "model"),
         ("Experiments and discussion", CanonicalSection.RESULTS, "model"),
+        ("Evaluation and discussion", CanonicalSection.RESULTS, "model"),
+        ("Observations and discussion", CanonicalSection.RESULTS, "model"),
+        ("Results/Discussion", CanonicalSection.RESULTS, "model"),
         ("Results and Discussions", CanonicalSection.DISCUSSION, "llm"),
     ):
         secs = [
@@ -677,3 +697,42 @@ def test_a_part_that_names_results_does_not_open_the_back_matter_whatever_its_ty
     ]
     by = _typed_hierarchy(secs)
     assert (by[3].level, by[3].parent_section_id) == (1, 0)
+
+
+def test_a_study_marker_is_judged_by_the_words_after_its_prefix():
+    """ "Study 1: Results and Discussion" reports results (the digit is gone
+    once the heading is normalised), so the guessed endnote after it stays in
+    the study; a bare "Study 2" the model typed discussion is no discussion,
+    so Study 2's guessed appendix and endnote stay in their parts."""
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1: Method", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Participants", CanonicalSection.METHODS, "model", level=2),
+        _typed(4, "Study 1: Results and Discussion", CanonicalSection.UNKNOWN, None, level=2),
+        _typed(5, "Manipulation check", CanonicalSection.RESULTS, "model", level=2),
+        _typed(6, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(7, "Study 2: Method", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(8, "General Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert by[6].level == 2 and by[6].parent_section_id != 0
+    secs = [
+        _typed(1, "Introduction", CanonicalSection.INTRODUCTION, "exact_alias", level=2),
+        _typed(2, "Study 1", CanonicalSection.UNKNOWN, None, level=2, score=0.0),
+        _typed(3, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(4, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(5, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+        _typed(6, "Study 2", CanonicalSection.DISCUSSION, "model", level=2),
+        _typed(7, "Method", CanonicalSection.METHODS, "exact_alias", level=2),
+        _typed(8, "Materials and stimuli", CanonicalSection.APPENDIX, "model", level=2),
+        _typed(9, "Results", CanonicalSection.RESULTS, "exact_alias", level=2),
+        _typed(10, "Exploratory analyses", CanonicalSection.ENDNOTE, "model", level=2),
+        _typed(11, "Discussion", CanonicalSection.DISCUSSION, "exact_alias", level=2),
+    ]
+    by = _typed_hierarchy(secs)
+    assert (by[8].level, by[8].parent_section_id) == (2, 7)
+    assert (by[10].level, by[10].parent_section_id, by[10].section_type) == (
+        2,
+        9,
+        CanonicalSection.RESULTS,
+    )

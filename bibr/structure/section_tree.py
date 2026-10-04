@@ -614,7 +614,7 @@ def _names_part(key: str) -> bool:
 
 
 # Words that name a results part on their own or beside another part
-# ("Findings and discussion", "Experiments and discussion").
+# ("Findings and discussion", "Evaluation and discussion").
 _RESULTS_PART_NAMES = frozenset(
     {
         "result",
@@ -625,6 +625,9 @@ _RESULTS_PART_NAMES = frozenset(
         "experiments",
         "experimental results",
         "empirical results",
+        "evaluation",
+        "observation",
+        "observations",
         "resultaten",
         "résultats",
         "ergebnisse",
@@ -633,13 +636,20 @@ _RESULTS_PART_NAMES = frozenset(
         "bulgular",
     }
 )
+_RESULTS_JOIN_RE = re.compile(r"\s*(?:,|&|/|\band\b)\s*")
 
 
 def _names_results_part(text: str) -> bool:
     """Whether a heading is, or joins, a results part name ("Results and
-    discussion", "Findings and discussion"; not "Discussion of the results")."""
-    pieces = [piece for piece in _PART_NAME_JOIN_RE.split(_part_name_key(text)) if piece]
+    discussion", "Findings/Discussion"; not "Discussion of the results")."""
+    pieces = [piece for piece in _RESULTS_JOIN_RE.split(_part_name_key(text)) if piece]
     return any(piece in _RESULTS_PART_NAMES for piece in pieces)
+
+
+def _names_discussion_part(text: str) -> bool:
+    """Whether a heading's words name a discussion part that is not also a
+    results part."""
+    return "discussion" in _part_name_key(text) and not _names_results_part(text)
 
 
 def _opens_discussion(sec: PaperSection) -> bool:
@@ -649,7 +659,16 @@ def _opens_discussion(sec: PaperSection) -> bool:
     header = sec.header or ""
     if _names_results_part(header):
         return False
-    return sec.section_type == CanonicalSection.DISCUSSION or "discussion" in _part_name_key(header)
+    return sec.section_type == CanonicalSection.DISCUSSION or _names_discussion_part(header)
+
+
+def _marker_remainder(header: str) -> str:
+    """The heading text after the study marker ("Study 2: Discussion" ->
+    "Discussion"); a heading without a marker prefix is returned whole."""
+    m = STUDY_MARKER_RE.match(header)
+    if m is None:
+        return header
+    return _MARKER_REMAINDER_STRIP_RE.sub("", header[m.end() :]).strip()
 
 
 def _is_part_name(text: str) -> bool:
@@ -914,7 +933,10 @@ def assign_hierarchy_from_top_level(
             sec.parent_section_id = 0
             last_body = sec
             anchor = None
-            after_discussion = _opens_discussion(sec)
+            # Only what the marker names after "Study 2:" counts, not its
+            # type: a bare "Study 2" is no discussion, and "Study 1: Results
+            # and Discussion" reports results.
+            after_discussion = _names_discussion_part(_marker_remainder(sec.header or ""))
             if number is not None:
                 numbered.append((sec, number.path))
             continue
