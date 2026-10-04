@@ -21,7 +21,14 @@ text itself, without retraining:
   reference prints its own publication year, or no year at all although the
   reference prints exactly one;
 * an editorial note printed as a list entry of its own ("(This is a series of
-  short articles by …)"), which is no reference at all.
+  short articles by …)"), which is no reference at all;
+* a Vancouver byline that lost its last author's single initial ("Newnham M."
+  tagged "Newnham": the tagger reads "M." as the field delimiter), kept the
+  colon of a colon-style byline ("…, et al.:"), or a byline tagged as the title
+  ("Deppe, U. et al.");
+* a title that kept the closing quote of a quoted-title style ("…in Sumatra,”"),
+  or a short quoted title right after the byline left untagged ("Ardupilot,
+  “MissionPlanner,” https://…").
 
 Each rule fires only on a clear textual signal and leaves fields that look well
 formed alone: a cut keeps the part of the title before the signal, sibling
@@ -860,7 +867,165 @@ def _rule_editorial_note(fields: dict[str, Any], text: str) -> bool:
     return True
 
 
+# A byline that ends in a family name ("Newnham", "Al-Shahi", "Ferrières"): a
+# capitalised word holding a lowercase letter, so not an initial.
+_SURNAME_END_RE = re.compile(
+    r"(?:^|[\s,;])[A-ZÀ-ÖØ-Þ][^\W\d_]*[a-zß-öø-ÿ][^\W\d_]*(?:[-'’][^\W\d_]+)*$"
+)
+# One or two initials right after it, closed by "." or ":" and a space (or the
+# end): "Newnham M. COVID-19 …", "Gauja A: Party reform …".
+_FINAL_INITIAL_RE = re.compile(r"\s+([A-ZÀ-ÖØ-Þ]{1,2})(?=[.:](?:\s|$))")
+
+
+def _rule_author_final_initial(fields: dict[str, Any], text: str) -> bool:
+    """Give the last author back the single initial the tagger left out.
+
+    Vancouver bylines close with the last author's initials and a period or a
+    colon. With one initial ("Loo J, Spittle DA, Newnham M. COVID-19 …") the
+    tagger reads "M." as the field delimiter and tags it O, so the byline ends
+    at "Newnham"; with two ("Smith JK.") it does not. Fires only when the
+    tagged byline is found verbatim, ends in a family name (not an initial),
+    and is followed directly by one or two capitals closed by "." or ":", and
+    the title does not start at those capitals ("M. tuberculosis …"). The
+    byline is extended over them.
+    """
+    authors = fields.get("authors")
+    if not isinstance(authors, str):
+        return False
+    byline = authors.rstrip()
+    if not byline or not _SURNAME_END_RE.search(byline):
+        return False
+    at = text.find(byline)
+    if at < 0:
+        return False
+    match = _FINAL_INITIAL_RE.match(text, at + len(byline))
+    if match is None:
+        return False
+    title = fields.get("title")
+    if isinstance(title, str) and title.strip() and text.find(title.strip(), at) == match.start(1):
+        return False
+    fields["authors"] = f"{byline} {match.group(1)}"
+    return True
+
+
+def _rule_author_trailing_colon(fields: dict[str, Any], _text: str) -> bool:
+    """ "Kling CC, Kunegis J, Hartmann H, et al.: Voting behaviour …": the colon
+    that closes a colon-style byline is punctuation, not part of the author list."""
+    authors = fields.get("authors")
+    if not isinstance(authors, str) or not authors.rstrip().endswith(":"):
+        return False
+    cut = authors.rstrip().rstrip(":").rstrip()
+    if not _has_word(cut):
+        return False
+    fields["authors"] = cut
+    return True
+
+
+# A byline tagged as the title: "Surname, I. et al." and nothing else.
+_ET_AL_BYLINE_RE = re.compile(
+    r"[A-ZÀ-ÖØ-Þ][^\W\d_]*[a-zß-öø-ÿ][^\W\d_]*(?:[-'’][^\W\d_]+)*,"
+    r"\s*(?:[A-ZÀ-ÖØ-Þ]\.\s?-?){1,3}\s*,?\s*et\s+al\.?"
+)
+
+
+def _rule_title_et_al_byline(fields: dict[str, Any], _text: str) -> bool:
+    """ "Deppe, U. et al. Nature 326, 1-2 (1987).": the tagger reads the byline of
+    a Nature-style note as its title and leaves the authors empty. Fires only
+    when no authors were tagged and the whole title is "Surname, I. et al.";
+    it moves to the authors and the title is cleared."""
+    if fields.get("authors"):
+        return False
+    title = fields.get("title")
+    if not isinstance(title, str) or not _ET_AL_BYLINE_RE.fullmatch(title.strip()):
+        return False
+    fields["authors"] = title.strip()
+    fields["title"] = None
+    return True
+
+
+# The punctuation a quoted-title style puts on either side of a closing quote.
+_QUOTE_PUNCT = ",.;"
+
+
+def _cut_closing_quote(title: str) -> tuple[str, str] | None:
+    """*title* without a closing quote at its end and one comma, period or
+    semicolon on either side of it, and the quote; None when it does not end
+    in one. String operations, not a regex: no backtracking on long spaces."""
+    rest = title.rstrip()
+    if rest[-1:] and rest[-1] in _QUOTE_PUNCT:
+        rest = rest[:-1].rstrip()
+    if rest[-1:] not in ("”", '"'):
+        return None
+    quote, rest = rest[-1], rest[:-1].rstrip()
+    if rest[-1:] and rest[-1] in _QUOTE_PUNCT:
+        rest = rest[:-1].rstrip()
+    return rest, quote
+
+
+def _rule_title_closing_quote(fields: dict[str, Any], _text: str) -> bool:
+    """ "Assessment of effect of haze … in Sumatra,”": drop the closing quote
+    (and the comma or period before or after it) of a quoted title when the
+    tagged title holds no opening quote of its own."""
+    title = fields.get("title")
+    cut_quote = _cut_closing_quote(title) if isinstance(title, str) else None
+    if cut_quote is None:
+        return False
+    cut, quote = cut_quote
+    if quote == '"':
+        if title.count('"') % 2 == 0:
+            return False
+    else:
+        # „…” (Polish, Romanian, Hungarian, Croatian) and ”…” (Swedish,
+        # Finnish) titles close their own quotes: only an odd surplus of ”
+        # over its openers is the residue of a quoted-title style.
+        surplus = title.count("”") - title.count("“") - title.count("„")
+        if surplus <= 0 or surplus % 2 == 0:
+            return False
+    if not _has_word(cut, 3):
+        return False
+    fields["title"] = cut.strip()
+    return True
+
+
+# The quoted title right after a byline: "Ardupilot, “MissionPlanner,” https://…".
+_QUOTED_AFTER_BYLINE_RE = re.compile(r"\s*[,.:]?\s*[“\"„](?P<title>[^”\"“„]{2,300}?)[”\"“ˮ]")
+
+
+def _rule_title_quoted_after_byline(fields: dict[str, Any], text: str) -> bool:
+    """An untitled reference whose title is the quotation right after its byline.
+
+    IEEE-style "[30] P. Ekman, “Microexpression training tool (METT),” Stanford
+    Univ., …" and web entries ("USA, “AirForceTimes,” https://…"): the tagger
+    tags the byline and leaves the short quoted title out. Fires only when no
+    title was tagged, the tagged byline is found verbatim and the next thing
+    after it (past a comma) is a double-quoted phrase; the phrase, without its
+    closing comma or period, becomes the title.
+    """
+    if fields.get("title"):
+        return False
+    authors = fields.get("authors")
+    if not isinstance(authors, str) or not authors.strip():
+        return False
+    byline = authors.rstrip()
+    at = text.find(byline)
+    if at < 0:
+        return False
+    match = _QUOTED_AFTER_BYLINE_RE.match(text, at + len(byline))
+    if match is None:
+        return False
+    title = _clean_cut(match.group("title")).rstrip(".").strip()
+    if not _has_word(title, 2):
+        return False
+    fields["title"] = title
+    return True
+
+
 _RULES: tuple[tuple[str, Callable[[dict[str, Any], str], bool]], ...] = (
+    ("author_final_initial", _rule_author_final_initial),
+    ("author_trailing_colon", _rule_author_trailing_colon),
+    ("title_et_al_byline", _rule_title_et_al_byline),
+    ("title_closing_quote", _rule_title_closing_quote),
+    ("title_quoted_after_byline", _rule_title_quoted_after_byline),
     ("web_lead_title", _rule_web_lead_title),
     ("author_dash_title", _rule_author_dash_title),
     ("dash_byline", _rule_dash_byline),

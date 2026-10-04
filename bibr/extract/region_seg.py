@@ -45,11 +45,27 @@ _NUMBERED_LOOSE = re.compile(r"^\(?\d{1,3}\)?\s*[-–—]?\s+(?=[\"'“(\[]?[A-Z
 # "Bogers RP, …", "Абилова Г.А. Влияние …". Family name followed by 1-3 initial
 # capitals and a delimiter — deliberately narrow so prose ("The WHO reported …")
 # cannot match. Cyrillic is in the class because GOST-style bibliographies use
-# exactly this shape.
+# exactly this shape. Hyphenated initials ("Barabási A-L,") count as initials.
 _UPPER = r"A-ZÀ-ÖØ-ÞЀ-ЯЀ-ҁҊ-Ҿ"
+_VANCOUVER_BYLINE = (
+    rf"[{_UPPER}][^\W\d_]+(?:[-'’][^\W\d_]+)?(?:\s+[{_UPPER}][^\W\d_]+)?"
+    rf"\s+[{_UPPER}]{{1,3}}\.?(?:-[{_UPPER}]\.?)?(?:\s?[{_UPPER}]\.?){{0,2}}"
+)
+# Title openings shaped like a colon byline: a word, one to three capitals and
+# a colon ("Vitamin D: …", "Hepatitis B: …", "Part II: …", "Appendix A: …").
+_COLON_TITLE_WORDS = (
+    r"(?:Vitamin|Hepatitis|Influenza|Part|Phase|Type|Appendix|Study|Stage|Grade|Class"
+    r"|Group|Chapter|Section|Volume|Annex|Model|Trial|Case|Level|Factor|Experiment)"
+)
+_ROMAN_NUMERAL = r"(?=[IVX]{2,4}:)X{0,3}(?:IX|IV|V?I{0,3})"
 _VANCOUVER_START = re.compile(
-    rf"^[\"'(]?[{_UPPER}][^\W\d_]+(?:[-'’][^\W\d_]+)?(?:\s+[{_UPPER}][^\W\d_]+)?"
-    rf"\s+[{_UPPER}]{{1,3}}\.?(?:\s?[{_UPPER}]\.?){{0,2}}[,.]"
+    rf"^[\"'(]?(?:{_VANCOUVER_BYLINE}[,.]"
+    # F1000Research / Open Research style closes the byline with a colon
+    # ("Gauja A: Party reform: …"). The family name must hold a lowercase
+    # letter, so a capitalised label ("KEY WORDS: …") is not an onset, and
+    # neither is a title opening on a title word or a Roman numeral.
+    rf"|(?=[^\s:]*[a-zß-öø-ÿа-яё])(?!{_COLON_TITLE_WORDS}\s)"
+    rf"(?![^\W\d_]+\s+{_ROMAN_NUMERAL}:){_VANCOUVER_BYLINE}:(?=\s))"
 )
 
 # Name-first onset whose title is quoted rather than dated — common in

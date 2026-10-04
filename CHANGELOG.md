@@ -8,6 +8,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- References in the F1000Research / Open Research style ("Surname AB: Title")
+  and entries with hyphenated initials ("Barabási A-L") are recognised as
+  separate entries, so consecutive single-author entries no longer merge
+  into one (#137).
+- An IEEE-style "[n]" entry glued to the one before it is split off again,
+  and splitting a merged reference no longer creates a second copy of an
+  entry that was already extracted on its own (#137).
+- Reference fields are cleaner: the last author keeps a single initial
+  ("Newnham M", not "Newnham"), a colon closing the author list is dropped,
+  a title no longer ends in its closing quote, a short quoted title right
+  after the authors is kept as the title, "Surname, I. et al." tagged as a
+  title becomes the authors, and a list number before a name particle
+  ("11 van Nieuwenhuizen D") stays out of the authors (#138).
+- A bibliography entry no longer carries the paper's own DOI, which a
+  repeated preprint banner or a "cite this article" line inside the
+  reference list used to attach to it (#139).
+- On a PDF whose text layer was read but whose References header was not
+  recognised (a line-numbered manuscript's "668 References"), the reference
+  segmentation warning now says that, instead of calling the PDF a DOCX or
+  non-native input (#140).
+- On a watermarked review copy, a reference entry is no longer extracted
+  twice when a few words of the diagonal stamp land in the entry's own
+  layout box (#140).
+- When a paper's notes stand in for its reference list, a single-author
+  note in the old Nature/Science style ("Surname, I. Journal 81, 286-300
+  (1981).") is now kept as a reference (#146).
 - The DOI is no longer left empty when the article's own citation block names it a few
   sentences after "How to cite this article" (version 2 and later of F1000-family
   articles, which also print the version 1 DOI), when a "Citation:" line in the front
