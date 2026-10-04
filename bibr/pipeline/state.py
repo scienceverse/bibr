@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from PIL.Image import Image as PILImage
 
+    from bibr.document.model import DocumentLayer
     from bibr.input.docx_native import DocxParser
     from bibr.input.epub_native import EpubParser
     from bibr.input.html_native import HtmlParser
@@ -108,6 +109,10 @@ class FileState:
     error_outage: bool = False
     stage_times: dict = field(default_factory=dict)
     warnings: "list[ProcessingWarning]" = field(default_factory=list)
+    # The document layer (``bibr.document``), built by NativeTextStage or
+    # rebuilt at the parse hand-off when ``pipeline.document_layer`` is on.
+    # Outlives the OCR stage; handed on as ``PaperContents.document``.
+    doc_layer: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
 
     def free_pre_ocr(self):
         """Free data consumed by OCR stage."""
@@ -176,6 +181,7 @@ class FileState:
         self.pdf_uri_links = None
         self.pdf_outline = None
         self.native_validation_artifact = None
+        self.doc_layer = None
         self.contents = None
         self.paper = None
 

@@ -983,6 +983,25 @@ def test_rotating_a_credential_still_leaves_the_fingerprint_alone(monkeypatch):
     assert before == after
 
 
+def test_document_layer_is_off_by_default_and_outside_the_fingerprint(monkeypatch):
+    """The document layer changes no output, so switching it must not move
+    the serve cache namespace; the rest of the pipeline section still does."""
+    from bibr.config import GlobalSettings, compute_behavior_fingerprint
+
+    monkeypatch.delenv("PIPELINE_DOCUMENT_LAYER", raising=False)
+    monkeypatch.delenv("PIPELINE_TIMEOUT", raising=False)
+    default = GlobalSettings()
+    monkeypatch.setenv("PIPELINE_DOCUMENT_LAYER", "true")
+    layer_on = GlobalSettings()
+    monkeypatch.setenv("PIPELINE_TIMEOUT", "301")
+    timeout_changed = GlobalSettings()
+
+    assert default.pipeline.document_layer is False
+    assert layer_on.pipeline.document_layer is True
+    assert compute_behavior_fingerprint(layer_on) == compute_behavior_fingerprint(default)
+    assert compute_behavior_fingerprint(timeout_changed) != compute_behavior_fingerprint(default)
+
+
 def test_redis_url_left_none_when_neither_password_nor_url_set(monkeypatch):
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("REDIS_PASSWORD", raising=False)

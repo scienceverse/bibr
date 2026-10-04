@@ -66,6 +66,7 @@ class NativeTextStage:
         "pdf_uri_links",
         "native_metadata",
         "pdf_outline",
+        "doc_layer",
     )
 
     async def run(self, ctx: PipelineContext) -> None:
@@ -84,6 +85,13 @@ class NativeTextStage:
             settings=settings,
         )[0]
         eligible_labels = resolve_eligible_labels(bool(settings.ocr.native_text_header_footer))
+        # The document layer's arguments are passed only when it is on, so the
+        # default call is unchanged.
+        layer_kwargs = {}
+        if settings.pipeline.document_layer is True:
+            from bibr.document.rebuild import render_budget
+
+            layer_kwargs = {"include_doc_layer": True, "render_budget": render_budget(settings)}
         native_skip_total = 0
         invisible_layer_pages = 0
         for fs in ctx.alive():
@@ -103,6 +111,7 @@ class NativeTextStage:
                     min_printable_ratio=settings.ocr.native_text_min_printable_ratio,
                     eligible_labels=eligible_labels,
                     reject_invisible_text_layer=settings.ocr.native_text_reject_invisible_layer,
+                    **layer_kwargs,
                 )
             except Exception:  # noqa: BLE001 — complete open failure falls back to OCR
                 for page in fs.layout_results or []:
@@ -118,6 +127,8 @@ class NativeTextStage:
             fs.ref_line_geometry = inspection.reference_lines or None
             fs.ref_page_lines = inspection.page_lines or None
             fs.pdf_uri_links = inspection.uri_links or None
+            if layer_kwargs:
+                fs.doc_layer = inspection.document
             native_skip_total += sum(
                 1
                 for page in inspection.layout_results

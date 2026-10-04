@@ -16,6 +16,7 @@ from bibr.input.consolidate_text import clean_text_content_late
 from bibr.processing_warnings import ProcessingWarning
 
 if TYPE_CHECKING:
+    from bibr.document.model import DocumentLayer
     from bibr.extract.front_matter import FrontMatterResolution
     from bibr.extract.front_role import FrontRolePredictions
     from bibr.models import PaperMetadata, PaperReference
@@ -891,6 +892,10 @@ class PaperContents:
     reference_yield_receipt: ReferenceYieldReceipt | None = None
     reference_boundary_reason_flags: list[str] = field(default_factory=list)
     structure_validation_issues: list["ValidationIssue"] = field(default_factory=list)
+    # The internal document layer (``bibr.document``) when
+    # ``pipeline.document_layer`` is on. Keyword-only so positional callers and
+    # the receipt staying last are unaffected; never exported.
+    document: "DocumentLayer | None" = field(default=None, compare=False, repr=False, kw_only=True)
     caption_assignment_receipt: CaptionAssignmentReceipt | None = None
 
     def invalidate_text_caches(self) -> None:
