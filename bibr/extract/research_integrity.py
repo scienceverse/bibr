@@ -240,7 +240,9 @@ async def extract_structured_integrity(
     elif integrity_resolution is not None and integrity_resolution.mode in {"shadow", "active"}:
         from bibr.extract.integrity_statements import render_selected_integrity_statement
 
-        funding_text = render_selected_integrity_statement(
+        # funding[] is parsed from the exported statement, so the two agree;
+        # the bounded selection is the fallback when nothing was exported.
+        funding_text = metadata.funding_statement or render_selected_integrity_statement(
             contents,
             integrity_resolution,
             "funding_statement",
@@ -251,11 +253,7 @@ async def extract_structured_integrity(
             integrity_resolution.candidates[index].method == "legacy_section_copy"
             for index in legacy_indices
         )
-        funding_text = (
-            dict(integrity_resolution.legacy_statement_snapshots).get("funding_statement")
-            if canonical_legacy
-            else None
-        )
+        funding_text = metadata.funding_statement if canonical_legacy else None
     contributions_text = _text_for_type(contents, text_map, CanonicalSection.AUTHOR_CONTRIBUTIONS)
     unique_affils, affil_author_ids = collect_affiliations(metadata.authors)
     if not funding_text and not contributions_text and not unique_affils:

@@ -65,6 +65,8 @@ import redis.asyncio as aioredis
 
 from bibr.config import Settings
 from bibr.serve.jobs import (
+    CANCELLED_ERROR,
+    CANCELLED_HTTP_STATUS,
     Job,
     JobCapacityError,
     JobStoreUnavailableError,
@@ -110,9 +112,14 @@ return {1, active + 1}
 """
 
 # KEYS[1] = job hash; ARGV[1] = started_at. Never resurrects a missing record.
+# Returns 1 = claimed, 0 = no record, -1 = no longer queued (cancelled: skip it).
 _RUNNING_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 0 then
   return 0
+end
+local status = redis.call('HGET', KEYS[1], 'status')
+if status and status ~= 'queued' then
+  return -1
 end
 redis.call('HSET', KEYS[1], 'status', 'running', 'started_at', ARGV[1])
 return 1
@@ -122,11 +129,18 @@ return 1
 # ARGV[1] = job id, ARGV[2] = status, ARGV[3] = finished_at, ARGV[4] = ttl (s),
 # ARGV[5] = http_status ('' = none), ARGV[6] = error JSON ('' = none),
 # ARGV[7] = result_size, ARGV[8] = compressed result body ('' for failures),
-# ARGV[9] = key prefix, ARGV[10] = max_retained, ARGV[11] = max_retained_bytes
+# ARGV[9] = key prefix, ARGV[10] = max_retained, ARGV[11] = max_retained_bytes,
+# ARGV[12] = the status the record must have now ('' = any; a cancel passes 'queued')
+# Returns 1, or 0 when ARGV[12] is set and the record is missing or in another status
+# (then nothing changes).
 _FINISH_SCRIPT = """
 local job_key, result_key, active_set, finished = KEYS[1], KEYS[2], KEYS[3], KEYS[4]
 local job_id, status, finished_at, ttl = ARGV[1], ARGV[2], ARGV[3], ARGV[4]
 local prefix = ARGV[9]
+local required = ARGV[12]
+if required and required ~= '' and redis.call('HGET', job_key, 'status') ~= required then
+  return 0
+end
 
 redis.call('SREM', active_set, job_id)
 if redis.call('EXISTS', job_key) == 1 then
@@ -378,14 +392,30 @@ class RedisJobStore:
         except JobStoreUnavailableError as exc:
             logger.error("job %s: could not discard the job record (%s)", job_id, exc)
 
-    async def set_running(self, job_id: str) -> None:
+    async def set_running(self, job_id: str) -> bool:
         try:
-            await self._bounded(
+            claimed = await self._bounded(
                 "set_running",
                 self._running_script(keys=[self.job_key(job_id)], args=[repr(self._wall_clock())]),
             )
         except JobStoreUnavailableError as exc:
             logger.error("job %s: could not record the running state (%s)", job_id, exc)
+            return True
+        # 1 = claimed; -1 = no longer queued; 0 = the record is gone (evicted).
+        return int(claimed) == 1
+
+    async def cancel(self, job_id: str) -> Job | None:
+        keys, args = self._finish_call(
+            job_id,
+            status="failed",
+            http_status=CANCELLED_HTTP_STATUS,
+            error=CANCELLED_ERROR,
+            result=b"",
+            result_size=0,
+            required="queued",
+        )
+        await self._bounded("cancel", self._finish_script(keys=keys, args=args))
+        return await self.get(job_id, include_result=False)
 
     async def set_succeeded(self, job_id: str, result: dict) -> None:
         # Encode first so an unrenderable result raises exactly like the memory
@@ -401,7 +431,9 @@ class RedisJobStore:
             result_size=len(encoded),
         )
 
-    async def set_failed(self, job_id: str, *, http_status: int | None, error: dict) -> None:
+    async def set_failed(
+        self, job_id: str, *, http_status: int | None, error: dict, required: str = ""
+    ) -> None:
         await self._finish(
             job_id,
             status="failed",
@@ -409,6 +441,7 @@ class RedisJobStore:
             error=error,
             result=b"",
             result_size=0,
+            required=required,
         )
 
     async def _finish(
@@ -420,7 +453,34 @@ class RedisJobStore:
         error: dict | None,
         result: bytes,
         result_size: int,
+        required: str = "",
     ) -> None:
+        keys, args = self._finish_call(
+            job_id,
+            status=status,
+            http_status=http_status,
+            error=error,
+            result=result,
+            result_size=result_size,
+            required=required,
+        )
+        try:
+            await self._bounded(f"set_{status}", self._finish_script(keys=keys, args=args))
+        except JobStoreUnavailableError as exc:
+            logger.error("job %s: could not record %s (%s)", job_id, status, exc)
+
+    def _finish_call(
+        self,
+        job_id: str,
+        *,
+        status: str,
+        http_status: int | None,
+        error: dict | None,
+        result: bytes,
+        result_size: int,
+        required: str = "",
+    ) -> tuple[list[str], list[Any]]:
+        """KEYS and ARGV for ``_FINISH_SCRIPT``."""
         ttl = max(1, int(Settings.jobs.ttl_seconds))
         args: list[Any] = [
             job_id,
@@ -434,6 +494,7 @@ class RedisJobStore:
             self._prefix,
             Settings.jobs.max_retained,
             Settings.jobs.max_retained_bytes,
+            required,
         ]
         keys = [
             self.job_key(job_id),
@@ -441,10 +502,7 @@ class RedisJobStore:
             self.active_key,
             self.finished_key,
         ]
-        try:
-            await self._bounded(f"set_{status}", self._finish_script(keys=keys, args=args))
-        except JobStoreUnavailableError as exc:
-            logger.error("job %s: could not record %s (%s)", job_id, status, exc)
+        return keys, args
 
     async def ping(self) -> None:
         """Bounded liveness probe for ``/ready``; raises when Redis does not answer."""

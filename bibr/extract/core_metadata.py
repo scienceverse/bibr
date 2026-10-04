@@ -1813,6 +1813,24 @@ def _normalize_affiliation_match_text(value: str) -> str:
     return re.sub(r"\s+", " ", translated).strip()
 
 
+# A keyword list the layout boxed as first-page footnotes ("Key words" over
+# "- Choroid plexus tumors" / "- Intraventricular", as in Elsevier's side
+# column). Footnote sections never join the front-matter record, so without
+# this block the title/keywords call never sees the list.
+_KEYWORD_FOOTNOTE_LABEL_RE = re.compile(r"^\W*(?:key\s*-?\s*words?|index\s+terms)\b", re.IGNORECASE)
+_KEYWORD_FOOTNOTE_ITEMS = 15
+_KEYWORD_FOOTNOTE_ITEM_CHARS = 80
+_KEYWORD_FOOTNOTE_CHARS = 600
+# A first-page footnote row that is no keyword: one opening with a footnote
+# marker, a numeric marker or a copyright sign ("* These authors contributed
+# equally.", "1 Department of …", "© 2020 …"), a funding line, or one ending a
+# sentence. A keyword may open with a digit ("5-HT receptors").
+_NOT_A_KEYWORD_ROW_RE = re.compile(
+    r"^(?:[*\u2020\u2021\u00a7\u00b6\u00a9]|\d+\s|(?:funded|supported)\s+by\b)|[.!?]$",
+    re.IGNORECASE,
+)
+
+
 # Affiliation value hygiene. A reconciler copies the printed definition and the
 # LLM copies what it reads, so both carry what the page prints around the
 # institution: line breaks, the list's own marker, a contact line, the list's
@@ -1892,6 +1910,60 @@ _AFFILIATION_ABBREVIATION_RE = re.compile(
     r"\b(?:" + "|".join(sorted(_AFFILIATION_ABBREVIATIONS, key=len, reverse=True)) + r")\b",
     re.IGNORECASE,
 )
+
+
+def first_page_keyword_footnote(contents) -> str:
+    """The first-page footnote rows that print the keyword list, as a labelled block, or "".
+
+    The list starts at a footnote that opens with a keyword label. A label row
+    with keywords of its own ("Keywords: a; b; c") is the whole list. A bare
+    label ("Key words") runs through the short keyword rows printed right
+    after it, and ends at a row from elsewhere in the text, a long or
+    labelled row ("Abbreviations: ..."), or one that reads as another
+    footnote (a marker, a digit or "©" first, or a full sentence). Nothing
+    is returned when the paper has a keywords section or no page numbers,
+    or when a bare label has no keyword rows after it.
+    """
+    sections = {section.section_id: section for section in getattr(contents, "sections", ()) or ()}
+    if any(section.section_type == CanonicalSection.KEYWORDS for section in sections.values()):
+        return ""
+    sentences = list(getattr(contents, "sentences", ()) or ())
+    first_page = min(
+        (sentence.page_number for sentence in sentences if sentence.page_number is not None),
+        default=None,
+    )
+    if first_page is None:
+        return ""
+    notes = [
+        (sentence.text_id, " ".join(sentence.text.split()))
+        for sentence in sorted(sentences, key=lambda sentence: sentence.text_id)
+        if sentence.page_number == first_page
+        and getattr(sections.get(sentence.section_id), "section_type", None)
+        == CanonicalSection.FOOTNOTE
+    ]
+    start = next(
+        (i for i, (_, note) in enumerate(notes) if _KEYWORD_FOOTNOTE_LABEL_RE.match(note)), None
+    )
+    if start is None:
+        return ""
+    previous_id, label = notes[start]
+    lines = [label]
+    if _KEYWORD_FOOTNOTE_LABEL_RE.sub("", label).strip(" \t:;,.-\u2013\u2014") == "":
+        for text_id, note in notes[start + 1 : start + 1 + _KEYWORD_FOOTNOTE_ITEMS]:
+            if (
+                text_id != previous_id + 1
+                or not note
+                or len(note) > _KEYWORD_FOOTNOTE_ITEM_CHARS
+                or ":" in note
+                or _NOT_A_KEYWORD_ROW_RE.search(note)
+            ):
+                break
+            lines.append(note)
+            previous_id = text_id
+        if len(lines) == 1:
+            return ""
+    block = "\n".join(lines)[:_KEYWORD_FOOTNOTE_CHARS]
+    return "[Keywords printed in a first-page footnote]\n" + block
 
 
 def _grounding_key(text: str) -> str:
@@ -2115,6 +2187,12 @@ class CoreMetadataExtractor:
             if table_text and authors_text is not None and table_text not in authors_text:
                 authors_text += "\n" + table_text
 
+            # Only the title/keywords call reads the full blob: the per-task
+            # slices above are already cut, and the checks below keep reading
+            # the front matter alone.
+            keyword_footnote = first_page_keyword_footnote(self.contents)
+            llm_text = f"{full_text}\n\n{keyword_footnote}" if keyword_footnote else full_text
+
             # Affiliations printed as a first-page footnote are not front-matter
             # candidates, so neither the author zone nor the block context
             # carries them and the model returned empty affiliations (or filled
@@ -2128,7 +2206,7 @@ class CoreMetadataExtractor:
                     )
 
             llm_metadata = await self._call_core_llm(
-                full_text,
+                llm_text,
                 authors_text=authors_text,
                 classification_text=classification_text,
             )
