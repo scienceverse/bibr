@@ -251,6 +251,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the same name with the same options while that paper is still queued or running returns the
   existing job instead of running the paper twice. Off by default, because every
   caller of a serve shares one API key (#145).
+- The harvester now reads a bare corresponding marker. A star (`*`, `∗`, `⁎`, a LaTeX `^{*}`
+  or an envelope) directly before an address, or before an "E-mail:" label and an address, marks
+  the author who already holds that address as corresponding (the "* E-mail: x@y.org" footnote
+  line); a list of addresses after one star marks each owner. This reading only flags: it never
+  assigns, moves or replaces an address. A star that follows author names in the byline must
+  follow this author too, a flag is not added next to a different flagged author, and a paper of
+  three or more authors never ends with all of them flagged. Equal-contribution stars, other
+  symbols and prose that merely contains "corresponding" are not read.
 
 ## [0.6.0] - 2026-09-30
 
