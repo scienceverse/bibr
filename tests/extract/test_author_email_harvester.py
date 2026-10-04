@@ -990,3 +990,82 @@ def test_footnote_pass_with_many_authors_is_fast():
     _harvest([("title", ["Byline"]), ("footnote", footnote)], authors)
     assert time.perf_counter() - started < 1.0
     assert authors[799].email == "x@example.org"
+
+
+def test_footnote_address_does_not_displace_a_marker_sentence_address():
+    """A phrase-less footnote pair must not take the address an in-scope marker line gives."""
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            ("title", ["Alice Lee, Hui-Kai Tan", "* Correspondence: hk.tan@uni.example.edu"]),
+            (
+                "footnote",
+                [
+                    "E-mail addresses: tan.hk@mail.example.com (H.K. Tan), alee@example.org (A. Lee)."
+                ],
+            ),
+        ],
+        authors,
+    )
+    assert authors[1].email == "hk.tan@uni.example.edu"
+    assert [a.corresponding for a in authors] == [False, True]
+    assert authors[0].email == "alee@example.org"  # still attached: Lee had no address
+
+
+def test_in_scope_correspondence_address_that_names_no_one_is_flagged_via_the_footnote_pair():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"), ("Omar", "Reyes"))
+    _harvest(
+        [
+            (
+                "title",
+                [
+                    "Alice Lee, Hui-Kai Tan, Omar Reyes",
+                    "First abstract sentence.",
+                    "Second abstract sentence.",
+                    "Third abstract sentence.",
+                    "Fourth abstract sentence.",
+                    "Correspondence to: x@example.org",
+                ],
+            ),
+            ("footnote", ["E-mail address: x@example.org (H.K. Tan)."]),
+        ],
+        authors,
+    )
+    assert authors[1].email == "x@example.org"
+    assert [a.corresponding for a in authors] == [False, True, False]
+
+
+def test_body_sentence_that_opens_with_correspondence_between_flags_nobody():
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [
+            (
+                "body",
+                [
+                    "Correspondence between the two raters was high.",
+                    "Coding was checked by a second rater (e-mail: hk@example.org (H.K. Tan)).",
+                ],
+            )
+        ],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, False]
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "Correspondence: hk@example.org",
+        "*Correspondence:",
+        "Correspondence to Department of Things.",
+        "Correspondence concerning this article should be addressed to the author.",
+        "Correspondence should be addressed to Department of Things.",
+    ],
+)
+def test_correspondence_used_as_a_label_still_counts(opener):
+    authors = _authors(("Alice", "Lee"), ("Hui-Kai", "Tan"))
+    _harvest(
+        [("footnote", [opener, "E-mail address: t@example.org (H.K. Tan)."])],
+        authors,
+    )
+    assert [a.corresponding for a in authors] == [False, True]
