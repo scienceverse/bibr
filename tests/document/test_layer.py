@@ -234,7 +234,12 @@ def test_block_text_and_boxes_reproduce_the_native_fill(name):
                 assert views.block_text(layer, block.block_id) == region["content"]
                 assert block.text == {block.chosen: region["content"]}
                 assert block.chosen == "native"
-    if name in {"synthetic_paper.pdf", "sample_paper.pdf", "native_text_sample.pdf"}:
+    if name in {
+        "synthetic_paper.pdf",
+        "sample_paper.pdf",
+        "native_text_sample.pdf",
+        "line_numbered_reference.pdf",
+    }:
         assert filled > 0
 
 
@@ -628,9 +633,7 @@ def test_the_removed_watermark_is_kept_as_furniture():
 
 
 def test_removed_line_numbers_get_page_scoped_ids():
-    from tests.ocr.test_line_number_column import _reference_page
-
-    layer = _inspect(_reference_page(), layer=True).document
+    layer = _inspect(_FIXTURES["line_numbered_reference.pdf"], layer=True).document
 
     assert all(page.furniture for page in layer.pages)
     for page in layer.pages:

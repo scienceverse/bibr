@@ -17,6 +17,7 @@ from pathlib import Path
 import pypdfium2
 
 from bibr.ocr.utils import pdfium_lock
+from tests.ocr.test_line_number_column import _reference_page
 from tests.ocr.test_watermark_text import _REVIEW_WATERMARK, _body, _width
 
 PAGE_W, PAGE_H = 612.0, 792.0
@@ -287,8 +288,11 @@ def page_count(pdf_bytes: bytes) -> int:
 
 
 def fixture_pdfs() -> dict[str, bytes]:
-    """The repository's small PDF fixtures and the synthetic paper."""
+    """The repository's small PDF fixtures, the synthetic paper, and a
+    two-page reference list whose margin line numbers the furniture strip
+    removes, so the stripped text frame runs through every fixture test."""
     found = {path.name: path.read_bytes() for path in sorted(FIXTURES.glob("*.pdf"))}
     found[SAMPLE_PAPER.name] = SAMPLE_PAPER.read_bytes()
     found["synthetic_paper.pdf"] = synthetic_paper()
+    found["line_numbered_reference.pdf"] = _reference_page()
     return found
