@@ -1,0 +1,3540 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+## [Unreleased]
+
+### Fixed
+
+- A figure or table caption is no longer lost when a figure or table on the
+  previous page scores higher for it: captions are matched only to figures and
+  tables on their own page, which is the only match the parser ever kept (#133).
+- A multi-panel figure is exported as one figure instead of one object per
+  panel: panel boxes inside a whole-figure box are dropped as duplicates, the
+  panels printed around one numbered caption are grouped under it, and panel
+  letters inside the group no longer take the figure's caption. Figures printed
+  with their own captions side by side or stacked stay separate, and a badge or
+  icon on a page without captions no longer shifts the figure numbers captions
+  are matched by. Figures with their captions printed above them keep their own
+  captions, a Scheme or Box beside a figure keeps its own float, and printed
+  figure numbers are compared with each page's offset, so a figure the paper
+  does not number no longer swaps the captions of the figures after it (#132).
+- A caption the layout split in two (a two-column caption under a full-width
+  figure, or a bare "FIGURE 1" label above its title line) is joined, so its
+  second half no longer ends up in the body text or the footnotes (#134).
+- A table that continues at the top of the next page, or in a second block
+  directly under the first, without repeating its caption is merged into the
+  captioned table instead of being exported as a separate uncaptioned table (#135).
+- Small caption fixes: a full "Table 1: …" caption the layout read as a note
+  now captions its table; "Sup. Fig. NAME", "Sup. Table 1" and "Fig.2" are
+  read as labels; a caption that opens with "Table" never captions a figure;
+  and licence or open-access icons on later pages are no longer exported as
+  figures (#136).
+- Funding, conflict-of-interest, ethics and data-availability statements no
+  longer keep raw PDF line breaks, and they end where the statement ends: a
+  following thanks sentence, the next label ("Grant information:",
+  "Copyright: ©"), a licence block or a preprint sidebar is no longer appended,
+  a statement section that holds only a licence is no longer exported, and a
+  long chapter typed as a statement section (a thesis's "Ethical Procedures")
+  is no longer copied whole. A sentence that only mentions copyright, a
+  licence or a publisher ("Due to copyright restrictions, the stimuli cannot
+  be shared.") is kept whole. A phrase split by a line break ("supported
+  by") is now found. (#127)
+- Prose that only mentions a statement topic is no longer exported as the
+  statement: "supported by" followed only by an acronym ("supported by the
+  base AR model") is not funding, a sentence about avoiding conflicts of
+  interest is not a conflict-of-interest declaration, informed consent named
+  as a topic is not an ethics statement, "financial support" or "data
+  availability" inside a sentence about something else is not a statement,
+  and a "Role of the funding source"
+  section, an essay section titled like ethics ("Time Discounting: An Ethical
+  Problem") or an AI-tool disclosure is no longer copied into the funding or
+  ethics statement. (#128)
+- The structured funder list (`funding[]`) is now parsed from the exported
+  funding statement. It was parsed from different text, so it was often empty
+  while the statement named a funder, or listed funders from another
+  paragraph. (#130)
+- A labelled statement printed after the reference list ("Conflict of
+  interest statement: …" on the last page) is now found, and a one-line
+  statement that the layout model merged into its heading ("Disclosure and
+  competing interests statement The authors declare no competing interests.")
+  is recovered from the heading. (#129)
+- A statement joined from several sections now keeps each section's heading
+  ("Materials availability: Not applicable."), so parts such as "Not
+  applicable." keep their meaning, and a section under a standard statement
+  heading ("Ethics approval and consent to participate") is exported even
+  when the section model typed it as something else, such as an endnote.
+  (#131)
+- Exports no longer carry a `VAL_STATEMENT_SUSPECT` warning. It compared
+  two internal statement resolvers, said nothing about the paper, and fired on
+  many papers; it is now a debug log message. (#146)
+- References in the F1000Research / Open Research style ("Surname AB: Title")
+  and entries with hyphenated initials ("Barabási A-L") are recognised as
+  separate entries, so consecutive single-author entries no longer merge
+  into one (#137).
+- An IEEE-style "[n]" entry glued to the one before it is split off again,
+  and splitting a merged reference no longer creates a second copy of an
+  entry that was already extracted on its own (#137).
+- Reference fields are cleaner: the last author keeps a single initial
+  ("Newnham M", not "Newnham"), a colon closing the author list is dropped,
+  a title no longer ends in its closing quote, a short quoted title right
+  after the authors is kept as the title, "Surname, I. et al." tagged as a
+  title becomes the authors, and a list number before a name particle
+  ("11 van Nieuwenhuizen D") stays out of the authors (#138).
+- A bibliography entry no longer carries the paper's own DOI, which a
+  repeated preprint banner or a "cite this article" line inside the
+  reference list used to attach to it (#139).
+- On a PDF whose text layer was read but whose References header was not
+  recognised (a line-numbered manuscript's "668 References"), the reference
+  segmentation warning now says that, instead of calling the PDF a DOCX or
+  non-native input (#140).
+- On a watermarked review copy, a reference entry is no longer extracted
+  twice when a few words of the diagonal stamp land in the entry's own
+  layout box (#140).
+- When a paper's notes stand in for its reference list, a single-author
+  note in the old Nature/Science style ("Surname, I. Journal 81, 286-300
+  (1981).") is now kept as a reference (#146).
+- The DOI is no longer left empty when the article's own citation block names it a few
+  sentences after "How to cite this article" (version 2 and later of F1000-family
+  articles, which also print the version 1 DOI), when a "Citation:" line in the front
+  matter names it, or
+  when the first page prints it next to a linked article's DOI while the running footer
+  repeats only the article's own (#141).
+- The abstract no longer keeps the printed line breaks of the PDF when the model copies
+  them (the default model often does): a line break inside a paragraph becomes one
+  space, while a blank line between paragraphs and a break before a list item stay
+  (#144).
+- `VAL_ABSTRACT_MISSING` no longer warns on an essay or commentary that prints no
+  abstract when the model found none and the only abstract section is the layout's
+  unlabelled opening column (#144).
+- An article-type kicker printed above the title ("Retraction", "ARTICLES", "Original
+  Article") is no longer taken as the title when the layout labels both as the title:
+  the title that follows it is used (#143).
+- A title that starts with "A " ("A genetic pathway for …") is no longer re-typed as a
+  lettered appendix when page 1 opens with the end of the previous article and its
+  reference list; the paper's byline and front matter stayed out of the extraction
+  (#143).
+- Keywords printed as first-page footnotes (a "Key words" label over one keyword per
+  line, as in some Elsevier journals) now reach the title and keywords call; before,
+  footnote rows never joined the front matter and the keywords came back empty (#144).
+- `bibr serve`: a client that gives up on a job can now cancel it. `DELETE
+  /papers/jobs/{id}` fails a job that is still queued (`error_code`
+  `job_cancelled`), frees its place under `JOBS_MAX_ACTIVE` and deletes its
+  upload; a job that is already running answers `409` for now (#145).
+- `bibr serve`: with `JOBS_DEDUPE_INFLIGHT=true`, uploading the same file under
+  the same name with the same options while that paper is still queued or running returns the
+  existing job instead of running the paper twice. Off by default, because every
+  caller of a serve shares one API key (#145).
+
+## [0.6.0] - 2026-09-30
+
+### Added — export schema 12.1 (additive)
+
+The export moves to schema `12.1`, which adds one optional block; every 12.0
+export is still valid input for the 12.x reader, `bibr.validation`'s
+`payload_validation()` and the evaluator.
+
+- `extraction.fields` gives the state of each tracked field, so a consumer can
+  tell "the paper has no DOI" from "DOI extraction failed" or "the extractor
+  declined to choose". For `title`, `author`, `abstract`, `keywords`, `doi`,
+  `published`, `journal`, `funding_statement`, `funding`, `paper_type` and
+  `bib` it records `{state, source, issues, rule}`. `state` is `extracted` (a value
+  was exported), `absent` (the extractor ran and found none), `abstained`
+  (for example a blocking `VAL_METADATA_MULTI_ITEM`, or an unresolved
+  `VAL_DOI_AMBIGUOUS`), `failed` (the step that produces it failed) or
+  `not_attempted` (no LLM, references off). `source` names the step that
+  produced the value (`llm`, `title_grounding`, `front_matter_candidate`,
+  `layout_title`, `section_header`, `byline_adjacent`, `doc_info`,
+  `abstract_section`, `keywords_section`, `llm_recovery`, `credit_statement`,
+  `classifier`, `llm_label`, `correction_notice`, `identity`,
+  `integrity_statement`, `lexical_anchor`, `native`, or the reference parser),
+  `issues` the codes of the warnings and validation issues that explain the
+  state, and `rule` the rule of the field's decision that chose the value or
+  its absence (`extracted`, `selected_record_title`, `layout_title_fallback`,
+  `abstract_section_fallback`, `correction_notice`, `abstained`, ...; null for
+  `doi` and `bib`). The block is built from facts the pipeline already records
+  and is omitted for a Paper exported outside the pipeline. The conformance
+  fixtures gain a 12.0 reader example and an invalid field record.
+
+### Changed — one decision point per metadata field
+
+- The title, authors, abstract, keywords, publication date, journal,
+  publisher, paper type (with the OECD fields), the four research-integrity
+  statements, structured funding and parsed affiliations are each decided
+  once, by one rule in `bibr.extract.field_decisions`, from the candidates their
+  producers propose: the model's answer and its grounding repairs, the
+  selected-record and layout title fallbacks, the unclassified-heading scan,
+  the Abstract and Keywords sections, the PDF doc-info, the empty-author
+  recovery and the CRediT statement, the paper classifier and its LLM relabel,
+  the correction-notice guard, and the integrity-statement resolution. Once the
+  record exists that module is their only writer, and a test fails when
+  another module assigns them. Not covered: the DOI, which the identity stage
+  decides; the fields a record is built with (volume, issue, pages, ISSN,
+  licence, language and the identifiers), which have one producer each; the
+  JATS and HTML readers, which build the record they hand over; structured
+  funding and affiliations in a run without an LLM, where nothing parses them;
+  and the contribution roles the structured-integrity call adds to the decided
+  authors in place, which the author receipt records as a `contribution_roles`
+  transform.
+  The rules keep the precedence of the write sites they replace, so exported
+  values are unchanged except one provenance case: when the author call fails
+  and the empty-author recovery returns only a translator credit,
+  `extraction.fields.author.source` now names the step that failed (`llm`)
+  instead of `llm_recovery`. Each field's receipt (the candidates considered,
+  the one used, the repairs applied to it and the rule) is kept on
+  `Paper.field_decisions`, and `extraction.fields` takes its `source` and
+  `rule` from it.
+
+### Changed — export schema 12.0 (breaking)
+
+The JSON export moves to schema `12.0`. It separates what the paper says from
+how bibr produced it, and the generated JSON Schema is now a documented
+contract. bibr writes and reads only 12.x; a v11 export or core checkpoint is
+rejected, as v10 was by 11.0. The drafted 11.1 is retired and was never
+released.
+
+- `extraction` now holds everything about how the output was produced, and
+  is always present; everything else is the paper. Root keys are emitted in the
+  order `paper_id`, `schema_version`, `source`; `metadata`, `author`,
+  `affiliation`, `funding`, `text`, `section`, `url`, `bib`, `xref`, `figure`,
+  `table`, `footnote`, `eq`; `metadata_match`, `affiliation_match`,
+  `funding_match`, `bib_match`; `extraction`. A Paper exported
+  outside the pipeline gets a minimal `extraction` block (package version,
+  export time, diagnostics, validation) with `settings` omitted.
+- The root `validation` block moved to `extraction.validation`. Readers of
+  saved files can use `bibr.validation.payload_validation(payload)`, which
+  finds it in both 12.x and older exports.
+- Figure and table `parts` left the content rows. The whole-object fields are
+  now truly whole: a figure detected as several panel crops gets an `image`
+  composited from them (it used to be the first panel), and a table continued
+  across pages keeps each printed piece's HTML in `html` instead of a lossy
+  re-render of the merged cells. Each piece's page and bounding box moved to
+  `extraction.float_parts`. Merged figures and continued tables no longer lose
+  pieces when a later merge step combines them. With images requested, each
+  figure image is now serialized once, not twice.
+- Processing fields left the content rows and now live under `extraction`,
+  keyed by the rows' IDs: `section[].classification_score` and
+  `classification_source` → `extraction.diagnostics.section_classification`
+  (an unscored section's score is `null`, not `0.0`); `xref[].tier` →
+  `extraction.diagnostics.xref_tier`; `metadata.paper_type_confidence` and
+  `oecd_confidence` → `extraction.diagnostics.paper_classification`;
+  `bib[].consolidated_fields` (a comma-joined string) →
+  `extraction.diagnostics.consolidation` (a list of field names per `bib_id`);
+  the opt-in per-sentence `text[]._bbox_2d`, `_font_size`, `_font_bold`,
+  `_is_italic`, `_region_type`, `_page_w` and `_page_h` →
+  `extraction.text_regions` (same `--region-meta` opt-in); and the root
+  `qualification_provenance` → `extraction.qualification`, omitted rather than
+  `null` when no LLM task ran.
+- Duplicates are gone. `bib[].author` and `editor`, a split derived from the
+  printed strings, are removed; `bib[].authors` and `editors` stay exactly as
+  printed. `author[].affiliation` is removed; the `affiliation[]` table,
+  linked by `author_ids`, is the one source and is now built on every run from
+  the byline, with the parsed components `null` when no LLM ran (it used to be
+  empty then).
+- `xref[].xref_id` and `url[].url_id` are new 1-based primary keys, so every
+  record table has one. The xref's target stays in `target_id`; up to v10,
+  `xref_id` meant the target.
+- Absent values are `null`, never `""`: `author[].given` and `family`,
+  `section[].header` and `eq[].df`.
+- Closed vocabularies are enums in the schema: `section[].section_type`,
+  `bib_type` in `bib` and both match tables, `metadata.paper_type`,
+  `metadata.oecd_l1` and `oecd_l2`, the match tables' `service`,
+  `source.input_format`, `eq[].comp` and `validation.issues[].severity`. Export
+  maps a foreign reference type (`journal-article`, `article`) into the enum and
+  drops an off-vocabulary classifier label with a logged warning instead of
+  failing the paper. Every token is snake_case: `paper_type` `meta_analysis` and
+  `case_study`, `section_type` `data_availability` (was `open_data`), and
+  `xref_tier` `paren_numeric`, `flattened_superscript`, `author_year`.
+  `input_format` names the format rather than the file extension: `jats` for
+  bibr's XML input (was `xml`), `html` for `.htm` too, and `tei` for GROBID
+  TEI, which converters into this format write.
+- `section[]` holds only the paper's sections. Captions and footnotes are no
+  longer sections of their own (`section_type` `figure`, `table` or `footnote`,
+  with a made-up header such as "Figure 2" or "Footnote 3"). Their text
+  stays in `text[]`, after the body, one row per whole caption or note (not
+  per sentence), with a `null` `section_id`, so text search
+  still finds them and "the text of Results" is the running text of Results.
+  `figure[]` and `table[]` gain `text_id`, the caption's row, and their
+  `section_id` is now the section they are printed in (it was the caption's
+  section). The new `footnote[]` table has one row per footnote or endnote:
+  `footnote_id`, the printed marker as `label` ("1", "*", "†") and `text_id`.
+  The `figure`, `table` and `footnote` section types remain for printed
+  headings such as "Figures" or "Notes".
+- Every id is a 1-based position in document order. Section ids have no gaps
+  (a section added late, such as an unheaded abstract, is numbered where its
+  text is), and figure and table ids count the paper's figures and tables in
+  document order on every input; PDF used the printed number, which left gaps
+  where a figure was missed. Ids stay stable for the same input and bibr
+  version, not across versions: to match rows across versions, use a figure's
+  or table's printed label, a reference's DOI, or the text.
+- `xref[].target_id` names a real row or is `null`. A `foot` reference points
+  at `footnote[].footnote_id` (it held the footnote's ordinal); `equation`,
+  `section` and `supplementary` references are `null` (they held the number
+  they print, or `0`, which named no row).
+- A `foot` reference no longer claims more than bibr knows. A PDF note printed
+  without a mark (an author note, or text taken for a note) gets no reference;
+  it used to get one with its ordinal as `contents`, which is printed nowhere.
+  A footnote reference has no `start`/`end`: its mark is not in the sentence
+  text, and the search for the digit landed on any number there. Its
+  `text_id` is approximate: the last sentence of the paragraph holding the
+  mark (DOCX), or the sentence before the note (PDF).
+- One scale and one spelling per concept. Every score and confidence is 0–1:
+  `bib_match[]` and `metadata_match[]` `score` was 0–100. The match tables'
+  ISO 8601 `date` is `published_date`, like `metadata.published_date`; `bib[]`
+  gains `published_date` (the printed date or year in ISO form), and
+  consolidation fills it from the match instead of overwriting the printed
+  `bib[].date`. Every DOI is bare and lowercase.
+- A group author (a consortium, a JATS `<collab>`) is `author[].literal`, with
+  `given` and `family` null; it was in `family`.
+- `figure[].image` is a `data:` URI that names its media type
+  (`data:image/jpeg;base64,…`); the format used to vary unannounced (JPEG
+  crops, PNG composites, whatever a DOCX embedded).
+- `extraction.warnings` holds `{code, message}` objects instead of prose
+  strings. `code` is a stable UPPER_SNAKE code like the validation issue codes
+  (`OCR_PAGE_FAILED`, `REF_SEG_CRF_FALLBACK`, `CROSSREF_ENRICHMENT_TIMEOUT`, …)
+  and `message` carries the details (page, counts, exception type). The schema
+  pins the code's form, not a list, so another producer can add codes of its
+  own; bibr's are listed in the JSON schema reference. An OCR page failure now
+  numbers its page from 1, like the region warnings. `bibr batch` ledgers count
+  warnings by code, `bibr tables` writes them to `extraction_warnings`, and the
+  `*_WARNING_PREFIX` constants in `bibr.extract` are replaced by
+  `bibr.processing_warnings.WarningCode`. The OCR disk cache (format 10) and the
+  enrichment sidecar (schema 4) store the new shape, so entries written by an
+  earlier build are not reused.
+- Every field and model in `docs/schema/bibr-export-v12.schema.json` has a
+  description, and a test keeps it that way; the documentation site's JSON
+  schema page shows them. Both schema documents carry a stable `$id` under
+  `https://bibr.org/schema/`. The v11 and v10 schema files stay published,
+  frozen. In the strict document `required` means *present*: every key bibr
+  always writes is required, nullable or not, so a producer that drops a column
+  fails validation. Nullable fields are spelled `"type": [T, "null"]`, the form
+  R and code generators read, and identifiers (DOI, ORCID, ROR, SHA-256, ISO
+  dates, country codes, CRediT URIs), ids (1-based), offsets and scores carry
+  patterns and bounds.
+- `xref[]`, `url[]` and `eq[]` carry `start`/`end`: the span of the item
+  within its sentence's `text` in Unicode code points (0-based, end exclusive),
+  or `null` when it cannot be located unambiguously. `eq[].verbatim` is now
+  filled from it.
+- Normalized fields sit next to the printed ones: `metadata.published_date`
+  (ISO 8601, as precise as printed), `license_url` and `license_spdx`
+  (Creative Commons with a known version, CC0), `language`, `pmid`, `pmcid` and
+  `arxiv` (declared by JATS/HTML inputs; arXiv also from an arXiv DOI or the
+  page-1 arXiv stamp), and `author[].credit_roles` (CRediT term URIs matched
+  from the printed roles).
+- `source.file_hash` (the first 16 hex characters of the input's SHA-256) is
+  replaced by `source.sha256`, the whole digest. `extraction.bibr_version` and
+  `build_sha` are replaced by `extraction.producer` {`name`, `version`,
+  `build_sha`}, so another tool writing this format can say so. `producer` is
+  the software that extracted the content; the new `extraction.converter`, of
+  the same shape, names a tool that wrote another extractor's output into this
+  format, and is `null` in bibr's own exports. A file converted from GROBID TEI
+  has producer `grobid` and the converter, and its `source` is the PDF GROBID
+  read when the converter has it, else the TEI (`input_format` `tei`), so
+  `source.sha256` joins it to a bibr export of the same PDF. A converter
+  keeps the producer's `completed_at` (now the time the content was
+  extracted) when it has it, takes `paper_id` from `source.file_name`, and
+  starts its own warning codes with its name (`METACHECK_…`); a tool that
+  rewrites an export keeps its `schema_version` and every key, including
+  those of a later 12.x it does not know.
+- `paper_id` is required and never `null`: `--paper-id`, else the input file's
+  stem, as `bibr batch` and metacheck already name papers. It used to be the
+  DOI, which changed whenever a later bibr read the DOI differently. `bibr
+  batch` writes its own corpus-unique id (the name of the JSON file) into each
+  export.
+- One geometry convention for every bounding box: `[x0, y0, x1, y1]` in PDF
+  points on the page as displayed, measured from the top-left corner. The new
+  `extraction.pages` gives each page's width and height. `float_parts[].bbox`
+  and the caption and region boxes were in the layout model's 0–1000 space;
+  `text_regions[].bbox_2d` was in points from the bottom-left and is now `bbox`,
+  with the row's `page_number` replacing the per-row `page_w`/`page_h`.
+  `extraction.regions` drops `bbox_height`/`bbox_width` (derivable from
+  `bbox`), and its `char_density` and `estimated_line_height` are now per point.
+- The match tables carry the identifiers Crossref records hold: `author[]`
+  entries gain `orcid` and `affiliation` (name and ROR ID), and each record
+  gains `funder` (name, Open Funder Registry DOI, ROR ID, award numbers),
+  `license_url` (the version-of-record license; text-mining licenses are
+  skipped) and `license_spdx`.
+- New `affiliation_match` and `funding_match` tables hold the ROR organization
+  matched to each affiliation string and printed funder name (ROR ID, name,
+  country code, and for funders the Open Funder Registry DOI). They are filled
+  when enrichment runs (`--crossref`), with `ROR_ENRICH=false` to skip ROR. Only
+  ROR's own recommended (`chosen`) match is kept; strings without one stay
+  unmatched. `ROR_CLIENT_ID` raises ROR's rate limit from 50 to 2000 requests
+  per 5 minutes; matching is capped per paper by `ROR_ENRICH_TIMEOUT` and never
+  holds an export back.
+- The schema documents in `docs/schema/` are dedicated to the public domain
+  under CC0 1.0; the software stays AGPL. Example valid, invalid and
+  newer-minor exports live in `tests/fixtures/schema_conformance/`, checked
+  against both schema documents.
+- `Result` exposes every root table as `Records`, now including
+  `affiliation`, `funding`, `footnote` and the `metadata_match`,
+  `affiliation_match` and `funding_match` tables.
+- `figure[]` and `table[]` gain `label`: what the caption prints after the
+  word, as printed without whitespace (`3`, `3.1`, `S2`, `A1`, `IV`, `C`); a
+  "Supplementary Table 4" caption is labelled `S4`. It is read from PDF, DOCX
+  and HTML captions and from the JATS `<label>`, and is `null` when none was
+  printed or detected. Figure and table references now resolve by it, compared
+  case-insensitively without whitespace, instead of taking the printed number
+  as the id: "Table 3.1", "Table S2", "Figure A1" and "Table IV" link, and a
+  float bibr missed no longer shifts every later link. When no float of a kind
+  has a label, "Figure N" links the N-th figure by page and reading order. A
+  reference whose label names no float, or two, is still exported with a
+  `null` `target_id`; it used to be dropped. A piece captioned as a
+  continuation ("Table 3 (continued)", "Figure 3. Cont.") that was not merged
+  into its float does not count as a second float with that label. "Table S2" and "Supplementary
+  Table 2" are `table` references when an extracted table carries that label
+  and `supplementary` ones otherwise. `extraction.diagnostics.xref_tier`
+  records `label` or `position` for every figure and table reference.
+- 12.x is additive-only: new optional fields and new enum values may appear in
+  any 12.x release, and the reader model and reader schema accept both. Any
+  rename, move, removal, type change, new required key or dropped enum value
+  needs 13.0.
+
+### Fixed
+
+- A court decision cited in a note is now a reference when the notes stand in
+  for the reference list. The reference parser read "Civ. 1re, 16 juill. 1998,
+  D. 1999. 306" as no work at all, kept the commentary before a decision ("…
+  en chocolat : TGI Laval, 16 févr. 2009, …") as its title, and exported each
+  second reporter after a semicolon ("; RLDI 2009, n° 50, p. 8") as a work of
+  its own. A decision (a court, chamber or parties, then a day-month-year
+  date) is now cut out of the note as one citation, titled by its court, date,
+  case number and parties ("Cass. 1re civ., 16 mai 2018, n° 15-14.023") and
+  dated by the year of its date, with the `ner` parse; its second reporters
+  are dropped. A dated newspaper ("Le Figaro, 18 déc. 2014") is no decision.
+  A decision cited by long party names keeps all of them ("CJEU, Bashar
+  Ibrahim and Others v. Bundesrepublik Deutschland and Bundesrepublik
+  Deutschland v. Taus Magamadov, …"), and a lead-in before the court ("See
+  CJEU, …") is dropped.
+- A surname the PDF text layer spaces out, as it does small capitals
+  ("Christine Ze l le r , Des enfants maltraités au Québec ?", "J.F. Bo u l a
+  is"), is joined again in a note citation when the notes stand in for the
+  reference list. Left spaced out it read as no name: the commentary before
+  it stayed in the citation, and the parser took byline and title for one
+  title. The repair needs a first name or initials before the surname and at
+  least two single-letter pieces in it, so "Y. Wu et al." stays as it is.
+- An undated note citation of a classical work by book and chapter ("Plinio,
+  Historia Natural, V, 45", "Diodoro de Sicilia, Biblioteca histórica, III,
+  32, 4.") keeps its author and work when the notes stand in for the
+  reference list. With the `ner` parse the tagger read the author, or
+  nothing, and no title, so the reference matched no work; a citation the
+  tagger gives no title now takes the work as its title.
+- A note citation whose title opens on a year ("Thomas A. Durkin and Gregory
+  E. Elliehausen, 1977 Consumer Credit Survey (Board of Governors of the
+  Federal Reserve System, 1978), p. 72") keeps its title when the notes stand
+  in for the reference list. With the `ner` parse the tagger read the title's
+  year as the work's year and the rest of the title as the container, so the
+  reference had no title and the wrong year. When the tagger gives no title
+  and its year is the one the title opens on, the title is kept whole and the
+  year comes from the bracketed imprint.
+- Initials joined by a hyphen after a period ("J.-M. Bruguière", "P.-B.
+  Hugenholtz") now read as a name in note citations, as "J-M." already did.
+  A citation opening on such a name after commentary ("… cité par P.-B.
+  Hugenholtz, « Chronique des Pays-Bas », …", "… (J.-M. Bruguière, Droit des
+  propriétés intellectuelles, Ellipses, 2018, p. 17)") was not found: the
+  commentary stayed its title, or the work was lost.
+- A note citation led in by "lire" ("À ce sujet, lire Jean Pineau, La
+  famille, …") or by an author's title after "par" ("… notamment par le
+  professeur Hélène Dumont, Le contrôle judiciaire …") now starts at the
+  author's name. The commentary before it had stayed in the citation, so the
+  parser took it for the title.
+- Native PDF text keeps the spaces between words at the edge of a layout
+  region, and a ligature no longer splits a word. pdfium gives a space a flat
+  box on the baseline, below the centre of the letters around it, so a region
+  whose bottom edge crossed a line between its baseline and the letters'
+  centres kept the words but dropped the spaces ("MODELANALYSIS"). A flat
+  space box now takes the vertical centre of the glyph before it when that
+  glyph stands on the same baseline. It is never lowered to a comma below the
+  baseline, and never raised to a closing quote. After a superscript
+  citation it usually stays at the height of the glyph that follows. A space
+  some fonts draw inside a ligature's box ("Traffi cking") is dropped when
+  the next glyph starts where the ligature ends; after a word-final ligature
+  it stays a word space. Only the spaces a region reads change.
+- Native PDF text is read through the page box pdfium renders. Layout regions
+  are found on the rendered page, the CropBox clipped to the MediaBox, either
+  of them inherited from the page tree, but native text mapped them back
+  through the page's own CropBox entry, which falls back to a US Letter
+  MediaBox when the page inherits its box. On such an A4 page every region
+  read the text some 45 pt lower and could lose the first letter of its
+  lines: the title region read the byline, and the paper exported an author's
+  name as its title.
+- A title the metadata LLM returns joined with its translation keeps only the
+  version printed first. The prompts ask for that version, but the model
+  still returns both at times: joined with " / " when each is printed on rows
+  of its own, or with the translation the title row prints in brackets after
+  it. Grounding accepted the join because each half is printed. When the two
+  halves read as one title in two languages or scripts (each at least three
+  words and, when function words tell the language, two of them on each
+  side), the version printed first in the selected record is kept and a
+  `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_parallel_versions_joined`. Both joined versions must be
+  printed as such. The title before the brackets must be printed, and not
+  only after its bracketed translation, which may be the model's own. Any
+  other title, including one with three or more versions, is left alone.
+- The reference locator keeps the paper's own list when the page layout hides
+  or doubles it. Rows printed above the paper's title on its first page (the
+  end of the previous article on a scanned journal page, under the same
+  "References" heading) are no longer taken as its references; when nothing
+  else is left the next candidate is tried. When no section holds the list,
+  a references heading printed run-in at the start of a body row
+  ("Bibliography.—1. Dreyer, …") opens it, up to the first row that reads as
+  neither a list number, an entry onset nor a dated row, and a references
+  heading that heads no rows takes the tables declared under it when the
+  layout model read the list as tables (one row per table row, at least half
+  of them dated), instead of `REF_SECTION_NOT_FOUND`.
+  `reference_boundary_reason_flags` records each case
+  (`preceding_article_rows_dropped`, `run_in_reference_heading`,
+  `reference_table_rows`).
+- The row printed just above a reference list (the acknowledgements, a data
+  availability statement, a closing sentence) is no longer taken into the
+  list, and exported as a reference of its own, when the list's first row
+  has no year but opens entry 1 of a numbered list ("1. Schyver Grace. A
+  History of Illinois.", its year on a later line) or is a bare "Family,
+  Given" name whose year opens the next row ("Rischel, Jørgen" / "1974:").
+  The row above is still taken as the head of the first entry when the
+  list's first row reads as the middle of an entry, or when the list opens
+  on a bare name and the row above itself opens on a "Family, Given" name
+  ("Fortescue, Michael, and" above "Rischel, Jørgen" / "1974:").
+- A references heading that the OCR misread ("BIBLIOGRfU'HIE." or
+  "BIBLIOGRAPHI€." for "BIBLIOGRAPHIE.", printed on a line of its own inside
+  the closing section) now opens the reference list instead of
+  `REF_SECTION_NOT_FOUND`, when no other heading was found. The row must be
+  one word in capitals within two letter edits of a references heading
+  ("bibliography", "bibliographie", "bibliografia", "references",
+  "referencias", "referenzen", "literaturverzeichnis") with the same first
+  letter and a length at most one letter apart, and the list is the rows
+  after it that read as list rows, as for a run-in heading, with at least
+  three dated rows.
+  `reference_boundary_reason_flags` records `misread_reference_heading`.
+- A reference list no longer runs on into what is printed below it (the next
+  item on a newsletter page, author biographies and addresses, a licence or
+  a publisher's note), which could come out as extra references. The rows
+  after the last entry of a numbered list are cut when the printed numbers
+  are exactly 1 to n, the layout model read the last entry as a reference
+  region, the last entry ends on a full stop, a digit or a closing bracket,
+  and at least two unnumbered rows follow, all from other regions it did not
+  read as references, the first opening in a capital on the last entry's
+  page. An entry that breaks off mid-title, or goes on over the page, keeps
+  its tail even when the tail opens in a capital.
+  `reference_boundary_reason_flags` records `numbered_list_end_trimmed`.
+- Old-style author-year bibliographies are parsed one work per reference.
+  An entry that prints several works under one byline ("Ehrke, G., 1931,
+  Arch. wissensch. Bot., 13, 221; 1932, 17, 650.") gives the NER parser each
+  later work with the byline in front, in a list written in that style and
+  only when the years do not decrease and the entry has no DOI or link; the
+  receipt records `same_byline_works_split`. In a list that marks a repeated
+  byline with a dash, an entry run on after the previous one's pages or into
+  the same segment on a new line ("… 24: 65-96. -1931b. The cytological
+  theory …", "- and Dark, S. O. S. 1932. …") reaches the parser as an entry
+  of its own (`inline_dash_entries_split`); a dash and year followed by a
+  volume, issue, part, book or pages area ("– 1973. V. 39", "– 2001. N 5",
+  "– 2001. Vyp. 5", the year area of a transliterated GOST list) opens no
+  entry.
+- A numbered reference list that prints several works under one number
+  ("[18] J.D. Bekenstein, …, 2333-2346. J.D. Bekenstein, …", "[30] J.F.
+  Plebanski, …, 2511; J. Samuel, …") gives the NER parser one entry per
+  work. Unnumbered fragments of an entry ("Phys. Rev., D9 (1974),
+  3292-3300.", which parsed as no reference) first rejoin the numbered entry
+  above them when the next entry carries the following number and the entry
+  above does not already close on a number and a period; a later work
+  splits out only where an initials-first byline follows a page, year or
+  preprint number, and entries with a DOI or link stay whole; nothing splits
+  where the later works would match or outnumber the numbered entries, which
+  would keep the list numbers in the parser's input. Each entry keeps its
+  place with its first work and the later works follow the list, without
+  a row of their own, so an in-text "[n]" still links to entry n. The receipt
+  records `numbered_fragments_joined` and `numbered_works_split`.
+- Chinese, Japanese and Korean author names now ground against the byline
+  however it is spaced. A byline printed one character per token
+  (奥　山　正　司) or with the family and given names run together no longer
+  makes the extracted author (奥山 正司) read as fabricated
+  (`VAL_AUTHOR_FABRICATED`), which left the paper without authors.
+- Byline rows printed between the first-page title and the abstract reach
+  the author call even when the section classifier types them as endnotes
+  or acknowledgments. When the parser promotes the cells of a grid or
+  column byline to headings, the mistyped cells dropped out, and their
+  authors with them, because the page-1 byline rescue runs only for a paper
+  with no byline at all. Rows in that gap (it opens at the parser's detected
+  title and needs a closing abstract, keywords or body section) are now
+  admitted on name evidence: a byline-shaped heading that is no field label
+  ("Author Note", "Corresponding Author:") and has no colon, a name over an
+  e-mail address, or a paragraph spanning several layout regions whose
+  first region reads as a byline (a byline row merged into a correspondence
+  block). An editorial or metadata line there ("Edited by Jane Smith",
+  "Handling Editor: Jane Smith" over her e-mail address, "Received 12 March
+  2020", "Data Availability") is admitted on none of these grounds. Only
+  the words outside an e-mail address make a line editorial, so an author
+  whose address names a history department or an ethics centre
+  (jane.smith@history.ox.ac.uk) still counts as a name over her address.
+- On a first page that prints no byline ahead of its abstract, an author's
+  name set above the title that layout labels a page header ("Hubert
+  Heinen" over "German-Texan Attitudes toward the Civil War") now reaches
+  the author call; the parser filed it with the running heads, and the
+  front matter had no author text at all. The row joins the front matter as
+  plain text, as the first page prints it (a later page may repeat the head
+  in other casing), only when it is a bare person's name ending just above
+  the title: no word in capitals, no "&", no journal, article-type, section
+  or editor word in English or a Romance language ("Educational Review",
+  "Case Report", "Scientific Reports", "Revista de Psicología", "Special
+  Issue", "John Smith, Editor"), and not the title's own words set as a
+  short running head. Its shape alone never makes it the title or a record
+  root. Byline-shaped rows after the abstract (a German keyword line, a
+  body heading that names a theorist) no longer keep it out.
+- A paper with a repository cover page that reprints its title block (the
+  title, the translated titles and the byline, printed again on the
+  article's first page) was exported with only its first author. The rows
+  under the title repeat on both pages as a block, the parser filed every
+  copy with the running heads, and the author call read only the closing
+  author biographies. On a first page that prints no byline ahead of its
+  abstract, a row of that block now reaches the author call, on the same
+  terms as a name set above the title: layout labelled it body text, it sits
+  under the title, the text of every row between the title and it is a
+  running head too, and it is nothing but two or more people's names,
+  separated by commas, semicolons, "&" or the word joining the last two
+  ("and", "et", "en", "und", "og", "och"). A row that names an institution,
+  repeats the title's own words, or has a name made only of words the paper
+  prints in lower case elsewhere (a translated title set in title case) is
+  not taken for names. The byline is read right after the title, and the
+  title no longer takes the cover's next heading ("Édition électronique") as
+  its subtitle.
+- A scanned page that carries the invisible text layer an OCR engine adds to a
+  scan (a page-sized image under text in an invisible render mode, as Acrobat
+  Paper Capture, ABBYY and Tesseract write it) is now read with OCR instead of
+  that legacy layer, which misread titles and garbled reference lists. No text
+  lines or font sizes are taken from such a page. If OCR returns no text for
+  the page, as in an OCR outage, its regions fall back to the layer text, and
+  so does any region of the page whose OCR request failed. The page then
+  carries an `OCR_TEXT_LAYER_FALLBACK` warning in place of `OCR_REGION_FAILED`
+  for those regions; serve does not cache such a result and the OCR cache does
+  not store it, so the next run reads the page with OCR again.
+  Pages whose text is mostly visible, including pages on a background image,
+  keep their text layer. Set `OCR_NATIVE_TEXT_REJECT_INVISIBLE_LAYER=false` to
+  trust these layers as before.
+- The local paper and section classifiers no longer take the GPU memory a
+  managed vLLM server needs. Free VRAM was measured once and each model was
+  checked against it alone, so both could land on CUDA when only one fit; the
+  second model's check now subtracts what the first one took. The check also
+  left nothing for the managed PaddleOCR-VL vLLM server, which claims 92% of
+  the GPU and, with a cloud LLM, starts after the classifiers have loaded, so
+  on a 24 GB card the classifiers took its room and OCR could fail to start.
+  The picker now keeps free what the managed vLLM servers the run may start
+  claim (that OCR server and the local vLLM LLM at `LLM_LOCAL_MEM_FRACTION`:
+  both when they fit on the GPU together, else the larger), and a classifier
+  that does not fit beside that and the safety reserve runs on CPU, with the
+  same results, only slower. With automatic OCR on x86 Linux, a 24 GB card now
+  runs both classifiers on CPU. `ML_PAPER_CLASSIFIER_DEVICE` and
+  `ML_SECTION_CLASSIFIER_DEVICE` still win, and a model pinned to `cuda` that
+  way comes off the other model's budget.
+- JATS input keeps the paper's structure instead of flattening it. References
+  accumulate across every `<ref-list>` with one continuous counter: a later
+  'Methods references' list extends the main bibliography instead of replacing
+  it, nested Springer-style wrappers contribute their refs and rows, and a
+  `<ref-list>` that is a back `<sec>`'s substance reuses that section while
+  one nested in other prose opens its own references section. An
+  `<alternatives>` emits one representation — MathML when present, else the
+  TeX body without its document preamble — and the same trim applies to a bare
+  `<tex-math>`, so LaTeX preambles no longer pollute sentences. Figures,
+  tables and display formulas nested inside `<p>` are registered as figures,
+  tables and formulas instead of being merged into the paragraph text, with
+  captions, table footnotes and every grid of a multi-table wrap kept, and an
+  article- or back-level `<floats-group>` is walked the same way. Body
+  `<boxed-text>`, `<fig-group>` (including grouped eLife figures),
+  `<supplementary-material>` and `<list>` wrappers beside `<p>` are kept too,
+  with each wrapper heading and caption title emitted once and list and
+  footnote markers left out of the sentences. Back-matter `<notes>`,
+  appendices, glossaries and biographies become sections built from their
+  titles (data-availability notes typed as open-data, COI statements as
+  conflicts, financial disclosures as funding). Author affiliations resolve
+  multi-id `rid` references and shared group-level `<aff>` elements, never
+  inheriting an affiliation another group claims, and a consortium byline
+  appears once as an organization followed by its credited members. Body
+  `<ext-link>`/`<uri>` targets are recorded as links with their display text
+  (bare-DOI hrefs as `https://doi.org/` URLs; scheme-less accessions skipped),
+  each attributed by anchor offset to the sentence holding it, so a short
+  display text no longer lands on an earlier sentence that happens to contain
+  it. HTML and ePub `<a href>` anchors are attributed the same way, to the
+  sentence holding them rather than the paragraph's last sentence. Reference
+  rows prefer the printed `<mixed-citation>` text — every citation in the
+  `<ref>` — else the separated fields of an `<element-citation>`,
+  `<nlm-citation>` or `<citation>`, with the label kept apart and sibling
+  notes in document order; a note never replaces the citation.
+- Settings, presets and `config set` now go through one parser, so a preset
+  or written value behaves exactly like the same line in `.env`: comma and
+  JSON-array lists arrive parsed, `Literal`/case validators run, and the
+  Ollama RPM, OCR region and resolver-enrichment auto-tunes apply
+  (`BIBR_RESOLVER_URL` in a preset raises `enrich_concurrency` to 16, as in
+  `.env`). `bibr preset use` validates through the real settings model
+  before writing, and `chew --preset` / `batch --preset` and the demo
+  validate on apply; a preset that adds any failure beyond what the current
+  environment already reports — including model-level errors, alias
+  spellings and lowercase keys that never mention the preset's own key —
+  raises a `ConfigurationError` naming the preset file and the setting
+  instead of corrupting `.env` or crashing with a traceback (the error says
+  `Fix the preset file`), while a preset that is valid on its own still
+  applies when an unrelated setting is broken, and unknown preset keys
+  are still reported. `bibr preset show`/`diff`/`save`/`use`/`rm` with a bad
+  preset name (for example a name with a space or `..`) and `chew --preset`
+  with such a name now exit 1 with a message naming the preset instead of
+  printing a traceback.
+- `parse_env` (used by `preset save`/`diff`/`show`) now reads `.env` files
+  with the same dotenv parser the runtime uses, so inline comments, `export`
+  prefixes and quoted escapes no longer bake comment text or quote
+  characters into snapshot values. `merge_env` rewrites every duplicate
+  definition of a key (including `export KEY=` lines), so the runtime can no
+  longer read back an older duplicate. The `*_MAX_TOKENS` tuning knobs and
+  `JOBS_KEY_PREFIX` are no longer mistaken for secrets and excluded from
+  snapshots, while third-party secrets
+  (`AWS_SECRET_ACCESS_KEY`, `*_PASSWD`, `*_CREDENTIALS`, `*_KEY` and
+  friends) are still excluded and redacted.
+- `bibr config example --full` renders lists as comma values, `None`
+  defaults as `null`, and factory list defaults as their value, so every one
+  of its lines loads unchanged when uncommented. `BIBR_RESOLVER_SOURCES`
+  also accepts the JSON-array form the resolver itself parses. `bibr config
+  set` validates through the real settings model and attributes failures to
+  the key being set, so an unrelated invalid value no longer blocks the
+  write — including a value that is only valid together with `.env` context
+  (a private `OCR_BACKEND` with its `OCR_PROFILE` in `.env`); error messages
+  name the env var (alias spellings verbatim, so no more `OCR_OCR_LOCAL_GPUS`)
+  and malformed mappings name the setting instead of printing a
+  `SettingsError` traceback.
+- CLI status lines and hints no longer drop bracketed text. `bibr doctor`
+  printed `Install with: pip install 'rapid-mlx'` for the Rapid-MLX backends,
+  because Rich read `[guided]` as a style tag and removed it; any error that
+  names a package extra, such as `bibr chew --ocr glm-rapid-mlx` without the
+  launcher, lost it the same way. Brackets that name no style are now printed
+  as written, and so is a closing tag with nothing left to close, such as
+  `[/tmp/x]` in an error message, which used to crash the command with a
+  `MarkupError`. Deliberate markup such as `[cyan]bibr setup[/cyan]` still
+  renders, and text a caller has already escaped shows no backslashes.
+- `bibr demo` kept every uploaded paper and every JSON download in the temp
+  folder until something else cleaned it: Gradio's cache was never cleared,
+  and each download was written twice, once outside that cache. It also
+  turned the OCR disk cache on, which keeps each paper's OCR text with no
+  expiry. Uploads and downloads are now deleted at most five minutes after
+  they turn an hour old (`DEMO_CACHE_TTL_SECONDS`; `0` keeps them, and a
+  value that is not a whole number of seconds stops the demo at start), and
+  all of them when the demo stops. The demo now turns the OCR disk cache on
+  only when it keeps its files (`DEMO_CACHE_TTL_SECONDS=0`) and `CACHE_OCR`
+  is not set. An upload over `DEMO_MAX_FILE_SIZE_MB` is now refused while it
+  arrives (HTTP 413) instead of after it has been stored.
+- The `bibr demo` summary card showed an extracted title, DOI, paper type,
+  domain and keywords as Markdown, so a crafted PDF could make the viewer's
+  browser load an outside image or show a link. They are now shown literally.
+- `table[].contents` keeps the cell text the paper printed. The OCR engines
+  return a PDF's tables as HTML, and HTML and ePub input carries them as HTML
+  too. That HTML was read with pandas type inference, so every column that
+  looked numeric was rewritten: "2.50" became "2.5", "007" became "7",
+  "1,234" became "1234", a decimal comma was read as a thousands separator
+  ("1,5" became "15", "0,25" became "25"), an integer column with one empty
+  cell came out as "12.0", and "TRUE" became "True". A cell printing "NA",
+  "n/a" or "None" came out empty from a PDF and as "nan" from HTML or ePub,
+  where every empty cell was "nan" too. A PDF table without a header row,
+  whose first row becomes the header, could get headers such as "2019.0".
+  Cells now keep their printed text and an empty cell is "", and tables keep
+  the shape they had before. A table printed as an image is now kept
+  with its caption and empty `contents`, so a mention of it resolves: in HTML
+  and ePub input a `<table>` with no cell text whose caption prints a table
+  label ("Table 3. ..."), in JATS a `<table-wrap>` with a label or caption but
+  no `<table>` with rows. An HTML table with a span such as `colspan="2px"` is no longer
+  dropped.
+- A table continued across pages no longer gets its repeated header as a data
+  row in the middle of `contents` when the later page prints the header with
+  different spacing, case, dashes or punctuation ("Mean(SD)" under
+  "Mean (SD)", "p value" under "p-value"), as per-page OCR often reads it.
+- Text from DOCX, JATS, HTML, ePub and the PDF text layer no longer goes
+  through the late clean-up meant for OCR output. That clean-up ran on every
+  sentence of every input. It fused "a 2 x 2 x 3 design" into "a2x2x3" and
+  "Items 1 2 3" into "Items 123". It deleted the underscore from identifiers,
+  file names and email addresses (`age_group`, `NM_022770`, `RRID:SCR_003070`,
+  `john_smith@uni.edu`), and it turned `10^6` into `106`. It also read two
+  literal dollar signs as a math span and deleted them along with the
+  underscores between (`df$age_group`, "US$ 60 to US$ 1,419", `$SAMPLE_R1`).
+  Each sentence now records whether any of its text came from OCR, and only
+  OCR text gets those repairs. DOCX inline equations are still unwrapped and
+  flattened, one glued to a word included ("the $n$th" reads "the nth"),
+  because each sentence also records the `$…$` spans the parser wrote.
+  Elsewhere in document text only a tightly delimited `$…$` counts as math,
+  as JATS tex-math writes it; two literal dollars that happen to fit that
+  shape are still unwrapped. In OCR text, `_x` and `^x` are now flattened only
+  inside `$…$` and `\(…\)` math, email addresses are protected like URLs, and
+  "2 x 2" and "2 × 2" are no longer fused. OCR text keeps the spaced-run
+  collapse, which repairs OCR's character spacing ("1 7. 9 0 6"), so an OCR'd
+  "Items 1 2 3" still reads "Items 123"; narrowing it further waits on data
+  from a GLM-OCR run. The PDF text layer sometimes extracts a superscript or
+  subscript as a separate token ("R 2 ,", "r 2 ¼"). The old clean-up fused
+  those by accident; they are now kept as extracted.
+- The per-region OCR clean-up no longer touches the PDF text layer, and it no
+  longer damages formulas and numbers. On text-layer regions it split "U.S."
+  into "U. S." and "e.g." into "e. g.", and it broke a DOI that opens a line
+  into "10. 1038/…". It cut a table of contents longer than 2,048 characters
+  with spaced dot leaders to its first entry. It also turned a printed "* p <
+  .05" into a bullet. Those regions are now only trimmed. In OCR output, a
+  formula that starts with `\theta`, `\tau`, `\text`, `\tilde` or `\times` no
+  longer loses its leading `\t`; on the default Paddle profile it exported as
+  "heta_{t+1} = …". The list-marker spacing ("1.text" → "1. text") no longer
+  applies to decimals, DOIs, abbreviations or formulas. The repeated-content
+  trimmer keeps the text after a repeated run instead of dropping the rest of
+  the region. A formula region that holds two formulas ("\(a\) + \(b\)") keeps
+  its delimiters, and one wrapped in single dollars is no longer nested inside
+  `$$`.
+- HTML and ePub text keeps inline markup attached to its word. The parser put a
+  space around every element, so `H<sub>2</sub>O` read "H 2 O",
+  `m<sup>6</sup>A` "m 6 A" and a linked citation "( Figure 1 )". Now only
+  block-level elements separate words, as in the JATS parser; like there, an
+  exponent joins its number (`10<sup>6</sup>` reads "106"). eLife publishes
+  each of its 984 test articles as both HTML and JATS. The share of HTML
+  sentences that also appear word for word in the same article's JATS rose
+  from about 24% to 41%.
+- JATS and HTML text no longer splits inline MathML at the whitespace
+  publishers put between its elements. PLOS and eLife pretty-print MathML
+  (`<mi>t</mi> <mo>-</mo> <mn>1</mn>`), and the parsers kept that whitespace,
+  so a formula read "( 0 , 2 . 5 )" or "y ¯ t - 1". The late clean-up's
+  spaced-run collapse fused some of those runs back by accident, but it also
+  fused prose, and it no longer touches document text. The parsers now drop
+  whitespace between MathML elements as a renderer does, so "(0,2.5)" and
+  "y¯t-1" read as they do from a publisher that writes none. They keep a
+  space where it separates words: "ln dbh", "0.93 GeV", "direct effect"
+  spelled one letter per element, a word after a comma, a function name
+  before a bare argument ("sin x"), and the text around the formula. They
+  also keep it between two numbers, so the parts of a fraction read "1 2" and
+  not "12"; an index pair (x with 1 below and 2 above) reads "x1 2". An
+  `<mspace>` (`\quad`, `\,`) and, in JATS as in HTML, a matrix row or cell
+  now separate the text around them, whitespace or not: "E_{t-1} \quad
+  0<λ≤1" reads "Et-1 0<λ≤1", and a matrix that read "(2112)" reads
+  "( 2 1 1 2)". Other letters and digits still close up, across a fraction
+  bar, a product or a script too, as they do from a publisher that writes no
+  whitespace: a/b reads "ab", and a unit set as an upright `<mi>` after a
+  number reads "5m" (in `<mtext>` it keeps its space).
+  Measured against the parsers that kept every such space, on the 885 test
+  articles that contain a MathML element (PMC_sample_1943, eLife_984 as JATS
+  and as HTML, PLOS_1000): 3,329 of their 40,308 formulas read differently.
+  Spaced decimals ("2 . 5") in them fell from 121 to none and spaced
+  differences ("t - 1") from 346 to none. No space between two digits and
+  none at an `<mspace>` is lost. Twenty closed spaces join two tokens of two
+  letters or more, between terms of a product ("m3hgNa"), the parts of a
+  fraction ("e-diλi") or a sum and its limits. Dropping every such space
+  would have joined 187 ("lndbh", "directeffect").
+- The Ollama provider sent every request to `/chat/completions` under
+  `LLM_OLLAMA_BASE_URL`, and Ollama answers that with 404. With the default URL,
+  `http://localhost:11434`, which is also what `bibr setup` writes, every paper
+  failed at its first LLM call, and so did the setup wizard's connection test.
+  Ollama serves its OpenAI-compatible API under `/v1`. bibr now adds `/v1`
+  unless the URL already ends in it, so both forms work. The wizard no longer
+  lists models from `/v1/v1/models` when the URL is typed with `/v1`.
+- `bibr doctor` and the `bibr setup` connection test now send their test
+  request through the provider adapter that extraction uses. Both built their
+  own client, with a 64-token cap. For the default `gemini-3.5-flash-lite`
+  they left out the thinking budget the Gemini adapter always sends. For
+  OpenAI they sent `max_tokens`, which reasoning models such as the wizard's
+  `gpt-5-nano` reject, where the adapter sends `max_completion_tokens`. The
+  test could therefore fail a setup that `bibr chew` runs. Doctor also skipped
+  Ollama; it now tests it like any other provider. When the wizard's test
+  fails for Ollama, it offers to change the base URL. It used to ask for an
+  API key and write the answer to `.env` as a line with no name, `=<key>`.
+  Both tests now give up after twice `LLM_TIMEOUT_SECONDS`, the limit `bibr
+  chew` puts on one LLM call. A server that accepted the request and never
+  answered kept them waiting on the SDK's own timeout instead, which for the
+  OpenAI SDK that Ollama and OpenAI-compatible servers go through is 600 s per
+  attempt.
+- `bibr setup` could leave an older `LLM_API_KEY`, `LLM_BASE_URL` or
+  `LLM_BACKEND` in effect behind the provider just chosen. Merging into an
+  existing `.env`, the default, keeps every key the wizard does not write, and
+  `~/.bibr/.env` still applies under a new `./.env`. The Google, Anthropic and
+  Groq adapters send `LLM_API_KEY` in place of their own key, so switching
+  from OpenAI to Google sent the old OpenAI key to Gemini, while the
+  connection test, which used the typed key, passed. Choosing a provider now
+  also writes `LLM_BACKEND=cloud`, and a blank `LLM_API_KEY` or `LLM_BASE_URL`
+  where none was entered, and the connection test uses those same values.
+- `bibr doctor` checks the LLM the way `bibr chew` does. `LLM_BACKEND=local` is
+  resolved to the backend chew would start on this machine; doctor used to
+  check it as a cloud provider and ask for a key. The provider's credentials are
+  checked by its adapter. `LLM_API_KEY` now counts for Google, Anthropic and
+  Groq, and an OpenAI-compatible server set with `LLM_BASE_URL` needs no key.
+  A managed local backend fails when chew's preflight would refuse it, for
+  example vLLM on a machine with no NVIDIA GPU, which doctor passed. An unknown
+  `LLM_BACKEND` value is reported instead of being checked as cloud.
+- `bibr doctor`'s OCR check now fails where `bibr chew` refuses a PDF. With
+  the default `OCR_BACKEND=paddle` on Windows, or on Linux without a GPU that
+  fits paddle-vllm, the automatic chain is glm-llama alone. Doctor now looks
+  for llama.cpp there, where it used to warn that availability was unverified.
+  It fails when no runtime of the chain can start, when
+  `OCR_BACKEND=paddle-vllm` has no GPU that fits it, and when a cloud vision
+  backend (`gemini`, `openai`, `anthropic`) has no API key.
+- `bibr doctor` no longer fails when the working directory has no `.env`.
+  Settings come from `~/.bibr/.env` and `./.env`, or from `BIBR_ENV_FILE`.
+  Doctor now names the files it read, and warns when there are none, because
+  configuration from the environment alone is valid. `bibr preset` uses the
+  file whose values are in effect, which is the last existing file of that
+  chain. `preset save` and `preset use` therefore work when the configuration
+  lives in `~/.bibr/.env`, and `save`, `use` and `deactivate` name the file.
+  The demo's preset picker reads the active preset from the same file.
+- `bibr doctor` reports a missing `uv` as a warning instead of a failure.
+  `python -m pip install bibr` is a documented setup, and only the uv-managed
+  vLLM and MLX-VLM runners need uv. Their own checks still fail without it.
+- Reference enrichment (`--crossref`) rejected the correct Crossref or
+  resolver record for references printed in most citation styles. The
+  author-initials check took "and", "et" or "und" for a first name
+  ("Smith, J. and Weber, E. U." read Weber as "A."), kept only the middle
+  initial of "Jeffery M. Sobal", and vetoed a record whenever a reference cut
+  short by "et al." printed one of two co-authors who share a surname. It now
+  reads a given name on either side of the surname, treats conjunctions as
+  separators, skips the second half of a hyphenated surname and pools
+  co-authors who share one, and still rejects a different person with the same
+  surname. Surnames now also match without their diacritics or with an umlaut
+  spelled out ("González" and "Gonzalez", "Müller" and "Mueller"), and an
+  organization author no longer counts as a surname that fails to match.
+- A title search could accept a different work from the one the reference's
+  own DOI names. When the DOI lookup failed with a timeout or server error,
+  the Crossref title search took any record with a matching title, a preprint
+  of the article for example, and consolidation filled the reference's gaps
+  from it. A printed DOI that parses now admits only a record carrying that
+  DOI, on the Crossref title and fingerprint searches as on the resolver
+  fallback, which already had this rule. The Crossref search, the resolver
+  search and the resolver fallback now share one matcher, so their rules
+  cannot drift apart again.
+- A generic title ("Introduction", "Emotion regulation") matched any record of
+  that title by an author of the same surname in about the same year. A title
+  of three words or fewer is now rejected when the printed volume disagrees
+  with the record's, or when the printed container does, unless the printed
+  volume and first page both agree with the record's: those identify the
+  article even when the container is an abbreviation the matcher cannot
+  expand, such as "PNAS". Any title is rejected when both the printed volume
+  and the first page disagree with the record's. A value missing on either
+  side counts for nothing.
+- Crossref titles and journal names kept their inline markup
+  (`CO<sub>2</sub>`, `<i>Drosophila</i>`, `&amp;`). The tags cost enough
+  similarity to reject the correct record, and an accepted match carried them
+  into `bib_match` and, through consolidation, into `bib`. Titles and
+  container names from Crossref and the resolver are now plain text.
+- On 2,312 printed references, each paired with the recorded Crossref record
+  its printed DOI names, the title matcher with all of the changes above
+  rejects 130 of those records, down from 798, mostly where the printed title
+  differs from the deposited one.
+- With `BIBR_RESOLVER_AUTHORITATIVE=true`, a failed resolver prefetch left
+  every reference without a DOI unmatched and never asked Crossref, although
+  the log said it was falling back to Crossref. Those references now go to
+  Crossref. `BIBR_RESOLVER_SEARCH_CONCURRENCY` below 1, one way to make the
+  prefetch fail, is now rejected when settings load.
+- When the resolver fallback (`BIBR_RESOLVER_FALLBACK_SOURCES`) reached its
+  deadline it discarded every search that had already answered. Each
+  reference's result is now applied as it arrives, the deadline cancels only
+  the searches still outstanding, and the warning says how many were left.
+- A resolver that answered `/health` with JSON other than an object
+  (`["ok"]`) failed the paper's whole reference enrichment, and one fallback
+  candidate with `"authors": null` stopped the fallback for every remaining
+  reference. Such a health answer now means unhealthy, a non-object `/works`
+  answer is a miss, malformed authors count as none, and an error on one
+  reference costs only that reference.
+- A matched Crossref monograph, edited or reference book, book part, report
+  component or database came back with `bib_type` `other`, because
+  `migrate_bib_type` knew only the BibTeX names and a few Crossref ones.
+  `consolidate="replace"` then overwrote a printed `book` with it. These
+  Crossref types now map to `book`, `book_chapter`, `report` and `dataset`, a
+  match's `other` still fills a missing type but never replaces a printed one,
+  and a type that is not a string maps to `other` instead of raising.
+- Resuming a `bibr batch` run now runs again the papers that failed because
+  of the run or a service rather than the paper; they used to wait for
+  `--retry-failed`, which also re-runs every genuine failure. A local OCR or
+  LLM server that went down or could not start failed each later paper with
+  the pipeline's own code (`ocr_failed`, `layout_failed`, …), and the next run
+  skipped them all. Those papers are now recorded as `upstream_unavailable`,
+  the code the remote executor uses for the same outage, and
+  `ChewFailure.outage` tells library users the same. Papers failed with
+  401/403 when the serve rejected the token are always picked up again. A
+  paper that crashed, hit an outage, or ran out of remote transient retries
+  is picked up again until it has failed that way three times, since the
+  cause can still be the paper (a prompt that brings the LLM server down, a
+  model reply the serve reports as a 502); after that it waits for
+  `--retry-failed`, so a batch still finishes. Timeouts are not picked up: a
+  paper can be too slow on its own.
+- An OCR server that stopped answering mid-file left the regions it refused
+  blank with a warning, so the file failed as `ocr_mostly_failed`, which
+  resume skipped, or passed with text missing. A region or page whose OCR
+  request was refused or dropped once the retries ran out now fails the file
+  as an outage, as an `UpstreamServiceError` from the OCR service already did.
+  A busy answer (429, 502, 503) still leaves only that region blank, with a
+  warning.
+- A crash in one chunk no longer fails every paper in it. `bibr.chew()` on a
+  list or directory lost every result when any chunk raised, and `bibr batch`
+  recorded the whole chunk as `chunk_error`, which resume then skipped. The
+  papers a crashed chunk left unfinished now run again one by one, with the
+  crashed chunk's pages released first, and only a paper that crashes on its
+  own fails with `chunk_error`.
+- A job the serve failed with 504 (`PIPELINE_TIMEOUT`) was treated as an OCR/LLM
+  outage: it was resubmitted up to `--retries` times, each run cost a full
+  timeout of a serve slot, in-flight shrank each time, and the paper was
+  recorded as `upstream_unavailable`. It is now retried once without shrinking
+  in-flight and then recorded as `pipeline_timeout`, and "timed out" in a
+  failed job's text no longer marks it as an outage.
+- Adding a file to a `bibr batch` input set could rename a paper already
+  processed. Ids were disambiguated only within one run, so a second
+  `paper.pdf` turned the existing `paper` into `paper-<sha8>`: both files were
+  processed again, and the stale `paper.json` stayed in the ledger and the
+  tables as a third paper. A file now keeps the id the ledger recorded for its
+  path, and only the newcomer gets a suffix. An input named `run_info` gets
+  one too; its export used to replace `run_info.json` mid-run and was then
+  overwritten by it, while the ledger said `ok`. `bibr.chew()` on a list or
+  directory gives stem collisions the same `<stem>-<sha8>` ids, where all of
+  them got the bare stem and `bibr.write_tables()` refused the batch.
+- A `bibr batch` run killed mid-write (out of memory, a full disk) left the
+  ledger's last line without a newline, and the next run's first record was
+  glued onto it and lost, so that paper ran again. The first record of a run
+  now starts on a line of its own.
+- `bibr batch` rebuilt no Parquet tables at all once its out dir held an export
+  of an older schema major, as after resuming a 0.5.x run with 12.0: the whole
+  rebuild failed on every later run. Such exports are now left out of the
+  tables with a warning.
+- Ctrl-C during `Chewer.chew()`, which `bibr batch` uses locally, left the call
+  running on the Chewer's event loop, and `close()` then resumed it alongside
+  the teardown, where it could start an OCR server after the OCR shutdown had
+  run. The Chewer now drives its own loop through `asyncio.Runner`, so Ctrl-C
+  cancels the call and waits for it to unwind before anything is closed; the
+  thread's current event loop is left alone.
+- `bibr.write_tables()` names the input files behind a duplicate `paper_id`,
+  not the `paper_id` twice.
+- llama.cpp server: an explicit `LLM_MAX_TOKENS`/`LLM_MAX_INPUT_CHARS`/
+  `LLM_REF_SEG_WINDOW_CHARS` is kept with a warning, while unset values
+  scale with `LLM_LLAMA_CPP_CONTEXT_SIZE`.
+- llama.cpp server: `*_LLAMA_CPP_EXTRA_ARGS` documents the separate-token
+  form (`--flag value`, not `--flag=value`) and names the setting on bad
+  quoting, and `-hfr` joins the `--hf-repo` aliases for the
+  identity-override check.
+- llama.cpp server: startup failures report the END of the stderr tail, and
+  the conservative-args retry fires only on argument-parse errors (unknown
+  flags and rejected flag values) — load and OOM failures fail fast. A
+  `/health` 200 is accepted only if the
+  process is still alive after a short grace period, so a port-racing
+  sibling's server is not mistaken for ours.
+- llama.cpp server: Ctrl-C during startup shuts down the child instead of
+  orphaning it; `--parallel N` is parsed for any N.
+- llmster: an `lms` timeout names the subcommand that timed out, and the
+  `load` hint suggests `LLM_LLMSTER_CONTEXT_LENGTH`. Reusing a pre-loaded
+  identifier validates it still serves that model. Unset `LLM_TIMEOUT_SECONDS`,
+  `LLM_MAX_CONCURRENCY` and `LLM_RATE_LIMIT_RPM` are raised to 300 s, 1 and
+  600 for the loopback server, matching the other local backends.
+- vLLM LLM server: readiness needs a second agreeing `/health` 200 after a
+  grace period, and startup failures report the END of the stderr tail.
+- vllm-mlx OCR server: Ctrl-C during startup shuts down the child, matching
+  the other managed servers; startup failures report the END of the stderr
+  tail, as does the paddle vLLM OCR server.
+- Ctrl-C or task cancellation while a managed local server is still starting
+  now stops the startup wait at once and shuts the half-started server down,
+  usually within a couple of seconds. Startup used to run its wait to the end
+  first, which on a first-run model download meant the whole startup timeout:
+  600 s for llama.cpp, vLLM, Rapid-MLX and MLX-VLM, 900 s for the Paddle vLLM
+  OCR server and 180 s for vllm-mlx. This covers every managed runtime with a
+  startup health loop, in both the LLM and OCR roles, a preloaded OCR server,
+  and OCR shutdown while a preload nobody collected is still starting.
+  llmster's `lms` commands keep their own 120 s timeout.
+- Rapid-MLX LLM setup raises unset `LLM_RATE_LIMIT_RPM` for the loopback
+  server like the other local backends.
+- Rapid-MLX OCR: a failed engine restart no longer discards the region that
+  triggered it — the caller gets its own transcription, and the restart
+  error surfaces on the next request where the generation is retried.
+  Callers parked on the recycle drain retry the failed restart once, and
+  get an `UpstreamServiceError` naming the failure instead of a bare
+  assert when the retry fails too, and replacing a dead generation
+  shuts down its HTTP pool and handles first.
+- `resolve_llm_backend` accepts the pipeline's settings when checking
+  rapid-mlx availability instead of only the global snapshot.
+- Cloud vision OCR: `settings.llm.api_key` is only forwarded to a vision
+  provider when it is a real key for the same provider and the LLM is not
+  pointed at another endpoint — cross-provider keys, managed-local
+  placeholders and a set `llm.base_url` fall through to the provider's own
+  key or SDK env fallback. The plain-HTTP refusal for a public vision
+  endpoint now also covers that fallback: an `OPENAI_API_KEY` the OpenAI SDK
+  would send is refused like a forwarded LLM key. Cloud vision backends
+  (`gemini`, `openai`, `anthropic`) are no longer torn down between chunks:
+  there are no local weights to reclaim.
+- Rate limiter: the strict-interval Redis Lua script works in whole
+  milliseconds (Redis truncates a Lua number reply to an integer, so a
+  fractional-second wait became 0), and the key TTL spans the queued
+  horizon so concurrent sleepers do not lose their place; the sliding
+  window quantizes to the same. The strict-interval key is now
+  `rate_limit:<resource>:next_allowed_ms`: it stores epoch milliseconds
+  while older releases stored epoch seconds under `next_allowed`, so the
+  two never read each other's values when old and new processes share one
+  Redis.
+- Circuit breaker: a waiter that times out no longer forces the breaker
+  back to OPEN under a still-running probe — only the probe's completion
+  owns the transition (a provably dead probe still fails fast).
+- Batch manifests: `content_sha256` streams inputs in 1 MiB chunks instead
+  of loading whole files. Validation still recomputes the hash for bytes
+  entering the pipeline, so the up-front manifest pass remains for now.
+- Layout preprocessing threads the resize column pass in row blocks; output
+  is bit-identical to the serial loop. The OOM batch-halving retry restores
+  torch.compile padding afterwards instead of leaving it disabled.
+
+- Front matter no longer abstains (`VAL_METADATA_MULTI_ITEM`, no title, authors
+  or abstract) on a paper whose first pages print its record twice or whose
+  furniture starts a second block. Any second block with a byline, a DOI or
+  abstract text used to block selection, even a publisher cover page, a
+  repository landing page, a citation box, a translated title and abstract, an
+  email list, a date line or an "article info" sidebar. Where that check
+  abstains, bibr now compares what each block prints about its paper: the DOI
+  (exactly), the title, and for a title in another language or script the
+  authors' surnames (all of them, or at least two). It selects the paper's own
+  record when all records agree and prefers the article's title page over a
+  cover page or citation box. The selected block must print a byline, and the
+  parser's detected title must belong to the selected paper or a translation of
+  it. Records that disagree still abstain, and so does a DOI shared by two
+  different titles, so compiled abstract books and proceedings pages still fail
+  closed. Pages the old check resolved are selected exactly as before.
+- Front matter no longer abstains on a paper whose only record sits beside
+  headings that print nothing a record prints: the heading of a committee's
+  member list pages after the title, a numbered outline, or the first body
+  heading of an old article. Their capitals or punctuation read as a byline, so
+  each started a second block, and the record-agreement check then abstained
+  because the page's one record printed no typed byline or no abstract or DOI.
+  A record whose every other block has no byline, abstract, DOI or cover line
+  is now selected as the page's only block would be. A second block with any
+  of these still competes, so multi-item pages keep abstaining. Such a record
+  is read without a download cover page printed ahead of its title page
+  ("This article was downloaded by", "PLEASE SCROLL DOWN FOR ARTICLE"), whose
+  stamp, disclaimer and publisher address would otherwise be read as the
+  article's date, abstract and affiliation.
+- Front matter no longer abstains on a multilingual article whose translated
+  title and abstract sit under a layout title of their own, with no byline or
+  DOI, after the complete original record. A record in another language
+  needed a byline naming the same authors to be linked, so the article and its
+  translation stayed unlinked. A byline-less translation is now linked when its
+  abstract prints exactly the figures of the record's abstract (years, counts,
+  percentages; not list numbers or the digits of a name such as COVID-19) and
+  they are distinctive: three figures, two with a count or measure among them,
+  or two years that abstracts in three languages print. Other figures, fewer,
+  or two years in only two languages keep the page abstaining, as does a
+  translation without figures.
+- Front matter no longer abstains with no candidate at all on a short paper
+  whose title is the header of its only body section and whose byline is that
+  section's first row, when the section classifier types the section as body
+  text (an introduction). Where no row reaches front matter, the first page
+  opens with that section, its header is title-shaped and its first row (on
+  the first page, at most 300 characters) prints a capitalized name and an
+  initial, an affiliation superscript or an affiliation, the section is now
+  read as untyped front matter. Pages with any candidate are unaffected.
+- Front matter no longer abstains on a bilingual article whose title page
+  prints the title in capitals twice, in the original language directly above
+  its translation, with the byline below. The commas in the upper title read
+  as a proceedings row (title followed by authors), so it started a block of
+  its own, cut away from the byline, and the article's records stayed
+  unlinked. An uppercase title that prints no names after it, directly above
+  a title in another language on the same page, now joins the record below.
+  Stacked titles in one language, and proceedings rows that print names after
+  the title, keep their own block.
+- Front matter no longer abstains on an article that prints its author's name
+  alone on a row above the title, with no initial or affiliation mark, when
+  its translated record elsewhere shares the DOI. The name had no byline
+  shape, so the article's own record counted as having no byline and was not
+  selected. A bare name row of two to four capitalized words now counts as the
+  byline when the same page's copyright line ("© O. Example, 2024") names a
+  person, with an initial, of the same surname. A row the copyright line does
+  not name, or a publisher's copyright line, keeps the page abstaining.
+- A failed LLM call now says how it failed. Every LLM task raised a bare
+  `UpstreamServiceError` ("Failed to extract …") without its cause, and serve
+  answered all of them with 502, so a response truncated at the token limit
+  or rejected by schema validation, which fails the same way on every retry,
+  looked like an outage and `bibr batch --remote` resubmitted the paper up to
+  four times. The call now raises an `LlmCallError` subclass
+  (`LlmTruncatedError`, `LlmInvalidOutputError`, `LlmTimeoutError`,
+  `LlmServiceError`, `LlmRejectedError`), still an `UpstreamServiceError`, with
+  an `error_code` (`llm_truncated`, `llm_invalid_output`, `llm_timeout`,
+  `llm_failed`) and a bounded cause in the message: the error class and HTTP
+  status, never the provider's error text, and for invalid output the error
+  locations only, never the model's text. Serve answers a
+  truncated or invalid response with 422 and its code, and keeps 502, now with
+  the code, for the others. A post-parse failure caused by an LLM error
+  records that code instead of `extraction_failed`. `LlmUnreachableError`, an
+  `LlmServiceError`, marks a service that could not be reached at all (a
+  refused, dropped or never-accepted connection, or an open circuit breaker),
+  the same failures the batch resume's service-outage rule names, and that
+  rule now counts it as an outage, so a resumed batch runs such a paper again.
+- A truncated or invalid title/keywords response no longer fails the paper.
+  That call is the anchor of the record, so its failure cancelled the
+  reference task and the file ended with no export, losing references,
+  authors and DOI that were already extracted. Its fields (title, abstract,
+  keywords and the journal, date and license fields) now stay empty, the
+  layout fallbacks fill title and abstract as they do for any null model
+  title, and the export carries a blocking `VAL_METADATA_FIELD_FAILED` error
+  naming the failed fields and the error code. Blocking, like
+  `VAL_REFERENCES_INCOMPLETE`: the record is written but not promotable, so a
+  checkpointed `bibr chew -o` run routes it to `_quarantine/blocked/` and
+  keeps it retryable. The same applies to the merged core call
+  (`LLM_MERGED_CORE_METADATA`), whose failure marks every core field. A
+  timeout, a 429/5xx, a transport failure, a rejected request, a blank or
+  aborted completion (`llm_failed`, even when the unconstrained recovery of a
+  decoder abort then fails validation) or an unrecognized error still fails
+  the paper, since a retry can complete it, and so does a truncated title
+  response when another core call failed for such a reason. After a failed title call the trained paper classifier is
+  skipped rather than run on empty input. Before giving up, the title/keywords
+  call now recovers a finished response that failed validation only for
+  invalid backslash escapes (LaTeX in the abstract, up to 128 of them) or
+  explanatory prose around one JSON fence; it never completes truncated JSON
+  or takes a nested value (from draft PR #8). A repaired response adds a
+  non-blocking `LLM_RESPONSE_REPAIRED` warning naming the call and the repair.
+- One bad file no longer kills its chunk or the rest of a batch. The stage
+  contract says a stage records a per-file error and never raises, but a
+  failing sentence-segmenter load, an exception in the identity stage or a
+  failed classifier startup escaped the stage, and the library's batch loop
+  (`bibr.chew(list)`, `bibr batch`) then abandoned every later chunk. The
+  segmenter failure now fails the chunk's files with `parse_failed`, an
+  identity failure fails only its file (`identity_failed`), and a classifier
+  startup failure is logged while papers fall back as they do when the
+  trained classifiers do not answer.
+- A page too large for the render budget no longer fails its paper. Layout
+  rendered every page at one DPI and refused a page above
+  `LAYOUT_MAX_RENDER_PIXELS` or `LAYOUT_MAX_RENDER_DIMENSION`, so a 2420×3205 pt
+  poster page (59.9 MP at 200 DPI) failed the whole paper as `layout_failed`.
+  That page now renders at the largest DPI that fits (129 DPI for the poster),
+  down to 24, and the export carries a `PAGE_DPI_REDUCED` warning naming the
+  page and DPI; other pages keep the configured DPI. The floor is low because
+  only a page that is huge in PDF points needs it, and its text is as large: a
+  scan stored at eight times its paper size needs 64 DPI, and the largest page
+  PDF allows fits the default budget at 25. Layout boxes, OCR and
+  figure crops, native-text lookups and exported coordinates are all
+  normalized by the rendered image's own size or measured in PDF points, so
+  they stay in place on a reduced page. A page that does not fit even at 24 DPI
+  is still refused.
+- Fallbacks that used to leave only a log line now leave a warning in
+  `extraction.warnings`, its message starting with the error code (for
+  example `llm_timeout: …`); the extracted values are unchanged:
+  `RESEARCH_INTEGRITY_LLM_FAILED` (structured funding, author roles and
+  affiliation parts missing), `SECTION_CLASSIFIER_LLM_FAILED`,
+  `IMPLICIT_SECTIONS_LLM_FAILED`, `CITATION_LLM_FAILED` (the unresolved
+  tier-3 candidates also carry `llm_failed:<code>` in the citation receipt's
+  rejection reasons), `AUTHORS_LLM_FAILED`, `PAPER_CLASSIFICATION_FAILED`,
+  `REF_SECTION_NOT_FOUND` (the reference list is empty because no reference
+  section was found), `REF_SECTION_INFERRED` (the last unclassified section
+  was taken as the reference list), and `ROR_MATCHING_FAILED` (a ROR HTTP error,
+  transport failure or rate-limit backoff, which read as "no match").
+  `EQUATION_LLM_FALLBACK_FAILED` could not fire for an LLM failure; it now
+  reports how many fallback batches failed and why. A salvaged author list
+  says so: `AUTHORS_TRUNCATED` when the response hit the token limit,
+  `AUTHORS_PARTIAL` when it failed validation and only the leading authors
+  validated (the salvage used to report both as a truncation, in the log
+  only). `PAPER_CLASSIFIER_DEGRADED` is recorded once the LLM fallback's
+  outcome is known, and no longer claims the LLM classified the paper when
+  that call failed too. `LLMClient.resolve_citations` and
+  `extract_equations` now raise the typed error instead of returning an empty
+  list; their callers degrade as before.
+- A wrong-typed value in an LLM response (an abstract sent as a list of
+  paragraphs, a reference `bib_type` or the keywords sent as a number) raised
+  an `AttributeError` or `TypeError` from a validator, which skipped
+  Instructor's re-ask and failed the call as an upstream error. The validators
+  now leave such a value to the schema's type check, so it is a
+  `ValidationError`: re-asked where validation re-asks are enabled (cloud
+  providers by default; a custom OpenAI-compatible endpoint makes one
+  attempt), and otherwise an `llm_invalid_output` failure. A falsy `bib_type`
+  (`false`, `0`, `[]`) still maps to `other`.
+- The NuExtract native backend's Instructor recovery request now takes its own
+  rate-limit slot, as the decoder-abort recovery already did; it was a further
+  physical request that the shared limiter never saw.
+- Cloud OCR (`--ocr gemini|openai|anthropic`) now sees the HTTP status of a
+  failed call. Instructor wraps the provider's error in its own exception,
+  which carries no status, so a bad key (401/403/404) returned blank regions
+  until the file failed as mostly-failed OCR instead of raising at once, and a
+  429 or 5xx was never retried by bibr. The status is now read from the
+  wrapped error, as the LLM client's failure classification does.
+- One network blip while loading the default front-role classifier no longer
+  turns it off for the rest of the process. The loader cached any load failure
+  as "unavailable" and the resource manager pinned it, so after a Hub timeout a
+  long-running `bibr serve` worker or `bibr batch` ran every later paper on
+  front-matter heuristics alone. A network failure is now retried by the next
+  paper; a missing or invalid bundle is still given up after one attempt.
+- Serve no longer caches a result shaped by a failure a retry could avoid. Every
+  successful response was cached for 24 hours, so one Crossref timeout, OCR
+  blip or failed LLM call was replayed to every later request for the same
+  PDF, including async jobs and `bibr batch --remote` re-runs. A response with
+  a blocking issue other than a front-matter abstention, incomplete
+  enrichment or a warning in `bibr.processing_warnings.NOT_FINAL_CODES` (OCR,
+  LLM-task, enrichment and resolver failures and timeouts) is returned but not
+  cached. This matters
+  more now that a failed title/keywords response exports a partial record
+  instead of failing.
+- `bibr batch` no longer refuses PDFs on a core install for lack of OpenCV. Its
+  preflight required `cv2` for every PDF and suggested `uv sync --extra ml`,
+  but only the torch layout path imports cv2. A core install runs layout
+  through ONNX Runtime, and `bibr chew` already accepted the same PDFs. The two
+  commands now share one check. Without torch, neither needs OpenCV. With
+  torch, both refuse a missing or broken `cv2` before any model loads, and
+  suggest `uv sync --extra torch`, or reinstalling `opencv-python-headless`
+  for a broken one. `bibr chew` on a core install also runs the local OCR
+  runtime check again, as `bibr batch` does. It stops before the layout model
+  loads when no local OCR runtime can start, for example `--ocr paddle-vllm`
+  without an NVIDIA GPU.
+- A GPU install (`onnxruntime-gpu[cuda,cudnn]`, the `gpu` extra) ran bibr's
+  ONNX models on the CPU. The CUDA and cuDNN libraries those wheels install
+  are found only after `onnxruntime.preload_dlls()` loads them, and bibr never
+  called it, so onnxruntime could not start its CUDA provider and fell back
+  to CPU. bibr now calls it before it opens a CUDA session. The logs still
+  said `cuda`, because they named the device bibr asked for. The layout
+  detector and sentence segmenter now log the device their session got, and
+  any ONNX model that loses CUDA this way logs a warning.
+- On a GPU, bibr's ONNX models held on to all the GPU memory they had ever
+  used. Page batches, reference lists and section headers come in different
+  sizes, and each new size added memory, so a batch run filled a 24 GB card
+  after 11 papers and every later paper failed. Each ONNX Runtime run on CUDA
+  now ends by freeing the memory it no longer uses (onnxruntime's arena
+  shrinkage), so GPU memory follows the model calls in flight.
+- The OCR disk cache key now includes the layout checkpoint (`LAYOUT_MODEL_ID`),
+  the ONNX layout bundle (`LAYOUT_ONNX_MODEL_ID`, `LAYOUT_ONNX_REVISION`) and
+  `ML_RUNTIME`. It held only the torch revision, so moving the ONNX bundle,
+  which is what the default runtime loads, replayed the previous model's cached
+  regions.
+- JATS footnotes printed under a heading of their own (an `<fn-group>` inside a
+  `<sec>`, as Europe PMC writes them) were dropped; they are now footnotes like
+  a back-matter `<fn-group>`. A JATS footnote keeps its printed `<label>`.
+- A GPU install could run bibr's ONNX models on the CPU. The core `onnxruntime`
+  package and the `gpu` extra's `onnxruntime-gpu` write the same `onnxruntime/`
+  directory, and `uv sync --extra gpu` writes both at once, so either build
+  could end up loaded. The documented remedy, `uv pip install
+  'onnxruntime-gpu[cuda,cudnn]'` after the sync, did nothing, because
+  `onnxruntime-gpu` was already installed. `bibr setup` now reinstalls the
+  `onnxruntime-gpu` version the sync chose, which writes the GPU build's files
+  last, and checks that the GPU build is the one that loads. The install guide
+  and the tester guide give the same step: `uv pip install --reinstall-package
+  onnxruntime-gpu "onnxruntime-gpu[cuda,cudnn]==1.26.0"`. `onnxruntime` stays
+  installed, because `uv run` reinstalls a missing one and its files would
+  replace the GPU build's. When both packages are installed and the CPU build is
+  the one loaded, bibr logs a warning once, with the command that fixes it.
+- `bibr doctor` now reports which ONNX Runtime build loads, CPU or GPU, and its
+  version. Before, it said nothing about it once torch was installed. When
+  `onnxruntime-gpu` is installed but the CPU build is the one loaded, the line
+  is a warning, and its hint gives the reinstall command.
+- After a GPU install, a `uv sync` without `--extra gpu` uninstalls
+  `onnxruntime-gpu`, which deletes the files it shares with `onnxruntime`.
+  `onnxruntime` stays installed, but its package is left empty or gone. An
+  empty package still imports, and the first ONNX model failed with an
+  `AttributeError`. A gone one raised an `ImportError` that suggested `pip
+  install onnxruntime`, which does nothing while the package counts as
+  installed. bibr now raises a `ConfigurationError` for an empty package, and
+  for an installed one that fails to import, an `ImportError` with the import
+  error. Both give the repair, `uv pip install --python <interpreter>
+  --reinstall-package onnxruntime onnxruntime==<version>` (a pinned pip
+  reinstall where pip manages the environment), and tell GPU users to repeat
+  the `onnxruntime-gpu` reinstall afterwards, since the repair writes the CPU
+  build. `bibr doctor` fails its ONNX Runtime line with the same command, and
+  names the import error when there is one.
+- The demo notebooks read each section's classification score from
+  `extraction.diagnostics.section_classification`; since 12.0 moved it there,
+  they showed 0% for every section.
+- A subtitle or a numbered series part printed on its own row under the title,
+  such as "Careers in garden design" followed by "4. Planting schemes", is now
+  part of the title. The metadata LLM sees both rows but often returned only the
+  first, and title grounding accepted that because the first row is printed
+  verbatim. When the model title is exactly the selected record's title row or
+  rows, the row printed directly under them is now appended, joined with ": "
+  (with a space when the title already ends in punctuation such as "?" or ":"),
+  and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_subtitle_row_dropped`. The row must be short and on the same
+  page. It is left out when it reads as a byline or an extracted author's name,
+  an affiliation, a date, citation or DOI line, an article-type label or section
+  heading, or a parallel title in another language or script.
+- A title that opens with a parenthetical, such as "(Rural) Clinics as layered
+  civic organizations" or "(Re)thinking …", keeps it. The metadata LLM can read
+  the parenthetical as an annotation and return only the rest of the title. Title
+  grounding accepted that because the rest is still printed verbatim, and once a
+  front-matter record is selected the layout title is not consulted. Grounding
+  now restores the parenthetical from the selected record's printed title row
+  and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_parenthetical_dropped`. Numbering such as "(1)" or
+  "(iv)" and article-type labels such as "(Review)" or "(Original Article)" are
+  still left out.
+- A paper that prints its title in two languages, the original and then a
+  translation, now gets the title printed first. The title prompts had no rule
+  for parallel titles, so the metadata LLM often returned the English
+  translation, or joined both versions into one title. The authors prompts had
+  no such rule either, so a byline printed in two scripts could come back
+  romanised, and the title and the authors could come from different language
+  versions of the same front matter. The title/keywords and merged
+  core-metadata prompts now ask for the version printed first, verbatim in the
+  language and script it is printed in, never translated and never joined to
+  the other version. A title quoted in a citation line or a running header does
+  not count. The authors prompts now copy the byline printed first when it is
+  printed in two scripts or languages, and never transliterate or romanise a
+  name. The abstract rule is unchanged: of parallel abstracts, the printed
+  English version is still preferred.
+- A title that opens with a printed label, such as "Research Report: …",
+  "Case report. …" or "Opinion: …", keeps it; so does a title whose label is
+  printed on a row of its own ending in a colon, such as "Review:" above the
+  rest of the title. The metadata LLM dropped such labels the same way it
+  dropped a leading parenthetical, and grounding accepted the rest because it is
+  still printed verbatim. Grounding now restores a label of up to five words
+  that is set off by a colon, full stop or dash in the selected record's title
+  row, and adds a `VAL_TITLE_REGROUNDED` warning with evidence
+  `reason:title_leading_label_dropped`. Numbering ("1.", "IV."), field labels
+  ("Title:", "Running title:"), citation lines ("To cite this article:",
+  "Smith et al.:"), page furniture ("Open access") and an article-type kicker
+  printed above the title without a colon are still left out, and nothing is
+  restored when another title row of the record prints the title without the
+  label.
+- A paper deposited in HAL keeps the article's own spelling of its title when
+  the archive's cover page retyped it with a line-break hyphen lost
+  ("CADMIUMAND THALLIUM-CONTAINING" for the article's "CADMIUM-" over "AND
+  THALLIUM-CONTAINING"). The metadata LLM copies the cover, and grounding
+  accepted the copy because the cover prints it; the article's own title is
+  filed with the running heads as a repeat of the cover's. When the title is
+  printed on a page that carries HAL's archive notice, the next page's layout
+  title is the same text once spaces and hyphens are removed, and each word
+  the cover joined is one the article never prints, the article's word breaks
+  are taken and a `VAL_TITLE_REGROUNDED` warning is added with evidence
+  `reason:title_retyped_on_archive_cover`. A title whose letters differ from
+  the article's print (a misread legacy text layer, for example) keeps the
+  cover's text.
+- The same repair now covers a Cairn.info distribution cover, whose text
+  layer can lose one of the hyphens the article prints in a compound
+  ("transférocontre-transférentielles" for the article's
+  "transféro-contre-transférentielles"). A cover page is recognised by
+  Cairn's "Distribution électronique Cairn.info" notice as well as HAL's, the
+  article's printing may be any text block of the next page (Cairn's article
+  page gives the layout title label to its rubric), and a cover word that
+  keeps a hyphen of its own counts as a lost break when the article prints it
+  as one word with more hyphens, each of the cover's pieces a run of the
+  article's; a word the article breaks at a row end still keeps the cover's
+  form.
+- A title no longer ends in the marker of a note about the article ("… solid
+  waste management1" over a note "1 Paper extracted from a doctoral
+  dissertation", "… en el vivero¹") or in an open-review platform's status tag
+  ("… [version 1; peer review: 1 approved, 2 approved with reservations]").
+  The metadata LLM copies either from the title row, and grounding accepted
+  the copy because the row prints it. A digit is dropped only when the
+  selected record's title row prints it glued to the last word, the byline
+  and affiliations do not use that number (on the title page a marker counts
+  after any name or star, glued or spaced: "Li1", "Chen 1 |", "Doe a,1"), and
+  the title page numbers it as a note: the first numbered note on the page
+  starts with it and is not about an author (a corresponding author, an
+  e-mail address, an equal contribution, an affiliation), or, for a raised
+  digit only, the title page's byline markers continue right after it (title
+  ¹, authors 2, 3, …); "12" can stand for notes 1 and 2. An asterisk, dagger
+  or double dagger is dropped when a note on the title page starts with it,
+  that note is not about an author, and the byline does not use the symbol;
+  the status tag is dropped when the record prints it. Each drop adds a
+  `VAL_TITLE_REGROUNDED` warning with evidence `reason:title_note_marker` or
+  `reason:title_review_status_tag`. Digits that are title text stay:
+  "COVID-19", "CO2", "Study 1", a digit after a word with a capital inside it
+  in a title not set in capitals ("BRCA1", "TiO2", "TMPRSS2"), and a plain
+  digit after a word of fewer than six letters ("Keap1"). So does a star or
+  superscript after a token of fewer than three letters ("A*", "R²"), and a
+  star after a word with a capital inside it ("IDA*", "SPARQL*").
+- An anonymised manuscript that prints its title as a plain text row in the
+  body font gets that title. No layout label, capitals or heading marks the
+  row, and the front-role classifier can score it as abstract text, so the
+  front matter had no title candidate at all and the paper exported none.
+  When no candidate is a title, the first row of the first page now seeds
+  the title if it is 4 to 30 words on at most three rows, does not end like a
+  sentence or a field label, carries no evidence of anything else (only the
+  classifier's abstract guess), and an "Abstract" heading follows it; the
+  selected-record fallback then recovers it (`VAL_TITLE_RECOVERED`).
+- The reference under-extraction warning (`REF_UNDER_EXTRACTION_SUSPECTED` in
+  `extraction.warnings`) now also covers numeric citation styles. It previously
+  counted only author-year citations, so a numbered paper whose reference
+  region was lost to OCR was never flagged. It now also counts the distinct
+  reference numbers cited by bracket and superscript markers, up to the highest
+  number where at least half of 1..n are cited, and warns when fewer than half
+  that many references were parsed (at least 15 cited).
+- The OCR disk cache (`CACHE_OCR`, on by default in the local demo) is now keyed
+  on the bibr version too, so an upgraded bibr no longer reuses rendering,
+  layout, native-text and OCR bundles made by the previous release. The key
+  still cannot see source changes between releases; the `CACHE_OCR` description
+  now says to use a fresh `CACHE_OCR_DIR` per revision when comparing such
+  changes, and to leave the cache off when timing runs.
+- `replace` consolidation (`CROSSREF_CONSOLIDATE=replace`, `--consolidate=replace`,
+  `Result.consolidate("replace")`) no longer overwrites printed reference fields,
+  the DOI included, from a match found by bibliographic search. That search
+  accepts a title similarity of 80, so a near-miss hit could rewrite a correct
+  printed volume, issue or page range. A printed value is now overwritten only by
+  a match that carries the reference's own printed DOI, compared
+  case-insensitively. Other matches still fill empty fields, as in `fill` mode.
+- Reference-segmentation training capture (`REF_TRAINING_DATA_DIR`) no longer
+  mixes geometry-segmenter predictions in with LLM segmentation labels; only
+  LLM output is captured. Under the default `geom` strategy, that means only
+  blocks the cascade sends to the LLM; set `REF_SEG_STRATEGY=llm` to label
+  every block. Records from earlier versions lack `provenance` and may contain
+  geometry output; discard them or capture into a fresh directory.
+- Documentation and the `ML_PAPER_CLASSIFIER_MODEL_ID` setting description no
+  longer call the default paper classifier SPECTER2-based; its model card
+  documents an `all-MiniLM-L6-v2` encoder. The Classifiers guide also notes that
+  the model has no `corrigendum` paper-type class and predicts 32 of the 36 OECD
+  subdomains.
+- The documentation now describes what the release does. The README links
+  GLM-OCR at `zai-org/GLM-OCR`; the `THUDM/GLM-OCR` page does not exist. The
+  tester guide replaces the hosted demo, which has no address, with a link from
+  whoever runs `bibr demo --share`, clones the public repository without the
+  GitHub CLI or an account, and notes that Metacheck must read export schema 12
+  (paper fields under `metadata`, not `info`). The Quickstart names the files
+  `-o` writes next to the result and the `_quarantine/<disposition>/` folder a
+  non-promotable export goes to while the command still exits 0. The
+  Architecture guide says that pages past `PIPELINE_MAX_PAGES` are dropped
+  without a warning, the Deployment guide no longer pins the Docker source to
+  the 0.5.1 tag, and the MCP guide adds `uv add 'bibr[mcp]'` for an install
+  from PyPI.
+- Sentence DOI candidates in `extraction.identity.receipt` now record the layout
+  region they were read from; `region_index` was previously always `null`. With
+  `page`, it matches the `page` and `index` of an `extraction.regions` row: the
+  region's position on that page after OCR post-processing renumbers merged
+  regions. It stays `null` when no layout region is recorded for the sentence,
+  or when the sentence is printed on a later page than the region that began its
+  paragraph. The v11 export schema changes only by describing these fields.
+- A paper whose DOI is printed only in a citation line that opens with the
+  year ("2017. Proc Soc 2, 20:1-15. https://doi.org/…"), as some journals print
+  it above the title, was exported with no DOI: the year was read as the number
+  of a reference-list entry. Numbered entries ("12. …", "[3] …") are still
+  references.
+- `bibr.Result(data)` loads exports written by newer releases of the same
+  major version, as the additive-only policy promises. It previously rejected
+  any unknown key and any `schema_version` other than the exact one it writes.
+  Unknown keys at any nesting level are now kept in `result.data` and in the
+  model's `model_extra`, and enum values it does not know yet are accepted. A
+  different major `schema_version` (`11.x`, `13.x`) and known fields of the
+  wrong type are still rejected. What bibr writes is still validated against
+  the strict models.
+- Tables captioned "Table 3.1" and "Table 3.2" on adjacent pages are no
+  longer merged as one table continued across pages, which appended Table
+  3.2's rows to Table 3.1 and lost its caption. Only the same whole label
+  continues a table.
+- "Supplementary Table 4" and "Supplementary Figure 4" give one
+  `supplementary` xref; they also gave a `table` or `figure` xref to the
+  paper's own Table 4 or Figure 4.
+- The citation linker no longer turns test statistics, equation references,
+  locators and unit exponents into bibliography links. In a paper with a
+  numbered reference list, the degrees of freedom in "F(3, 84) = 4.49", "t(45)
+  = 2.10" or "χ 2 (6) = 22.03" linked references 3, 84, 45 and 6, as did "Eq.
+  (5)", "Equation (6)" and both labels of "Eqs. (7) and (8)". A
+  parenthetical group glued to a one-letter or Greek statistic symbol, or
+  followed by a comparison, is no longer a citation; a bracket group needs
+  both ("F[2, 9] = 5.20"). "Fig.3", "Eq.5",
+  "Tab.2", "Vol.12", "No.5", "pp.14-16" and "Exp.1" are no longer flattened
+  superscript citations, and no longer switch that style on in a paper that
+  cites with brackets. "25 cm^{2}" and "3 g cm $ ^{3} $" linked references 2
+  and 3 and lost the exponent from the text; a length unit (cm, mm, km, µm,
+  nm, ft) or "ms" before a superscript now keeps it as an exponent.
+- Two distant numbers in one bracket, such as "[11, 33]" or "[91, 108]", are
+  citations again in a paper that cites with brackets. They were taken for a
+  confidence interval and dropped with no fallback; on 973 PLOS and 1,922 PMC
+  JATS articles that cost 2,608 citation links. They stay intervals in a
+  paper without bracket citations and after "CI", "IQR", "range" or
+  "interval".
+- A superscript citation group with a number the reference parser dropped
+  links its other numbers, as a bracket group does. "form^{3-5}" with
+  reference 4 missing linked nothing and was flattened into "form3-5"; it now
+  links 3 and 5 and the marker is removed. A number past the last reference
+  still rejects the group.
+- The LLM citation step no longer re-offers citations the author-year
+  matcher already linked. The matcher links "In Smith (2020)"; "Smith (2020)"
+  went to the LLM again, and a different answer added a second, conflicting
+  link. A group such as "(Smith, 2020; Jones, 2019; Brown, 2016)" is offered
+  work by work, and every reference the LLM names for one citation is kept;
+  before, the unresolved works were folded into the whole group and only one
+  answer survived. An answer that names several references for a citation of
+  one work, such as "(Smith, 2020)", links none of them; the last one was
+  kept. The LLM may break a same-surname, same-year tie only with a reference
+  that carries that surname and year: it could pick any reference, and the
+  receipt kept the surname and year evidence for it.
+- The LLM citation step sends at most 40 citations per request, run
+  concurrently within the client's `LLM_MAX_CONCURRENCY` and rate limits.
+  All candidates went into one request whose answer had to fit the
+  8192-token `citation_max_tokens` cap; a paper with about a hundred
+  candidate citations hit the cap and got no LLM link at all. A failed
+  request now loses only its own citations.
+- DOCX tables get their captions: a Caption-styled paragraph directly above
+  or below a table is its caption and leaves the body text, as figure
+  captions do; the table had none and the caption stayed in the body. A style
+  based on Caption, such as pandoc's "Table Caption" and "Image Caption",
+  counts as Caption-styled for tables and figures alike.
+- A PDF caption the layout model tags as a figure title that opens with
+  "Table S1", "Table A1" or "Supplementary Table 2" goes to the tables; it
+  found no table and fell back into the body text.
+- The 0.5.0 notes said evaluation, aspect scoring and the benchmark harness share
+  `metrics_version=6`. That counter belongs to an aspect scorer and a benchmark
+  harness that are not part of this repository. The evaluator here,
+  `evaluation/evaluate.py`, recorded `metrics_version: 4` in 0.5.0 and 0.5.1,
+  and no definition changed after that until version 5 (see Changed). Full
+  printed names (`authors_fullname_f1`) were already its primary author metric
+  in 0.5.0, with family-name-only `authors_f1` as a diagnostic.
+- Statistics in `eq[]` keep their whole printed value: `p = 2.3 × 10−5`
+  exported as `p = 2.3`, `p < 1e-10` as `p < 1` (which passes a p ≤ 1 check),
+  `p = 0,05` and `p=0·008` as `p = 0`, and `r = .85–.94` as `r = .85`. `rhs`
+  now holds, as printed, scientific notation (also as JATS, HTML and PDF text
+  layers flatten the superscript, `× 10−5` and `10 −9`, and as OCR prints it,
+  `\times 10^{-5}`), decimal commas, mid-dot decimals and ranges. A comma after
+  a count is no decimal comma (`n = 9,7 cells` lists two groups), and a signed
+  number after a space is the next column of a table flattened to text, not
+  the end of a range (`β = 0.21 −0.05 0.47` gives `β = 0.21`). A value that
+  runs on into a fraction or a time (`BF10<1/3`, `t = 12:30`) is no longer
+  exported cut short; a count before a slash is kept, cut at the slash
+  (`n = 12/20 cells` gives `n = 12`).
+- Statistic names are read whole and exported as printed. A Greek letter,
+  superscript or Δ (also ∆, U+2206) belongs to the name, so `η²p = .12` and
+  `η 2 p` (partial eta squared) are no longer p-values, `ΔR²` is no longer
+  `R²` and `τp` no longer a p. That holds where a PDF text layer puts the
+  stacked scripts on lines of their own, `η\r\n2\r\np = 0.11` (a p-value
+  before) and `ηp\r\n2 = .61` (not read at all before), as the extractor now
+  reads each line break as one character. `p-value` and `P value`, `χ 2` (χ²
+  as text layers print it), `r(df)`, `H(df)`, `Z`, `g`, `χ²` without df,
+  `90% CI`, `r s` and `rs` (Spearman) and `d z` are recognised. A subscript
+  printed after a space, such as the `h` of a Holm-adjusted `p h`, is no
+  longer a statistic of its own. Consumers matching `p`, `χ²` or `ηp²` have to
+  fold these spellings.
+- `lhs`, `df` and `rhs` in `eq[]` are exported on one line: a run of
+  whitespace, line breaks included, is one space, as in the sentence text.
+  PDF text layers gave the lhs `Cohen’s \r\ndz`, the df `1, \r\n19` and the rhs
+  `[0.30, \r\n0.42]`.
+- Statistics that share parentheses or a formula with a recognised one are no
+  longer dropped: `BF10` in `(p < .001, BF10 = 12.3)`, a second count in one
+  clause, `\chi^2(1)` in `$\chi^2(1) = 3.84, p = .05$`. Statistics printed
+  together share a group whichever pass reads them.
+- No printed statistic is exported twice. Inline LaTeX (`$t(28) = 2.10$`) and
+  `Cohen's d` were exported again under a new group, while two identical
+  printed values were merged into one. LaTeX comparators (`\leq`, `\geqslant`,
+  `\neq`, …) are read, a LaTeX statistic splits its df, and a `$` before a
+  digit is currency unless it opens math. Group ids no longer skip numbers,
+  the LLM fallback continues the regex results' ids, and the broad pass no
+  longer rescans a long token from each of its characters.
+- `eq[]` spans no longer place a value at a longer one that begins with it
+  (`n = 1` at the `n = 16` earlier in the sentence), and locate a value that
+  late clean-up respaced (`10 − 6` printed as `10 −6`) and a name it printed
+  without its spaces (`η p 2`, read from MathML, printed as `ηp2`). Late
+  clean-up prints `\leqslant` and `\geqslant` as `≤` and `≥`, not `≤slant`.
+- A supplement's DOI no longer becomes the paper's DOI (`metadata.doi`, which
+  also keys self-DOI enrichment) or makes its selection abstain. APA's
+  "Supplemental materials: https://doi.org/….supp", Copernicus `-supplement`,
+  MDPI `/s1`, PeerJ `/supp-1`, `/fig-1` and `/table-1`, and PLOS `.s001` DOIs
+  are now components, like PLOS figure and table DOIs.
+- BMJ articles from 2013 and 2014 (`10.1136/bmj.f1049`, `bmj.g2276`) and
+  articles whose citation line names a supplement issue ("30 (Supplement 5)",
+  "Volume 30, Supplement 5") were exported with no DOI, because their DOI was
+  taken for a component's. A component suffix now needs PLOS's zero-padded
+  number (`.g001`), and a supplement issue is not a component label.
+- Preprints hosted on OSF (PsyArXiv `10.31234/osf.io/…`, SocArXiv, OSF
+  Preprints) were exported with no DOI: "osf" inside the DOI marked it as a
+  data deposit. Only the text around a DOI counts now. OSF project, Zenodo,
+  Figshare and Dryad DOIs are still rejected by their registrant.
+- A DOI that no label names the article's (a bare DOI or a doi.org link),
+  printed outside the front matter and the running headers and footers, no
+  longer becomes the paper's DOI unless it matches the manifest's expected DOI.
+  Neither does a lone "Journal DOI". In a manuscript with no DOI of its own such
+  a DOI was a cited work. When it is the only candidate, a manifest that
+  requires a DOI now gets `VAL_EXPECTED_ID_MISSING`; before, the cited DOI was
+  selected, and reported as `VAL_EXPECTED_ID_MISMATCH` when an expected DOI was
+  given. The front matter is the title, abstract and keywords sections and
+  pages 1 and 2. DOCX, ePub, HTML and JATS inputs have no pages, so for them it
+  is the unclassified block before the first classified section (usually the
+  Abstract), and a DOCX title page's doi.org link still names the paper.
+- A DOI cited in a page-1 or page-2 footnote no longer replaces the paper's DOI
+  when the running header repeats the paper's own. The conflict is reported and
+  no DOI is selected.
+- A JATS or HTML article's own DOI (its `article-id` or `citation_doi`) now
+  wins over DOIs printed in its body text. eLife figure DOIs extend the article
+  DOI with a number, so many eLife JATS and HTML files exported no DOI, and one
+  a figure's.
+- Wiley SICI DOIs (`10.1002/(SICI)1097-4679(199901)55:1<1::AID-JCLP1>3.0.CO;2-K`)
+  were cut at the `<` when read as the paper's DOI or matched against a
+  manifest's expected DOI. They are kept whole.
+- A PDF whose DOI is printed only in a repository banner up the page margin
+  ("… first published as 10.…/… on 1 May 1999. Downloaded from …"), or in a
+  masthead line the layout did not turn into a region, was exported with no
+  DOI. The identity stage now also reads the text layer of pages 1 and 2, in
+  any orientation, where the parsed text does not reach, including the banner
+  a publisher stamped on a scan. Invisible text (a scan's hidden OCR layer)
+  is not read. A banner's "first published as" names the paper. A text-layer
+  DOI printed in a reference entry, table or figure is rejected like the
+  region's text.
+- A footer DOI with the journal's ISSN on the next line ("…04.006" over
+  "1234-5678/© 2026 The Authors") was exported with the ISSN glued on
+  (`…04.0061234-5678/`). A parsed DOI that the text layer shows running from a
+  line's end into the next printed field, or that ends in a slash, is now
+  rejected as `line_join_overrun`, and the text layer's reading stands. A
+  parsed DOI that lost its last characters gives way to the complete reading
+  of its printed line.
+- A DOI printed after "doi:" or "DOI" in a body page, an acknowledgment or a
+  figure note outranked the paper's own DOI printed as a doi.org link on page
+  1. Outside the front matter and the running headers and footers, a labelled
+  DOI now ranks below every front-matter candidate. It still names the paper
+  when it is the only candidate left, as in a preprint's "The present work has
+  been shared as a preprint on …, doi: …"; two different ones are reported as
+  `VAL_DOI_AMBIGUOUS` and no DOI is selected. A labelled DOI inside an
+  author-led or numbered citation (a reference entry outside the located
+  reference list, or a figure's source note citing another work) no longer
+  names the paper, and neither does the tail of a reference entry split into
+  a line of its own that opens with a page range, a volume or the DOI label
+  ("131-138. doi: …"). A line holding nothing but the labelled DOI ("DOI: …")
+  is not such a tail, so a paper's own DOI line after cover pages still names
+  it. An eLife JATS or HTML file's labelled figure DOIs no longer raise
+  `VAL_DOI_AMBIGUOUS` against its article-id.
+- A correction notice printed "DOI of original article: …" on its first page
+  and exported the corrected article's DOI as its own. That DOI is now the
+  notice's parent, like a "parent article DOI".
+- A reference entry under a "References" (or "Bibliography") heading that the
+  section classifier left untyped counted as body text, so its labelled DOI
+  could name a paper that prints none of its own. From page 3 on, the section
+  header now marks the section as the reference list for the DOI choice,
+  whether the page prints it or the parser made it up from the layout's
+  reference label. On pages 1 and 2 the section keeps its own type: there the
+  parser can head a "Cite as" box that the layout labels as reference text
+  "References", and the paper's own DOI in it still names the paper.
+- Standard funding wording reached neither structured funding (`funding`, and
+  so `funding_match`) in the default shadow integrity-statement mode nor
+  `funding_statement` in active mode: "This project has received funding from
+  the European Union's Horizon 2020 …", "The research leading to these results
+  has received funding …", "We gratefully acknowledge funding from …",
+  "Preparation of this article was supported by …" and "The first author was
+  supported by …". Their subjects were checked as if they named authors, and
+  failed. A named author who "has received funding" is now matched on the name.
+- Active integrity-statement mode rejected or cut short standard declarations
+  under a generic heading, and the default shadow mode raised
+  `VAL_STATEMENT_SUSPECT` for each. "Available upon reasonable request to the
+  corresponding author" was cut after "to the". "Data and analysis scripts are
+  available at …", "The datasets can be obtained from the corresponding author
+  …", "… will be made available by the authors", Frontiers' "conducted in the
+  absence of any commercial or financial relationships …" conflict-of-interest
+  statement and "Ethical approval was received …" were rejected. The licence
+  the data are made available under ("… available … under a CC BY 4.0 license"
+  or "under a Creative Commons Attribution 4.0 licence") and the date an
+  approval was received ended the statement as if they were publisher
+  boilerplate.
+- A section whose heading merely contains the word "reference", such as
+  "Revealed Preferences", "Reference standard" or "Reference values", is no
+  longer taken for the bibliography when no other reference section is found.
+  Its prose was parsed into references and the section was exported as
+  `references`. The heading fallback now needs "references", "bibliography",
+  "works cited", "literature cited" or "reference list" as whole words
+  ("Selected References" and "Appendix B. References" still count), or a whole
+  references heading in any language the reference-line capture recognises, so
+  it also finds headings it used to miss, such as "Literaturverzeichnis" or
+  "Daftar Pustaka".
+- When a printed "References" heading overrides the sections the classifier
+  had typed `references`, each of them now gets the type its heading looks up
+  to ("General Discussion" becomes `discussion`, a heading with no known alias
+  `unknown`). They kept `references`, so a bibliography entry could point its
+  `text_id` at a body sentence, the citation linker read the section's numbers
+  as reference numbers, and the export typed a body section as references. The
+  reference receipt records `classifier_references_demoted`. A second list
+  keeps its type when its heading names references or looks up to them, or
+  when at least half of its rows open like a dated reference entry, as under
+  "Studies Included in the Meta-Analysis".
+- Reference strings from a JATS `<ref-list>` are parsed as given, one per
+  `<ref>`. The filter for non-reference fragments dropped short entries without
+  a year (a classic such as "Aristotle. Nicomachean Ethics.", or an entry whose
+  year abuts its journal name), and the merged-reference splitter cut single
+  entries in two, so every later entry shifted. HTML reference lists still go
+  through both, because the HTML reader also collects other lists under a
+  references heading, such as page navigation.
+- The merged-reference splitter no longer cuts one reference in two at a
+  citation inside its title when the title opens right after that reference's
+  own date ("Brown, T. (2018). Beyond Kahneman and Tversky (1979): …"), or at
+  an edition number that equals the next entry number in a numbered list
+  ("1. Müller A. Lehrbuch. 2. Aufl. …", and likewise "udg.", "uppl.", "ed.",
+  "wyd." and similar edition words).
+- The geometry segmenter's segment-count check and the layout-region
+  segmentation tier count only the reference onsets on the pages of the
+  located reference section. Onsets from a second list elsewhere in the PDF,
+  such as a transliterated copy of the bibliography or supplementary
+  references, made the check decline a correct geometry result and the region
+  tier decline as well, so the list went to the LLM segmenter.
+- An aggregate `reference` layout box is dropped only when the entry boxes
+  inside it hold all of its text. When the layout model returned entry boxes
+  for only some of the entries in it, the entries without a box of their own
+  were lost from the reference list. The aggregate box now stays and the entry
+  boxes it repeats are hidden instead; they still count as layout onsets. The
+  texts are compared with a tolerance for OCR noise in either direction, since
+  a scanned page reads the aggregate box and each entry box separately and the
+  reads differ by a character here and there. Text the entry boxes lack keeps
+  the aggregate box however small a share of it that text is, such as one
+  entry among twelve or more, a line or a DOI. A piece under 16 letters and
+  digits long, such as a page range alone on the last line of an entry, still
+  passes for OCR noise and is lost when the box is dropped or emptied. This
+  applies both to the OCR stage's overlap cleanup and to the PDF parser. The
+  OCR stage's second cleanup, which empties a `reference` region whose text
+  the page's text regions already hold, uses the same comparison. It kept a
+  region whose read ran a few characters longer than the text regions' reads,
+  so its entries were emitted twice, and it emptied a region holding a line
+  that no text region had, such as the end of a reference continued from the
+  previous page, when that line was a small share of the region's text. The
+  first is now emptied and the second kept. The comparison also takes the
+  same text read in another order as the same text: a PDF text layer can list
+  a numbered list's labels as one column before the entries, or two entries
+  the other way round from the entry boxes, and the aggregate box then stayed
+  next to the entry boxes, so every entry was exported twice and the label
+  column became a reference of its own. Lines holding only entry labels
+  ("[12]", "(3)", "7.") are left out of the comparison.
+- The page-furniture filter on the reference lines the geometry segmenter
+  reads removes only lines at the top or bottom edge of a page, as it was
+  documented to. It removed every line whose text, with digits masked, matched
+  a line repeated at the edges of two pages, so reference text inside a page
+  was dropped when the same short text also opened or closed two pages: a
+  wrapped year or page range matching a page number, a wrapped "Polish)." line,
+  or a reference label printed on its own line ("2." matching a "4." at the top
+  of the next page).
+- When implicit-section detection created an Abstract or Introduction, it
+  moved every section without text of its own behind References: the root,
+  the title once its text went to the new Abstract, a printed "Abstract"
+  heading emptied the same way, and a numbered parent such as "2 Method"
+  whose paragraphs sit in "2.1". The section sanity check reads list position
+  as document position, so it then reset that printed Abstract heading to
+  `unknown`, and reset References to `unknown` with score 0 whenever body
+  sections now followed it in the first half of the list (reference location
+  put the type back, not the score). Each new section is now inserted right
+  after the section its text came from, usually the title, and no other
+  section moves. Where a printed heading ("LITERATURE CITED") and the
+  reference section bibr created for the rows both classify as references,
+  the printed heading now comes first and keeps the type, as the tie-break by
+  document order intends.
+- The export placed a heading without text of its own right after the
+  section with the next lower id. A "Method" heading whose subsections were
+  not nested under it therefore came before the Abstract and Introduction
+  that implicit-section detection cut from the title's text, since those are
+  created last. It now follows the section listed before it.
+- The section sanity check also counted the root and the figure, table and
+  footnote sections added at the end of the list, so enough floats could
+  place a terminal References section in the "first half" and reset it. Only
+  body sections count now, and References is reset only when more body
+  sections follow it than precede it, the threshold a paper without floats
+  already had.
+- The printed abstract span opened only on absolute page 1 and continued only
+  onto page 2. A PDF processed with `--pages` or serve `start_page` keeps its
+  absolute page numbers, and DOCX, HTML and ePub input has no pages, so none
+  of them got a span: a DOCX with no model abstract exported an empty one, and
+  a DOCX model abstract was flagged `VAL_ABSTRACT_SUSPECT` (`ungrounded`) even
+  when it matched the printed abstract. The span now opens on the first page
+  the parse saw, as the first-page abstract fallback already did, and skips
+  the page test for input without pages. On the eLife HTML sample it now
+  selects exactly the printed Abstract section in 841 of 984 articles, where it
+  selected nothing.
+- The lettered-appendix repair re-typed ordinary headings as top-level
+  `appendix` sections. A run of "A. …", "B. …" headings in the last 40% of the
+  section list qualified with no anchor at all, which caught the lettered
+  subsections of IEEE-style papers ("IV. EXPERIMENTS", "A. Datasets", "C.
+  Results") and of many regional journals ("Results and Discussion", "A. …",
+  "B. …"), and a Roman "V. CONCLUSION", which reads as letter V. Any lettered
+  heading after the first section typed references also qualified, so a
+  Frontiers "Citation" panel above the title, or the navigation "References"
+  at the top of an eLife HTML page, turned the title "A protocol for …" or
+  subsections such as "A specific requirement for …" and "C. elegans strains"
+  into appendices. A lettered run now needs a real anchor: an "Appendix"
+  heading, which anchors only the headings after it, or the reference list
+  that ends the body. That is the first section typed references after a
+  body section, or the first one when no body section comes before any.
+- A heading that is exactly the name of a part ("Materials and methods",
+  "Experimental Section") folded under an earlier heading of the same type
+  that only contains a keyword, such as the Results subsection "A neural
+  implementation of oscillation" read as Methods. It became a subsection of
+  that heading, and the subsections printed under it were attached to the
+  part before it (Discussion, in eLife articles) and took that part's type.
+  It now starts its own part and keeps its subsections. Exact names of
+  subsections, such as "Study design" or "Limitations", still fold under a
+  keyword part heading such as "Patients and methods" or "Discussion and
+  conclusion". A part name printed as a subsection of such a heading, such as
+  "Conclusions" inside "Discussion and conclusion", does start a part of its
+  own. The earlier heading counts as a keyword hit only when the alias table
+  typed it, which in runs with an LLM or the trained classifier happens only
+  when the keyword covers most of the heading.
+- On the default automatic OCR chain, a window covered entirely by native text
+  stored the static fallback identity where later windows read the concrete
+  runtime from. Those windows then ran a GLM engine with Paddle prompts, the
+  Paddle profile and Paddle provenance, mangling HTML tables through OTSL
+  decoding. The resolved identity now persists only after the engine starts,
+  and a window that starts the engine adopts the runtime that actually
+  started. `OcrStage` and the interleaved render/OCR stage share one identity
+  state machine, and an engine-start failure fails only files still needing
+  OCR instead of files already served from the OCR cache.
+- Truncated Paddle tables are now retried once at a higher token budget on
+  the Paddle HTTP transports (the local `paddle-*` clients and `bibr serve`)
+  through one shared helper; previously only `bibr serve`
+  retried. Only generations the provider cut short are retried
+  (`finish_reason == "length"`, or structural truncation when no finish reason
+  is reported) — a stop-terminated ragged or unterminated grid at temperature 0
+  reproduces deterministically, as does a closed grid whose spans are
+  malformed, so neither costs a second generation. The retry is skipped when
+  the first request's table budget already meets or exceeds the recovery
+  budget (for example under an `OCR_GENERATION_MAX_TOKENS` override at or
+  above it), keeping the longer first output. The OCR cache key carries
+  the recovery budget for the transports that run the retry, not just serve. Whitespace
+  after OTSL continuation markers no longer destroys spans, stray text after
+  a row terminator opens the next row, and blank table output decodes to empty
+  content so the OCR success-rate gate still catches a silently degraded engine
+  (blank tables are then reported only through OCR_TABLE_INCOMPLETE, no longer
+  also as a parse-level OCR_TABLE_DROPPED).
+- The test suite no longer depends on file order through global Settings,
+  logging, network, or local-server-port state. Global Settings changes
+  (including which fields count as user-set) and `bibr.*` logger levels
+  are restored after every test; the section-classifier tests stub the LLM
+  tier instead of calling the Gemini API; the doctor tests patch the
+  helpers doctor actually calls; and the managed-server tests pass with
+  bibr's default ports held. Opt-in `slow` tests under `tests/local/` skip
+  those port-probe stubs and see the real server, so the vLLM integration
+  test can poll a real `/health` endpoint. Tests that intentionally reach
+  the network (live API and Hub downloads, including the slow extraction
+  smoke test and the vLLM integration test) are marked `network` and opt
+  out of the socket guard. Core CI now runs
+  the default torch-free ONNX runtime (section/paper classifiers, NER parser,
+  layout, and the HTTP-path no-torch check) against committed tiny bundles
+  under `tests/fixtures/onnx`, regenerated by
+  `scripts/generate_onnx_test_bundles.py`. The hermetic LitServe descriptor
+  handoff test and the reference-geometry tests run in the default suite
+  again, backed by committed synthetic fixtures
+  (`scripts/generate_hermetic_test_fixtures.py`) instead of uncommitted
+  corpus files.
+- `bibr chew` writing JSON to stdout is now valid JSON under every console
+  encoding. The startup stream setup replaced unencodable characters with
+  Python escapes (`\U0001d465`), which no JSON parser accepts; the export is
+  now written as UTF-8 bytes instead. File output already wrote UTF-8 and is
+  unchanged.
+- `bibr chew papers/ -o results/` with one paper in the directory no longer
+  writes a file named `results`. A trailing slash or an existing directory in
+  `-o` now means a directory even for a single resolved file, so the export
+  lands as `results/<stem>.json` and a later run with the same `-o`
+  writes into it again instead of crashing. A blocked `-o` is a clean exit 2
+  before any model loads, and `-o` is resolved before the pipeline is
+  constructed.
+- The automatic-OCR dry-run line no longer reports the Paddle served-model
+  alias as weights to download. For the default chain it cache-checks the
+  weight repo the launcher loads, so a cached
+  `PaddlePaddle/PaddleOCR-VL-1.6` renders `cached` instead of
+  `will download (size unknown)`.
+- A bad `--ocr-model`/`--ocr-profile` combination no longer blames `--pages`.
+  Option errors from the run configuration print as `Invalid option: …` with
+  exit 2 in both `chew` and `batch`.
+- Per-file failure hints follow the pipeline's structured `error_code`
+  instead of message substrings that never matched (or matched `rapid-mlx`
+  for `api` and blamed API keys for local runtime failures).
+- Building the CLI no longer needs installed package metadata. Running from
+  a source tree via `PYTHONPATH` used to crash before argparse ran; the
+  version now falls back to `?`, as the help screen already did.
+- The batch report no longer shows a phantom `enrich_prefetch` stage share.
+  That timer overlaps another stage's wall clock (the export stage already
+  excludes it from `total_seconds`), but the report divided by a sum that
+  included it, deflating the real stages. It now shares the export stage's
+  exclusion list.
+- Removed dead evaluation code with no in-repo callers: the unreferenced
+  `keywords_fuzzy_f1`, `authors_count_ratio` and `authors_order_score`
+  helpers, and the opposite-contract `validation_metrics.keywords_f1`
+  duplicate (the harness's `evaluate.keywords_f1` is the one scored). The
+  `title_soft_containment` docstring no longer promises a per-paper aggregate
+  that was never emitted.
+- Reference matching in the evaluator now runs once per paper instead of three
+  times: one shared `match_references` pass feeds `ref_matching_f1`,
+  `ref_field_scores` and `ref_field_counts`, and the gold-field predicates
+  live in a single table that the per-pair loop gates on, instead of two
+  copies that had to stay in lockstep. Scores are unchanged: re-scoring stored
+  evaluation runs gives identical metrics, about three times faster.
+- The abstract ROUGE-L length now comes from rapidfuzz's bit-parallel LCS
+  instead of the pure-Python table — same value, roughly three orders of
+  magnitude faster on long abstracts.
+- Input validation no longer rejects readable files. A password-protected DOCX
+  is reported as password-protected instead of corrupted: the CFB check
+  searched for an ASCII `EncryptedPackage` stream name that real files store as
+  UTF-16LE. A PDF that pypdfium2 opens is no longer rejected for bytes before
+  `%PDF-` or data after `%%EOF`; the reader's open verdict is the corruption
+  verdict, with the byte heuristics kept as a fallback. A PMC efetch download
+  (`<pmc-articleset>` wrapping exactly one `<article>`) validates and parses;
+  multi-article sets are still rejected, with a message naming the count. All
+  3,927 PMC/eLife/PLOS corpus files validate exactly as before.
+- One stale PDF bookmark no longer discards the whole outline; entries whose
+  destination lies past the last page keep their title with no resolvable page.
+  An ePub with one missing spine file now exports its readable chapters instead
+  of failing, failing only when no spine member is readable, and each skipped
+  chapter is recorded as an `EPUB_SPINE_MEMBER_SKIPPED` entry in
+  `extraction.warnings` instead of vanishing silently. An over-cap or
+  corrupt spine member still rejects the book. `dc:identifier` values in
+  `doi:`, `urn:doi:` and `https://doi.org/` form are recognised as DOIs
+  alongside bare `10.` strings.
+- The export gate's `VAL_EMPTY_EQ` now fires on a blank `lhs` or a blank
+  `rhs`, the shape a null equation side ships as, instead of only on an
+  all-blank row the exporter cannot produce. A link dropped from the export as
+  malformed is recorded as a `URL_MALFORMED_DROPPED` entry in
+  `extraction.warnings` instead of vanishing silently. `VAL_DANGLING_REF` now
+  covers `xref`/`url`/`eq` text ids, affiliation author ids, the three match
+  tables and the `extraction` id lists, and a new `VAL_DUPLICATE_PK` flags
+  repeated primary keys. The all-blank shape the old check fired on still
+  fires; nothing previously flagged goes quiet.
+- Impossible printed dates such as `31 April 2020` no longer export as
+  `published_date: '2020-04-31'`; the value falls back to `YYYY-MM`. Valid
+  dates, leap days included, are unchanged.
+- A checkpointed (`-o`) export now consolidates like the unsinked export (so
+  the `CONSOLIDATE_WITHOUT_ENRICHMENT` warning reaches the file, and the file
+  is rewritten only when consolidation ran) and replays the enriched run's
+  `extraction.timings`, so the `enrich` stage time is reported on both paths.
+- Anthropic thinking budgets no longer produce requests the API rejects
+  with a 400. With `LLM_THINKING_BUDGET` set, a task cap sends thinking only
+  when it leaves at least 1024 tokens above the budget for the answer;
+  smaller caps run without thinking at temperature 0. Budgets below the 1024
+  minimum are raised to it and logged.
+- `bibr mcp` chew tools report failure causes again: `chew_paper` and
+  `chew_url` wrap non-`BibrError` failures in a `ToolError` carrying the
+  exception type and a secret-scrubbed message with the file name only,
+  never the full path or URL, instead of the detail-less "Error executing
+  tool". `BibrError` messages are scrubbed the same way, and `chew_url`
+  reports the downloaded file name rather than the URL.
+- `bibr mcp` without cloud credentials prints the one-line missing-key
+  message and exits 1 instead of dumping a traceback. Only the startup
+  credential check is reported that way; a `ValueError` from the running
+  server session keeps its traceback, and `bibr.chew()`/`Chewer` still raise
+  the provider's `ValueError`.
+- The offline batch docs no longer claim batch runs prefill the LLM
+  response cache: nothing writes it, so `CACHE_LLM` serves live runs only.
+- The Crossref bulk DOI prefetch sends no request and seeds nothing when
+  both cache tiers are disabled, and leaves comma-bearing DOIs to their
+  individual lookup instead of failing the whole chunk's filter.
+- `CACHE_TTL_SECONDS=0` (or negative) now means "no expiry" instead of
+  failing every Redis SET with "invalid expire time" and silently
+  disabling the result cache.
+- `dir(bibr)` lists the lazy public API (`chew`, `Chewer`, `Result`,
+  `write_tables`, ...) without importing it, and `Result` answers the
+  plural table aliases (`figures`, `tables`, `affiliations`, `urls`,
+  `equations`).
+- Constructing a pipeline with `FIG_EXTRACT=meta` logs the documented
+  "not implemented" warning instead of passing silently.
+- `bibr serve` cache-miss waiters no longer give up after a flat 10 seconds and
+  pay for a duplicate extraction. Unless the operator set an explicit wait, the
+  wait budget now follows the pipeline timeout, and a waiter whose owner's
+  lease disappears re-reads the cache once before falling back (the owner's
+  publish may have landed between the waiter's read and its lease check) and
+  otherwise takes over only after atomically acquiring the lease, so exactly
+  one waiter extracts instead of every waiter at once.
+- `bibr serve` `/ready` accepts baked-in local-path classifier models (it used
+  to report them degraded without ever checking the directory): a local
+  directory counts as present when the configured runtime could load from
+  it (the ONNX bundle is required only for `ML_RUNTIME=onnx`), re-checks
+  a failed classifier verdict after a bounded
+  interval instead of caching it forever, and still loads no model on the
+  request path. It also probes the OCR server's `/v1/models` for the
+  served-model alias the backend will ask for, so a healthy `/health` with
+  the wrong models listed no longer reads ready; a 401 there is reported as
+  unauthorized (check the key), not as a missing model. The backend's startup
+  wait remembers the last non-200 status for the same reason, cleared by any
+  later 200.
+- `bibr serve` keeps a failed `serve-http` OCR backend — one that owns a
+  cross-request readiness cooldown — instead of discarding it, so the
+  backend's own cooldown fail-fasts later requests instead of every request
+  paying a full poll. The published instance is never shut down. Clients
+  without such a cooldown are still discarded on failure.
+- On the `/papers/extract` and `/jobs` routes, `bibr serve` extraction
+  metering records now carry the `request_id` of the request that submitted
+  them (and the `job_id` for async jobs), so the worker-side `extract`
+  record joins back to the API-side request record.
+  Unhandled route failures also emit their request record with status 500
+  before the 500 response is built; the 500 body itself is unchanged.
+- The served-model choice for HTTP OCR endpoints now lives in one place. With
+  `OCR_PROFILE=paddle`, `bibr serve` asked the server for `glm-ocr` while its
+  own identity said `paddle-ocr-vl-1.6`; candidates, static identity, serve
+  defaults and `--dry-run` now agree on the paddle alias, and the dry-run
+  preview prints the resolved alias.
+- The author-email harvester no longer hands an unrelated nearby address to an
+  author with no email. Ranked candidates pass the gate first, so a
+  lower-ranked candidate whose local part names the author wins over a nearer
+  one it does not name; a candidate is assigned only when the address sits on
+  a correspondence-marker line, its local part names the author (family or
+  given token, covering forms like `bathri@` for Bathrinath, plus a 2-letter
+  family name leading the address, as in `lixh@` for Xiaohong Li), or the
+  surname is printed in the same sentence. The single-corresponding-author
+  elimination fallback accepts a correspondence marker in the window, or a
+  PLOS-style `* E-mail:` line, only when no sentence pairs the marker with an
+  explicit address — those pairings are exhaustive. An editorial-office or
+  affiliation address printed before the real one is therefore skipped,
+  leaving the author empty for their own address instead of consuming them
+  with someone else's. On the JATS benchmark (3,617 gold addresses) this
+  assigns more addresses correctly than before (3,299 vs 3,287) with fewer
+  misassignments (38 vs 82); the addresses it newly leaves empty are opaque
+  ones with no textual link to any name (initials, numbers, transliterations
+  the harvester cannot match), which are left empty rather than guessed.
+- A `Published by ...` / `Published under ...` line no longer blocks
+  publication-date refinement for the whole record. Those tails carry no date,
+  so the label is skipped and scanning continues; only a date-like tail that
+  fails to parse still marks the record ambiguous. A history label mid-line
+  after prose is still ignored, and already-full dates are untouched.
+- The trained paper classifier no longer runs on an empty title+abstract. With
+  no signal the model returns a training-prior artifact, so the extractor
+  skips it and takes the LLM path with the full classification text. Skipping
+  is missing input, not an outage, so no `PAPER_CLASSIFIER_DEGRADED` warning
+  is recorded.
+- Bare OECD L1 short forms an LLM may return now validate: `Humanities`,
+  `Engineering`, `Medicine`, `Agriculture` (plus `Agricultural Sciences` and
+  `Medical Sciences`) canonicalize through the shared token-set matcher and a
+  two-entry synonym map, instead of dropping to empty. A string naming two
+  domains at once (`Humanities and Social Sciences`) stays empty instead of
+  resolving to one of them. Every other observed label string maps exactly
+  as before.
+- Equation cross-references no longer fire on unit spellings or software
+  names. A hyphen before a lowercase short form kills `CO2-eq.` matches while
+  a hyphen before longhand `Equation` still reads as a range dash (`Equation
+  5-Equation 7` keeps both halves), a `%` directly trailing the number kills
+  shares like `eq. (39.1%)`, and an all-caps `EQS` with no period is dropped
+  as the SEM package's name, dotted or not (`EQS 6.1`, `EQS 6`). Bare printed
+  forms (`eq 5`, `eqs 4 and 8`, `Eq (1)`) and dotted ids (`Eq. (2.3)`) still
+  match. Equation and section recall against the JATS corpora's gold links
+  is unchanged. Per-number expansion of ranges
+  (`Eqs. 1-5` stays five rows) and the first-number-only section rows are
+  untouched, as is the reversed-range policy (`5-3` yields no rows), which is
+  now documented on `_expand_nums`.
+- `bibr setup` writes a retried cloud API key back to `.env` instead of
+  keeping it in memory. When the connection test failed and a different key
+  passed, setup finished "successfully" with the old key in the file, so the
+  next run failed the same way. The corrected key is merged unless the save
+  step was skipped, and a skipped save stays skipped.
+- `bibr setup` no longer runs `uv add` in a project it does not belong to.
+  From a source checkout it still uses `uv sync --inexact --extra=…`, and after
+  `uv add bibr` it still uses `uv add` — but only when bibr runs from that
+  project's own environment. Anywhere else it installs with
+  `uv pip install --python <the running interpreter>`, so the extras land in
+  the interpreter setup runs on instead of whichever `uv` happens to find.
+- `bibr setup --advanced` honours a step-1 ml decline in step 4. Declining
+  the `ml` extra used to install it anyway in step 4, without asking, and a
+  failed install exited before `.env` was written; now that decline stands
+  and step 4 prints a one-line hint with the command that adds it later.
+  Accepting `ml` in step 1 still installs it there.
+- The setup wizard no longer lets Rich markup in errors eat its own output.
+  Dynamic text (exceptions, `uv`/smoke-test detail) is escaped before
+  printing, so a hint such as `pip install 'bibr[torch]'` prints in full; a
+  startup failure caused by a `ConfigurationError` (which `chew()` reports
+  wrapped in a `ProcessingError`) prints once instead of twice.
+- `bibr setup` now offers the LLM connection test for the private-server
+  tier too, matching the cloud fallback: the URL, key and model were just
+  collected either way.
+- `bibr batch` re-downloads a finished result that fails to download
+  instead of re-submitting the paper. A reset connection on
+  `/papers/jobs/{id}/result` is retried against the same job before the
+  resubmit fallback runs, and the input file is read once: the ledger sha256
+  comes from the uploaded bytes. The outcome ledger now carries the
+  documented `n_validation_errors` and `n_validation_warnings` counts, which
+  `summarize_export` computed but the ledger dropped.
+- `bibr batch` only reads manifest-like files as manifests (`.txt`, `.lst`,
+  `.list`, `.manifest`, or no extension). Any other explicit file (a stray
+  `.doc`, a `.md`, an `.nxml` from a shell glob) is reported as unsupported
+  and skipped instead of being read line by line as paths — on real data an
+  `.nxml`'s XML lines became "missing" entries and over-long lines crashed
+  discovery with `OSError`. An unreadable manifest-like file names itself in
+  `unreadable` instead of raising a bare codec error.
+- `bibr export tables` converts rows from the validated 12.x model instead
+  of the raw payload, so a value lax validation coerces (a `"2"` page
+  number) no longer crashes the Parquet write with `ArrowInvalid` after
+  validation passed. A residual failure names the table and the buffered
+  papers (an in-memory export, and any per-paper conversion failure, by its
+  `paper_id`) instead
+  of only the Arrow type error. A non-bibr export that omits a defaulted key
+  takes the model default instead of null (an omitted `author.role` writes
+  `[]`). Clean-corpus output is unchanged: all 25 tables are byte-identical
+  before and after.
+- The NuExtract native client builds each response model's contract once
+  and shares it: one `create()` call built it twice (request kwargs, then
+  parse), and every call rebuilt it from scratch. Contracts are memoized per
+  model with independent copies per caller, the recorded wire-shape check
+  runs once at build, and hand-assembled contracts still pay the per-parse
+  check. The built contract is unchanged.
+- The byline check that reports authors missing from the extracted list
+  (`VAL_AUTHOR_MISSING`) read a byline joined with French "et", Dutch "en",
+  German "und", Danish or Norwegian "og", Swedish "och" or Indonesian "dan"
+  as one fewer name than it prints. It split names only on ";", "&" and
+  "and". Spanish "y", Portuguese and Italian "e", and Catalan and Polish "i"
+  also separate two names now, but only in lower case and only when the words
+  on both sides are full names of two or more words, so one person's two
+  surnames, as in "Ramón y Cajal", stay together.
+- A translator credited under the byline, as in "Traducido del inglés por …",
+  "Translated by …" or "Übersetzt von …", was extracted as an author. A name
+  printed only right after such a credit in the front matter is now dropped
+  from the author list, with a `VAL_AUTHOR_TRANSLATOR_DROPPED` warning
+  (evidence `reason:translator_credit`). A translator who is also printed in
+  the byline stays.
+- When a PDF positions a word instead of printing a space before it, the text
+  layer glues the two together, and a byline such as "Kerem B.Yalcin, Selin
+  DenizAksoy" came back with family names "B.Yalcin" and "DenizAksoy". Initials
+  glued to the family name now move back to the given name. A family name
+  joined at a lower-to-upper case step is split, and its first part moved to
+  the given name, when the paper prints the spaced form elsewhere, for example
+  in its contribution statement. Both repairs add a
+  `VAL_AUTHOR_PARTITION_REPAIRED` warning with evidence
+  `reason:glued_family_name`. Author grounding also reads such a join as two
+  words, so a correctly spaced name still matches the glued byline, while
+  surname prefixes such as "McDonald" or "DeKay" stay one word.
+- The metadata LLM can romanise a byline printed in another script, returning
+  "N. O. Petrova" for a Cyrillic byline, even though it is asked for verbatim
+  names. When every extracted name is in a script the selected byline barely
+  uses (under a fifth of its letters, ignoring email addresses and URLs) and
+  none of them is printed in the extraction context, the list is now
+  discarded like a fabricated one: `VAL_AUTHOR_FABRICATED` with evidence
+  `reason:authors_script_mismatch`, then the empty-author recovery retries
+  against the byline alone. Papers that also print the romanised names keep
+  them.
+- PDF paragraphs that run across a page break no longer split in two when a
+  footnote or a figure intervenes. A join across such a region (or a heading
+  demoted to body text) needs a lowercase continuation on the same or the
+  next page, from a body-width row that does not end in a URL, so
+  front-matter rows and list items are not glued to what follows. A
+  footnote's xref anchors to the joined sentence printed on the note's page,
+  never to text printed after the note, such as a caption replayed from the
+  next page.
+  A paragraph ending in a closing quote or a footnote superscript, or in a
+  bare URL followed by a capitalised row, is no longer glued to the next
+  one. Repeated mid-column body text ("where", "(TIF)") is no longer demoted
+  as a running header: only a repeated line in the margin band, or a block of
+  repeated rows such as a reprinted chart legend, is. On a sliced front page
+  (`pages=`), affiliation markers are stripped only from short, unterminated,
+  byline-shaped rows, so body citation superscripts there survive.
+- A title split across two `doc_title` regions is now joined into one title
+  section instead of truncating `detected_title` and stranding a level-1
+  section that later headings parent under; a first region that reads as a
+  journal masthead is not extended, and a later region that reads as a
+  personal-name byline keeps its own section, so the authors stay in the
+  byline. Numbered study headings ("2 Study 1",
+  "3. Experiment 2") now open scopes like unnumbered ones, so the second
+  study's Method/Results no longer fold under the first study's. Reference
+  and abstract hint regions reuse the adjacent printed heading when it spells
+  the hint's name differently ("Literature Cited", "5 References",
+  "Bibliography", "Reference List", "Abstract:", or "Summary" directly above
+  a front-page abstract) instead of leaving an empty printed section beside
+  a synthetic one; "Author summary", a later "Summary" or "Supplementary
+  references" stay separate sections. A "Reference List" heading now
+  classifies as References.
+- PDF float accounting no longer duplicates caption text that de-duplication
+  already consumed, and unowned captions replay where they were printed
+  instead of after all body text. Uppercase or unmarked panel titles with a
+  description ("(A) Congruent trials", "A Congruent trials") now reach the
+  figure caption instead of disappearing from the export. Dotted table
+  labels ("Table 3.1") no longer reserve a printed id, continuation pages
+  sharing one printed label no longer raise a false id-conflict warning, and
+  floats keep document order instead of being resorted by id. Header-only
+  tables (a `<th>` header with no rows, or a markdown header plus separator)
+  are kept instead of dropped and export their header row in `contents`; a
+  one-row region without `<th>` still drops, since that shape is usually a
+  publisher label or masthead box. A bare panel marker joins the vertically
+  nearest same-page figure group when one is near, and otherwise the next
+  labelled figure as before.
+- Reference lists are also segmented as one stream of printed lines, with the
+  evidence for where each entry starts pooled instead of tried tier by tier. The
+  cascade reconciled two readings of the list (layout rows with their line
+  breaks flattened, and text-layer lines captured from the first "References"
+  heading to the end of the file) through exact text probes under one gate, and
+  a declined tier's evidence was thrown away, so a list crossing a page break
+  with a running head in it, a list the geometry model labelled well but whose
+  lines did not align, or a list of short entries came out merged, cut short or
+  dropped. The stream reads the text-layer lines inside the located section's
+  layout boxes, page after page (a box without usable text-layer lines, such as
+  an OCR'd or scanned page, contributes its text line by line), keeps a line
+  the box edge cut short by a letter or two in the row text, reads a box that
+  repeats an aggregate box's text once, drops manuscript line numbers and page
+  furniture, and stops at a heading that ends the list (Acknowledgements,
+  Funding, Appendix, Data availability and the like) when the line before it
+  closes an entry. Furniture is a line in a header, footer or page-number box,
+  or a line at a page edge that is a running head (its text, digits masked,
+  recurs at an edge of two or more pages and has six letters or more, and it
+  holds no DOI, URL, arXiv id or ISBN) or a page number (a lone number whose
+  offset from the page index recurs on another page). Each line's start is voted
+  by the geometry model's per-line probability, author/year, Vancouver, all-caps
+  and corporate onsets, "same author" dashes, the first line of a layout box,
+  hanging indent, a vertical gap and the previous line ending in a DOI, a URL or
+  a DOI link. A line opening on an OCR speck glued to a family name (".lehrer,
+  H. R.") is not voted down as a continuation. A printed sequence counting up by
+  one ("[n]", "n.", "(n)", roman numerals, a second list numbered from 1 again
+  included), bullets or bracketed labels decide instead when the list has them.
+  A sequence keeps one marker style, and a line numbered 0, opening on an
+  edition, supplement or month word ("3. Aufl.", "10 Suppl") or standing off the
+  list's marker column takes no place in it. An entry printed out of order still
+  opens, and a numbered list ends with its last entry's box. A second work
+  printed on its own line under the same number opens an entry when it starts a
+  reference box of its own and both works carry a date or DOI; a manuscript
+  history line after the list ("Received April 26, 1972.") never does. A
+  fragment that opens in lower case with no date or DOI rejoins the entry before
+  it, an entry holding two DOIs is split after the first, and a numbered entry
+  is never dropped as a short fragment without a year. A reference list split
+  into two sections, a non-English heading ("Referencias") over the first page
+  and a synthetic "References" section for the reference boxes on the next, is
+  read whole. Parsing is unchanged.
+- The cascade still runs, and its result stands unless it fell back (region
+  recovery, CRF, marker split) or found nothing, most of its entries came from
+  the merged-reference splitter, or it under-yielded against its credible entry
+  starts; then the line stream's result is used when its quality is at least the
+  cascade's. A selected geometry or LLM-anchor result gives way only to a stream
+  whose quality is higher by 0.15. The stream never replaces a result with fewer
+  entries than that result has distinct ones (a segment read twice, nearly alike
+  and with the same years, counts once), nor on a paper with a rotated reference
+  page, where its line geometry is unreliable. Quality is the share of the
+  section's full text the entries cover (so text the stream leaves out costs it)
+  times the share of entries that look like one complete reference: not a
+  fragment, and not a merge (two DOIs, two publication years once access and
+  first-publication dates are set aside, two author-date or Vancouver dates, a
+  second reference the merged-reference splitter can see, or an outlier length).
+  Both segmentations are scored the same way, a numbered entry counting as
+  complete in either. `extraction.diagnostics.reference_yield.attempts` records
+  the stream as a `line_stream` attempt with the reason for the decision and
+  both qualities (`stream_quality_…`, `cascade_quality_…`), and a replaced
+  attempt is marked `superseded_by_line_stream`. The stream's spans index its
+  own text (flag `stream_text_offsets`); a joined split section is flagged
+  `split_section_joined`. Any error in the stream keeps the cascade's result.
+- Roman list numbers ("I.", "IV.") are stripped from the NER parser's input in
+  a list numbered that way, as arabic ones already were. They were parsed into
+  the first author ("V. Lal, S. K. L.").
+- The NER reference parser's field boundaries are repaired from the reference
+  text before the references are finalized. A web reference whose name was
+  tagged as its author, cut short or split in two takes that name as its title
+  ("AWS Wavelength. https://…. Accessed …"). A title that ran on is cut at the
+  closing quote of a quoted title, a URL or access date, a news dateline
+  ("Outlet, 18.11.2011"), a place-and-year imprint, a bracketed English
+  translation or GOST material mark, a language note ("(Hindi)"), a statement
+  of responsibility ("/ A. A. Yuldashev") or a year followed by notes
+  ("… aplicada. 2000. 264f. Tese …"); an author span that ran on through a dash into
+  the title is split ("LIPSZYC, Delia — Domínio Público"). A year read off an
+  access date gives way to the one publication year the reference prints, and
+  a reference with no tagged year takes the one year it prints as a date
+  outside its title, URLs and access dates, or else a year from a full numeric
+  date ("21-01-1983") that no article-history label ("Received:",
+  "Recebido:") introduces. A title ending in "retrieved", "accessed" or
+  "available online" with no URL or date after it stays whole, and a year
+  inside a title ("… Earthquake of June 16, 1964. Part 2. …") is not taken as
+  the reference's year when the reference prints another. Each repair needs
+  its own textual signal and fills other fields only when they are empty;
+  references parsed by the LLM are unchanged.
+- The NER decoder reads a YEAR span that holds a full date by its four-digit
+  year: "18.11.2011" was read as 1811 and "3 March 2011" as 3201.
+- PDFium joins a line ending in a hyphen, which it reads as U+FFFE, to the next
+  printed line. The page lines the reference line stream reads break there
+  again; the geometry segmenter's own line capture is unchanged.
+- A reference printed as "SURNAME, Given — Title, Place, Publisher Year" gets
+  its byline and title from the text when the NER tagger tagged neither (the
+  reference was dropped), only the surname, or the given names as the start of
+  the title. The dash ends the byline; a title the tagger missed runs to its
+  first comma, and one it started on the given names keeps its end.
+  Dash-joined co-author lists and titles the tagger started after the dash are
+  left as they are.
+- A thesis title that opens on a quotation keeps its subtitle: the NER field
+  repair no longer cuts "“Somos as pessoas …”. Infância e cenários de
+  participação pública: … . 2014. 524 f. Tese …" at the closing quote, since a
+  thesis has no container for the title to run into. A thesis note run into
+  the title ("…,” Ph.D. dissertation, …") is still cut.
+- An editorial note printed as an entry of the reference list ("(This is a
+  series of short articles by … .)") is no longer exported as a reference: the
+  NER field repair clears an entry that is one parenthesised sentence of four
+  or more words with no digit in it.
+
+### Added
+
+- References from footnote and endnote citations. Law, history and much of the
+  humanities cite in notes and print no reference list, so bibr exported an
+  empty `bib` for them. When no reference list is found, or the one found
+  parses to at most two references, and at least five notes cite works in full
+  (and at least fifteen times as many notes as the located list has
+  references), the notes' citations become the reference list. Each note is
+  split into its citations; lead-ins ("See", "Cf.", "Voir", "Véase") and
+  commentary before a citation are dropped, repeats ("Ibid.", "Id.",
+  "op. cit.", "supra", "ref. 5") are skipped, and the rest goes through the
+  configured reference parser. With the NER parser (the default), a citation
+  the tagger finds nothing in keeps the quoted title it opens on; the LLM
+  parsers have no such fallback. A later short form of a work folds into its
+  first citation (never one dated to another year), so each cited work is one
+  reference, whose `text_id` is the note that first cites it. With the LLM
+  parsers a reference takes the first note whose citation carries its title,
+  or the note at its position when the parser returned one reference per
+  citation, and its `text_id` is null otherwise. In-text numbers are not linked to such a list: the
+  numeric citation tiers are off for it, because a note mark is not a
+  reference number (the note marks keep their `foot` xrefs). The export marks
+  such a list with the `REF_FOOTNOTE_CITATIONS` warning,
+  `extraction.fields.bib.source` `footnotes` and a selected `footnotes`
+  attempt in `extraction.diagnostics.reference_yield`. When no list was
+  located, `REF_SECTION_NOT_FOUND` stays beside it ("…; the references were
+  read from the notes"): the paper may still print a list the locator missed.
+  A note longer than 8,000 characters is not read, and a failure reading the
+  notes leaves the references as the located list has them. A paper whose
+  located list parses to three or more references is never touched. The new
+  `REF_FOOTNOTE_CITATIONS` setting (default on) turns it off. The export
+  schema's `bib[].text_id` description now names the note row (schema
+  regenerated; no field changed).
+- New `OCR_NATIVE_TEXT_HEADER_FOOTER` setting (default off): read header and
+  footer regions from the PDF text layer instead of OCR on born-digital PDFs,
+  under the same printable-ratio gate as body text. Default output is
+  unchanged; enable it to compare.
+- PP-DocLayoutV4 support, not yet the default. PaddlePaddle keeps
+  `PaddlePaddle/PP-DocLayoutV4_safetensors` private until its release, so bibr
+  still loads PP-DocLayoutV3; switching is a settings change behind an
+  evaluation gate (see the Configuration guide, "Layout model generation").
+  `scripts/export_onnx_layout.py` exports either generation, and the bundle
+  manifest's `architecture` selects the pre- and post-processing of the ONNX
+  runtime; the torch runtime loads V4 through `LAYOUT_MODEL_ID` once
+  transformers ships it. V4 keeps V3's 25 region labels. bibr uses the
+  rectangle enclosing each predicted quadrilateral and decodes V4's reading
+  order (a successor graph made acyclic, sorted topologically, with
+  relative-order votes breaking ties) in numpy, without scipy. It matches
+  transformers' processor except where scores tie exactly or are NaN, which a
+  trained head's output does not produce. A bundle or checkpoint whose label
+  list differs from the one bibr maps, or a V4 bundle that declares none, is
+  refused. Under the ONNX runtime a `LAYOUT_MODEL_ID` naming a different
+  checkpoint than the bundle's source is logged as unused.
+- `LAYOUT_MODEL_ID` names the torch layout checkpoint (default
+  `PaddlePaddle/PP-DocLayoutV3_safetensors`). The serve image bakes it next to
+  `LAYOUT_MODEL_REVISION`.
+- Parquet corpus tables. `bibr tables <exports> --out DIR`, `bibr.write_tables()`
+  and `bibr batch` (into `<out>/tables/` after every run; `--no-tables` skips
+  it) write any number of exports as one Parquet file per table: `paper` (one
+  row per paper), every record and match table, and `extraction_*` files for
+  the processing lists. Rows start with `paper_id`; column types come from the
+  schema, so every file has the same columns whatever papers it holds, with
+  lists and nested records kept as Arrow lists and structs. `pyarrow` is now a
+  core dependency.
+- `CROSSREF_NOT_FOUND_TTL_SECONDS` (default 1 day, `0` disables): the Crossref
+  response caches now remember a DOI lookup's 404 (no record, typically a
+  malformed DOI or one registered elsewhere) for that long. Repeat lookups then
+  skip the rate-limited request, and the DOI is left out of the bulk prefetch. A
+  remembered 404 behaves exactly like a live one: the reference gets no Crossref
+  match and no bibliographic search. With `CROSSREF_REDIS_CACHE` on it survives
+  restarts, so re-running a batch no longer re-spends a request on every known
+  missing DOI.
+- Captured reference training records carry a `provenance` object with the
+  label source, LLM provider and model, prompt name and hash, and bibr version.
+- Evaluation artifacts now record a `bibr_dirty` flag (uncommitted tracked
+  changes in the scoring checkout) and an `eval_code_sha256` digest over
+  `evaluation/*.py`, so a score from a patched worktree no longer stamps
+  the same provenance as unpatched code. No metric definition changed.
+- `bibr.export.PaperExportReader`, a lenient reader model for any 12.x export,
+  generated from the strict `PaperExport` models. `Result.model` is an instance
+  of it when built from a dict, and it remains a `PaperExport` subclass.
+  `docs/schema/bibr-export-v12-reader.schema.json` is its JSON Schema, published
+  alongside the strict `bibr-export-v12.schema.json`.
+- GROBID can be scored with the same evaluator as bibr. `python -m
+  evaluation.grobid_tei` writes GROBID TEI as 12.0 exports (producer `grobid`,
+  the converter in `extraction.converter`), carrying every field the evaluator
+  credits: title, DOI, authors with their contacts and affiliations, abstract,
+  keywords, and each reference's title, container, authors (given names
+  included), editors apart, volume, issue, pages, year and DOI, plus body text
+  for the section benchmark. `python -m evaluation.grobid_run` sends a
+  directory of PDFs to a GROBID server with fixed parameters (no
+  consolidation, raw citations and affiliations included), bounded
+  concurrency, timeouts and retries, and writes a manifest of the GROBID
+  version, parameters, and every PDF's digest, wall time and outcome. A failed
+  paper stays in the manifest's `ids`, so `--expected-ids` keeps it in the
+  denominator; `--ids-file` limits the run to the cohort bibr is scored on, so
+  both tools share one list. Whatever fails one paper is recorded for that
+  paper, in the runner and the converter, and the rest go on. `--resume`
+  refuses to continue a run over other paper ids, or when the server's GROBID
+  version, the request parameters or a `--grobid-image` given on the resume
+  differ from the manifest's.
+- `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS` (default empty): extra CLI args for the
+  managed Paddle Rapid-MLX OCR server (`paddle-rapid-mlx`), parsed like
+  `OCR_PADDLE_MLX_EXTRA_ARGS`. The two Apple-Silicon Paddle runtimes still
+  share `OCR_PADDLE_MLX_PORT`, because the `paddle` chain never runs them at
+  the same time.
+- `bibr.ocr.pdf_links.read_uri_links()` reads a PDF's URI link annotations
+  (page, rectangle, target), and `doi_from_uri()` the DOI a doi.org or `doi:`
+  link targets, with HTML entities and percent-encoding undone; a target holding
+  a NUL or a replacement character, or not DOI-shaped once decoded, yields none.
+  The PDF inspection now captures every page's text-layer lines and its URI
+  links in the layout frame, numbered by PDF page. A reference whose text prints
+  no DOI takes the one targeted by the only DOI link over its own lines, as
+  MDPI, BMJ and IOP print it only behind a "[CrossRef]" label; the reference
+  yield receipt records `doi_from_link_annotation`. This applies with the NER
+  parser, the default.
+
+### Changed
+
+- `bibr chew --dry-run` now reports a Blockers section and exits 1 when the
+  real run would fail immediately: missing inputs, missing LLM credentials
+  (key lookup only, no client is built), an unstartable managed local LLM
+  backend, and the PDF OCR/image runtime. `bibr batch --dry-run` runs the
+  same local preflight (the PDF OCR/image runtime) the real run does and
+  exits 1 with it. A clean preview still exits 0.
+- Removed the shipped `bibr.metrics` package: the `PerformanceRecorder`
+  (whose only consumer was never published, and whose per-request peaks were
+  process-lifetime maxima) has no in-repo callers left, so `bibr.metrics`
+  no longer imports.
+- `bibr serve` no longer runs two rotating writers against one
+  `METER_LOG_PATH`. The API process writes request records to `METER_LOG_PATH`
+  itself while the worker writes extraction records — the only ones carrying
+  `llm_usage_totals` — to the sibling `<stem>.worker<suffix>` file, each
+  process rotating only its own file, so records are neither lost nor
+  duplicated across rotation. Operators tallying token usage must read both
+  files: `METER_LOG_PATH` alone holds no extraction records.
+- The OCR cache format is version 11: a bundle also holds the page text lines
+  and URI links the reference line stream reads. Older bundles are re-run
+  rather than read without them.
+- The OCR cache format is version 12. A bundle stores its regions after the
+  native-text fill, and the cache key cannot see code changes, so a version 11
+  bundle would serve native text with the old word spacing and page box (see
+  Fixed); such bundles are re-run.
+- The identity stage is the only step that sets `metadata.doi`. The
+  core-metadata extractor no longer looks for a DOI, and the no-LLM
+  document-information fallback no longer fills one from a PDF's Subject or
+  Keywords: a DOI the paper does not print is never exported. A PDF's
+  document-information DOIs and its DOI link targets are recorded as
+  `agreement_only` rows in `extraction.identity.receipt` (`source_kind`
+  `pdf_info`, `link_annotation`); they take no part in the selection.
+  `extraction.fields.doi.source` names the selected candidate's `source_kind`
+  (`sentence`, `header`, `footer`, `publication_region`, `text_layer`, or
+  `native` for a JATS or HTML article-id) instead of `identity`. The export
+  schema changes only by describing the new receipt values.
+- Enrichment looks up the paper's own DOI alongside the reference lookups
+  instead of before them, so a DOI-bearing paper's references no longer wait
+  one Crossref round-trip. If the self-DOI lookup fails, the reference lookups
+  still finish before the enrichment is reported partial.
+- On CPU-only machines the layout detector runs one page at a time unless
+  `LAYOUT_BATCH_SIZE` is set explicitly. Batching pages on CPU only grows
+  memory use without running faster.
+- CPU sessions for the layout detector and the sentence segmenter no longer
+  use the ONNX Runtime CPU arena, which otherwise holds its peak allocation
+  for the life of the session. The smaller footprint costs about 10% more
+  wall time on CPU.
+- In aggressive memory mode the NER reference parser loads on CPU rather than
+  the GPU and is released after post-parse. Balanced and keep-all modes keep
+  the previous device choice (CUDA when available) and keep it loaded across
+  files in one process; set `NER_DEVICE` to override.
+- The equation fallback sends fewer methods/results sentences to the LLM:
+  sentences whose digit-bearing parentheticals are only author-year citations,
+  bare years, or figure, table, supplement, equation or section references are
+  skipped — unless the surrounding prose carries digits of its own, in which
+  case they are still sent, as is any sentence with statistic-like content.
+  Measured over three public JATS corpora (3927 papers), about 18% of
+  sentences with digit-bearing parentheticals are skipped, all
+  citation/reference-only; no equation in the stored exports came from a
+  skipped sentence.
+- Choice-like settings are validated at load: `LLM_PROVIDER`, `LLM_BACKEND`,
+  `LLM_INSTRUCTOR_MODE`, `LLM_STRUCTURED_BACKEND` and `RAPID_MLX_SPEC_DECODE`
+  only accept their documented choices. Values match case-insensitively (so
+  `OLLAMA` still works and now normalizes to `ollama` instead of skipping
+  the auto-tune), and the description's own `json_object` spelling of
+  `LLM_INSTRUCTOR_MODE` now means `json`. `OCR_BACKEND` stays free-form on
+  purpose: private OCR aliases with an explicit `OCR_PROFILE` still load.
+  Migration: a typo that used to load and misbehave now fails at startup
+  with an error listing the allowed values.
+- Semaphore/RPM settings reject `0`: `LLM_RATE_LIMIT_RPM`,
+  `OCR_VISION_RATE_LIMIT_RPM`, `CROSSREF_RATE_LIMIT_RPM`,
+  `OCR_MAX_CONCURRENT_FILES`, `OCR_MAX_CONCURRENT_REGIONS`,
+  `OCR_CONCURRENT_REGIONS_PER_FILE`, `CROSSREF_ENRICH_CONCURRENCY`,
+  `BIBR_RESOLVER_LIMIT` and `PIPELINE_MAX_CONCURRENT_POST_PARSE`, plus
+  `CROSSREF_REQUEST_TIMEOUT`, `ROR_REQUEST_TIMEOUT` and
+  `BIBR_RESOLVER_TIMEOUT`. (`BIBR_RESOLVER_SEARCH_CONCURRENCY` already had
+  its bound.) A zero RPM used to raise `ZeroDivisionError` on the first LLM
+  call and a zero concurrency deadlocked the counting semaphore, so `0`
+  never worked — set an explicit positive value instead. Probability-like
+  knobs (`LLM_LOCAL_MEM_FRACTION`, `OCR_MIN_SUCCESS_RATE`, the
+  `ML_*_MIN_CONFIDENCE` thresholds, `REF_GEOM_SEG_CASCADE_THRESHOLD`,
+  `REF_GEOM_MIN_ALIGN_YIELD`, `REF_SEG_MIN_SOURCE_RECALL`) reject values
+  outside `0`–`1`.
+- The literal `null` now sets `None` on nullable fields, so a section field
+  can be set to its documented null from the environment (top-level fields
+  already accepted it). Blank values keep the meaning they had: a blank
+  nullable string disables (`LLM_REASONING_EFFORT=`, `ML_*_MODEL_ID=`), a
+  blank per-call override (`LLM_REASONING_EFFORT_AUTHORS=`,
+  `LLM_REASONING_EFFORT_CITATIONS=`) omits the parameter for that call while
+  the global effort still applies elsewhere, `BIBR_RESOLVER_SOURCES=` still
+  means the resolver's own tier, and other blank lists stay empty. A blank
+  for a plain `str` field stays blank, as before, unless its default is
+  computed; a blank for any other field now loads as the default — or `None`
+  where the field is nullable — instead of failing. Two blanks change
+  meaning: `RAPID_MLX_SPEC_DECODE=` used to load as blank and disable
+  speculative decoding with a warning, and now means `auto`; `CACHE_VERSION=`
+  used to pin the serve result cache to an empty version, and now means the
+  computed code hash, so a deploy invalidates cached results again.
+- Evaluator metric definitions changed, and `evaluation/evaluate.py` now
+  records `metrics_version: 5`. Scores with `metrics_version` 4 and 5 do not
+  compare; re-score saved predictions before comparing them. The
+  `run_info.json` that `bibr batch` writes into `--out` is no longer read as a
+  prediction: it added an unmatched paper with an empty id, was listed in
+  `prediction_ids`, and changed `predictions_tree_sha256` on every run. The
+  micro-averaged reference accuracies (`micro_mean` on the `ref_*_acc`
+  metrics) count a paper whose gold carries the field but whose matched pairs
+  do not, for example one whose bibliography was lost, as misses over its gold
+  references; they left it out, so a paper that lost every reference could
+  leave `micro_mean` at 1.0. Section-text tokens keep letters in every script:
+  only ASCII letters and digits survived, so a Cyrillic or Chinese section was
+  scored on its numbers and "Straße" split in two. Han, kana and Thai text
+  gives one token per character. Section-text results record
+  `metrics_version` too.
+- `paddle-rapid-mlx` no longer reads `OCR_PADDLE_MLX_EXTRA_ARGS`, which is now
+  for `paddle-mlx-vlm` only. The two runtimes have different command lines,
+  so a flag only one of them accepts made the other exit at startup and the
+  `paddle` chain fall through to the next candidate. Migration: move a value
+  tuned for Rapid-MLX to `OCR_PADDLE_RAPID_MLX_EXTRA_ARGS`.
+- An OCR server URL now selects the same backend everywhere.
+  `LocalPipeline(ocr_url=...)`, `bibr.chew`/`Chewer` and `bibr mcp --ocr-url`
+  follow `bibr chew --ocr-url`: a bare URL, the `paddle` selector and any
+  Paddle backend connect to a Paddle server (`paddle-http`), and a GLM
+  backend (`glm`, `glm-*`) connects to a GLM server (`glm-http`). Given a
+  URL, the library used to start `glm-http` for every request except
+  `paddle-http` and `serve-http`: a bare `ocr_url`, the `paddle` selector,
+  every local Paddle runtime (`paddle-vllm`, `paddle-rapid-mlx`,
+  `paddle-mlx-vlm`) and the cloud vision backends. A Paddle server therefore
+  got GLM prompts and its tables came back as undecoded OTSL markup.
+  Without an explicit backend (`--ocr`, `ocr=`, `ocr_backend=`), the
+  configured `OCR_BACKEND` is the request, so `OCR_BACKEND=glm-http` keeps
+  GLM at every entry point; `bibr chew --ocr-url` used to ignore it. A
+  cloud vision `OCR_BACKEND` (`gemini`, `openai` or `anthropic`; the cloud
+  tier of `bibr setup` writes `gemini`) never replaces a URL the caller
+  passes: the run uses that server as `paddle-http` and sends no page image
+  to the cloud provider. An explicit cloud vision backend plus a URL keeps
+  calling its provider, logs that the URL is ignored (`OCR_VISION_BASE_URL` moves its
+  endpoint) and drops the URL, so it no longer splits the OCR cache; the
+  library used to start `glm-http` for it and the CLI `paddle-http`. A
+  `ResourceManager` built directly with a URL now starts the backend its
+  OCR cache identity names; it could record `gemini` or a local runtime and
+  start `glm-http`. Migration: library users who pass a bare `ocr_url` for
+  a GLM server must now pass `ocr_backend="glm"` (or `"glm-http"`;
+  `ocr="glm"` in `bibr.chew`).
+
+### Security
+
+- **A `bibr serve` without `AUTH_API_KEY` no longer takes orders from web pages.**
+  Loopback was its only boundary, and a page open in the operator's browser could
+  cross it: a cross-site form POST needs no CORS preflight, and a DNS-rebinding page
+  reaches 127.0.0.1 under its own host name and reads the answers, `/mcp` included,
+  whose rebinding protection was switched off. Without a key the server now answers
+  only a `Host` of `127.0.0.1`, `localhost` or `[::1]` (`421` otherwise), refuses
+  state-changing requests from another site's `Origin` or with
+  `Sec-Fetch-Site: cross-site` (`403`; origins listed by name in `CORS_ORIGINS` are
+  accepted, `*` admits none), and turns the MCP transport's rebinding check on with
+  the same names. A keyless bind is accordingly limited to `127.0.0.1`, `::1` and
+  `localhost`; another loopback address such as `127.0.0.2` needs a key. `bibr batch
+  --serve-url`, MCP clients, curl and the operator's own browser on `/docs` are
+  unaffected. With a key nothing changes; a proxy or tunnel in front of the server
+  needs one.
+- **Upstream errors no longer put the OCR or Crossref URL into exports and error
+  bodies.** An httpx status error quotes the full request URL, user-info and query
+  included, and region, page and file OCR failures and Crossref enrichment failures
+  copied it into `extraction.warnings`, the `422` body and the job error. They now
+  name the error and its status (`HTTPStatusError: HTTP 400 Bad Request`), other
+  messages have URLs replaced by `<url>`, and the serve error body drops URLs too;
+  the full text stays in the (scrubbed) log.
+- **The log scrubber covers exceptions passed as arguments.** It rewrote only the
+  `str` arguments of a record, so `logger.warning("...: %s", exc)` — the common
+  form — logged `?key=…`, bearer tokens and URL passwords from the exception
+  unmasked. It now masks every argument, keeping the argument tuple that formatters
+  such as uvicorn's access-log formatter unpack, or freezes the masked message when
+  that cannot be done argument by argument; and it masks a password-only URL
+  (`redis://:password@redis:6379/0`) as well.
+- **`bibr setup` writes a new `.env` readable by its owner only (0600)**, as
+  `bibr config set` already did; it was created with the umask's mode (usually
+  0644), readable by every account on a shared machine. An existing file is
+  rewritten in place as before, keeping its mode, owner and links.
+- **Bearer keys are not sent over plain HTTP to public hosts.** `bibr batch
+  --serve-url` and an `LLM_BASE_URL` or `OCR_VISION_BASE_URL` receiving an API key
+  had no scheme check. `http://` stays allowed for loopback and private-network
+  hosts (LAN or tailnet addresses, single-label names,
+  `.local`/`.internal`/`.lan`/`.ts.net`); a public host needs `https://`, or
+  `--allow-insecure-http` for `bibr batch` and `LLM_ALLOW_INSECURE_HTTP=true` for the
+  LLM key, which the vision endpoint also receives. The pipeline, `bibr setup` (model
+  listing and connection test) and `bibr doctor` apply the same rule; the wizard asks
+  again, or records the opt-in, instead of sending the key. `bibr batch` also warns
+  when its token goes over plain `http://` to a LAN host, and its examples now use
+  `https://`.
+- **Script-capable links are dropped from exports.** `javascript:`, `vbscript:` and
+  `data:` targets from HTML, JATS or DOCX links reached `url[].href`, `bib[].url`
+  and the match rows' `url` and `license_url` (taken from the Crossref record as
+  deposited), which readers render as anchors. Other schemes pass; none of the
+  evaluation corpora carries a script-capable link.
+- **`chew_url` in `bibr mcp` keeps a downloaded file inside its temporary
+  directory on Windows.** A server-chosen name such as `D:evil.pdf` discarded the
+  directory and wrote to drive D. The name is now reduced to one plain component:
+  characters Windows forbids are replaced and device names such as `NUL` prefixed.
+- **The serve response cache and the OCR cache are keyed on the full SHA-256.**
+  The shared response cache used a 64-bit prefix, so two crafted files could share
+  one cached result. It also ignored the file extension, which picks the parser:
+  the same bytes uploaded as `.html` and then `.xml` got the HTML result back for
+  the cache's lifetime. Both keys changed, so existing response and OCR cache
+  entries are no longer read: the first request for each file extracts again, and
+  old OCR cache files can be deleted.
+- **Model bundles load through an allowlist.** The restricted joblib loader refused
+  a list of dangerous modules, which any allowed module could hand back as an
+  attribute, and it did not cover object-array payloads or joblib's pre-0.10
+  format. It now resolves only the numpy, scikit-learn and joblib classes the
+  front-role and geometry-segmenter bundles are built from, reads object arrays
+  under the same allowlist, and refuses the old format. The shipped bundles load
+  to identical models.
+- **`REDIS_PASSWORD` no longer shows inside `REDIS_URL`.** `repr()`/`model_dump()`
+  of the settings and `bibr config show` (and the batch ledger's settings snapshot)
+  printed it in the URL they mask elsewhere; URL passwords are masked now.
+- **`REDIS_PASSWORD` reaches the other Redis URLs on the same server.** It was
+  added only to `REDIS_URL`, so a host-only `JOBS_REDIS_URL` or
+  `CROSSREF_CACHE_REDIS_URL` on the compose Redis connected unauthenticated, and a
+  user-only URL (`redis://default@redis:6379/0`) stayed without a password. A
+  unix-socket URL gets it as before (`unix://:password@/path/redis.sock`), and so
+  does a sibling URL on the same socket. A URL on a different server, or with its
+  own password, is left alone.
+- `ML_CLASSIFIERS_REQUIRED=true` is now enforced on the local pipeline, not
+  just in serve. A required classifier that fails to load fails the file
+  with code `classifier_required_failed` and a message naming the setting.
+  The run used to continue silently without the classifiers; set
+  `ML_CLASSIFIERS_REQUIRED=false` to allow the run to continue without them.
+- `save_paper` writes only `.json` files and refuses to overwrite an
+  existing file unless `overwrite=True` is passed explicitly.
+
+### Removed
+
+- Dead helpers with no callers anywhere (including tests):
+  `snapshot_download_no_symlink`, `onnxruntime_available`,
+  `ONNX_TOKENIZER`, `vllm_mlx_available`, `TAG_TO_IDX`, and
+  `bibr.batch.runner._print`.
+
+## [0.5.1] - 2026-09-12
+
+### Fixed
+
+- Cancelled OCR and local LLM startup reclaim servers that finish starting after
+  cancellation. Shutdown waits for startup and completes resource cleanup even
+  when interrupted repeatedly.
+- Cancelled local sentence segmentation retains its inference lock until the
+  worker finishes, preventing concurrent inference or premature model unloading.
+- OCR cache hits preserve page-failure counts and warnings, and recheck the
+  current minimum success ratio. Older entries without this evidence are rebuilt.
+- Served requests can enable reference parsing and Crossref enrichment when the
+  deployment defaults reference parsing to off.
+- Layout initialization failures affect only PDFs in mixed batches; native
+  documents continue through the pipeline, including streaming runs.
+- Closing a pipeline releases resident layout and segmentation models and its
+  cached front-matter classifier reference.
+
+## [0.5.0] - 2026-09-11
+
+### Fixed
+
+- Release validation installs macOS's `libmagic` prerequisite and exercises
+  Windows with platform-independent fixtures. Windows accepts sealed segmenter
+  bundles, tolerates unavailable Unix memory metrics, and preserves upload
+  identity and binary bytes. CLI output remains usable with legacy encodings,
+  and disabling circuit-breaker deduplication counts failures even within one
+  clock tick.
+- Use patched vLLM 0.27.0 for the optional CUDA runtime and isolated LLM/OCR
+  bootstraps, addressing GHSA-7m6h-x95x-82q5.
+- Restore publication-date precision from an unambiguous printed publication
+  date, and repair an empty author surname when the printed name and email
+  establish a unique partition. Preserve ambiguous and already complete values.
+- Preserve selected front-matter author evidence and distinguish explicit absent
+  abstracts from inferred opening prose. Author-information tables supplement
+  eligible single-record pages; generic literature-summary tables do not.
+- Prefer a printed English abstract when parallel versions are available; otherwise
+  retain the first complete printed version, without translating or concatenating.
+- Stop requesting downstream author roles from metadata LLMs. Custom
+  OpenAI-compatible endpoints can recover explicit decoder aborts through one
+  validated JSON route, with token caps and chat-template options preserved.
+- Structured-response caches distinguish generation schemas and chat-template
+  options, and preserve explicit-null versus blank abstract intent.
+- Recover a printed article DOI from complete retained OCR of a publisher box above
+  its uniquely selected title. Explicit DOI, ISSN and publication labels establish
+  identity; cited, ambiguous and truncated evidence remains excluded.
+
+- LLM responses that echo a JSON Schema, including extracted values incorrectly
+  nested under `properties`, now fail validation instead of being accepted as
+  empty metadata with the schema name as the paper title.
+
+- Numeric citations now follow reliable printed reference labels after dropped or spurious
+  bibliography entries shift internal IDs. Citation diagnostics use the same corrected
+  targets; duplicate and missing labels in that mapping cannot select a different entry.
+- Reference-type inference reads the complete printed reference, recognizing thesis,
+  preprint, conference and report labels outside the title when the parser omitted a type.
+- GROBID benchmark runs accept both plain-text and JSON version responses without putting
+  a JSON object into snapshot filenames or version columns.
+- Dependabot CI keeps the coverage threshold and stores its report without attempting
+  a Codecov upload that requires an unavailable Actions secret.
+
+- **Release tests collect on Windows again.** The process-group signal guard
+  only installs where `os.killpg` exists; Unix runtime tests supply their own
+  mock on other platforms.
+- **Cancelled REST and MCP extractions retain their admission slots.** The
+  in-flight slot now belongs to the dispatch task until it finishes, so cancelling
+  a caller cannot admit more work while its extraction is still running. Oversized
+  MCP uploads are also rejected before allocating a decoded base64 copy.
+
+- Async-job shutdown stops workers even if a dependency consumes cancellation while
+  completing a request. Queued uploads are discarded instead of starting more work or
+  waiting indefinitely for another job.
+- **Protected docs smoke tests identify their HTTP client.** Both probes send
+  `User-Agent: bibr-ci-smoke/1.0`, avoiding Cloudflare's error 1010 for Python's
+  default agent. A browser-signature block is reported separately from an Access
+  service-token rejection; anonymous protection and exact-revision checks remain enforced.
+- **Docs deployments retain their revision marker.** The CI artifact now includes
+  `.well-known/bibr-build`, so protected preview and production checks can verify
+  the deployed commit after downloading the built site. Both jobs install Node/npm
+  explicitly so Wrangler also runs on a freshly provisioned self-hosted runner.
+- Redis-backed job workers preserve shutdown cancellation when a Redis reply arrives
+  in the same event-loop turn. This prevents an intermittent Python 3.11 server shutdown
+  hang while retaining the configured Redis operation timeout.
+- Removed unsupported accuracy tables from the evaluation guide.
+- The private-site CI smoke now distinguishes a rejected Cloudflare Access service token
+  from a missing build marker, so deployment failures identify the required fix.
+
+- **Exported URLs no longer carry PDF line-wrap artifacts.** A URL broken across a line in the
+  source picked up the wrap whitespace when the text was re-joined, and a sentence-final period
+  was absorbed into the href. `url[].href` and `bib[].url` are now collapsed and stripped of
+  trailing dots at export, idempotently, so a downstream consumer can delete its own patch.
+- **A JATS bibliography in `<body>` is no longer dropped.** EuropePMC's `fullTextXML`
+  emits the reference list as a body `<sec sec-type="ref-list">` rather than inside
+  `<back>`; the parser only looked in `<back>`, so every reference in such a document
+  disappeared with no warning and the export shipped an empty `bib` — which is the whole
+  contract for a reference-checking consumer. A body-located `<ref-list>` is now ingested
+  into the section its producer already wrapped it in. A `<back>` ref-list still wins, so
+  no document that parses correctly today changes.
+- **JATS consortium authors survive.** A `<contrib>` carrying `<collab>` (a
+  working-group or consortium byline) has no `<name>`, so it was emitted as an author row
+  with an empty given *and* family name — a `VAL_AUTHOR_BLANK` validation error in place
+  of the group's name. The collaboration name is now kept the way Crossref models a group
+  author, and a `<contrib>` with no name of any kind is skipped instead of emitting a
+  blank row.
+- **JATS markup that means a line break no longer fuses words.** Flattening concatenated
+  descendant text with nothing between the pieces, so `Cognitive load<break/>and recall`
+  became `Cognitive loadand recall`, a structured `<aff>` became
+  `Department of PsychologyUtrecht University`, and a two-paragraph abstract ran its
+  sentences together. Block-level and structured-field elements now contribute a
+  separator; inline markup still does not, so `H<sub>2</sub>O` stays `H2O`. XML comments
+  are no longer flattened into the text either.
+- **DOCX line breaks and tabs no longer fuse words together.** `<w:br/>`, `<w:tab/>` and
+  `<w:cr/>` carry no text of their own and were dropped outright, so a title page laid out
+  with Shift+Enter came out as `Cognitive load and recallJane SmithDepartment of
+  Psychologyjane.smith@example.edu` — one unsplittable token where the title, author and
+  affiliation should be. The same applied to footnote and endnote text, which is where a
+  humanities bibliography lives. Those three elements now contribute a separator; adjacent
+  `<w:t>` runs still concatenate untouched, because Word splits runs mid-word for
+  formatting. Every DOCX fixture in the suite was built from python-docx plain strings,
+  which never emit either element, so nothing caught this.
+- **An unreadable DOCX is classified instead of crashing validation.** Validation only
+  caught `BadZipFile`, but reading a *member* fails differently: `zipfile` raises
+  `RuntimeError` for a password-protected entry and a truncated or damaged deflate stream
+  surfaces as `zlib.error` from the real-size check. Both escaped
+  `_check_docx_corruption` and took down the whole validation call rather than marking the
+  file corrupt. A zip whose members are encrypted — what third-party tools produce, as
+  opposed to the OLE container Word writes — is now reported as `encrypted_file` rather
+  than as generic corruption.
+- **The LLM rate limiter no longer freezes `bibr serve` while it probes Redis.** Deciding
+  between the shared and the local limiter ran a *synchronous* `redis.Redis.ping()` from
+  inside a coroutine. One LitServe worker with `enable_async=True` serves every concurrent
+  request on a single event loop, so a Redis that accepts the connection but never answers
+  stalled every in-flight paper, not just the caller — 5.1 s of total freeze, measured
+  against a wedged-but-reachable Redis. The probe is async now, guarded by a
+  loop-bound init lock so concurrent first callers build exactly one limiter, and the
+  command round-trip is bounded (`socket_connect_timeout` only ever covered the connect).
+  `CrossrefClient` was fixed this way already; `LLMClient` was missed.
+- **A reference the LLM returns empty is re-parsed instead of deleted.** A batch item that
+  came back with neither a title nor authors was counted as *covered*, so the NER recovery
+  never ran for that slot — and then the completeness filter dropped it. One printed
+  reference disappeared and every later `bib_id` shifted up by one, so an inline `[8]`
+  resolved to what the paper printed as `[7]`, all the way down the list. Nothing warned:
+  14 references returned for 15 entries clears the under-yield thresholds. Such a slot now
+  counts as missing, goes through the same NER recovery as an entry the LLM skipped
+  outright, and is reported if it cannot be recovered.
+- **A repeated reference index no longer leaves segment-anchored backfills on.** When the
+  LLM's reported indices are rejected the refs are re-numbered positionally, and the
+  backfills that copy a printed DOI or issue number off the anchored segment are supposed
+  to switch off whenever that mapping cannot be trusted. The check for that looked only at
+  the *count*, so three rows labelled 1, 2, 2 for three entries passed it — while entry 3
+  was missing and everything after the repeat sat one row off. The result was a
+  neighbouring reference's DOI stamped onto the wrong row, which then enriched cleanly
+  against Crossref and scored as a confident match. A repeated index now marks the batch
+  untrusted too. A batch merely numbered from 1 instead of from `start_index` still stays
+  trusted — positional re-indexing fixes that exactly.
+- **The OCR disk cache now keys on the model pins.** A complete entry lets the pipeline
+  skip layout detection and OCR inference outright, but the key recorded none of the
+  settings that select those weights — `LAYOUT_MODEL_REVISION`, `OCR_PADDLE_REVISION` and
+  `OCR_PADDLE_MODEL`. Re-pinning a model and re-running over cached papers silently
+  replayed the *old* model's regions, so an A/B evaluation of the two pins reported no
+  difference because it never ran the new one. `identity.model` did not cover this: for
+  every served backend it is the alias (`paddle-ocr-vl-1.6`) that vLLM is launched with
+  under `--served-model-name`, while `--revision` takes the pin — the alias is unchanged
+  by a re-pin. The cache format version is bumped, so entries written without the pins are
+  invalidated rather than trusted.
+- **JATS keeps its Greek letters and accents.** The parser reads uploads with entity
+  expansion disabled (the XXE and billion-laughs defense), which leaves every *named*
+  character entity — `&alpha;`, `&uuml;`, `&deg;`, `&mdash;` — as an unresolved node whose
+  text is the literal source string. Titles, author surnames and reference strings shipped
+  markup like `M&uuml;ller` and `Effects of &alpha;-synuclein`. Because XML's five
+  predefined entities and all numeric references resolve regardless, the output looked
+  plausible rather than obviously broken. Named entities are now resolved after the parse
+  against the HTML5 character table, which covers the ISO sets JATS DTDs pull in. Entities
+  a document declares in its own internal DTD subset are still never expanded — the same
+  applies to the ePub package document.
+- **Non-ASCII ePub text is no longer mojibake.** The spine is re-emitted as one synthesized
+  HTML document for the HTML parser, and that document declared no charset — so html5lib
+  fell back to windows-1252 and decoded the UTF-8 bytes wrongly. Every non-ASCII character
+  in an ePub's title, authors, publisher and body text was corrupted (`München` →
+  `MÃ¼nchen`), affecting every non-English ePub.
+- **Numbered bibliographies survive the in-text-citation filter.** Vancouver and IEEE entries
+  terminate at the year exactly as a bare in-text cite does, so `"12. Rothman KJ. Modern
+  epidemiology. Boston: Little, Brown; 1986."` was dropped as a citation — and because
+  survivors are renumbered, one dropped entry shifted every later `bib_id` and repointed
+  every numbered citation past the gap. Silent, with one `logger.info` line.
+- **Multi-study `Method`/`Results` headings are no longer demoted as running headers.**
+  Repetition alone was the test; page furniture's margin-band geometry is now required too,
+  so a paper with per-study sections keeps them instead of exporting neither.
+- **DOCX, JATS, HTML and ePub inputs no longer crash in the positional abstract fallback.**
+  `min()` over page numbers that are all `None` raised `TypeError` for every native-format
+  paper that reached it.
+- **A crafted ePub can no longer exhaust server memory.** Every zip limit was per member, so
+  a spine naming one member N times multiplied all of them: a 1 MB upload reached multi-GB
+  RSS and OOM-killed the serve worker. Spine documents, total expanded bytes and repeats are
+  bounded now, and percent-encoded hrefs resolve.
+- **Statistics keep their sample size.** `(N = 1,204)` truncated to `N = 1` on the thousands
+  separator, and a chi-square's own `df` parenthesis emitted a fabricated `N` that then
+  vetoed the real match.
+- **Figure and table numbers survive float merging.** Mergers renumbered survivors from 1, so
+  a body mention of `Figure N` resolved to the wrong figure; renumbering now honours the
+  printed label where a caption carries one.
+- **Rotated pages map their text correctly.** `page.render()` applies `/Rotate` and the text
+  layer does not, so on a rotated page every layout box sampled the wrong region of the PDF.
+  Crop-relative coordinates are also emitted in the frame their page dimensions describe.
+- **Plus 25 further defects** — a caption-dedup `KeyError` that surfaced as `parse_failed`
+  and dropped the paper, an equation-extraction timeout that discarded the regex results it
+  had already computed, OTSL row/column spans destroyed by a trailing newline, math exponents
+  linked as citations and deleted from the sentence, an OCR backend that could never start,
+  an OCR engine orphaned when an earlier stage failed, and a repeat scan whose cost grew
+  superlinearly with region length (~11 s on a 50,000-character region, now under 15 ms).
+- **`bibr serve` no longer crashes at startup when the `mcp` extra is installed.** LitServe
+  0.2.17 enables its own MCP connector whenever the official `mcp` package is importable
+  but builds it from the third-party `fastmcp` package, so `server.run()` died with
+  `NameError: name 'MCPServer' is not defined` on any install of `bibr[mcp]` (including the
+  serve image above). bibr now switches LitServe's detection off — it mounts its own
+  `/mcp` endpoint and never wanted LitServe's.
+- **The scorer no longer charges an elided page range against its expansion.** Gold keeps
+  the printed ending ("486–92"); bibr and GROBID expand it to "492", and the exact
+  string compare counted every such pair as a pages miss on both sides. `ref_pages_acc`
+  now expands a compact ending against the first page on both sides before comparing.
+
+- **Half-emitted page ranges are completed from the printed reference.** The CRF parser
+  drops the start of a range and the LLM parser the end of a compact one ("339-42"); the
+  shared finalize step now fills the missing end anchored on the value the parser did
+  emit, only when the segment prints exactly one such range, and splits a range lumped
+  into one field. Nothing populated is overwritten. This is the LLM-path repair the July
+  analysis projected to lift `ref_pages_acc` from 0.389 to 0.745; measured by unit tests
+  so far.
+- **A plain Linux `bibr chew` no longer bootstraps vLLM behind your back.** The automatic
+  `paddle` OCR chain only lists `paddle-vllm` on an NVIDIA GPU with at least 8 GB of VRAM;
+  CPU-only and small-GPU Linux machines go straight to llama.cpp (`glm-llama`), as the
+  tester guide always said. The managed vLLM launcher refuses to start without a suitable
+  GPU (naming the alternatives), and when vLLM is not installed it now *warns* — with the
+  `uv sync --extra vllm` remedy — before falling back to the isolated
+  `uv tool run --from vllm==0.26.0` environment, which downloads several GB on first use.
+  On Python 3.14, where `vllm==0.26.0` has no wheels, the bootstrap pins a managed 3.13
+  interpreter instead of failing to resolve. `bibr chew` also checks before loading any
+  model that at least one local OCR runtime can start for the PDFs it was given, and
+  fails fast with the install hints otherwise.
+- **`bibr setup` installs the runtime its Linux plan needs.** The "fully local" plan on
+  Linux/CUDA selects the `vllm` extra; it used to select `local`, whose only member is
+  Apple-Silicon-only, so nothing was installed and the first chew paid for the bootstrap
+  above. The advanced picker no longer offers `local-cuda`, an extra that does not exist
+  and made `uv sync` fail before `.env` was written.
+- **`glm-mlx` is no longer offered anywhere.** The backend has been disabled since July
+  (vllm-mlx produced corrupted OCR text and leaked memory), but the wizard, the `--ocr`
+  choices, `bibr doctor` and the quickstart still presented it. `bibr doctor` now reports
+  a config that still names it as a failed check pointing at `glm-rapid-mlx`.
+- **`OCR_BASE_URL` may end in `/v1`.** bibr appends `/v1/models` and
+  `/v1/chat/completions` itself, so the deployment guide's own example
+  (`https://ocr.example.internal/v1`) was requested as `/v1/v1/...` and never became
+  ready. A trailing `/v1` is now stripped with a warning in `bibr serve`, `bibr chew
+  --ocr-url` and the readiness probe. `bibr serve` also honours
+  `OCR_BACKEND=paddle-http` for its defaults (served alias `paddle-ocr-vl-1.6`, profile
+  `paddle`) instead of silently assuming the GLM `glm-ocr` alias; the guide is corrected.
+- **A stalled Redis can no longer wedge `bibr serve`.** The response cache, the Crossref
+  response cache and the Redis rate limiter now carry connect, socket and health-check
+  timeouts, and every cache touch on the request path (read, single-flight lease, release,
+  write) is additionally bounded by the new `CACHE_OPERATION_TIMEOUT_SECONDS` (default
+  5). A Redis that accepts connections but never answers now degrades to a cache miss
+  instead of holding every request — and its admission slot — forever.
+- **A bearer token containing non-ASCII bytes is rejected with 401, not 500.** The
+  auth middleware and `/ready` compared the header as text, and `hmac.compare_digest`
+  raises on non-ASCII strings; the comparison now runs on UTF-8 bytes.
+- **502 bodies no longer name the internal OCR endpoint or the models it serves.** The
+  readiness errors raised by `bibr serve`'s OCR backend (unreachable, not ready,
+  cooling down) included `OCR_BASE_URL` and the server's model list; those details now
+  go to the operator log only, and the client sees the expected served alias at most.
+- **Idle MCP sessions now expire.** The serve MCP endpoint closes a client session after
+  `MCP_SESSION_IDLE_TIMEOUT_SECONDS` (default 1800) of inactivity and drops its papers,
+  as the MCP guide already promised. A client that reconnected without `DELETE` used to
+  pin its session — and up to sixteen full exports — for the process lifetime.
+- **Docker Compose publishes the API on loopback and passes the Redis password safely.**
+  `bibr-serve` was published as `0.0.0.0:8000`, which Docker routes past host firewalls,
+  with plaintext bearer tokens on the wire; it is now `127.0.0.1:8000` unless
+  `BIBR_PUBLISH_HOST` says otherwise. `REDIS_PASSWORD` is no longer interpolated raw into
+  `REDIS_URL` — a password with URL metacharacters silently disabled the cache — but
+  handed to bibr, which URL-encodes it into the connection URL itself.
+- **`LLM_LOCAL_MODEL` no longer defaults to the MLX weights on every platform.** The
+  config default was `numind/NuExtract3-mlx-8bits`, and the CUDA vLLM and llama.cpp
+  launchers read it too, so a hand-written `.env` with `LLM_BACKEND=vllm` or `llama-cpp`
+  downloaded 4.8 GB of MLX weights and failed to load. Unset now resolves per backend
+  (bf16 for vLLM, GGUF Q4_K_M for llama.cpp, 8-bit MLX on Apple Silicon); `bibr setup`
+  keeps writing an explicit value.
+- **`bibr setup` and `--llm local` no longer pick vLLM for a GPU that cannot hold the
+  model.** The rule was "vLLM above 8 GB", but NuExtract 3's only vLLM variant (bf16)
+  needs 11 GB, and the fit filter was dropped silently when nothing fit — a 9-10 GB
+  card got a plan that OOMed after OCR. Both now choose vLLM only when a vLLM variant of
+  the recommended model fits and llama.cpp otherwise; the wizard says which half (OCR,
+  LLM, or both) needs `llama-server`.
+- **The managed local LLM bootstrap matches the OCR one.** When vLLM is not installed the
+  LLM launcher now warns (naming `uv sync --extra vllm`) before its `uv tool run`
+  bootstrap and pins a managed Python 3.13 on 3.14, where `vllm==0.25.1` has no wheels
+  and the `vllm` extra installs nothing; it used to fail there after OCR with "LLM
+  server start failed" while `bibr doctor` reported vLLM as available. `bibr doctor`
+  now says the runner is uv-managed, that the first run downloads several GB, and
+  what 3.14 implies. Python 3.14 is listed in the package classifiers, matching CI.
+- **`bibr.chew()` and `bibr.Chewer()` check the LLM before loading any model.** The
+  library ran layout and OCR before discovering a missing API key or an unlaunchable
+  local backend; the CLI already checked first. Both entry points now run the same
+  preflight (skipped with `no_llm=True`), raising the provider's `ValueError` for
+  credentials and `ConfigurationError` for a managed local backend.
+- **A trained classifier that does not answer is now visible in the export.** When the
+  section or paper classifier is configured but cannot load (core install without
+  torch, failed download, a degraded serve resource) or errors during inference, the LLM
+  classifies instead; the JSON was indistinguishable from a healthy run. The section path
+  now records `section_classifier_degraded` in `processing_warnings` for every such
+  case (previously only inference errors), and the paper path records
+  `Metadata extraction WARNING: paper classifier degraded (<reason>)` — the exception
+  type only, never document text.
+
+
+- **Job results are bounded by size, not only by count.** `bibr serve` kept every completed
+  result as a live dict and evicted only beyond `JOBS_MAX_RETAINED` (128), so a run of large
+  exports could hold hundreds of megabytes for an hour. The result is now rendered once at
+  completion (the bytes `/result` serves) and the store evicts oldest-first until both the
+  count and the new `JOBS_MAX_RETAINED_BYTES` budget (default 256 MiB; `0` disables) fit;
+  the newest result is always kept, so an export larger than the budget can still be
+  fetched once.
+- **The MCP chew tools are under upload admission, and a 50 MiB file fits.** The admission
+  middleware only knew `/papers/extract` and `/papers/jobs`, so any number of `/mcp` calls
+  could hold their bodies and decoded bytes in API memory and dispatch straight to the
+  worker; and because `chew_paper` carries its file base64-encoded, LitServe's 51 MiB body
+  cap refused a 40 MB PDF before the advertised 50 MB check. A large `/mcp` body now holds
+  a `PIPELINE_MAX_ACTIVE_UPLOADS` slot while it is received, both chew tools take a spool
+  slot through the persist and an inflight slot for the extraction itself — matching
+  `POST /papers/extract`, so a running pipeline no longer refuses uploads the server has
+  capacity to accept (a `server busy` tool error when none is free), the outer body cap grows to
+  fit a full-size file in base64 when MCP is enabled, and an oversize body gets a `413` that
+  explains the arithmetic before a byte is read.
+- **`bibr serve` logs are configured — in both processes.** The CLI returned before its own
+  logging setup, so `bibr.*` INFO records were dropped, warnings fell through
+  `logging.lastResort` unformatted and unscrubbed, metering emitted nothing without
+  `METER_LOG_PATH`, and the spawned inference worker never installed the metering handler,
+  losing every per-extraction record with LLM token usage. Each process now installs one
+  formatted, secret-scrubbed stderr sink (`SERVE_LOG_LEVEL`, default `info`), uvicorn and
+  LitServe records ride it, and metering goes to stderr or, when configured, only to the
+  JSONL file — from the worker too.
+- **A born-digital window no longer starts an OCR engine it will not use.** OcrStage waited
+  for the engine before counting the regions that would call it, and the automatic `paddle`
+  chain was started before layout to key an OCR cache that is off by default. The count
+  now comes first and, when native text covers every region, no engine is started or
+  awaited; with `CACHE_OCR` off the automatic chain starts after native text is known.
+  Captions, table titles and formula numbers still go through OCR by design.
+
+- `bibr doctor` now reports a missing system **libmagic** as its own named check, and
+  `bibr.input.validate` imports the `python-magic` binding defensively instead of at
+  module scope. libmagic is a system library a `pip install` cannot supply, so a fresh
+  macOS/Linux setup died with a bare "failed to find libmagic" during `bibr setup`'s test
+  extraction — and the import failure took down `import bibr` wholesale, so `doctor` could
+  not run to diagnose it. The error now names the platform's install command
+  (`brew install libmagic`, `apt install libmagic1`, `dnf install file-libs`). (#64)
+- A managed local server whose port is held by an unrelated process now fails with a
+  message naming the port, instead of spawning a subprocess that cannot bind it and dies
+  with an unrelated-looking startup crash. The pre-spawn guard treated "listener with an
+  unusable /v1/models" the same as "port free"; it now confirms the port is genuinely
+  held with a TCP connect before reporting a conflict. (#82)
+
+- LLM retries now acquire their own rate-limit slot. Only the first attempt of each logical
+  call took one, so a retry storm spent budget it never acquired — precisely when the
+  provider was already rate-limiting and, with Redis configured, when the shared limiter is
+  meant to hold the whole fleet back.
+- A missing `CROSSREF_API_EMAIL` now warns with the concrete rates: without it Crossref's
+  anonymous pool caps the client at 60 RPM, so a configured `CROSSREF_RATE_LIMIT_RPM=200`
+  was silently a third of that (~81s of an 80-reference paper's 120s enrichment budget).
+
+### Changed
+
+- Release preparation supports a manual rehearsal on `main` that tests and validates
+  the distributions without publishing. PyPI uploads use Trusted Publishing on a
+  GitHub-hosted runner and stay disabled until `PUBLISH_PYPI=true` is explicitly set.
+- Shorten the README, keep the illustrated banner, and link to detailed guides.
+  Add a draft LLM-use disclosure and clarify extraction accuracy limits and the
+  current focus on English-language social science papers.
+- The README opens with a paper-cream banner with square corners and no outer border.
+
+- **The launch export uses schema 11.0 (breaking).** `schema_version` is at the root;
+  `info` becomes `metadata`, `info_match` becomes `metadata_match`, and input file identity
+  moves to `source`. Root `affiliations` becomes `affiliation`. Telemetry moves under
+  `extraction`: engines, settings, timings (`stages` and `total_seconds`), usage (`totals`
+  and per-label/provider/model `breakdown`), enrichment, diagnostics, identity receipts,
+  warnings, and optional regions/trace. Validation findings live in `validation.issues`.
+  `xref[].xref_id` becomes `target_id`; equations and funding gain explicit IDs;
+  table cell contents are string grids. Match-table structured `authors`/`editors` become
+  singular `author`/`editor`. The v10 output mode is retired; core checkpoints and enrichment
+  sidecars reject older schema versions. The evaluation tools still read frozen v10 gold
+  alongside v11 predictions without changing the scoring rules.
+- **MCP Python SDK v2**, locked to 2.2.0. The server uses `MCPServer` and the public HTTP
+  lifespan/idle-timeout API. Paper tools run on the event loop and keep stores isolated
+  across initialized clients, including clients sharing a bearer key. HTTP clients negotiate
+  the session-based 2025-11-25 protocol, which the chew/query workflow requires; automatic
+  v2 clients fall back from sessionless discovery. Upload limits account for base64 overhead.
+
+- Evaluation, aspect scoring and the benchmark harness now share `metrics_version=6`.
+  The benchmark headline author score uses full printed names; family-name-only scores
+  remain available as diagnostics. Re-score older benchmark records before comparing them.
+
+- The LLM rate-limit slot is now acquired once inside `_invoke_structured`, below the cache
+  check, instead of separately at each of the twelve call sites. A cache hit spends no
+  provider quota, so it no longer waits on the budget that exists to protect that quota —
+  previously a fully-cached corpus re-run was still paced at `LLM_RATE_LIMIT_RPM`. Live
+  calls are unaffected: still one slot per dispatched request, plus one per retry.
+- **The install extras are reorganised around that runtime.** `onnxruntime`, `tokenizers`,
+  `huggingface-hub`, `scikit-learn` and `joblib` move into the core dependencies, so a
+  plain `pip install bibr` runs the whole HTTP-service path — OCR and the LLM over HTTP,
+  every bibr-owned model through ONNX Runtime — with no `torch`, `transformers` or OpenCV
+  in the environment. The PyTorch stack is now the **`torch`** extra (training parity,
+  Apple MPS, `torch.compile` on the serve layout model, transformers OCR, the CRF
+  reference segmenter, and the fallback runtime); **`ml` is kept as an alias for it**, so
+  existing installs, Dockerfiles and `bibr setup` plans are unaffected. `all` now bundles
+  `batch,cache,demo,mcp,torch`. The two OpenCV calls in `bibr/ocr/image_processing.py` are
+  Pillow/numpy.
+
+- **The CLI stops treating a missing `torch` as a broken install.** `bibr doctor` reports
+  the ONNX Runtime execution provider as the device instead of failing, and calls
+  `seg=geom, parse=ner` healthy on a core install; only `REF_SEG_STRATEGY=crf` (torch-only,
+  no ONNX export) and an explicit `ML_RUNTIME=torch` without torch still fail. `bibr chew`
+  no longer refuses PDFs when OpenCV is absent — cv2 is reachable only through the torch
+  layout path — and `--dry-run` names the ONNX provider it would use.
+
+- **Enrichment's network wait overlaps the extract stage.** When enrichment is on, the
+  enrich stage's up-front round-trips (resolver health probe and title searches, the
+  Crossref bulk DOI lookup) start as soon as the references are parsed — while citation
+  linking and structured-integrity LLM calls are still running — instead of strictly after
+  extraction. `enrich_references` consumes the
+  `EnrichmentPrefetch` when the pipeline hands it one and is unchanged otherwise; the core
+  checkpoint still sees unenriched references, the enrichment stage's accounting is
+  unchanged, and every path that does not enrich cancels the task. `extraction.timings`
+  gains `enrich_prefetch` (its wall time; excluded from `total_seconds`).
+- **Crossref reference enrichment is opt-in.** `CROSSREF_ENRICH` now defaults to `false`:
+  a plain `bibr chew`, `bibr.chew()` or `POST /papers/extract` no longer calls Crossref or
+  the resolver, `bib_match` stays empty, and `extraction.crossref_enrich` reports the
+  effective per-run value. Enrichment was a network fan-out that added seconds of serial
+  wall time per paper for every caller, including those that never read `bib_match`.
+  Deployments that relied on the old default must set `CROSSREF_ENRICH=true` (or pass the
+  per-run switch above); `bibr setup` now asks before writing it, and only offers
+  consolidation once enrichment is on.
+
+- **`bibr serve` keeps CPU-bound work off the shared event loop.** One LitServe worker runs
+  with `enable_async=True`, so synchronous CPU inside a coroutine is head-of-line blocking
+  for every co-resident request. Post-parse, citation linking and OCR post-processing now
+  offload to a thread like their neighbouring stages (40.0 ms → 5.2 ms loop-tick latency for
+  this class of work), four exact necessary-condition prefilters remove ~52 ms/paper of
+  regex sweeps outright, and OCR crops moved inside the region semaphore (`Image.crop` is an
+  eager copy; every crop of every page was held at once, ~1 GB at 8 in-flight requests).
+- **The serve container image ships the `mcp` extra.** `Dockerfile.serve` now installs
+  `bibr[mcp]`, so `MCP_ENABLED=true` on the Compose stack mounts the remote MCP endpoint
+  without a custom build. The dependency is inert unless enabled.
+- **CI runs for `main` only.** The retired February `dev` branch no longer triggers the
+  suite on push, and pull requests can no longer target it.
+- Removed unsupported comparative accuracy claims from the public documentation.
+- **Every Hub-loaded model is pinned to a commit.** PP-DocLayoutV3, the section and paper
+  classifiers and the default `sat-6l-sm` sentence segmenter loaded `main`, so a hub
+  push could change extraction output between two runs of the same bibr version. Their
+  audited commits are now the defaults (`LAYOUT_MODEL_REVISION`,
+  `ML_SECTION_CLASSIFIER_REVISION`, `ML_PAPER_CLASSIFIER_REVISION`,
+  `WTPSPLIT_MODEL_REVISION`; set any to `main` to track the head), `Dockerfile.serve`
+  bakes the same revisions, and `scripts/prefetch_segmenter.py` accepts `--revision`.
+- **The managed vLLM pin moves to 0.26.0** (`vllm` extra and the `uv tool run` bootstrap).
+  It closes GHSA-87x5-vmc3-756j (completion prompt lists fanning out into unbounded engine
+  requests) and drops `diskcache`, whose unfixed advisory bibr had been carrying as an audit
+  exception; torch stays at 2.11.0. The lock resolves cleanly and the extra installs;
+  serving with 0.26.0 has not yet been exercised on a GPU.
+- **`LIMITATIONS.md` is current again** (native-format inputs, the `ner` default, the
+  classifier-degraded warnings, single-tenant serve/MCP, and which benchmark numbers are
+  held-out), and the local model registry's sizes were re-verified against the Hub.
+
+- Removed ignored/no-op config names: `LLM_VLLM_MLX_CACHE_MB`, `LLM_BATCH_PROVIDER`;
+  `OCR_API_HOST`, `OCR_API_PORT`, `OCR_CONFIG_PATH`, `OCR_ENABLE_LAYOUT`, `OCR_API_PATH`,
+  `OCR_API_MODE`; and the reserved `ML_ENABLED`, `ML_SECTION`, `ML_REF_SEG`, `ML_REF_PARSE`,
+  `ML_SECTION_ACCEPT_THRESHOLD`, `ML_SECTION_FLAG_THRESHOLD`, `ML_SECTION_REPO_ID`,
+  `ML_REF_SEG_REPO_ID`, and `ML_REF_PARSE_REPO_ID`. These names are ignored if left in
+  existing config and should be removed. External deployment/Compose and bundled-SGLang
+  scope are unchanged.
+- OCR disk cache format 7 removes the retired layout-toggle key; existing format-6 entries
+  incur a one-time cache miss and rebuild.
+- `OCR_MAX_CONCURRENT_REGIONS` now binds the single-machine OCR path, which previously
+  ignored it and capped every run at `OCR_CONCURRENT_REGIONS_PER_FILE` (6). Against the
+  managed `paddle-vllm` runtime — the Linux/CUDA default — that left its vLLM server
+  (launched with `--max-num-seqs 12`) under-subscribed; it now runs at the server-wide cap
+  (16 by default). Files still run one at a time, so page-image RAM is unchanged. Engines
+  whose prefill serializes on the device (MLX, llama.cpp) keep the per-file cap, and the
+  Apple Silicon auto-tune to 1 is unaffected.
+- Crossref enrichment now prefetches every DOI-bearing reference in one
+  `/works?filter=doi:...` query (up to 50 DOIs per request) before the per-reference
+  fan-out, instead of spending one rate-limited request per DOI. The prefetch seeds the
+  same response cache the per-reference path reads, so matching, consolidation and
+  provenance are unchanged; only DOIs the bulk query returns are seeded, so a DOI Crossref
+  does not know still takes its own lookup and still 404s rather than falling through to a
+  bibliographic search. Disable with `CROSSREF_BULK_DOI_LOOKUP=false`.
+- **Removed `PIPELINE_WORKERS_PER_DEVICE`.** `bibr serve` now pins exactly one inference
+  worker in `build_server()`. There is no measured configuration where a second worker won:
+  each worker gets its own `GpuBatcher` (so GPU batches shrink as workers rise) on top of
+  duplicating the model weights and CUDA context, costs ~1.5 GB RSS (~570 MB of that in
+  imports alone, before any model loads), and parallelizes only GIL-bound Python — the heavy
+  CPU stages already use every core from one process, and the process-global pdfium lock it
+  would have relieved is under 1% of a paper's wall clock (~10 ms/page render plus a
+  comparable inspection pass). Left in an existing config the name is ignored, not rejected,
+  but it should be deleted. Scale with `PIPELINE_MAX_INFLIGHT_REQUESTS` and the batch-timeout
+  settings instead. `cap_inference_threads`, which existed only to divide cores among
+  co-located workers, is removed with it; torch now uses its own default thread count, which
+  on a hyperthreaded host is typically physical rather than logical cores.
+- A managed local LLM server (`--llm local` on CUDA or Apple Silicon) auto-raises
+  `LLM_RATE_LIMIT_RPM`, unless set explicitly. The 60 default guards a cloud provider's
+  quota; against a server bibr owns it capped bulk runs near 8-12 papers/min regardless of
+  hardware.
+
+### Security
+
+- Remove the unused Accelerate dependency from the PyTorch extras and lockfile,
+  eliminating CVE-2026-69112 from supported bibr installations. Existing environments
+  need a locked sync or rebuild to remove the previously installed package.
+- **A configuration error no longer prints your API keys.** `ConfigurationError` rendered
+  pydantic's `input` payload; for a model-level validation failure that payload is the whole
+  merged settings mapping, so one bad value printed every key in the environment to stderr
+  and into any log collecting it. Model-level errors now omit the input, and a secret-named
+  field's value is masked wherever it appears.
+- **`MCP_URL_ALLOWED_HOSTS` accepts the form the docs give.** As a bare `list[str]`,
+  pydantic-settings JSON-decoded it, so `MCP_URL_ALLOWED_HOSTS=arxiv.org,zenodo.org` failed
+  startup outright — in practice no deployment had the `chew_url` SSRF allowlist on. The
+  comma-separated and JSON forms both parse now, here and for the CORS lists.
+- **No credential literals in the tree, and CI now scans for them.** Six tracked scripts
+  and a notebook carried a metacheck platform API key as a string; they read it from the
+  environment now (`PLATFORM_API_KEY`, `METACHECK_PLATFORM_API_KEY` for the `data/`
+  scripts). A required gitleaks job scans the checked-out tree and the commits every pull
+  request introduces, alongside Semgrep's tree-only secrets pack; `.gitleaks.toml` holds
+  the allowlist of documented placeholders and test fixtures. The same scan runs as a
+  pre-commit hook over the staged diff.
+
+### Added
+
+- **Structured reference names alongside the verbatim strings.**
+  `bib[].authors` and `bib[].editors` stay exactly as printed; new `bib[].author` and
+  `bib[].editor` carry a best-effort split into `{family, given, suffix}`, or a `{literal}`
+  fallback for corporate and unsplittable names, and are `null` when there was nothing to
+  split (never `[]`). Every emitted value is a substring of the verbatim string, so a consumer
+  can always fall back to it. `author[]` gains an optional `suffix`. Included in schema 11.0.
+- **A machine-readable JSON Schema of the export** is committed at
+  `docs/schema/bibr-export-v11.schema.json`, generated from the pydantic export models by
+  `scripts/generate_schema.py`. A test fails when the file drifts from the models, and its
+  `required` list is derived from the exporter's own omit rules (`OMITTABLE_ROOT_KEYS`), so the
+  artifact can never call an always-present table optional.
+- **Opt-in LLM response cache** (`CACHE_LLM=true`, directory `CACHE_LLM_DIR`, default
+  `$XDG_CACHE_HOME/bibr/llm`). Structured responses are cached on disk keyed by model,
+  response schema, system prompt, user text, per-task `max_tokens`/`reasoning_effort`, and
+  transport mode — so an entry can only serve a request that would have produced it. A hit
+  costs no tokens; a miss, a stale entry, or an unwritable cache directory all fall through
+  to a live call, so nothing about correctness depends on it. Re-running a corpus after a
+  parser change (or an evaluation sweep over the same papers under different non-LLM
+  settings) now pays for its LLM work once instead of every time. Off by default, like the
+  OCR disk cache. Note the key canonicalises the per-call `uuid4` prompt-injection fence
+  boundary, which 10 of the 13 call sites mint fresh each call — without that the same
+  logical request would hash differently on every run and never hit.
+- **`bib[]` carries the five reference fields the parser tagged and the decoder threw
+  away (export schema 10.8).** The NER parser's 39-tag BIO scheme has covered `ARXIV`,
+  `PMID`, `SERIES`, `ACCESS_DATE` and `NOTE` since v4, but `map_fields_to_paper_ref` had
+  no target for any of them, so every predicted value was discarded at decode — `PMID`
+  reaches 0.947 F1 on the JATS-supervised corpus and reached nothing else. They are now
+  `PaperReference` fields (`arxiv`, `pmid`, `series`, `access_date`, `note`), exported
+  verbatim as printed, and a test asserts no field type can be tagged and silently
+  dropped again. Output from the shipped `bibr-parser-v4-5-gold` is unchanged in
+  substance — its training corpus had no examples of any of the five, so it emits none —
+  and the fields are explicit nulls. The LLM reference schema is deliberately *not*
+  widened: the fields are removed from the JSON schema both LLM paths read, because the
+  NuExtract template is qualified against a fixed shape and the LFM2.5 student was
+  distilled on prompts embedding this exact schema.
+- **A torch-free core: bibr's four local models now run on ONNX Runtime.** The layout
+  detector, the section and paper classifiers and the ModernBERT+CRF reference parser each
+  ship an `onnx/` bundle (graph, a `bibr_onnx.json` contract carrying preprocessing
+  constants, label classes and CRF parameters, and the exact tokenizer) alongside the
+  PyTorch weights at the same pinned revision. `ML_RUNTIME=auto|onnx|torch` chooses:
+  `auto` prefers the ONNX bundle, falls back to PyTorch when the bundle is absent and
+  `torch` is importable, and otherwise raises a `ConfigurationError` naming the model and
+  the fix. `scripts/export_onnx_*.py` rebuild the bundles and check parity against the
+  PyTorch classes; `bibr/ner/crf_numpy.py` is a numpy Viterbi decoder so the parser needs
+  no `pytorch-crf`, and `bibr/utils/onnx_tokenizer.py` tokenizes through `tokenizers`
+  alone. Layout's PyTorch weights live in a third-party repo, so its ONNX artifact has its
+  own `LAYOUT_ONNX_MODEL_ID` / `LAYOUT_ONNX_REVISION`, published as
+  `scienceverse/bibr-layout-onnx`. All four bundles are on the Hub and pinned, so a core
+  install — 1.0 MB wheel, 677 MB venv, no `torch`, `transformers` or OpenCV — downloads
+  them on first use with nothing to configure.
+
+- **`JOBS_STORE=redis` shares async-job state between bibr-serve replicas.** Job status,
+  results (zlib-compressed, under their own key) and the active-job cap move into Redis,
+  so several `bibr serve` instances behind a load balancer answer status/result polls for
+  each other's jobs, and `JOBS_MAX_ACTIVE` / `JOBS_MAX_RETAINED` /
+  `JOBS_MAX_RETAINED_BYTES` bound the whole deployment. Uploads and execution stay on the
+  replica that received the upload, and every job status now reports that `replica`.
+  Admission is one Lua script (no cap race between replicas); every Redis call is bounded
+  by the `REDIS_*_TIMEOUT_SECONDS` budgets; an unreachable store answers
+  `503 {"detail": "job store unavailable"}` on the job routes and `jobs_store: error` on
+  `/ready`; a replica lost mid-job frees its cap slots after a 24 h safety TTL. New
+  settings: `JOBS_STORE`, `JOBS_REDIS_URL` (falls back to `REDIS_URL`), `JOBS_KEY_PREFIX`,
+  `JOBS_REPLICA_ID`. The in-process store is unchanged and remains the default
+  (`bibr.serve.jobs.JobStore` is now the protocol; the class is `MemoryJobStore`).
+  Handing queued work to another replica (a shared queue) is documented as a follow-up.
+- **Front-role classifier for front matter.** `bibr/extract/front_role.py` loads a small
+  gradient-boosted bundle (`ML_FRONT_ROLE_MODEL_ID`, defaulting to the published
+  `scienceverse/bibr-front-role-v1` at a pinned revision) that scores every OCR
+  region as title / byline / affiliation / abstract / keywords / doi_line / masthead /
+  heading / ref_header / body / other from page-relative geometry, relative font size and
+  script-independent text shape. Front-matter ownership uses the scores as additive
+  evidence (a model byline survives the English byline shape and the 45-word cap, a model
+  title seeds non-Latin records, a confident masthead cannot root a record) and
+  `RefLocator` accepts a model `ref_header` heading in any language. A title seed the model
+  confidently types as something else keeps its title role and loses only the right to root a
+  *second* record (`ML_FRONT_ROLE_RECORD_ROOT_CONFIDENCE`, default `0.9`) — boxed headers
+  like `Correspondence` and `A R T I C L E I N F O` score `heading` at 1.00 and otherwise cut
+  a page's real title away from its own abstract. The model is trained from publisher JATS projected onto cached OCR regions;
+  see `docs/guides/classifiers.md`.
+
+- **`bibr batch` — a first-class, resumable corpus runner.** Takes manifests (one path per
+  line, `#` comments), directories (recursive) or files, writes `<out>/<paper_id>.json` per
+  paper and an append-only `<out>/outcomes.jsonl` ledger — one line per attempt with
+  status, error code and stage, timings, per-stage times, LLM tokens, reference and match
+  counts, warning frequencies, bibr version and build sha. Re-running the same command
+  resumes (`ok` skipped, `failed` skipped unless `--retry-failed`, `--force` for all;
+  interrupted papers run again by default); `--limit`, `--shuffle`/`--seed` and
+  `--deadline` shape a leg. Locally it feeds one warm pipeline in `--batch-size` chunks
+  with every `bibr chew` option; with `--serve-url` it drives a `bibr serve` job API with
+  adaptive concurrency (429 drops in-flight to `--min-concurrency`, 5xx/connection errors/
+  upstream outages retry with backoff, successes grow back toward `--max-concurrency`) and
+  a graceful Ctrl-C. `bibr batch report <out>` (or `--json`) summarises a ledger: ok/failed,
+  throughput, latency percentiles, stage-time shares, tokens, match rate, failure and
+  warning breakdowns; every run ends with the same table. `run_info.json` records the
+  options, the serve build and a secret-redacted settings snapshot. `bibr chew` gains
+  `--include-regions` as an alias of `--regions`. Guide: `docs/guides/batch.md`.
+- **A per-run switch for reference enrichment.** `bibr chew --crossref` (mutually
+  exclusive with `--no-crossref`), `bibr mcp --crossref`, `bibr.chew(..., crossref=True|False)`,
+  the `crossref=true|false` multipart field on `POST /papers/extract`, and the `crossref`
+  knob on the serve MCP `chew_paper`/`chew_url` tools all force enrichment on or off for
+  that run, overriding `CROSSREF_ENRICH` either way. `RunConfig.crossref` is tri-state
+  (`None` follows the setting) and resolves through `RunConfig.enrichment_enabled(settings)`;
+  the serve response cache keys on the effective value, so an enriched and an unenriched
+  result for the same file never collide. `bibr chew --dry-run` names why enrichment is
+  off and how to turn it on.
+
+- **`BIBR_DISABLE_DOTENV=1`** makes every settings model ignore `./.env` and `~/.bibr/.env`
+  (the process environment still applies). `python -m benchmarks run --tool bibr` refuses
+  to start while either file exists unless it is set, so a run's recorded configuration is
+  the profile plus the environment and nothing a developer's `.env` slipped in.
+- **`bibr.local-default` benchmark profile** (`geom` segmentation + `ner` parsing, what a
+  fresh `bibr setup` runs) next to the LLM-parse `bibr.default`, so the install default
+  can be promoted as its own row.
+
+- **`bibr mcp` — MCP server for agents** (new optional `mcp` extra, included in `all`).
+  Exposes extraction as Model Context Protocol tools over stdio: `chew_paper` /
+  `load_paper` register a paper and return a compact `bibr inspect`-style summary, then
+  `get_metadata`, `get_sections`, `get_text`, `search_text`, `get_references`,
+  `get_reference_citations`, `get_tables`, `get_figures`, and `save_paper` query the
+  stored export in slices sized for an agent's context. One warm pipeline serves the
+  whole session (models load once), extraction progress streams as MCP progress
+  notifications, and pipeline options are fixed at server start via a subset of the
+  `bibr chew` flags. Register with e.g. `claude mcp add bibr -- uv run bibr mcp`; see
+  the new [MCP server guide](https://bibr.org/guides/mcp/).
+- `Chewer.chew` / `achew` (and `chew_file` / `achew_file`) accept a `progress=` tracker
+  (`bibr.pipeline.progress.ProgressTracker`, e.g. `RichProgress`) to observe stage
+  transitions and per-region OCR progress from library code.
+- **Remote MCP on `bibr serve`** (`MCP_ENABLED=true`, requires the `mcp` extra): mounts a
+  streamable-HTTP Model Context Protocol endpoint at `/mcp` with the same chew-then-query
+  tool surface as `bibr mcp`. Gated by the existing bearer auth; extraction rides the
+  regular serve inference dispatch (resident worker models, admission control, size caps —
+  no second pipeline). `chew_paper` takes base64 file content plus per-call
+  `start_page`/`end_page`/`refs`/`consolidate` options; the filesystem tools
+  (`load_paper`/`save_paper`) are not exposed remotely, and papers are held per MCP
+  session, capped by `MCP_MAX_PAPERS_PER_SESSION` (default 16). See the
+  [MCP server guide](https://bibr.org/guides/mcp/).
+- **`chew_url` MCP tool** on both servers: extract a paper straight from a public
+  `https://` URL. The download is SSRF-guarded by the new `bibr.utils.safe_fetch`
+  (HTTPS/443 only, every DNS answer must be public unicast, the connection is pinned to
+  the validated IP with TLS SNI/verification kept on the hostname to defeat DNS
+  rebinding, redirects re-validated per hop, size-capped under a deadline). Capped at
+  100MB on `bibr mcp`; on `bibr serve` it uses the upload size limit and rides the same
+  inference dispatch, with `MCP_URL_ALLOWED_HOSTS` to pin hosts and
+  `MCP_CHEW_URL_ENABLED=false` to remove the tool.
+
+## [0.4.0] - 2026-07-26
+
+Consolidates roughly five weeks of work since 0.3.0: a new default OCR engine
+(PaddleOCR-VL), mature local-LLM runtimes across CUDA / Apple Silicon / Windows,
+native JATS/HTML/ePub input, a rebuilt reference pipeline, trained
+section/paper-type classifiers on by default, a much richer extraction schema
+(v10.7), resolver-based enrichment, a config-preset system, a full CLI/UX
+overhaul, and a security-hardening pass.
+
+### Added
+
+**OCR**
+- **PaddleOCR-VL is the new default OCR engine** (`OCR_BACKEND=paddle`), with PP-DocLayoutV3 layout detection. Backends: `paddle` (default), `paddle-vllm` (GPU/vLLM), `paddle-rapid-mlx` / `paddle-mlx-vlm` (Apple Silicon), and `paddle-http` (external). Includes OTSL table decoding, formula canonicalization, and incomplete-table recovery.
+- GLM-OCR retained as an alternative family: `glm-mlx` / `glm-rapid-mlx` (Apple Silicon), `glm-llama` (Windows default; llama.cpp), `glm-http` (external).
+- **Cloud vision-LLM OCR** backends — `gemini`, `openai`, `anthropic` (via Instructor).
+- **Native PDF text bypass** (on by default) — regions backed by a good PDF text layer skip OCR, with a printable-ratio corruption gate that falls back to OCR.
+
+**Local LLM runtime**
+- **`--llm local`** auto-resolves a managed, self-hosted OpenAI-compatible server: managed **vLLM** on CUDA, **vllm-mlx** (continuous batching) on Apple Silicon, **`--llm rapid-mlx`**, and **`--llm llama-cpp`** for Windows / low-VRAM (6 GB+) GPUs. NuExtract3 is the default local extraction model, chosen from a curated hardware-detected model registry.
+
+**Input formats**
+- **Native JATS XML, HTML/`.htm`, and ePub ingestion** — parsed natively; skip OCR and core LLM extraction, like DOCX.
+
+**References**
+- **Reference segmentation rebuilt** around a local **geometry GBM (`geom`, now the default, ~free)** with a confidence-gated LLM-anchor cascade; CRF, region, and pure-LLM strategies remain selectable. Segmentation and parsing are decoupled via `REF_SEG_STRATEGY` / `REF_PARSE_STRATEGY` (CLI `--refs` / `--ref-seg`).
+- **Local NER reference parser is the default** (`--refs ner`); `--refs llm` gives full-precision batched LLM parsing; **`--refs off`** skips reference extraction entirely.
+- Deterministic **merged-reference splitter** (on by default), leading-reference salvage from truncated LLM batches, Vancouver year/container backfill, and under-extraction warnings (vs in-text citation count).
+
+**Trained classifiers (on by default, LLM fallback only on low confidence)**
+- **Context-aware section classifier (v3/v4)**, loaded from HF Hub, with a positional sanity pass.
+- **Paper-type** and **OECD research-domain** classifiers.
+
+**Extraction & schema (v10.7)**
+- **Research-integrity mining** — data/code-availability & ethics statements, structured funding, and CRediT author-contribution roles.
+- **Structured affiliations** and **paper self-identity** (journal, volume, issue, pages, ISSN, publisher, date, license, self-DOI match).
+- Figure/table **captions**, an extraction **provenance** block, **per-label LLM token usage** (`llm_usage_by_label`), non-fatal **`processing_warnings`**, and an **output validation gate**.
+
+**Enrichment**
+- **Optional resolver-first enrichment** via **bibr-resolver** (`BIBR_RESOLVER_*`) — one `sources` query spanning OpenAlex + Crossref, short-circuiting on a clean resolver miss — layered on the default Crossref enrichment. Two-tier Crossref cache (in-process LRU → shared Redis). Optional **consolidation** of accepted matches into `bib` (`CROSSREF_CONSOLIDATE=off|fill|replace`, `--consolidate`). Title-less (Nature/Science-style) reference matching by fingerprint.
+
+**Config presets**
+- **`bibr preset`** subcommands + a **`--preset`** flag and `PresetManager` for named JSON config profiles; `~/.bibr/.env` fallback when the CWD has none.
+
+**CLI / setup**
+- **Unified terminal design system** across all commands; **`bibr config`** (show/path/set/example, always-redacted), **`bibr inspect`** for extraction results, **`chew --dry-run`** resolution preview, and **`--no-llm`** structural-only mode.
+- **Setup wizard redesigned** — hardware-detected plan preview before installing, local-LLM onboarding, save-as-preset, and an end-to-end smoke extraction on a shipped synthetic sample.
+
+**Serve**
+- **Async job API** with per-request usage metering, **GPU micro-batching** for safe single-worker concurrency, **gzip** responses (~8× on paper JSON), bearer-token auth gating all non-probe routes, per-request `refs`/`ref_seg` overrides, and an opt-in OCR disk cache.
+
+**Library API**
+- **`bibr.chew()` / `achew()`** (single file, directory, or list) returning a `Result` with `.df` / `.records` views and per-file `ChewFailure`; a **`Chewer`** warm-pipeline session; a typed paper-export model; and isolated `Settings` on the library APIs.
+
+### Changed
+- **Default OCR engine switched from GLM-OCR to PaddleOCR-VL** (see Added).
+- `OCR_SGLANG_GPUS` renamed to `OCR_LOCAL_GPUS` (old name still accepted as an alias). The unused `OCR_LOCAL_MEM_FRACTION` setting was removed — it only configured the in-process SGLang engine.
+- Recommended cloud LLM updated to **Gemini 3.5 Flash-Lite**.
+- Reference-parse batch size default raised **5 → 15**; layout-detection batch **4 → 8**.
+- Apple Silicon throughput defaults unlocked (higher default MPS concurrency/batch).
+- Section classification is now trained-model-first (LLM only on miss / low confidence), using document-context snippets.
+- Core install stays torch-free; heavy ML deps remain behind the `ml` extra.
+- OCR cache hardened (correct model-profile keys, safer concurrent writes).
+
+### Fixed
+- **Metadata regressions:** single-article title/byline is no longer blanked by front-matter multi-item abstention; native NuExtract author extraction no longer returns schema-valid empty author lists when byline/CRediT evidence exists; deterministic LLM invalid-output is no longer misclassified as a retryable upstream failure.
+- **Compound figures:** panels are grouped as parts of their parent figure instead of exploding into independent top-level figures and sections.
+- **Extraction quality:** OCR NUL/surrogate scrubbing before tokenization, mangled section-header repair, masthead/internal-heading title rejection, DOI line-wrap bridging with self-DOI selection over funder/reference/footnote candidates, full-name author scoring, footnote/xref positional anchoring, and filtering of parenthetical-numeric equation false positives (author-year veto + equation-tag guard).
+- **References:** never drop the leading reference; drop bare in-text citations that leaked into `ref_text`; remove running-header bleed.
+- **Windows:** OCR cache and section-classifier download handling, symlink-failure fallbacks, and `llama.cpp` PATH discovery; low-VRAM llama.cpp path hardened.
+- **Security hardening** (audit 2026-07-23): redact secrets from `Settings` repr / `model_dump`, CLI & serve logs, and `bibr doctor`; exclude API keys from cache fingerprints; enforce real-byte zip caps and reject spoofed file types; reject path-traversal DOIs before resolver/Crossref lookup; cap HTML input and upload-filename length; gate `/ready` detail; guard wildcard-CORS credentials; rotate the metering log; gadget-restricted joblib load for the geom segmenter.
+
+### Performance
+- Serve concurrency reworked around a single async worker (event loop unblocked, pipeline reused, GPU work micro-batched); `workers_per_device` default 2.
+- Inference offloaded off the event loop (NER/GBM parse, native-text pdfium work, `gc.collect`); CUDA TF32/cuDNN autotuner and MPS float16 autocast for layout; per-page pdfium locks plus next-file render prefetch enable parallel file processing.
+- Crossref/resolver caching (in-process LRU + Redis tier-2, `select=` field trimming, higher enrich concurrency when the resolver is enabled).
+
+### Removed
+- **SGLang removed entirely** — both the managed SGLang _LLM_ backend and the in-process `glm-sglang` _OCR_ backend, along with the `sglang[all]` dependency and the now-empty `local-cuda` extra. The pinned 0.5.12 line carried three unpatched critical advisories (unauthenticated RCE, pickle deserialization on a `0.0.0.0` socket, path traversal) and transitively pulled `diffusers` (two high advisories). Local LLM serving is vLLM / vllm-mlx / rapid-mlx / llama.cpp; GPU OCR is `paddle-vllm`. **Migration:** run your own SGLang server and point `glm-http` at it (`OCR_BACKEND=glm-http`, `OCR_BASE_URL=...`) — the bundled Compose `bibr-ocr` service still does exactly this.
+- **Falcon OCR backend.**
+- Dropping `sglang[all]` shed ~82 locked packages, removed the last mutually exclusive extras (so **`--all-extras` resolves again**), and made the `pillow` override unnecessary (it existed only for `moviepy`, a transitive SGLang dep).
+- Dead code and unused dependencies — `spacy`, `rpy2`, the `metacheck` extra, legacy CRF model files, and transitional flat-name config shims.
+
+## [0.3.0] - 2026-06-15
+
+First tagged release of the rebuilt pipeline. The intermediate `0.2.0` tag was never published, so its notes are folded in here.
+
+### Added
+- **One-call Python API** — `bibr.chew()` / `bibr.achew()` process a single file, a directory, or a list of paths in one call, returning a `Result` with `.df` / `.records` views and `.ok` / `ChewFailure` per-file error handling. `Chewer` is a warm-pipeline session context manager. `from bibr import LocalPipeline, Pipeline, Settings` remains the lower-level entry point (lazy-loaded; no heavy deps at import time).
+- **Reference segmentation rebuilt around LLM anchor-emit** — references are segmented by an LLM anchor pass (CRF fallback) then parsed in batches, replacing the retired rule splitter. Strategies are decoupled and configurable via `REF_SEG_STRATEGY` / `REF_PARSE_STRATEGY`; NER parsing is opt-in (`--refs ner`). The pipeline warns in `processing_warnings` on CRF seg-fallback and on suspected reference under-extraction (vs in-text citation count).
+- **In-text citation (xref) linking + evaluation** — improved narrative and parenthetical citation parsing, plus automated checks for citation-linking behavior.
+- **URL extraction (`url[]`)** — printed DOI links and web URLs are extracted, including reconstruction of line-wrapped URLs (CRLF and mid-word wraps) and support for balanced-paren DOIs.
+- **Local LLM serving** — managed SGLang LLM server with `--llm local` auto-resolution; `LLM_MAX_CONCURRENCY` gate for single-device servers; `LLM_VLLM_MLX_EXTRA_ARGS` passthrough; opt-in merged core-metadata call (`LLM_MERGED_CORE_METADATA`); schema-envelope unwrapping for small-model structured output.
+- **Crossref consolidation** — optionally merge accepted Crossref matches into `bib` at export via `CROSSREF_CONSOLIDATE=off|fill|replace`, the `--consolidate` CLI flag, the `consolidate=` chew option, and a serve form field.
+- **Scoped hierarchy (v5-lite)** for correct section nesting in multi-study papers.
+- **Lead-reference recovery** from the PDF text layer for references the layout model drops.
+- **Per-paper LLM token-usage export** (`llm_usage`).
+- **MiniLM section classifier (v2)** on by default, with LLM fallback only on miss or low confidence.
+- **`bibr_release`** stamped on every serve response `info`.
+- **Saved-export evaluation** — scoring helpers compare extracted fields with independently prepared reference JSON.
+- **CLI setup polish** — LLM credential preflight, ref-strategy knob in the setup wizard and doctor, `--refs` surfaced in help and `bibr demo`.
+- **JSON v10 schema** — top-level shape change (`figure` replaces `fig`, drops `study`, adds `bib_match`). v10.1 moves `ocr_config` and `processing_warnings` to top-level so `info` is scalar-only (R consumers can `as.data.frame(info)`). Adds `ocr_config` block, `BibAuthorExport` author records in `bib_match`, section `level` field, and backfill of empty bib fields from high-confidence external matches.
+- **`include_regions` toggle** (default off) for the large `_regions` layout debug payload — CLI `--regions`, the `include_regions` form field, `Paper.export_to_json(include_regions=...)`, `RunConfig.include_regions`. Reduces output size when diagnostics are not requested.
+
+### Changed
+- **Core install is now torch-free** — heavy ML dependencies moved to an optional `ml` extra, ML imports degrade gracefully, and OCR exports are lazy.
+- **LLM client migrated from LangChain to Instructor**, with multi-provider support (Google, OpenAI, Anthropic, Groq, Ollama) through a single Instructor factory.
+- **CLI flag renames**: `--ocr-backend` → `--ocr`, `--llm-backend` → `--llm`. All CLI unified under the `bibr` namespace.
+- **Settings restructured** into sub-models: read via `Settings.ocr.backend`, `Settings.llm.provider`, etc. Env vars stay flat (`OCR_BACKEND`, `LLM_PROVIDER`).
+- Reference parse batch size default raised 5 → 15.
+
+### Fixed
+- Extraction and structure: OCR wide-letter-spacing collapse before segmentation, repeated running-header demotion, mid-word DOI line-wrap bridging, DOI rescue from publisher `/doi/` URLs and clean `doi:` tokens, page-1 `TC` badge-glyph stripping, fabricated-abstract suppression on abstract-less commentaries, software/dataset title and book-edition handling, bracket-citation retention.
+- xref parsing: nested group-cites, narrative colon-page and curly-apostrophe possessive cites, year-less back-references, et-al disambiguation, harvested-year constraints, parenthetical cap recovery.
+- Robustness and security: pdfium lock in validation, DOCX zip-bomb ceilings, pdfium handle cleanup, CUDA gating by compute capability, per-file pipeline errors on resource-init failure, `401` responses carrying `WWW-Authenticate` + CORS, CVE-driven torch bump.
+- CLI: batch output directories with dotted names are no longer misread as file suffixes.
+
+### Performance
+- Crossref works/search LRU cache; native-text pdfium work moved off the event loop; next-file page render prefetched during layout detection; serve `workers_per_device` default raised to 2.
+
+### Removed
+- **SSE streaming endpoint** `POST /papers/extract/stream`. The synchronous `POST /papers/extract` is the only paper-extraction endpoint.
+- LibreOffice-based DOCX conversion path. `.docx` is parsed natively via `python-docx`; `.doc` (legacy Word) is no longer supported — convert to `.docx` first. Drops `DOCX_BACKEND`, `LIBREOFFICE_TIMEOUT_SECONDS`, the `WITH_OFFICE` build arg, and `bibr.clients.libreoffice.LibreOfficeClient`.
+- `bibr-serve`, `bibr-setup`, `bibr-demo` console scripts (replaced by `bibr serve` / `setup` / `demo` subcommands).
+- LangChain dependency; legacy rule reference segmenter (moved to `evaluation/`).
+- Empty `bibr/_vendor/` package and orphan top-level `ocr/Dockerfile`.
+- `debug_samples/`, `metacheck_integration/`, `prereg.json`, and tracked `notebooks/incest.json` artifact data.
+
+## [0.1.3] - 2026-03
+
+### Added
+- **`bibr chew` CLI**: process PDF/DOCX files directly without an external OCR server or serve deployment. Includes in-process OCR via SGLang (NVIDIA CUDA + Apple Silicon MPS), sequential GPU model loading with configurable memory management (`aggressive`, `balanced`, `keep_all`), and support for external OCR servers via `--ocr-url`
+- `[local]` optional extra: `uv sync --extra=local` installs SGLang for in-process OCR
+- `BibType` enum with standard BibTeX entry types (article, book, inproceedings, incollection, etc.)
+- `booktitle` field on `PaperReference` for book chapters and proceedings papers
+- LLM extraction of 6 new reference fields: `last_page`, `issue`, `publisher`, `editor`, `booktitle`, `bibtype`
+- Non-destructive Crossref backfill: enrichment now populates empty fields (DOI, volume, issue, pages, publisher, ISBN, ISSN, booktitle, bibtype)
+- `BibTypeEnum` in Pydantic schemas for validated LLM bibtype output
+- API key authentication middleware (`X-API-Key` header, backward compatible)
+- In-memory per-IP rate limiting middleware with configurable window and request count
+- Trivy vulnerability scanning for Docker images in CI (table + SARIF upload)
+- SSE streaming endpoint (`POST /papers/extract/stream`) for real-time pipeline progress
+- Study design classification: LLM-based (RCT, Retrospective Cohort, Case Report, Meta-Analysis, In Vitro)
+
+### Changed
+- **JSON is now the primary (and only) export format** -- JSON v8.0 schema with top-level keys: `paper_id`, `info`, `author`, `text`, `section`, `url`, `bib`, `xref`, `fig`, `table`, `eq`
+- `bibtype` values normalized from custom capitalized strings (e.g. "Article", "BookChapter") to standard lowercase BibTeX types (e.g. "article", "incollection")
+- Crossref `container-title` now routed to `booktitle` for book chapters and proceedings articles
+- Demo reference tables now display "Book Title" column
+- CORS origins automatically restricted from `["*"]` to `[]` in production mode (`ENVIRONMENT=production`)
+- Health endpoints (`/health`, `/ready`) exempt from authentication and rate limiting
+- Section classification switched from zero-shot NLI (bart-large-mnli) to lookup table + LLM fallback
+
+### Removed
+- Arrow IPC export format (v6.2 and earlier) -- replaced entirely by JSON v8.0
+
+## [0.1.2] - 2026-02
+
+### Added
+- Evaluation harness with 9 per-field metrics (exact match, ROUGE-L, Jaccard, etc.)
+- Multi-class paper type classifier (empirical, review, meta-analysis, case-study, commentary, unknown)
+- OECD domain classifier using cascading zero-shot NLI (L1 + L2 taxonomy)
+- Configurable reference deduplication thresholds (`DEDUP_TITLE_THRESHOLD`, `DEDUP_MIN_TITLE_LENGTH`)
+- Ground truth loading from Parquet for evaluation
+
+### Changed
+- Paper type classification upgraded from binary stub to priority-ordered rule-based system
+- Reference dedup thresholds now configurable via Settings (previously hardcoded)
+
+## [0.1.1] - 2026-02
+
+### Fixed
+- OCR region label routing now uses `native_label` for correct treatment dispatch
+- Markdown prefix stripping in section headers (prevents `#` leaking into classified text)
+- Footnote crash on `content=None` regions
+- Missing `layout_hints` attribute on OCR regions
+
+### Added
+- OCR artifact correction (ligature expansion, soft hyphen removal) at page processing level
+- Reference section text preserved intact for downstream CRF/LLM segmenter
+- Non-destructive IMRaD enforcement (repeatable section types preserved)
+- Title fallback from first non-canonical heading when layout model and LLM both fail
+- Graceful degradation on LLM failures (partial `PaperMetadata` returned instead of crash)
+
+### Removed
+- Dead AST-era code (Tier 1 citation linking, unused imports, stale type definitions)
+
+## [0.1.0] - 2026-01
+
+### Added
+- Initial release
+- PDF and DOCX input support (DOCX via LibreOffice conversion)
+- OCR via glmocr SDK with Ollama, vLLM, and SGLang backends
+- LLM-based metadata extraction (title, authors, DOI, keywords, references)
+- Section classification using zero-shot NLI (facebook/bart-large-mnli)
+- Sentence segmentation via wtpsplit (ONNX)
+- Inline citation NER (DistilBERT) with citation linking
+- Reference extraction (LLM and NER strategies)
+- Optional Crossref reference enrichment
+- Arrow IPC export (v5.5 schema) with manifest
+- FastAPI REST API with Redis caching
+- Gradio demo application
+- CLI (`bibr-serve`, `bibr-setup`, `bibr-demo`)
+- Docker deployment with GPU-accelerated OCR sidecar
