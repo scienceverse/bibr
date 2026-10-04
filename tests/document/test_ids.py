@@ -49,6 +49,44 @@ def test_make_rejects_what_parse_could_not_read(page, kind, n):
         ids.make(page, kind, n)
 
 
+def test_a_document_id_names_no_page():
+    parsed = ids.parse("ol5")
+
+    assert parsed == ids.LayerId(None, "ol", 5)
+    assert parsed.path == (5,)
+    assert str(parsed) == ids.outline_entry(5) == ids.make_document("ol", 5) == "ol5"
+
+
+def test_the_path_of_a_page_id_is_its_index():
+    assert ids.parse("p2.lk17").path == (17,)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["ol", "ol05", "ol-1", "ol5.", "ol.5", "ol5x", "OL5", " ol5", "xx5", "r5", "p3", "p3.ol5"],
+)
+def test_parse_rejects_what_is_not_a_document_id_either(text):
+    with pytest.raises(ValueError):
+        ids.parse(text)
+
+
+@pytest.mark.parametrize("args", [("r", 5), ("ol",), ("ol", -1), ("OL", 1), ("", 1)])
+def test_make_document_rejects_what_parse_could_not_read(args):
+    with pytest.raises(ValueError):
+        ids.make_document(*args)
+
+
+def test_a_kind_is_a_page_kind_or_a_document_kind_never_both():
+    with pytest.raises(ValueError):
+        ids.make(3, "ol", 5)
+
+
+def test_a_document_id_names_no_block():
+    layer = _layer_of(_page(0))
+
+    assert views.find_block(layer, "ol0") is None
+
+
 def _page(rotation: int) -> Page:
     return Page(
         index=0,

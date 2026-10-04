@@ -22,8 +22,9 @@ Conventions:
   range (:mod:`bibr.document.ids`): blocks ``p3.r12`` (page, post-OCR region
   index), lines ``p3.l40``, spans ``p3.sp210``, links ``p3.lk4`` (page,
   position among the page's link annotations), structure elements ``p3.st12``
-  (page, position in that page's tree), outline entries ``ol5`` (position in
-  the outline, which is always read whole).
+  (page, position in that page's tree). An object of the whole PDF names no
+  page: outline entries ``ol5`` (position in the outline, which is always
+  read whole).
 
 D1 fills the PDF-native part: glyphs, text objects, fonts, records, spans,
 lines, superscript tags, furniture, render recipes and presence flags, plus
@@ -40,6 +41,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from bibr.document import ids
 
 # The layer's schema version: bump it with any change to a serialised class,
 # its fields or COLUMN_DTYPES (tests/document/test_layer.py pins the pair).
@@ -312,7 +315,7 @@ class OutlineEntry:
 
     @property
     def entry_id(self) -> str:
-        return f"ol{self.idx}"
+        return ids.outline_entry(self.idx)
 
 
 @dataclass(frozen=True, slots=True)
